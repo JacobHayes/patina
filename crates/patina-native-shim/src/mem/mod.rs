@@ -1,5 +1,5 @@
 //! Memory: the one model behind the C `mmap`/`mmap64`/`munmap`/`mremap`/
-//! `mprotect`/`msync`/`mlock*` interposers and the SUD rows of the same names,
+//! `mprotect`/`madvise`/`msync`/`mlock*` interposers and the SUD rows of the same names,
 //! plus the page cache the descriptor funnels keep coherent with the
 //! deterministic filesystem, memory locking against the virtual
 //! `RLIMIT_MEMLOCK`, `memfd_create` and seals (`memfd`), and `membarrier`
@@ -41,6 +41,11 @@
 //! per-range state in step with the host's: the views (and System V
 //! attachments, which are views of a segment's memfd), the memory locks and the
 //! memory policies (`crate::numa`).
+//!
+//! The runtime arena's region (`crate::arena`) is no part of the guest's
+//! address space, however much of it the arena has mapped: every row here
+//! answers a range in it as the kernel answers a range past the address
+//! space's end, or one nothing maps ([`in_arena`]).
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -117,6 +122,7 @@ const VIEW_HINTS: c_int = MAP_NORESERVE | MAP_POPULATE | MAP_NONBLOCK | MAP_STAC
 pub(crate) const PROT_READ: c_int = uapi::PROT_READ as c_int;
 pub(crate) const PROT_WRITE: c_int = uapi::PROT_WRITE as c_int;
 pub(crate) const PROT_EXEC: c_int = uapi::PROT_EXEC as c_int;
+const MREMAP_MAYMOVE: usize = uapi::MREMAP_MAYMOVE as usize;
 const MREMAP_FIXED: usize = uapi::MREMAP_FIXED as usize;
 const MREMAP_DONTUNMAP: usize = uapi::MREMAP_DONTUNMAP as usize;
 const MS_SYNC: c_int = uapi::MS_SYNC as c_int;
@@ -293,6 +299,15 @@ pub(crate) fn host_number(nr: i64, args: [usize; 6]) -> i64 {
     }
 }
 
+/// Whether the guest's range `[addr, addr + len)`, in whole pages, reaches
+/// into the runtime arena's region, which is no part of the guest's address
+/// space (`crate::arena`): a request about it is answered here, never by the
+/// host, whose answer would depend on how much of the region the arena has
+/// mapped.
+pub(crate) fn in_arena(addr: usize, len: usize) -> bool {
+    crate::arena::reserved(addr, round_up(len).unwrap_or(usize::MAX))
+}
+
 fn round_up(len: usize) -> Option<usize> {
     len.checked_add(PAGE - 1).map(|len| len & !(PAGE - 1))
 }
@@ -343,7 +358,7 @@ pub(crate) use hooks::msync;
 pub(crate) use locks::{patina_mlock, patina_mlockall, patina_munlock, patina_munlockall};
 #[cfg(patina_posix_exports)]
 pub(crate) use mapping::patina_mremap;
-pub(crate) use mapping::{mmap, mprotect, mremap, munmap};
+pub(crate) use mapping::{madvise, mmap, mprotect, mremap, munmap};
 pub(crate) use memfd::{
     patina_add_seals, patina_get_seals, patina_memfd_create, patina_memfd_secret,
 };

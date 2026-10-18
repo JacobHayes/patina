@@ -241,6 +241,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
     // SanitizerCoverage symbols.
     let yield_object =
         stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
+    let allocator = built_shim.allocator_link_args(&host_target)?;
 
     match invocation.target {
         NativeBuildTarget::Source {
@@ -257,6 +258,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             invocation.release,
             &object,
             &built_shim,
+            &allocator,
             yield_object.as_deref(),
             &rustc_args,
             &rustc,
@@ -274,6 +276,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             &host_target,
             &object,
             &built_shim,
+            &allocator,
             yield_object.as_deref(),
             &rustc,
         ),
@@ -348,6 +351,7 @@ fn build_native_source(
     release: bool,
     object: &Path,
     shim: &BuiltNativeShim,
+    allocator: &[OsString],
     yield_object: Option<&Path>,
     rustc_args: &[OsString],
     rustc: &RustcInvocation,
@@ -375,6 +379,11 @@ fn build_native_source(
             .args(sancov_rustc_flags())
             .arg("-C")
             .arg(link_arg(yield_object));
+    }
+    // Route the runtime's own Rust allocations to its arena, off the guest's
+    // heap (`allocator_routing.rs`); empty where the platform routes nothing.
+    for arg in allocator {
+        command.arg("-C").arg(arg);
     }
     push_platform_link_args(|arg| {
         command.arg("-C").arg(arg);
@@ -472,6 +481,7 @@ fn build_native_package(
     host_target: &str,
     object: &Path,
     shim: &BuiltNativeShim,
+    allocator: &[OsString],
     yield_object: Option<&Path>,
     rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
@@ -513,7 +523,12 @@ fn build_native_package(
     }
     command
         .arg("--")
-        .args(native_package_link_args(object, staticlib, yield_object))
+        .args(native_package_link_args(
+            object,
+            staticlib,
+            allocator,
+            yield_object,
+        ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&selected.target_dir)?;
     shim_cache::inherit(&mut command, &shim._lease)?;
@@ -848,6 +863,7 @@ pub(super) fn stage_sancov_stub(
 pub(super) fn native_package_link_args(
     object: &Path,
     staticlib: &Path,
+    allocator: &[OsString],
     yield_object: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
@@ -859,6 +875,11 @@ pub(super) fn native_package_link_args(
     if let Some(yield_object) = yield_object {
         args.push(OsString::from("-C"));
         args.push(link_arg(yield_object));
+    }
+    // The allocator routing (`allocator_routing.rs`).
+    for arg in allocator {
+        args.push(OsString::from("-C"));
+        args.push(arg.clone());
     }
     push_platform_link_args(|arg| {
         args.push(OsString::from("-C"));
@@ -1164,7 +1185,8 @@ mod tests {
             }
         }
 
-        let args = native_package_link_args(&object, &staticlib, Some(&yield_object));
+        let allocator = [OsString::from("link-arg=routing.o")];
+        let args = native_package_link_args(&object, &staticlib, &allocator, Some(&yield_object));
         let rendered: Vec<String> = args
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1183,7 +1205,7 @@ mod tests {
             );
         }
         assert!(
-            native_package_link_args(&object, &staticlib, None)
+            native_package_link_args(&object, &staticlib, &allocator, None)
                 .iter()
                 .all(|arg| !arg.to_string_lossy().ends_with("patina_yield.o"))
         );

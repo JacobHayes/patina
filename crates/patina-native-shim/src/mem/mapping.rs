@@ -22,8 +22,49 @@ pub(crate) fn mmap(
     };
     crate::abi::LinuxReturn::new(result)
         .decode()
+        .inspect(|address| {
+            crate::arena::refuse_placement(*address as usize, round_up(len).unwrap_or(usize::MAX));
+        })
         .map(|address| address as usize)
 }
+
+/// Where to ask the host for a mapping of `len` bytes at `addr` under
+/// `flags` and `offset`, or the errno. The runtime arena's region is no part
+/// of the guest's address space ([`in_arena`]): a fixed mapping in it is
+/// `ENOMEM`, as past the address space's end, or `EEXIST` under
+/// `MAP_FIXED_NOREPLACE`, whose answer for a range it may not take that is; a
+/// hint there is dropped. A request the kernel refuses before it looks at the
+/// address (no length, an unaligned offset or fixed address) goes to the host
+/// for that refusal.
+fn placeable(addr: usize, len: usize, flags: c_int, offset: i64) -> Result<usize, c_int> {
+    if malformed(addr, len, flags, offset) || !in_arena(addr, len) {
+        Ok(addr)
+    } else if flags & MAP_FIXED_NOREPLACE != 0 {
+        Err(crate::EEXIST)
+    } else if flags & MAP_FIXED != 0 {
+        Err(ENOMEM)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Whether the kernel refuses a mapping request as malformed before it looks
+/// at the address: no length, an unaligned offset or fixed address, or no
+/// sharing type.
+fn malformed(addr: usize, len: usize, flags: c_int, offset: i64) -> bool {
+    let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
+    len == 0
+        || !(offset as u64).is_multiple_of(PAGE as u64)
+        || (fixed && !addr.is_multiple_of(PAGE))
+        || !matches!(
+            flags & MAP_TYPE,
+            MAP_SHARED | MAP_PRIVATE | MAP_SHARED_VALIDATE
+        )
+}
+
+/// The refusal a guest stack mapping (`MAP_GROWSDOWN`) gets.
+const DENY_GROWSDOWN: &str = "patina: mmap(MAP_GROWSDOWN) has no model (the kernel grows such a \
+    mapping into address space nothing maps, which the runtime arena may own); failing closed\n";
 
 /// An anonymous mapping: host address space. Linux ignores its descriptor,
 /// and a guest number means nothing to the host kernel, so it never gets one.
@@ -42,7 +83,10 @@ fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64
         if flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0 && !addr.is_multiple_of(size) {
             return fail(EINVAL);
         }
-        return map_huge_pages(addr, len, prot, flags, size);
+        return match placeable(addr, len, flags, offset) {
+            Ok(addr) => map_huge_pages(addr, len, prot, flags, size),
+            Err(errno) => fail(errno),
+        };
     }
     let lock = if flags & MAP_LOCKED != 0 || TRACKED.load(Ordering::Acquire) {
         // The judgments `do_mmap` makes before a lock is weighed.
@@ -59,6 +103,18 @@ fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64
         }
     } else {
         None
+    };
+    // A stack mapping grows into address space nothing maps, and how much of
+    // the arena's region is unmapped differs by mode: no model, by name.
+    if flags & MAP_GROWSDOWN != 0 && !malformed(addr, len, flags, offset) {
+        // `deny` writes the named line; its libc-style answer is not this
+        // raw `-errno` ABI's.
+        crate::deny(DENY_GROWSDOWN);
+        return fail(crate::ENOSYS);
+    }
+    let addr = match placeable(addr, len, flags, offset) {
+        Ok(addr) => addr,
+        Err(errno) => return fail(errno),
     };
     let result = host(
         Syscall::N_mmap,
@@ -122,6 +178,10 @@ fn map_file(addr: usize, len: usize, prot: c_int, flags: c_int, fd: c_int, offse
     if fixed && !addr.is_multiple_of(align) {
         return fail(EINVAL);
     }
+    let addr = match placeable(addr, rounded, flags, offset) {
+        Ok(addr) => addr,
+        Err(errno) => return fail(errno),
+    };
     // `MAP_FIXED_NOREPLACE` is refused over a live mapping before the file is
     // judged; the claim holds the range until the view replaces it.
     let claimed = flags & MAP_FIXED_NOREPLACE != 0;
@@ -354,6 +414,9 @@ pub(super) fn alias(
         return view;
     }
     let start = view as usize;
+    if fixed.is_none() {
+        crate::arena::refuse_placement(start, rounded);
+    }
     if let Some(desc) = object.desc()
         && hold(desc).is_err()
     {
@@ -419,6 +482,12 @@ fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
 
 pub(crate) fn mprotect(addr: usize, len: usize, prot: c_int) -> crate::abi::SysResult<i64> {
     'result: {
+        // The arena's region, as a range nothing maps, once the protection
+        // is one the kernel takes (it refuses any other before it looks at
+        // the range).
+        if addr.is_multiple_of(PAGE) && protection_known(prot) && in_arena(addr, len) {
+            break 'result Err(crate::abi::Errno::new(ENOMEM));
+        }
         if prot & (PROT_WRITE | PROT_EXEC) != 0
             && addr.is_multiple_of(PAGE)
             && len != 0
@@ -456,7 +525,41 @@ pub(crate) fn mprotect(addr: usize, len: usize, prot: c_int) -> crate::abi::SysR
     }
 }
 
+/// Whether `prot` is a protection `mprotect` takes (`do_mprotect_pkey` and
+/// `arch_validate_prot`): the access bits, `PROT_SEM`, one of the two growth
+/// bits, and on aarch64 `PROT_BTI` and `PROT_MTE`.
+fn protection_known(prot: c_int) -> bool {
+    const PROT_SEM: c_int = 0x8;
+    const PROT_GROWSDOWN: c_int = 0x0100_0000;
+    const PROT_GROWSUP: c_int = 0x0200_0000;
+    let arch = if cfg!(target_arch = "aarch64") {
+        0x30
+    } else {
+        0
+    };
+    let known =
+        PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM | PROT_GROWSDOWN | PROT_GROWSUP | arch;
+    prot & !known == 0 && prot & (PROT_GROWSDOWN | PROT_GROWSUP) != PROT_GROWSDOWN | PROT_GROWSUP
+}
+
+/// `madvise(2)`: advice about the process's own pages, the host's to take,
+/// except for the arena's region, which is a range nothing maps (`ENOMEM`)
+/// once the kernel has judged the advice, the start and the length: a
+/// zero-length call of the same advice at the same start is that judgment.
+pub(crate) fn madvise(addr: usize, len: usize, advice: usize) -> i64 {
+    let whole = round_up(len).and_then(|rounded| addr.checked_add(rounded));
+    if whole.is_some() && in_arena(addr, len) {
+        let judged = host(Syscall::N_madvise, [addr, 0, advice, 0, 0, 0]);
+        return if judged == 0 { fail(ENOMEM) } else { judged };
+    }
+    host(Syscall::N_madvise, [addr, len, advice, 0, 0, 0])
+}
+
 pub(crate) fn munmap(addr: usize, len: usize) -> crate::abi::SysResult<i64> {
+    // The arena's region, as a range past the address space's end.
+    if in_arena(addr, len) {
+        return Err(crate::abi::Errno::new(EINVAL));
+    }
     let result = host(Syscall::N_munmap, [addr, len, 0, 0, 0, 0]);
     if result == 0 && tracking() {
         crate::LAST_BOUNDARY_SYMBOL.store(c"munmap".as_ptr().cast_mut(), Ordering::Relaxed);
@@ -491,7 +594,22 @@ pub(crate) fn mremap(
     new_addr: usize,
 ) -> crate::abi::SysResult<usize> {
     'result: {
+        // The arena's region, once the kernel's judgments of the flags, the
+        // start and the new length pass: a source in it is a range nothing
+        // maps (`EFAULT`), a destination in it one past the address space's
+        // end (`EINVAL`). A growth in place into it is one the kernel cannot
+        // make: `ENOMEM`, or under `MREMAP_MAYMOVE` a move, to a place the
+        // host picks, as the kernel moves a mapping a neighbour blocks.
+        let new_rounded = round_up(new_len).unwrap_or(0);
+        let judged = flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) == 0
+            && (flags & MREMAP_FIXED == 0 || flags & MREMAP_MAYMOVE != 0)
+            && (flags & MREMAP_DONTUNMAP == 0
+                || (flags & MREMAP_MAYMOVE != 0 && old_len == new_len))
+            && old.is_multiple_of(PAGE)
+            && new_rounded != 0;
         let tracked = tracking();
+        // The lock limit is judged before any place for a move is taken, so
+        // its refusal leaves nothing behind.
         let locked = tracked && old.is_multiple_of(PAGE) && MAPPINGS.lock().locks.at(old).is_some();
         if locked && new_len > old_len {
             let growth =
@@ -501,10 +619,50 @@ pub(crate) fn mremap(
                 break 'result Err(crate::abi::Errno::new(crate::EWOULDBLOCK));
             }
         }
+        let (mut flags, mut new_addr, mut destination) = (flags, new_addr, None);
+        if judged {
+            if in_arena(old, old_len.max(1)) {
+                break 'result Err(crate::abi::Errno::new(crate::EFAULT));
+            }
+            if flags & MREMAP_FIXED != 0 {
+                if in_arena(new_addr, new_len) {
+                    break 'result Err(crate::abi::Errno::new(EINVAL));
+                }
+            } else if flags & MREMAP_DONTUNMAP == 0 && in_arena(old, new_len) {
+                if flags & MREMAP_MAYMOVE == 0 {
+                    break 'result Err(crate::abi::Errno::new(ENOMEM));
+                }
+                let place = host(
+                    Syscall::N_mmap,
+                    [
+                        0,
+                        new_rounded,
+                        0,
+                        (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE) as usize,
+                        usize::MAX,
+                        0,
+                    ],
+                );
+                if place < 0 {
+                    break 'result Err(crate::abi::Errno::new((-place) as c_int));
+                }
+                crate::arena::refuse_placement(place as usize, new_rounded);
+                (flags, new_addr, destination) =
+                    (flags | MREMAP_FIXED, place as usize, Some(place));
+            }
+        }
         let result = host(
             Syscall::N_mremap,
             [old, old_len, new_len, flags, new_addr, 0],
         );
+        if result < 0
+            && let Some(place) = destination
+        {
+            host(Syscall::N_munmap, [place as usize, new_rounded, 0, 0, 0, 0]);
+        }
+        if result >= 0 && flags & MREMAP_FIXED == 0 {
+            crate::arena::refuse_placement(result as usize, new_rounded);
+        }
         if result < 0 || !tracked {
             break 'result crate::abi::LinuxReturn::new(result)
                 .decode()

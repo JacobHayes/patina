@@ -35,6 +35,11 @@ pub(crate) fn attach(
     let Some(rounded) = round_up(len) else {
         return fail(EINVAL);
     };
+    // The arena's region, as `do_shmat` answers a range past the address
+    // space's end.
+    if addr.is_some_and(|addr| in_arena(addr, rounded)) {
+        return fail(EINVAL);
+    }
     let lock = match lock_request(0, rounded) {
         Ok(lock) => lock,
         Err(errno) => return fail(errno),
@@ -136,6 +141,11 @@ pub(crate) fn policies_in(from: usize, to: usize) -> Vec<(usize, usize, Policy)>
 /// chunks a stack vector holds.
 pub(crate) fn mapped(addr: usize, len: usize) -> bool {
     const CHUNK: usize = 256;
+    // The arena's region, however much of it is mapped, maps nothing of the
+    // guest's.
+    if in_arena(addr, len.max(1)) {
+        return false;
+    }
     let mut vector = [0u8; CHUNK];
     let end = addr.saturating_add(len.max(1));
     let mut at = addr;
@@ -157,6 +167,9 @@ pub(crate) fn mapped(addr: usize, len: usize) -> bool {
 pub(crate) fn resident(addr: usize) -> Option<bool> {
     let mut vector = [0u8; 1];
     let page = addr & !(PAGE - 1);
+    if in_arena(page, PAGE) {
+        return None;
+    }
     (host(
         Syscall::N_mincore,
         [page, PAGE, vector.as_mut_ptr() as usize, 0, 0, 0],
@@ -167,6 +180,9 @@ pub(crate) fn resident(addr: usize) -> Option<bool> {
 /// Read-fault the page at `addr` in, as `get_user_pages` does for a lookup:
 /// `false` when no fault reaches it (unmapped, or `PROT_NONE`).
 pub(crate) fn fault_in(addr: usize) -> bool {
+    if in_arena(addr & !(PAGE - 1), PAGE) {
+        return false;
+    }
     require_populate();
     host(
         Syscall::N_madvise,

@@ -395,11 +395,43 @@ The guest's address layout is pinned by the supervisor and checked by the shim
 (ARCHITECTURE.md, "Address layout").
 `native_containment::address_layout_is_the_same_in_every_run_of_a_seed` runs
 `testbeds/native-boundary/address_layout_probe.rs` (its code, main and thread
-stacks, thread-local, heap and mapping addresses, and a pointer-hash order)
-twice seeded, twice recorded and once replayed. On Linux the image, main stack
-and thread-local addresses agree across all five runs, and the seeded pair and
-the recorded pair each agree in every line. On macOS the image and thread-stack
-addresses agree across all five. Before the change every address differed
+stacks, thread-local, heap and mapping addresses, and a pointer-hash order, then
+heap blocks and mappings during and after a churn of recorded file operations
+beside guest allocations) twice seeded, twice recorded and once replayed. On
+Linux every line agrees across all five runs. With the allocator routing
+removed, the runtime's allocations share the guest's heap: the first small
+block sits 0x150 bytes apart between the seeded run and the recording, the
+blocks after the churn about 1.4 MiB apart, and in the replay the probe's 4 MiB
+block, a mapping of its own in the seeded run, comes from the heap instead.
+`native_containment::the_arena_region_answers_the_guest_alike_in_every_run_of_a_seed`
+runs `testbeds/native-boundary/arena_region_probe.rs` seeded, recorded and
+replayed. The probe makes 300 recorded 64 KiB writes, then asks for the arena's
+region through every memory call that names a range: `MAP_FIXED_NOREPLACE` at
+offsets up to 256 MiB, `MAP_FIXED`, a hint, `munmap`, `mprotect`, `madvise`,
+`mlock`, `msync`, `mincore` and `mremap` from and to it. It also grows a
+mapping just below the region with and without `MREMAP_MAYMOVE`. Every answer
+agrees across the three runs, no fixed mapping is made, the movable growth
+moves, and the runtime runs on. Without the move, that growth was `ENOMEM`.
+`a_stack_mapping_is_refused_by_name` asks for a `MAP_GROWSDOWN` page just
+above the region. The refusal is named and `ENOSYS`. Without it, a store below
+the page grew the mapping into the region, and a later `munmap` of the grown
+page was `EINVAL`. Unit tests cover
+three more things, since this host has no aarch64 gate: the aarch64 tag
+normalization, the choice of a free place for the region, and the order of a
+malformed request's refusal before the region's answer. Each was red with its
+fix reverted. The routing object's test assembles it and checks that every
+entry starts with the landing pad and that the property note is there. Without
+the pad, the first instruction was the jump. With
+the region's guard removed, the answers depend on how much of the region the
+arena has mapped. `MAP_FIXED_NOREPLACE` at 48 MiB succeeds in the seeded run and
+is `EEXIST` in the recording and its replay. At 64 to 192 MiB it succeeds in
+the seeded run and the recording and is `EEXIST` in the replay. A
+`MAP_FIXED` over the region's start replaces runtime memory, and the next
+boundary call faults inside the shim. Gold links the routing too
+(`a_gold_link_routes_the_runtime_allocations`, which skips by name where the C
+compiler has no gold). Before the routing was jumps in an object, gold refused
+the link's symbol assignments to the wrapped entry points' real definitions. On
+macOS the image and thread-stack addresses agree across all five. Before the change every address differed
 between two seeded runs on both platforms. With randomization off but no
 initial-stack padding, the Linux main stack moved between the seeded run and the
 recording. The unit test `the_control_plane_never_resizes_the_initial_stack`
@@ -992,25 +1024,7 @@ unit suite — it is in the handful of **structurally unpaired classes** below
    sound check). Static instruction scan misses commpage `ldr` time reads and
    novel encodings. Highest structural residual; honestly stated, not closeable
    today.
-2. **Heap and mapping addresses across modes.** The runtime and the shim
-   allocate on the guest's heap: in-process Rust allocations go through the
-   guest's global allocator, and on Linux the shim's C allocations share
-   glibc's arena with it. A recording grows its trace as it runs, and a replay
-   holds the trace it loaded. So with the layout pinned, a heap block's
-   address, and on Linux a mapping placed after the runtime's large
-   allocations, still differs between a seeded run, a recording and its
-   replay. Each mode repeats its own layout exactly. The probe's first small
-   block sits at `…0a0` seeded, `…1f0` recorded and `…f10` replayed, and the
-   gap widens as a run allocates. A guest whose behaviour depends on a heap
-   address can therefore act differently on replay than in its recording;
-   where that reaches the boundary, replay stops at the first mismatched
-   operation, and campaign reproduction verification classes a finding whose
-   replay differs `NONDETERMINISM`; nothing stops it at run time. Closing this
-   needs a guest
-   heap the runtime never allocates from (a shim-owned allocator behind the
-   guest's `malloc`, over a reserved region), with guest mappings and thread
-   stacks placed there too.
-3. **Darwin heap and main-stack addresses.** libmalloc places its regions at
+2. **Darwin heap and main-stack addresses.** libmalloc places its regions at
    randomized addresses seeded from the exec-time `malloc_entropy` apple
    string. The kernel generates that string fresh at every exec, libSystem's
    initializer reads it before any image the guest controls runs, and the
@@ -1021,17 +1035,20 @@ unit suite — it is in the handful of **structurally unpaired classes** below
    read in the same window, so the shim cannot reseed them either. A stack
    canary is also live in every frame above the shim's constructor. Heap blocks,
    and the main thread's thread-local block that dyld allocates from the heap,
-   therefore differ between same-seed runs. The same random strings vary in
-   length, so the main stack moves by 16 bytes in a minority of runs (6 in 30
-   without Patina). Image and thread-stack addresses are fixed.
-4. **Vacuous-schedule floor + `SCHEDULE_MIN_BOUNDARIES=5000` are tuned constants.**
+   therefore differ between same-seed runs. The runtime allocates on the same
+   heap, because Darwin's linker has no `--wrap` to route Rust's allocator
+   entry points to the runtime's own arena as Linux does. The same random
+   strings vary in length, so the main stack moves by 16 bytes in a minority
+   of runs (6 in 30 without Patina). Image and thread-stack addresses are
+   fixed.
+3. **Vacuous-schedule floor + `SCHEDULE_MIN_BOUNDARIES=5000` are tuned constants.**
    The detector mechanism is structural but its calibration is a magic number; a
    std thread-scaffolding cost change could produce silent false negatives. Wants
    a calibration guard that pins the measured scaffolding yield cost.
-5. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `killpg`).
+4. **macOS guest `dlsym` of a non-deny-trapped blocked symbol** (e.g. `killpg`).
    Measured unreachable for any std guest, but no detector — relies on a guest not
    hand-writing `dlsym`. Low risk by measurement, unpaired in principle.
-6. **macOS `mmap(MAP_SHARED)`.** Invisible to the symbol audit (the flag is not
+5. **macOS `mmap(MAP_SHARED)`.** Invisible to the symbol audit (the flag is not
    in the import table); no detector. On Linux `mmap` is interposed and a shared
    mapping is process-local memory or a view of a modeled file's page cache. (`rdseed` no longer belongs here: the TSC
    slice added its decode row, and `classifies_rdtscp_and_rdseed` pins it as a

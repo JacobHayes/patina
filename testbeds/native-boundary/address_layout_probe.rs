@@ -1,7 +1,10 @@
 //! Prints where the guest's memory lives — its code, the main and a worker
 //! thread's stacks, a thread-local, small and large heap blocks, an anonymous
-//! mapping — plus an order that only the addresses decide. Under Patina every
-//! line is a function of the seed: identical across seeded runs and replay.
+//! mapping — plus an order that only the addresses decide. Then it churns:
+//! boundary operations the runtime records, beside guest allocations that
+//! live and die, and prints the heap blocks and mappings it gets after. Under
+//! Patina every line is a function of the seed: identical across seeded runs,
+//! recordings and replay.
 //!
 //! `deep-stack` (Linux) first raises the soft stack limit to 16 MiB and
 //! recurses through 11 MiB of main stack, past the 8 MiB a process starts
@@ -83,19 +86,7 @@ fn main() {
     regions.push(("heap", small[0].as_ptr() as usize));
     let large = vec![0u8; 4 << 20];
     regions.push(("heap-large", large.as_ptr() as usize));
-    // SAFETY: an anonymous private mapping with no address hint.
-    let mapping = unsafe {
-        mmap(
-            std::ptr::null_mut(),
-            1 << 16,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    assert_ne!(mapping as isize, -1, "mmap failed");
-    regions.push(("mmap", mapping as usize));
+    regions.push(("mmap", map(1 << 16)));
 
     for (name, address) in &regions {
         println!("{name}={address:#x}");
@@ -115,4 +106,55 @@ fn main() {
         .collect();
     let order: Vec<String> = ordered.values().map(usize::to_string).collect();
     println!("pointer-order={}", order.join(","));
+
+    churn();
+    // Blocks of each size class an allocator keeps, one past the C
+    // library's initial mmap threshold, and mappings of a few sizes.
+    let sizes = [16, 40, 100, 250, 600, 1500, 4000, 10_000, 40_000, 200 << 10];
+    let blocks: Vec<Vec<u8>> = sizes.iter().map(|size| vec![1u8; *size]).collect();
+    for (size, block) in sizes.iter().zip(&blocks) {
+        println!("after-churn-heap-{size}={:#x}", block.as_ptr() as usize);
+    }
+    for pages in [1, 16, 256] {
+        println!("after-churn-mmap-{pages}={:#x}", map(pages << 12));
+    }
+}
+
+/// A file written and read back, over and over, each round beside guest
+/// allocations of varying sizes, some kept and most dropped: a recording's
+/// trace grows with every round, and a replay holds every round's events.
+fn churn() {
+    let path = "address-layout-churn";
+    let mut kept = Vec::new();
+    for round in 0..1500usize {
+        let bytes = vec![round as u8; 1 + round % 700];
+        std::fs::write(path, &bytes).expect("write");
+        assert_eq!(std::fs::read(path).expect("read"), bytes);
+        if round % 7 == 0 {
+            kept.push(vec![0u8; 1 + round % 3000]);
+        }
+        if round % 500 == 499 {
+            println!("during-churn-mmap-{round}={:#x}", map(1 << 16));
+            println!("during-churn-heap-{round}={:#x}", kept[kept.len() - 1].as_ptr() as usize);
+        }
+    }
+    std::fs::remove_file(path).expect("remove");
+    std::hint::black_box(kept);
+}
+
+/// An anonymous private mapping of `len` bytes with no address hint.
+fn map(len: usize) -> usize {
+    // SAFETY: an anonymous private mapping with no address hint.
+    let mapping = unsafe {
+        mmap(
+            std::ptr::null_mut(),
+            len,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    assert_ne!(mapping as isize, -1, "mmap failed");
+    mapping as usize
 }

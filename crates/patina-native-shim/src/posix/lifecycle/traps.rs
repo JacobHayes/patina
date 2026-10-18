@@ -223,7 +223,10 @@ unsafe fn discover_regions() -> Result<(), ()> {
         return Err(());
     }
     let result = unsafe {
-        let fd = open(c"/proc/self/maps".as_ptr(), libc::O_RDONLY);
+        let fd = open(
+            c"/proc/self/maps".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        );
         let mut total = 0;
         let read_all = fd >= 0
             && loop {

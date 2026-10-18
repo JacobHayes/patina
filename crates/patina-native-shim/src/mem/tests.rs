@@ -172,3 +172,96 @@ fn a_read_only_shared_view_or_attachment_refuses_write() {
     assert!(!view(false, true).writes_back(1));
     assert!(!view(true, true).writes_back(2));
 }
+
+/// A malformed request about the runtime arena's region gets the kernel's
+/// refusal of the malformation, which the kernel judges before the range;
+/// a well-formed one gets the region's answer.
+#[test]
+fn a_malformed_request_about_the_arena_is_refused_as_malformed_first() {
+    let (base, _) = crate::arena::region();
+    let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+    let errno = |result: crate::abi::SysResult<usize>| result.err().map(|errno| errno.get());
+    let rows: [(&str, Option<c_int>, c_int); 5] = [
+        (
+            "an unaligned fixed address",
+            errno(mmap(base + 1, PAGE, RW, anonymous | MAP_FIXED, -1, 0)),
+            EINVAL,
+        ),
+        (
+            "no length",
+            errno(mmap(base, 0, RW, anonymous | MAP_FIXED, -1, 0)),
+            EINVAL,
+        ),
+        (
+            "an unaligned offset",
+            errno(mmap(base, PAGE, RW, anonymous | MAP_FIXED_NOREPLACE, -1, 1)),
+            EINVAL,
+        ),
+        (
+            "no sharing type",
+            errno(mmap(base, PAGE, RW, MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+            EINVAL,
+        ),
+        (
+            "a well-formed fixed mapping",
+            errno(mmap(base, PAGE, RW, anonymous | MAP_FIXED, -1, 0)),
+            ENOMEM,
+        ),
+    ];
+    for (what, answer, expected) in rows {
+        assert_eq!(answer, Some(expected), "{what}");
+    }
+    assert_eq!(
+        madvise(base, PAGE, usize::MAX),
+        fail(EINVAL),
+        "an unknown advice"
+    );
+    assert_eq!(madvise(base, PAGE, 4), fail(ENOMEM), "MADV_DONTNEED");
+    let refusal = |result: crate::abi::SysResult<i64>| result.err().map(|errno| errno.get());
+    assert_eq!(
+        refusal(mprotect(base, PAGE, 0x40_0000)),
+        Some(EINVAL),
+        "an unknown protection"
+    );
+    assert_eq!(refusal(mprotect(base, PAGE, 0)), Some(ENOMEM), "PROT_NONE");
+    assert_eq!(
+        refusal(msync(base, PAGE, 0xff)),
+        Some(EINVAL),
+        "unknown sync flags"
+    );
+    assert_eq!(refusal(msync(base, PAGE, MS_SYNC)), Some(ENOMEM), "MS_SYNC");
+}
+
+/// A movable growth of a locked mapping into the arena's region that the
+/// lock limit refuses leaves no place behind for the move it never made.
+#[test]
+fn a_refused_move_out_of_the_arenas_way_leaves_no_mapping_behind() {
+    let (base, _) = crate::arena::region();
+    let below = base - PAGE;
+    let claim = (MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE) as usize;
+    assert_eq!(
+        host(
+            Syscall::N_mmap,
+            [below, PAGE, RW as usize, claim, usize::MAX, 0]
+        ),
+        below as i64
+    );
+    assert_eq!(patina_mlock(below, PAGE, 0), 0);
+    let count = || {
+        let mut mappings = 0;
+        assert!(crate::arena::each_mapping(&mut |_, _| mappings += 1));
+        mappings
+    };
+    let before = count();
+    let past_the_limit = (lock_limit_pages() + 2) * PAGE;
+    for _ in 0..3 {
+        let refused = mremap(below, PAGE, past_the_limit, MREMAP_MAYMOVE, 0);
+        assert_eq!(
+            refused.err().map(|errno| errno.get()),
+            Some(crate::EWOULDBLOCK)
+        );
+    }
+    assert_eq!(count(), before);
+    assert_eq!(patina_munlock(below, PAGE), 0);
+    host(Syscall::N_munmap, [below, PAGE, 0, 0, 0, 0]);
+}

@@ -804,6 +804,12 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
+        "madvise",
+        Platform::Linux,
+        Serves::Syscalls(&["madvise"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "mlock",
         Platform::Linux,
         Serves::Syscalls(&["mlock"]),

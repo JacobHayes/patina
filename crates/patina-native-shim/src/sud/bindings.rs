@@ -527,9 +527,11 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_pkey_alloc, |_, a| sys_pkey_alloc(a)),
     (Syscall::N_pkey_free, |_, a| sys_pkey_free(a)),
     (Syscall::N_map_shadow_stack, |_, a| sys_map_shadow_stack(a)),
-    (Syscall::N_madvise, mem_passthrough),
-    (Syscall::N_brk, mem_passthrough),
-    (Syscall::N_mincore, mem_passthrough),
+    (Syscall::N_madvise, |_, a| {
+        crate::mem::madvise(a[0] as usize, a[1] as usize, a[2] as usize)
+    }),
+    (Syscall::N_brk, sys_brk),
+    (Syscall::N_mincore, sys_mincore),
     (Syscall::N_mlock, |_, a| {
         crate::mem::patina_mlock(a[0] as usize, a[1] as usize, 0)
     }),
@@ -552,7 +554,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_prlimit64, |_, a| unsafe {
         crate::limits::patina_prlimit(a[0] as c_int, a[1] as u32, a[2] as *const _, a[3] as *mut _)
     }),
-    (Syscall::N_remap_file_pages, mem_passthrough),
+    (Syscall::N_remap_file_pages, sys_remap_file_pages),
     // SAFETY: memfd_create reads the guest name through uaccess.
     (Syscall::N_memfd_create, |_, a| unsafe {
         ret_i32(crate::mem::patina_memfd_create(

@@ -524,11 +524,11 @@ is stated plainly:
     (`native_containment::layout`). A host that forbids the request refuses
     the run unless the operator passes `--allow-randomized-address-layout`,
     which keeps the host's layout and qualifies the run (see below).
-    What the allocator decides remains. The runtime allocates on the guest's
-    heap, so heap and later mapping addresses differ between a seeded run, a
+    On Linux the runtime allocates from an arena of its own, off the guest's
+    heap, so heap and mapping addresses are the same in a seeded run, a
     recording and its replay. On Darwin, libmalloc randomizes the heap from
-    exec-time kernel entropy. A guest that branches on a heap address is
-    deterministic within one mode on Linux and not at all on Darwin
+    exec-time kernel entropy, and the runtime shares it. A guest that branches
+    on a heap address is deterministic on Linux and not at all on Darwin
     (VALIDATION.md, the unpaired list).
 
 ## Escape hatch

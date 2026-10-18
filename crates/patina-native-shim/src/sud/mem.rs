@@ -92,6 +92,41 @@ pub(super) fn mem_passthrough(nr: i64, args: [u64; 6]) -> i64 {
     crate::mem::host_number(nr, args.map(|arg| arg as usize))
 }
 
+/// `brk(2)`: the host's, except that the break never moves into the runtime
+/// arena's region (`crate::arena`), however much of it is mapped: the kernel
+/// refuses a break it cannot set by answering the current one, and so does
+/// this.
+pub(super) fn sys_brk(nr: i64, args: [u64; 6]) -> i64 {
+    let current = crate::mem::host_number(nr, [0; 6]);
+    let wanted = args[0] as usize;
+    if current >= 0
+        && wanted > current as usize
+        && crate::arena::reserved(current as usize, wanted - current as usize)
+    {
+        return current;
+    }
+    mem_passthrough(nr, args)
+}
+
+/// `mincore(2)`: the host's, except for the runtime arena's region, a range
+/// nothing of the guest's maps (`ENOMEM`).
+pub(super) fn sys_mincore(nr: i64, args: [u64; 6]) -> i64 {
+    let (start, len) = (args[0] as usize, args[1] as usize);
+    if start.is_multiple_of(crate::mem::PAGE) && crate::mem::in_arena(start, len) {
+        return -(errno::ENOMEM as i64);
+    }
+    mem_passthrough(nr, args)
+}
+
+/// `remap_file_pages(2)`: the host's, except for the runtime arena's region,
+/// which holds no mapping of the guest's to rearrange (`EINVAL`).
+pub(super) fn sys_remap_file_pages(nr: i64, args: [u64; 6]) -> i64 {
+    if crate::mem::in_arena(args[0] as usize, args[1] as usize) {
+        return -EINVAL;
+    }
+    mem_passthrough(nr, args)
+}
+
 // ---- the virtual CPU's memory features ------------------------------------
 //
 // The virtual machine's CPU has neither memory protection keys nor user

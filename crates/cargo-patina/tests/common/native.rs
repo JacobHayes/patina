@@ -446,10 +446,8 @@ fn build_native_guest(mut cc: Command, name: &str, link: CLink, flags: &[&str]) 
             } else {
                 cc.arg(object);
             }
-            cc.arg(archive);
-            if cfg!(target_os = "linux") {
-                cc.arg("-Wl,--wrap=dlsym");
-            }
+            cc.arg(archive)
+                .args(super::shim_linker_args(archive, dir.path()));
         }
     }
     assert_success(cc.args(flags).arg("-o").arg(&binary).output().unwrap());

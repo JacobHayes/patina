@@ -64,6 +64,15 @@ extern "C" fn mprotect(address: *mut c_void, length: usize, protection: c_int) -
     )
 }
 #[unsafe(no_mangle)]
+extern "C" fn madvise(address: *mut c_void, length: usize, advice: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    result(crate::mem::madvise(
+        address as usize,
+        length,
+        advice as usize,
+    ))
+}
+#[unsafe(no_mangle)]
 extern "C" fn mlock(address: *const c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlock(address as usize, length, 0))

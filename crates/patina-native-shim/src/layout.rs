@@ -3,7 +3,10 @@
 //! randomized layout by name. The host is asked, not trusted — Darwin can
 //! drop the spawn attribute, and a persona a set-id exec clears is gone — so a
 //! run that was promised a fixed layout and did not get one stops at startup,
-//! by name, instead of running with addresses no seed decides.
+//! by name, instead of running with addresses no seed decides. On Linux a fixed
+//! layout also needs the runtime's allocations off the guest's heap
+//! (`arena.rs`), so a binary linked without the allocator routing stops the
+//! same way.
 
 use patina_dst_runtime::{ENV_ADDRESS_LAYOUT, RuntimeError};
 
@@ -29,17 +32,30 @@ fn promised() -> Result<Option<Layout>, RuntimeError> {
 }
 
 /// Refuse the run if the supervisor promised a fixed layout and the host did
-/// not apply it.
+/// not apply it, or (on Linux) the runtime's allocations would land on the
+/// guest's heap.
 pub(crate) fn verify() -> Result<(), RuntimeError> {
-    if promised()? != Some(Layout::Fixed) || fixed() {
+    if promised()? != Some(Layout::Fixed) {
         return Ok(());
     }
-    Err(RuntimeError::Config(format!(
-        "the supervisor exec'd this guest with address-space randomization off \
+    if !fixed() {
+        return Err(RuntimeError::Config(format!(
+            "the supervisor exec'd this guest with address-space randomization off \
 ({ENV_ADDRESS_LAYOUT}=fixed), but the host randomized its layout anyway, so its addresses would \
 not be a function of the seed. Pass --allow-randomized-address-layout to run with the host's \
 layout and qualified determinism"
-    )))
+        )));
+    }
+    #[cfg(target_os = "linux")]
+    if !crate::arena::routed() {
+        return Err(RuntimeError::Config(
+            "the runtime's allocations reach the guest's heap: this binary was linked without \
+Patina's allocator routing (`cargo patina build` links it), so its heap addresses would differ \
+between a seeded run, a recording and its replay"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The run's address layout, shaped for `RunMetadata::address_layout`:
@@ -55,7 +71,7 @@ pub(crate) fn recorded() -> Result<Option<patina_dst_trace::AddressLayout>, Runt
 /// The process persona carries `ADDR_NO_RANDOMIZE`, which the kernel read
 /// when it laid out this image.
 #[cfg(target_os = "linux")]
-fn fixed() -> bool {
+pub(crate) fn fixed() -> bool {
     const ADDR_NO_RANDOMIZE: std::ffi::c_long = 0x0040000;
     const QUERY: std::ffi::c_long = 0xffff_ffff;
     let personality = patina_dst_syscalls::Syscall::N_personality.number();

@@ -140,6 +140,16 @@ pub(crate) unsafe fn capture_control_plane() {
             }
             entry = entry.add(1);
         }
+        // The control plane is the runtime's, and differs between a seeded
+        // run, a recording and a replay: on Linux it lives in the runtime's
+        // arena, so the guest's heap never holds it.
+        #[cfg(target_os = "linux")]
+        let snapshot = crate::arena::alloc_zeroed(
+            (kept + 1) * size_of::<*mut c_char>(),
+            align_of::<*mut c_char>(),
+        )
+        .cast::<*mut c_char>();
+        #[cfg(not(target_os = "linux"))]
         let snapshot = libc::calloc(kept + 1, size_of::<*mut c_char>()).cast::<*mut c_char>();
         if snapshot.is_null() {
             fatal(b"patina: failed to capture the PATINA_* control plane before scrubbing the environment\n");

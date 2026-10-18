@@ -16,17 +16,28 @@ fn address_layout(output: &[u8]) -> std::collections::BTreeMap<&str, &str> {
 // linked, in every run of a seed, recorded or replayed. On Linux the initial
 // stack the control plane cannot resize puts the main stack and its first
 // thread-local block at fixed addresses too, and everything else the probe
-// reports — thread stacks, heap blocks, mappings and the pointer-keyed order
-// — is a function of the run's own allocations, the same in every run of one
-// mode. On Darwin the thread stacks sit at fixed addresses; the main stack
-// moves with the length of the kernel's random apple strings, and the heap
-// (with the thread-local block dyld allocates from it) is placed by libmalloc
-// from exec-time entropy no seed reaches (VALIDATION.md, the unpaired list).
+// reports — thread stacks, heap blocks and mappings, before and after a churn
+// of recorded operations beside guest allocations, and the pointer-keyed
+// order — is a function of the guest's own allocations, because the runtime
+// allocates from an arena of its own: the same in a seeded run, a recording
+// and its replay. On Darwin the thread stacks sit at fixed addresses; the main
+// stack moves with the length of the kernel's random apple strings, and the
+// heap (with the thread-local block dyld allocates from it) is placed by
+// libmalloc from exec-time entropy no seed reaches (VALIDATION.md, the
+// unpaired list).
 #[test]
 fn address_layout_is_the_same_in_every_run_of_a_seed() {
     let g = Guest::assert_build("address_layout_probe.rs");
     let pinned: &[&str] = if cfg!(target_os = "linux") {
-        &["code", "stack", "tls"]
+        &[
+            "code",
+            "stack",
+            "tls",
+            "heap",
+            "mmap",
+            "after-churn-heap-16",
+            "after-churn-mmap-1",
+        ]
     } else {
         &["code", "thread-stack"]
     };
@@ -36,9 +47,9 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
         g.assert_run_success(1, &["--record", trace.to_str().unwrap()])
             .stdout
     };
-    let recorded = record();
     let runs = [
         g.assert_run_success(1, &[]).stdout,
+        record(),
         record(),
         assert_success(g.command("replay", &[trace.to_str().unwrap()])).stdout,
     ];
@@ -48,13 +59,12 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     }
     for run in &runs {
         let layout = address_layout(run);
+        if cfg!(target_os = "linux") {
+            assert_eq!(baseline, layout, "every line: {}", text(run));
+        }
         for region in pinned {
             assert_eq!(baseline[region], layout[region], "{region}: {}", text(run));
         }
-    }
-    if cfg!(target_os = "linux") {
-        assert_eq!(text(&seeded), text(&runs[0]), "seeded repeat");
-        assert_eq!(text(&recorded), text(&runs[1]), "recorded repeat");
     }
 }
 
@@ -480,4 +490,134 @@ fn a_campaign_from_before_layout_control_is_not_continued() {
     assert!(!refused.status.success(), "{refused:?}");
     assert!(text(&refused.stderr).contains("--out-dir"), "{refused:?}");
     assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
+}
+
+/// A C guest that prints `main ran`, linked by hand over the POSIX layer with
+/// the allocator routing or without it, and with the driver flags `flags`.
+#[cfg(target_os = "linux")]
+fn main_ran_guest(routed: bool, flags: &[&str]) -> Guest {
+    let archive = common::shim_archive();
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("guest.c");
+    std::fs::write(
+        &source,
+        "#include <stdio.h>\nint main(void) { return puts(\"main ran\") < 0; }\n",
+    )
+    .unwrap();
+    let binary = dir.path().join("guest");
+    let mut cc = common::c_compiler();
+    // The product link's dead-section removal, so the C link drops the std
+    // sections nothing uses (and their imports the audit refuses).
+    cc.arg(&source)
+        .arg(common::compile_posix_object(dir.path()))
+        .arg(&archive)
+        .arg("-Wl,--gc-sections")
+        .args(flags);
+    if routed {
+        cc.args(common::shim_linker_args(&archive, dir.path()));
+    } else {
+        cc.arg("-Wl,--wrap=dlsym");
+    }
+    assert_success(cc.arg("-o").arg(&binary).output().unwrap());
+    Guest { dir, binary }
+}
+
+// The runtime keeps its allocations off the guest's heap only where the link
+// routes Rust's allocator entry points to its arena. A binary linked without
+// the routing would run with heap addresses that differ between a seeded run,
+// a recording and its replay, so a fixed-layout run of it stops before its
+// `main`; the same program linked with the routing runs.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_binary_linked_without_the_allocator_routing_stops_the_run() {
+    let unrouted = main_ran_guest(false, &[]).command("run", &["--seed", "1"]);
+    assert!(!unrouted.status.success(), "{}", text(&unrouted.stderr));
+    assert!(!text(&unrouted.stdout).contains("main ran"));
+    let routed = main_ran_guest(true, &[]).assert_run_success(1, &[]);
+    assert!(text(&routed.stdout).contains("main ran"));
+}
+
+// The routing is code the link wraps onto, not linker symbol assignments, so
+// every linker with `--wrap` links it: gold too, whose `--defsym` cannot name
+// a wrapped symbol's real definition. (Gold's dead-section removal keeps a
+// `splice` import of std's that GNU ld drops, with or without the routing, so
+// the run allows it.)
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gold_link_routes_the_runtime_allocations() {
+    let gold = common::c_compiler()
+        .args(["-fuse-ld=gold", "-Wl,--version"])
+        .output()
+        .is_ok_and(|output| output.status.success() && text(&output.stdout).contains("gold"));
+    if !gold {
+        eprintln!("skipped: this host's C compiler has no gold linker (-fuse-ld=gold)");
+        return;
+    }
+    let routed = main_ran_guest(true, &["-fuse-ld=gold"])
+        .assert_run_success(1, &["--allow-unsupported-symbols", "splice"]);
+    assert!(text(&routed.stdout).contains("main ran"));
+}
+
+// The kernel grows a stack mapping (`MAP_GROWSDOWN`) down into address space
+// nothing maps, and how much of the arena's region is unmapped differs by
+// mode, so a guest stack mapping is refused by name (`ENOSYS`) wherever it
+// is asked for: one just above the region never grows into it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stack_mapping_is_refused_by_name() {
+    const ENOSYS: &str = "errno 38";
+    let g = Guest::assert_build("arena_region_probe.rs");
+    let output = g.assert_run_success(1, &["--", "growsdown"]);
+    let answers = address_layout(&output.stdout);
+    assert_eq!(
+        answers.get("growsdown"),
+        Some(&ENOSYS),
+        "{}",
+        text(&output.stdout)
+    );
+    assert!(
+        !text(&output.stdout).contains("grew"),
+        "{}",
+        text(&output.stdout)
+    );
+    assert!(
+        text(&output.stderr).contains("MAP_GROWSDOWN"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+// The runtime arena's region is the runtime's whatever the arena has mapped
+// of it, and how much it has differs by mode: a recording has grown its trace
+// there, a replay holds the trace it loaded. So every memory call about the
+// region answers the same in every run of a seed, after a churn of recorded
+// writes: a fixed mapping there is refused (`EEXIST` under
+// `MAP_FIXED_NOREPLACE`), never made over runtime memory; a hint there is not
+// honoured; and the runtime runs on.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_arena_region_answers_the_guest_alike_in_every_run_of_a_seed() {
+    const EEXIST: &str = "errno 17";
+    let g = Guest::assert_build("arena_region_probe.rs");
+    let trace = g.dir.path().join("region.patina");
+    let runs = [
+        g.assert_run_success(1, &[]).stdout,
+        g.assert_run_success(1, &["--record", trace.to_str().unwrap()])
+            .stdout,
+        assert_success(g.command("replay", &[trace.to_str().unwrap()])).stdout,
+    ];
+    let seeded = address_layout(&runs[0]);
+    assert_eq!(seeded.get("after"), Some(&"ok"), "{}", text(&runs[0]));
+    for run in &runs[1..] {
+        assert_eq!(seeded, address_layout(run), "{}", text(run));
+    }
+    for (call, answer) in &seeded {
+        match *call {
+            "after" => {}
+            "hint-start" => assert_eq!(*answer, "outside", "{call}"),
+            "mremap-grow-maymove" => assert_eq!(*answer, "moved", "{call}"),
+            _ if call.starts_with("noreplace-") => assert_eq!(*answer, EEXIST, "{call}"),
+            _ => assert!(answer.starts_with("errno "), "{call}={answer}"),
+        }
+    }
 }

@@ -52,6 +52,35 @@ pub fn workspace_manifest() -> PathBuf {
     native_workspace().join("Cargo.toml")
 }
 
+/// The linker arguments a guest linked by hand needs beside the shim archive
+/// `archive`, as `cargo patina build` passes them: on Linux the `dlsym` wrap
+/// behind the host-alias table and the allocator routing that keeps the
+/// runtime's allocations off the guest's heap, whose object is compiled into
+/// `dir`.
+pub fn shim_linker_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsString> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let mut args = vec!["-Wl,--wrap=dlsym".into()];
+    args.extend(
+        cargo_patina::shim_allocator_linker_args(archive, dir)
+            .unwrap_or_else(|error| panic!("{error}")),
+    );
+    args
+}
+
+/// [`shim_linker_args`] as rustc `-C` values.
+pub fn shim_rustc_link_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsString> {
+    shim_linker_args(archive, dir)
+        .into_iter()
+        .map(|arg| {
+            let mut value = std::ffi::OsString::from("link-arg=");
+            value.push(arg);
+            value
+        })
+        .collect()
+}
+
 /// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
 pub fn shim_archive() -> PathBuf {
     build_shim_archive(&[], true)

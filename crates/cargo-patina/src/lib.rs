@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 // `--output json` envelope. Both are read-only consumers of trace/runtime
 // semantics — they never record, replay, or mutate a trace — so rendering or
 // emitting an envelope cannot perturb replay hashes.
+mod allocator_routing;
 mod audit;
 mod aux_store;
 mod campaign;
@@ -672,6 +673,36 @@ enum UnsupportedPolicy {
     /// `--allow-unsupported-symbols a,b,c`: downgrade only the listed symbols;
     /// anything else still hard-errors.
     Only(BTreeSet<String>),
+}
+
+/// The compiler-driver arguments that route Rust's allocator entry points
+/// through the shim archive `staticlib`'s arena router, for a link `cargo
+/// patina build` does not drive (the test suites' C and C++ guests): the
+/// routing object is compiled into `dir` with `cc`.
+#[doc(hidden)]
+pub fn shim_allocator_linker_args(staticlib: &Path, dir: &Path) -> Result<Vec<OsString>, CliError> {
+    let routing = allocator_routing::AllocatorRouting::read(staticlib)?;
+    let Some(defines) = routing.defines() else {
+        return Ok(Vec::new());
+    };
+    let source = dir.join("patina_allocator_routing.S");
+    let object = dir.join("patina_allocator_routing.o");
+    fs::write(&source, allocator_routing::PATINA_ALLOCATOR_ROUTING_S)
+        .map_err(|error| CliError(format!("staging {}: {error}", source.display())))?;
+    let status = Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        .args(&defines)
+        .arg("-c")
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .map_err(|error| CliError(format!("compiling the allocator routing: {error}")))?;
+    if !status.success() {
+        return Err(CliError(
+            "compiling the allocator routing failed".to_owned(),
+        ));
+    }
+    Ok(routing.linker_args(&object, staticlib))
 }
 
 pub fn entrypoint() -> Result<i32, CliError> {

@@ -87,8 +87,11 @@ fn main() {
             .arg(format!("link-arg={}", archive.display()))
             .arg("-o")
             .arg(&binary);
+        for arg in common::shim_rustc_link_args(&archive, dir.path()) {
+            rustc.arg("-C").arg(arg);
+        }
         if cfg!(target_os = "linux") {
-            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym", "-C", "link-arg=-lc"]);
+            rustc.args(["-C", "link-arg=-lc"]);
         }
         assert_success(rustc.output().unwrap());
         let guest = Guest { dir, binary };

@@ -246,6 +246,7 @@ fn build_native_harness(
         .args(native_package_link_args(
             &object,
             staticlib,
+            &built_shim.allocator_link_args(&host_target)?,
             yield_object.as_deref(),
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);

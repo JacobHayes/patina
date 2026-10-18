@@ -508,9 +508,13 @@ int main(int argc, char **argv) {
     let archive = common::shim_archive_with(&["test-panic"]);
     let binary = dir.path().join("guest");
     let mut cc = common::c_compiler();
-    cc.arg("-fno-builtin").arg(&source).arg(object).arg(archive);
+    cc.arg("-fno-builtin")
+        .arg(&source)
+        .arg(object)
+        .arg(&archive)
+        .args(common::shim_linker_args(&archive, dir.path()));
     if cfg!(target_os = "linux") {
-        cc.args(["-Wl,--wrap=dlsym", "-Wl,--gc-sections"]);
+        cc.arg("-Wl,--gc-sections");
     } else {
         cc.arg("-Wl,-dead_strip");
     }

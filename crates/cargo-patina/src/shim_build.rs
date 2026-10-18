@@ -105,6 +105,26 @@ pub(super) struct BuiltNativeShim {
     pub(super) _lease: shim_cache::Lease,
 }
 
+impl BuiltNativeShim {
+    /// The rustc `-C` values that route the allocator entry points of the
+    /// compiler that built the archive through its arena router
+    /// (`allocator_routing.rs`): the wraps, and the routing object staged for
+    /// `host_target`. Empty where the platform routes nothing.
+    pub(super) fn allocator_link_args(&self, host_target: &str) -> Result<Vec<OsString>, CliError> {
+        let routing = crate::allocator_routing::AllocatorRouting::read(&self.staticlib)?;
+        let Some(defines) = routing.defines() else {
+            return Ok(Vec::new());
+        };
+        let object = stage_shim_object(
+            self,
+            &PATINA_ALLOCATOR_ROUTING_OBJECT,
+            host_target,
+            &defines,
+        )?;
+        Ok(routing.link_args(&object, &self.staticlib))
+    }
+}
+
 /// Unpack the embedded shim source bundle into the per-user cache (a no-op when
 /// this binary's bundle is already there) and return where it lives.
 ///
@@ -666,6 +686,18 @@ pub(super) const PATINA_POSIX_OBJECT: ShimObject = ShimObject {
     companion_sources: PATINA_POSIX_C_FAMILIES,
     cc_flags: patina_dst_native_shim::POSIX_C_FLAGS,
     what: "the Patina POSIX shim layer",
+};
+
+/// The allocator routing's object (`allocator_routing.rs`), compiled with the
+/// compiler's entry-point prefix as a define.
+const PATINA_ALLOCATOR_ROUTING_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_allocator_routing.o",
+    source_name: "patina_allocator_routing.S",
+    source: crate::allocator_routing::PATINA_ALLOCATOR_ROUTING_S,
+    header: None,
+    companion_sources: &[],
+    cc_flags: &[],
+    what: "the Patina allocator routing",
 };
 
 /// The `--yield-points` hook object. Compiled without the SanitizerCoverage flags

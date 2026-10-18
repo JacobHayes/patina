@@ -650,9 +650,10 @@ mod stdio_lifecycle {
         cxx.args(["-std=c++17", "-Wall", "-Wextra", "-Werror"])
             .arg(guest_source("cxx_stdio_probe.cc"));
         if matches!(link, CLink::PosixShim) {
+            let archive = common::shim_archive();
             cxx.arg(common::compile_posix_object(dir.path()))
-                .arg(common::shim_archive())
-                .arg("-Wl,--wrap=dlsym");
+                .arg(&archive)
+                .args(common::shim_linker_args(&archive, dir.path()));
         }
         assert_success(cxx.arg("-o").arg(&binary).output().unwrap());
         Guest { dir, binary }

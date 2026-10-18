@@ -805,10 +805,8 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
             .arg(shim.join("include"))
             .arg(guest_source("signals/internal_panic.c"))
             .arg(posix)
-            .arg(&built.archive);
-        if cfg!(target_os = "linux") {
-            cc.arg("-Wl,--wrap=dlsym");
-        }
+            .arg(&built.archive)
+            .args(common::shim_linker_args(&built.archive, dir.path()));
         assert_success(cc.arg("-o").arg(&binary).output().unwrap());
         let guest = Guest { dir, binary };
         let (output, trace) = guest.record_standalone(&[]);
@@ -865,8 +863,8 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
                 .arg("-L")
                 .arg(format!("dependency={}", directory.display()));
         }
-        if cfg!(target_os = "linux") {
-            rustc.args(["-C", "link-arg=-Wl,--wrap=dlsym"]);
+        for arg in common::shim_rustc_link_args(&built.archive, guest.dir.path()) {
+            rustc.arg("-C").arg(arg);
         }
         assert_success(rustc.output().unwrap());
         let replacement = Guest {

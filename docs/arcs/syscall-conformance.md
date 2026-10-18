@@ -318,7 +318,10 @@ forwards into the same dispatcher instead of its two-number allowlist.
   refuses it past the limit, `EAGAIN` from `do_brk_flags`); a mapping the
   shim's allocator makes for itself is never locked by `MCL_FUTURE`;
   `mlockall(MCL_CURRENT)` is a named deny (the kernel answers from `total_vm`,
-  unreadable without `/proc`); a `MAP_HUGETLB|MAP_NORESERVE` mapping is judged
+  unreadable without `/proc`); so is an anonymous `mmap(MAP_GROWSDOWN)`, since
+  the kernel grows such a mapping into address space nothing maps, as the
+  runtime arena's unmapped tail is (glibc and Rust map thread stacks without
+  it); a `MAP_HUGETLB|MAP_NORESERVE` mapping is judged
   at base-page granularity by `munmap`/`mremap`/`mprotect`, and `mlock`
   charges its pages where `mlock_fixup` skips hugetlb; `mlock` of an
   execute-only page answers `ENOMEM` (the kernel populates it with

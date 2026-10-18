@@ -204,6 +204,15 @@ pub(crate) fn crashed() {
 
 pub(crate) fn msync(addr: usize, len: usize, flags: c_int) -> crate::abi::SysResult<i64> {
     'result: {
+        // The arena's region, as a range nothing maps, once the kernel has
+        // judged the flags and the start.
+        const MS_ASYNC: c_int = 1;
+        let judged = flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) == 0
+            && flags & (MS_ASYNC | MS_SYNC) != MS_ASYNC | MS_SYNC
+            && addr.is_multiple_of(PAGE);
+        if judged && in_arena(addr, len) {
+            break 'result Err(crate::abi::Errno::new(ENOMEM));
+        }
         let result = host(Syscall::N_msync, [addr, len, flags as usize, 0, 0, 0]);
         if (result != 0 && result != -i64::from(ENOMEM)) || !tracking() {
             break 'result crate::abi::LinuxReturn::new(result)
