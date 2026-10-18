@@ -183,6 +183,13 @@ mod tests {
 
     // Cargo may rewrite an unchanged executable during uplift. Its typed
     // compiler-artifact receipts expose freshness independently of file times.
+    //
+    // The builds under test are cargo-patina's alone. They run in a target dir
+    // of their own, and with any compiler wrapper the suite inherits (a build
+    // cache running the tests) switched off: a wrapper that stamps its outputs
+    // with a fine-grained mtime can leave a build-script executable newer than
+    // the kernel-stamped record of that script's run, and Cargo then reruns the
+    // script and relinks the guest on an unchanged build.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn second_native_package_build_reuses_cargo_cache() {
@@ -196,8 +203,7 @@ mod tests {
             &cargo,
             r#"#!/bin/sh
 [ "$1" = rustc ] || exec "$PATINA_TEST_REAL_CARGO" "$@"
-CARGO_LOG=cargo::core::compiler::fingerprint=info \
-    "$PATINA_TEST_REAL_CARGO" "$@" > "$PATINA_TEST_CARGO_RECEIPTS" \
+"$PATINA_TEST_REAL_CARGO" --verbose "$@" > "$PATINA_TEST_CARGO_RECEIPTS" \
     2> "$PATINA_TEST_CARGO_RECEIPTS.log"
 status=$?
 cat "$PATINA_TEST_CARGO_RECEIPTS.log" >&2
@@ -208,10 +214,15 @@ exit "$status"
         .unwrap();
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
         let real_cargo = active_toolchain_binary("cargo");
+        let target = common::guest_target_dir("cargo-cache-reuse");
         let envs = [
             ("CARGO", cargo.to_str().unwrap()),
             ("PATINA_TEST_REAL_CARGO", real_cargo.to_str().unwrap()),
             ("PATINA_TEST_CARGO_RECEIPTS", receipts.to_str().unwrap()),
+            ("CARGO_TARGET_DIR", target.to_str().unwrap()),
+            // Empty overrides an inherited or configured wrapper alike.
+            ("RUSTC_WRAPPER", ""),
+            ("RUSTC_WORKSPACE_WRAPPER", ""),
         ];
         let package_text = package.to_str().unwrap();
         let plain = [
@@ -235,7 +246,7 @@ exit "$status"
             let artifacts = cargo_artifact_receipts(&receipts);
             // Cargo's own account of why a unit was dirty, for a failure.
             let log = fs::read_to_string(receipts.with_extension("jsonl.log")).unwrap_or_default();
-            let reasons: Vec<_> = log.lines().filter(|line| line.contains("dirty")).collect();
+            let reasons: Vec<_> = log.lines().filter(|line| line.contains("Dirty")).collect();
             assert!(
                 artifacts.iter().all(|row| row["fresh"] == true),
                 "unchanged build ({flags:?}) recompiled guest artifacts: {artifacts:?}\n\
