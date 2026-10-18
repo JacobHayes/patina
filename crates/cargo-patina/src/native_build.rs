@@ -397,10 +397,18 @@ fn build_native_source(
             "overflow-checks=off",
         ]);
     }
+    // Link under one fixed name, then copy to `output`. The linker writes the
+    // output's file name into the executable (the macOS ad-hoc code signature's
+    // identifier and the image UUID), so linking straight to `output` would make
+    // two builds of the same source differ by what they were called — and the
+    // executable digest is the build identity a native trace replays against.
+    let link_dir = tempfile::tempdir()
+        .map_err(|error| CliError(format!("failed to create a link directory: {error}")))?;
+    let linked = link_dir.path().join(SINGLE_SOURCE_LINK_NAME);
     command
         .arg(source)
         .arg("-o")
-        .arg(output)
+        .arg(&linked)
         .args(rustc_args)
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let status = command
@@ -409,7 +417,40 @@ fn build_native_source(
     if !status.success() {
         return Err(CliError("linking the native Patina program failed".into()));
     }
+    install_built_executable(&linked, output)?;
     Ok(output.to_path_buf())
+}
+
+/// The file name every single-source native guest is linked under.
+const SINGLE_SOURCE_LINK_NAME: &str = "patina-guest";
+
+/// Copy a freshly linked executable to `output` through a sibling file and a
+/// rename, so a running copy of the previous build is replaced rather than
+/// rewritten in place.
+fn install_built_executable(linked: &Path, output: &Path) -> Result<(), CliError> {
+    let name = output.file_name().ok_or_else(|| {
+        CliError(format!(
+            "native build output {} has no file name",
+            output.display()
+        ))
+    })?;
+    let mut partial_name = OsString::from(".");
+    partial_name.push(name);
+    partial_name.push(".partial");
+    let partial = output.with_file_name(partial_name);
+    fs::copy(linked, &partial).map_err(|error| {
+        CliError(format!(
+            "failed to copy the linked program to {}: {error}",
+            partial.display()
+        ))
+    })?;
+    fs::rename(&partial, output).map_err(|error| {
+        let _ = fs::remove_file(&partial);
+        CliError(format!(
+            "failed to install the linked program at {}: {error}",
+            output.display()
+        ))
+    })
 }
 
 /// Drive a Cargo package's own build under Patina control, as `cargo rustc` so

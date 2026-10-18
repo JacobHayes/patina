@@ -49,6 +49,12 @@ const SHIM_PACKAGES: &[&str] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // The platform this `cargo-patina` runs native guests on, recorded as
+    // context in every native trace's build identity.
+    println!(
+        "cargo:rustc-env=PATINA_BUILD_TARGET={}",
+        env::var("TARGET").expect("cargo sets TARGET for build scripts")
+    );
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let pkg_set: BTreeSet<&str> = SHIM_PACKAGES.iter().copied().collect();

@@ -213,12 +213,19 @@ pub fn emit_simple(verb: &str, result: &str, exit_code: i32, message: Option<Str
 /// This class is emitted only by the native audit gate, before guest launch.
 pub(crate) const NATIVE_PRERUN_REFUSAL: &str = "native_prerun_audit";
 
-pub(crate) fn emit_native_prerun_refusal(artifact: &Path, message: String) {
+/// The class of a replay refused because the trace belongs to another build.
+/// The native supervisor emits it before guest launch; the same class names a
+/// runtime's own fingerprint refusal read off a dying child's output.
+pub(crate) const FINGERPRINT_MISMATCH_REFUSAL: &str = "fingerprint_mismatch";
+
+/// Emit the envelope of a native run the supervisor refused before the guest
+/// started, so no `guest_exit` exists.
+pub(crate) fn emit_native_refusal(artifact: &Path, class: &str, message: String) {
     let mut env = Envelope::new("run", "error", 2);
     env.family = Some("native".into());
     env.artifact = Some(artifact.to_string_lossy().into_owned());
     env.refusal = Some(Refusal {
-        class: NATIVE_PRERUN_REFUSAL.into(),
+        class: class.into(),
         message: message.clone(),
         guest_exit_code: None,
     });

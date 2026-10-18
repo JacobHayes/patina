@@ -174,7 +174,7 @@ pub(super) fn run_generation(
     guest_args: &[String],
     timeout_secs: u64,
 ) -> Result<GenerationRun, CliError> {
-    let mut command = child_command(self_exe, "run");
+    let mut command = child_command(self_exe, "run")?;
     command
         .arg(artifact)
         .arg("--seed")
@@ -208,7 +208,7 @@ pub(super) fn run_replay(
     invocation: &[String],
     timeout_secs: u64,
 ) -> Result<GenerationRun, CliError> {
-    let mut command = child_command(self_exe, "replay");
+    let mut command = child_command(self_exe, "replay")?;
     command.arg(artifact).arg(trace);
     for flag in invocation {
         command.arg(flag);
@@ -218,7 +218,7 @@ pub(super) fn run_replay(
 
 /// The child `cargo patina <verb> --no-config --format json` command every
 /// campaign child shares, in its own process group.
-fn child_command(self_exe: &Path, verb: &str) -> Command {
+fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
     let mut command = Command::new(self_exe);
     #[cfg(unix)]
     {
@@ -243,7 +243,10 @@ fn child_command(self_exe: &Path, verb: &str) -> Command {
     for report in patina_dst_runtime::Report::ALL {
         command.env(report.env(), "1");
     }
-    command
+    // Every child is this same supervisor build, or refuses to run; see
+    // `collect_child`.
+    crate::supervisor_identity::expect_this_supervisor(&mut command)?;
+    Ok(command)
 }
 
 /// Spawn a campaign child, enforce the wall-clock backstop, and reduce what it
@@ -333,6 +336,17 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     let child_signal: Option<i32> = None;
     let child_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let child_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    // A child that is another cargo-patina build (the executable was replaced
+    // under the campaign) stops the whole run: its result, and every one after
+    // it, would come from a supervisor the campaign's state does not name.
+    if let Some(refusal) =
+        crate::supervisor_identity::supervisor_mismatch(&child_stdout, &child_stderr)
+    {
+        return Err(CliError(format!(
+            "stopping: a child run is another supervisor build than the one running this \
+             campaign, so its results are not comparable. {refusal}"
+        )));
+    }
 
     // The child's own captured guest output travels inside the envelope; without
     // one (a build failure, a pre-run refusal, a timeout kill) the child's raw
@@ -475,6 +489,26 @@ fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// A child that refuses because it is another supervisor build stops the
+    /// campaign, naming the supervisor, instead of being filed as one more
+    /// generation's result.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_of_another_supervisor_build_stops_the_campaign() {
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(format!(
+            "echo 'cargo-patina: {} this cargo-patina is another build' >&2; exit 2",
+            crate::supervisor_identity::SUPERVISOR_MISMATCH
+        ));
+        let stopped = collect_child(child, 0).err().map(|error| error.to_string());
+        assert!(
+            stopped
+                .as_deref()
+                .is_some_and(|error| error.contains("supervisor")),
+            "the campaign must stop, naming the supervisor; got {stopped:?}"
+        );
+    }
 
     /// A timed-out generation's trace scratch file is swept only once the last
     /// process holding it is gone. The backstop SIGKILLs the generation's whole

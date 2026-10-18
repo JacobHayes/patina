@@ -80,7 +80,7 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
         "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
         "buggify_setup_never_called",
     ),
-    ("fingerprint mismatch", "fingerprint_mismatch"),
+    ("fingerprint mismatch", FINGERPRINT_MISMATCH_REFUSAL),
     ("trace operation mismatch", "trace_operation_mismatch"),
     ("operation mismatch", "trace_operation_mismatch"),
     (

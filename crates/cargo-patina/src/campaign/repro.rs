@@ -1,7 +1,7 @@
 //! Failure artifacts and recorded generation reproduction.
 
 use super::generation::{GenerationFiles, run_generation};
-use super::state::{load_campaign_state, verify_artifact_identity};
+use super::state::{load_campaign_state, verify_campaign_build};
 use super::{GenerationRun, VerdictFacts, invocation_flags};
 use crate::CliError;
 use std::path::{Path, PathBuf};
@@ -166,7 +166,7 @@ pub(crate) fn generation_repro(
         )));
     }
     let state = load_campaign_state(&state_path)?;
-    verify_artifact_identity(&state.artifact)?;
+    verify_campaign_build(&state)?;
     let outcome = state
         .notable_runs
         .iter()

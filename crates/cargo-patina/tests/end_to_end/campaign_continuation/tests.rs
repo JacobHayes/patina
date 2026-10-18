@@ -836,6 +836,152 @@ fn campaign_continuation_refusals_are_loud() {
     );
 }
 
+/// A campaign continues, and a generation is reduced, only under the
+/// `cargo-patina` build that ran it: the supervisor builds every generation's
+/// run, and its package version stays the same across development builds that
+/// behave differently, so the campaign names it by its executable's digest.
+#[test]
+fn campaign_continuation_and_reduction_refuse_another_supervisor_build() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    let module = cwd.join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let run = |args: &[&str]| invoke_unchecked(patina, cwd, args);
+    let out = cwd.join("camp");
+    let out_dir = out.to_str().unwrap();
+    let report = |output: &Output| {
+        format!(
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let fresh = run(&[
+        "campaign",
+        module.to_str().unwrap(),
+        "--gens",
+        "1",
+        "--out-dir",
+        out_dir,
+    ]);
+    assert!(fresh.status.success(), "{}", report(&fresh));
+
+    let state_path = out.join("campaign-state.json");
+    let read_state = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap()
+    };
+    let own = format!(
+        "sha256:{}",
+        Sha256::digest(fs::read(patina).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    assert_eq!(
+        read_state()["supervisor_sha256"].as_str(),
+        Some(own.as_str()),
+        "a campaign records the digest of the cargo-patina that ran it"
+    );
+    let extended = run(&["campaign", "--extend", "1", "--out-dir", out_dir]);
+    assert!(extended.status.success(), "{}", report(&extended));
+
+    let output = cwd.join("minimized.patina");
+    let continuations: [&[&str]; 2] = [
+        &["campaign", "--extend", "1", "--out-dir", out_dir],
+        &[
+            "minimize",
+            "--generation",
+            "0",
+            "--out-dir",
+            out_dir,
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    ];
+    let another = format!("sha256:{}", "0".repeat(64));
+    for (case, edit) in [
+        ("another supervisor build", Some(another)),
+        ("no supervisor identity", None),
+    ] {
+        let mut state = read_state();
+        let object = state.as_object_mut().unwrap();
+        match &edit {
+            Some(digest) => {
+                object.insert("supervisor_sha256".into(), digest.clone().into());
+            }
+            None => {
+                object.remove("supervisor_sha256");
+            }
+        }
+        let original = fs::read(&state_path).unwrap();
+        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        for arguments in continuations {
+            let refused = run(arguments);
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(
+                !refused.status.success() && stderr.contains("supervisor"),
+                "{case}: `{}` must be refused, naming the supervisor\n{}",
+                arguments[0],
+                report(&refused)
+            );
+        }
+        assert!(
+            !output.exists(),
+            "{case}: a refused reduction writes nothing"
+        );
+        fs::write(&state_path, original).unwrap();
+    }
+}
+
+/// A `cargo-patina` launched by another build (a campaign's child after the
+/// executable was replaced under it) refuses before it runs anything, so no
+/// generation is filed from a supervisor the campaign's state does not name.
+#[test]
+fn a_child_of_another_supervisor_build_refuses_before_running() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    let module = cwd.join("noop.wasm");
+    fs::write(
+        &module,
+        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
+            .unwrap(),
+    )
+    .unwrap();
+    let run_expecting = |digest: &str| {
+        Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+            .current_dir(cwd)
+            .args(["run", module.to_str().unwrap()])
+            .env("PATINA_EXPECTED_SUPERVISOR_SHA256", digest)
+            .output()
+            .unwrap()
+    };
+    let own = format!(
+        "sha256:{}",
+        Sha256::digest(fs::read(env!("CARGO_BIN_EXE_cargo-patina")).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let same = run_expecting(&own);
+    assert!(
+        same.status.success(),
+        "the same build runs:\n{}",
+        String::from_utf8_lossy(&same.stderr)
+    );
+    let refused = run_expecting(&format!("sha256:{}", "0".repeat(64)));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && stderr.contains("supervisor_mismatch"),
+        "another build must refuse, naming the supervisor:\n{stderr}"
+    );
+}
+
 // The campaign classifier `--selftest` proves every outcome class is reachable
 // and the signature store dedups/novelty logic bites — the campaign peer of
 // fuzz-sweep's `--selftest`.

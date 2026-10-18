@@ -24,6 +24,7 @@ mod file_lock;
 mod handoff;
 mod lifecycle;
 mod metadata;
+mod native_identity;
 mod recorder;
 mod replay;
 
@@ -42,6 +43,7 @@ pub use metadata::{
     FaultConfigRecord, FaultCrashOp, PctPolicyRecord, RunMetadata, SchedulePolicyRecord,
     StarvationPolicyRecord, SwarmConfigRecord, TornGranularity, WatchdogConfigRecord,
 };
+pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord};
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;
 

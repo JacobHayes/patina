@@ -255,10 +255,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
         )
     }
 
-    // Gate 5: replaying with a conflicting harness configuration fails closed. The
-    // harness overlay flows through the same `RuntimeConfig::faults` field the CLI
-    // sets, so the runtime's `reconcile_replay_faults` (the trace is authoritative)
-    // catches a divergent harness-configured knob exactly like a CLI flag conflict.
+    // Gate 5: replaying with a conflicting harness configuration fails closed. A
+    // harness configures itself in code, so a conflicting configuration is another
+    // executable, and the trace's build identity refuses it before the guest
+    // starts. Inside the guest the overlay flows through the same
+    // `RuntimeConfig::faults` field the CLI sets, which the runtime's
+    // `reconcile_replay_faults` reconciles against the trace (its unit tests).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn harness_replay_with_conflicting_config_fails_closed() {
@@ -296,9 +298,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
             ],
         );
 
-        // Binary B embeds a different (conflicting) sleep jitter; both share the same
-        // fingerprint (faults are reconciled from trace metadata, not fingerprinted),
-        // so the run reaches fault reconciliation and fails closed there.
+        // Binary B embeds a different (conflicting) sleep jitter. Both share the
+        // fingerprint label, but not the executable.
         let conflict = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             native_workspace(),
@@ -317,8 +318,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
         );
         let stderr = String::from_utf8_lossy(&conflict.stderr);
         assert!(
-            stderr.contains("conflict with the trace's recorded configuration"),
-            "missing fault-reconciliation conflict diagnostic:\nstderr:\n{stderr}"
+            stderr.contains("fingerprint mismatch") && stderr.contains("executable"),
+            "the refusal must name the differing executable:\nstderr:\n{stderr}"
         );
 
         // The original binary (matching config) replays cleanly.

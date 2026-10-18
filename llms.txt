@@ -91,7 +91,12 @@ unknown option.
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
   flag that conflicts is refused). A fingerprint or operation mismatch fails
-  closed with a nonzero exit.
+  closed with a nonzero exit. A native trace also carries its build identity
+  (`metadata.native`: the executable's and the `cargo-patina` executable's
+  digests, plus the patina version, shim bundle and target as context, stamped
+  by the supervisor when it commits the recording); replay against a different build, or of a
+  trace with no identity, is refused before the guest starts, naming each
+  differing component (refusal class `fingerprint_mismatch`).
 - `cargo patina trace info <TRACE> [--timeline ID]` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
   Inspect an existing trace without executing a guest. `info` prints metadata,
   timelines, resolved event count, and virtual-time span. `events` prints the
@@ -100,7 +105,8 @@ unknown option.
   `other`), and `--task` accepts a task id or `main`. `stats` aggregates totals,
   per-kind/category/task counts, notable events, and a virtual-time histogram.
   `diff` compares two traces, exits 0 when identical and 1 when metadata/events
-  diverge, and reports the first operation/outcome/length divergence.
+  diverge, and reports the first operation/outcome/length divergence. A metadata
+  field that is an object on both sides is diffed by member (`native.executable_sha256`).
 - `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
   finding. Audit source-first (or a `cargo patina build` artifact): only a
@@ -338,7 +344,8 @@ ABSENT means "did not fire", never zero.
   `unknown_import`, `starvation_stall`, `incomplete_trace`, `native_prerun_audit`).
   `native_prerun_audit` is emitted directly by the native audit gate before any
   guest launch, with no `guest_exit`; it lets harnesses skip futile recording retries.
-  Other classes are constructed by the
+  A native replay refused for its build identity is likewise emitted before launch
+  as `fingerprint_mismatch`, with no `guest_exit`. Other classes are constructed by the
   supervising process from what the dying child printed and exited with. Its
   ABSENCE is meaningful: an abort with no `refusal` is the guest's own doing.
 - `qualifications[]` = `{kind, detail}` — what the operator relaxed for a

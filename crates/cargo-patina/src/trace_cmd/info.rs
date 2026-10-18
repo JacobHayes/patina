@@ -40,6 +40,7 @@ pub(crate) fn info_value(
         "path": path.to_string_lossy(),
         "format_version": bundle.format_version,
         "fingerprint": bundle.metadata.fingerprint,
+        "native": bundle.metadata.native,
         "root_seed": bundle.metadata.root_seed,
         "decision_policy": bundle.metadata.decision_policy,
         "guest_argv": bundle.metadata.guest_argv,
@@ -114,6 +115,20 @@ pub(super) fn print_info_human(facts: &Value) {
         "fingerprint: {}",
         facts["fingerprint"].as_str().unwrap_or("?")
     );
+    if let Some(native) = facts["native"].as_object() {
+        let field = |name: &str| native.get(name).and_then(Value::as_str).unwrap_or("?");
+        println!(
+            "native identity: executable {} supervisor {}",
+            field("executable_sha256"),
+            field("supervisor_sha256")
+        );
+        println!(
+            "native context: patina {} shim bundle {} target {}",
+            field("patina_version"),
+            field("shim_bundle_sha256"),
+            field("target")
+        );
+    }
     println!("root_seed: {}", facts["root_seed"]);
     println!(
         "decision_policy: {}",

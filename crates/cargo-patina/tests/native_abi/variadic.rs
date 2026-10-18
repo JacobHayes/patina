@@ -538,16 +538,7 @@ int main(int argc, char **argv) {
     // A standalone recording ran with the host's address-space randomization,
     // so its supervised replay accepts that layout by name.
     assert_eq!(
-        assert_success(guest.command(
-            "replay",
-            &[
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "native-boundary",
-                "--allow-randomized-address-layout"
-            ]
-        ))
-        .stdout,
+        assert_success(guest.replay_standalone(&trace, &[])).stdout,
         expected
     );
 }

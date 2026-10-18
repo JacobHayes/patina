@@ -326,6 +326,27 @@ impl Guest {
         (output, trace)
     }
 
+    /// Replay a [`record_standalone`](Self::record_standalone) trace the same way,
+    /// through an inherited host fd. A standalone recording carries no native
+    /// build identity, so `cargo patina replay` refuses it.
+    pub fn replay_standalone(&self, trace: &Path, args: &[&str]) -> Output {
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_clear()
+            .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "native-boundary"])
+            .arg(trace)
+            .arg(&self.binary)
+            .args(args)
+            .envs([
+                ("PATINA_MODE", "replay"),
+                ("PATINA_SEED", "1"),
+                ("PATINA_TRACE_FD", "3"),
+                ("PATINA_FINGERPRINT", "native-boundary"),
+            ]);
+        super::output_with_deadline(&mut command, Duration::from_secs(20))
+            .expect("replayed standalone guest exceeded 20s")
+    }
+
     /// Internal containment refusals must abort without publishing a complete trace.
     pub fn assert_internal_fatal(&self, args: &[&str], diagnostics: &[&str]) {
         use std::os::unix::process::ExitStatusExt;

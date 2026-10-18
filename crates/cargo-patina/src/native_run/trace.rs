@@ -1,6 +1,7 @@
 //! Native trace capture and unsupported sidecars.
 
 use super::*;
+use patina_dst_trace::NativeIdentityRecord;
 
 /// The one sentence a run prints when its trace CHANNEL failed — the scratch
 /// file could not be opened, read, or renamed. It is a fixed prefix on purpose:
@@ -104,30 +105,28 @@ impl NativeTraceSink {
             })
     }
 
-    pub(super) fn commit(mut self) -> Result<PathBuf, TraceCommitFailure> {
+    /// Stamp `identity` into the recorded trace and move it to its final path.
+    /// The stamp is written into the locked scratch file before the rename, so
+    /// the final path only ever holds a complete, stamped trace.
+    pub(super) fn commit(
+        mut self,
+        identity: &NativeIdentityRecord,
+    ) -> Result<PathBuf, TraceCommitFailure> {
         // Held, and with it the scratch file's lock, until the rename is done.
-        let _file = self.file.take();
-        if let Err(error) = TraceBundle::load(&self.temp_path) {
-            // Tell "the recorder gave up, and said so" apart from "the trace
-            // is simply not there". Both leave no bundle at the temp path, but
-            // only the first is accompanied by an abandoned-trace marker the
-            // recorder wrote deliberately AFTER the guest had already finished.
-            // A guest that died mid-run leaves an empty or truncated file and
-            // no marker, and that must keep failing the run.
-            let abandoned = fs::read(&self.temp_path)
-                .ok()
-                .and_then(|bytes| parse_abandoned_trace_marker(&bytes));
+        let file = self.file.take().expect("trace sink is live until commit");
+        let mut bundle = match TraceBundle::load(&self.temp_path) {
+            Ok(bundle) => bundle,
+            Err(error) => return Err(self.uncommitted(error)),
+        };
+        bundle.metadata.native = Some(identity.clone());
+        // The recorder's trace is complete and loaded, so a failure from here
+        // on is the channel's, not the run's: the guest reached its verdict.
+        if let Err(error) = rewrite(&file, &bundle) {
             let _ = fs::remove_file(&self.temp_path);
-            return Err(match abandoned {
-                Some(_) => TraceCommitFailure::Abandoned(error.to_string()),
-                // The scratch file could not be OPENED at all — it is gone, or
-                // its directory is. The guest still ran, so this is the channel
-                // failing under the run rather than the run failing.
-                None if matches!(error, TraceError::Io { .. }) => {
-                    TraceCommitFailure::Unavailable(error.to_string())
-                }
-                None => TraceCommitFailure::Broken(error.to_string()),
-            });
+            return Err(TraceCommitFailure::Unavailable(format!(
+                "failed to stamp the native build identity into temporary trace {}: {error}",
+                self.temp_path.display()
+            )));
         }
         fs::rename(&self.temp_path, &self.final_path).map_err(|error| {
             let _ = fs::remove_file(&self.temp_path);
@@ -139,6 +138,43 @@ impl NativeTraceSink {
         })?;
         Ok(self.final_path.clone())
     }
+
+    /// Classify, and clean up after, a recording that left no loadable bundle.
+    fn uncommitted(&self, error: TraceError) -> TraceCommitFailure {
+        // Tell "the recorder gave up, and said so" apart from "the trace is
+        // simply not there". Both leave no bundle at the temp path, but only the
+        // first is accompanied by an abandoned-trace marker the recorder wrote
+        // deliberately AFTER the guest had already finished. A guest that died
+        // mid-run leaves an empty or truncated file and no marker, and that must
+        // keep failing the run.
+        let abandoned = fs::read(&self.temp_path)
+            .ok()
+            .and_then(|bytes| parse_abandoned_trace_marker(&bytes));
+        let _ = fs::remove_file(&self.temp_path);
+        match abandoned {
+            Some(_) => TraceCommitFailure::Abandoned(error.to_string()),
+            // The scratch file could not be OPENED at all — it is gone, or its
+            // directory is. The guest still ran, so this is the channel failing
+            // under the run rather than the run failing.
+            None if matches!(error, TraceError::Io { .. }) => {
+                TraceCommitFailure::Unavailable(error.to_string())
+            }
+            None => TraceCommitFailure::Broken(error.to_string()),
+        }
+    }
+}
+
+/// Replace the scratch file's contents with `bundle`'s canonical encoding.
+/// Every field of a bundle is typed and unknown fields are refused on load, so
+/// the rewrite carries everything the recorder wrote.
+fn rewrite(mut file: &fs::File, bundle: &TraceBundle) -> Result<(), String> {
+    use std::io::{Seek, Write};
+
+    let bytes = bundle.to_bytes().map_err(|error| error.to_string())?;
+    file.set_len(0).map_err(|error| error.to_string())?;
+    file.rewind().map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())
 }
 
 impl Drop for NativeTraceSink {

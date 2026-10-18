@@ -534,7 +534,7 @@ fn join_recorded_incarnations(
 
 /// An anonymous host file holding `contents`, rewound for the child to read.
 #[cfg(unix)]
-fn scratch_file(purpose: &str, contents: &[u8]) -> Result<fs::File, CliError> {
+pub(crate) fn scratch_file(purpose: &str, contents: &[u8]) -> Result<fs::File, CliError> {
     use std::io::{Seek, Write};
 
     let mut file = tempfile::tempfile()

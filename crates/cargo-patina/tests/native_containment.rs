@@ -478,11 +478,14 @@ mod linux {
             g.assert_seed_variation(&[1, 2, 3, 4], &[]);
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+            // The supervisor reads a trace's build identity before it
+            // launches the guest, so an empty trace is refused there,
+            // before anything runs.
             let trace = g.dir.path().join("invalid.patina");
             std::fs::write(&trace, []).unwrap();
             assert_refused(
                 g.command("replay", &[trace.to_str().unwrap()]),
-                &["lacks syscall-user-dispatch"],
+                &["incomplete trace"],
             );
         }
     }

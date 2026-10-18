@@ -275,7 +275,9 @@ loads through `cargo patina sites --exercised <out-dir>`.
 (inspect with `jq` or `cargo patina trace info|events`). Replay is strict: the
 trace carries the seed, fault knobs, buggify config, guest argv, and native
 `--env` values, and any mismatch — changed binary, changed
-config, diverging operation — fails closed rather than lying. Cargo and WASI
+config, diverging operation — fails closed rather than lying. A native trace
+names its binary by digest, so replaying it against one that differs by a
+single byte is refused before the guest starts, naming what differs. Cargo and WASI
 traces also support *branch timelines*: replay a recorded prefix, then explore a
 different seeded suffix from that moment
 (`replay … --branch --from N --branch-seed S --branch-id ID`).

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use patina_dst_abi::TaskId;
 use serde::{Deserialize, Serialize};
 
+use crate::NativeIdentityRecord;
+
 /// The boundary-operation kind a filesystem crash is pinned to. Serialized by
 /// name (snake_case) so it round-trips independent of declaration order, mirror
 /// of the runtime's `CrashOp`.
@@ -442,6 +444,13 @@ pub struct RunMetadata {
     /// never replayed as though they had been, nor the other way round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_layout: Option<AddressLayout>,
+    /// The build a native recording belongs to: stamped by the supervisor into
+    /// every trace `cargo patina run --record` commits for a native binary, and
+    /// absent on standalone recordings and the other families' traces. Native replay refuses a trace without it, and one
+    /// whose identity differs from the build replaying it, before the guest
+    /// starts. See [`NativeIdentityRecord`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeIdentityRecord>,
     /// The run's virtual realtime epoch: the Unix time in nanoseconds that
     /// `ClockKind::Realtime` read at monotonic zero (`--realtime-epoch`, default
     /// `patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS`). Required, not additive:
@@ -502,6 +511,7 @@ impl RunMetadata {
             sud: None,
             tsc: None,
             address_layout: None,
+            native: None,
             realtime_epoch_nanos,
             boot_origin_nanos: patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS,
             time_model: patina_dst_abi::TIME_MODEL,

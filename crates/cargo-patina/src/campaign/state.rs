@@ -317,6 +317,12 @@ pub(super) struct CampaignState {
     /// its generation `OK`, and so out of `notable_runs`; this is its only
     /// record.
     pub(super) clean_reruns: CleanReruns,
+    /// The `sha256:` digest of the `cargo-patina` executable that started the
+    /// campaign. Every generation is a run that supervisor built, so a
+    /// continuation or a reduction by another supervisor build is refused.
+    /// `None` only on an out-dir written before the key existed, which is
+    /// refused by name.
+    pub(super) supervisor_sha256: Option<String>,
 }
 
 impl CampaignState {
@@ -330,6 +336,7 @@ impl CampaignState {
             notable_runs: Vec::new(),
             invocations: Vec::new(),
             clean_reruns: CleanReruns::default(),
+            supervisor_sha256: None,
         }
     }
 
@@ -356,6 +363,11 @@ impl CampaignState {
                     "infra": self.clean_reruns.infra,
                 }),
             );
+        }
+        if let Some(supervisor) = &self.supervisor_sha256
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("supervisor_sha256".into(), supervisor.clone().into());
         }
         value
     }
@@ -411,6 +423,15 @@ impl CampaignState {
                 }
             }
         };
+        let supervisor_sha256 = match object.get("supervisor_sha256") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| "supervisor_sha256 must be a string".to_string())?
+                    .to_string(),
+            ),
+        };
         let state = CampaignState {
             artifact,
             spec,
@@ -420,6 +441,7 @@ impl CampaignState {
             notable_runs,
             invocations,
             clean_reruns,
+            supervisor_sha256,
         };
         state.validate()?;
         if state.to_json() != *value {
@@ -751,7 +773,30 @@ pub(super) fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, CliErro
     })
 }
 
-pub(super) fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError> {
+/// Refuse to continue or reduce a campaign with anything but the build that
+/// ran it: the same artifact bytes, and the same `cargo-patina` executable,
+/// which built every generation's run.
+pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliError> {
+    verify_artifact_identity(&state.artifact)?;
+    let current = crate::supervisor_identity::supervisor_sha256()?.to_string();
+    match &state.supervisor_sha256 {
+        None => Err(CliError(
+            "campaign out-dir records no supervisor build identity: it was written by a \
+             cargo-patina that predates them, so nothing says which supervisor ran its \
+             generations. Start a new campaign in a new --out-dir."
+                .to_string(),
+        )),
+        Some(recorded) if *recorded != current => Err(CliError(format!(
+            "campaign out-dir was run by supervisor (cargo-patina executable) {recorded} but this \
+             cargo-patina is {current}; the supervisor builds every generation's run, so results \
+             from different supervisor builds are not comparable. Finish it with the \
+             cargo-patina that started it, or start a new out-dir."
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError> {
     let path = PathBuf::from(&recorded.path);
     let current = artifact_identity(&path).map_err(|error| {
         CliError(format!(

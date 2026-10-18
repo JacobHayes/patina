@@ -44,6 +44,7 @@ use std::{env, fs, io};
 mod child;
 mod fs_image;
 mod gate;
+mod identity;
 mod layout;
 mod trace;
 
@@ -66,6 +67,9 @@ pub(super) use gate::effective_native_allow;
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
 pub(super) use gate::target_has_sud;
+use identity::{
+    guest_trace_channel, native_identity, native_identity_refusal, withhold_native_identity,
+};
 use trace::NativeTraceSink;
 pub(crate) use trace::TRACE_CHANNEL_UNAVAILABLE;
 use trace::TraceCommitFailure;
@@ -78,8 +82,8 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
 
     // Source-first: an artifact runs as-is; a source/package is built on the fly
     // first (`resolved` holds the build workspace alive for the whole run). For
-    // replay, the rebuilt binary is judged against the trace by the fingerprint
-    // and operation-mismatch machinery below — no special-casing.
+    // replay, the rebuilt binary is judged against the trace's build identity
+    // below, exactly like a prebuilt one — no special-casing.
     let resolved = resolve_artifact(invocation.binary.clone())?;
     let binary = fs::canonicalize(&resolved.path).map_err(|error| {
         CliError(format!(
@@ -87,6 +91,39 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
             resolved.path.display()
         ))
     })?;
+
+    // A replay reads its trace once: the build identity, the guest arguments,
+    // the fingerprint components and the crash-restart plan all come from this
+    // one load.
+    let replay_trace = match &invocation.mode {
+        NativeRunMode::Replay { path, .. } => Some(TraceBundle::load(path).map_err(|error| {
+            CliError(format!("failed to read trace {}: {error}", path.display()))
+        })?),
+        NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
+    };
+
+    // The build identity a recording stores and a replay must match. A replay
+    // against another build is refused here, by component, before the guest
+    // starts: past this point it could only fail as an operation mismatch at
+    // some later boundary, or not fail at all.
+    let identity = match &invocation.mode {
+        NativeRunMode::Seeded { .. } => None,
+        NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
+            Some(native_identity(&binary)?)
+        }
+    };
+    if let (NativeRunMode::Replay { path, .. }, Some(bundle), Some(identity)) =
+        (&invocation.mode, &replay_trace, &identity)
+        && let Some(message) =
+            native_identity_refusal(path, bundle.metadata.native.as_ref(), identity)
+    {
+        if output::facts_active() {
+            output::emit_native_refusal(&binary, output::FINGERPRINT_MISMATCH_REFUSAL, message);
+            return Ok(2);
+        }
+        return Err(CliError(message));
+    }
+    let replay_trace = replay_trace.map(withhold_native_identity);
 
     // Pre-run default-deny gate. Before the guest executes, enumerate every
     // externally-resolved symbol it can reach and hard-error, listing names, if
@@ -102,7 +139,11 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
         match native_prerun_gate(&binary, &invocation.allow, &invocation.allow_unsupported) {
             Ok(downgraded) => downgraded,
             Err(error) if output::facts_active() => {
-                output::emit_native_prerun_refusal(&binary, error.to_string());
+                output::emit_native_refusal(
+                    &binary,
+                    output::NATIVE_PRERUN_REFUSAL,
+                    error.to_string(),
+                );
                 return Ok(2);
             }
             Err(error) => return Err(error),
@@ -180,15 +221,6 @@ liveness-safe."
         })?)
     } else {
         None
-    };
-
-    // A replay reads its trace once: the guest arguments, the fingerprint
-    // components and the crash-restart plan all come from this one load.
-    let replay_trace = match &invocation.mode {
-        NativeRunMode::Replay { path, .. } => Some(TraceBundle::load(path).map_err(|error| {
-            CliError(format!("failed to read trace {}: {error}", path.display()))
-        })?),
-        NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
     };
 
     // Restore the guest arguments for a replay from the trace's recorded argv, so
@@ -289,6 +321,9 @@ liveness-safe."
             + serde_json::to_string(&arguments).map_or(0, |json| json.len())
     };
 
+    // A replaying guest reads the trace the supervisor hands it, so it reads
+    // the recording without its build identity.
+    let replay_channel = replay_trace.as_ref().map(guest_trace_channel).transpose()?;
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
         return Err(CliError::usage(
@@ -500,12 +535,7 @@ liveness-safe."
     } else {
         // Hold the trace channel open until the child exits so the inherited
         // descriptor named by `PATINA_TRACE_FD` stays valid.
-        let replay_trace_file = match &invocation.mode {
-            NativeRunMode::Replay { path, .. } => Some(fs::File::open(path).map_err(|error| {
-                CliError(format!("failed to open trace {}: {error}", path.display()))
-            })?),
-            NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
-        };
+        let replay_trace_file = replay_channel;
         let trace = trace_sink
             .as_ref()
             .map(NativeTraceSink::file)
@@ -613,7 +643,13 @@ liveness-safe."
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;
     let mut channel_unavailable: Option<i32> = None;
     if let Some(sink) = trace_sink {
-        match sink.commit() {
+        // The supervisor stamps the build identity as it commits the trace, so
+        // a recording replays against its own build whatever the recorder
+        // linked into the guest knows about identities.
+        let identity = identity
+            .as_ref()
+            .expect("a recording computes its build identity");
+        match sink.commit(identity) {
             Ok(path) => {
                 if let Err(error) = write_unsupported_sidecar(&path, &downgraded) {
                     let _ = fs::remove_file(&path);

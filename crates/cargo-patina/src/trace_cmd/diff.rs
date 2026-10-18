@@ -119,20 +119,7 @@ fn metadata_diff(
         .cloned()
         .unwrap_or_else(|| serde_json::to_value(&b_bundle.metadata).unwrap_or(Value::Null));
     match (a_meta.as_object(), b_meta.as_object()) {
-        (Some(a), Some(b)) => {
-            let keys: BTreeSet<String> = a.keys().chain(b.keys()).cloned().collect();
-            for key in keys {
-                let av = a.get(&key).cloned().unwrap_or(Value::Null);
-                let bv = b.get(&key).cloned().unwrap_or(Value::Null);
-                if av != bv {
-                    diffs.push(MetadataDiff {
-                        field: key,
-                        a: av,
-                        b: bv,
-                    });
-                }
-            }
-        }
+        (Some(a), Some(b)) => diff_fields(&mut diffs, "", a, b),
         _ if a_meta != b_meta => diffs.push(MetadataDiff {
             field: "metadata".into(),
             a: a_meta,
@@ -141,6 +128,34 @@ fn metadata_diff(
         _ => {}
     }
     diffs
+}
+
+/// Diff two metadata objects field by field. A field that is an object on both
+/// sides is diffed member by member as `field.member`, so a record such as the
+/// native build identity names the component that differs, not just the record.
+fn diff_fields(
+    diffs: &mut Vec<MetadataDiff>,
+    prefix: &str,
+    a: &serde_json::Map<String, Value>,
+    b: &serde_json::Map<String, Value>,
+) {
+    let keys: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    for key in keys {
+        let av = a.get(key).unwrap_or(&Value::Null);
+        let bv = b.get(key).unwrap_or(&Value::Null);
+        if av == bv {
+            continue;
+        }
+        let field = format!("{prefix}{key}");
+        match (av.as_object(), bv.as_object()) {
+            (Some(a), Some(b)) => diff_fields(diffs, &format!("{field}."), a, b),
+            _ => diffs.push(MetadataDiff {
+                field,
+                a: av.clone(),
+                b: bv.clone(),
+            }),
+        }
+    }
 }
 
 fn event_divergence(

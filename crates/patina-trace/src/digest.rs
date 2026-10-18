@@ -49,6 +49,21 @@ impl fmt::Display for Sha256Digest {
     }
 }
 
+/// Serialized in its one text form, so a stored digest reads exactly as the
+/// supervisor reports it, and a malformed one is refused when it is decoded.
+impl serde::Serialize for Sha256Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Sha256Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +74,15 @@ mod tests {
         let text = digest.to_string();
         assert_eq!(text, format!("sha256:{}", "ab".repeat(32)));
         assert_eq!(Sha256Digest::parse(&text).unwrap(), digest);
+    }
+
+    #[test]
+    fn sha256_digest_serializes_as_its_text_form() {
+        let digest = Sha256Digest([0x5c; 32]);
+        let json = serde_json::to_string(&digest).unwrap();
+        assert_eq!(json, format!("\"{digest}\""));
+        assert_eq!(serde_json::from_str::<Sha256Digest>(&json).unwrap(), digest);
+        assert!(serde_json::from_str::<Sha256Digest>("\"5c5c\"").is_err());
     }
 
     #[test]

@@ -18,7 +18,7 @@ use super::repro::{
 use super::state::{
     CampaignLock, CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord,
     absolute_out_dir, artifact_identity, class_counts_failures, load_campaign_state,
-    load_coverage_tally, verify_artifact_identity, write_campaign_checkpoint,
+    load_coverage_tally, verify_campaign_build, write_campaign_checkpoint,
 };
 use super::verify::{
     Attempt, Observation, VerificationSummary, Verifier, VerifyStatus, nondeterminism_signature,
@@ -91,7 +91,10 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 spec.address_layout
                     .get_or_insert(patina_dst_trace::AddressLayout::Fixed);
             }
-            CampaignState::fresh(identity, spec)
+            let mut state = CampaignState::fresh(identity, spec);
+            state.supervisor_sha256 =
+                Some(crate::supervisor_identity::supervisor_sha256()?.to_string());
+            state
         }
         CampaignMode::Resume | CampaignMode::Extend { .. } => {
             let state = load_campaign_state(&state_path)?;
@@ -108,7 +111,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     };
 
     let artifact_path = PathBuf::from(&state.artifact.path);
-    verify_artifact_identity(&state.artifact)?;
+    verify_campaign_build(&state)?;
 
     // The DNS family exception, enforced where the artifact family is finally
     // known: wasip1 has no name-resolution surface, so a WASI campaign carrying a

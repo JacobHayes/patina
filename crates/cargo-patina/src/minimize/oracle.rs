@@ -211,9 +211,19 @@ impl ReplayOracle {
             command.arg(flag);
         }
         crate::config::scrub_child_config_env(&mut command, "replay");
+        crate::supervisor_identity::expect_this_supervisor(&mut command)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let output = command.output()?;
         let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if let Some(refusal) =
+            crate::supervisor_identity::supervisor_mismatch(&child_stdout, &child_stderr)
+        {
+            return Err(io::Error::other(format!(
+                "stopping: a candidate replay ran another supervisor build than this \
+                 reduction. {refusal}"
+            )));
+        }
 
         // Under `--format json` the guest's own streams travel INSIDE the
         // envelope; without one (patina refused to replay at all) the child's raw

@@ -596,13 +596,35 @@ fn run_native_harness_seed(
     args.push(OsString::from("--exact"));
     args.push(OsString::from(&invocation.exact));
     args.push(OsString::from("--nocapture"));
-    let output = Command::new(&executable)
-        .args(&args)
+    let mut command = Command::new(&executable);
+    command.args(&args);
+    // Every seed, and the recorded retry, is this same supervisor build.
+    crate::supervisor_identity::expect_this_supervisor(&mut command)?;
+    let output = command
         .output()
         .map_err(|error| CliError(format!("failed to run native harness seed {seed}: {error}")))?;
+    harness_seed_outcome(seed, &output)
+}
+
+/// What one harness seed's child `cargo patina run` reported.
+fn harness_seed_outcome(
+    seed: u64,
+    output: &std::process::Output,
+) -> Result<HarnessSeedRun, CliError> {
     let exit_code = exit_code(output.status)?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
     let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    // A child that is another cargo-patina build (the executable was replaced
+    // under the run) stops the test run rather than being filed as a seed
+    // failure: it is not the supervisor this run started with.
+    if let Some(refusal) =
+        crate::supervisor_identity::supervisor_mismatch(&stdout_text, &child_stderr)
+    {
+        return Err(CliError(format!(
+            "stopping: native harness seed {seed} ran another supervisor build than this test \
+             run, so its result is not comparable. {refusal}"
+        )));
+    }
     let json_line = stdout_text
         .lines()
         .rev()
@@ -1038,6 +1060,32 @@ mod tests {
                 assert_eq!(fs::read(trace).unwrap(), b"previous recording");
             }
         }
+    }
+
+    /// A seed whose child refuses because it is another supervisor build stops
+    /// the test run, naming the supervisor, instead of being filed as that
+    /// seed's failure.
+    #[cfg(unix)]
+    #[test]
+    fn a_seed_run_by_another_supervisor_build_stops_the_test_run() {
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "echo '{{\"result\":\"failure\"}}'; \
+                 echo 'cargo-patina: {} this cargo-patina is another build' >&2; exit 2",
+                crate::supervisor_identity::SUPERVISOR_MISMATCH
+            ))
+            .output()
+            .unwrap();
+        let stopped = harness_seed_outcome(3, &output)
+            .err()
+            .map(|error| error.to_string());
+        assert!(
+            stopped
+                .as_deref()
+                .is_some_and(|error| error.contains("supervisor")),
+            "the test run must stop, naming the supervisor; got {stopped:?}"
+        );
     }
 
     #[test]

@@ -32,11 +32,11 @@ fn main() {
 "#;
 
     // A `--yield-points` binary schedules under a denser policy than a plain build,
-    // so their traces are different guests. `native-run` folds the yield-point
-    // marker into the compatibility fingerprint, so a trace recorded from an
-    // instrumented binary must fail closed when replayed against a plain one (and
-    // the reverse), never produce a silently different run. The instrumented binary
-    // replays its own trace exactly.
+    // so their traces are different guests. The two are different executables, so
+    // a trace recorded from an instrumented binary is refused by its build identity
+    // before the guest starts when replayed against a plain one (and the reverse),
+    // never producing a silently different run. The instrumented binary replays its
+    // own trace exactly.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_yield_points_trace_fails_closed_against_plain_binary() {
@@ -111,11 +111,11 @@ fn main() {
             "a yield-points trace must not replay against a plain binary; got success\nstdout:\n{}\nstderr:\n{rejected_stderr}",
             String::from_utf8_lossy(&rejected.stdout),
         );
-        // Fail-closed, but say WHY: the shim surfaces the runtime's fingerprint
-        // mismatch instead of the generic "no runtime installed" abort.
+        // Fail-closed, but say WHY: the refusal names the executable as the
+        // component that differs.
         assert!(
-            rejected_stderr.contains("failed to initialize")
-                && rejected_stderr.contains("fingerprint mismatch"),
+            rejected_stderr.contains("fingerprint mismatch")
+                && rejected_stderr.contains("executable"),
             "cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_stderr}"
         );
 
@@ -148,8 +148,8 @@ fn main() {
             "a plain trace must not replay against a yield-points binary:\nstderr:\n{rejected_reverse_stderr}"
         );
         assert!(
-            rejected_reverse_stderr.contains("failed to initialize")
-                && rejected_reverse_stderr.contains("fingerprint mismatch"),
+            rejected_reverse_stderr.contains("fingerprint mismatch")
+                && rejected_reverse_stderr.contains("executable"),
             "reverse cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_reverse_stderr}"
         );
     }

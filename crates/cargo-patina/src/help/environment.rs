@@ -80,6 +80,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Compatibility fingerprint checked on replay.",
     },
     EnvVar {
+        name: "PATINA_EXPECTED_SUPERVISOR_SHA256",
+        scope: "protocol",
+        doc: "Digest of the cargo-patina that launched this one (campaign and reduction children); a cargo-patina of another build refuses before running anything.",
+    },
+    EnvVar {
         name: "PATINA_TIMELINE / PATINA_PARENT_TIMELINE / PATINA_BRANCH_FROM / PATINA_BRANCH_SEED / PATINA_BRANCH_ID",
         scope: "protocol",
         doc: "Timeline and branch-append controls (mirror the replay --timeline/--branch flags).",

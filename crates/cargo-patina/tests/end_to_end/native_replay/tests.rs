@@ -578,3 +578,246 @@ fn native_replay_restores_guest_argv_and_normalizes_argv0() {
         "an old trace without recorded argv must replay with explicit arguments as before"
     );
 }
+
+/// Build the identity probe at `bin` and record one run of it into `trace`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn record_identity_probe(directory: &Path, bin: &Path, trace: &Path) -> String {
+    let workspace = native_workspace();
+    let source = directory.join("identity_probe.rs");
+    fs::write(&source, IDENTITY_PROBE_SOURCE).unwrap();
+    invoke(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            bin.to_str().unwrap(),
+        ],
+    );
+    let recorded = invoke(
+        workspace,
+        &[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "5",
+            "--record",
+            trace.to_str().unwrap(),
+        ],
+    );
+    String::from_utf8_lossy(&recorded.stdout).into_owned()
+}
+
+/// A native trace replays against the executable it was recorded from, and is
+/// refused, by component and before the guest starts, against one that differs
+/// in a single byte.
+///
+/// RED before the fix: the flipped byte is one the guest never reads, so its
+/// replay against the trace succeeds; nothing tied the trace to the bytes it
+/// was recorded from.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_refuses_an_executable_one_byte_away_and_names_it() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let bin = directory.path().join("identity-probe");
+    let trace = directory.path().join("identity.patina");
+    let recorded_out = record_identity_probe(directory.path(), &bin, &trace);
+
+    let same = invoke(
+        workspace,
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&same.stdout),
+        recorded_out,
+        "the recorded executable must replay its own trace"
+    );
+
+    let changed = directory.path().join("identity-probe-changed");
+    flip_identity_probe_byte(&bin, &changed);
+    let refused = invoke_unchecked(
+        patina,
+        workspace,
+        &["replay", changed.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a trace must not replay against a different executable\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        stderr.contains("fingerprint mismatch") && stderr.contains("executable"),
+        "the refusal must name the differing component:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("IDENTITY_PROBE"),
+        "the guest must not start under a refused replay"
+    );
+
+    // The structured result classifies it as Patina's own refusal, before any
+    // guest ran.
+    let json = invoke_unchecked(
+        patina,
+        workspace,
+        &[
+            "replay",
+            "--format",
+            "json",
+            changed.to_str().unwrap(),
+            trace.to_str().unwrap(),
+        ],
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["refusal"]["class"], "fingerprint_mismatch");
+    assert!(
+        envelope
+            .get("guest_exit")
+            .is_none_or(serde_json::Value::is_null)
+    );
+}
+
+/// The supervisor stamps the build identity into the trace it commits, so a
+/// recording names its executable and its supervisor whatever the recorder
+/// linked into the guest knows: that recorder writes no identity at all, as
+/// one linked before identities existed does not.
+///
+/// RED before the fix: the identity rode the control plane to the guest's
+/// recorder, so a binary whose recorder did not know it recorded none, exited
+/// 0, and was then refused against itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_recording_names_its_build_whatever_the_recorder_writes() {
+    let directory = tempdir().unwrap();
+    let bin = directory.path().join("identity-probe");
+    let trace = directory.path().join("identity.patina");
+    record_identity_probe(directory.path(), &bin, &trace);
+
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+    let native = &value["metadata"]["native"];
+    assert_eq!(
+        native["executable_sha256"].as_str(),
+        Some(file_digest(&bin).as_str()),
+        "the trace must name the executable it was recorded from"
+    );
+    assert_eq!(
+        native["supervisor_sha256"].as_str(),
+        Some(file_digest(Path::new(env!("CARGO_BIN_EXE_cargo-patina"))).as_str()),
+        "the trace must name the cargo-patina that recorded it"
+    );
+}
+
+/// A native trace recorded by another `cargo-patina` build is refused, naming
+/// the supervisor, even when both builds carry the same package version: the
+/// supervisor builds the guest's initial state and arms its traps, and the
+/// version stays the same across development builds that do so differently.
+///
+/// RED before the fix: the package version stood for the supervisor, so a
+/// trace from another build of the same version replayed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_refuses_a_trace_from_another_supervisor_build_and_names_it() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("identity-probe");
+    let trace = directory.path().join("identity.patina");
+    record_identity_probe(directory.path(), &bin, &trace);
+    let foreign = directory.path().join("foreign.patina");
+    record_as_another_supervisor_build(&trace, &foreign);
+
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["replay", bin.to_str().unwrap(), foreign.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a trace from another supervisor build must not replay\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(
+        stderr.contains("fingerprint mismatch") && stderr.contains("supervisor"),
+        "the refusal must name the differing component:\n{stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&refused.stdout).contains("IDENTITY_PROBE"),
+        "the guest must not start under a refused replay"
+    );
+}
+
+/// A native trace without a build identity, as one recorded before identities
+/// existed reads, is refused rather than replayed on trust.
+///
+/// RED before the fix: no field was required, so the stripped trace replayed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_replay_refuses_a_trace_without_a_build_identity() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("identity-probe");
+    let trace = directory.path().join("identity.patina");
+    record_identity_probe(directory.path(), &bin, &trace);
+    let old = directory.path().join("old.patina");
+    strip_native_identity(&trace, &old);
+
+    let refused = invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        workspace,
+        &["replay", bin.to_str().unwrap(), old.to_str().unwrap()],
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success(),
+        "a trace without a build identity must not replay\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fingerprint mismatch") && stderr.contains("no native build identity"),
+        "the refusal must say the identity is missing:\n{stderr}"
+    );
+}
+
+/// Building one source twice, under different output names, reproduces the
+/// executable, so a source-first replay matches a trace recorded from a built
+/// binary.
+///
+/// RED before the fix on macOS: the linker writes the output's file name into
+/// the executable (the ad-hoc signature identifier and the image UUID), so the
+/// two builds differ and the source-first replay is refused.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn native_single_source_rebuild_reproduces_the_build_identity() {
+    let directory = tempdir().unwrap();
+    let workspace = native_workspace();
+    let bin = directory.path().join("identity-probe");
+    let trace = directory.path().join("identity.patina");
+    let recorded_out = record_identity_probe(directory.path(), &bin, &trace);
+    let source = directory.path().join("identity_probe.rs");
+
+    let renamed = directory.path().join("renamed");
+    invoke(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            renamed.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        fs::read(&bin).unwrap() == fs::read(&renamed).unwrap(),
+        "two builds of one source must be byte-identical whatever they are named"
+    );
+
+    let replayed = invoke(
+        workspace,
+        &["replay", source.to_str().unwrap(), trace.to_str().unwrap()],
+    );
+    assert!(
+        String::from_utf8_lossy(&replayed.stdout).contains(recorded_out.trim()),
+        "a source-first replay must match the trace of the built binary:\n{}",
+        String::from_utf8_lossy(&replayed.stdout)
+    );
+}

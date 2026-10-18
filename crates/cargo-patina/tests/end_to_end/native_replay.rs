@@ -172,6 +172,74 @@ fn strip_guest_argv(source: &Path, dest: &Path) {
     fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
+/// A guest carrying a byte its behaviour never reads: [`IDENTITY_PROBE_TAG`],
+/// kept in the image by `#[used]`. Flipping it changes the executable and
+/// nothing the guest does, so only the build identity can tell the two apart.
+/// The thread gives the trace scheduling decisions to replay.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const IDENTITY_PROBE_SOURCE: &str = r#"
+#[used]
+static TAG: [u8; 22] = *b"PATINA-IDENTITY-PROBE0";
+
+fn main() {
+    let worker = std::thread::spawn(|| 20u64);
+    println!("IDENTITY_PROBE {}", worker.join().unwrap() + 1);
+}
+"#;
+
+/// The inert tag in [`IDENTITY_PROBE_SOURCE`], found in the built executable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const IDENTITY_PROBE_TAG: &[u8] = b"PATINA-IDENTITY-PROBE0";
+
+/// Copy `source` to `dest` with one byte of its inert tag changed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn flip_identity_probe_byte(source: &Path, dest: &Path) {
+    let mut bytes = fs::read(source).unwrap();
+    let at = bytes
+        .windows(IDENTITY_PROBE_TAG.len())
+        .position(|window| window == IDENTITY_PROBE_TAG)
+        .expect("the built probe carries its tag");
+    bytes[at + IDENTITY_PROBE_TAG.len() - 1] = b'1';
+    fs::write(dest, bytes).unwrap();
+    fs::set_permissions(dest, fs::metadata(source).unwrap().permissions()).unwrap();
+}
+
+/// Rewrite `source` into `dest` without `metadata.native`, as a trace recorded
+/// before build identities, or by something other than the native supervisor,
+/// reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn strip_native_identity(source: &Path, dest: &Path) {
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+    let removed = value["metadata"].as_object_mut().unwrap().remove("native");
+    assert!(
+        removed.is_some(),
+        "the recorded trace was expected to carry a native build identity before stripping"
+    );
+    fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+/// Copy the trace at `source` to `dest` as though another `cargo-patina` build
+/// with the same package version had recorded it.
+fn record_as_another_supervisor_build(source: &Path, dest: &Path) {
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+    let native = value["metadata"]["native"].as_object_mut().unwrap();
+    let another = format!("sha256:{}", "0".repeat(64));
+    assert_ne!(native["supervisor_sha256"], another);
+    native.insert("supervisor_sha256".into(), another.into());
+    fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+/// The `sha256:` text digest of the file at `path`.
+fn file_digest(path: &Path) -> String {
+    format!(
+        "sha256:{}",
+        Sha256::digest(fs::read(path).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
 #[cfg(test)]
 #[path = "native_replay/tests.rs"]
 mod tests;

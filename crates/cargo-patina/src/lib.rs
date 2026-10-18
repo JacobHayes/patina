@@ -55,6 +55,7 @@ mod sdk_report;
 mod shim_build;
 mod shim_cache;
 mod sites;
+mod supervisor_identity;
 mod syscalls;
 mod trace_cmd;
 mod trace_view;
@@ -667,6 +668,7 @@ enum UnsupportedPolicy {
 }
 
 pub fn entrypoint() -> Result<i32, CliError> {
+    supervisor_identity::establish()?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     // Strip the cross-cutting output/config flags (`--format`, `--render`,
     // `--report`, `--no-config`) once, globally, before any per-verb routing —

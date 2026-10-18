@@ -33,6 +33,12 @@ mod shim_bundle {
     include!(concat!(env!("OUT_DIR"), "/shim_sources.rs"));
 }
 
+/// The content address of the shim source bundle this `cargo-patina` embeds,
+/// in hex: the shim every native guest it builds links.
+pub(super) fn embedded_shim_bundle_sha256() -> &'static str {
+    shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256
+}
+
 const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
 /// Subdirectory of the shim's own profile target dir where the content-addressed
 /// POSIX/yield helper objects are staged, so their `-Clink-arg` paths stay stable

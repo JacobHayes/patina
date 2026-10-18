@@ -164,8 +164,10 @@ $ cargo patina replay ./ledger/ledger ./bug.patina
 BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1, identical
 ```
 
-No `--seed` or `--buggify`: the trace is authoritative. If you rebuild the binary
-incompatibly, replay fails closed on the fingerprint rather than lying.
+No `--seed` or `--buggify`: the trace is authoritative. The trace also records
+the digest of the binary it was recorded from: replay it against a binary that
+differs by even one byte and patina refuses before the guest starts, naming
+the executable as what differs, rather than lying.
 
 ## 7. Render the timeline
 
