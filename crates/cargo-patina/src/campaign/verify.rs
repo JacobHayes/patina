@@ -10,6 +10,13 @@
 //! way, so a leak that never fails a run is caught too. A mismatch is
 //! [`CampaignClass::Nondeterminism`], and both outcomes travel with it.
 //!
+//! The signature's policy annotation (`bug_depth=N`, the PCT change points and
+//! starvation exclusions the seeded schedule hit) describes how the run
+//! explored, not what it reached. A rerun explores again and must hit the same
+//! ones; a replay follows the recorded selections, makes no scheduling
+//! decisions and reports none, so a replay leaves the annotation out of the
+//! comparison.
+//!
 //! A replay that does not follow its trace is a mismatch on its own, whatever
 //! the refusal that reports it: the replayed run is not the recorded one. Any
 //! other reproduction attempt patina could not complete (a timeout, a host
@@ -84,8 +91,12 @@ pub(super) fn nondeterminism_signature(observed: Option<&Signature>) -> Signatur
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Observation {
     pub(super) class: CampaignClass,
-    /// The failure signature key; `None` for a clean run.
+    /// The failure signature key without its policy annotation; `None` for a
+    /// clean run.
     pub(super) signature: Option<String>,
+    /// The failure signature's policy annotation, empty when it has none or
+    /// the run was clean.
+    pub(super) policy: String,
     /// The exit status: the process's code, the guest's full code, the signal,
     /// and patina's refusal class with the status the guest reached under it.
     pub(super) exit: String,
@@ -124,9 +135,11 @@ impl Observation {
         facts: &GenerationFacts,
         trace: Option<String>,
     ) -> Self {
+        let failure = class.is_failure().then(|| signature(class, facts));
         Observation {
             class,
-            signature: class.is_failure().then(|| signature(class, facts).key()),
+            signature: failure.as_ref().map(Signature::outcome_key),
+            policy: failure.map(|failure| failure.policy).unwrap_or_default(),
             exit: exit_status(&facts.facts),
             finding: class.is_failure().then(|| primary_finding(class, facts)),
             verdicts: facts.exact_verdicts.clone(),
@@ -135,13 +148,17 @@ impl Observation {
         }
     }
 
-    /// Whether `other` is the same outcome, on every exact axis.
-    fn agrees_with(&self, other: &Observation) -> bool {
+    /// Whether `other`, reached along `path`, is the same outcome on every
+    /// exact axis. A replay explores nothing, so it is not held to the
+    /// recording's policy annotation.
+    fn agrees_with(&self, other: &Observation, path: VerifyPath) -> bool {
         let traces_agree = match (&self.trace, &other.trace) {
             (Some(first), Some(second)) => first == second,
             _ => true,
         };
+        let policies_agree = path == VerifyPath::Replay || self.policy == other.policy;
         self.signature == other.signature
+            && policies_agree
             && self.exit == other.exit
             && self.finding == other.finding
             && self.verdicts == other.verdicts
@@ -153,6 +170,9 @@ impl Observation {
         map.insert("class".into(), self.class.as_str().into());
         if let Some(signature) = &self.signature {
             map.insert("signature".into(), signature.clone().into());
+        }
+        if !self.policy.is_empty() {
+            map.insert("policy".into(), self.policy.clone().into());
         }
         map.insert("exit".into(), self.exit.clone().into());
         if let Some(finding) = &self.finding {
@@ -188,6 +208,7 @@ impl Observation {
             class: CampaignClass::parse(class_text)
                 .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?,
             signature: json_optional_str(object, "signature")?,
+            policy: json_optional_str(object, "policy")?.unwrap_or_default(),
             exit: json_required_str(object, "exit")?.to_string(),
             finding: json_optional_str(object, "finding")?,
             verdicts,
@@ -292,7 +313,7 @@ impl Verification {
             VerifyStatus::Nondeterministic
         } else if reproduction.class.is_failure() && !reproduction.class.is_finding() {
             VerifyStatus::Infra
-        } else if observed.agrees_with(&reproduction) {
+        } else if observed.agrees_with(&reproduction, path) {
             VerifyStatus::Reproduced
         } else {
             VerifyStatus::Nondeterministic
@@ -542,12 +563,13 @@ impl Verifier<'_> {
 /// The verification outcomes `campaign --selftest` proves, as
 /// `(name, want, got)` class checks: every comparison axis is load-bearing (a
 /// red twin that differs only there), a replay divergence is nondeterminism
-/// whatever class carries it, and any other reproduction patina could not
-/// finish keeps the observed class.
+/// whatever class carries it, any other reproduction patina could not finish
+/// keeps the observed class, and only a rerun is held to the policy annotation.
 pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, CampaignClass)> {
     let failure = || Observation {
         class: CampaignClass::Violation,
         signature: Some("VIOLATION|verdict kind=violation label=x-#|".into()),
+        policy: String::new(),
         exit: "exit=1".into(),
         finding: Some("verdict kind=violation label=x-1".into()),
         verdicts: vec![r#"{"detail":"1","kind":"violation","label":"x-1","seq":0}"#.into()],
@@ -557,6 +579,7 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
     let clean = |trace: &str| Observation {
         class: CampaignClass::Ok,
         signature: None,
+        policy: String::new(),
         exit: "exit=0".into(),
         finding: None,
         verdicts: Vec::new(),
@@ -566,6 +589,7 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
     let infra = || Observation {
         class: CampaignClass::Infra,
         signature: Some("INFRA|refusal class=shutdown_failure|".into()),
+        policy: String::new(),
         exit: "exit=134 signal=6 refusal=shutdown_failure refusal_guest_exit=0".into(),
         finding: Some("refusal class=shutdown_failure".into()),
         verdicts: Vec::new(),
@@ -578,6 +602,17 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
         let mut reproduction = failure();
         change(&mut reproduction);
         judged(VerifyPath::Replay, failure(), reproduction)
+    };
+    // A seeded run that hit change points, and a run of it that hit none.
+    let explored = || {
+        let mut run = failure();
+        run.policy = "bug_depth=2".into();
+        run
+    };
+    let unexplored = || {
+        let mut run = failure();
+        run.policy = "bug_depth=0".into();
+        run
     };
     let mut other_class = clean("sha256:a");
     other_class.trace = None;
@@ -633,6 +668,16 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
                 run.verdicts =
                     vec![r#"{"detail":"2","kind":"violation","label":"x-1","seq":0}"#.into()]
             }),
+        ),
+        (
+            "verify-replay-is-not-held-to-the-seeded-policy",
+            CampaignClass::Violation,
+            judged(VerifyPath::Replay, explored(), unexplored()),
+        ),
+        (
+            "verify-rerun-policy-mismatch-is-nondeterminism",
+            CampaignClass::Nondeterminism,
+            judged(VerifyPath::Rerun, explored(), unexplored()),
         ),
         (
             "verify-class-mismatch-is-nondeterminism",
@@ -727,6 +772,7 @@ mod tests {
         let observed = Observation {
             class: CampaignClass::Unclassified,
             signature: Some("UNCLASSIFIED|PLANTED token=#|".into()),
+            policy: "bug_depth=1".into(),
             exit: "exit=3".into(),
             finding: Some("PLANTED token=1".into()),
             verdicts: Vec::new(),

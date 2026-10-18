@@ -694,7 +694,11 @@ surface (`cargo patina campaign`) generalizing the shell campaign machinery.
    `PATINA_INFRA native_run` marker becomes the finding line, it loses its
    `trace_path` and `reason` fields, the run's own trace and scratch file. Only
    the exact line the supervisor reports having appended (`native_run_marker`
-   in the envelope) is reduced; a guest line is evidence as written. A difference
+   in the envelope) is reduced; a guest line is evidence as written. The
+   signature's policy annotation (`bug_depth`) says how the seeded run
+   explored, not what it reached: a rerun explores again and must match it,
+   while a replay follows the recorded selections, makes no scheduling
+   decisions and is not held to it. A difference
    on any of them, or a replay that does not follow its trace, is the
    cross-run class `NONDETERMINISM`. The divergence is typed at its source:
    the runtime notes the trace layer's divergence kind

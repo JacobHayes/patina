@@ -38,8 +38,9 @@ mod tests {
             "json",
         ];
         args.extend_from_slice(extra);
-        // A WASI module takes no `--` guest arguments: its mode is "". A native
-        // guest keeps the host's randomized layout (see the module docs).
+        // A guest without modes (a WASI module, a single-purpose native guest)
+        // takes no `--` guest arguments: its mode is "". A moded native guest
+        // keeps the host's randomized layout (see the module docs).
         if !mode.is_empty() {
             args.extend(["--allow-randomized-address-layout", "--", mode]);
         }
@@ -218,6 +219,69 @@ mod tests {
                 verification["reproduction"]["replay_diverged"], true,
                 "{record:#}"
             );
+        }
+    }
+
+    /// Four workers contend on one mutex long enough for PCT's change points
+    /// to land, then the guest fails with the same count on every schedule.
+    const PCT_COUNTER_GUEST: &str = r#"use std::sync::{Arc, Mutex};
+use std::thread;
+
+fn main() {
+    let counter = Arc::new(Mutex::new(0u64));
+    let workers: Vec<_> = (0..4)
+        .map(|_| {
+            let counter = Arc::clone(&counter);
+            thread::spawn(move || {
+                for _ in 0..500 {
+                    *counter.lock().unwrap() += 1;
+                    thread::yield_now();
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    println!("MRE_FAILURE counted {}", *counter.lock().unwrap());
+    std::process::exit(4);
+}
+"#;
+
+    #[test]
+    fn a_pct_finding_that_hit_a_change_point_reproduces() {
+        let directory = tempdir().unwrap();
+        let guest = build_facts_guest(directory.path(), "pct_counter", PCT_COUNTER_GUEST);
+        let (code, envelope) = campaign(
+            &guest,
+            &directory.path().join("out"),
+            4,
+            &["--sched-pct"],
+            "",
+        );
+        assert_eq!(code, Some(1), "{envelope:#}");
+        assert!(
+            envelope["classes"].get("NONDETERMINISM").is_none(),
+            "{envelope:#}"
+        );
+        let records = signatures(&envelope);
+        // Non-vacuity: some generation's seeded schedule hit a change point,
+        // which its replay, following recorded selections, never does.
+        let bug_depth = |record: &serde_json::Value| -> u64 {
+            record["policy"]
+                .as_str()
+                .and_then(|policy| policy.strip_prefix("bug_depth="))
+                .and_then(|depth| depth.parse().ok())
+                .unwrap_or_else(|| panic!("no bug depth: {record:#}"))
+        };
+        assert!(
+            records.iter().any(|record| bug_depth(record) > 0),
+            "{envelope:#}"
+        );
+        for record in records {
+            let verification = &record["verification"];
+            assert_eq!(verification["path"], "replay", "{record:#}");
+            assert_eq!(verification["status"], "reproduced", "{record:#}");
         }
     }
 

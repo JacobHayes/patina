@@ -108,6 +108,12 @@ impl Signature {
     pub fn key(&self) -> String {
         format!("{}|{}|{}", self.class.as_str(), self.shape, self.policy)
     }
+
+    /// The key without its policy annotation: what the run reached, not how
+    /// the seeded run explored to get there.
+    fn outcome_key(&self) -> String {
+        format!("{}|{}|", self.class.as_str(), self.shape)
+    }
 }
 
 /// A typed value for a child `run` flag, rendered to the exact canonical syntax
