@@ -84,7 +84,12 @@ pub use replay::Replayer;
 ///   another time model is refused ([`TraceError::UnsupportedTimeModel`]).
 /// - 18: `entropy_fill`'s required `wait`, how the request meets a random pool
 ///   that is not yet initialized (`until_ready`, `fail_if_unready`, `never`).
-pub const TRACE_FORMAT_VERSION: u32 = 18;
+/// - 19: no field changes, but a crash-restart trace's restarted incarnation
+///   draws its seeded streams from the run seed keyed by its incarnation
+///   number, and its realtime carries on from the crashed incarnation's, so
+///   format 18 traces, whose restart re-drew incarnation 0's streams, are
+///   refused rather than replayed with different unrecorded draws.
+pub const TRACE_FORMAT_VERSION: u32 = 19;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

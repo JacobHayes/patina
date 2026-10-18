@@ -427,14 +427,19 @@ liveness-safe."
             fds.push(pipe.as_raw_fd());
         }
         // A restarted incarnation boots from the recovered filesystem instead of
-        // the run's base image.
-        match (launch.restart_snapshot, &image_file) {
-            (Some(file), _) => {
-                command.env(
-                    patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD,
-                    file.as_raw_fd().to_string(),
-                );
-                fds.push(file.as_raw_fd());
+        // the run's base image, and carries realtime on from the crashed one.
+        match (launch.restart, &image_file) {
+            (Some(restart), _) => {
+                command
+                    .env(
+                        patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD,
+                        restart.snapshot.as_raw_fd().to_string(),
+                    )
+                    .env(
+                        patina_dst_runtime::ENV_RESTART_REALTIME_NANOS,
+                        restart.previous_realtime_nanos.to_string(),
+                    );
+                fds.push(restart.snapshot.as_raw_fd());
             }
             (None, Some(image)) => {
                 command.env(ENV_FS_IMAGE_FD, image.file.as_raw_fd().to_string());
@@ -481,7 +486,7 @@ liveness-safe."
             trace,
             handoff: None,
             crash_report: None,
-            restart_snapshot: None,
+            restart: None,
         })?;
         // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
         // when starvation is enabled, so it has zero effect on any other mode). The

@@ -13,8 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{CrashPointRecord, FaultCrashOp};
 
+/// The envelope's fixed tag. [`VERSION`] names its layout, so a handoff of
+/// another layout is refused by its version rather than as foreign bytes.
 const MAGIC: &[u8; 12] = b"PATINA-HO-v1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"patina-incarnation-handoff-snapshot-digest/v1";
 const SEAL_DOMAIN: &[u8] = b"patina-incarnation-handoff-seal/v1";
 
@@ -142,6 +144,9 @@ pub struct IncarnationHandoff {
     pub to_incarnation: u64,
     pub selector: CrashPointRecord,
     pub consumed: HandoffConsumedState,
+    /// The realtime, in Unix-time nanoseconds, the crashed incarnation's clock
+    /// had reached: the next incarnation's realtime carries on from it.
+    pub realtime_nanos: u64,
     pub snapshot: FsSnapshot,
 }
 
@@ -163,6 +168,7 @@ impl IncarnationHandoff {
         payload.extend_from_slice(&self.selector.ordinal.to_le_bytes());
         payload.extend_from_slice(&self.consumed.operations.to_le_bytes());
         payload.extend_from_slice(&self.consumed.lifecycle_order.to_le_bytes());
+        payload.extend_from_slice(&self.realtime_nanos.to_le_bytes());
         encode_bytes(&mut payload, &snapshot_bytes)?;
         if payload.len() as u64 > MAX_HANDOFF_PAYLOAD_BYTES {
             return Err(HandoffError::LimitExceeded("handoff payload"));
@@ -222,6 +228,7 @@ impl IncarnationHandoff {
             operations: payload_reader.take_u64()?,
             lifecycle_order: payload_reader.take_u64()?,
         };
+        let realtime_nanos = payload_reader.take_u64()?;
         let snapshot_bytes = payload_reader.take_bytes()?.to_vec();
         if !payload_reader.is_empty() {
             return Err(HandoffError::Malformed(
@@ -245,6 +252,7 @@ impl IncarnationHandoff {
             to_incarnation,
             selector,
             consumed,
+            realtime_nanos,
             snapshot_digest: recorded_digest,
             snapshot_bytes,
             snapshot,
@@ -260,6 +268,7 @@ pub struct VerifiedIncarnationHandoff {
     pub to_incarnation: u64,
     pub selector: CrashPointRecord,
     pub consumed: HandoffConsumedState,
+    pub realtime_nanos: u64,
     pub snapshot_digest: [u8; 32],
     pub snapshot_bytes: Vec<u8>,
     pub snapshot: FsSnapshot,
@@ -494,6 +503,7 @@ mod tests {
                 operations: 8,
                 lifecycle_order: 10,
             },
+            realtime_nanos: 1_784_761_209_000_000_000,
             snapshot: fs.export_snapshot(),
         }
     }
@@ -522,6 +532,7 @@ mod tests {
         assert_eq!(verified.selector.ordinal, 3);
         assert_eq!(verified.consumed.operations, 8);
         assert_eq!(verified.consumed.lifecycle_order, 10);
+        assert_eq!(verified.realtime_nanos, handoff().realtime_nanos);
         let fs = verified.snapshot.into_memfs();
         assert_eq!(fs.contents("/state").unwrap(), b"stable");
 
@@ -552,6 +563,17 @@ mod tests {
     }
 
     #[test]
+    fn handoff_of_another_layout_version_is_refused_by_its_version() {
+        let mut encoded = handoff().seal(&key()).unwrap();
+        let older = VERSION - 1;
+        encoded[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&older.to_le_bytes());
+        assert!(matches!(
+            IncarnationHandoff::open(&encoded, &key()),
+            Err(HandoffError::UnsupportedVersion(version)) if version == older
+        ));
+    }
+
+    #[test]
     fn handoff_refuses_digest_mismatch_even_with_matching_seal() {
         let mut encoded = handoff().seal(&key()).unwrap();
         let digest_offset = encoded.len() - SEAL_LEN - DIGEST_LEN;
@@ -575,6 +597,7 @@ mod tests {
         payload.extend_from_slice(&1u64.to_le_bytes());
         payload.extend_from_slice(&2u64.to_le_bytes());
         payload.extend_from_slice(&3u64.to_le_bytes());
+        payload.extend_from_slice(&4u64.to_le_bytes());
         encode_bytes(&mut payload, b"not-a-snapshot").unwrap();
 
         let mut encoded = Vec::new();

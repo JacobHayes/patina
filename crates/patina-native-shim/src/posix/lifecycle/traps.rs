@@ -111,14 +111,15 @@ unsafe fn auxv(envp: *const *const c_char) -> *mut [usize; 2] {
     }
 }
 
-/// PATINA_SEED from the still-intact environment, or 0.
-unsafe fn env_seed(envp: *const *const c_char) -> u64 {
+/// The decimal value of the `name=` entry (`PATINA_SEED=`,
+/// `PATINA_INCARNATION=`) of the still-intact environment, or 0.
+unsafe fn env_u64(envp: *const *const c_char, name: &[u8]) -> u64 {
     let mut entry = envp;
     unsafe {
         while !(*entry).is_null() {
             if let Some(value) = core::ffi::CStr::from_ptr(*entry)
                 .to_bytes()
-                .strip_prefix(b"PATINA_SEED=")
+                .strip_prefix(name)
             {
                 return value
                     .iter()
@@ -151,8 +152,16 @@ fn splitmix64(state: &mut u64) -> u64 {
 /// independently of SUD: PR_SET_TSC needs the host's page and frame sizes
 /// even when the SUD probe fails.
 unsafe fn determinize_at_random(envp: *const *const c_char) {
-    // Domain-separate the AT_RANDOM stream from every other seeded draw.
-    let mut state = unsafe { env_seed(envp) } ^ 0x5241_4E44_4F4D_0001;
+    // Domain-separate the AT_RANDOM stream from every other seeded draw. A
+    // restarted incarnation boots with its own bytes, as every stream of its
+    // boot is its own (`Incarnation::stream_root`).
+    let (seed, incarnation) = unsafe {
+        (
+            env_u64(envp, b"PATINA_SEED="),
+            env_u64(envp, b"PATINA_INCARNATION="),
+        )
+    };
+    let mut state = patina_dst_runtime::incarnation_seed(seed, incarnation) ^ 0x5241_4E44_4F4D_0001;
     let base = unsafe { auxv(envp) };
     let mut entry = base;
     unsafe {

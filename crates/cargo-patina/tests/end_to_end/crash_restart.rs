@@ -248,6 +248,131 @@ fn main() {
         );
     }
 
+    /// A guest that reports, in each incarnation, its first entropy draw and
+    /// its realtime, and in incarnation 1 the last realtime incarnation 0 read
+    /// and the timestamp it left on the file it wrote that reading to.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const NATIVE_INCARNATION_STREAMS_SOURCE: &str = r#"
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+unsafe extern "C" {
+    fn getentropy(buf: *mut core::ffi::c_void, len: usize) -> i32;
+}
+
+fn now_nanos() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+}
+
+fn report(incarnation: u32) {
+    let mut bytes = [0_u8; 16];
+    assert_eq!(unsafe { getentropy(bytes.as_mut_ptr().cast(), bytes.len()) }, 0);
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!("STREAMS incarnation={incarnation} entropy={hex} realtime={}", now_nanos());
+}
+
+fn main() {
+    if let Ok(previous) = fs::read_to_string("/last-realtime") {
+        let stamped = fs::metadata("/last-realtime").unwrap().modified().unwrap();
+        let stamped = stamped.duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        println!("STREAMS previous_realtime={previous} previous_stamp={stamped}");
+        report(1);
+        return;
+    }
+    report(0);
+    // Run on for a while, so incarnation 0's clock gets well past the boot.
+    std::thread::sleep(Duration::from_secs(5));
+    let mut last = OpenOptions::new().create(true).truncate(true).write(true).open("/last-realtime").unwrap();
+    write!(last, "{}", now_nanos()).unwrap();
+    last.sync_all().unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+    // The crash selector: this second write.
+    OpenOptions::new().create(true).write(true).open("/trigger").unwrap().write_all(b"x").unwrap();
+}
+"#;
+
+    /// The `STREAMS` lines of a run's output, each as its `key=value` fields.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn streams_report(stdout: &[u8]) -> Vec<BTreeMap<String, String>> {
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix("STREAMS "))
+            .map(|fields| {
+                fields
+                    .split(' ')
+                    .map(|field| {
+                        let (key, value) = field.split_once('=').expect("key=value field");
+                        (key.to_owned(), value.to_owned())
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_restarted_incarnation_draws_fresh_streams_and_carries_realtime_forward() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("incarnation_streams.rs");
+        fs::write(&source, NATIVE_INCARNATION_STREAMS_SOURCE).unwrap();
+        let bin = directory.path().join("incarnation_streams");
+        invoke(
+            native_workspace(),
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let trace = directory.path().join("incarnation-streams.patina");
+        let run = |extra: &[&str]| {
+            let mut args = vec![
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "11",
+                "--fs-crash-at",
+                "write:2",
+            ];
+            args.extend_from_slice(extra);
+            invoke(native_workspace(), &args)
+        };
+        let seeded = run(&[]);
+        let report = streams_report(&seeded.stdout);
+        let [first, previous, restarted] = report.as_slice() else {
+            panic!(
+                "expected incarnation 0's report, then incarnation 1's two:\n{}",
+                String::from_utf8_lossy(&seeded.stdout)
+            );
+        };
+        let nanos =
+            |fields: &BTreeMap<String, String>, key: &str| -> u128 { fields[key].parse().unwrap() };
+
+        assert_ne!(
+            first["entropy"], restarted["entropy"],
+            "incarnation 1 repeated incarnation 0's entropy"
+        );
+        let restarted_realtime = nanos(restarted, "realtime");
+        assert!(
+            restarted_realtime >= nanos(previous, "previous_realtime")
+                && restarted_realtime >= nanos(previous, "previous_stamp"),
+            "realtime ran backwards across the restart: {report:?}"
+        );
+
+        // The same seed gives the same streams on every run, and a replay of
+        // the recorded run reproduces both incarnations' streams.
+        assert_eq!(streams_report(&run(&[]).stdout), report);
+        let recorded = run(&["--record", trace.to_str().unwrap()]);
+        assert_eq!(streams_report(&recorded.stdout), report);
+        let replayed = invoke(
+            native_workspace(),
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(streams_report(&replayed.stdout), report);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_fs_crash_restart_record_replays_both_incarnations() {

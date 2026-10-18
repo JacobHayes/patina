@@ -77,6 +77,14 @@ pub mod fault_domain {
     /// domain seed and the label's own hash.
     pub const CUSTOM_OP_FAULT: &str = "patina.custom_op.fail";
 
+    /// Keys a restarted incarnation's stream root to its incarnation number
+    /// ([`super::incarnation_seed`]), so each boot of a crash-restart run
+    /// draws its own streams from the run's seed.
+    pub const INCARNATION: &str = "patina.incarnation";
+    /// The seeded downtime between a modeled crash and the restarted
+    /// incarnation's boot: how far realtime moves on while the machine is down.
+    pub const RESTART_DOWNTIME: &str = "patina.clock.restart_downtime";
+
     /// Swarm per-class coin for crash/torn-write knobs.
     pub const SWARM_CRASH: &str = "patina.swarm.crash";
     /// Swarm per-class coin for sleep jitter.
@@ -174,6 +182,24 @@ pub fn splitmix_hash(inputs: &[u64]) -> u64 {
 /// perturb or alias another domain's sequence.
 pub fn domain_seed(root_seed: u64, domain: &'static str) -> u64 {
     splitmix_hash(&[root_seed, splitmix_hash_str(domain)])
+}
+
+/// The root seed one incarnation of a run derives every stream from.
+///
+/// Incarnation 0, the first boot of every run, uses the run's seed itself. A
+/// later incarnation (a native `--fs-crash-at` restart) uses the run seed keyed
+/// by its incarnation number, so its streams are fresh (a restarted process
+/// draws new UUIDs, salts and nonces, as a rebooted host would) yet still a
+/// pure function of the run's seed, which is what lets replay re-derive them.
+pub fn incarnation_seed(run_seed: u64, incarnation: u64) -> u64 {
+    match incarnation {
+        0 => run_seed,
+        incarnation => splitmix_hash(&[
+            run_seed,
+            splitmix_hash_str(fault_domain::INCARNATION),
+            incarnation,
+        ]),
+    }
 }
 
 /// A deterministic entropy source with chunk-independent output.
@@ -277,5 +303,15 @@ mod tests {
         let net_first = SplitMix64::new(net_seed).next_u64();
         assert_ne!(entropy_first, old_root_first);
         assert_ne!(entropy_first, net_first);
+    }
+
+    #[test]
+    fn each_incarnation_has_its_own_root_from_the_run_seed() {
+        assert_eq!(incarnation_seed(7, 0), 7);
+        let restarted = incarnation_seed(7, 1);
+        assert_ne!(restarted, 7);
+        assert_ne!(restarted, incarnation_seed(7, 2));
+        assert_ne!(restarted, incarnation_seed(8, 1));
+        assert_eq!(restarted, incarnation_seed(7, 1));
     }
 }

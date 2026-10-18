@@ -1,6 +1,6 @@
 //! Runtime configuration, fault settings, and control-plane parsing.
 
-use crate::fs_crash::{CrashOp, CrashPoint};
+use crate::fs_crash::{CrashOp, CrashPoint, Incarnation};
 use crate::network::builtin_dns_resolution;
 use crate::reports::ReportConfig;
 use crate::{
@@ -193,8 +193,9 @@ pub struct RuntimeConfig {
     /// reaches no recorded byte, is never fingerprinted, and is never reconciled
     /// on replay.
     pub(super) facts_path: Option<std::path::PathBuf>,
-    /// Native crash-restart incarnation id. Direct/cargo/WASI contexts stay at 0.
-    pub(super) incarnation: u64,
+    /// Which boot of a native crash-restart run this is. Direct/cargo/WASI
+    /// contexts are always the first.
+    pub(super) incarnation: Incarnation,
     pub(super) require_crash_selector_reached: bool,
 }
 
@@ -222,7 +223,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -250,7 +251,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -283,7 +284,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -317,7 +318,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -352,7 +353,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -393,7 +394,7 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             facts_path: None,
-            incarnation: 0,
+            incarnation: Incarnation::First,
             require_crash_selector_reached: false,
         }
     }
@@ -780,7 +781,7 @@ impl RuntimeConfig {
         &self.mode
     }
 
-    pub fn with_incarnation(mut self, incarnation: u64) -> Self {
+    pub fn with_incarnation(mut self, incarnation: Incarnation) -> Self {
         self.incarnation = incarnation;
         self
     }

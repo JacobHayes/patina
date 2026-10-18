@@ -211,7 +211,12 @@ pub struct BuggifySiteReport {
 /// re-derives every decision from the seed and the trace's recorded config.
 pub(super) struct Buggify {
     config: BuggifyConfig,
+    /// The run's seed: a site's activation and knob value are per-run picks,
+    /// the same in every incarnation of a crash-restart run.
     seed: u64,
+    /// This incarnation's stream root: firing, delay and `patina_dst::rng()`
+    /// draws are fresh in each boot, like every other seeded stream.
+    draw_seed: u64,
     /// Lifecycle marker state. Firing is not gated on it (see the crate/module
     /// docs on the causal limitation); it is reported and, for a guest that
     /// places its workload sites after the call, marks the setup boundary.
@@ -225,14 +230,15 @@ pub(super) struct Buggify {
 }
 
 impl Buggify {
-    pub(super) fn new(config: BuggifyConfig, seed: u64) -> Self {
+    pub(super) fn new(config: BuggifyConfig, seed: u64, draw_seed: u64) -> Self {
         Self {
             config,
             seed,
+            draw_seed,
             setup_complete: false,
             declared_sites: BTreeMap::new(),
             sites: BTreeMap::new(),
-            rng: SplitMix64::new(buggify_prf(&[seed, buggify_domain::RNG])),
+            rng: SplitMix64::new(buggify_prf(&[draw_seed, buggify_domain::RNG])),
             cutoff_suppressed: 0,
             cutoff_reached: false,
         }
@@ -490,7 +496,7 @@ impl Context {
             return Ok(SiteOutcome::Ok);
         }
         let permille = prob_permille.unwrap_or(self.buggify.config.fire_permille);
-        if Buggify::fire_draw(hash, self.buggify.seed, eval, permille) {
+        if Buggify::fire_draw(hash, self.buggify.draw_seed, eval, permille) {
             self.buggify
                 .sites
                 .get_mut(label)
@@ -535,7 +541,7 @@ impl Context {
         }
         if !Buggify::fire_draw(
             hash,
-            self.buggify.seed,
+            self.buggify.draw_seed,
             eval,
             self.buggify.config.fire_permille,
         ) {
@@ -547,7 +553,7 @@ impl Context {
         const MAX_DELAY_NANOS: u64 = 5_000_000_000;
         let span = MAX_DELAY_NANOS - MIN_DELAY_NANOS + 1;
         let delay = MIN_DELAY_NANOS
-            + (buggify_prf(&[self.buggify.seed, hash, buggify_domain::DELAY, eval]) % span);
+            + (buggify_prf(&[self.buggify.draw_seed, hash, buggify_domain::DELAY, eval]) % span);
         self.buggify
             .sites
             .get_mut(label)

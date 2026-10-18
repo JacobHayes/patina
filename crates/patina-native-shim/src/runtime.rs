@@ -637,6 +637,7 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
         to_incarnation,
         selector,
         consumed,
+        realtime_nanos,
         snapshot,
     } = *control;
     let point = patina_dst_runtime::CrashPoint::from(selector);
@@ -651,6 +652,7 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
             to_incarnation,
             selector,
             consumed,
+            realtime_nanos,
             snapshot,
         };
         let bytes = handoff
@@ -984,6 +986,33 @@ fn with_identity_home(mut fs: MemFs) -> Result<MemFs, patina_dst_abi::EffectErro
     Ok(fs)
 }
 
+/// Which boot of the run this process is: the first unless the supervisor
+/// restarted it after a crash, in which case it names the incarnation and the
+/// realtime the crashed one reached, both or neither.
+fn incarnation_from_control() -> Result<patina_dst_runtime::Incarnation, RuntimeError> {
+    let incarnation = parse_control_u64(patina_dst_runtime::ENV_INCARNATION)?.unwrap_or(0);
+    let previous_realtime = parse_control_u64(patina_dst_runtime::ENV_RESTART_REALTIME_NANOS)?;
+    match (std::num::NonZeroU64::new(incarnation), previous_realtime) {
+        (None, None) => Ok(patina_dst_runtime::Incarnation::First),
+        (Some(id), Some(previous_realtime_nanos)) => {
+            Ok(patina_dst_runtime::Incarnation::Restarted {
+                id,
+                previous_realtime_nanos,
+            })
+        }
+        (None, Some(_)) => Err(RuntimeError::Config(format!(
+            "{} is only meaningful for a restarted incarnation ({} >= 1)",
+            patina_dst_runtime::ENV_RESTART_REALTIME_NANOS,
+            patina_dst_runtime::ENV_INCARNATION
+        ))),
+        (Some(_), None) => Err(RuntimeError::Config(format!(
+            "a restarted incarnation ({} >= 1) requires {}, the crashed incarnation's realtime",
+            patina_dst_runtime::ENV_INCARNATION,
+            patina_dst_runtime::ENV_RESTART_REALTIME_NANOS
+        ))),
+    }
+}
+
 pub(crate) fn runtime_config_from_control_plane()
 -> Result<(RuntimeConfig, Option<i32>), RuntimeError> {
     let mode = control_env(patina_dst_runtime::ENV_MODE).unwrap_or_else(|| "seeded".into());
@@ -1059,9 +1088,7 @@ pub(crate) fn runtime_config_from_control_plane()
     if let Some(budget) = parse_control_u64(patina_dst_runtime::ENV_STEP_BUDGET)? {
         config = config.with_step_budget(budget);
     }
-    if let Some(incarnation) = parse_control_u64(patina_dst_runtime::ENV_INCARNATION)? {
-        config = config.with_incarnation(incarnation);
-    }
+    config = config.with_incarnation(incarnation_from_control()?);
     if control_handoff_fd()?.is_some() {
         config = config.require_crash_selector_reached();
     }

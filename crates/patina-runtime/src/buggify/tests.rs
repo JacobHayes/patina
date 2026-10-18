@@ -33,6 +33,7 @@ fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {
             ..BuggifyConfig::default()
         },
         7,
+        7,
     );
     let mut active = 0;
     for index in 0..2000 {
@@ -60,6 +61,7 @@ fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {
             activation_permille: 250,
             ..BuggifyConfig::default()
         },
+        8,
         8,
     );
     let differ = (0..2000).any(|index| {

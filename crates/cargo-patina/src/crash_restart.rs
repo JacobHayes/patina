@@ -117,9 +117,17 @@ pub(super) struct IncarnationLaunch<'a> {
     pub(super) handoff: Option<(&'a fs::File, &'a str)>,
     /// Incarnation 0's crash-report pipe (`ENV_CRASH_REPORT_FD`).
     pub(super) crash_report: Option<&'a std::io::PipeWriter>,
-    /// The recovered filesystem a restarted incarnation boots from, in place of
-    /// the run's base image.
-    pub(super) restart_snapshot: Option<&'a fs::File>,
+    /// What a restarted incarnation boots from, from the crashed one's handoff.
+    pub(super) restart: Option<RestartBoot<'a>>,
+}
+
+/// What a restarted incarnation boots from: the recovered filesystem, in place
+/// of the run's base image, and the realtime the crashed incarnation's clock
+/// had reached, which its own realtime carries on from.
+#[cfg(unix)]
+pub(super) struct RestartBoot<'a> {
+    pub(super) snapshot: &'a fs::File,
+    pub(super) previous_realtime_nanos: u64,
 }
 
 /// A supervised crash-restart run: its merged guest output and status, the
@@ -295,7 +303,7 @@ pub(super) fn supervise_crash_restart(
         trace: crashed_trace.as_ref(),
         handoff: Some((&handoff, &key_hex)),
         crash_report: Some(&report_writer),
-        restart_snapshot: None,
+        restart: None,
     })?;
     // Incarnation 0 has exited: with the supervisor's own write end closed,
     // the pipe holds everything it reported.
@@ -419,7 +427,10 @@ pub(super) fn supervise_crash_restart(
         trace: restarted_trace.as_ref(),
         handoff: None,
         crash_report: None,
-        restart_snapshot: Some(&snapshot),
+        restart: Some(RestartBoot {
+            snapshot: &snapshot,
+            previous_realtime_nanos: verified.realtime_nanos,
+        }),
     })?;
 
     let terminal_kind = if second.exit_code == 0 && second.signal.is_none() {
@@ -677,6 +688,7 @@ mod tests {
                 operations: 12,
                 lifecycle_order: 12,
             },
+            realtime_nanos: 1,
             snapshot: patina_dst_fs_mem::MemFs::new().export_snapshot(),
         };
         let mut encoded = handoff.seal(&key).unwrap();

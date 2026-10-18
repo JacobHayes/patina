@@ -119,7 +119,9 @@ pub use recording::TraceTransport;
 
 pub use config_env::trace_fd_from_env;
 pub use filesystem::FsTime;
-pub use fs_crash::{CrashAttemptSink, CrashCounts, CrashOp, CrashPoint};
+pub use fs_crash::{
+    CrashAttemptSink, CrashCounts, CrashOp, CrashPoint, Incarnation, RESTART_DOWNTIME_NANOS,
+};
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
@@ -148,6 +150,8 @@ pub use patina_dst_fs_crash::TornGranularity;
 pub use patina_dst_time_virtual::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
 
 pub use patina_dst_trace::MAX_TRACE_BYTES;
+
+pub use patina_dst_rng_seeded::incarnation_seed;
 
 mod fault_knob;
 
@@ -219,6 +223,11 @@ pub const ENV_RESTART_SNAPSHOT_FD: &str = "PATINA_RESTART_SNAPSHOT_FD";
 
 /// Zero-based process incarnation identifier for native crash-restart runs.
 pub const ENV_INCARNATION: &str = "PATINA_INCARNATION";
+
+/// The realtime, in Unix-time nanoseconds, the crashed incarnation's clock had
+/// reached: set by the native supervisor, from the handoff, for every restarted
+/// incarnation and only for one (see [`Incarnation::Restarted`]).
+pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RESTART_REALTIME_NANOS";
 
 pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
 
@@ -775,6 +784,9 @@ pub struct InjectedFsCrash {
     pub to_incarnation: u64,
     pub selector: patina_dst_trace::CrashPointRecord,
     pub consumed: HandoffConsumedState,
+    /// The realtime the crashing incarnation's clock had reached, which the
+    /// next incarnation's realtime carries on from.
+    pub realtime_nanos: u64,
     pub snapshot: FsSnapshot,
 }
 
@@ -787,6 +799,7 @@ impl fmt::Debug for InjectedFsCrash {
             .field("to_incarnation", &self.to_incarnation)
             .field("selector", &self.selector)
             .field("consumed", &self.consumed)
+            .field("realtime_nanos", &self.realtime_nanos)
             .field("snapshot", &self.snapshot)
             .finish()
     }
@@ -988,8 +1001,9 @@ impl Context {
         Self::from_config(RuntimeConfig::from_env()?)
     }
 
-    /// The run's root seed — the single input every deterministic decision
-    /// derives from.
+    /// The run's root seed — with the incarnation number of a crash-restart
+    /// run ([`Incarnation::stream_root`]), the single input every deterministic
+    /// decision derives from.
     pub const fn root_seed(&self) -> u64 {
         self.root_seed
     }

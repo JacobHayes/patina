@@ -26,21 +26,33 @@ Operation `sequence` numbers run contiguously across both incarnations (incarnat
 
 ## Handoff contract
 
-`IncarnationHandoff/v1` is the supervisor-owned binary envelope around the recovered `FsSnapshot` bytes. It contains:
+`IncarnationHandoff` (layout version 2) is the supervisor-owned binary envelope around the recovered `FsSnapshot` bytes. It contains:
 
 - compatibility fingerprint;
 - from/to incarnation ids;
 - crash selector (`op`, 1-based ordinal);
 - consumed trace state (operation count and lifecycle order);
+- the realtime the crashed incarnation's clock had reached;
 - the bounded canonical `FsSnapshot` payload;
 - a domain-separated SHA-256 snapshot digest;
 - a domain-separated keyed SHA-256 seal.
 
-The current seal is deliberately exposed as a `seal` / `open` API with a `HandoffSealKey`. It is an integrity check for supervisor-controlled bytes, not an HMAC claim and not a guest-authentication boundary. `open` validates magic, version, declared length, exact trailing bytes, seal, snapshot digest, metadata invariants, and nested `FsSnapshot::decode` before returning a verified handoff.
+The current seal is deliberately exposed as a `seal` / `open` API with a `HandoffSealKey`. It is an integrity check for supervisor-controlled bytes, not an HMAC claim and not a guest-authentication boundary. `open` validates magic, version (a handoff of another layout version is refused by its version), declared length, exact trailing bytes, seal, snapshot digest, metadata invariants, and nested `FsSnapshot::decode` before returning a verified handoff.
 
 ## Native supervision
 
-The runtime turns a reached selector into an internal uncatchable termination control after the selected successful boundary operation. The shim seals the handoff and terminates with `_exit`; the supervisor validates the handoff and starts exactly one fresh incarnation with the snapshot as its base image and clean descriptor state. Both incarnations get the same configuration and seed; a run has one crash selector, and incarnation 0 is the one it fires in, so every later incarnation starts with the selector already consumed. When swarm deselects the crash class the selector is not armed, and the run is an ordinary single-incarnation run.
+The runtime turns a reached selector into an internal uncatchable termination control after the selected successful boundary operation. The shim seals the handoff and terminates with `_exit`; the supervisor validates the handoff and starts exactly one fresh incarnation with the snapshot as its base image, clean descriptor state, and the handoff's realtime (`PATINA_RESTART_REALTIME_NANOS`). Both incarnations get the same configuration and run seed; a run has one crash selector, and incarnation 0 is the one it fires in, so every later incarnation starts with the selector already consumed. When swarm deselects the crash class the selector is not armed, and the run is an ordinary single-incarnation run.
+
+### Each incarnation is a fresh boot
+
+The crash models power loss, so a restarted incarnation boots as a rebooted machine would:
+
+- **Seeded streams.** Every stream of an incarnation derives from its stream root, `incarnation_seed(run_seed, incarnation)` in `patina-rng-seeded`: the run seed itself for incarnation 0, and the run seed keyed by the incarnation number for a restart. Incarnation 1 therefore draws its own entropy, `AT_RANDOM` bytes, scheduler choices, buggify firings, delays and `patina_dst::rng()` values, and its own filesystem, network, DNS, clock, entropy and custom-op fault decisions, while each remains a pure function of the run seed. The handoff carries no seed: the trace records the run seed and stamps every operation with its incarnation, so a replay re-derives each incarnation's streams from those alone.
+- **Per-run decisions.** Swarm deselection, buggify site activation and buggify knob values are picks for the run, drawn from the run seed, and are the same in every incarnation: both incarnations run one fault configuration, and the joined trace's metadata must agree on it.
+- **Realtime carries forward.** The handoff records the realtime the crashed incarnation's clock had reached, which is at or after every unperturbed realtime read and every timestamp that clock stamped. The restarted incarnation's realtime starts there plus a seeded downtime, uniform over one second to one minute and drawn from its own stream root, so realtime never runs backwards across a restart. `--epoch-jump-nanos` perturbs individual reads around the clock in either incarnation and does not move it.
+- **Monotonic time is per boot.** The restarted incarnation's monotonic clock starts again at the run's boot origin, as `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` do after a real reboot.
+
+The downtime is not a knob: a restart's realtime is a derived value, and replay re-derives it from the replayed handoff and the run seed. The trace layout is unchanged, since the realtime comes from replaying incarnation 0, which the replay checks against the recorded operation count and snapshot digest.
 
 An armed selector that is never reached is a named runtime error (`PATINA_FS_CRASH_SELECTOR_UNREACHED`), and a corrupt handoff is a named supervisor error (`PATINA_FS_CRASH_INVALID_HANDOFF`).
 

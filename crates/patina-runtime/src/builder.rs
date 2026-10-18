@@ -3,7 +3,7 @@ use crate::ENV_FACTS;
 
 use crate::buggify::Buggify;
 use crate::config::{BuggifyConfig, ExecutionMode, FaultConfig, RuntimeConfig, validate_guest_env};
-use crate::fs_crash::CrashCounts;
+use crate::fs_crash::{CrashCounts, Incarnation};
 use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
 use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
 use crate::replay::{
@@ -287,7 +287,7 @@ impl RuntimeBuilder {
                         .with_sud(self.config.sud)
                         .with_tsc(self.config.tsc),
                     )
-                    .with_incarnation(self.config.incarnation),
+                    .with_incarnation(self.config.incarnation.id()),
                     sink: RecordSink::Path {
                         path: path.clone(),
                         _reservation: RecordReservation::acquire(path)?,
@@ -317,7 +317,7 @@ impl RuntimeBuilder {
                         .with_sud(self.config.sud)
                         .with_tsc(self.config.tsc),
                     )
-                    .with_incarnation(self.config.incarnation),
+                    .with_incarnation(self.config.incarnation.id()),
                     sink: RecordSink::Transport(
                         self.trace_transport.take().expect("transport was checked"),
                     ),
@@ -455,6 +455,11 @@ impl RuntimeBuilder {
             }
         };
 
+        // Every incarnation of a crash-restart run boots with its own streams,
+        // all derived from the run's seed and its incarnation number.
+        let run_seed = root_seed;
+        let root_seed = self.config.incarnation.stream_root(run_seed);
+
         // Adopt the trace's authoritative fault configuration before any driver
         // is constructed from it, so a flag-free replay rebuilds the same
         // CrashFs/SimNet the recording used.
@@ -483,7 +488,12 @@ impl RuntimeBuilder {
             self.config.boot_origin_nanos = Some(origin);
         }
         let boot_origin_nanos = replay_boot_origin_override.unwrap_or(recorded_boot_origin);
-        let realtime_epoch = replay_realtime_epoch_override.unwrap_or(recorded_realtime_epoch);
+        let realtime_epoch = self.config.incarnation.realtime_epoch(
+            replay_realtime_epoch_override.unwrap_or(recorded_realtime_epoch),
+            boot_origin_nanos,
+            root_seed,
+            installed_clock_epoch.is_some(),
+        )?;
         realtime_epoch
             .checked_add(boot_origin_nanos)
             .filter(|nanos| *nanos <= i64::MAX as u64)
@@ -673,7 +683,7 @@ impl RuntimeBuilder {
         Ok(Context {
             compute_stop,
             boot_origin_nanos,
-            root_seed,
+            root_seed: run_seed,
             compatibility_fingerprint: self.config.fingerprint.clone(),
             step_budget: self.config.step_budget,
             steps: 0,
@@ -702,9 +712,9 @@ impl RuntimeBuilder {
             crash_counts: CrashCounts::default(),
             // A run has one crash selector and incarnation 0 is the one it
             // fires in; every later incarnation starts after it has fired.
-            crash_fired: self.config.incarnation > 0,
+            crash_fired: self.config.incarnation != Incarnation::First,
             crash_attempt_sink: self.crash_attempt_sink.take(),
-            incarnation: self.config.incarnation,
+            incarnation: self.config.incarnation.id(),
             require_crash_selector_reached: self.config.require_crash_selector_reached,
             sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,
             // Domain-separated seed so sleep-jitter draws do not correlate with
@@ -728,7 +738,7 @@ impl RuntimeBuilder {
             epoch_jump_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::EPOCH_JUMP)),
             clock_report: patina_dst_driver_api::ClockFaultReport::default(),
             schedule: ScheduleTracker::default(),
-            buggify: Buggify::new(self.config.buggify, root_seed),
+            buggify: Buggify::new(self.config.buggify, run_seed, root_seed),
             verdicts: Vec::new(),
             custom_op: None,
             custom_op_fail_permille: self.config.faults.custom_op.fail_permille,

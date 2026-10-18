@@ -2,9 +2,13 @@
 
 use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
-use crate::fs_crash::CrashOp;
-use crate::{Context, RuntimeError, TornGranularity};
-use patina_dst_abi::{OpenFlags, SeekWhence};
+use crate::fs_crash::{CrashOp, Incarnation, RESTART_DOWNTIME_NANOS};
+use crate::{
+    Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, EntropyWait, RuntimeError,
+    TornGranularity,
+};
+use patina_dst_abi::{ClockKind, OpenFlags, SeekWhence};
+use std::num::NonZeroU64;
 
 use patina_dst_fs_crash::CrashFs;
 
@@ -183,7 +187,7 @@ fn restarted_incarnation_never_fires_the_crash_selector() {
     let mut context = Context::from_config(
         RuntimeConfig::seeded(1)
             .with_crash_at(CrashOp::Open, 1)
-            .with_incarnation(1),
+            .with_incarnation(restarted(DEFAULT_REALTIME_EPOCH_NANOS)),
     )
     .unwrap();
     context
@@ -274,4 +278,102 @@ fn context_from_config_filesystem_is_rooted_and_crashable() {
         .fs_crash()
         .expect("imperative fs_crash must succeed");
     assert_eq!(context.read_file("/state/value").unwrap(), b"durable");
+}
+
+/// Incarnation 1, booting after a crash whose clock had reached
+/// `previous_realtime_nanos`.
+fn restarted(previous_realtime_nanos: u64) -> Incarnation {
+    Incarnation::Restarted {
+        id: NonZeroU64::MIN,
+        previous_realtime_nanos,
+    }
+}
+
+/// The first `len` entropy bytes a fresh context of `incarnation` draws at `seed`.
+fn first_entropy(seed: u64, incarnation: Incarnation) -> Vec<u8> {
+    let mut context =
+        Context::from_config(RuntimeConfig::seeded(seed).with_incarnation(incarnation)).unwrap();
+    let bytes = context.entropy_bytes(32, EntropyWait::UntilReady).unwrap();
+    context.finish().unwrap();
+    bytes
+}
+
+#[test]
+fn a_restarted_incarnation_draws_its_own_streams_from_the_run_seed() {
+    let first = first_entropy(11, Incarnation::First);
+    let restart = first_entropy(11, restarted(DEFAULT_REALTIME_EPOCH_NANOS));
+    assert_ne!(
+        restart, first,
+        "incarnation 1 must not repeat incarnation 0's entropy"
+    );
+    // Both still come from the run's seed alone: the same seed gives the same
+    // streams on every run, and a different seed different ones.
+    assert_eq!(first, first_entropy(11, Incarnation::First));
+    assert_eq!(
+        restart,
+        first_entropy(11, restarted(DEFAULT_REALTIME_EPOCH_NANOS))
+    );
+    assert_ne!(
+        restart,
+        first_entropy(12, restarted(DEFAULT_REALTIME_EPOCH_NANOS))
+    );
+}
+
+#[test]
+fn a_restarted_incarnation_boots_after_the_crashed_one_and_replays_identically() {
+    // Incarnation 0 reads realtime, runs on for a while, stamps a file, and
+    // crashes after its second write.
+    let mut first =
+        Context::from_config(RuntimeConfig::seeded(5).with_crash_at(CrashOp::Write, 2)).unwrap();
+    let fd = first
+        .fs_open("/f", OpenFlags::create_truncate_write())
+        .unwrap();
+    first.fs_write(fd, b"one").unwrap();
+    first.sleep_for(3_000_000_000).unwrap();
+    let last_read = first.now(ClockKind::Realtime).unwrap();
+    let stamped = first.fs_time_unrecorded().unwrap();
+    let crash = match first.fs_write(fd, b"two") {
+        Err(RuntimeError::InjectedFsCrash(crash)) => crash,
+        other => panic!("expected the injected crash, got {other:?}"),
+    };
+    assert!(crash.realtime_nanos >= last_read.max(stamped));
+
+    let directory = tempdir().unwrap();
+    let trace = directory.path().join("restart.patina");
+    let boot = |config: RuntimeConfig| {
+        let mut context =
+            Context::from_config(config.with_incarnation(restarted(crash.realtime_nanos))).unwrap();
+        let realtime = context.now(ClockKind::Realtime).unwrap();
+        let monotonic = context.now(ClockKind::Monotonic).unwrap();
+        let fd = context
+            .fs_open("/g", OpenFlags::create_truncate_write())
+            .unwrap();
+        context.fs_write(fd, b"after").unwrap();
+        // Unrecorded, so a replay answers it from its own clock and image
+        // rather than from the trace.
+        let modified = context.fs_fd_metadata_unrecorded(fd).unwrap().mtime_nanos;
+        context.finish().unwrap();
+        (realtime, monotonic, modified)
+    };
+    let (realtime, monotonic, modified) = boot(RuntimeConfig::record(5, &trace, "restart-v1"));
+    // Realtime carries on from the crash after a downtime; monotonic time is
+    // per boot and starts again at the boot origin.
+    assert!(
+        realtime > crash.realtime_nanos,
+        "realtime ran backwards across the restart: {} ns at the crash, {realtime} ns after",
+        crash.realtime_nanos
+    );
+    let downtime = realtime - crash.realtime_nanos;
+    assert!(
+        RESTART_DOWNTIME_NANOS.contains(&downtime),
+        "downtime {downtime} ns is outside {RESTART_DOWNTIME_NANOS:?}"
+    );
+    assert!(modified > i128::from(crash.realtime_nanos));
+    assert_eq!(monotonic, DEFAULT_BOOT_ORIGIN_NANOS);
+    // A replay of the restarted incarnation, handed the same predecessor
+    // realtime, reads and stamps exactly what the recording did.
+    assert_eq!(
+        boot(RuntimeConfig::replay(&trace, "restart-v1")),
+        (realtime, monotonic, modified)
+    );
 }
