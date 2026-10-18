@@ -430,8 +430,8 @@ use patina_dst_runtime::RuntimeError;
 
 fn scenario() -> Result<String, RuntimeError> {
     patina_dst_runtime::run(|context| {
-        let prefix = context.entropy_bytes(8)?;
-        let suffix = context.entropy_bytes(8)?;
+        let prefix = context.entropy_bytes(8, patina_dst_runtime::EntropyWait::UntilReady)?;
+        let suffix = context.entropy_bytes(8, patina_dst_runtime::EntropyWait::UntilReady)?;
         context.write_file("/state/value", &suffix)?;
         context.sleep_for(10)?;
         let stored = context.read_file("/state/value")?;

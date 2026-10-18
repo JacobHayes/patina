@@ -15,7 +15,7 @@ use patina_dst_runtime::RuntimeError;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (seed, entropy, time, stored) = patina_dst_runtime::run(|context| {
-        let entropy = context.entropy_bytes(12)?;
+        let entropy = context.entropy_bytes(12, patina_dst_runtime::EntropyWait::UntilReady)?;
         context.write_file("/state/entropy", &entropy)?;
         context.sleep_for(250_000_000)?;
         let time = context.now(ClockKind::Monotonic)?;

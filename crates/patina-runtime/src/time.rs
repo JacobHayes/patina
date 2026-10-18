@@ -2,56 +2,83 @@
 
 use crate::recording::{decode_bytes, decode_u64, decode_unit};
 use crate::{Context, RuntimeError};
-use patina_dst_abi::{ClockKind, EffectError, ErrorCode, Operation, Outcome};
+use patina_dst_abi::{ClockKind, EffectError, EntropyWait, ErrorCode, Operation, Outcome};
 
 impl Context {
-    pub fn entropy_bytes(&mut self, len: usize) -> Result<Vec<u8>, RuntimeError> {
+    /// `len` bytes from the seeded entropy stream, for a request that meets an
+    /// uninitialized pool as `wait` says.
+    ///
+    /// The entropy fault models a guest that starts before the pool is
+    /// initialized. Each [`EntropyWait::FailIfUnready`] request made before the
+    /// pool is known to be ready draws on the fault's own stream. A request
+    /// that fires answers `EAGAIN` ([`ErrorCode::WouldBlock`]). The pool is
+    /// known ready from the first such request that does not fire, or the first
+    /// [`EntropyWait::UntilReady`] request that returns. After that, no request
+    /// fails, as a real initialized pool never un-initializes.
+    pub fn entropy_bytes(
+        &mut self,
+        len: usize,
+        wait: EntropyWait,
+    ) -> Result<Vec<u8>, RuntimeError> {
         if self.entropy.is_none() {
             return Err(EffectError::missing_driver("entropy").into());
         }
-        let operation = Operation::EntropyFill { len };
-        if let Some((_, recorded)) = self.replay_expected(&operation)? {
-            return decode_bytes(&operation, recorded);
-        }
-
-        self.entropy_report.requests += 1;
-        let outcome = match self.draw_entropy_failure() {
-            Some(error) => {
-                self.entropy_report.failures_injected += 1;
-                Outcome::Error(error)
-            }
+        let operation = Operation::EntropyFill { len, wait };
+        let outcome = match self.replay_expected(&operation)? {
+            Some((_, recorded)) => recorded,
             None => {
-                let mut bytes = vec![0; len];
-                let result = self
-                    .entropy
-                    .as_mut()
-                    .expect("driver was checked")
-                    .fill(&mut bytes);
-                match result {
-                    Ok(()) => Outcome::Bytes(bytes),
-                    Err(error) => Outcome::Error(error),
-                }
+                let outcome = match self.draw_entropy_failure(wait) {
+                    Some(error) => Outcome::Error(error),
+                    None => {
+                        let mut bytes = vec![0; len];
+                        let result = self
+                            .entropy
+                            .as_mut()
+                            .expect("driver was checked")
+                            .fill(&mut bytes);
+                        match result {
+                            Ok(()) => Outcome::Bytes(bytes),
+                            Err(error) => Outcome::Error(error),
+                        }
+                    }
+                };
+                self.complete(operation.clone(), outcome)
             }
         };
-        let outcome = self.complete(operation.clone(), outcome);
+        // Derived from the outcome rather than the draw, so a replay (which
+        // draws nothing) knows the pool's state at every point the recording
+        // did, and a run that goes live after a replayed prefix continues
+        // from it.
+        if wait != EntropyWait::Never && matches!(outcome, Outcome::Bytes(_)) {
+            self.entropy_pool_ready = true;
+        }
         decode_bytes(&operation, outcome)
     }
 
-    /// Draw the seeded entropy-request failure for one eligible call, or `None`
-    /// when the knob does not fire. Extreme rates are decision-free so the
-    /// never-fail default perturbs no stream, mirroring [`Context::draw_dns_failure`].
-    fn draw_entropy_failure(&mut self) -> Option<EffectError> {
+    /// Draw the seeded entropy-request failure for one request, or `None` when
+    /// the request is not eligible or the knob does not fire. Only an
+    /// [`EntropyWait::FailIfUnready`] request made while the pool is not yet
+    /// known ready is eligible, and only eligible requests are counted or
+    /// draw. Extreme rates are decision-free, so the never-fail default
+    /// perturbs no stream, as in [`Context::draw_dns_failure`].
+    fn draw_entropy_failure(&mut self, wait: EntropyWait) -> Option<EffectError> {
+        if wait != EntropyWait::FailIfUnready || self.entropy_pool_ready {
+            return None;
+        }
+        self.entropy_report.requests += 1;
         let fires = match self.entropy_fail_permille {
             0 => false,
             1000 => true,
             permille => (self.entropy_fault_rng.next_u64() % 1000) < u64::from(permille),
         };
-        fires.then(|| {
-            EffectError::new(
-                ErrorCode::Interrupted,
-                "injected entropy failure: request did not complete",
-            )
-        })
+        if !fires {
+            return None;
+        }
+        self.entropy_report.failures_injected += 1;
+        Some(EffectError::new(
+            ErrorCode::WouldBlock,
+            "injected entropy failure: the random pool is not yet initialized",
+        ))
     }
 
     /// The end-of-run entropy fault summary, or `None` when the knob was never

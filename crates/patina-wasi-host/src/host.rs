@@ -9,7 +9,7 @@ use crate::{
     BUGGIFY_SETUP_NEVER_CALLED_MARKER, MountPolicy, ResourceLimits, WasiExit, WasiHostError,
 };
 use patina_dst_abi::{ClockKind, EffectError, ErrorCode, Fd, SeekWhence, SocketId};
-use patina_dst_runtime::Context;
+use patina_dst_runtime::{Context, EntropyWait};
 use std::collections::BTreeMap;
 use wasmi::StoreLimits;
 
@@ -272,7 +272,12 @@ impl Preview1Host {
     }
 
     pub fn random_get(&mut self, destination: &mut [u8]) -> Result<(), WasiHostError> {
-        let bytes = self.context.entropy_bytes(destination.len())?;
+        // A WASI host's pool is seeded before the guest runs, and `random_get`
+        // reports no unready state: wasi-libc's `getentropy` and Rust's std
+        // treat any error as fatal.
+        let bytes = self
+            .context
+            .entropy_bytes(destination.len(), EntropyWait::UntilReady)?;
         destination.copy_from_slice(&bytes);
         Ok(())
     }

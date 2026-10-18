@@ -387,8 +387,11 @@ fault_registry! {
             }
         }
         EntropyFaultConfig as entropy {
-            /// Seeded entropy-request failure probability in per-mille (0..=1000). On
-            /// fire, the request returns a deterministic named error instead of bytes.
+            /// Seeded entropy-request failure probability in per-mille (0..=1000),
+            /// over the requests a real random pool can fail: `GRND_NONBLOCK` reads
+            /// before the pool is known initialized. On fire, the request answers
+            /// `EAGAIN` instead of bytes. No other entropy API can fail, so a guest
+            /// that makes no such read gives the knob nothing to judge.
             fail_permille: u16 => EntropyFailPermille = 14 {
                 meta: KnobMeta {
                     flag: "--entropy-fail-permille",

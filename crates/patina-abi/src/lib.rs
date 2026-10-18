@@ -56,7 +56,7 @@ mod verdict;
 pub mod verdict_line;
 
 pub use charge::{ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
-pub use effect::{Operation, Outcome};
+pub use effect::{EntropyWait, Operation, Outcome};
 pub use error::{EffectError, ErrorCode};
 pub use filesystem::{
     AtimePolicy, CREATE_MODE_UNUSED, DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_FILE_CREATE_MODE,

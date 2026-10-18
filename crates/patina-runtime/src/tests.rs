@@ -1,7 +1,7 @@
 //! Tests spanning runtime modules and crate entry points.
 
 use crate::config::RuntimeConfig;
-use crate::{Context, RuntimeError, run_with_context};
+use crate::{Context, EntropyWait, RuntimeError, run_with_context};
 use patina_dst_abi::{ClockKind, EffectError, ErrorCode, TaskId};
 
 use patina_dst_trace::TraceBundle;
@@ -9,7 +9,7 @@ use std::env;
 use tempfile::tempdir;
 
 pub(super) fn exercise(context: &mut Context) -> Result<Vec<u8>, RuntimeError> {
-    let entropy = context.entropy_bytes(12)?;
+    let entropy = context.entropy_bytes(12, EntropyWait::UntilReady)?;
     context.write_file("/state/value", &entropy)?;
     assert_eq!(context.read_file("/state/value")?, entropy);
     let start = context.now(ClockKind::Monotonic)?;

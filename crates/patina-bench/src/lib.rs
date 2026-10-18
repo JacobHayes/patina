@@ -81,7 +81,7 @@ const FINGERPRINT: &str = "patina-dst-bench-v1";
 /// count so callers can normalize timings.
 fn workload(context: &mut Context, iterations: usize) -> Result<(), RuntimeError> {
     for index in 0..iterations {
-        let bytes = context.entropy_bytes(16)?;
+        let bytes = context.entropy_bytes(16, patina_dst_runtime::EntropyWait::UntilReady)?;
         let _ = context.now(ClockKind::Monotonic)?;
 
         let path = format!("/bench/{index}");

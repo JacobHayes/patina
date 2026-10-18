@@ -1,5 +1,6 @@
 use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
+#[cfg(target_os = "linux")]
 use std::ptr::NonNull;
 
 unsafe extern "C" {
@@ -11,6 +12,7 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
+#[cfg(target_os = "linux")]
 type GetRandomFn = unsafe extern "C" fn(*mut c_void, usize, u32) -> isize;
 type GetEntropyFn = unsafe extern "C" fn(*mut c_void, usize) -> i32;
 
@@ -41,7 +43,8 @@ fn main() {
         assert!(table(denied).is_null(), "dlsym table leaked {denied:?}");
     }
     // On Linux every name the shim defines resolves, to the very definition
-    // the static link bound; macOS's table is the entropy pair alone.
+    // the static link bound; macOS's table is `getentropy` alone, since
+    // libSystem defines no `getrandom`.
     #[cfg(target_os = "linux")]
     {
         let linked = getpid as unsafe extern "C" fn() -> i32;
@@ -49,51 +52,52 @@ fn main() {
         assert!(!table("open").is_null(), "open is not routed");
     }
     #[cfg(not(target_os = "linux"))]
-    for unrouted in ["open", "getpid"] {
+    for unrouted in ["open", "getpid", "getrandom"] {
         assert!(table(unrouted).is_null(), "the macOS table leaked {unrouted:?}");
     }
 
-    let getrandom_ptr = table("getrandom");
     let getentropy_ptr = table("getentropy");
-    assert!(!getrandom_ptr.is_null(), "getrandom is not routed");
     assert!(!getentropy_ptr.is_null(), "getentropy is not routed");
-    let getrandom: GetRandomFn = unsafe { std::mem::transmute(getrandom_ptr) };
     let getentropy: GetEntropyFn = unsafe { std::mem::transmute(getentropy_ptr) };
-
-    // The availability probe the `getrandom` crate runs immediately after
-    // resolving the pointer: a zero-length call through a dangling pointer. A
-    // negative answer there makes the crate mark getrandom unavailable and take
-    // the /dev/random fallback, so this exact shape has to succeed.
-    let dangling = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
-    assert_eq!(
-        unsafe { getrandom(dangling, 0, 0) },
-        0,
-        "availability probe failed"
-    );
-
-    let mut from_getrandom = [0u8; 24];
-    let filled = unsafe { getrandom(from_getrandom.as_mut_ptr().cast(), from_getrandom.len(), 0) };
-    assert_eq!(
-        filled,
-        from_getrandom.len() as isize,
-        "short getrandom fill"
-    );
-
     let mut from_getentropy = [0u8; 24];
     let status = unsafe { getentropy(from_getentropy.as_mut_ptr().cast(), from_getentropy.len()) };
     assert_eq!(status, 0, "getentropy failed");
+    assert_ne!(from_getentropy, [0u8; 24], "getentropy wrote nothing");
 
-    // Successive draws off one seeded stream: neither empty nor the same block.
-    assert_ne!(from_getrandom, [0u8; 24], "getrandom wrote nothing");
-    assert_ne!(from_getrandom, from_getentropy, "two draws were identical");
+    #[cfg(target_os = "linux")]
+    let (link, from_getrandom) = {
+        let getrandom_ptr = table("getrandom");
+        assert!(!getrandom_ptr.is_null(), "getrandom is not routed");
+        let getrandom: GetRandomFn = unsafe { std::mem::transmute(getrandom_ptr) };
 
-    // Unknown GRND_* flags stay fail-closed rather than silently succeeding.
-    let mut scratch = [0u8; 8];
-    let rejected = unsafe { getrandom(scratch.as_mut_ptr().cast(), scratch.len(), 0x4000_0000) };
-    assert_eq!(rejected, -1, "unknown getrandom flags were accepted");
+        // The availability probe the `getrandom` crate runs immediately after
+        // resolving the pointer: a zero-length call through a dangling pointer. A
+        // negative answer there makes the crate mark getrandom unavailable and take
+        // the /dev/random fallback, so this exact shape has to succeed.
+        let dangling = NonNull::<u8>::dangling().as_ptr().cast::<c_void>();
+        assert_eq!(
+            unsafe { getrandom(dangling, 0, 0) },
+            0,
+            "availability probe failed"
+        );
 
-    let link = {
-        #[cfg(target_os = "linux")]
+        let mut from_getrandom = [0u8; 24];
+        let filled =
+            unsafe { getrandom(from_getrandom.as_mut_ptr().cast(), from_getrandom.len(), 0) };
+        assert_eq!(
+            filled,
+            from_getrandom.len() as isize,
+            "short getrandom fill"
+        );
+        // Successive draws off one seeded stream: not the same block.
+        assert_ne!(from_getrandom, from_getentropy, "two draws were identical");
+
+        // Unknown GRND_* flags stay fail-closed rather than silently succeeding.
+        let mut scratch = [0u8; 8];
+        let rejected =
+            unsafe { getrandom(scratch.as_mut_ptr().cast(), scratch.len(), 0x4000_0000) };
+        assert_eq!(rejected, -1, "unknown getrandom flags were accepted");
+
         {
             // RTLD_DEFAULT is NULL on glibc: the handle both the `getrandom`
             // crate and std pass. The wrapped dlsym must hand back the very
@@ -107,17 +111,14 @@ fn main() {
             let name = CString::new("__pthread_get_minstack").unwrap();
             let probed = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
             assert!(probed.is_null(), "dlsym leaked a host symbol");
-            "wrapped"
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            "table-only"
-        }
+        ("wrapped", hex(&from_getrandom))
     };
+    #[cfg(not(target_os = "linux"))]
+    let (link, from_getrandom) = ("table-only", "absent".to_string());
 
     println!(
-        "NATIVE_DLSYM_ENTROPY link={link} getrandom={} getentropy={}",
-        hex(&from_getrandom),
+        "NATIVE_DLSYM_ENTROPY link={link} getrandom={from_getrandom} getentropy={}",
         hex(&from_getentropy)
     );
 }

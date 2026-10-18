@@ -375,7 +375,11 @@ fn dlsym_routes_the_shim_definitions_and_no_host_name() {
             "table-only"
         }
     );
-    assert_lower_hex(fields["getrandom"], 48);
+    if cfg!(target_os = "linux") {
+        assert_lower_hex(fields["getrandom"], 48);
+    } else {
+        assert_eq!(fields["getrandom"], "absent");
+    }
     assert_lower_hex(fields["getentropy"], 48);
     g.assert_seed_variation(&[1, 2], &[]);
 }

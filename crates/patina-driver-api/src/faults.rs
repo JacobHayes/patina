@@ -313,8 +313,11 @@ impl DnsFaultReport {
 /// (`Context::entropy_bytes`), so there is no driver to ask.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EntropyFaultReport {
-    /// Fault-eligible entropy requests observed (every `entropy_bytes` call: the
-    /// baseline nondeterminism source has no undefined-name-style exemption).
+    /// Fault-eligible entropy requests observed: the `GRND_NONBLOCK` reads made
+    /// before the random pool was known initialized, the only requests a real
+    /// pool can fail. Zero on a platform or guest with no such read (Darwin,
+    /// WASI, and Rust's std, which waits or reads `GRND_INSECURE`), which
+    /// leaves the knob undiagnosable rather than vacuous.
     pub requests: u64,
     /// The failure knob was live over enough eligible requests that
     /// [`vacuity_is_diagnosable`] holds, so zero injected failures is anomalous.

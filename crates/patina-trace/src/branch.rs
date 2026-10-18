@@ -234,7 +234,13 @@ mod tests {
         let path = directory.path().join("run.patina");
         let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
         recorder.observe(operation(), Outcome::U64(10));
-        recorder.observe(Operation::EntropyFill { len: 1 }, Outcome::Bytes(vec![1]));
+        recorder.observe(
+            Operation::EntropyFill {
+                len: 1,
+                wait: patina_dst_abi::EntropyWait::UntilReady,
+            },
+            Outcome::Bytes(vec![1]),
+        );
         recorder.finish(&path).unwrap();
 
         let mut branch =
@@ -245,11 +251,20 @@ mod tests {
         );
         assert_eq!(
             branch
-                .expect_prefix(&Operation::EntropyFill { len: 1 })
+                .expect_prefix(&Operation::EntropyFill {
+                    len: 1,
+                    wait: patina_dst_abi::EntropyWait::UntilReady
+                })
                 .unwrap(),
             None
         );
-        branch.observe(Operation::EntropyFill { len: 1 }, Outcome::Bytes(vec![9]));
+        branch.observe(
+            Operation::EntropyFill {
+                len: 1,
+                wait: patina_dst_abi::EntropyWait::UntilReady,
+            },
+            Outcome::Bytes(vec![9]),
+        );
         branch.finish().unwrap();
 
         let bundle = TraceBundle::load(&path).unwrap();

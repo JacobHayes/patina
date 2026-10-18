@@ -10,7 +10,8 @@ use patina_dst_driver_api::{DriverResult, EntropyDriver};
 /// constants or by reusing the root seed directly.
 pub mod fault_domain {
     /// Guest entropy bytes (`Context::entropy_bytes`, WASI `random_get`, native
-    /// `getrandom`/`getentropy` interposers).
+    /// `getrandom`/`getentropy`/`CCRandomGenerateBytes` interposers and
+    /// `/dev/urandom` reads).
     pub const ENTROPY: &str = "patina.entropy";
     /// SimNet's seeded network fault stream (drop, retransmit, jitter).
     pub const NET_FAULT: &str = "patina.net.fault";

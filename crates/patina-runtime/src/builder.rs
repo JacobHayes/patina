@@ -723,6 +723,7 @@ impl RuntimeBuilder {
             entropy_fail_permille: self.config.faults.entropy.fail_permille,
             entropy_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::ENTROPY_FAULT)),
             entropy_report: patina_dst_driver_api::EntropyFaultReport::default(),
+            entropy_pool_ready: false,
             epoch_jump_nanos: self.config.faults.clock.epoch_jump_nanos,
             epoch_jump_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::EPOCH_JUMP)),
             clock_report: patina_dst_driver_api::ClockFaultReport::default(),
@@ -752,7 +753,7 @@ impl RuntimeBuilder {
 mod tests {
     use crate::builder::RuntimeBuilder;
     use crate::config::RuntimeConfig;
-    use crate::{Context, RuntimeError};
+    use crate::{Context, EntropyWait, RuntimeError};
     use patina_dst_abi::{ClockKind, EffectError, ErrorCode, SendDisposition};
     use patina_dst_driver_api::{EntropyDriver, NetDriver};
     use patina_dst_net_sim::SimNet;
@@ -763,7 +764,7 @@ mod tests {
         let seed = 7;
 
         let mut context = Context::from_config(RuntimeConfig::seeded(seed)).unwrap();
-        let actual_entropy = context.entropy_bytes(24).unwrap();
+        let actual_entropy = context.entropy_bytes(24, EntropyWait::UntilReady).unwrap();
         context.finish().unwrap();
 
         let mut expected_entropy = SeededEntropy::new(domain_seed(seed, fault_domain::ENTROPY));
@@ -842,7 +843,9 @@ mod tests {
         let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
             .build()
             .unwrap();
-        let error = context.entropy_bytes(1).unwrap_err();
+        let error = context
+            .entropy_bytes(1, EntropyWait::UntilReady)
+            .unwrap_err();
         assert!(matches!(
             error,
             RuntimeError::Effect(EffectError {

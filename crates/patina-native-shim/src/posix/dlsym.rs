@@ -20,11 +20,9 @@ pub unsafe extern "C" fn patina_dlsym_route(symbol: *const c_char) -> *mut c_voi
     #[cfg(target_os = "macos")]
     {
         match name.to_bytes() {
+            // libSystem defines `getentropy` but no `getrandom`.
             b"getentropy" => {
                 super::entropy::patina_deterministic_getentropy as *const () as *mut c_void
-            }
-            b"getrandom" => {
-                super::entropy::patina_deterministic_getrandom as *const () as *mut c_void
             }
             _ => ptr::null_mut(),
         }

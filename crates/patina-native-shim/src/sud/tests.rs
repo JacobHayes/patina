@@ -225,8 +225,10 @@ fn flag_words_the_kernel_refuses_or_ignores() {
     // getrandom: every bit outside NONBLOCK|RANDOM|INSECURE, and INSECURE
     // with RANDOM, are EINVAL before any byte is drawn; every other
     // combination is accepted (no runtime is installed here, so the
-    // accepted side is asked of the rule itself), and a null buffer is
-    // EFAULT.
+    // accepted side is asked of the rule itself). A null buffer is EFAULT
+    // only after the pool is consulted, so it needs the runtime: the
+    // `native_workloads` entropy-fault test and the `entropy/getentropy`
+    // conformance scenario cover it.
     let unknown = 1 << (insecure | nonblock | random).count_ones();
     assert_eq!(sys_getrandom(buf, 16, unknown), -EINVAL);
     assert_eq!(sys_getrandom(buf, 16, insecure | random), -EINVAL);
@@ -243,7 +245,6 @@ fn flag_words_the_kernel_refuses_or_ignores() {
             "{accepted:#x}"
         );
     }
-    assert_eq!(sys_getrandom(0, 16, 0), -EFAULT);
     // newfstatat/statx: a bit vfs_statx does not accept is EINVAL, before
     // the descriptor is looked at; statx also refuses both sync modes at
     // once and the reserved mask bit.

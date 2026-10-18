@@ -345,6 +345,7 @@ pub(crate) fn effect_errno(error: &EffectError) -> c_int {
         ErrorCode::CrossDevice => EXDEV,
         ErrorCode::NoSuchPosition => ENXIO,
         ErrorCode::FileTooBig => EFBIG,
+        ErrorCode::WouldBlock => EWOULDBLOCK,
     }
 }
 

@@ -208,6 +208,11 @@ paths are wired.
   `HarnessBuilder::dns_service`, which allocates the virtual address for you.
   `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
   per generation and classifies an inert one as `VACUOUS_DNS_FAULT`.
+- **Entropy**: `--entropy-fail-permille` models a guest that starts before the
+  kernel's random pool is initialized: a `GRND_NONBLOCK` `getrandom` answers
+  `EAGAIN` until a read shows the pool ready. No other entropy API can fail, so
+  a guest that makes no such read (any Darwin or WASI guest, and Rust's std)
+  gets no entropy report. The knob is undiagnosable there, not vacuous.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class

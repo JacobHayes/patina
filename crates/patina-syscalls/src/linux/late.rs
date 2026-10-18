@@ -861,7 +861,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Entropy,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_entropy`): seeded bytes; GRND_* flags are irrelevant to a source that never blocks.",
+                "Routed by the SUD dispatcher into the same entry the `getrandom` interposer calls: seeded bytes; an unknown flag, or `GRND_INSECURE` with `GRND_RANDOM`, is `EINVAL`. The pool is initialized from boot; only the entropy fault (`--entropy-fail-permille`) models one that is not, answering `EAGAIN` to a `GRND_NONBLOCK` read without `GRND_INSECURE` until a read shows it ready.",
                 None,
             )
             .since("3.17"),

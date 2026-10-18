@@ -33,7 +33,10 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
     };
     vec![
         (
-            Operation::EntropyFill { len: 4 },
+            Operation::EntropyFill {
+                len: 4,
+                wait: patina_dst_abi::EntropyWait::UntilReady,
+            },
             Outcome::Bytes(vec![1, 2, 3, 4]),
         ),
         (

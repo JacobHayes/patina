@@ -55,6 +55,10 @@ pub enum ErrorCode {
     /// A file would pass its filesystem's size limit (`EFBIG`): a write that
     /// starts at or past it, a truncate or allocation that reaches past it.
     FileTooBig,
+    /// The request cannot complete without waiting and the caller asked not to
+    /// wait (`EAGAIN`): `getrandom(GRND_NONBLOCK)` on a random pool that is not
+    /// yet initialized.
+    WouldBlock,
 }
 
 /// A typed effect failure suitable for traces and user-facing diagnostics.
@@ -125,6 +129,7 @@ impl fmt::Display for ErrorCodeDisplay {
             ErrorCode::CrossDevice => "cross_device",
             ErrorCode::NoSuchPosition => "no_such_position",
             ErrorCode::FileTooBig => "file_too_big",
+            ErrorCode::WouldBlock => "would_block",
         };
         f.write_str(value)
     }

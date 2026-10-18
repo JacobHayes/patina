@@ -234,7 +234,10 @@ mod tests {
 
         let mut replay = Replayer::open(&path, "fingerprint").unwrap();
         let mismatch = replay
-            .expect(&Operation::EntropyFill { len: 1 })
+            .expect(&Operation::EntropyFill {
+                len: 1,
+                wait: patina_dst_abi::EntropyWait::UntilReady,
+            })
             .unwrap_err();
         assert!(matches!(mismatch, TraceError::OperationMismatch { .. }));
 

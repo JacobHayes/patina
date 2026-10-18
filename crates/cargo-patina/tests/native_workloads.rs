@@ -838,6 +838,145 @@ fn yield_points_preserve_single_threaded_output() {
     assert_eq!(out, instrumented.assert_run_success(1, &[]).stdout);
 }
 
+/// One seeded run under a certain entropy fault rate, as the guest's stdout and
+/// the `fault_reports` object of its `patina.result/v1` envelope.
+fn certain_entropy_fault_run(g: &Guest) -> (String, serde_json::Value) {
+    let output = g.command(
+        "run",
+        &[
+            "--seed",
+            "1",
+            "--entropy-fail-permille",
+            "1000",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}: {}{}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stdout = envelope["stdout"].as_str().unwrap().to_string();
+    (stdout, envelope["fault_reports"].clone())
+}
+
+/// The entropy fault reaches only an API the platform can really fail. A
+/// thread's first `HashMap` draws from one that cannot fail on either platform,
+/// so it runs under a certain failure rate. With no eligible request, the
+/// entropy plane is absent: undiagnosable, never vacuous. RED before: Darwin's
+/// `CCRandomGenerateBytes` trapped (signal 5), and Linux's std retried the
+/// injected `EINTR` forever. Class pairing: `Context::entropy_bytes` takes an
+/// `EntropyWait` from every caller, and only `FailIfUnready` can be failed.
+#[test]
+fn a_thread_hashmap_runs_under_certain_entropy_failure() {
+    let g = Guest::assert_build("thread_hashmap_probe.rs");
+    let (stdout, reports) = certain_entropy_fault_run(&g);
+    assert_eq!(
+        assert_unique_line_payload(stdout.as_bytes(), "NATIVE_THREAD_HASHMAP len="),
+        "1"
+    );
+    assert!(reports.get("entropy").is_none(), "{reports}");
+    g.assert_seeded_record_replay_identity(1, &["--entropy-fail-permille", "1000"]);
+}
+
+/// On Linux, only a `GRND_NONBLOCK` read before the pool is known ready fails,
+/// with `EAGAIN` (getrandom(2)), and the kernel decides that before it looks at
+/// the buffer or the length: a NULL and an empty read fail the same way. An
+/// empty `getentropy` never reaches the kernel, so it leaves the pool unknown.
+/// Every other entry point, and a nonblocking read once a waiting read has
+/// returned, gets bytes. RED before: every request failed with `EINTR`, which
+/// glibc's `getentropy` never returns; then the empty `getentropy` showed the
+/// pool ready, and the NULL read answered `EFAULT` without being counted.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_entropy_fault_fails_only_nonblocking_reads_of_an_unready_pool() {
+    let g = Guest::assert_build("entropy_fault_probe.rs");
+    let (stdout, reports) = certain_entropy_fault_run(&g);
+    let eagain = format!("errno{}", libc::EAGAIN);
+    assert_eq!(
+        assert_unique_line_payload(stdout.as_bytes(), "NATIVE_ENTROPY_FAULT "),
+        format!(
+            "empty_getentropy=0 nonblocking_first={eagain} null_nonblocking={eagain} \
+empty_nonblocking={eagain} insecure=16 hashmap=1 getentropy=0 nonblocking_after=16"
+        )
+    );
+    let entropy = &reports["entropy"];
+    assert_eq!(entropy["requests"], 3, "{reports}");
+    assert_eq!(entropy["failures_injected"], 3, "{reports}");
+    assert_eq!(entropy["vacuous"], false, "{reports}");
+    g.assert_seeded_record_replay_identity(1, &["--entropy-fail-permille", "1000"]);
+}
+
+/// The libc entropy surface answers as the host's own libc does, the native
+/// run being the oracle: `getentropy`'s size limit and errno (glibc `EIO`, XNU
+/// `EINVAL`), an empty request, and which names `dlsym` finds. RED before on
+/// Darwin: an oversized request was `EIO`. Class pairing: the native-oracle
+/// comparison, as in the conformance scenarios.
+#[test]
+fn the_libc_entropy_surface_answers_as_the_host_libc() {
+    let g = Guest::assert_build("entropy_libc_probe.rs");
+    let patina = g.assert_run_success(1, &[]).stdout;
+    let native = native_stdout("entropy_libc_probe.rs");
+    assert_eq!(text(&patina), text(&native));
+}
+
+/// Entropy requests whose destination stops being writable answer as the host
+/// kernel does, the native run being the oracle: on Linux the bytes written
+/// before the fault, or `EFAULT` when none were; on macOS a short
+/// `/dev/urandom` read is `EFAULT`. On Linux the Patina run gets a 1 GiB
+/// address-space limit, so a request is never allocated whole: a NULL request
+/// of `MAX_RW_COUNT` bytes is `EFAULT`, not an allocation failure. RED before:
+/// the run aborted allocating 2 GiB, a Linux partial write answered `EFAULT`,
+/// and a macOS short read answered its byte count. The record/replay pair
+/// checks the chunked draws reproduce.
+#[test]
+fn entropy_into_a_faulting_buffer_answers_the_bytes_written() {
+    let g = Guest::assert_build("entropy_bounds_probe.rs");
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    command.current_dir(common::native_workspace()).args([
+        "run",
+        g.binary.to_str().unwrap(),
+        "--seed",
+        "1",
+    ]);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let limit = libc::rlimit {
+            rlim_cur: 1 << 30,
+            rlim_max: 1 << 30,
+        };
+        // SAFETY: setrlimit is async-signal-safe, and `limit` outlives the spawn.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    let output = common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
+        .expect("the bounded run exceeded 60s");
+    assert!(
+        output.status.success(),
+        "{}: {}{}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    );
+    assert_eq!(
+        text(&output.stdout),
+        text(&native_stdout("entropy_bounds_probe.rs"))
+    );
+    g.assert_seeded_record_replay_identity(1, &[]);
+}
+
 #[test]
 fn rand_rng_is_seeded_and_replayable() {
     let g = Guest::assert_build("rand-rng");

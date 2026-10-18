@@ -68,7 +68,10 @@ fn flatten_branch_lifecycle_continues_inherited_incarnation_without_duplicate_st
     )];
     let mut branch_event = TraceEvent::new(
         1,
-        Operation::EntropyFill { len: 1 },
+        Operation::EntropyFill {
+            len: 1,
+            wait: patina_dst_abi::EntropyWait::UntilReady,
+        },
         Outcome::Bytes(vec![9]),
     );
     branch_event.order = 3;

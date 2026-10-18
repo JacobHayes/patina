@@ -3,12 +3,49 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
 
+/// How an entropy request meets a random pool that is not yet initialized.
+///
+/// That is the one state in which a real entropy API fails on its own, so it
+/// decides whether the entropy fault (`--entropy-fail-permille`) can touch a
+/// request. Linux's CRNG starts uninitialized at boot. `getrandom(2)` then waits
+/// for it, or answers `EAGAIN` under `GRND_NONBLOCK`, or reads regardless under
+/// `GRND_INSECURE` (6.8 `drivers/char/random.c`, `SYSCALL_DEFINE3(getrandom)`).
+/// Once initialized it stays initialized. Darwin and WASI hosts seed their pool
+/// before any process runs and offer no call that reports an unready pool.
+///
+/// Every caller of `Context::entropy_bytes` names its entry point's behavior
+/// here, so an API that cannot fail is never handed an injected failure. The
+/// trace records it on [`Operation::EntropyFill`]: it decides both the outcome
+/// and the pool state later requests see, so a replay that asks differently
+/// diverges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntropyWait {
+    /// Waits until the pool is initialized, so it never fails, and returning
+    /// proves the pool ready. This covers `getrandom` without `GRND_NONBLOCK`
+    /// or `GRND_INSECURE`, and glibc's `getentropy` and `arc4random`, which
+    /// call it with flags 0 and retry `EINTR` (glibc 2.39 `sysdeps/unix/sysv/linux/getentropy.c`,
+    /// `stdlib/arc4random.c`). It also covers every entry point of a platform
+    /// whose pool is ready before the guest runs: Darwin's `getentropy` and
+    /// `CCRandomGenerateBytes`, and WASI `random_get`.
+    UntilReady,
+    /// Fails with `EAGAIN` while the pool is not initialized: `getrandom` with
+    /// `GRND_NONBLOCK` and without `GRND_INSECURE`. The only request the
+    /// entropy fault can fail.
+    FailIfUnready,
+    /// Reads whether or not the pool is initialized, so it never fails and
+    /// proves nothing about the pool: `getrandom` with `GRND_INSECURE`, and
+    /// reads of `/dev/urandom`, which never block (`urandom_read_iter`).
+    Never,
+}
+
 /// A typed boundary operation. Its serialized form is part of trace matching.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Operation {
     EntropyFill {
         len: usize,
+        wait: EntropyWait,
     },
     ClockNow {
         clock: ClockKind,

@@ -115,13 +115,22 @@ pub(crate) unsafe fn read_resolved(
             // writable for `length` bytes; this file path accesses it directly.
             unsafe { fs_read(Fd(resolved.handle), destination, length) }
         }
+        // A read that faults partway answers the bytes it wrote on Linux
+        // (`urandom_read_iter` is `get_random_bytes_user`). XNU's
+        // `random_read` returns the copy's `EFAULT`, which `dofileread`
+        // keeps after partial progress (it drops only interruption and
+        // would-block), so a short read there is `EFAULT`.
         FdKind::Urandom => {
             // SAFETY: forwarded from this function's own contract.
-            let result = unsafe { patina_entropy(destination, length) };
-            if result == 0 {
-                isize::try_from(length).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-            } else {
-                fail(patina_errno()) as isize
+            match unsafe {
+                crate::entropy::fill(destination, length, crate::entropy::EntropyWait::Never)
+            } {
+                #[cfg(target_os = "macos")]
+                Ok(written) if written < length => fail(EFAULT) as isize,
+                Ok(written) => {
+                    isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+                }
+                Err(errno) => fail(errno.get()) as isize,
             }
         }
         // SAFETY: forwarded from this function's own contract.

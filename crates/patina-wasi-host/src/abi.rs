@@ -218,6 +218,7 @@ fn effect_errno(code: ErrorCode) -> i32 {
         ErrorCode::CrossDevice => WASI_ERRNO_XDEV,
         ErrorCode::NoSuchPosition => WASI_ERRNO_NXIO,
         ErrorCode::FileTooBig => WASI_ERRNO_FBIG,
+        ErrorCode::WouldBlock => WASI_ERRNO_AGAIN,
     }
 }
 

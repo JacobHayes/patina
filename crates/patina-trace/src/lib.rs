@@ -82,7 +82,9 @@ pub use replay::Replayer;
 ///   events a run records did.
 /// - 17: the required [`RunMetadata::time_model`]; a bundle recorded under
 ///   another time model is refused ([`TraceError::UnsupportedTimeModel`]).
-pub const TRACE_FORMAT_VERSION: u32 = 17;
+/// - 18: `entropy_fill`'s required `wait`, how the request meets a random pool
+///   that is not yet initialized (`until_ready`, `fail_if_unready`, `never`).
+pub const TRACE_FORMAT_VERSION: u32 = 18;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

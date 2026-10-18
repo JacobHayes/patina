@@ -352,7 +352,9 @@ undefined name is NXDOMAIN by semantics and is never fault-eligible.",
 }
 
 /// Emit the default-on entropy fault-injection diagnostic. Silent when the knob
-/// was never live at all. Suppressed by a false-y [`ENV_ENTROPY_FAULT_REPORT`].
+/// was never live or the run made no fault-eligible request, as on a platform
+/// whose entropy APIs cannot fail. Suppressed by a false-y
+/// [`ENV_ENTROPY_FAULT_REPORT`].
 pub(super) fn emit_entropy_fault_report(
     reports: ReportConfig,
     report: &patina_dst_driver_api::EntropyFaultReport,
@@ -373,8 +375,8 @@ pub(super) fn emit_entropy_fault_report(
     if report.is_vacuous() {
         diagnostic!(
             "PATINA WARNING: entropy fault knobs inert — {} fault-eligible entropy request(s) \
-occurred, enough that the configured rate should have fired several times over, yet it applied \
-ZERO effects.",
+occurred (GRND_NONBLOCK reads before the random pool was known ready), enough that the configured \
+rate should have fired several times over, yet it applied ZERO effects.",
             report.requests,
         );
     }

@@ -460,8 +460,10 @@ impl RuntimeConfig {
         self
     }
 
-    /// Fail guest entropy requests with the given per-mille (0..=1000)
-    /// probability, returning a deterministic named error instead of bytes.
+    /// Fail the guest entropy requests a real random pool can fail with the
+    /// given per-mille (0..=1000) probability: each `GRND_NONBLOCK` read made
+    /// before the pool is known initialized answers `EAGAIN` instead of bytes
+    /// (see [`EntropyWait`](crate::EntropyWait)).
     pub fn with_entropy_fail_permille(mut self, permille: u16) -> Self {
         self.faults.entropy.fail_permille = permille;
         self

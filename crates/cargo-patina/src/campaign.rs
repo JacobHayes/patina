@@ -542,9 +542,11 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 hi: jitter_hi,
             },
         );
-        // Runtime-level like the fs/net bands above, and available to every
-        // family (WASI guests draw entropy too, unlike DNS resolution): no
-        // host-table-shaped gate needed.
+        // Runtime-level like the fs/net bands above, and accepted by every
+        // family: no host-table-shaped gate needed. It fails only
+        // `GRND_NONBLOCK` reads of a pool not yet known ready, so a guest
+        // without one (any Darwin or WASI guest, Rust's std) leaves the plane
+        // absent: undiagnosable, never `VACUOUS_ENTROPY_FAULT`.
         let entropy_fail = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,

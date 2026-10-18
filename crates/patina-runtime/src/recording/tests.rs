@@ -1,5 +1,6 @@
 //! Tests for trace transport, recording lifecycle, effect reconciliation, and outcome decoding.
 
+use crate::EntropyWait;
 use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
 use crate::fs_crash::CrashOp;
@@ -256,12 +257,12 @@ fn replay_rejects_changed_operations_and_unconsumed_events() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("run.patina");
     let mut record = Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")).unwrap();
-    record.entropy_bytes(4).unwrap();
+    record.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     record.finish().unwrap();
 
     let mut changed = Context::from_config(RuntimeConfig::replay(&path, "fixture-v1")).unwrap();
     assert!(matches!(
-        changed.entropy_bytes(5),
+        changed.entropy_bytes(5, EntropyWait::UntilReady),
         Err(RuntimeError::Trace(TraceError::OperationMismatch { .. }))
     ));
 
@@ -325,7 +326,10 @@ fn replay_rejects_a_changed_fingerprint() {
 #[test]
 fn branch_replays_the_prefix_and_uses_a_new_seed_for_the_suffix() {
     fn two_decisions(context: &mut Context) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
-        Ok((context.entropy_bytes(8)?, context.entropy_bytes(8)?))
+        Ok((
+            context.entropy_bytes(8, EntropyWait::UntilReady)?,
+            context.entropy_bytes(8, EntropyWait::UntilReady)?,
+        ))
     }
 
     let directory = tempdir().unwrap();
@@ -361,11 +365,11 @@ fn branch_replays_the_prefix_and_uses_a_new_seed_for_the_suffix() {
 #[test]
 fn step_budget_stops_before_an_unrecorded_boundary_operation() {
     let mut context = Context::from_config(RuntimeConfig::seeded(1).with_step_budget(2)).unwrap();
-    context.entropy_bytes(1).unwrap();
+    context.entropy_bytes(1, EntropyWait::UntilReady).unwrap();
     context.now(ClockKind::Monotonic).unwrap();
     assert_eq!(context.steps(), 2);
     assert!(matches!(
-        context.entropy_bytes(1),
+        context.entropy_bytes(1, EntropyWait::UntilReady),
         Err(RuntimeError::StepBudgetExceeded { budget: 2 })
     ));
     assert_eq!(context.steps(), 2);

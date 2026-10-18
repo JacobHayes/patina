@@ -132,6 +132,8 @@ pub use buggify::{
 
 pub use custom_op::CustomOpMode;
 
+pub use patina_dst_abi::EntropyWait;
+
 pub use reports::{
     ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DEPTH_REPORT,
     ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT,
@@ -366,7 +368,9 @@ pub const ENV_FS_LATENCY: &str = "PATINA_FS_LATENCY_NANOS";
 pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
 
 /// Seeded guest entropy-request failure probability in per-mille (0..=1000),
-/// applied to every `Context::entropy_bytes` call. Off (zero) when unset.
+/// applied to the requests a real random pool can fail: `GRND_NONBLOCK` reads
+/// before the pool is known initialized ([`EntropyWait`]). Off (zero) when
+/// unset.
 pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_ENTROPY_FAIL_PERMILLE";
 
 /// Seeded guest custom-operation failure probability in per-mille (0..=1000),
@@ -682,6 +686,9 @@ pub struct Context {
     entropy_fault_rng: SplitMix64,
     /// Per-class entropy fault accounting for the end-of-run vacuity diagnostic.
     entropy_report: patina_dst_driver_api::EntropyFaultReport,
+    /// Whether a request has shown the random pool initialized, after which no
+    /// entropy request is fault-eligible (see [`Context::entropy_bytes`]).
+    entropy_pool_ready: bool,
     /// Magnitude in nanoseconds of the seeded signed realtime-epoch jump and its
     /// domain-separated stream. Zero means the knob is off. The stream is its
     /// own label ([`fault_domain::EPOCH_JUMP`]), never the clock driver's own

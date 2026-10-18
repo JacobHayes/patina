@@ -833,7 +833,10 @@ fn operation_progress_classification_is_correct() {
             bytes: vec![1],
         },
         Operation::TaskComplete { task: TaskId(1) },
-        Operation::EntropyFill { len: 4 },
+        Operation::EntropyFill {
+            len: 4,
+            wait: patina_dst_abi::EntropyWait::UntilReady,
+        },
     ] {
         assert_eq!(progress_of(&operation), Progress::Always, "{operation:?}");
     }

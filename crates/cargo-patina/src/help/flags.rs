@@ -165,7 +165,7 @@ const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
         ),
         FaultKnob::EntropyFailPermille => (
             Value::Required("N", Kind::Permille),
-            "Fail guest entropy requests at N per-mille with a seeded named error instead of bytes.",
+            "Fail at N per-mille the entropy requests a real pool can fail: GRND_NONBLOCK reads before the pool is known ready answer EAGAIN.",
             KnobGroup::Fault,
         ),
         FaultKnob::EpochJumpNanos => (

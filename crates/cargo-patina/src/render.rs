@@ -613,7 +613,10 @@ mod tests {
     fn renders_wellformed_standalone_html() {
         let bundle = bundle_with(vec![
             (
-                Operation::EntropyFill { len: 4 },
+                Operation::EntropyFill {
+                    len: 4,
+                    wait: patina_dst_abi::EntropyWait::UntilReady,
+                },
                 Outcome::Bytes(vec![1, 2, 3, 4]),
             ),
             (

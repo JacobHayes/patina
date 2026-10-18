@@ -461,7 +461,7 @@ recording was produced by a guest whose result type no longer matches this one"
 mod tests {
     use crate::config::RuntimeConfig;
     use crate::custom_op::CustomOpMode;
-    use crate::{Context, RuntimeError};
+    use crate::{Context, EntropyWait, RuntimeError};
     use patina_dst_abi::{Operation, Outcome};
 
     use patina_dst_trace::TraceBundle;
@@ -609,7 +609,7 @@ mod tests {
             context.custom_op_begin("wrapped.fs", b"k", false).unwrap(),
             CustomOpMode::Record
         );
-        context.entropy_bytes(4).unwrap();
+        context.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
         let error = context
             .custom_op_record(b"result".to_vec())
             .expect_err("a modeled operation inside perform must be refused");

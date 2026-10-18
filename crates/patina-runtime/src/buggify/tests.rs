@@ -2,7 +2,9 @@
 
 use crate::buggify::{Buggify, BuggifyKind, SiteOutcome, label_hash};
 use crate::config::{BuggifyConfig, RuntimeConfig};
-use crate::{Context, DEFAULT_BUGGIFY_CUTOFF_NANOS, DEFAULT_BUGGIFY_FIRE_PERMILLE, VerdictKind};
+use crate::{
+    Context, DEFAULT_BUGGIFY_CUTOFF_NANOS, DEFAULT_BUGGIFY_FIRE_PERMILLE, EntropyWait, VerdictKind,
+};
 use patina_dst_abi::Operation;
 
 use patina_dst_trace::TraceBundle;
@@ -363,7 +365,7 @@ fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
     let trace = directory.path().join("verdicts.patina");
 
     let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
-    context.entropy_bytes(4).unwrap();
+    context.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     context
         .verdict(VerdictKind::Pass, "phase-one", "a")
         .unwrap();
@@ -397,7 +399,7 @@ fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
 
     // Replaying the same verdict stream reconciles cleanly.
     let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-    replay.entropy_bytes(4).unwrap();
+    replay.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     replay.verdict(VerdictKind::Pass, "phase-one", "a").unwrap();
     replay
         .verdict(VerdictKind::Violation, "two-leaders", "{\"term\":4}")
@@ -408,7 +410,7 @@ fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
     // fails closed like any other operation mismatch rather than being
     // reconciled away.
     let mut diverged = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-    diverged.entropy_bytes(4).unwrap();
+    diverged.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     let error = diverged
         .verdict(VerdictKind::Violation, "phase-one", "a")
         .expect_err("a diverging verdict must be refused");
@@ -436,7 +438,7 @@ fn buggify_record_replay_reproduces_decisions_without_re_supplying_flags() {
     let mut recorded_fires = Vec::new();
     let mut context =
         Context::from_config(RuntimeConfig::record(3, &trace, "fp").with_buggify(config)).unwrap();
-    context.entropy_bytes(4).unwrap();
+    context.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     for _ in 0..20 {
         recorded_fires.push(matches!(
             context.buggify_evaluate("s", "r.rs:1", None).unwrap(),
@@ -450,7 +452,7 @@ fn buggify_record_replay_reproduces_decisions_without_re_supplying_flags() {
     // is authoritative and the pure-function decisions must reproduce exactly.
     let mut replay_fires = Vec::new();
     let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-    replay.entropy_bytes(4).unwrap();
+    replay.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
     for _ in 0..20 {
         replay_fires.push(matches!(
             replay.buggify_evaluate("s", "r.rs:1", None).unwrap(),
