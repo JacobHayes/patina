@@ -297,6 +297,34 @@ mod linux {
         );
     }
 
+    /// A call the shim refuses by name answers the guest `ENOSYS`, through
+    /// libc's wrapper and the raw syscall alike, never another errno.
+    #[test]
+    fn a_named_refusal_answers_enosys() {
+        let output = mem_probe("refusals");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = text(&output.stdout);
+        let answers: std::collections::BTreeMap<&str, &str> = stdout
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        let enosys = format!("errno {}", libc::ENOSYS);
+        for call in [
+            "mlockall-current",
+            "mlockall-current-raw",
+            "msgctl-info-raw",
+            "semctl-info-raw",
+            "shmctl-info-raw",
+        ] {
+            assert_eq!(
+                answers.get(call).copied(),
+                Some(enosys.as_str()),
+                "{call}: {stdout}{}",
+                text(&output.stderr)
+            );
+        }
+    }
+
     /// `RLIMIT_MEMLOCK` is the virtual 8 MiB whatever the host's is, lowers
     /// but never rises again, and judges `mlock`.
     #[test]

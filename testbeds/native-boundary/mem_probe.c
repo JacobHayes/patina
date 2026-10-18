@@ -11,6 +11,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/shm.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 /* Virtual answers of the memory family that no host setting may reach, one
@@ -31,7 +32,11 @@
  *             and msync(MS_INVALIDATE) over a locked page is EBUSY;
  *   descriptors  every mapped file holds one host memfd: past the host's
  *             descriptor limit the shim stops by name, and the guest never
- *             sees the host's EMFILE (the test lowers the host limit). */
+ *             sees the host's EMFILE (the test lowers the host limit);
+ *   refusals  print the errno of each call the shim refuses by name
+ *             (mlockall(MCL_CURRENT) through libc and the syscall, the IPC
+ *             table queries through the syscall), one call=errno N line
+ *             each. */
 
 #define MIB (1024UL * 1024UL)
 
@@ -214,6 +219,20 @@ static int descriptors(void) {
     return 0;
 }
 
+static void refusal(const char *call, long result) {
+    printf("%s=%s %d\n", call, result == -1 ? "errno" : "result", result == -1 ? errno : (int)result);
+}
+
+static int refusals(void) {
+    char table[256] = {0};
+    refusal("mlockall-current", mlockall(MCL_CURRENT));
+    refusal("mlockall-current-raw", syscall(SYS_mlockall, MCL_CURRENT));
+    refusal("msgctl-info-raw", syscall(SYS_msgctl, 0, IPC_INFO, table));
+    refusal("semctl-info-raw", syscall(SYS_semctl, 0, 0, IPC_INFO, table));
+    refusal("shmctl-info-raw", syscall(SYS_shmctl, 0, IPC_INFO, table));
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     if (patina_init_seed(7) != 0) return 3;
@@ -232,6 +251,8 @@ int main(int argc, char **argv) {
         status = populate();
     } else if (strcmp(argv[1], "descriptors") == 0) {
         status = descriptors();
+    } else if (strcmp(argv[1], "refusals") == 0) {
+        status = refusals();
     } else {
         return 4;
     }

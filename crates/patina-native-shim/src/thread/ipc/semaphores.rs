@@ -285,7 +285,7 @@ pub(crate) unsafe fn semctl(id: i32, num: i32, cmd: i32, arg: usize) -> i64 {
         return fail(EINVAL);
     }
     match cmd {
-        IPC_INFO | SEM_INFO | SEM_STAT | SEM_STAT_ANY => i64::from(crate::deny(DENY_TABLES)),
+        IPC_INFO | SEM_INFO | SEM_STAT | SEM_STAT_ANY => crate::deny_raw(DENY_TABLES),
         IPC_STAT => {
             let stat = {
                 let state = lock_state();

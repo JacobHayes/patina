@@ -55,6 +55,14 @@ pub(crate) fn deny(message: &str) -> c_int {
     fail(ENOSYS)
 }
 
+/// [`deny`] for an entry in the raw ABI (a negative value is `-errno`, no
+/// libc `errno` step): the same line, answered `-ENOSYS`.
+#[cfg(target_os = "linux")]
+pub(crate) fn deny_raw(message: &str) -> i64 {
+    deny(message);
+    -i64::from(ENOSYS)
+}
+
 #[unsafe(no_mangle)]
 /// `openat(2)` over the deterministic filesystem: resolve `(dirfd, path)`
 /// through the one resolver, then open what it names. Every success is a fresh

@@ -107,10 +107,7 @@ fn map_anonymous(addr: usize, len: usize, prot: c_int, flags: c_int, offset: i64
     // A stack mapping grows into address space nothing maps, and how much of
     // the arena's region is unmapped differs by mode: no model, by name.
     if flags & MAP_GROWSDOWN != 0 && !malformed(addr, len, flags, offset) {
-        // `deny` writes the named line; its libc-style answer is not this
-        // raw `-errno` ABI's.
-        crate::deny(DENY_GROWSDOWN);
-        return fail(crate::ENOSYS);
+        return crate::deny_raw(DENY_GROWSDOWN);
     }
     let addr = match placeable(addr, len, flags, offset) {
         Ok(addr) => addr,

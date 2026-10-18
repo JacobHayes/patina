@@ -230,7 +230,7 @@ pub(crate) unsafe fn msgctl(id: i32, cmd: i32, buf: *mut MsqidDs) -> i64 {
         return fail(EINVAL);
     }
     match cmd {
-        IPC_INFO | MSG_INFO | MSG_STAT | MSG_STAT_ANY => i64::from(crate::deny(DENY_TABLES)),
+        IPC_INFO | MSG_INFO | MSG_STAT | MSG_STAT_ANY => crate::deny_raw(DENY_TABLES),
         IPC_STAT => {
             let stat = {
                 let state = lock_state();

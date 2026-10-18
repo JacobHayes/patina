@@ -329,7 +329,7 @@ pub extern "C" fn patina_mlockall(flags: c_int) -> i64 {
         return fail(crate::EPERM);
     }
     if flags & MCL_CURRENT != 0 {
-        return i64::from(crate::deny(DENY_MCL_CURRENT));
+        return crate::deny_raw(DENY_MCL_CURRENT);
     }
     let mut mappings = MAPPINGS.lock();
     mappings.future = Some(flags & MCL_ONFAULT != 0);

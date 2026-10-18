@@ -157,7 +157,7 @@ pub(crate) unsafe fn shmctl(id: i32, cmd: i32, buf: *mut ShmidDs) -> i64 {
     }
     match cmd {
         IPC_INFO | SHM_INFO | SHM_STAT | SHM_STAT_ANY | SHM_LOCK | SHM_UNLOCK => {
-            i64::from(crate::deny(DENY_TABLES))
+            crate::deny_raw(DENY_TABLES)
         }
         IPC_STAT => {
             let stat = {
