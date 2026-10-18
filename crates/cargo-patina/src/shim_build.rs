@@ -208,8 +208,23 @@ pub(super) fn build_native_shim(
     shim: &ShimSources,
     instrumentation: GuestInstrumentation,
 ) -> Result<BuiltNativeShim, CliError> {
-    let explicit = env::var_os("CARGO_TARGET_DIR");
+    let explicit = shim_target_base(
+        env::var_os("PATINA_SHIM_TARGET_DIR"),
+        env::var_os("CARGO_TARGET_DIR"),
+    );
     build_native_shim_at(release, rustc, shim, explicit.as_deref(), instrumentation)
+}
+
+/// `PATINA_SHIM_TARGET_DIR` sets the shim's base alone, so guest builds with
+/// target dirs of their own can share one shim build; otherwise the shim
+/// stages under `CARGO_TARGET_DIR`.
+fn shim_target_base(
+    shim_target_dir: Option<OsString>,
+    cargo_target_dir: Option<OsString>,
+) -> Option<OsString> {
+    shim_target_dir
+        .filter(|dir| !dir.is_empty())
+        .or(cargo_target_dir)
 }
 
 fn build_native_shim_at(
@@ -980,6 +995,17 @@ mod tests {
                 .unwrap()
                 .join("relative/patina-native-shim")
         );
+    }
+
+    #[test]
+    fn shim_target_dir_takes_precedence_over_cargo_target_dir() {
+        let shim = || Some(OsString::from("/shim-target"));
+        let cargo = || Some(OsString::from("/cargo-target"));
+        assert_eq!(shim_target_base(shim(), cargo()), shim());
+        assert_eq!(shim_target_base(shim(), None), shim());
+        assert_eq!(shim_target_base(None, cargo()), cargo());
+        assert_eq!(shim_target_base(Some(OsString::new()), cargo()), cargo());
+        assert_eq!(shim_target_base(None, None), None);
     }
 
     #[test]

@@ -23,6 +23,8 @@ Takes no positional arguments. Requires the wasm32-wasip1 target
 
 Environment:
   CARGO_TARGET_DIR   override the Cargo target directory (default <repo>/target).
+  PATINA_CLI         a cargo-patina built from this checkout, used instead of
+                     building the release CLI.
   CC                 C compiler to use (default cc).
 
 Exit status: 0 = cross-target determinism validated; 1 = a determinism/entropy
@@ -113,11 +115,19 @@ entropy_hash={entropy_hash:016x} tail={tail} len={len}"
 }
 RS
 
-# Keep the direct shim artifact in debug, but drive it with the optimized
-# supervisor used by the other core validation scripts.
-cargo build --locked --manifest-path "$root/Cargo.toml" -p patina-dst-native-shim >/dev/null
-cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
-runner="$target_dir/release/cargo-patina"
+# Drive the targets with the optimized supervisor used by the other core
+# validation scripts, or the CLI the caller built from this checkout
+# (PATINA_CLI).
+if [[ -n ${PATINA_CLI:-} ]]; then
+  runner=$PATINA_CLI
+else
+  cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
+  runner="$target_dir/release/cargo-patina"
+fi
+if [[ ! -x $runner ]]; then
+  echo "smoke-cross-target: $runner is not an executable cargo-patina" >&2
+  exit 2
+fi
 
 # --- WASI target: seeded smoke plus record/replay ---
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/smoke.rs" -o "$tmp/smoke.wasm"

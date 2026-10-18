@@ -8,8 +8,9 @@ usage() {
   cat <<'EOF'
 usage: testbeds/patina-macro-adopter/run.sh [--selftest]
 
-Builds the local cargo-patina binary, then drives the standalone adopter crate
-with plain cargo test commands:
+Builds the local cargo-patina binary (or uses PATINA_CLI, a cargo-patina built
+from this checkout), then drives the standalone adopter crate with plain cargo
+test commands:
   * a passing #[patina_dst::test] sweep;
   * a planted seeded failure whose panic must carry the seed plus test/replay
     repro commands;
@@ -31,7 +32,7 @@ MANIFEST="$ROOT/testbeds/patina-macro-adopter/Cargo.toml"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/testbeds/patina-macro-adopter}"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 OUT="$TARGET_DIR/patina-macro-adopter"
-CLI="$TARGET_DIR/debug/cargo-patina"
+CLI="${PATINA_CLI:-$TARGET_DIR/debug/cargo-patina}"
 
 if [[ ! -f "$ROOT/Cargo.toml" || ! -f "$MANIFEST" ]]; then
   echo "patina-macro-adopter: run from the Patina repository root" >&2
@@ -40,7 +41,9 @@ fi
 
 mkdir -p "$OUT"
 
-cargo build --quiet -p cargo-patina --locked
+if [[ -z ${PATINA_CLI:-} ]]; then
+  cargo build --quiet -p cargo-patina --locked
+fi
 if [[ ! -x "$CLI" ]]; then
   echo "patina-macro-adopter: expected executable $CLI" >&2
   exit 1

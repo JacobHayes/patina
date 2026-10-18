@@ -55,6 +55,9 @@ Checks every --flag token mentioned in the project docs AND in every shell scrip
 (scripts/*.sh, testbeds/**/*.sh) against the CLI's generated help registry. Prints
 nothing but a PASS line when clean; on drift, lists each unknown flag with the
 file:line locations that mention it and exits 1.
+
+PATINA_CLI names a cargo-patina built from this checkout to read the registry
+from; without it the script builds one.
 EOF
 }
 
@@ -161,6 +164,9 @@ ALLOWED_FLAGS='
 --workload
 --baseline
 --depth
+--no-run
+--profile
+--test-threads
 '
 # -- cargo / rustc / rustup / linker tool flags --
 # --all/--all-targets/--check/--doc/--exclude/--lib/--no-deps/--workspace/
@@ -169,6 +175,8 @@ ALLOWED_FLAGS='
 # --example: a cargo flag the Cargo package family forwards to `cargo build`.
 # --manifest-path/--quiet/--test/--features/--skip/--target-dir: cargo flags in
 #   the scripts' build/test preludes and timed check runner.
+# --no-run/--profile/--test-threads: cargo nextest flags (the check runner's
+#   workspace suite).
 # --installed: `rustup target list --installed` (smoke/validate-wasi wasip1 probe).
 # --cfg/--emit: rustc flags (`--cfg patina`, `--cfg rustix_use_libc`, `--emit=obj`).
 # --redefine-sym: llvm-objcopy, discussed (and rejected) in VALIDATION.md.
@@ -208,15 +216,30 @@ ALLOWED_FLAGS='
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
 
-# (a) The CLI registry, from the local build. Progressive disclosure means no
-# single call lists every flag: the bare `--help` index carries only the shared
-# global flags, and each verb's own flags live behind `<verb> --help`. So fetch
-# the index, enumerate its verbs, and fold every verb's payload into one flag set.
-help_json() { cargo run -q -p cargo-patina -- patina "$@" --help --format json 2>/dev/null; }
+# (a) The CLI registry, from the local build: PATINA_CLI when the caller names a
+# cargo-patina built from this checkout (scripts/check.sh does), else one built
+# here. Progressive disclosure means no single call lists every flag: the bare
+# `--help` index carries only the shared global flags, and each verb's own flags
+# live behind `<verb> --help`. So fetch the index, enumerate its verbs, and fold
+# every verb's payload into one flag set.
+if [[ -n ${PATINA_CLI:-} ]]; then
+  cli=$PATINA_CLI
+else
+  if ! cargo build -q --locked -p cargo-patina --bin cargo-patina; then
+    echo "check-flag-drift: FAILED to build cargo-patina" >&2
+    exit 1
+  fi
+  cli="$CARGO_TARGET_DIR/debug/cargo-patina"
+fi
+if [[ ! -x $cli ]]; then
+  echo "check-flag-drift: $cli is not an executable cargo-patina" >&2
+  exit 1
+fi
+help_json() { "$cli" patina "$@" --help --format json 2>/dev/null; }
 
 if ! index=$(help_json); then
   echo "check-flag-drift: FAILED to obtain the CLI help index" >&2
-  echo "  (cargo run -q -p cargo-patina -- patina --help --format json)" >&2
+  echo "  ($cli patina --help --format json)" >&2
   exit 1
 fi
 

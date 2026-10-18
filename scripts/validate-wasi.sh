@@ -18,6 +18,8 @@ Takes no positional arguments. Requires the wasm32-wasip1 target
 
 Environment:
   CARGO_TARGET_DIR   override the Cargo target directory (default <repo>/target).
+  PATINA_CLI         a cargo-patina built from this checkout, used instead of
+                     building the release CLI.
 
 Exit status: 0 = validated; 1 = a determinism/replay/import check failed;
 2 = usage error or a missing prerequisite (target/toolchain).
@@ -226,11 +228,18 @@ RS
 
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/probe.rs" -o "$tmp/probe.wasm"
 rustc --edition 2024 --target wasm32-wasip1 "$tmp/network.rs" -o "$tmp/network.wasm"
-# Exercise the optimized supervisor used for distribution. Native validation
-# is invocation-heavy enough that a debug supervisor dominates its runtime; use
-# one profile consistently across the core validation scripts.
-cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
-runner="$target_dir/release/cargo-patina"
+# Exercise the optimized supervisor used for distribution, or the CLI the
+# caller built from this checkout (PATINA_CLI).
+if [[ -n ${PATINA_CLI:-} ]]; then
+  runner=$PATINA_CLI
+else
+  cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
+  runner="$target_dir/release/cargo-patina"
+fi
+if [[ ! -x $runner ]]; then
+  echo "validate-wasi: $runner is not an executable cargo-patina" >&2
+  exit 2
+fi
 guest=(--arg validation --env MODE=test)
 "$runner" audit "$tmp/probe.wasm" >"$tmp/imports"
 "$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-1"

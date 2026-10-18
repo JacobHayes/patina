@@ -1,6 +1,7 @@
-# CI runs the workspace suite with `cargo nextest run --profile ci`, split into
-# partitions across parallel jobs (.github/workflows/ci.yml). Local gates keep
-# using `cargo test` through scripts/check.sh.
+# The workspace suite runs under nextest everywhere: CI with `--profile ci`,
+# split into partitions across parallel jobs (.github/workflows/ci.yml), and
+# the local gates with `--profile local` through scripts/check.sh. Doctests run
+# separately with `cargo test --doc`, which nextest does not run.
 [profile.ci]
 # Run every test: one failure must not hide the rest of the partition's results.
 fail-fast = false
@@ -9,3 +10,12 @@ fail-fast = false
 slow-timeout = { period = "60s" }
 final-status-level = "slow"
 failure-output = "immediate-final"
+
+[profile.local]
+# Keep passing tests' output, printed once at the end: the conformance harness
+# reports a scenario this host cannot judge with a `NOT RUN` line from a
+# passing test, and scripts/check.sh counts those lines in its summary.
+success-output = "final"
+failure-output = "immediate-final"
+slow-timeout = { period = "60s" }
+final-status-level = "slow"

@@ -174,4 +174,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         scope: "tool",
         doc: "Honored as usual; Patina augments RUSTFLAGS via CARGO_ENCODED_RUSTFLAGS for package builds and uses CARGO_TARGET_DIR as the base for its namespaced shim staging.",
     },
+    EnvVar {
+        name: "PATINA_SHIM_TARGET_DIR",
+        scope: "tool",
+        doc: "The base for Patina's namespaced shim staging in place of CARGO_TARGET_DIR, which still holds the guest's own build: guests built in separate target dirs share one shim build.",
+    },
 ];

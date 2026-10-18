@@ -187,8 +187,13 @@ def command(args, *, cwd=ROOT, timeout=120):
     return result
 
 
+# A cold release cargo-patina build alone can take well over a minute on a
+# loaded host; the guest-run default would kill it.
+CARGO_TIMEOUT = 900
+
+
 def cargo_bins(args):
-    output = command(["cargo", *args, "--message-format", "json"]).stdout
+    output = command(["cargo", *args, "--message-format", "json"], timeout=CARGO_TIMEOUT).stdout
     bins = {}
     for line in output.splitlines():
         try:

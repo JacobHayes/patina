@@ -36,13 +36,14 @@ A level is complete only when all its required checks pass. Higher levels do not
 Required locally before landing (`mise run check`):
 
 - `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets -- -D warnings` (plus the same run with
-  `--target x86_64-unknown-linux-gnu`, `--target aarch64-unknown-linux-gnu` and
-  `--target aarch64-apple-darwin`, so Linux-cfg, per-architecture and Darwin-cfg
-  code lint from any host)
+- `cargo clippy --workspace --all-targets -- -D warnings`, plus the same run
+  for the other OS family (`--target aarch64-apple-darwin` from Linux,
+  `--target x86_64-unknown-linux-gnu` from macOS) so its cfg code lints too;
+  CI's gates job lints both Linux architectures natively
 - `cargo doc --workspace --no-deps`
-- `cargo test --workspace` on the pinned toolchain, including the
-  `cargo-patina` `end_to_end` integration-test binary
+- `cargo nextest run --workspace` on the pinned toolchain, including the
+  `cargo-patina` `end_to_end` integration-test binary, and
+  `cargo test --doc --workspace` for the doctests
 - `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
 - packaging (`cargo package --workspace --no-verify`) so manifest/readme/include
   drift fails before release work
@@ -56,7 +57,7 @@ Required locally before landing (`mise run check`):
 - the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds; the
   syscall conformance scenarios run with the native acceptance tests
 
-`mise run check:fast` is the inner loop: fmt, the four clippy passes, every workspace
+`mise run check:fast` is the inner loop: fmt, host and cross-cfg clippy, every workspace
 test except cargo-patina's e2e/native execution targets (conformance among them),
 the cheap selftests, CLI flag drift, toolchain pin drift, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.
@@ -68,11 +69,16 @@ include the pin files in their keys and only main writes caches.
 
 These checks must run without network access after dependencies have been
 fetched. For local development, `mise run setup` installs the Rust
-toolchain/components/targets needed by these gates. After cheap failure checks, the full
-local gate runs the e2e-heavy pinned workspace test rung alone, then overlaps
-runtime/testbed rungs with independent scratch/output paths. Successful rung logs
-are retained with commands and timings; the console shows one overall result
-and the log directory, plus a failed rung's complete log.
+toolchain/components/targets (and the pinned cargo-nextest) needed by these
+gates. After cheap failure checks, the full local gate builds the workspace
+suite once; that build's `cargo-patina` drives the CLI flag-drift and campaign
+selftest gates and every testbed (`PATINA_CLI`), and the suite's native shim
+builds serve every testbed's guests (`PATINA_SHIM_TARGET_DIR`). The workspace
+suite then runs alone under nextest (one test per Cargo build job), filling
+those shim builds; the doctests, WASI/cross-target smoke and the testbed rungs
+follow it concurrently, each testbed with independent scratch/output paths. The multiproc pending-gap battery runs in CI.
+Successful rung logs are retained with commands and timings; the console shows
+one overall result and the log directory, plus a failed rung's complete log.
 `scripts/check.sh --selftest` is the output-contract class detector: planted
 serial and parallel children prove success silence, retained logs/counts, and
 failure status/diagnostic propagation.
@@ -895,8 +901,8 @@ cancellation each fire this detector. Timeout regression pins pair with the
 runner's bounded capture/reap authority and pinned command-session membership,
 including an orphaned child in a different process group.
 The classifier selftest pairs each refusal rule with planted success, wrong
-boundary and unrelated-failure controls. The fast ladder runs that detector;
-the full ladder and x86_64 Linux CI run the native/pending-gap battery. These
+boundary and unrelated-failure controls. Both local ladders run that
+detector; x86_64 Linux CI runs the native/pending-gap battery. These
 are process-support foundations, not acceptance evidence for multi-process
 execution. Arm64 and Darwin refusal baselines remain pending host evidence.
 
@@ -1131,8 +1137,8 @@ the panic-scope AST rule without new exceptions. The shared CLI fcntl/prctl
 bindings have compiler-checked variadic types; conflicting declarations fail
 Clippy's `-D warnings` gate. Cancellation is exercised by the compiled
 fcntl/open guests; syntax no longer pins every cancellation or trap body.
-Cross-clippy for Linux arm64 is compile-time evidence,
-not runtime evidence on that architecture. The full landing battery is separate
+Linux arm64 executes the same families in CI's arm64 test rows, and CI's
+arm64 gates job lints them natively. The full landing battery is separate
 from these focused acceptance checks.
 
 ### Per-call CPU charges

@@ -512,7 +512,10 @@ exit "$status"
                 "--output",
                 pristine.to_str().unwrap(),
             ],
-            &[("CARGO_TARGET_DIR", shim_target.to_str().unwrap())],
+            &[
+                ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
+                ("PATINA_SHIM_TARGET_DIR", ""),
+            ],
         );
         assert!(
             primed.status.success(),
@@ -540,9 +543,12 @@ exit "$status"
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
 
+        // An empty PATINA_SHIM_TARGET_DIR clears an inherited shared shim base,
+        // so CARGO_TARGET_DIR places the shim this test inspects.
         let envs: &[(&str, &str)] = &[
             ("CARGO", stub.to_str().unwrap()),
             ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
+            ("PATINA_SHIM_TARGET_DIR", ""),
         ];
         let mut printed = Vec::new();
         for (generation, binary) in [(1u32, "gen1"), (2u32, "gen2")] {
@@ -645,9 +651,12 @@ exit "$status"
     )
     .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        // An empty PATINA_SHIM_TARGET_DIR clears an inherited shared shim base,
+        // so CARGO_TARGET_DIR places the shim this test inspects.
         let envs: &[(&str, &str)] = &[
             ("CARGO", stub.to_str().unwrap()),
             ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
+            ("PATINA_SHIM_TARGET_DIR", ""),
         ];
 
         let output = package.join("guest");

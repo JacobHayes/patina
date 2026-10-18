@@ -36,6 +36,7 @@ runs:
       shell: bash
       run: |
         mise exec -- ast-grep --version
+        mise exec -- cargo nextest --version
         python3 -B scripts/check-toolchain.py
         python3 -B scripts/check-toolchain.py --selftest
     - uses: actions/cache/save@v5

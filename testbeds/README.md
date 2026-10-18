@@ -47,11 +47,17 @@ Conventions:
   `target/check/parallel/`. A script must not create a real `testbeds/*/target`
   tree; temporary run data belongs in `mktemp` directories or under its assigned
   target directory.
+- `PATINA_CLI` names a cargo-patina already built from this checkout; the
+  core batteries (FIFO/rustix-default/cap-std, workq, pubsub, macro adopter,
+  WASI and cross-target smoke) use it instead of building their own, and
+  without it build the release CLI themselves. The local check ladder passes
+  the workspace suite's build, and sets `PATINA_SHIM_TARGET_DIR` so every
+  rung's guests share one native shim build.
 - The local ladder has one testbed path per tier: `mise run check:fast` runs the
   cheap classifier selftests (including multiproc); the full local gate runs the
-  multiproc native/pending-gap battery and the
   workq/pubsub/macro-adopter `run-patina.sh` batteries, WASI/cross smoke, and
-  FIFO/rustix-default/cap-std gates. Native acceptance tests (the syscall
+  FIFO/rustix-default/cap-std gates. The multiproc native/pending-gap battery
+  runs in x86_64 Linux CI. Native acceptance tests (the syscall
   conformance scenarios of `crates/patina-conformance` among them) run in the
   full workspace-test tier and CI, not `check:fast`. FIFO/rustix-default/cap-std
   run through `scripts/check-native-testbeds.sh`, which requires

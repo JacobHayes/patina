@@ -73,10 +73,10 @@ Prefer JSON when parsing results programmatically.
 With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
 the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
 
-- `mise run check:fast` — the inner-loop tier: fmt, clippy (host +
-  cross-target `x86_64-unknown-linux-gnu` for Linux-cfg code,
-  `aarch64-unknown-linux-gnu` for arm64 Linux, and `aarch64-apple-darwin` for
-  Darwin-cfg code), every workspace
+- `mise run check:fast` — the inner-loop tier: fmt, clippy (host, plus
+  `aarch64-apple-darwin` for Darwin-cfg code from Linux or
+  `x86_64-unknown-linux-gnu` for Linux-cfg code from macOS; CI's gates job lints
+  both Linux architectures natively), every workspace
   test except `cargo-patina`'s `end_to_end` and seven native execution targets
   (syscall conformance among them), the cheap classifier selftests, CLI flag drift,
   toolchain pin drift, WASI validation, and cross-target smoke. It is designed to
@@ -85,8 +85,10 @@ the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
   docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
   test suite including `end_to_end`, native acceptance tests and the syscall
   conformance scenarios, WASI/cross smoke, and the workq/pubsub/macro-adopter
-  and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first; the e2e-heavy workspace test rung runs
-  alone; independent runtime/testbed rungs then overlap. The runner prints
+  and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first,
+  then one build of the workspace suite, whose `cargo-patina` drives the CLI
+  gates and every testbed; the suite then runs alone under nextest, and the
+  testbed and smoke rungs follow it concurrently. The runner prints
   one overall result and a retained log directory (commands and per-rung timings),
   suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
   the audit corpus.

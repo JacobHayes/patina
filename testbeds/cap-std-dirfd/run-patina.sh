@@ -36,12 +36,17 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/cap-std-dirfd}"
 export CARGO_TARGET_DIR="$target_dir"
 out="$target_dir/patina"
 built="$out/cap-std-dirfd"
-PATINA="$target_dir/release/cargo-patina"
+# PATINA_CLI names a cargo-patina already built from this checkout (the local
+# check runner passes one CLI to every rung); otherwise the release CLI builds here.
+PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green (the fuzz-sweep FATAL convention).
-if ! cargo build --release --quiet -p cargo-patina; then
+if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
+fi
+if [[ ! -x $PATINA ]]; then
+  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
 fi
 if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3

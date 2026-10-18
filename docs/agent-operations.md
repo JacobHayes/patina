@@ -41,7 +41,7 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   recurring check sequences as one command or script. A prose checklist is not a
   gate.
 - `mise run check:fast` is an inner-loop tier, not landing evidence. It includes
-  fmt, the four clippy passes, all workspace tests except the `cargo-patina`
+  fmt, host and cross-cfg clippy, all workspace tests except the `cargo-patina`
   `end_to_end` binary and the seven native execution targets, cheap selftests, flag and toolchain
   drift, WASI, and cross-target smoke. `mise run check` is the default local
   landing gate; CI/final gates add audit corpus breadth. For runtime/shim/trace/target changes, the native acceptance

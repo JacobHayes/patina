@@ -16,6 +16,8 @@ lockfile = true
 # The selector follows releases only when mise.lock is deliberately refreshed.
 rust = "latest"
 ast-grep = "0.45.3"
+# The workspace test runner, locally (scripts/check.sh) and in CI.
+"github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 
 [tasks.setup]
 description = "Install the pinned root-workspace Rust toolchain, components and targets"
@@ -32,7 +34,7 @@ toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]
 # Register an existing rustup install with mise too. This repairs older mise
 # Rust symlink registries that otherwise resolve `latest` from installed tools.
 subprocess.run(["mise", "install", "rust@" + toolchain["channel"]], check=True)
-subprocess.run(["mise", "install", "ast-grep"], check=True)
+subprocess.run(["mise", "install", "ast-grep", "github:nextest-rs/nextest"], check=True)
 args = ["rustup", "toolchain", "install", toolchain["channel"], "--profile", toolchain["profile"]]
 for component in toolchain["components"]:
     args.extend(["--component", component])
@@ -44,15 +46,17 @@ cc --version >/dev/null
 echo "Patina local toolchain is ready."
 """
 
-# The check runner keeps cheap, high-signal failures serial, runs only measured
-# overlap groups concurrently, retains per-rung timings in logs, hides successful
-# command chatter, and replays complete failure logs. That last failure-log
-# contract is the mise feature gap that keeps the small shell runner in place.
+# The check runner keeps cheap, high-signal failures serial, builds the
+# workspace suite once and drives the CLI gates with its cargo-patina, runs only
+# measured overlap groups concurrently, retains per-rung timings in logs, hides
+# successful command chatter, and replays complete failure logs. That last
+# failure-log contract is the mise feature gap that keeps the small shell runner
+# in place.
 [tasks.check]
 description = "Full local pre-landing validation (audit-corpus runs in CI/final gates)"
 run = "scripts/check.sh full"
 
-# Inner-loop tier: fmt, the four clippy passes, all workspace tests except the
+# Inner-loop tier: fmt, host and cross-cfg clippy, all workspace tests except the
 # cargo-patina end_to_end and native execution targets (conformance included),
 # cheap selftests, flag and toolchain drift, WASI validation, and
 # cross-target smoke.
