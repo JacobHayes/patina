@@ -21,9 +21,10 @@ export CARGO_TARGET_DIR="$check_target_base/serial"
 patina_cli="$CARGO_TARGET_DIR/debug/cargo-patina"
 # Testbed rungs only: the workspace suite's tests place shims themselves.
 testbed_env=(env PATINA_CLI="$patina_cli" PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR")
-# One test process per Cargo build job: a test can start guest builds of its
-# own, so this keeps the suite inside the build cap the host already sets.
-test_threads=${CARGO_BUILD_JOBS:-$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 ))}
+# One test process per Cargo build job by default: a test can start guest
+# builds of its own, so this keeps the suite inside the build cap the host
+# already sets. NEXTEST_TEST_THREADS (nextest's own variable) overrides it.
+test_threads=${NEXTEST_TEST_THREADS:-${CARGO_BUILD_JOBS:-$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 ))}}
 # Host clippy plus one cross-cfg pass for the other OS family. CI's gates job
 # lints both Linux architectures natively.
 if [[ $(uname -s) == Darwin ]]; then
@@ -53,8 +54,8 @@ could not judge (NOT RUN, named on the next line). The full profile requires a
 host oracle (PATINA_REQUIRE_HOST_ORACLE=1, as CI sets; set it to 0 to relax):
 a NOT RUN other than a missing hardware feature fails it. On failure, the
 complete rung log and exact command are printed. The workspace suite runs
-under nextest (profile `local`), one test per CARGO_BUILD_JOBS job, else per
-two CPUs. Serial work, the workspace suite and the doctests share one Cargo
+under nextest (profile `local`) with NEXTEST_TEST_THREADS tests at a time,
+else one per CARGO_BUILD_JOBS job, else one per two CPUs. Serial work, the workspace suite and the doctests share one Cargo
 target dir; every other parallel rung gets its own under
 target/check/parallel/, plus the suite's cargo-patina (PATINA_CLI) and shim
 builds (PATINA_SHIM_TARGET_DIR).
