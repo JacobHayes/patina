@@ -43,6 +43,53 @@ fn prerun_refuses_aliases_of_interposed_names() {
     assert!(!text(&out.stdout).contains("INTERPOSER_ALIAS_RAN"));
 }
 
+/// A `.symver`-pinned `dlsym@GLIBC_…` reference reaches around the shim's
+/// `-Wl,--wrap=dlsym`, which rewrites only unversioned references. The probe's
+/// reference is weak, as the shim's own `dlsym` import is, so only its version
+/// tells it apart. The version-aware audit refuses the binary by its versioned
+/// name before it can resolve a host symbol through libc's own resolver.
+#[cfg(target_os = "linux")]
+#[test]
+fn prerun_refuses_versioned_dlsym_bypass() {
+    let g = Guest::assert_build("versioned_dlsym_probe.rs");
+    let out = g.assert_run_refused(1, &["dlsym@GLIBC_", "versioned-bypass"]);
+    assert!(!text(&out.stdout).contains("VERSIONED_DLSYM_ESCAPED"));
+    assert_refused(
+        g.command("audit", &[]),
+        &["dlsym@GLIBC_", "versioned-bypass"],
+    );
+}
+
+/// A versioned reference to a name the shim interposes is no bypass: whether
+/// the linker binds `mmap@GLIBC_…` to the executable's own `mmap` (GNU ld) or
+/// leaves an import (lld), the loader resolves it to the shim's exported
+/// definition before libc's. The guest audits clean and its call is bound to the
+/// shim on every linker; refusing it would refuse a contained guest.
+#[cfg(target_os = "linux")]
+#[test]
+fn versioned_interposer_reference_binds_to_the_shim() {
+    let check = |g: Guest| {
+        g.assert_audit_clean();
+        let out = g.assert_run_success(1, &[]);
+        assert_exact_line(&out.stdout, "VERSIONED_MMAP_BOUND=shim");
+    };
+    check(Guest::assert_build("versioned_mmap_probe.rs"));
+    // x86-64 links with rustc's lld by default and can also link with GNU ld,
+    // aarch64's default, so this host covers both shapes.
+    if cfg!(target_arch = "x86_64") {
+        check(Guest::assert_build_with(
+            "versioned_mmap_probe.rs",
+            &[
+                "--",
+                "-C",
+                "linker-features=-lld",
+                "-C",
+                "link-self-contained=-linker",
+            ],
+        ));
+    }
+}
+
 #[test]
 fn prerun_refuses_shm_open_and_hatch_warns() {
     let g = Guest::assert_build("gate_refusal_probe.rs");

@@ -214,9 +214,9 @@ pub enum TargetError {
     UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
     RelocatableNativeElf,
-    /// A linked ELF whose section headers (or dynamic symbol table) are gone:
-    /// the import audit and the instruction scan read them, so nothing could
-    /// be certified.
+    /// A linked ELF whose section headers, dynamic symbol table, or the
+    /// symbol-version section its dynamic table names are gone: the import
+    /// audit and the instruction scan read them, so nothing could be certified.
     UnauditableNativeElf,
     UnsupportedNativeArchitecture(Architecture),
     UnsupportedNativeImports(Vec<NativeEscape>),
@@ -248,7 +248,7 @@ impl fmt::Display for TargetError {
                 "refusing relocatable ELF (ET_REL): an object file is not a runnable guest; link an executable before audit/run",
             ),
             Self::UnauditableNativeElf => f.write_str(
-                "refusing an ELF without section headers or a dynamic symbol table: the import audit and the instruction scan read them, so the binary cannot be certified; link it without stripping its section headers",
+                "refusing an ELF without section headers, a dynamic symbol table, or the symbol-version section its dynamic table names: the import audit and the instruction scan read them, so the binary cannot be certified; link it without stripping its section headers",
             ),
             Self::UnsupportedNativeArchitecture(architecture) => {
                 write!(

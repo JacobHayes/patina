@@ -104,6 +104,54 @@ pub fn macho_import_allowlist() -> impl Iterator<Item = &'static AllowedImports>
     native_import_allowlist(NativeFormat::MachO)
 }
 
+/// Whether `name` (an ELF undefined-symbol name, spelled as it appears in the
+/// dynamic symbol table) is one the shim *interposes* with its own strong
+/// definition — the `Interposed` groups of the ELF allowlist. A shim-linked
+/// guest binds these names to the shim's definition in the executable, which
+/// the link also exports; a versioned reference to one that the executable does
+/// NOT export a definition of reaches glibc's, and is the bypass
+/// [`crate::native_audit`] refuses. Spelled exactly like
+/// `native_allowlisted_import`'s `Interposed` arm so the two agree on what
+/// "interposed" means.
+pub(crate) fn elf_interposed_import(name: &str) -> bool {
+    native_import_allowlist(NativeFormat::Elf)
+        .filter(|group| matches!(group.entry, KernelEntry::Interposed))
+        .any(|group| group.lists(linked_c_name(name, NativeFormat::Elf)))
+}
+
+/// Whether `name` is the host-alias control-plane resolver the shim reaches
+/// through `-Wl,--wrap=dlsym` (`dlsym`), or the explicit-version resolver
+/// (`dlvsym`) the shim neither wraps nor defines. `--wrap` rewrites only
+/// *unversioned* `dlsym` references to the shim's `__wrap_dlsym`; a versioned
+/// reference slips past it, so every versioned import of either name is a
+/// bypass except the shim's own vehicle ([`elf_shim_dlsym_vehicle`]).
+pub(crate) fn elf_wrapped_resolver(name: &str) -> bool {
+    matches!(normalize_native_symbol(name), "dlsym" | "dlvsym")
+}
+
+/// The symbol version the shim's own host-alias `dlsym` import carries. The
+/// shim's `__real_dlsym` reference is unversioned, so the link binds it to
+/// glibc's default `dlsym`, and glibc 2.34 (which moved `dlsym` from libdl into
+/// libc) made `dlsym@@GLIBC_2.34` that default on every architecture; the
+/// supported glibc (2.39 and later, x86-64 and aarch64) all record it so. The
+/// pre-2.34 base versions (`GLIBC_2.2.5` on x86-64, `GLIBC_2.17` on aarch64)
+/// survive only as compatibility symbols a reference reaches by pinning them.
+/// A shim-linked guest on a glibc older than 2.34 has its vehicle at the base
+/// version and is refused by name rather than admitted on a guess.
+pub(crate) const SHIM_DLSYM_VERSION: &str = "GLIBC_2.34";
+
+/// Whether a versioned undefined import is the shim's own host-alias vehicle:
+/// a *weak* `dlsym` (the shim declares `.weak __real_dlsym`) at exactly
+/// [`SHIM_DLSYM_VERSION`]. Any other version, or a strong binding, is a
+/// reference that reached around the wrap. A guest's weak reference pinned to
+/// that very version merges with the shim's at link time into one dynamic
+/// symbol, which nothing in the image can tell apart afterwards; reaching it
+/// takes deliberately pinning the default version weakly, outside the
+/// accidental-escape threat model.
+pub(crate) fn elf_shim_dlsym_vehicle(name: &str, version: &str, weak: bool) -> bool {
+    weak && name == "dlsym" && version == SHIM_DLSYM_VERSION
+}
+
 /// How the platform libc's implementation of an allowlisted import reaches
 /// the kernel. An import is a call into libc's own text, which syscall user
 /// dispatch leaves to the host kernel, so an allowlisted import that enters
