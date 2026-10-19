@@ -236,6 +236,12 @@ fn a_malformed_request_about_the_arena_is_refused_as_malformed_first() {
 /// lock limit refuses leaves no place behind for the move it never made.
 #[test]
 fn a_refused_move_out_of_the_arenas_way_leaves_no_mapping_behind() {
+    // The count below is of the whole process's mappings, so it means something
+    // only when no other test shares the process: nextest's process-per-test
+    // mode, which the check and CI use. Under `cargo test` it is not judged.
+    if std::env::var_os("NEXTEST_EXECUTION_MODE").is_none_or(|mode| mode != "process-per-test") {
+        return;
+    }
     let (base, _) = crate::arena::region();
     let below = base - PAGE;
     let claim = (MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE) as usize;
