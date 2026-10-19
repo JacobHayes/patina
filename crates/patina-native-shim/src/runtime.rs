@@ -679,11 +679,12 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
     }
     report_crash(&patina_dst_trace::CrashReport::HandedOver);
     let _ = flush_captured_stdio();
-    // SAFETY: `_exit` is the host process termination primitive. It skips guest
-    // atexit handlers and Patina's normal finalization, which is exactly the
-    // modeled power-loss boundary: no code after the triggering call runs in this
-    // incarnation.
-    unsafe { libc_exit_immediately(NATIVE_FS_CRASH_RESTART_EXIT) }
+    // SAFETY: `host_immediate_exit` is libc's `_exit`, resolved by the shim
+    // (never named as an import, so the guest's own `_exit` stays its own). It
+    // skips guest atexit handlers and Patina's normal finalization, which is
+    // exactly the modeled power-loss boundary: no code after the triggering call
+    // runs in this incarnation.
+    unsafe { (hostapi::get().host_immediate_exit)(NATIVE_FS_CRASH_RESTART_EXIT) }
 }
 
 /// Run a scheduler closure against the installed [`Context`], preserving the
@@ -894,14 +895,6 @@ fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
             })
         })
         .transpose()
-}
-
-// Process-termination primitive for modeled power loss. This must be `_exit`,
-// not libc `exit`, because crash termination skips guest atexit handlers and
-// Patina's normal finalization.
-unsafe extern "C" {
-    #[link_name = "_exit"]
-    fn libc_exit_immediately(status: c_int) -> !;
 }
 
 const NATIVE_FS_CRASH_RESTART_EXIT: c_int = 112;

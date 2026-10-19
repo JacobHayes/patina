@@ -119,8 +119,8 @@ unsafe extern "C" {
     fn getdents64(fd: libc::c_int, buffer: *mut libc::c_void, length: libc::size_t) -> isize;
 }
 
-// glibc's wrappers of the process-descriptor rows (2.36) and the x86_64
-// thread-pointer rows, which the libc crate does not declare.
+// glibc's wrappers of the process-descriptor rows (2.36), `semtimedop` and
+// the x86_64 thread-pointer rows, which the libc crate does not declare.
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
     fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int;
@@ -139,6 +139,12 @@ unsafe extern "C" {
         flags: libc::c_uint,
     ) -> libc::ssize_t;
     fn process_mrelease(pidfd: libc::c_int, flags: libc::c_uint) -> libc::c_int;
+    fn semtimedop(
+        semid: libc::c_int,
+        sops: *mut libc::sembuf,
+        nsops: libc::size_t,
+        timeout: *const libc::timespec,
+    ) -> libc::c_int;
     #[cfg(target_arch = "x86_64")]
     fn arch_prctl(code: libc::c_int, addr: libc::c_ulong) -> libc::c_int;
     #[cfg(target_arch = "x86_64")]
@@ -694,8 +700,40 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[4] as *mut c_void,
             ) as i64,
             Syscall::N_memfd_create => memfd_create(a[0] as *const c_char, a[1] as c_uint) as i64,
+            // glibc's System V IPC wrappers, which the shim defines. `semctl`'s
+            // fourth argument is a `union semun`, one register-sized word.
+            Syscall::N_shmget => shmget(a[0] as key_t, a[1] as size_t, a[2] as c_int) as i64,
+            Syscall::N_shmat => shmat(a[0] as c_int, a[1] as *const c_void, a[2] as c_int) as i64,
+            Syscall::N_shmdt => shmdt(a[0] as *const c_void) as i64,
+            Syscall::N_shmctl => shmctl(a[0] as c_int, a[1] as c_int, a[2] as *mut shmid_ds) as i64,
+            Syscall::N_semget => semget(a[0] as key_t, a[1] as c_int, a[2] as c_int) as i64,
+            Syscall::N_semop => semop(a[0] as c_int, a[1] as *mut sembuf, a[2] as size_t) as i64,
+            Syscall::N_semtimedop => semtimedop(
+                a[0] as c_int,
+                a[1] as *mut sembuf,
+                a[2] as size_t,
+                a[3] as *const timespec,
+            ) as i64,
+            Syscall::N_semctl => {
+                semctl(a[0] as c_int, a[1] as c_int, a[2] as c_int, a[3] as c_ulong) as i64
+            }
+            Syscall::N_msgget => msgget(a[0] as key_t, a[1] as c_int) as i64,
+            Syscall::N_msgsnd => msgsnd(
+                a[0] as c_int,
+                a[1] as *const c_void,
+                a[2] as size_t,
+                a[3] as c_int,
+            ) as i64,
+            Syscall::N_msgrcv => msgrcv(
+                a[0] as c_int,
+                a[1] as *mut c_void,
+                a[2] as size_t,
+                a[3] as c_long,
+                a[4] as c_int,
+            ) as i64,
+            Syscall::N_msgctl => msgctl(a[0] as c_int, a[1] as c_int, a[2] as *mut msqid_ds) as i64,
             // Memory and IPC rows whose glibc wrapper the shim does not define
-            // (`brk`, `mincore`, SysV shm/sem/msg, the kernel rows under
+            // (`brk`, `mincore`, the kernel rows under
             // glibc's `mq_*`, `pkey_*`, `remap_file_pages`) or that glibc
             // does not wrap at all
             // (`membarrier`, `memfd_secret`, `map_shadow_stack`, the NUMA
@@ -706,18 +744,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             // `Vehicle::KERNEL`, not `syscall(2)` twice.
             Syscall::N_brk
             | Syscall::N_mincore
-            | Syscall::N_shmget
-            | Syscall::N_shmat
-            | Syscall::N_shmdt
-            | Syscall::N_shmctl
-            | Syscall::N_semget
-            | Syscall::N_semop
-            | Syscall::N_semtimedop
-            | Syscall::N_semctl
-            | Syscall::N_msgget
-            | Syscall::N_msgsnd
-            | Syscall::N_msgrcv
-            | Syscall::N_msgctl
             | Syscall::N_mq_open
             | Syscall::N_mq_unlink
             | Syscall::N_mq_timedsend

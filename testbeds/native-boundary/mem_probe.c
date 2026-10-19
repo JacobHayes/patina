@@ -8,8 +8,10 @@
 #include <string.h>
 #include <sys/ipc.h>
 #include <sys/mman.h>
+#include <sys/msg.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -34,9 +36,8 @@
  *             descriptor limit the shim stops by name, and the guest never
  *             sees the host's EMFILE (the test lowers the host limit);
  *   refusals  print the errno of each call the shim refuses by name
- *             (mlockall(MCL_CURRENT) through libc and the syscall, the IPC
- *             table queries through the syscall), one call=errno N line
- *             each. */
+ *             (mlockall(MCL_CURRENT) and the IPC table queries, each
+ *             through libc and the syscall), one call=errno N line each. */
 
 #define MIB (1024UL * 1024UL)
 
@@ -227,6 +228,9 @@ static int refusals(void) {
     char table[256] = {0};
     refusal("mlockall-current", mlockall(MCL_CURRENT));
     refusal("mlockall-current-raw", syscall(SYS_mlockall, MCL_CURRENT));
+    refusal("msgctl-info", msgctl(0, IPC_INFO, (struct msqid_ds *)table));
+    refusal("semctl-info", semctl(0, 0, IPC_INFO, table));
+    refusal("shmctl-info", shmctl(0, IPC_INFO, (struct shmid_ds *)table));
     refusal("msgctl-info-raw", syscall(SYS_msgctl, 0, IPC_INFO, table));
     refusal("semctl-info-raw", syscall(SYS_semctl, 0, 0, IPC_INFO, table));
     refusal("shmctl-info-raw", syscall(SYS_shmctl, 0, IPC_INFO, table));

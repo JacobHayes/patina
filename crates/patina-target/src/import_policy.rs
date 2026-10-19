@@ -50,7 +50,7 @@ pub(super) fn native_import_decision(
     if timer_symbol(normalized) {
         return NativeImportDecision::Denied("signals-timers");
     }
-    if native_allowlisted_import(normalized, format) {
+    if native_allowlisted_import(symbol, format) {
         return NativeImportDecision::Allowed;
     }
     NativeImportDecision::Denied(
@@ -58,13 +58,124 @@ pub(super) fn native_import_decision(
     )
 }
 
+/// Whether a group admits the import `symbol`. A group whose members the
+/// shim interposes admits only the exact names it lists: the shim's
+/// definition of `mmap` binds `mmap` alone, so glibc's `__mmap`, which
+/// normalizes onto an interposed name, would run libc's own text and is
+/// refused. Every other group judges the normalized name, whose aliases
+/// share its effect, or the exact C name for a name it spells with its
+/// leading underscore (`_exit`, a different function from `exit`).
 fn native_allowlisted_import(symbol: &str, format: NativeFormat) -> bool {
-    common_native_allowlisted_import(symbol)
-        || match format {
-            NativeFormat::MachO => macho_native_allowlisted_import(symbol),
-            NativeFormat::Elf => elf_native_allowlisted_import(symbol),
+    let normalized = normalize_native_symbol(symbol);
+    let linked = linked_c_name(symbol, format);
+    native_import_allowlist(format).any(|group| match group.entry {
+        KernelEntry::Interposed => group.lists(linked),
+        KernelEntry::Never | KernelEntry::HostPassthrough(_) => {
+            group.lists(normalized) || group.lists(linked)
         }
+    })
 }
+
+/// The C name an import binds: Mach-O prefixes C names with one underscore,
+/// ELF does not.
+fn linked_c_name(symbol: &str, format: NativeFormat) -> &str {
+    match format {
+        NativeFormat::MachO => symbol.strip_prefix('_').unwrap_or(symbol),
+        NativeFormat::Elf => symbol,
+    }
+}
+
+/// The allowlist for `format`: the common groups, then the format's own.
+fn native_import_allowlist(format: NativeFormat) -> impl Iterator<Item = &'static AllowedImports> {
+    let own = match format {
+        NativeFormat::MachO => MACHO_ALLOWLIST,
+        NativeFormat::Elf => ELF_ALLOWLIST,
+    };
+    COMMON_ALLOWLIST.iter().chain(own)
+}
+
+/// Every group the audit lets an ELF guest import with no `--allow`.
+pub fn elf_import_allowlist() -> impl Iterator<Item = &'static AllowedImports> {
+    native_import_allowlist(NativeFormat::Elf)
+}
+
+/// Every group the audit lets a Mach-O guest import with no `--allow`.
+pub fn macho_import_allowlist() -> impl Iterator<Item = &'static AllowedImports> {
+    native_import_allowlist(NativeFormat::MachO)
+}
+
+/// How the platform libc's implementation of an allowlisted import reaches
+/// the kernel. An import is a call into libc's own text, which syscall user
+/// dispatch leaves to the host kernel, so an allowlisted import that enters
+/// the kernel there is a host effect unless the shim defines the symbol
+/// itself. Every group says which it is; `cargo-patina/tests/syscall_registry.rs`
+/// checks `Interposed` against the symbol registry, both ways.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KernelEntry {
+    /// The implementation never enters the kernel itself: pure compute,
+    /// caller-owned memory, process-local data. Memory it allocates comes
+    /// from the allocator, whose entry is the allocator group's.
+    Never,
+    /// The shim defines the symbol on this format's platform: a guest linked
+    /// with the POSIX layer binds to the interposer and never reaches libc's
+    /// text. The names are exact C names, never normalized: an alias libc
+    /// exports beside an interposed name is a different symbol the shim
+    /// does not define, and the audit refuses it.
+    Interposed,
+    /// libc's own text enters the host kernel, accepted for this reason.
+    HostPassthrough(&'static str),
+}
+
+/// One reasoned group of allowlisted imports: names (or name prefixes) and
+/// how their implementation reaches the kernel. An `Interposed` group's names
+/// are exact C names; the others are normalized, and admit every alias,
+/// except a name spelled with a leading underscore, which is that exact C
+/// name (normalization strips the underscore, so no alias can spell it).
+#[derive(Clone, Copy, Debug)]
+pub struct AllowedImports {
+    pub names: &'static [&'static str],
+    pub prefix: bool,
+    pub entry: KernelEntry,
+}
+
+impl AllowedImports {
+    const fn exact(names: &'static [&'static str], entry: KernelEntry) -> Self {
+        Self {
+            names,
+            prefix: false,
+            entry,
+        }
+    }
+
+    const fn prefixed(names: &'static [&'static str], entry: KernelEntry) -> Self {
+        Self {
+            names,
+            prefix: true,
+            entry,
+        }
+    }
+
+    /// Whether this group lists `symbol`, spelled as the group's names are:
+    /// exact for an `Interposed` group, normalized (or exact, for an
+    /// underscore-spelled name) for the others.
+    pub fn lists(&self, symbol: &str) -> bool {
+        if self.prefix {
+            self.names.iter().any(|prefix| symbol.starts_with(prefix))
+        } else {
+            self.names.contains(&symbol)
+        }
+    }
+}
+
+use KernelEntry::{HostPassthrough, Interposed, Never};
+
+/// The process heap: glibc's and libSystem's allocators grow and trim it with
+/// `brk`/`mmap`/`munmap`/`madvise`/`mremap` from their own text. That is this
+/// process's anonymous memory, host address space the runtime does not
+/// virtualize (ARCHITECTURE.md, memory).
+const HEAP: KernelEntry = HostPassthrough(
+    "the allocator grows and trims the process's own anonymous memory, which is host address space",
+);
 
 /// Reduce a native import to its canonical name so alias forms such as Mach-O
 /// underscore prefixes, glibc `__`-prefixed aliases, glibc C-standard generation
@@ -107,7 +218,7 @@ fn strip_glibc_alias_generation(symbol: &str) -> &str {
     }
 }
 
-fn common_native_allowlisted_import(symbol: &str) -> bool {
+const COMMON_ALLOWLIST: &[AllowedImports] = {
     // Allocator entry points only mutate the process-local heap. Patina does
     // not virtualize addresses, so these host-deferred calls have no boundary
     // effect except deterministic success/failure for the same allocation load.
@@ -116,11 +227,11 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "calloc",
         "free",
         "malloc",
-        "malloc_size",
-        "malloc_usable_size",
         "posix_memalign",
         "realloc",
     ];
+    // Size queries read the allocator's own chunk headers.
+    const ALLOCATOR_QUERIES: &[&str] = &["malloc_size", "malloc_usable_size"];
     // Compiler and libc memory/string intrinsics read or write only caller-owned
     // memory. The *_chk forms add bounds checks before doing the same work.
     const MEMORY_AND_STRING: &[&str] = &[
@@ -198,9 +309,16 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     ];
     // Abort/exit paths terminate the process rather than observing host state;
     // they are used by Rust panic/abort and explicit process-exit glue.
-    const TERMINATION: &[&str] = &["abort", "exit"];
-    // Stack-protector checks compare process-local canaries and fail closed.
-    const STACK_PROTECTOR: &[&str] = &["stack_chk_fail", "stack_chk_guard"];
+    // `exit` is the shim's on both platforms; `abort` is listed per format.
+    const TERMINATION: &[&str] = &["exit"];
+    // `_exit` is not an alias of `exit`: it skips atexit handlers and stdio
+    // flushing, and the shim does not define it (process.rs). A guest calls it
+    // to end at once, skipping its own teardown.
+    const IMMEDIATE_EXIT: &[&str] = &["_exit"];
+    // Stack-protector checks compare process-local canaries and fail closed:
+    // the guard is data, and the failure path ends the process.
+    const STACK_GUARD: &[&str] = &["stack_chk_guard"];
+    const STACK_PROTECTOR: &[&str] = &["stack_chk_fail"];
     // These pthread helpers expose only the current managed host-thread handle
     // or configure thread/lock attributes in caller-owned memory. Creation and
     // synchronization are provided by Patina interposers, not by these helpers.
@@ -229,27 +347,20 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
         "pthread_rwlockattr_init",
         "pthread_rwlockattr_setkind_np",
         "pthread_self",
-        "pthread_setname_np",
         "pthread_setspecific",
     ];
     // Unwind/personality routines walk in-process frames or transfer control to
     // language runtimes; they do not perform host I/O, time, entropy, or waits.
     const UNWIND_AND_PERSONALITY: &[&str] = &["gxx_personality_v0", "rust_eh_personality"];
-    // Signal registration is used by Rust's panic/stack-overflow diagnostics;
-    // Patina does not deliver ambient host signals into guest execution, so
-    // installation is deterministic; admitted delivery comes from faults or
-    // the platform's modeled self-signal entry, never an allowed host raise.
-    const SIGNAL_DIAGNOSTICS: &[&str] = &["sigaction", "sigaltstack", "signal"];
+    // Signal registration (`sigaction`, `sigaltstack`, `signal`) is listed per
+    // format: the shim defines it on Linux only.
     // The environment pointer itself is startup glue referenced by libc/std
     // runtime setup. The native shim scrubs the ambient host storage at startup
     // and repoints this at an array built from the deterministic guest env map,
     // so direct environ readers see exactly what the getenv interposer answers.
     const ENVIRONMENT_STORAGE: &[&str] = &["environ"];
-    // Process-local virtual-memory management backs the allocator, thread
-    // stacks, and guard pages; mappings are not guest-observable effects.
-    // `madvise` only hints the kernel about process-local pages (the allocator
-    // and memory-mapped readers use it), with no boundary effect.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["madvise", "mprotect", "munmap"];
+    // Process-local virtual-memory management (`madvise`, `mprotect`,
+    // `munmap`) is listed per format: the shim defines it on Linux only.
     // Pure signal-set construction: these read or write only a caller-owned
     // `sigset_t`, performing bit manipulation with no host effect. They pair
     // with the already-allowlisted `sigaction`/`signal` registration — a guest
@@ -408,24 +519,37 @@ fn common_native_allowlisted_import(symbol: &str) -> bool {
     // given call sequence (aws-lc/DataFusion numeric code sets a rounding mode
     // around a computation). No host effect crosses the runtime boundary.
     const FLOAT_ENVIRONMENT: &[&str] = &["fegetround", "fesetround"];
-    symbol.starts_with("Unwind_")
-        || ALLOCATOR.contains(&symbol)
-        || MEMORY_AND_STRING.contains(&symbol)
-        || COMPILER_ARITHMETIC.contains(&symbol)
-        || TERMINATION.contains(&symbol)
-        || STACK_PROTECTOR.contains(&symbol)
-        || PTHREAD_LOCAL_HELPERS.contains(&symbol)
-        || UNWIND_AND_PERSONALITY.contains(&symbol)
-        || SIGNAL_DIAGNOSTICS.contains(&symbol)
-        || ENVIRONMENT_STORAGE.contains(&symbol)
-        || PROCESS_LOCAL_MEMORY.contains(&symbol)
-        || SIGNAL_SET_MANIPULATION.contains(&symbol)
-        || MATH_LIBM.contains(&symbol)
-        || FORMAT_PARSE_SEARCH.contains(&symbol)
-        || FLOAT_ENVIRONMENT.contains(&symbol)
-}
+    &[
+        AllowedImports::prefixed(&["Unwind_"], Never),
+        AllowedImports::exact(ALLOCATOR, HEAP),
+        AllowedImports::exact(ALLOCATOR_QUERIES, Never),
+        AllowedImports::exact(MEMORY_AND_STRING, Never),
+        AllowedImports::exact(COMPILER_ARITHMETIC, Never),
+        AllowedImports::exact(TERMINATION, Interposed),
+        AllowedImports::exact(
+            IMMEDIATE_EXIT,
+            HostPassthrough(
+                "ends the process at once from libc's text: no guest atexit handler or Patina finalization runs",
+            ),
+        ),
+        AllowedImports::exact(STACK_GUARD, Never),
+        AllowedImports::exact(
+            STACK_PROTECTOR,
+            HostPassthrough(
+                "a smashed stack ends the process: libc writes its diagnostic to the host's stderr and aborts",
+            ),
+        ),
+        AllowedImports::exact(PTHREAD_LOCAL_HELPERS, Never),
+        AllowedImports::exact(UNWIND_AND_PERSONALITY, Never),
+        AllowedImports::exact(ENVIRONMENT_STORAGE, Never),
+        AllowedImports::exact(SIGNAL_SET_MANIPULATION, Never),
+        AllowedImports::exact(MATH_LIBM, Never),
+        AllowedImports::exact(FORMAT_PARSE_SEARCH, Never),
+        AllowedImports::exact(FLOAT_ENVIRONMENT, Never),
+    ]
+};
 
-fn macho_native_allowlisted_import(symbol: &str) -> bool {
+const MACHO_ALLOWLIST: &[AllowedImports] = {
     // Darwin errno is thread-local process state. The shim sets errno after
     // deterministic boundary failures; the host accessor only returns its slot.
     const ERRNO: &[&str] = &["error"];
@@ -448,9 +572,20 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
     // static init reaches it). Registration only records a callback in
     // process-local storage; nothing crosses the boundary Patina models.
     const FINALIZERS: &[&str] = &["atexit", "cxa_atexit"];
-    // Darwin's 64-bit mmap import backs the allocator and thread stacks;
-    // mprotect/munmap live on the common list.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap"];
+    // Darwin's 64-bit mmap import backs the allocator and thread stacks, with
+    // `mprotect`/`munmap` for guard pages and `madvise` hints on process-local
+    // pages: libSystem's, as the shim does not define them on Darwin.
+    const PROCESS_LOCAL_MEMORY: &[&str] = &["madvise", "mmap", "mprotect", "munmap"];
+    // Signal registration is used by Rust's panic/stack-overflow diagnostics;
+    // Patina does not deliver ambient host signals into guest execution, so
+    // installation is deterministic; admitted delivery comes from faults or
+    // the platform's modeled self-signal entry, never an allowed host raise.
+    const SIGNAL_DIAGNOSTICS: &[&str] = &["sigaction", "sigaltstack", "signal"];
+    // Abort paths terminate the process rather than observing host state.
+    const TERMINATION: &[&str] = &["abort"];
+    // Rust names its spawned threads; the name is a host debugging label
+    // nothing in a run reads back.
+    const THREAD_NAME: &[&str] = &["pthread_setname_np"];
     // Darwin libc byte-pattern fills: write a repeating 4/8/16-byte pattern into
     // a caller-owned buffer. Pure caller-memory writes, exactly like the common
     // `memset`/`memcpy` intrinsics but Darwin-only (a byte-oriented regex matcher
@@ -482,18 +617,34 @@ fn macho_native_allowlisted_import(symbol: &str) -> bool {
     // Linux defines it in the shim beside its interposed `dlsym`.
     const DL_ERROR: &[&str] = &["dlerror"];
 
-    ERRNO.contains(&symbol)
-        || MEMORY_FILL.contains(&symbol)
-        || STARTUP_AND_IMAGE_GLUE.contains(&symbol)
-        || FINALIZERS.contains(&symbol)
-        || PROCESS_LOCAL_MEMORY.contains(&symbol)
-        || STACK_EXTENT_HELPERS.contains(&symbol)
-        || STACK_PROBE.contains(&symbol)
-        || ARGV_ENV_STORAGE.contains(&symbol)
-        || DL_ERROR.contains(&symbol)
-}
+    &[
+        AllowedImports::exact(ERRNO, Never),
+        AllowedImports::exact(MEMORY_FILL, Never),
+        AllowedImports::exact(STARTUP_AND_IMAGE_GLUE, Never),
+        AllowedImports::exact(FINALIZERS, Never),
+        AllowedImports::exact(PROCESS_LOCAL_MEMORY, HEAP),
+        AllowedImports::exact(
+            SIGNAL_DIAGNOSTICS,
+            HostPassthrough(
+                "installs a diagnostic handler; no ambient host signal reaches the guest",
+            ),
+        ),
+        AllowedImports::exact(
+            TERMINATION,
+            HostPassthrough("ends the process with SIGABRT"),
+        ),
+        AllowedImports::exact(
+            THREAD_NAME,
+            HostPassthrough("labels the host thread; nothing reads the label back"),
+        ),
+        AllowedImports::exact(STACK_EXTENT_HELPERS, Never),
+        AllowedImports::exact(STACK_PROBE, Never),
+        AllowedImports::exact(ARGV_ENV_STORAGE, Never),
+        AllowedImports::exact(DL_ERROR, Never),
+    ]
+};
 
-fn elf_native_allowlisted_import(symbol: &str) -> bool {
+const ELF_ALLOWLIST: &[AllowedImports] = {
     // glibc errno is thread-local process state. The shim sets errno after
     // deterministic boundary failures; the host accessor only returns its slot.
     const ERRNO: &[&str] = &["errno_location"];
@@ -504,9 +655,10 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
         "cxa_thread_atexit_impl",
         "gmon_start",
         "gmon_start__",
-        "libc_start_main",
         "tls_get_addr",
     ];
+    // The process entry, which the shim wraps to start the runtime first.
+    const PROCESS_ENTRY: &[&str] = &["__libc_start_main"];
     // Optional transactional-memory clone-table hooks are weak process startup
     // glue emitted by GCC/LLVM; absence or no-op presence has no boundary effect.
     const CLONE_TABLE_GLUE: &[&str] = &["deregisterTMCloneTable", "registerTMCloneTable"];
@@ -516,19 +668,21 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     const FIXED_PROCESS_METADATA: &[&str] = &["getauxval", "gnu_get_libc_version"];
     // Backtrace metadata walks already-loaded ELF program headers.
     const BACKTRACE_IMAGE_GLUE: &[&str] = &["dl_iterate_phdr"];
-    // Process-local memory extent. `mmap`/`mmap64` are the same 64-bit mapping on
-    // an LP64 glibc (a guest built against plain `mmap` imports that name; the
-    // allocator backs its arenas with it); `sbrk` adjusts the program break — both
-    // grow only this process's own address space, exactly like the allocator's
-    // `mmap` on macOS. `mprotect`/`munmap` live on the common list. Addresses are
-    // never virtualized (like `malloc`/`mmap` pointers), so they carry no
-    // cross-boundary effect. These entries now cover only a guest linked WITHOUT
-    // the POSIX layer (the C-ABI staticlib mode): with it, the shim's strong
-    // `mmap`/`mmap64`/`munmap` definitions take these names off the import table
-    // entirely and model a mapping of a VIRTUAL descriptor as a file copy with
-    // write-back, so the `MAP_SHARED` residual the coverage matrix used to record
-    // is closed there rather than merely documented.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap", "mmap64", "sbrk"];
+    // Process-local memory extent: `mmap`/`mmap64` (the same 64-bit mapping on an
+    // LP64 glibc), `munmap`, `mprotect` and `madvise`. With the POSIX layer the
+    // shim's strong definitions take these names off the import table and the
+    // mapping model answers them; the entries cover a guest linked WITHOUT it
+    // (the C-ABI staticlib mode), whose ordinary libc calls are not interposed.
+    const PROCESS_LOCAL_MEMORY: &[&str] = &["madvise", "mmap", "mmap64", "mprotect", "munmap"];
+    // glibc's `sbrk` moves the program break from its own text, as its
+    // allocator does, so it is the heap's entry rather than the modeled `brk`
+    // row (which also keeps the break out of the runtime arena).
+    const PROGRAM_BREAK: &[&str] = &["sbrk"];
+    // Signal registration for Rust's panic/stack-overflow diagnostics, and
+    // the abort path: the shim's on Linux.
+    const SIGNALS_AND_ABORT: &[&str] = &["abort", "sigaction", "sigaltstack", "signal"];
+    // Rust names its spawned threads; the shim's on Linux.
+    const THREAD_NAME: &[&str] = &["pthread_setname_np"];
     // Pure in-register byte-order conversion; referenced by the shim's own
     // sockaddr translation.
     const BYTE_ORDER: &[&str] = &["htonl", "htons", "ntohl", "ntohs"];
@@ -540,9 +694,12 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // `sched_getcpu`, which reads the live CPU id and IS interposed to the virtual one).
     const PURE_COMPUTE: &[&str] = &["ctype_b_loc", "sched_cpucount"];
     // glibc-only pthread introspection: reads the current thread's attributes
-    // for Rust's stack-overflow guard. The XPG strerror_r alias is the pure
-    // message formatter behind std::io::Error display.
-    const GLIBC_THREAD_AND_ERROR_HELPERS: &[&str] = &["pthread_getattr_np", "xpg_strerror_r"];
+    // for Rust's stack-overflow guard. For the main thread glibc reads
+    // `/proc/self/maps`, `RLIMIT_STACK` and the affinity mask from the host to
+    // fill them in. The XPG strerror_r alias is the pure message formatter
+    // behind std::io::Error display.
+    const THREAD_ATTRIBUTES: &[&str] = &["pthread_getattr_np"];
+    const ERROR_HELPERS: &[&str] = &["xpg_strerror_r"];
     // ld.so's restartable-sequence layout words (`__rseq_offset`, `__rseq_size`,
     // `__rseq_flags`): constants of the loaded glibc naming where each thread's
     // rseq area sits from the thread pointer. The area itself is the virtual
@@ -551,18 +708,35 @@ fn elf_native_allowlisted_import(symbol: &str) -> bool {
     // never a host CPU id.
     const RSEQ_LAYOUT: &[&str] = &["rseq_offset", "rseq_size", "rseq_flags"];
 
-    symbol.starts_with("ITM_")
-        || ERRNO.contains(&symbol)
-        || STARTUP_AND_TLS_GLUE.contains(&symbol)
-        || CLONE_TABLE_GLUE.contains(&symbol)
-        || FIXED_PROCESS_METADATA.contains(&symbol)
-        || BACKTRACE_IMAGE_GLUE.contains(&symbol)
-        || PROCESS_LOCAL_MEMORY.contains(&symbol)
-        || BYTE_ORDER.contains(&symbol)
-        || PURE_COMPUTE.contains(&symbol)
-        || GLIBC_THREAD_AND_ERROR_HELPERS.contains(&symbol)
-        || RSEQ_LAYOUT.contains(&symbol)
-}
+    &[
+        AllowedImports::prefixed(&["ITM_"], Never),
+        AllowedImports::exact(ERRNO, Never),
+        AllowedImports::exact(STARTUP_AND_TLS_GLUE, Never),
+        AllowedImports::exact(PROCESS_ENTRY, Interposed),
+        AllowedImports::exact(CLONE_TABLE_GLUE, Never),
+        AllowedImports::exact(FIXED_PROCESS_METADATA, Never),
+        AllowedImports::exact(
+            BACKTRACE_IMAGE_GLUE,
+            HostPassthrough(
+                "takes the loader's lock, a host futex wait only while another thread holds it",
+            ),
+        ),
+        AllowedImports::exact(PROCESS_LOCAL_MEMORY, Interposed),
+        AllowedImports::exact(PROGRAM_BREAK, HEAP),
+        AllowedImports::exact(SIGNALS_AND_ABORT, Interposed),
+        AllowedImports::exact(THREAD_NAME, Interposed),
+        AllowedImports::exact(BYTE_ORDER, Never),
+        AllowedImports::exact(PURE_COMPUTE, Never),
+        AllowedImports::exact(
+            THREAD_ATTRIBUTES,
+            HostPassthrough(
+                "the main thread's stack extent comes from the host's /proc/self/maps and RLIMIT_STACK; only stack-guard placement reads it",
+            ),
+        ),
+        AllowedImports::exact(ERROR_HELPERS, Never),
+        AllowedImports::exact(RSEQ_LAYOUT, Never),
+    ]
+};
 
 /// Timer names are host effects even if a future spelling is not inventoried.
 fn timer_symbol(symbol: &str) -> bool {
@@ -870,9 +1044,11 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // shim binary that imports one raw still reads as a class-g escape rather than
     // a bare unknown import. `eventfd`/`eventfd2` (Linux, mio's Waker vehicle)
     // joined that in-process interposed slice — a single 64-bit counter inside
-    // the one guest — and follow the same stay-classified convention. The
-    // cross-process members (`shm_open`/`mach_*`/`mq_*`) are NOT interposed and
-    // stay refused.
+    // the one guest — and follow the same stay-classified convention, as do
+    // glibc's System V IPC wrappers (`shm*`/`sem*`/`msg*`), interposed on Linux
+    // as doors into the one-process model and refused by this name on macOS,
+    // where the shim does not define them. The cross-process members
+    // (`shm_open`/`mach_*`/`mq_*`) are NOT interposed and stay refused.
     const SHARED_MEMORY_IPC: &[&str] = &[
         "shm_open",
         "shm_unlink",
@@ -892,6 +1068,18 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "socketpair",
         "eventfd",
         "eventfd2",
+        "shmget",
+        "shmat",
+        "shmdt",
+        "shmctl",
+        "semget",
+        "semop",
+        "semtimedop",
+        "semctl",
+        "msgget",
+        "msgsnd",
+        "msgrcv",
+        "msgctl",
     ];
     // Environment reads and mutation. The native shim runs glibc's environment
     // functions over the process's own `environ`, which starts as the run's

@@ -490,6 +490,7 @@ fn every_escape_class_is_detected_and_denied() {
         ("process", "posix_spawn", NativeFormat::Elf),
         ("signals-timers", "setitimer", NativeFormat::Elf),
         ("shared-memory-ipc", "shm_open", NativeFormat::Elf),
+        ("shared-memory-ipc", "msgrcv", NativeFormat::MachO),
         ("environment", "setenv", NativeFormat::Elf),
         ("dynamic-loading", "dlopen", NativeFormat::Elf),
         ("direct-syscall", "syscall", NativeFormat::Elf),
@@ -720,6 +721,58 @@ fn an_imported_assert_failure_hook_is_refused() {
         assert_eq!(
             native_import_decision("__assert_fail", format, &empty),
             NativeImportDecision::Denied("unknown-import"),
+        );
+    }
+}
+
+// A name the shim interposes is admitted only as itself: an alias libc
+// exports beside it normalizes onto it but is a different linker symbol the
+// shim does not define, so it would run libc's own text. Aliases of the
+// pure entries share their effect and stay admitted; `_exit` is its own
+// listed entry, not an alias of `exit`.
+#[test]
+fn aliases_of_interposed_names_are_refused() {
+    let empty = BTreeSet::new();
+    let decide = |symbol, format| native_import_decision(symbol, format, &empty);
+    for alias in [
+        "__mmap",
+        "__munmap",
+        "__mprotect",
+        "__madvise",
+        "__sigaction",
+        "__exit",
+        "libc_start_main",
+    ] {
+        assert_ne!(
+            decide(alias, NativeFormat::Elf),
+            NativeImportDecision::Allowed,
+            "{alias}"
+        );
+    }
+    for name in [
+        "mmap",
+        "munmap",
+        "sigaction",
+        "exit",
+        "_exit",
+        "__libc_start_main",
+        "__errno_location",
+        "__isoc23_sscanf",
+        "__stack_chk_fail",
+    ] {
+        assert_eq!(
+            decide(name, NativeFormat::Elf),
+            NativeImportDecision::Allowed,
+            "{name}"
+        );
+    }
+    // Mach-O spells C `exit` as `_exit` and C `_exit` as `__exit`; `_exit`
+    // is listed as itself, so only its exact C name is admitted.
+    for (name, admitted) in [("_exit", true), ("__exit", true), ("___exit", false)] {
+        assert_eq!(
+            decide(name, NativeFormat::MachO) == NativeImportDecision::Allowed,
+            admitted,
+            "{name}"
         );
     }
 }

@@ -10,6 +10,8 @@ mod door_thunks;
 mod entropy;
 mod fd_io;
 mod fs;
+#[cfg(target_os = "linux")]
+mod ipc;
 mod lifecycle;
 #[cfg(target_os = "linux")]
 mod memory;

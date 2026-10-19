@@ -31,6 +31,14 @@ macro_rules! symbol_rows {
     (@arch $arch:tt) => { Some($arch) };
 }
 
+/// Join concern-specific inventories, in order, as one const slice.
+macro_rules! join_rows {
+    ($last:expr $(,)?) => { $last };
+    ($first:expr, $($rest:expr),+ $(,)?) => {
+        &inventory::concat::<_, { $first.len() $(+ $rest.len())+ }>($first, join_rows!($($rest),+))
+    };
+}
+
 /// Join concern-specific inventories in const data, with no runtime allocation.
 pub(super) const fn concat<T: Copy, const N: usize>(left: &[T], right: &[T]) -> [T; N] {
     assert!(N == left.len() + right.len());

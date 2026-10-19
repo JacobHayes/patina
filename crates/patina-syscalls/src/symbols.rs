@@ -30,35 +30,18 @@ mod stdio;
 #[path = "symbol_memory.rs"]
 mod memory;
 
-pub const SYMBOLS: &[SymbolRow] = &inventory::concat::<
-    _,
-    { ROWS.len() + time::ROWS.len() + stdio::ROWS.len() + memory::ROWS.len() },
->(
-    ROWS,
-    &inventory::concat::<_, { time::ROWS.len() + stdio::ROWS.len() + memory::ROWS.len() }>(
-        time::ROWS,
-        &inventory::concat::<_, { stdio::ROWS.len() + memory::ROWS.len() }>(
-            stdio::ROWS,
-            memory::ROWS,
-        ),
-    ),
-);
+#[path = "symbol_ipc.rs"]
+mod ipc;
+
+pub const SYMBOLS: &[SymbolRow] =
+    join_rows!(ROWS, time::ROWS, stdio::ROWS, memory::ROWS, ipc::ROWS);
 #[doc(hidden)]
-pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] = &inventory::concat::<
-    _,
-    { METADATA.len() + time::METADATA.len() + stdio::METADATA.len() + memory::METADATA.len() },
->(
+pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] = join_rows!(
     METADATA,
-    &inventory::concat::<
-        _,
-        { time::METADATA.len() + stdio::METADATA.len() + memory::METADATA.len() },
-    >(
-        time::METADATA,
-        &inventory::concat::<_, { stdio::METADATA.len() + memory::METADATA.len() }>(
-            stdio::METADATA,
-            memory::METADATA,
-        ),
-    ),
+    time::METADATA,
+    stdio::METADATA,
+    memory::METADATA,
+    ipc::METADATA
 );
 
 symbol_rows! {

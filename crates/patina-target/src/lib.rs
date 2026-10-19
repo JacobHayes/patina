@@ -135,7 +135,10 @@ mod x86_scan;
 #[cfg(test)]
 mod tests;
 
-pub use import_policy::native_elf_import_allowed;
+pub use import_policy::{
+    AllowedImports, KernelEntry, elf_import_allowlist, macho_import_allowlist,
+    native_elf_import_allowed,
+};
 #[cfg(test)]
 use import_xrefs::collect_import_xref_provenance;
 #[cfg(test)]

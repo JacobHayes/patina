@@ -2,6 +2,9 @@
 //! probes these also execute on macOS and Linux arm64, and pin virtual time.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
+#[cfg(target_os = "linux")]
+#[path = "native_abi/sysv_ipc.rs"]
+mod sysv_ipc;
 #[path = "native_abi/variadic.rs"]
 mod variadic;
 use common::native::*;
@@ -312,8 +315,11 @@ mod linux {
         for call in [
             "mlockall-current",
             "mlockall-current-raw",
+            "msgctl-info",
             "msgctl-info-raw",
+            "semctl-info",
             "semctl-info-raw",
+            "shmctl-info",
             "shmctl-info-raw",
         ] {
             assert_eq!(

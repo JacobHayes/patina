@@ -18,6 +18,8 @@ fn main() {
         "src/symbol_inventory.rs",
         "src/symbol_time.rs",
         "src/symbol_stdio.rs",
+        "src/symbol_memory.rs",
+        "src/symbol_ipc.rs",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }

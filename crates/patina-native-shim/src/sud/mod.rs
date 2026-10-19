@@ -492,6 +492,12 @@ mod forwarding {
         }
     }
 
+    impl Word for i64 {
+        fn word(self) -> u64 {
+            self as u64
+        }
+    }
+
     impl Word for usize {
         fn word(self) -> u64 {
             self as u64
@@ -528,10 +534,35 @@ mod forwarding {
         };
         crate::posix::signal_result(result)
     }
+
+    /// [`forward`] for a row whose answer is a full word (an address, a
+    /// `ssize_t`): only the kernel's reserved error range is a failure, so
+    /// an address above it is never mistaken for one. Failure is `-1`.
+    ///
+    /// # Safety
+    /// As for [`forward`].
+    pub(crate) unsafe fn forward_word(nr: c_long, args: &[u64]) -> i64 {
+        let mut words = [0; 6];
+        for (word, arg) in words.iter_mut().zip(args) {
+            *word = *arg;
+        }
+        // SAFETY: The caller upholds the syscall row's pointer contract for this synchronous dispatch.
+        let result = unsafe {
+            super::patina_sud_dispatch(
+                nr, words[0], words[1], words[2], words[3], words[4], words[5], 0,
+            )
+        };
+        crate::abi::libc_delivered(
+            crate::abi::LinuxReturn::new(result)
+                .decode()
+                .map(|value| value as i64),
+            -1,
+        )
+    }
 }
 
 #[cfg(patina_posix_exports)]
-pub(crate) use forwarding::{Word, forward};
+pub(crate) use forwarding::{Word, forward, forward_word};
 
 mod bindings;
 mod dispatch;

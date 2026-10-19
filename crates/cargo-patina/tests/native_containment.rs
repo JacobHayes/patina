@@ -32,6 +32,17 @@ fn audit_rejects_shared_memory_import() {
     assert_refused(ipc.command("audit", &["--raw"]), &["shared-memory-ipc"]);
 }
 
+/// glibc's aliases of names the shim interposes (`__mmap`, `__munmap`) are
+/// different linker symbols the shim does not define: the gate refuses them
+/// by name instead of letting libc's own text map past the mapping model.
+#[cfg(target_os = "linux")]
+#[test]
+fn prerun_refuses_aliases_of_interposed_names() {
+    let g = Guest::assert_build("interposer_alias_probe.rs");
+    let out = g.assert_run_refused(1, &["__mmap", "__munmap"]);
+    assert!(!text(&out.stdout).contains("INTERPOSER_ALIAS_RAN"));
+}
+
 #[test]
 fn prerun_refuses_shm_open_and_hatch_warns() {
     let g = Guest::assert_build("gate_refusal_probe.rs");

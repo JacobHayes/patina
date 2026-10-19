@@ -7,7 +7,9 @@
 //! call `SA_RESTART` restarts runs again from the same registers. The thunk
 //! keeps no state but its own frame and moves no stack argument, so it fits
 //! doors whose arguments all travel in registers: these all do (at most six
-//! integer words).
+//! integer words). That holds for `semctl`'s variadic fourth argument too: a
+//! `union semun` is one integer-class word, which both Linux ABIs pass in the
+//! next argument register (`%rcx`, `x3`) exactly as a named argument.
 //!
 //! A door listed here with no `patina_door_<name>` definition is an undefined
 //! reference at link time, and one still exported under its public name a
@@ -74,6 +76,10 @@ PATINA_DOOR killpg
 PATINA_DOOR mount
 PATINA_DOOR mount_setattr
 PATINA_DOOR move_mount
+PATINA_DOOR msgctl
+PATINA_DOOR msgget
+PATINA_DOOR msgrcv
+PATINA_DOOR msgsnd
 PATINA_DOOR open_tree
 PATINA_DOOR pidfd_getfd
 PATINA_DOOR pidfd_open
@@ -88,12 +94,20 @@ PATINA_DOOR raise
 PATINA_DOOR reboot
 PATINA_DOOR sched_getaffinity
 PATINA_DOOR sched_setaffinity
+PATINA_DOOR semctl
+PATINA_DOOR semget
+PATINA_DOOR semop
+PATINA_DOOR semtimedop
 PATINA_DOOR setgid
 PATINA_DOOR setgroups
 PATINA_DOOR setns
 PATINA_DOOR setpgid
 PATINA_DOOR setsid
 PATINA_DOOR setuid
+PATINA_DOOR shmat
+PATINA_DOOR shmctl
+PATINA_DOOR shmdt
+PATINA_DOOR shmget
 PATINA_DOOR sigqueue
 PATINA_DOOR swapoff
 PATINA_DOOR swapon
@@ -164,6 +178,10 @@ PATINA_DOOR killpg
 PATINA_DOOR mount
 PATINA_DOOR mount_setattr
 PATINA_DOOR move_mount
+PATINA_DOOR msgctl
+PATINA_DOOR msgget
+PATINA_DOOR msgrcv
+PATINA_DOOR msgsnd
 PATINA_DOOR open_tree
 PATINA_DOOR pidfd_getfd
 PATINA_DOOR pidfd_open
@@ -178,12 +196,20 @@ PATINA_DOOR raise
 PATINA_DOOR reboot
 PATINA_DOOR sched_getaffinity
 PATINA_DOOR sched_setaffinity
+PATINA_DOOR semctl
+PATINA_DOOR semget
+PATINA_DOOR semop
+PATINA_DOOR semtimedop
 PATINA_DOOR setgid
 PATINA_DOOR setgroups
 PATINA_DOOR setns
 PATINA_DOOR setpgid
 PATINA_DOOR setsid
 PATINA_DOOR setuid
+PATINA_DOOR shmat
+PATINA_DOOR shmctl
+PATINA_DOOR shmdt
+PATINA_DOOR shmget
 PATINA_DOOR sigqueue
 PATINA_DOOR swapoff
 PATINA_DOOR swapon

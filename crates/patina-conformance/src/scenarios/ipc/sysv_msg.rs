@@ -28,7 +28,6 @@ use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
 use crate::probe::{Key, MsgArg, Probe, UNKNOWN_IPC_CMD, Window, neg, perm_mode};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -228,7 +227,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_msgrcv,
         Syscall::N_msgctl,
     ],
-    vehicles: Vehicle::KERNEL,
     needs: &[Need::SysvMsg],
     ..DEFAULTS
 };

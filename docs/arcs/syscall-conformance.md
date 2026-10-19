@@ -292,14 +292,16 @@ forwards into the same dispatcher instead of its two-number allowlist.
   (protection keys, shadow stacks, secret memory, lockable pages, one NUMA
   node, SysV and POSIX IPC) declare host needs, and a behaviour newer than its
   row (self `process_madvise`, `MREMAP_DONTUNMAP`, …) a kernel floor. The
-  POSIX `shm_*`/`sem_*`/`mq_*` symbols have no registry rows yet: the probe
+  System V scenarios run through glibc's wrappers as well as the kernel rows.
+  The POSIX `shm_*`/`sem_*`/`mq_*` symbols have no registry rows yet: the probe
   cannot import a wrapper the shim leaves undefined (the pre-run audit would
   refuse it), so the scenarios drive the kernel rows under them.
   Status: file mappings map a per-file page cache (a host memfd; page-granular
   write-back before a read, mirroring after a write) in one model behind both
   doors; `memfd_create` and seals live in fs-mem (trace format 10); System V
   shm/sem/msg and POSIX mq are modeled for one process and its threads,
-  blocking on the scheduler, and every `mem/*` and `ipc/*` scenario passes; NUMA
+  blocking on the scheduler, glibc's System V wrappers are doors into the same
+  rows, and every `mem/*` and `ipc/*` scenario passes; NUMA
   answers for one node; resource limits are a 16-resource virtual table and
   locking is bookkeeping against its `RLIMIT_MEMLOCK`; no hugetlb pages are
   configured and THP is off;
@@ -310,8 +312,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   `memfd_secret` is a filesystem file whose bytes only a shared mapping of its
   page cache reaches, the descriptor funnels refusing the rest. Left as named
   traps: the libc
-  `shm_*`/`sem_*`/`mq_*` and SysV wrappers (still refused by the
-  audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
+  `shm_*`/`sem_*`/`mq_*` wrappers (still refused by the audit). Scenarios for the resource limits other than `RLIMIT_MEMLOCK` come
   with the time + identity family. Locking and populating need
   `MADV_POPULATE_*` (Linux 5.14, SUD needs 5.11): on an older host the first
   populate stops the run by name, since no fallback is exact (touching pages
