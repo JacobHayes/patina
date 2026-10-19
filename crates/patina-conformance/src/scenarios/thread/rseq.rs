@@ -4,12 +4,12 @@
 //!
 //! * registering any other area is `EINVAL`: one registration per thread,
 //!   judged before the new area is read;
-//! * glibc's own area — found near the thread pointer as the one address
-//!   the kernel answers `EBUSY` for — is refused as already registered
-//!   with glibc's signature (`EBUSY`), as a signature mismatch with another
-//!   (`EPERM`), and with another length (`EINVAL`); a flag other than
-//!   `RSEQ_FLAG_UNREGISTER` is `EINVAL`, and unregistering with the wrong
-//!   signature `EPERM`, so glibc's registration stays;
+//! * glibc's own area, at the length glibc registered it with, is refused
+//!   as already registered with glibc's signature (`EBUSY`), as a signature
+//!   mismatch with another (`EPERM`), and with another length (`EINVAL`);
+//!   a flag other than `RSEQ_FLAG_UNREGISTER` is `EINVAL`, and
+//!   unregistering with the wrong signature `EPERM`, so glibc's
+//!   registration stays;
 //! * the kernel keeps the registered area current: with the thread pinned
 //!   to its CPU, `cpu_id` and `cpu_id_start` name the CPU `getcpu` answers,
 //!   and pinned to another CPU of its mask (the same one on a machine with
@@ -17,14 +17,14 @@
 //!
 //! The host must leave glibc's registration live (`Need::RseqRegistered`:
 //! not so under `GLIBC_TUNABLES=glibc.pthread.rseq=0`). The probe also
-//! stops before its search unless the first call shows a registration: on
-//! an unregistered thread each candidate address would be registered,
-//! handing the kernel thread-local memory to write CPU ids into.
+//! stops unless the first call shows a registration: on an unregistered
+//! thread glibc's area would be registered, handing the kernel thread-local
+//! memory to write CPU ids into.
 //!
-//! glibc wraps no rseq, so the scenario finds the area through the kernel
-//! (not through `__rseq_offset`, which patina's `dlsym` answers NULL for)
-//! and runs through the kernel vehicles. Every call is refused: glibc's registration is
-//! never changed.
+//! glibc wraps no rseq, so the scenario runs through the kernel vehicles,
+//! and it finds the area through glibc's documented ABI words, linked
+//! (patina's `dlsym` answers NULL for them). Every call is refused: glibc's
+//! registration is never changed.
 
 use super::thread_pointer;
 use crate::catalog::{DEFAULTS, Need, Scenario};
@@ -39,16 +39,38 @@ use patina_dst_syscalls::Syscall;
 const SIG: i64 = 0x5305_3053;
 #[cfg(target_arch = "aarch64")]
 const SIG: i64 = 0xd428_bc00;
-/// glibc 2.39's registration length: `sizeof(struct rseq)`.
+/// `ORIG_RSEQ_SIZE`, the original `struct rseq`: the length of the
+/// scenario's own area.
 const LEN: i64 = 32;
 /// `RSEQ_FLAG_UNREGISTER`.
 const UNREGISTER: i64 = 1;
 /// A flag no kernel defines for rseq (7.0's time-slice extension takes the
 /// low bits).
 const UNDEFINED_FLAG: i64 = 1 << 30;
-/// How far from the thread pointer the search looks, each way: glibc keeps
-/// the area in the thread descriptor, beside the thread pointer.
-const SEARCH: isize = 4096;
+unsafe extern "C" {
+    /// ld.so's (`<sys/rseq.h>`, GLIBC_2.35), set before any user code runs:
+    /// where each thread's area sits from the thread pointer, and the size
+    /// of its active features.
+    static __rseq_offset: isize;
+    static __rseq_size: u32;
+}
+
+/// The calling thread's area as glibc registered it: its address and
+/// length (sysdeps/unix/sysv/linux/rseq-internal.h: `__rseq_size`, raised
+/// to the original 32 bytes). glibc 2.39 keeps the area in the thread
+/// descriptor, and its `__rseq_size` is those 32 bytes. From 2.41 the area
+/// is a TLS block after every module's own, so its offset grows with the
+/// executable's thread-locals, and `__rseq_size` is the kernel's
+/// `AT_RSEQ_FEATURE_SIZE`, which Linux 7.0's time-slice extension raises
+/// to 33. Another length is `EINVAL` for glibc's own area too.
+fn glibc_area() -> (usize, i64) {
+    // SAFETY: plain reads of ld.so's initialized words.
+    let (offset, size) = unsafe { (__rseq_offset, __rseq_size) };
+    (
+        thread_pointer().wrapping_add_signed(offset),
+        i64::from(size).max(LEN),
+    )
+}
 
 /// `struct rseq`, 32-byte aligned as the kernel requires.
 #[repr(C, align(32))]
@@ -89,35 +111,6 @@ fn rseq(p: &Probe, area: usize, len: i64, flags: i64, sig: i64, what: &str) -> i
             ("sig_is_glibcs", (sig == SIG).into()),
         ],
     )
-}
-
-/// glibc's area: the one 32-byte-aligned address near the thread pointer
-/// that the kernel answers `EBUSY` for. Each other candidate must answer
-/// `EINVAL` (another area than the registered one), which reads and changes
-/// nothing; any other answer ends the search. One that registers the
-/// candidate (0: the thread had no registration after all) is undone at
-/// once, before the kernel writes CPU ids into thread-local memory.
-fn registered_area(p: &Probe) -> Result<usize, String> {
-    let tp = thread_pointer() as isize;
-    p.rec.quiet(|| {
-        for offset in (-SEARCH..SEARCH).step_by(32) {
-            let candidate = (tp + offset) as usize & !31;
-            let r = p.call_unrecorded(Syscall::N_rseq, [candidate as i64, LEN, 0, SIG, 0, 0]);
-            if r == neg(EBUSY) {
-                return Ok(candidate);
-            }
-            if r == 0 {
-                p.call_unrecorded(
-                    Syscall::N_rseq,
-                    [candidate as i64, LEN, UNREGISTER, SIG, 0, 0],
-                );
-            }
-            if r != neg(EINVAL) {
-                return Err(format!("a candidate answered {r}"));
-            }
-        }
-        Err("no candidate is registered".to_string())
-    })
 }
 
 /// The area's `cpu_id_start` and `cpu_id`.
@@ -190,33 +183,29 @@ pub fn run(p: &Probe) {
         p.rec
             .quiet(|| p.call_unrecorded(Syscall::N_rseq, [own as i64, LEN, UNREGISTER, SIG, 0, 0]));
     }
-    // Without glibc's registration the search below would register
+    // Without glibc's registration the calls below would register
     // thread-local memory: go no further.
     p.require("glibc registered the thread", r == neg(EINVAL));
-    let found = registered_area(p);
-    if let Err(reason) = &found {
-        p.require(&format!("find glibc's registered area: {reason}"), false);
-    }
-    let area = found.unwrap();
+    let (area, len) = glibc_area();
     p.check(
         "glibc's area with glibc's signature is EBUSY",
-        rseq(p, area, LEN, 0, SIG, "glibc") == neg(EBUSY),
+        rseq(p, area, len, 0, SIG, "glibc") == neg(EBUSY),
     );
     p.check(
         "another signature is EPERM",
-        rseq(p, area, LEN, 0, SIG ^ 1, "glibc") == neg(EPERM),
+        rseq(p, area, len, 0, SIG ^ 1, "glibc") == neg(EPERM),
     );
     p.check(
         "another length is EINVAL",
-        rseq(p, area, LEN - 1, 0, SIG, "glibc") == neg(EINVAL),
+        rseq(p, area, len - 1, 0, SIG, "glibc") == neg(EINVAL),
     );
     p.check(
         "an undefined flag is EINVAL",
-        rseq(p, area, LEN, UNDEFINED_FLAG, SIG, "glibc") == neg(EINVAL),
+        rseq(p, area, len, UNDEFINED_FLAG, SIG, "glibc") == neg(EINVAL),
     );
     p.check(
         "unregistering with another signature is EPERM",
-        rseq(p, area, LEN, UNREGISTER, SIG ^ 1, "glibc") == neg(EPERM),
+        rseq(p, area, len, UNREGISTER, SIG ^ 1, "glibc") == neg(EPERM),
     );
     p.check(
         "unregistering another area is EINVAL",
@@ -225,7 +214,7 @@ pub fn run(p: &Probe) {
     area_names_the_cpu(p, area);
     p.check(
         "and glibc's registration stays",
-        rseq(p, area, LEN, 0, SIG, "glibc") == neg(EBUSY),
+        rseq(p, area, len, 0, SIG, "glibc") == neg(EBUSY),
     );
 }
 
