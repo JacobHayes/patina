@@ -3,7 +3,7 @@
 //! under `cargo patina`, in the same test, through every vehicle it has.
 //!
 //! Per vehicle: the native run passes (every check holds) and agrees with the
-//! scenario's first vehicle; the patina run, recorded, equals it or fails
+//! scenario's first passing vehicle; the patina run, recorded, equals it or fails
 //! exactly as the scenario's gaps declare (a plain run observes the same:
 //! `recording_changes_no_observation`). One that completes is also replayed
 //! (identical streams; the scenario's trace facts) and run directly
@@ -14,15 +14,23 @@
 //! (Linux 6.8, `VIRTUAL_ABI`) and its glibc (2.39, `host::PINNED_GLIBC`), so
 //! only a host with both (`host::pinned`) is authoritative: elsewhere
 //! (GitHub's runners run 6.17) whatever sets the host apart from patina — a
-//! failed native check, a native-versus-patina difference, a gap that no
-//! longer matches — is reported, `DIVERGES (host H, pinned P)` on stderr and
-//! a section of `$GITHUB_STEP_SUMMARY` when set, and fails nothing;
-//! `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native vehicles that disagree, patina's record/replay,
-//! trace and strace checks, and runs that crash or overrun fail on every
-//! host: a patina run that dies of a signal the native run did not and no
-//! gap of the vehicle declares is a crash, whatever the host. Every patina
-//! failure, reported or failed, carries the tail of the recorded run's
-//! stderr.
+//! native run that fails a check or dies of a signal it did not announce, a
+//! native-versus-patina difference, a gap that no longer matches — is
+//! reported, `DIVERGES (host H, pinned P)` on stderr and a section of
+//! `$GITHUB_STEP_SUMMARY` when set, and fails nothing;
+//! `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Such
+//! a native run is no oracle: it is compared neither with patina nor with
+//! the other vehicles, and its vehicle's patina leg is reported unjudged,
+//! held only to what needs no oracle (record/replay, trace facts, strace, no
+//! undeclared crash; a declared stop leaves even those unchecked, which is
+//! reported too). Native vehicles that are oracles and disagree, a
+//! native run that fails otherwise (records nothing, stops at a
+//! precondition), patina's record/replay, trace and strace checks, and runs
+//! that crash or overrun fail on every host: a patina run that dies of a
+//! signal no native oracle died of (or, with none, that it did not announce)
+//! and no gap of the vehicle declares is a crash, whatever the host. Every
+//! patina failure, reported or failed, carries the tail of the recorded
+//! run's stderr.
 //!
 //! A host that cannot be the oracle (a kernel lacking a covered
 //! row or older than the scenario's kernel floor, or a run-directory

@@ -237,11 +237,15 @@ forwards into the same dispatcher instead of its two-number allowlist.
   kernel (Ubuntu's 6.8 build, `VIRTUAL_ABI`) and its glibc (2.39,
   `host::PINNED_GLIBC`); a bump is an explicit, wholesale migration. Only a
   host with both (kernel release `6.8.*`, glibc `2.39`) is authoritative:
-  elsewhere a failed native check, a native-versus-patina difference or a gap
-  that no longer matches prints `DIVERGES (host H, pinned P)` and joins
-  `$GITHUB_STEP_SUMMARY` without failing (`PATINA_REQUIRE_PINNED_KERNEL=1`
-  judges any host strictly), while disagreeing native vehicles, replay, trace
-  facts, strace and crashes fail everywhere. Every run owns a
+  elsewhere a native run that fails a check or dies of a signal it did not
+  announce, a native-versus-patina difference or a gap that no longer matches
+  prints `DIVERGES (host H, pinned P)` and joins `$GITHUB_STEP_SUMMARY`
+  without failing (`PATINA_REQUIRE_PINNED_KERNEL=1` judges any host
+  strictly); such a native run is compared with neither patina nor the other
+  vehicles, and its patina leg is reported unjudged, held only to replay,
+  trace facts, strace and no undeclared crash, while disagreeing native
+  oracles, a native run that fails
+  otherwise, replay, trace facts, strace and crashes fail everywhere. Every run owns a
   temporary directory and runs under a deadline; a scenario's forked children
   are reaped within one.
 - The tests run in the full workspace suite (`mise run check`, CI on Linux

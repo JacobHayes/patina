@@ -504,6 +504,8 @@ pub fn run(p: &Probe) {
     }
     // Exercise the literal libc symbol too: the adapter above intentionally
     // spells a null-path request as futimens, which cannot detect this split.
+    // glibc 2.39's `utimensat` refuses a NULL path with EINVAL; from 2.41 it
+    // passes it to the kernel, which answers as for futimens.
     let literal_ok = if p.vehicle == crate::vehicle::Vehicle::Libc {
         let r = unsafe { libc::utimensat(fd, std::ptr::null(), std::ptr::null(), 0) };
         r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(EINVAL)

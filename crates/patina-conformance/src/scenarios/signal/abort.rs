@@ -1,7 +1,9 @@
-//! signal/abort — glibc's `abort` (stdlib/abort.c): it unblocks SIGABRT
-//! and raises it, so an installed handler runs even though the caller
-//! blocked the signal; when the handler returns, abort restores `SIG_DFL`
-//! and raises it again, and the process ends by SIGABRT.
+//! signal/abort — glibc 2.39's `abort` (stdlib/abort.c): it unblocks
+//! SIGABRT and raises it, so an installed handler runs even though the
+//! caller blocked the signal; when the handler returns, abort restores
+//! `SIG_DFL` and raises it again, and the process ends by SIGABRT. From
+//! 2.41 `abort` is async-signal-safe and raises without unblocking, so a
+//! blocked handler never runs: a host divergence.
 //!
 //! The handler records its run (the main thread is inside `abort`, holding
 //! no recorder lock) and announces the death that follows its return, so

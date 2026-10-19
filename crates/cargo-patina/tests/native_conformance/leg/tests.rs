@@ -118,7 +118,7 @@ fn a_killed_native_ipc_run_is_swept() {
         let rerun = leg
             .native()
             .unwrap_or_else(|error| panic!("{name}: rerun: {error}"));
-        compare::native_verdict(&rerun)
+        compare::verdict(&rerun)
             .unwrap_or_else(|error| panic!("{name}: the run after the kill is no oracle: {error}"));
         assert_eq!(
             owned::sweep(&dir),

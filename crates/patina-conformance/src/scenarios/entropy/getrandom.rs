@@ -1,6 +1,9 @@
 //! entropy/getrandom — getrandom: lengths, the flag vocabulary, that two draws
 //! differ (the bytes themselves are never recorded), and the buffer: NULL is
 //! EFAULT unless the length is 0 (drivers/char/random.c copies nothing then).
+//! glibc 2.39's `getrandom` is the system call, so the libc vehicle asks the
+//! kernel too; from 2.41 it fills the buffer from the vDSO in user space,
+//! where a NULL buffer is the caller's own SIGSEGV: a host divergence.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use patina_dst_syscalls::Syscall;

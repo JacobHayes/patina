@@ -294,38 +294,39 @@ pub fn normalize(mut events: Vec<Event>) -> Vec<Event> {
     events
 }
 
-// ---- the native oracle ------------------------------------------------------
+// ---- a run's own verdict ----------------------------------------------------
 
-/// Whether a native observation is an oracle at all: it recorded something,
+/// Whether a run passes the scenario on its own: it recorded something,
 /// every check passed, and the process exited 0, exited with the status its
-/// last event announced, or died by the signal its last event announced.
-pub fn native_verdict(native: &Observation) -> Result<(), String> {
-    if native.events.is_empty() {
-        return Err(format!("recorded no event ({})", native.termination));
+/// last event announced, or died by the signal its last event announced. A
+/// native run that does is an oracle.
+pub fn verdict(run: &Observation) -> Result<(), String> {
+    if run.events.is_empty() {
+        return Err(format!("recorded no event ({})", run.termination));
     }
-    if let Some(label) = failed_check(native) {
-        return Err(format!("a check failed natively: {label}"));
+    if let Some(label) = failed_check(run) {
+        return Err(format!("a check failed: {label}"));
     }
-    let announced_exit = native
+    let announced_exit = run
         .events
         .last()
         .filter(|event| event.op == EXPECT_EXIT_OP)
         .and_then(|event| event.args.get("code"))
         .and_then(Value::as_i64);
     if let Some(code) = announced_exit {
-        return if native.termination == Termination::Exited(code as i32) {
+        return if run.termination == Termination::Exited(code as i32) {
             Ok(())
         } else {
             Err(format!(
                 "announced exiting {code} (Probe::exits_with) but {}",
-                native.termination
+                run.termination
             ))
         };
     }
-    match native.termination {
+    match run.termination {
         Termination::Exited(0) => Ok(()),
         Termination::Signaled { signal, .. } => {
-            let announced = native
+            let announced = run
                 .events
                 .last()
                 .filter(|event| event.op == EXPECT_DEATH_OP)
@@ -339,7 +340,7 @@ pub fn native_verdict(native: &Observation) -> Result<(), String> {
                 ))
             }
         }
-        other => Err(format!("did not pass natively: {other}")),
+        other => Err(format!("did not pass: {other}")),
     }
 }
 
@@ -1237,7 +1238,7 @@ mod tests {
 
     #[test]
     fn an_empty_native_stream_is_not_an_oracle() {
-        assert!(native_verdict(&observation(vec![])).is_err());
+        assert!(verdict(&observation(vec![])).is_err());
     }
 
     #[test]
@@ -1257,12 +1258,12 @@ mod tests {
 
     #[test]
     fn a_passing_native_run_is_an_oracle() {
-        assert_eq!(native_verdict(&native()), Ok(()));
+        assert_eq!(verdict(&native()), Ok(()));
     }
 
     #[test]
     fn a_native_failed_check_is_not_an_oracle() {
-        assert!(native_verdict(&patina_enosys()).is_err());
+        assert!(verdict(&patina_enosys()).is_err());
     }
 
     #[test]
@@ -1274,7 +1275,7 @@ mod tests {
             },
             ..native()
         };
-        assert!(native_verdict(&died).is_err());
+        assert!(verdict(&died).is_err());
     }
 
     #[test]
@@ -1287,7 +1288,7 @@ mod tests {
             signal: 15,
             core: Some(false),
         };
-        assert_eq!(native_verdict(&died), Ok(()));
+        assert_eq!(verdict(&died), Ok(()));
     }
 
     fn exit_announced(code: i64) -> Event {
@@ -1301,7 +1302,7 @@ mod tests {
         let mut exited = native();
         exited.events.push(exit_announced(3));
         exited.termination = Termination::Exited(3);
-        assert_eq!(native_verdict(&exited), Ok(()));
+        assert_eq!(verdict(&exited), Ok(()));
     }
 
     #[test]
@@ -1310,7 +1311,7 @@ mod tests {
             termination: Termination::Exited(3),
             ..native()
         };
-        assert!(native_verdict(&exited).is_err());
+        assert!(verdict(&exited).is_err());
     }
 
     #[test]
@@ -1319,7 +1320,7 @@ mod tests {
             let mut exited = native();
             exited.events.push(exit_announced(3));
             exited.termination = termination;
-            assert!(native_verdict(&exited).is_err(), "{termination}");
+            assert!(verdict(&exited).is_err(), "{termination}");
         }
     }
 

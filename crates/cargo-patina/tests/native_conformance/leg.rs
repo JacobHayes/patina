@@ -254,7 +254,7 @@ impl Leg<'_> {
     }
 
     /// Every check of this leg; `reference` is the scenario's first native
-    /// observation, which every other vehicle's must agree with.
+    /// oracle, which every other vehicle's must agree with.
     /// `diverged` collects what the oracle only reports.
     pub(super) fn check(
         &self,
@@ -298,7 +298,7 @@ impl Leg<'_> {
         } else {
             Ok(())
         };
-        if let Some(death) = undeclared_death(&native, &recorded, &gaps) {
+        if let Some(death) = undeclared_death(compared.then_some(&native), &recorded, &gaps) {
             let mut failures = judgement.err().unwrap_or_default();
             failures.push(death);
             return Err(with_stderr(failures, &recorded));
@@ -309,7 +309,16 @@ impl Leg<'_> {
         )?;
         if gaps.iter().any(|gap| gap.failure.ends_early()) {
             // A stopped run leaves no complete trace, and the direct run would
-            // be the same refusal outside the supervisor.
+            // be the same refusal outside the supervisor. With no native
+            // oracle the stop itself went unchecked too: nothing judged the
+            // leg, which is reported, never passed.
+            if !compared {
+                diverged.push(
+                    "patina: a declared stop ends the run, so with no native oracle neither \
+                     the stop nor replay and strace are checked"
+                        .to_string(),
+                );
+            }
             return Ok(());
         }
         let replayed = self
