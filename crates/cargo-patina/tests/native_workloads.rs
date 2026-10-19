@@ -932,52 +932,57 @@ fn the_libc_entropy_surface_answers_as_the_host_libc() {
 /// before the fault, or `EFAULT` when none were; on macOS a short
 /// `/dev/urandom` read is `EFAULT`. On Linux the Patina run gets a 1 GiB
 /// address-space limit, so a request is never allocated whole: a NULL request
-/// of `MAX_RW_COUNT` bytes is `EFAULT`, not an allocation failure. RED before:
-/// the run aborted allocating 2 GiB, a Linux partial write answered `EFAULT`,
-/// and a macOS short read answered its byte count. The record/replay pair
-/// checks the chunked draws reproduce.
+/// of `MAX_RW_COUNT` bytes is `EFAULT`, not an allocation failure. The native
+/// run asks the kernel through `syscall(2)`; on Linux the Patina run asks
+/// through it and through the exported `getrandom` wrapper
+/// (`ENTROPY_BOUNDS_DOOR=libc`), and both must answer as the kernel did. RED
+/// before: the run aborted allocating 2 GiB, a Linux partial write answered
+/// `EFAULT`, and a macOS short read answered its byte count. The record/replay
+/// pair checks the chunked draws reproduce.
 #[test]
 fn entropy_into_a_faulting_buffer_answers_the_bytes_written() {
     let g = Guest::assert_build("entropy_bounds_probe.rs");
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
-    command.current_dir(common::native_workspace()).args([
-        "run",
-        g.binary.to_str().unwrap(),
-        "--seed",
-        "1",
-    ]);
+    let native = native_stdout("entropy_bounds_probe.rs");
     #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let limit = libc::rlimit {
-            rlim_cur: 1 << 30,
-            rlim_max: 1 << 30,
-        };
-        // SAFETY: setrlimit is async-signal-safe, and `limit` outlives the spawn.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
+    let doors: &[&[&str]] = &[&[], &["--env", "ENTROPY_BOUNDS_DOOR=libc"]];
+    #[cfg(not(target_os = "linux"))]
+    let doors: &[&[&str]] = &[&[]];
+    for &door in doors {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        command
+            .current_dir(common::native_workspace())
+            .args(["run", g.binary.to_str().unwrap(), "--seed", "1"])
+            .args(door);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+            let limit = libc::rlimit {
+                rlim_cur: 1 << 30,
+                rlim_max: 1 << 30,
+            };
+            // SAFETY: setrlimit is async-signal-safe, and `limit` outlives the spawn.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::setrlimit(libc::RLIMIT_AS, &limit) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
         }
+        let output = common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
+            .expect("the bounded run exceeded 60s");
+        assert!(
+            output.status.success(),
+            "{door:?}: {}: {}{}",
+            output.status,
+            text(&output.stdout),
+            text(&output.stderr)
+        );
+        assert_eq!(text(&output.stdout), text(&native), "{door:?}");
+        g.assert_seeded_record_replay_identity(1, door);
     }
-    let output = common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
-        .expect("the bounded run exceeded 60s");
-    assert!(
-        output.status.success(),
-        "{}: {}{}",
-        output.status,
-        text(&output.stdout),
-        text(&output.stderr)
-    );
-    assert_eq!(
-        text(&output.stdout),
-        text(&native_stdout("entropy_bounds_probe.rs"))
-    );
-    g.assert_seeded_record_replay_identity(1, &[]);
 }
 
 #[test]

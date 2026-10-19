@@ -5,6 +5,13 @@
 // is `EFAULT` without the request's size ever being allocated. XNU's
 // `random_read` answers a short `/dev/urandom` read with `EFAULT`. A
 // `getentropy` that straddles the fault is `EFAULT` on both.
+//
+// Linux's `getrandom` requests go through `syscall(2)`, which enters the
+// kernel on every glibc: from 2.41 glibc's `getrandom` fills the buffer from
+// the vDSO in user space, so a fault there is the caller's own SIGSEGV, not
+// the kernel's answer. With `ENTROPY_BOUNDS_DOOR=libc` they go through the
+// `getrandom` symbol instead: under patina the shim's exported wrapper,
+// which answers as glibc 2.39's (the system call) does.
 use std::ffi::c_void;
 use std::os::fd::AsRawFd;
 
@@ -18,14 +25,37 @@ const MAP_PRIVATE_ANONYMOUS: i32 = 0x02 | 0x20;
 #[cfg(target_os = "macos")]
 const MAP_PRIVATE_ANONYMOUS: i32 = 0x02 | 0x1000;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const SYS_GETRANDOM: i64 = 318;
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const SYS_GETRANDOM: i64 = 278;
+
 unsafe extern "C" {
     #[cfg(target_os = "linux")]
-    fn getrandom(buffer: *mut c_void, length: usize, flags: u32) -> isize;
+    fn syscall(number: i64, ...) -> i64;
+    #[cfg(target_os = "linux")]
+    #[link_name = "getrandom"]
+    fn libc_getrandom(buffer: *mut c_void, length: usize, flags: u32) -> isize;
     fn getentropy(buffer: *mut c_void, length: usize) -> i32;
     fn read(fd: i32, buffer: *mut c_void, length: usize) -> isize;
     fn mmap(address: *mut c_void, length: usize, prot: i32, flags: i32, fd: i32, offset: i64)
     -> *mut c_void;
     fn munmap(address: *mut c_void, length: usize) -> i32;
+}
+
+/// `getrandom(2)`, through the door `ENTROPY_BOUNDS_DOOR` names: the libc
+/// symbol for `libc`, else the kernel.
+#[cfg(target_os = "linux")]
+unsafe fn getrandom(buffer: *mut c_void, length: usize, flags: u32) -> isize {
+    if std::env::var_os("ENTROPY_BOUNDS_DOOR").is_some_and(|door| door == "libc") {
+        // SAFETY: the caller's request, as the wrapper takes it.
+        return unsafe { libc_getrandom(buffer, length, flags) };
+    }
+    // SAFETY: the caller's request, passed through as the kernel takes it:
+    // each argument a full register, as `syscall(2)` reads them.
+    unsafe {
+        syscall(SYS_GETRANDOM, buffer as i64, length as i64, i64::from(flags)) as isize
+    }
 }
 
 /// A call's result, or its errno when it failed.
