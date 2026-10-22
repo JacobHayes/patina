@@ -10,6 +10,7 @@
 
 use super::{PAGE, host};
 use crate::registry::Syscall;
+use patina_dst_abi::Fd;
 use std::ffi::c_int;
 
 /// A file-sized array of bytes: bytes past its length read zero, growth
@@ -179,6 +180,34 @@ impl Drop for Memfd {
     fn drop(&mut self) {
         host(Syscall::N_close, [self.fd as usize, 0, 0, 0, 0, 0]);
     }
+}
+
+/// All `size` bytes (its length, as its metadata reports it) of the file
+/// `handle` is open on, to fill its page cache. A kernel fills a page cache
+/// with no read the guest issued, so each read is unrecorded and never faulted
+/// (`Context::fs_read_at_unrecorded`), and the reads go on until every byte is
+/// in. A filesystem that ends the file early or refuses a read is a named
+/// stop: no answer `mmap` or a page fault could give describes it.
+pub(super) fn file_bytes(handle: u64, size: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(size);
+    while bytes.len() < size {
+        let offset = bytes.len();
+        let read = crate::with_context_raw(|context| {
+            context.fs_read_at_unrecorded(Fd(handle), offset as u64, size - offset)
+        });
+        match read {
+            Ok(chunk) if !chunk.is_empty() => bytes.extend_from_slice(&chunk),
+            Ok(_) => crate::trap_fatal(&format!(
+                "loading a mapped file's page cache, the filesystem ended the {size}-byte file \
+                 at byte {offset}"
+            )),
+            Err(errno) => crate::trap_fatal(&format!(
+                "loading a mapped file's page cache, the filesystem refused a read at byte \
+                 {offset} (errno {errno})"
+            )),
+        }
+    }
+    bytes
 }
 
 pub(super) struct Cache<P: Pages> {

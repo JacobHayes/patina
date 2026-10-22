@@ -326,6 +326,31 @@ impl Context {
             .fd_metadata_unfaulted(fd)?)
     }
 
+    /// Up to `max_len` bytes of `fd`'s file from `offset`, read UNRECORDED and
+    /// never faulted ([`FsDriver::read_at_unfaulted`]), with no latency: the
+    /// bytes are a pure function of the recorded operations the driver
+    /// executes again on replay, as [`Self::fs_fd_metadata_unrecorded`]'s
+    /// answer is, and the caller loads at the same point on replay, so the
+    /// `atime` the read stamps reproduces too. The native shim fills a mapped
+    /// file's page cache with it, a load no guest read issued. A host-capture
+    /// replay executes no driver, so there it is the recorded read.
+    pub fn fs_read_at_unrecorded(
+        &mut self,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_read_at(fd, offset, max_len);
+        }
+        let clock = self.fs_clock()?;
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .read_at_unfaulted(clock, fd, offset, max_len)?)
+    }
+
     /// How many of pages `first..=last` of `fd`'s file are dirty (written
     /// since their last durability point), read UNRECORDED and never faulted
     /// as [`Self::fs_fd_metadata_unrecorded`] is (`cachestat`). A

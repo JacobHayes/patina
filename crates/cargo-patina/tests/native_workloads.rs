@@ -914,6 +914,35 @@ empty_nonblocking={eagain} insecure=16 hashmap=1 getentropy=0 nonblocking_after=
     g.assert_seeded_record_replay_identity(1, &["--entropy-fail-permille", "1000"]);
 }
 
+/// A mapped file's page cache is the whole file whatever the filesystem faults
+/// do to the guest's own I/O: it is sized from the file's size and filled by a
+/// read no fault reaches. So every page of a `MAP_SHARED` view is backed and
+/// holds the file's bytes, `mmap` answers no injected errno, and the reload
+/// after an in-process crash is whole too. RED before: a short injected read
+/// sized the page cache to the bytes it returned, so the first store past them
+/// was `SIGBUS`, and an injected error failed `mmap` with `EIO`. Class pairing:
+/// the shim's `clippy.toml` keeps the faulted content reads out of everything
+/// but the guest's own read funnels.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_mapped_file_is_whole_under_filesystem_faults() {
+    let g = Guest::assert_build("mmap_short_read_probe.rs");
+    for mode in [&[][..], &["--env", "MMAP_SHORT_READ_MODE=crash"]] {
+        for faults in [
+            ["--fs-short-permille", "1000"],
+            ["--fs-error-permille", "500"],
+        ] {
+            let flags = [&faults[..], mode].concat();
+            let out = g.assert_seeded_record_replay_identity(1, &flags);
+            assert_eq!(
+                assert_unique_line_payload(&out, "NATIVE_MMAP_SHORT_READ "),
+                "pages_written=64",
+                "{flags:?}"
+            );
+        }
+    }
+}
+
 /// The libc entropy surface answers as the host's own libc does, the native
 /// run being the oracle: `getentropy`'s size limit and errno (glibc `EIO`, XNU
 /// `EINVAL`), an empty request, and which names `dlsym` finds. RED before on

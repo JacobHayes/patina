@@ -150,9 +150,16 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   which `MAP_SHARED` views map directly and `MAP_PRIVATE` views map
   copy-on-write, so every view and the shim itself (through `pread`/`pwrite`
   on the memfd) see one set of bytes and the kernel's shmem rules answer for
-  them. The filesystem stays the store the crash model judges: the descriptor
-  funnels write back the pages views changed before a read (through the
-  write-back driver op write seals do not refuse), mirror a write, truncation
+  them. The page cache is the whole file: it is loaded, at the first mapping
+  and after an in-process crash, to the length the file's metadata reports,
+  by unrecorded reads no filesystem fault reaches
+  (`Context::fs_read_at_unrecorded`), since no kernel fills its page cache
+  with a read the guest issued. The faulted `fs_read`/`fs_read_at` are the
+  guest's own reads: the crate's `clippy.toml` refuses them anywhere else, and
+  a guest read funnel says so with an `expect`. The filesystem stays the
+  store the crash model judges: the descriptor funnels write back the pages
+  views changed before a read (through the write-back driver op write seals
+  do not refuse), mirror a write, truncation
   or allocation into the page cache after the filesystem accepts it, and
   `msync(MS_SYNC)`/`fsync`/`syncfs` make the stores durable. The hooks
   (`mem::reading`, `written`, `written_at_cursor`, `resized`, `allocated`,

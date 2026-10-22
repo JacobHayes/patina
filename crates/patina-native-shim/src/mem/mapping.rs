@@ -274,10 +274,13 @@ fn map_file_judged(
         let flags = flags & (MAP_TYPE | MAP_NORESERVE | MAP_FIXED | MAP_FIXED_NOREPLACE);
         return map_huge_pages(addr, rounded, prot, flags, size as usize);
     }
-    let metadata = match crate::with_context(|context| context.fs_fd_metadata(Fd(handle))) {
-        Ok(metadata) => metadata,
-        Err(errno) => return fail(errno),
-    };
+    // The inode and size a kernel reads off the file's inode: bookkeeping, so
+    // no injected `fstat` fault reaches it, and no `mmap` fails for one.
+    let metadata =
+        match crate::with_context(|context| context.fs_fd_metadata_unrecorded(Fd(handle))) {
+            Ok(metadata) => metadata,
+            Err(errno) => return fail(errno),
+        };
     if metadata.kind != FsEntryKind::File {
         return fail(ENODEV);
     }
@@ -457,19 +460,14 @@ pub(super) fn hold(desc: DescId) -> Result<(), c_int> {
     Ok(())
 }
 
-/// The memfd of `ino`'s page cache, created and loaded from the filesystem
-/// through `handle` when the file is first mapped.
+/// The memfd of `ino`'s page cache, created and loaded with all `size` bytes
+/// of the file through `handle` when the file is first mapped.
 fn cache_for(ino: u64, handle: u64, size: u64) -> Result<c_int, i64> {
     if let Some(cache) = MAPPINGS.lock().caches.get(&ino) {
         return Ok(cache.pages.fd);
     }
     let size = usize::try_from(size).map_err(|_| fail(EOVERFLOW))?;
-    let contents = if size == 0 {
-        Vec::new()
-    } else {
-        crate::with_context_raw(|context| context.fs_read_at(Fd(handle), 0, size)).map_err(fail)?
-    };
-    let cache = Cache::new(Memfd::new(), &contents);
+    let cache = Cache::new(Memfd::new(), &cache::file_bytes(handle, size));
     let fd = cache.pages.fd;
     let mut mappings = MAPPINGS.lock();
     mappings.caches.insert(ino, cache);

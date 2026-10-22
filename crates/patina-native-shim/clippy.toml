@@ -1,0 +1,9 @@
+# The faulted content reads are the guest's own reads. The shim reading a
+# file for itself (a mapped file's page cache) gets no injected short or failed
+# read, which no kernel's page cache load has: it uses
+# `fs_read_at_unrecorded`. A guest read funnel says so with an `expect`.
+disallowed-methods = [
+  { path = "patina_dst_runtime::Context::fs_read", reason = "a guest read; the shim's own loads use fs_read_at_unrecorded" },
+  { path = "patina_dst_runtime::Context::fs_read_at", reason = "a guest read; the shim's own loads use fs_read_at_unrecorded" },
+  { path = "patina_dst_runtime::Context::read_file", reason = "opens and reads through the guest's faulted calls; the shim's own loads use fs_read_at_unrecorded" },
+]

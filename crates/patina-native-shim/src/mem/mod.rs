@@ -12,7 +12,8 @@
 //!
 //! A mapping of a deterministic-filesystem file is a VIEW of that file's page
 //! cache: a host memfd the shim holds, sized to the file and loaded from the
-//! filesystem when the file is first mapped. A `MAP_SHARED` view maps the
+//! filesystem when the file is first mapped, by unrecorded reads no injected
+//! filesystem fault reaches (`cache::file_bytes`). A `MAP_SHARED` view maps the
 //! memfd shared and a `MAP_PRIVATE` view maps it private, so every view is the
 //! kernel's own shmem semantics: views of any shape see one set of bytes, a
 //! private view shows the file until its own store copies a page, and a page

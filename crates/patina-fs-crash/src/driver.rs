@@ -478,6 +478,16 @@ impl FsDriver for CrashFs {
         self.live.fd_metadata_unfaulted(fd)
     }
 
+    fn read_at_unfaulted(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> DriverResult<Vec<u8>> {
+        self.live.read_at_unfaulted(clock, fd, offset, max_len)
+    }
+
     fn crash(&mut self) -> DriverResult<()> {
         let crashes = self.crashes.checked_add(1).ok_or_else(|| {
             EffectError::new(

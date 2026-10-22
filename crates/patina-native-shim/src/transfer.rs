@@ -107,6 +107,10 @@ impl Position {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the source read of the guest's copy_file_range(2), sendfile(2) or splice(2)"
+)]
 fn read_file_at(handle: Fd, offset: i64, len: usize) -> Result<Vec<u8>, c_int> {
     let offset = u64::try_from(offset).map_err(|_| EINVAL)?;
     crate::mem::reading(handle.0);

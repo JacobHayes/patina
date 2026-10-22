@@ -13,6 +13,7 @@ use super::*;
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
+#[expect(clippy::disallowed_methods, reason = "the guest's own read(2)")]
 unsafe fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
     #[cfg(target_os = "linux")]
     mem::reading(fd.0);
@@ -366,6 +367,7 @@ pub(crate) fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved,
 
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
+#[expect(clippy::disallowed_methods, reason = "the guest's own pread(2)")]
 pub(crate) unsafe fn fs_pread(
     resolved: Resolved,
     destination: *mut c_void,

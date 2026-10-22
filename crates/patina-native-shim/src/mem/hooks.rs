@@ -150,17 +150,20 @@ pub(crate) fn crashed() {
     };
     let mut reloaded = Vec::new();
     for (old, handle) in files {
-        let recovered = crate::with_context_raw(|context| {
-            let metadata = context.fs_fd_metadata(Fd(handle))?;
-            let contents = context.fs_read_at(Fd(handle), 0, metadata.len as usize)?;
-            Ok((metadata.ino, contents))
-        });
+        // Bookkeeping, as at the first mapping: no injected fault reaches the
+        // reload, which reads the whole file.
+        let recovered =
+            crate::with_context_raw(|context| context.fs_fd_metadata_unrecorded(Fd(handle)));
         // A file the durable image does not hold (its name never became
         // durable) has nothing to reload: the views map an empty file, and a
         // touch is `SIGBUS` as after a truncation. The in-process crash has no
         // kernel analogue; this is the page cache agreeing with the image.
         reloaded.push(match recovered {
-            Ok((ino, contents)) => (old, ino, contents),
+            Ok(metadata) => (
+                old,
+                metadata.ino,
+                cache::file_bytes(handle, metadata.len as usize),
+            ),
             Err(_) => (old, old, Vec::new()),
         });
     }

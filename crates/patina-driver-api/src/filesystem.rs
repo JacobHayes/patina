@@ -333,6 +333,19 @@ pub trait FsDriver: Send {
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
         self.fd_metadata(fd)
     }
+    /// [`FsDriver::read_at`] as a load the runtime makes for itself rather
+    /// than for a guest read (the native shim filling a mapped file's page
+    /// cache): never faulted, since a kernel fills its page cache with no read
+    /// the guest issued, so no injected short or failed read can apply to it.
+    fn read_at_unfaulted(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> DriverResult<Vec<u8>> {
+        self.read_at(clock, fd, offset, max_len)
+    }
     /// How many of the 4096-byte pages `first..=last` of `fd`'s file hold
     /// bytes written since they were last made durable (`cachestat`'s dirty
     /// pages): never faulted bookkeeping, as
