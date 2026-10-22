@@ -305,6 +305,11 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         // a pure caller-memory operation exactly like `memcpy`, no boundary effect.
         "strcpy",
         "strcpy_chk",
+        // Size-bounded copy and append (`strlcpy`/`strlcat`) in their fortified
+        // `_chk` forms: they write only into the caller's destination, within
+        // the size the caller passed and the bound the compiler knew.
+        "strlcat_chk",
+        "strlcpy_chk",
         "strerror_r",
         "strlen",
         "strncasecmp",
@@ -327,6 +332,8 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         // `strtol` normalize onto this common entry. (`strtoul` and the other
         // radix/float parsers are deliberately NOT here — this is an exact list,
         // never a prefix, so an unlisted parser stays denied as `unknown-import`.)
+        // `atoi` is `strtol` in base 10 with no end pointer.
+        "atoi",
         "strtol",
         // In-place sort of a caller-owned array through a caller-supplied
         // comparator: it reads and permutes only caller memory and takes no
@@ -436,9 +443,10 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
     // (`_pow`, ...) that the default-deny audit would otherwise refuse. This is
     // an EXPLICIT list only — no prefix/glob matching, which could mask an
     // effectful symbol that merely shares a math-looking name. It covers the
-    // pure, no-boundary-effect math surface only: `random`/`drand48` (PRNG
-    // draws), `time`, and CoreFoundation/Security-framework math helpers are
-    // deliberately NOT here and stay refused.
+    // pure, no-boundary-effect math surface only: the PRNG draws
+    // (`random`/`drand48`, whose state is a separate question; Darwin's
+    // `random` has its own group), `time`, and CoreFoundation/Security-framework
+    // math helpers are deliberately NOT here.
     const MATH_LIBM: &[&str] = &[
         // Powers, exponentials, logarithms.
         "pow",
@@ -634,6 +642,24 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
     // Rust names its spawned threads; the name is a host debugging label
     // nothing in a run reads back.
     const THREAD_NAME: &[&str] = &["pthread_setname_np"];
+    // libmalloc's zone interface: a zone is an allocator, and the default zone
+    // is the one `malloc` allocates from. Creating, naming and allocating from a
+    // zone touch only the process heap, as `malloc` does (SQLite's Darwin
+    // allocator reaches them).
+    const ZONE_ALLOCATOR: &[&str] = &[
+        "malloc_create_zone",
+        "malloc_default_zone",
+        "malloc_set_zone_name",
+        "malloc_zone_free",
+        "malloc_zone_malloc",
+        "malloc_zone_realloc",
+    ];
+    // libc's `random`: an additive-feedback generator over process-local state
+    // with a fixed initial state, reseeded only by a guest value (`srandom`) or
+    // the run's entropy stream (the shim's `srandomdev`), so its draws are a
+    // deterministic function of what the guest did. Its siblings that reseed or
+    // swap the state (`srandom`, `initstate`, `setstate`) are not listed.
+    const PRNG_STATE: &[&str] = &["random"];
     // Darwin libc byte-pattern fills: write a repeating 4/8/16-byte pattern into
     // a caller-owned buffer. Pure caller-memory writes, exactly like the common
     // `memset`/`memcpy` intrinsics but Darwin-only (a byte-oriented regex matcher
@@ -671,6 +697,8 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(STARTUP_AND_IMAGE_GLUE, Never),
         AllowedImports::exact(FINALIZERS, Never),
         AllowedImports::exact(PROCESS_LOCAL_MEMORY, HEAP),
+        AllowedImports::exact(ZONE_ALLOCATOR, HEAP),
+        AllowedImports::exact(PRNG_STATE, Never),
         AllowedImports::exact(
             SIGNAL_DIAGNOSTICS,
             HostPassthrough(
@@ -913,6 +941,12 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         // LABELED here. It is the planted filesystem representative of the
         // macOS gate-level e2e (`native_run_prerun_gate_refuses_every_escape_class`).
         "acct",
+        // Volume metadata: modeled as the one deterministic volume on both
+        // platforms. Darwin's `fsctl` (AFP byte-range locks and volume control)
+        // is a deny-trap there.
+        "statfs",
+        "fstatfs",
+        "fsctl",
     ];
     // (f) Network: BSD sockets. Modeled over SimNet when interposed.
     const NETWORK: &[&str] = &[
@@ -1034,6 +1068,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "arc4random",
         "arc4random_buf",
         "arc4random_uniform",
+        "srandomdev",
         "CCRandomGenerateBytes",
         "SecRandomCopyBytes",
         "RAND_bytes",
@@ -1230,6 +1265,7 @@ fn is_host_introspection_symbol(symbol: &str) -> bool {
         "proc_pidinfo",
         "proc_pid_rusage",
         "proc_pidpath",
+        "gethostuuid",
     ];
     HOST_STATE.contains(&symbol)
         || symbol.starts_with("IOService")

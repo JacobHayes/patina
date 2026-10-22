@@ -125,6 +125,10 @@ pub(crate) mod hostapi {
         pub task_self: MachPort,
         pub mach_vm_read_overwrite: MachVmReadOverwrite,
         pub mach_vm_write: MachVmWrite,
+        /// libc's own `srandom`, which the `srandomdev` model seeds libc's
+        /// `random` state through.
+        #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+        pub host_srandom: unsafe extern "C" fn(u32),
     }
 
     // SAFETY: the fields are all function pointers into libSystem/libdispatch;
@@ -246,6 +250,9 @@ pub(crate) mod hostapi {
                 mach_vm_write: std::mem::transmute::<*mut c_void, MachVmWrite>(resolve(
                     c"mach_vm_write",
                 )),
+                host_srandom: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32)>(
+                    resolve(c"srandom"),
+                ),
             }
         }
     }

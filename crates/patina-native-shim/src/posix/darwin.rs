@@ -290,6 +290,25 @@ unsafe extern "C" fn sysctlbyname(
         }
     }
 }
+/// The modeled machine's hardware UUID (`50415449-4e41-4000-8000-000000000001`,
+/// "PATINA" in its first six bytes): a constant, so every run on every Mac
+/// reads the same identity.
+const HOST_UUID: [u8; 16] = [
+    0x50, 0x41, 0x54, 0x49, 0x4e, 0x41, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+];
+/// `gethostuuid(2)`. XNU copies the timeout in first and the UUID out last,
+/// each `EFAULT` where the guest's memory refuses; the modeled UUID is always
+/// known, so no wait ever runs out.
+#[unsafe(no_mangle)]
+extern "C" fn gethostuuid(id: *mut u8, wait: *const libc::timespec) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let copied = crate::uaccess::read::<[i64; 2]>(wait as usize)
+        .and_then(|_| crate::uaccess::write(id as usize, &HOST_UUID));
+    match copied {
+        Ok(()) => 0,
+        Err(errno) => super::error(errno),
+    }
+}
 #[unsafe(no_mangle)]
 extern "C" fn _NSGetExecutablePath(_buf: *mut c_char, _size: *mut u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

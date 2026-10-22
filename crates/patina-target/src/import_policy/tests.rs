@@ -207,12 +207,12 @@ fn classifies_native_import_decisions() {
         native_import_decision("_pow", NativeFormat::MachO, &empty),
         NativeImportDecision::Allowed
     );
-    // Guard: genuinely-effectful symbols that share the math neighborhood must
-    // NOT be swept in by the libm allowance. `random`/`drand48` draw from a
-    // host PRNG; `system` spawns a process; `srand` mutates PRNG state. The
-    // explicit-list discipline keeps all of them denied.
+    // Guard: symbols that share the math neighborhood must NOT be swept in by
+    // the libm allowance. `random`/`drand48` are PRNG draws; `system` spawns a
+    // process; `srand` mutates PRNG state. The explicit-list discipline keeps
+    // all of them denied.
     assert_eq!(
-        native_import_decision("random", NativeFormat::MachO, &empty),
+        native_import_decision("drand48", NativeFormat::MachO, &empty),
         NativeImportDecision::Denied("unknown-import")
     );
     assert_eq!(
@@ -773,6 +773,54 @@ fn aliases_of_interposed_names_are_refused() {
             decide(name, NativeFormat::MachO) == NativeImportDecision::Allowed,
             admitted,
             "{name}"
+        );
+    }
+}
+
+// SQLite's Darwin build (the amalgamation's `__APPLE__` code: zone malloc, AFP
+// and proxy locking) imports these beside the filesystem calls the shim models.
+// The pure and heap ones clear the audit; the PRNG's reseeding siblings stay
+// refused, and the calls the shim defines read as their escape class when a
+// binary without the shim imports them.
+#[test]
+fn darwin_sqlite_imports_are_classified() {
+    let empty = BTreeSet::new();
+    for symbol in [
+        "_atoi",
+        "___strlcpy_chk",
+        "___strlcat_chk",
+        "_malloc_create_zone",
+        "_malloc_default_zone",
+        "_malloc_set_zone_name",
+        "_malloc_zone_malloc",
+        "_malloc_zone_realloc",
+        "_malloc_zone_free",
+        "_random",
+    ] {
+        assert_eq!(
+            native_import_decision(symbol, NativeFormat::MachO, &empty),
+            NativeImportDecision::Allowed,
+            "{symbol}"
+        );
+    }
+    for symbol in ["_srandom", "_initstate", "_setstate"] {
+        assert_eq!(
+            native_import_decision(symbol, NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied("unknown-import"),
+            "{symbol}"
+        );
+    }
+    for (symbol, class) in [
+        ("_statfs", "filesystem"),
+        ("_fstatfs", "filesystem"),
+        ("_fsctl", "filesystem"),
+        ("_srandomdev", "entropy"),
+        ("_gethostuuid", "host-introspection"),
+    ] {
+        assert_eq!(
+            native_import_decision(symbol, NativeFormat::MachO, &empty),
+            NativeImportDecision::Denied(class),
+            "{symbol}"
         );
     }
 }

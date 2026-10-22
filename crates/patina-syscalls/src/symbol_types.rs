@@ -87,7 +87,8 @@ pub enum SymbolStatus {
     Partial,
     /// A deny-trap: linking is inert, the first call aborts naming the symbol.
     /// The class is the audit's escape category for the surface
-    /// (`process`, `dynamic-loading`, `macos-framework`, `host-introspection`).
+    /// (`process`, `dynamic-loading`, `macos-framework`, `host-introspection`,
+    /// `filesystem`).
     Deny(&'static str),
     /// Shim control plane: not a libc contract (startup, the trace channel,
     /// the SUD/TSC arming entries, weak-hook stubs, sentinel data).

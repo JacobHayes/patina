@@ -4,6 +4,8 @@ use super::{at, cancel, error, model_result};
 use crate::paths::RESOLVE_EMPTY_PATH;
 use crate::paths::{AT_FDCWD, RESOLVE_NOFOLLOW};
 use core::ffi::{c_char, c_int};
+#[cfg(target_os = "macos")]
+mod darwin_volume;
 mod directory;
 pub(super) mod metadata;
 mod paths;

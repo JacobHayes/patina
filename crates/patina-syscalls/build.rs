@@ -20,6 +20,7 @@ fn main() {
         "src/symbol_stdio.rs",
         "src/symbol_memory.rs",
         "src/symbol_ipc.rs",
+        "src/symbol_darwin.rs",
     ] {
         println!("cargo:rerun-if-changed={source}");
     }

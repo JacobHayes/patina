@@ -93,6 +93,35 @@ unsafe extern "C" fn CCRandomGenerateBytes(destination: *mut c_void, length: usi
     0
 }
 
+#[cfg(target_os = "macos")]
+/// `srandomdev(3)`: seed libc's `random` state from the entropy pool. Darwin's
+/// draws the seed from `getentropy`; the model draws it from the run's seeded
+/// entropy stream and hands it to libc's own `srandom`, so what `random` yields
+/// afterwards is a function of the run seed. `random` itself is libc's, a
+/// deterministic generator over process-local state.
+#[unsafe(no_mangle)]
+extern "C" fn srandomdev() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let mut seed = [0u8; 4];
+    // SAFETY: `seed` is writable local storage of the requested length.
+    let filled = unsafe {
+        crate::entropy::fill(
+            seed.as_mut_ptr().cast(),
+            seed.len(),
+            EntropyWait::UntilReady,
+        )
+    };
+    if filled != Ok(seed.len()) {
+        // A pool that is ready before the guest runs cannot fail a local
+        // buffer; fault as `CCRandomGenerateBytes` does rather than seed
+        // from anything else.
+        // SAFETY: this noreturn instruction intentionally raises the established trap.
+        unsafe { core::arch::asm!("brk #1", options(noreturn)) }
+    }
+    // SAFETY: the resolved host `srandom` takes any seed.
+    unsafe { (crate::hostapi::get().host_srandom)(u32::from_ne_bytes(seed)) }
+}
+
 #[cfg(target_os = "linux")]
 core::arch::global_asm!(".hidden patina_deterministic_getentropy");
 #[cfg(target_os = "macos")]

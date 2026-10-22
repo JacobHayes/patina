@@ -3,8 +3,9 @@
 //!
 //! Every entry a path can name is on ONE deterministic volume, an ext4-like
 //! filesystem on block device 8:1 whose description is a constant (so it is
-//! the same on record and replay and on every host): 4 KiB blocks, fixed
-//! block and inode counts, `NAME_MAX` names, and `f_flags` as
+//! the same on record and replay and on every host): the shared
+//! [`VOLUME`] geometry (4 KiB blocks, fixed block and inode counts),
+//! `NAME_MAX` names, and `f_flags` as
 //! `calculate_f_flags` builds them — `ST_VALID` always, plus the mount's
 //! `relatime`, the atime policy the filesystem stamps by. A descriptor with no
 //! entry on the volume is on one of the kernel's pseudo-filesystems, which
@@ -12,8 +13,8 @@
 //! sockfs, an eventfd, signalfd or epoll instance on
 //! anon_inodefs. The entropy device `/dev/urandom` is on a mount of its own,
 //! devtmpfs (a tmpfs), described by constants like the volume. Every `f_fsid`
-//! is derived from the filesystem's device. Linux only: the C `statfs` family
-//! is the Linux one.
+//! is derived from the filesystem's device. This is the Linux description;
+//! macOS describes the same volume as APFS (`posix/fs/darwin_volume.rs`).
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -22,6 +23,7 @@ use std::ffi::{c_char, c_int};
 #[cfg(target_arch = "x86_64")]
 use crate::EINVAL;
 use crate::fdtable::FdKind;
+use crate::fs::VOLUME;
 use crate::{
     EBADF, EFAULT, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fs_device,
     path_from_c, paths, resolve_fd, set_errno, thread,
@@ -166,15 +168,15 @@ impl Filesystem {
         match self {
             Filesystem::Volume => KernelStatfs {
                 f_type: EXT4_SUPER_MAGIC,
-                f_bsize: 4096,
-                f_blocks: 1 << 20,
-                f_bfree: 1 << 19,
-                f_bavail: 1 << 19,
-                f_files: 1 << 20,
-                f_ffree: 1 << 19,
+                f_bsize: i64::from(VOLUME.block_size),
+                f_blocks: VOLUME.blocks,
+                f_bfree: VOLUME.free_blocks,
+                f_bavail: VOLUME.free_blocks,
+                f_files: VOLUME.files,
+                f_ffree: VOLUME.free_files,
                 f_fsid: self.fsid(),
                 f_namelen: NAME_MAX,
-                f_frsize: 4096,
+                f_frsize: i64::from(VOLUME.block_size),
                 f_flags: ST_VALID | ST_RELATIME,
                 f_spare: [0; 4],
             },

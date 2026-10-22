@@ -46,7 +46,7 @@ fn native_trap(class: &CStr, symbol: &CStr) -> ! {
     crate::host_abort()
 }
 // The registry's deny rows outside the process family (dynamic loading, the
-// macOS framework and host-introspection helpers), generated with the
+// macOS framework and host-introspection helpers, Darwin's `fsctl`), generated with the
 // arity-free trap ABI: callers cannot return from any of them.
 include!(concat!(env!("OUT_DIR"), "/deny_traps.rs"));
 

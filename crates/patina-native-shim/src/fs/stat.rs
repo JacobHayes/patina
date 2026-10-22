@@ -21,11 +21,35 @@ pub(crate) fn stat_mode(values: &PatinaMetadata) -> libc::mode_t {
     kind | (values.mode & 0o7777) as libc::mode_t
 }
 
+/// The size and capacity of the one deterministic volume every path names: a
+/// constant, so it is the same on record and replay and on every host. Each
+/// platform's `statfs` describes this volume in its own vocabulary: an
+/// ext4-like filesystem on Linux (`src/volume.rs`), an APFS volume on macOS
+/// (`src/posix/fs/darwin_volume.rs`).
+pub(crate) struct VolumeGeometry {
+    /// The block size: `statfs`'s `f_bsize` and every file's `st_blksize`.
+    pub(crate) block_size: u32,
+    pub(crate) blocks: u64,
+    pub(crate) free_blocks: u64,
+    pub(crate) files: u64,
+    pub(crate) free_files: u64,
+}
+
+/// The volume's geometry: 4 GiB of 4 KiB blocks, half of them free, and
+/// 2^20 inodes, half of them free.
+pub(crate) const VOLUME: VolumeGeometry = VolumeGeometry {
+    block_size: 4096,
+    blocks: 1 << 20,
+    free_blocks: 1 << 19,
+    files: 1 << 20,
+    free_files: 1 << 19,
+};
+
 /// `st_blksize`: the virtual volume's 4 KiB block, or devpts' 1 KiB block.
 pub(crate) fn stat_blksize(values: &PatinaMetadata) -> u64 {
     if values.fs == PATINA_FS_DEVPTS {
         1024
     } else {
-        4096
+        u64::from(VOLUME.block_size)
     }
 }

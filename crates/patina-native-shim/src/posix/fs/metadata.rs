@@ -6,7 +6,7 @@ use super::*;
 use crate::PatinaMetadata;
 use core::{mem::MaybeUninit, ptr};
 
-fn makedev(major: u32, minor: u32) -> libc::dev_t {
+pub(super) fn makedev(major: u32, minor: u32) -> libc::dev_t {
     #[cfg(target_os = "macos")]
     {
         ((major << 24) | minor) as libc::dev_t

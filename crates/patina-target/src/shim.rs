@@ -143,7 +143,8 @@ pub fn native_escape_is_tsc_manageable(escape: &NativeEscape) -> bool {
 /// import-table audit because the whole point of the deny-trap is to leave the
 /// import table clean. `(symbol, class)`, where `class` is the same escape
 /// category the pre-run gate prints for the equivalent un-interposed surface
-/// (`process`/`dynamic-loading`/`macos-framework`/`host-introspection`).
+/// (`process`/`dynamic-loading`/`macos-framework`/`host-introspection`/
+/// `filesystem`).
 pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 
 /// The enumerated deny-trap-armed symbols the native shim strong-defines: the
@@ -151,9 +152,11 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// `dlopen`/`dlclose` (loading host code is never modeled, yet extension
 /// loaders such as `libloading` link them), the macOS CoreFoundation/Security
 /// framework helpers left unreachable by the honest empty-trust-store /
-/// UTC-timezone models, and the IOKit registry walk left unreachable by
-/// `IOServiceMatching` returning NULL. The shim generates the last three
-/// classes from their registry rows (`posix.rs` `native_trap`).
+/// UTC-timezone models, the IOKit registry walk left unreachable by
+/// `IOServiceMatching` returning NULL, and Darwin's `fsctl`, which SQLite's
+/// AFP locking reaches only on an afpfs volume the APFS model never is. The
+/// shim generates every class but the first from its registry rows
+/// (`posix.rs` `native_trap`).
 ///
 /// This is the UNION across platforms. A given binary only *defines* the members
 /// its target actually compiles — the framework/introspection set is
@@ -201,6 +204,8 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("IORegistryEntryCreateCFProperty", "host-introspection"),
     ("IORegistryEntryGetName", "host-introspection"),
     ("IOServiceGetMatchingServices", "host-introspection"),
+    // filesystem: AFP byte-range locking, unreachable on the APFS volume.
+    ("fsctl", "filesystem"),
     // macos-framework: CoreFoundation/Security helpers
     // downstream of the honest empty-trust-store / UTC-timezone models.
     ("CFArrayGetValueAtIndex", "macos-framework"),

@@ -360,6 +360,265 @@ fn main() {
         );
     }
 
+    // `statfs`/`fstatfs` describe the one deterministic volume as a local,
+    // writable APFS volume mounted at `/`, by path (through the resolver `stat`
+    // uses) and by descriptor alike, with `f_fsid` naming the device `stat`
+    // reports, and a buffer the guest cannot write is `EFAULT` rather than a
+    // fault inside the shim. SQLite's `unixOpen` fails every open whose
+    // `fstatfs` fails, and its lock-style probe picks AFP or no locking from
+    // these fields. Class
+    // pairing: the default-deny audit refuses a filesystem import the shim does
+    // not define, and `syscall_registry` checks every row is defined.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_statfs_describes_the_one_volume() {
+        let out = native_source_prints_deterministically(
+            "volume.rs",
+            r#"use std::ffi::CStr;
+use std::os::fd::AsRawFd;
+use std::os::raw::{c_char, c_int, c_void};
+use std::os::unix::fs::MetadataExt;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Statfs {
+    f_bsize: u32,
+    f_iosize: i32,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [i32; 2],
+    f_owner: u32,
+    f_type: u32,
+    f_flags: u32,
+    f_fssubtype: u32,
+    f_fstypename: [c_char; 16],
+    f_mntonname: [c_char; 1024],
+    f_mntfromname: [c_char; 1024],
+    f_flags_ext: u32,
+    f_reserved: [u32; 7],
+}
+
+unsafe extern "C" {
+    fn statfs(path: *const c_char, out: *mut Statfs) -> c_int;
+    fn fstatfs(fd: c_int, out: *mut Statfs) -> c_int;
+    fn pipe(fds: *mut c_int) -> c_int;
+    fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64)
+        -> *mut c_void;
+}
+
+const MNT_RDONLY: u32 = 0x1;
+const MNT_LOCAL: u32 = 0x1000;
+
+fn checked(result: c_int) -> Result<(), i32> {
+    match result {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error().raw_os_error().unwrap()),
+    }
+}
+
+fn by_path(path: &CStr) -> Result<Statfs, i32> {
+    let mut out = unsafe { std::mem::zeroed::<Statfs>() };
+    checked(unsafe { statfs(path.as_ptr(), &mut out) }).map(|()| out)
+}
+
+fn by_fd(fd: c_int) -> Result<Statfs, i32> {
+    let mut out = unsafe { std::mem::zeroed::<Statfs>() };
+    checked(unsafe { fstatfs(fd, &mut out) }).map(|()| out)
+}
+
+fn text(field: &[c_char]) -> String {
+    unsafe { CStr::from_ptr(field.as_ptr()) }.to_string_lossy().into_owned()
+}
+
+fn bytes(fs: &Statfs) -> &[u8] {
+    unsafe { std::slice::from_raw_parts((fs as *const Statfs).cast(), size_of::<Statfs>()) }
+}
+
+fn main() {
+    let file = std::fs::File::create("probe.db").unwrap();
+    let dev = file.metadata().unwrap().dev();
+    let fs = by_path(c"probe.db").unwrap();
+    assert_eq!(text(&fs.f_fstypename), "apfs");
+    assert_eq!(text(&fs.f_mntonname), "/");
+    assert_ne!(fs.f_flags & MNT_LOCAL, 0, "the volume is local");
+    assert_eq!(fs.f_flags & MNT_RDONLY, 0, "the volume is writable");
+    assert_eq!(fs.f_bsize, 4096);
+    assert_eq!(file.metadata().unwrap().blksize(), u64::from(fs.f_bsize));
+    assert!(fs.f_bfree <= fs.f_blocks && fs.f_bavail <= fs.f_bfree);
+    assert!(fs.f_ffree <= fs.f_files);
+    assert_eq!(fs.f_fsid, [dev as i32, fs.f_type as i32], "f_fsid is the device and the type");
+    for (name, other) in [
+        ("fstatfs of the file", by_fd(file.as_raw_fd()).unwrap()),
+        ("statfs of the directory", by_path(c".").unwrap()),
+        ("statfs of the root", by_path(c"/").unwrap()),
+    ] {
+        assert!(bytes(&other) == bytes(&fs), "{name} names another volume");
+    }
+    assert_eq!(by_path(c"missing/probe").err(), Some(2), "a missing path is ENOENT");
+    assert_eq!(by_path(c"probe.db/x").err(), Some(20), "a path through a file is ENOTDIR");
+    let mut ends = [0; 2];
+    assert_eq!(unsafe { pipe(ends.as_mut_ptr()) }, 0);
+    assert_eq!(by_fd(ends[0]).err(), Some(22), "a pipe has no volume: EINVAL");
+    assert_eq!(by_fd(4000).err(), Some(9), "a closed descriptor is EBADF");
+    // A buffer the guest cannot write is EFAULT, judged after the path or descriptor.
+    let sealed = unsafe { mmap(std::ptr::null_mut(), 1 << 14, 0, 0x1002, -1, 0) };
+    assert_ne!(sealed as isize, -1, "mapping a PROT_NONE page failed");
+    let sealed = sealed.cast::<Statfs>();
+    let path = c"probe.db".as_ptr();
+    assert_eq!(checked(unsafe { statfs(path, sealed) }), Err(14), "statfs into PROT_NONE");
+    assert_eq!(checked(unsafe { fstatfs(file.as_raw_fd(), sealed) }), Err(14), "fstatfs into PROT_NONE");
+    assert_eq!(checked(unsafe { statfs(c"missing/probe".as_ptr(), sealed) }), Err(2));
+    assert_eq!(checked(unsafe { fstatfs(4000, sealed) }), Err(9));
+    println!(
+        "type={} flags={:#x} bsize={} blocks={} bfree={} files={} ffree={}",
+        text(&fs.f_fstypename),
+        fs.f_flags,
+        fs.f_bsize,
+        fs.f_blocks,
+        fs.f_bfree,
+        fs.f_files,
+        fs.f_ffree
+    );
+}
+"#,
+        );
+        assert!(
+            out.contains("type=apfs"),
+            "the volume probe did not run to completion:\n{out}"
+        );
+    }
+
+    // The rest of SQLite's Darwin surface beside `statfs`: `atoi` and the
+    // fortified `strlcpy`/`strlcat` are pure, the malloc-zone interface is the
+    // process heap, `random` starts from libc's fixed state (so its unseeded
+    // draws do not follow the seed), `srandomdev` seeds it from the run's
+    // entropy stream (so its draws do), and `gethostuuid` answers the modeled
+    // machine's fixed identity (so it does not), with `EFAULT` where the guest's
+    // timeout or buffer is inaccessible. Recording and replaying the run agree.
+    // Class pairing: the default-deny audit, which refuses every import no
+    // group admits.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_sqlite_surface_follows_the_seed() {
+        let directory = tempdir().unwrap();
+        let workspace = native_workspace();
+        let source = directory.path().join("surface.rs");
+        fs::write(
+            &source,
+            r#"use std::ffi::CStr;
+use std::os::raw::{c_char, c_int, c_long, c_void};
+
+unsafe extern "C" {
+    fn atoi(text: *const c_char) -> c_int;
+    fn __strlcpy_chk(dst: *mut c_char, src: *const c_char, size: usize, dst_len: usize) -> usize;
+    fn __strlcat_chk(dst: *mut c_char, src: *const c_char, size: usize, dst_len: usize) -> usize;
+    fn malloc_default_zone() -> *mut c_void;
+    fn malloc_create_zone(start_size: usize, flags: u32) -> *mut c_void;
+    fn malloc_set_zone_name(zone: *mut c_void, name: *const c_char);
+    fn malloc_zone_malloc(zone: *mut c_void, size: usize) -> *mut c_void;
+    fn malloc_zone_realloc(zone: *mut c_void, ptr: *mut c_void, size: usize) -> *mut c_void;
+    fn malloc_zone_free(zone: *mut c_void, ptr: *mut c_void);
+    fn srandomdev();
+    fn random() -> c_long;
+    fn gethostuuid(id: *mut u8, wait: *const [i64; 2]) -> c_int;
+    fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64)
+        -> *mut c_void;
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap()
+}
+
+fn main() {
+    assert_eq!(unsafe { atoi(c"  42 rows".as_ptr()) }, 42);
+    let mut path = [0 as c_char; 8];
+    let len = path.len();
+    assert_eq!(unsafe { __strlcpy_chk(path.as_mut_ptr(), c"db".as_ptr(), len, len) }, 2);
+    assert_eq!(unsafe { __strlcat_chk(path.as_mut_ptr(), c"-journal".as_ptr(), len, len) }, 10);
+    assert_eq!(unsafe { CStr::from_ptr(path.as_ptr()) }, c"db-jour");
+    let own = unsafe { malloc_create_zone(4096, 0) };
+    unsafe { malloc_set_zone_name(own, c"probe".as_ptr()) };
+    for zone in [unsafe { malloc_default_zone() }, own] {
+        let block = unsafe { malloc_zone_malloc(zone, 16) }.cast::<u8>();
+        unsafe { block.write_bytes(7, 16) };
+        let block = unsafe { malloc_zone_realloc(zone, block.cast(), 4096) }.cast::<u8>();
+        assert!(unsafe { std::slice::from_raw_parts(block, 16) }.iter().all(|&byte| byte == 7));
+        unsafe { malloc_zone_free(zone, block.cast()) };
+    }
+    let unseeded: Vec<c_long> = (0..3).map(|_| unsafe { random() }).collect();
+    unsafe { srandomdev() };
+    let draws: Vec<c_long> = (0..3).map(|_| unsafe { random() }).collect();
+    let mut id = [0u8; 16];
+    assert_eq!(unsafe { gethostuuid(id.as_mut_ptr(), &[0, 0]) }, 0);
+    let sealed = unsafe { mmap(std::ptr::null_mut(), 1 << 14, 0, 0x1002, -1, 0) };
+    assert_ne!(sealed as isize, -1, "mapping a PROT_NONE page failed");
+    let mut spare = [0u8; 16];
+    let refused = unsafe { gethostuuid(spare.as_mut_ptr(), sealed.cast()) };
+    assert_eq!((refused, errno()), (-1, 14), "a PROT_NONE timeout is EFAULT");
+    assert_eq!(spare, [0; 16], "a refused call wrote the UUID");
+    let refused = unsafe { gethostuuid(sealed.cast(), &[0, 0]) };
+    assert_eq!((refused, errno()), (-1, 14), "a PROT_NONE UUID buffer is EFAULT");
+    let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!("unseeded={unseeded:?}");
+    println!("random={draws:?}");
+    println!("hostuuid={id}");
+}
+"#,
+        )
+        .unwrap();
+        let bin = directory.path().join("surface-bin");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let trace = directory.path().join("surface.patina");
+        let recorded = invoke(
+            workspace,
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let replayed = invoke(
+            workspace,
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(recorded.stdout, replayed.stdout, "replay diverged");
+        let run = |seed: &str| {
+            let out = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let line = |key: &str| {
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix(key))
+                    .unwrap_or_else(|| panic!("no {key} line under seed {seed}:\n{stdout}"))
+                    .to_owned()
+            };
+            (line("unseeded="), line("random="), line("hostuuid="))
+        };
+        let first = run("1");
+        assert_eq!(first, run("1"), "same-seed runs differ");
+        let other = run("2");
+        assert_eq!(first.0, other.0, "random's unseeded state follows the seed");
+        assert_ne!(
+            first.1, other.1,
+            "srandomdev's seed does not follow the run seed"
+        );
+        assert_eq!(first.2, other.2, "the host UUID changes with the seed");
+    }
+
     // Local-timezone surface (iana-time-zone / chrono `Local`): the runtime models a
     // single fixed timezone, UTC (matching the localtime_r interposer), so
     // `CFTimeZoneCopySystem`/`GetName`/`CFStringGetCStringPtr` report "UTC"
