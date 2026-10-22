@@ -4,9 +4,11 @@
 # Heavy standalone testbeds keep their own setup and are not required for
 # ordinary local development.
 
-# mise.lock is lockfile version 3. Older mise warns that it can't read it, then
-# silently resolves `rust = "latest"` to whatever is installed; refuse instead.
-min_version = "2026.9.18"
+# Older mise resolves `rust = "latest"` to whatever is installed instead of
+# mise.lock's pin; refuse it. Before 2026.9.18 it can't read lockfile version 3;
+# before 2026.10.1 it takes core:rust's rustup symlinks for `mise link`ed
+# versions, which bypass the lockfile.
+min_version = "2026.10.17"
 
 [settings]
 # Lock every configured tool, including tools added later.

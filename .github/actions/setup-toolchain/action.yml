@@ -26,7 +26,7 @@ runs:
     # Cache after setup so every component and target is retained too.
     - uses: jdx/mise-action@v3
       with:
-        version: 2026.9.18
+        version: 2026.10.17
         cache: false
         install_args: --locked
     - name: Install Rust components and targets
