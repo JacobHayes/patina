@@ -152,10 +152,9 @@ unsafe fn write_fields(lock: *mut PatinaFlock, value: &PatinaFlock) {
 /// start (`SEEK_SET`), the description's offset (`SEEK_CUR`) or the file's
 /// size (`SEEK_END`). `l_len` 0 runs to the end of the file, a negative one
 /// ends just before the start. An unknown whence or a range that starts
-/// before zero is `EINVAL`, one past `OFFSET_MAX` `EOVERFLOW`. (The `SEEK_CUR`
-/// and `SEEK_END` bases are read through the fault-eligible `fs_seek` and
-/// `fs_fd_metadata`, so an injected filesystem error can fail them, which no
-/// kernel does; a never-faulted size and position lookup would close it.)
+/// before zero is `EINVAL`, one past `OFFSET_MAX` `EOVERFLOW`. The kernel
+/// reads both bases from memory (`f_pos`, `i_size_read`), so neither lookup
+/// is fault-eligible: no filesystem fault can fail a lock.
 fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_int> {
     const OFFSET_MAX: i64 = i64::MAX;
     let base = match lock.l_whence {
@@ -168,7 +167,7 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
         }
         2 => {
             let handle = Fd(resolved.handle);
-            let size = with_context(|context| context.fs_fd_metadata(handle))?.len;
+            let size = with_context(|context| context.fs_fd_metadata_unrecorded(handle))?.len;
             i64::try_from(size).map_err(|_| EOVERFLOW)?
         }
         _ => return Err(EINVAL),

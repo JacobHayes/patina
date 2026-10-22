@@ -77,6 +77,8 @@ fn unrecorded_filesystem_queries_leave_no_trace_op() {
             assert_eq!(by_fd.len, 5);
             let by_path = ctx.fs_metadata_unrecorded("/f").unwrap();
             assert_eq!(by_path.ino, by_fd.ino);
+            let by_ino = ctx.fs_inode_metadata_unrecorded(by_fd.ino).unwrap();
+            assert_eq!(by_ino, by_fd);
             assert_eq!(ctx.fs_fd_path_unrecorded(fd).unwrap(), "/f");
         }
         ctx.fs_close(fd).unwrap();
@@ -114,6 +116,10 @@ fn unrecorded_filesystem_queries_are_never_faulted() {
         .unwrap();
     assert_eq!(ctx.fs_fd_metadata_unrecorded(fd).unwrap(), expected);
     assert_eq!(ctx.fs_metadata_unrecorded("/f").unwrap(), expected);
+    assert_eq!(
+        ctx.fs_inode_metadata_unrecorded(expected.ino).unwrap(),
+        expected
+    );
     assert_eq!(ctx.fs_fault_report().unwrap().eligible_ops, 0);
     // The recorded read is a guest operation, and the knob fails it.
     assert!(ctx.fs_fd_metadata(fd).is_err());

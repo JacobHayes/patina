@@ -942,6 +942,68 @@ fn a_mapped_file_is_whole_under_filesystem_faults() {
     }
 }
 
+/// What `inode_read_fault_probe.rs` prints for each call Linux answers from
+/// in-memory inode and file state: a 4096-byte file read from offset 1000, and
+/// every other call succeeding (`copy_file_range` copies nothing from the end
+/// of its source and refuses an overlap within one file).
+#[cfg(target_os = "linux")]
+const INODE_READ_ANSWERS: [(&str, &str); 9] = [
+    ("fionread", "3096"),
+    ("fioqsize", "4096"),
+    ("lock_end", "0"),
+    ("fchdir", "0"),
+    ("copy_file_range", "at_end=0 overlap=EINVAL"),
+    ("name_to_handle_at", "0"),
+    ("utimensat_fd", "0"),
+    ("fchown_file", "0"),
+    ("fchown_fifo", "0"),
+];
+
+/// A call the kernel answers from the in-memory inode gets Linux's answer
+/// under filesystem faults, and the shim's inode read inside it draws no
+/// fault. The probe never calls `fstat` itself, so a run whose fault report
+/// attributes an injected error to `fd_metadata` has a shim step that read
+/// the inode through the guest's `fstat`. That attribution is what judges
+/// `utimensat` and `fchown`, whose own attribute write can fail and is
+/// retried. Each call runs alone so a failure names its site; the whole probe
+/// then repeats and replays under the same faults. RED before: each site read
+/// the inode through the faulted `fstat`, so the calls that do no I/O failed
+/// with `EIO` and every site drew `fd_metadata` faults.
+#[cfg(target_os = "linux")]
+#[test]
+fn in_memory_inode_reads_answer_under_filesystem_faults() {
+    let g = Guest::assert_build("inode_read_fault_probe.rs");
+    let faults = ["--fs-error-permille", "500", "--fs-short-permille", "1000"];
+    for (site, expected) in INODE_READ_ANSWERS {
+        let env = format!("INODE_READ_SITE={site}");
+        let run = ["--seed", "1", "--env", &env, "--format", "json"];
+        let output = g.command("run", &[&faults[..], &run].concat());
+        assert!(
+            output.status.success(),
+            "{site}: {}: {}{}",
+            output.status,
+            text(&output.stdout),
+            text(&output.stderr)
+        );
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let stdout = envelope["stdout"].as_str().unwrap();
+        let prefix = format!("NATIVE_INODE_READ {site} ");
+        assert_eq!(
+            assert_unique_line_payload(stdout.as_bytes(), &prefix),
+            expected,
+            "{site}"
+        );
+        let errors = &envelope["fault_reports"]["fs"]["errors_by_op"];
+        assert!(errors.is_object(), "{site}: {envelope:#}");
+        assert_eq!(errors.get("fd_metadata"), None, "{site}: {errors}");
+    }
+    let out = g.assert_seeded_record_replay_identity(1, &faults);
+    for (site, expected) in INODE_READ_ANSWERS {
+        let prefix = format!("NATIVE_INODE_READ {site} ");
+        assert_eq!(assert_unique_line_payload(&out, &prefix), expected);
+    }
+}
+
 /// The libc entropy surface answers as the host's own libc does, the native
 /// run being the oracle: `getentropy`'s size limit and errno (glibc `EIO`, XNU
 /// `EINVAL`), an empty request, and which names `dlsym` finds. RED before on

@@ -333,6 +333,11 @@ pub trait FsDriver: Send {
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
         self.fd_metadata(fd)
     }
+    /// [`FsDriver::inode_metadata`] as the same never-faulted bookkeeping (the
+    /// mode of a FIFO endpoint's node, read inside `fchown`).
+    fn inode_metadata_unfaulted(&mut self, ino: u64) -> DriverResult<FsMetadata> {
+        self.inode_metadata(ino)
+    }
     /// [`FsDriver::read_at`] as a load the runtime makes for itself rather
     /// than for a guest read (the native shim filling a mapped file's page
     /// cache): never faulted, since a kernel fills its page cache with no read

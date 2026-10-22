@@ -314,7 +314,9 @@ impl Context {
     /// a guest operation, so it costs no latency and is never faulted
     /// ([`FsDriver::fd_metadata_unfaulted`]): the native shim's page cache asks
     /// which file a handle's bytes belong to, its fs notifications which inode
-    /// a handle is on, and `cachestat` how many pages a file has.
+    /// a handle is on, `cachestat` how many pages a file has, and a call the
+    /// kernel answers from the in-memory inode (`FIONREAD`'s size, a
+    /// `SEEK_END` lock's base, `fchdir`'s search bit) what that inode holds.
     pub fn fs_fd_metadata_unrecorded(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_fd_metadata(fd);
@@ -324,6 +326,21 @@ impl Context {
             .as_mut()
             .ok_or_else(|| EffectError::missing_driver("filesystem"))?
             .fd_metadata_unfaulted(fd)?)
+    }
+
+    /// The metadata of the entry inode `ino` names
+    /// ([`Self::fs_inode_metadata`]), read UNRECORDED and never faulted as
+    /// [`Self::fs_fd_metadata_unrecorded`] is: the mode `fchown` decides on
+    /// for a FIFO endpoint, whose node the filesystem holds no handle to.
+    pub fn fs_inode_metadata_unrecorded(&mut self, ino: u64) -> Result<FsMetadata, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_inode_metadata(ino);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .inode_metadata_unfaulted(ino)?)
     }
 
     /// Up to `max_len` bytes of `fd`'s file from `offset`, read UNRECORDED and

@@ -542,13 +542,65 @@ fn write_patina_metadata(metadata: PatinaMetadata, out: *mut PatinaMetadata) -> 
     0
 }
 
+/// Whose read of a descriptor's metadata it is. [`MetadataLookup::Fstat`] is
+/// the guest's own `fstat`: a recorded filesystem operation that is charged
+/// latency and can fail with an injected error. [`MetadataLookup::Inode`] is
+/// the kernel reading the in-memory inode inside another call (`FIOQSIZE`,
+/// `name_to_handle_at` on a descriptor, both Linux-only). That read does no
+/// storage access, so it is never faulted and records nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MetadataLookup {
+    Fstat,
+    #[cfg(target_os = "linux")]
+    Inode,
+}
+
+impl MetadataLookup {
+    fn of_fd(
+        self,
+        context: &mut Context,
+        fd: Fd,
+    ) -> Result<patina_dst_abi::FsMetadata, RuntimeError> {
+        match self {
+            Self::Fstat => context.fs_fd_metadata(fd),
+            #[cfg(target_os = "linux")]
+            Self::Inode => context.fs_fd_metadata_unrecorded(fd),
+        }
+    }
+
+    fn of_inode(
+        self,
+        context: &mut Context,
+        ino: u64,
+    ) -> Result<patina_dst_abi::FsMetadata, RuntimeError> {
+        match self {
+            Self::Fstat => context.fs_inode_metadata(ino),
+            #[cfg(target_os = "linux")]
+            Self::Inode => context.fs_inode_metadata_unrecorded(ino),
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
-/// Read full metadata for a deterministic descriptor.
+/// Read full metadata for a deterministic descriptor: the guest's `fstat`.
 ///
 /// # Safety
 /// `out` must point to a writable `struct patina_metadata`.
 pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: per this function's contract.
+    unsafe { fd_metadata_full(raw_fd, out, MetadataLookup::Fstat) }
+}
+
+/// [`patina_fd_metadata_full`] read as `lookup`.
+///
+/// # Safety
+/// `out` must point to a writable `struct patina_metadata`.
+pub(crate) unsafe fn fd_metadata_full(
+    raw_fd: c_int,
+    out: *mut PatinaMetadata,
+    lookup: MetadataLookup,
+) -> c_int {
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
     // filesystem knows the ENTRY but holds no handle to ask about. What the
     // descriptor holds is the NODE, so the filesystem is asked about the inode —
@@ -562,7 +614,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
     // an unlinked-but-open entry. There is no open-time copy to fall back to,
     // because a copy is a stale cache one field over from the cached path.
     if let Some(node) = thread::fifo_ino(raw_fd) {
-        return match with_context(|context| context.fs_inode_metadata(node)) {
+        return match with_context(|context| lookup.of_inode(context, node)) {
             Ok(metadata) => write_metadata(metadata, out),
             Err(errno) => fail(errno),
         };
@@ -608,7 +660,7 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         Err(errno) => return fail(errno),
     };
     mem::inspecting(fd.0);
-    match with_context(|context| context.fs_fd_metadata(fd)) {
+    match with_context(|context| lookup.of_fd(context, fd)) {
         Ok(metadata) => write_metadata(metadata, out),
         Err(errno) => fail(errno),
     }
@@ -821,8 +873,8 @@ pub unsafe extern "C" fn patina_utimensat(
         let ino = if let Some(ino) = thread::fifo_ino(dirfd) {
             ino
         } else if descriptor.kind.is_fs() {
-            match with_context(|context| context.fs_fd_metadata(Fd(descriptor.handle))) {
-                Ok(metadata) => metadata.ino,
+            match with_context(|context| context.fs_fd_ino(Fd(descriptor.handle))) {
+                Ok(ino) => ino,
                 Err(errno) => return fail(errno),
             }
         } else {
@@ -1027,7 +1079,9 @@ pub unsafe extern "C" fn patina_chown(
 
 #[unsafe(no_mangle)]
 /// `fchown`: the same decision on the node a descriptor holds. `O_PATH` is
-/// `EBADF`; descriptors without a modeled inode refuse loudly.
+/// `EBADF`; descriptors without a modeled inode refuse loudly. The decision
+/// reads the in-memory inode's mode, so only the mode write can fail with an
+/// injected filesystem error.
 pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match fdget(raw_fd) {
@@ -1035,7 +1089,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         Err(errno) => return fail(errno),
     };
     if let Some(node) = thread::fifo_ino(raw_fd) {
-        let metadata = match with_context(|context| context.fs_inode_metadata(node)) {
+        let metadata = match with_context(|context| context.fs_inode_metadata_unrecorded(node)) {
             Ok(metadata) => metadata,
             Err(errno) => return fail(errno),
         };
@@ -1059,7 +1113,7 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
         return deny("patina: fchown on a descriptor without a modeled inode; failing closed\n");
     }
     let fd = Fd(resolved.handle);
-    let metadata = match with_context(|context| context.fs_fd_metadata(fd)) {
+    let metadata = match with_context(|context| context.fs_fd_metadata_unrecorded(fd)) {
         Ok(metadata) => metadata,
         Err(errno) => return fail(errno),
     };

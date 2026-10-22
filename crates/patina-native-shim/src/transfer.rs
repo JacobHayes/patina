@@ -197,11 +197,18 @@ pub unsafe extern "C" fn patina_copy_file_range(
         {
             return Err(EOVERFLOW);
         }
-        let source_meta = with_context(|context| context.fs_fd_metadata(from))?;
+        // The kernel's checks read the source's `i_size` and compare the two
+        // files' inodes in memory: no storage access, so these lookups are
+        // never faulted, and only the copy's own read and write below can fail
+        // with an injected error.
+        let (source_meta, destination_ino) = with_context(|context| {
+            let metadata = context.fs_fd_metadata_unrecorded(from)?;
+            Ok((metadata, context.fs_fd_metadata_unrecorded(to)?.ino))
+        })?;
         let count = u64::try_from(source.at).ok().map_or(len, |at| {
             source_meta.len.saturating_sub(at).min(len as u64) as usize
         });
-        let same = with_context(|context| context.fs_fd_metadata(to))?.ino == source_meta.ino;
+        let same = destination_ino == source_meta.ino;
         if same
             && destination.at + count as i64 > source.at
             && destination.at < source.at + count as i64

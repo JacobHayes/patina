@@ -295,14 +295,15 @@ pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
 
 /// `fchdir(2)`: a directory descriptor (opened plainly or `O_PATH`) becomes the
 /// working directory; the shim takes its own reference on the node so the guest
-/// closing the number changes nothing.
+/// closing the number changes nothing. The search check reads the in-memory
+/// inode's mode, as `inode_permission` does, so no filesystem fault can fail it.
 pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
     let resolved = resolve_fd(guest_fd)?;
     if resolved.kind != FdKind::Dir {
         return Err(ENOTDIR);
     }
     let handle = Fd(resolved.handle);
-    let metadata = with_context(|context| context.fs_fd_metadata(handle))?;
+    let metadata = with_context(|context| context.fs_fd_metadata_unrecorded(handle))?;
     if metadata.mode & 0o100 == 0 {
         return Err(EACCES);
     }

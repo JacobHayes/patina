@@ -69,8 +69,10 @@ pub(in crate::sud) fn sys_name_to_handle_at(
     } else {
         0
     };
+    // The kernel encodes the handle from the in-memory inode, so the
+    // descriptor form reads it unfaulted.
     let values = if dirfd as c_int != AT_FDCWD as c_int && is_empty_path(path, flags) {
-        fd_stat_values(dirfd as c_int)
+        fd_inode_values(dirfd as c_int)
     } else {
         path_stat_values(dirfd, path, resolve)
     };

@@ -613,6 +613,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fd_metadata_unfaulted(fd)
     }
 
+    fn inode_metadata_unfaulted(&mut self, ino: u64) -> DriverResult<FsMetadata> {
+        self.inner.inode_metadata_unfaulted(ino)
+    }
+
     fn read_at_unfaulted(
         &mut self,
         clock: FsClock,

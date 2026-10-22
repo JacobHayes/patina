@@ -117,10 +117,21 @@ impl KernelStat {
     }
 }
 
-pub(in crate::sud) fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
+/// The descriptor's metadata, as the guest's `fstat` reads it.
+fn fd_stat_values(fd: c_int) -> Result<StatValues, i64> {
+    fd_values(fd, crate::fs::MetadataLookup::Fstat)
+}
+
+/// The descriptor's node, as the kernel reads the in-memory inode inside
+/// another call: never faulted, and nothing recorded.
+pub(in crate::sud) fn fd_inode_values(fd: c_int) -> Result<StatValues, i64> {
+    fd_values(fd, crate::fs::MetadataLookup::Inode)
+}
+
+fn fd_values(fd: c_int, lookup: crate::fs::MetadataLookup) -> Result<StatValues, i64> {
     let mut v = empty_metadata();
     // SAFETY: the out-pointer is writable local storage.
-    let rc = unsafe { crate::fs::patina_fd_metadata_full(fd, &mut v) };
+    let rc = unsafe { crate::fs::fd_metadata_full(fd, &mut v, lookup) };
     if rc != 0 {
         return Err(-(crate::environment::patina_errno() as i64));
     }

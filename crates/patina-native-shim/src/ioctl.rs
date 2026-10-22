@@ -74,17 +74,19 @@ fn put_int(arg: *mut c_void, value: i32) -> c_int {
 }
 
 /// `FIONREAD` on a regular file: its size minus the description's position,
-/// truncated to an `int` exactly as `put_user` into an `int *` does.
+/// truncated to an `int` exactly as `put_user` into an `int *` does. The
+/// kernel reads both from memory (`i_size`, `f_pos`), so the size is the
+/// never-faulted lookup: no filesystem fault can fail the request.
 fn file_fionread(handle: Fd, arg: *mut c_void) -> c_int {
-    let size = match with_context(|context| context.fs_fd_metadata(handle)) {
-        Ok(metadata) => metadata.len,
-        Err(errno) => return fail(errno),
-    };
-    let position = match with_context(|context| context.fs_seek(handle, 0, SeekWhence::Current)) {
-        Ok(position) => position,
-        Err(errno) => return fail(errno),
-    };
-    put_int(arg, size.wrapping_sub(position) as i32)
+    let queued = with_context(|context| {
+        let size = context.fs_fd_metadata_unrecorded(handle)?.len;
+        let position = context.fs_seek(handle, 0, SeekWhence::Current)?;
+        Ok(size.wrapping_sub(position))
+    });
+    match queued {
+        Ok(queued) => put_int(arg, queued as i32),
+        Err(errno) => fail(errno),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -446,14 +448,16 @@ mod vfs {
 
     /// The bytes an inode holds (`inode_get_bytes`): what `fstat`'s
     /// `st_blocks` counts, in bytes; a queue's and a namespace file's inode
-    /// holds none.
+    /// holds none. The kernel reads the in-memory inode, so no filesystem
+    /// fault can fail it.
     fn bytes(raw_fd: c_int, resolved: &Resolved) -> Result<i64, c_int> {
         if matches!(resolved.kind, FdKind::MessageQueue | FdKind::Namespace) {
             return Ok(0);
         }
         let mut metadata = std::mem::MaybeUninit::<crate::PatinaMetadata>::uninit();
+        let lookup = crate::MetadataLookup::Inode;
         // SAFETY: the out-pointer is writable local storage.
-        if unsafe { crate::patina_fd_metadata_full(raw_fd, metadata.as_mut_ptr()) } != 0 {
+        if unsafe { crate::fd_metadata_full(raw_fd, metadata.as_mut_ptr(), lookup) } != 0 {
             return Err(crate::patina_errno());
         }
         // SAFETY: a 0 answer wrote the record.

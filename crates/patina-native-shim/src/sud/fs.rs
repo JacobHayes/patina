@@ -373,7 +373,8 @@ pub(super) use dirents::{DirentFormat, getdents};
 pub(super) use metadata::STAT_AT_FLAGS;
 use metadata::STATX_MNT_ID_VALUE;
 pub(super) use metadata::{
-    fd_stat_values, path_stat_values, sys_fstat, sys_fstatfs, sys_newfstatat, sys_statfs, sys_statx,
+    fd_inode_values, path_stat_values, sys_fstat, sys_fstatfs, sys_newfstatat, sys_statfs,
+    sys_statx,
 };
 pub(super) use namespace::{
     sys_faccessat, sys_fchmod, sys_fchmodat, sys_linkat, sys_mkdirat, sys_mknodat, sys_readlinkat,
