@@ -470,6 +470,15 @@ impl FsDriver for CrashFs {
         self.live.fd_ino(fd)
     }
 
+    /// A path-only open creates and truncates nothing, so the handle is the
+    /// only thing to track.
+    fn open_path_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<Fd> {
+        let fd = self.live.open_path_unfaulted(clock, path)?;
+        let normalized = normalize_entry_path(path).expect("open normalized the path already");
+        self.open_paths.insert(fd, normalized);
+        Ok(fd)
+    }
+
     fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
         self.live.metadata_unfaulted(path)
     }

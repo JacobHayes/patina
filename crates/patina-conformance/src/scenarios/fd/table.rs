@@ -15,7 +15,7 @@ use crate::catalog::{DEFAULTS, Scenario};
 
 use patina_dst_syscalls::Syscall;
 
-use crate::probe::{AT_FDCWD, Probe, neg};
+use crate::probe::{AT_FDCWD, Probe, Shown, neg};
 use libc::*;
 
 /// `F_GETSIG` (`asm-generic/fcntl.h`), which the libc crate does not define.
@@ -137,6 +137,62 @@ pub fn run(p: &Probe) {
         p.fcntl(a, F_DUPFD, 1023) == neg(EMFILE),
     );
     p.close(1023);
+
+    // ---- an open at RLIMIT_NOFILE has no effect ----
+    // The kernel takes the number before it walks the path
+    // (`get_unused_fd_flags` before `do_filp_open`), so an open that cannot
+    // have one is EMFILE before anything else, and creates or truncates
+    // nothing.
+    let kept = open("kept");
+    p.require("a file to keep", kept >= 0);
+    p.check("write the kept file", p.write(kept, b"kept") == 4);
+    p.check("close the kept file", p.close(kept) == 0);
+    let next = p.dup(a) as i32;
+    p.require("the lowest free number", next >= 0);
+    p.close(next);
+    let (limit_result, soft, hard) = p.getrlimit(RLIMIT_NOFILE as i32, Shown::Soft);
+    p.require("read RLIMIT_NOFILE", limit_result == 0);
+    p.require(
+        "lower RLIMIT_NOFILE to the numbers in use",
+        p.setrlimit_kept(RLIMIT_NOFILE as i32, next as u64, hard) == 0,
+    );
+    let created = p.openat(
+        AT_FDCWD,
+        &format!("{root}/absent"),
+        O_RDWR | O_CREAT | O_CLOEXEC,
+        0o640,
+    );
+    let truncated = p.openat(
+        AT_FDCWD,
+        &format!("{root}/kept"),
+        O_WRONLY | O_TRUNC | O_CLOEXEC,
+        0,
+    );
+    let missing = p.openat(AT_FDCWD, &format!("{root}/missing/x"), O_RDONLY, 0);
+    let restored = p.setrlimit_kept(RLIMIT_NOFILE as i32, soft, hard);
+    p.require("restore RLIMIT_NOFILE", restored == 0);
+    p.check(
+        "a creating open with the table full is EMFILE",
+        i64::from(created) == neg(EMFILE),
+    );
+    p.check(
+        "and creates nothing",
+        p.newfstatat(AT_FDCWD, &format!("{root}/absent"), 0).0 == neg(ENOENT),
+    );
+    p.check(
+        "a truncating open with the table full is EMFILE",
+        i64::from(truncated) == neg(EMFILE),
+    );
+    p.check(
+        "and leaves the file's bytes",
+        p.newfstatat(AT_FDCWD, &format!("{root}/kept"), 0)
+            .1
+            .is_some_and(|stat| stat.size == 4),
+    );
+    p.check(
+        "EMFILE comes before the path walk's ENOENT",
+        i64::from(missing) == neg(EMFILE),
+    );
 
     // ---- close_range ----
     let x = open("x");

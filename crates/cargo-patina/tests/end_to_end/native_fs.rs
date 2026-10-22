@@ -690,6 +690,125 @@ fn main() {
         );
     }
 
+    // A `pwritev` whose second segment is a shared mapping of the file the
+    // first segment just wrote reads what that segment stored: Linux writes the
+    // vector through one page cache, so file and mapping both end `BB`.
+    #[cfg(target_os = "linux")]
+    const PWRITEV_FROM_OWN_MAPPING_SOURCE: &str = r#"
+use std::io::Write;
+use std::os::unix::io::AsRawFd;
+
+#[repr(C)]
+struct Iovec {
+    base: *const u8,
+    len: usize,
+}
+
+unsafe extern "C" {
+    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+}
+
+const PROT_READ_WRITE: i32 = 3;
+const MAP_SHARED: i32 = 1;
+
+fn main() {
+    let path = std::env::args().nth(1).unwrap_or_else(|| "/mapped".into());
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(b"AA").unwrap();
+    let view = unsafe { mmap(std::ptr::null_mut(), 2, PROT_READ_WRITE, MAP_SHARED, file.as_raw_fd(), 0) };
+    assert_ne!(view as isize, -1);
+    let segments = [
+        Iovec { base: b"B".as_ptr(), len: 1 },
+        Iovec { base: view.cast_const(), len: 1 },
+    ];
+    let wrote = unsafe { pwritev(file.as_raw_fd(), segments.as_ptr(), 2, 0) };
+    let mapped = unsafe { std::slice::from_raw_parts(view, 2) };
+    println!(
+        "PWRITEV_VIEW wrote={wrote} file={} view={}",
+        String::from_utf8_lossy(&std::fs::read(&path).unwrap()),
+        String::from_utf8_lossy(mapped)
+    );
+}
+"#;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_pwritev_segment_from_a_mapping_of_its_file_reads_the_earlier_segment() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("pwritev_view.rs");
+        fs::write(&source, PWRITEV_FROM_OWN_MAPPING_SOURCE).unwrap();
+        let native = directory.path().join("native-file");
+        let oracle = native_run_of(&source, &[native.to_str().unwrap()]);
+        let workspace = native_workspace();
+        let bin = directory.path().join("pwritev-view");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let bin = bin.to_str().unwrap();
+        let trace = directory.path().join("pwritev-view.patina");
+        let recorded = invoke(
+            workspace,
+            &[
+                "run",
+                bin,
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+        for (what, output) in [("run", &recorded), ("replay", &replayed)] {
+            let line = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| line.starts_with("PWRITEV_VIEW "))
+                .map(str::to_owned);
+            assert_eq!(line.as_deref(), Some(oracle.as_str()), "{what} vs native");
+        }
+    }
+
+    /// The `PWRITEV_VIEW` line a single-file guest prints run natively with
+    /// plain `rustc`, without Patina.
+    #[cfg(target_os = "linux")]
+    fn native_run_of(source: &Path, args: &[&str]) -> String {
+        let binary = source.with_extension("native");
+        let built = Command::new("rustc")
+            .args(["--edition", "2024", "-o"])
+            .arg(&binary)
+            .arg(source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let output = Command::new(&binary).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.starts_with("PWRITEV_VIEW "))
+            .expect("native guest printed its line")
+            .to_owned()
+    }
+
     // `statfs`/`fstatfs` (Linux): the virtual filesystem answers as ONE constant
     // ext4-like volume for any path or descriptor that resolves, ENOENT for a
     // missing path, EBADF for a bad descriptor. A storage engine probes this on
@@ -900,5 +1019,331 @@ fn main() {
             !String::from_utf8_lossy(&output.stdout).contains("main should not run"),
             "ctor failure should happen before main"
         );
+    }
+
+    // Three threads append records to one file, each through a different append
+    // spelling: `pwrite` through an `O_APPEND` description (which Linux lands at the
+    // end whatever the offset), a two-segment `pwritev` through it, and a
+    // two-segment `pwritev2(.., -1, RWF_APPEND)` through a plain description. Linux
+    // reads the end and writes the whole call under `inode_lock`, so no record is
+    // lost, overwritten, or split, whatever the interleaving.
+    #[cfg(target_os = "linux")]
+    const CONCURRENT_APPEND_SOURCE: &str = r#"
+use std::fs::OpenOptions;
+use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
+
+#[repr(C)]
+struct Iovec {
+    base: *const u8,
+    len: usize,
+}
+
+unsafe extern "C" {
+    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+    fn syscall(number: i64, ...) -> i64;
+}
+
+// glibc's `pwritev2` wrapper is not interposed; the raw syscall is.
+#[cfg(target_arch = "x86_64")]
+const SYS_PWRITEV2: i64 = 328;
+#[cfg(target_arch = "aarch64")]
+const SYS_PWRITEV2: i64 = 287;
+const RWF_APPEND: i64 = 0x10;
+
+/// `pwritev2(fd, iov, 2, -1, RWF_APPEND)`: the kernel's `pos_l`/`pos_h` pair
+/// carries the position.
+unsafe fn append_at_cursor(fd: i32, iov: &[Iovec; 2]) -> isize {
+    unsafe { syscall(SYS_PWRITEV2, i64::from(fd), iov.as_ptr(), 2_i64, -1_i64, 0_i64, RWF_APPEND) as isize }
+}
+const WRITERS: usize = 3;
+const ROUNDS: usize = 16;
+
+fn record(writer: usize, round: usize) -> String {
+    format!("w{writer}r{round:02}\n")
+}
+
+fn halves(bytes: &[u8]) -> [Iovec; 2] {
+    let (head, tail) = bytes.split_at(bytes.len() / 2);
+    [
+        Iovec { base: head.as_ptr(), len: head.len() },
+        Iovec { base: tail.as_ptr(), len: tail.len() },
+    ]
+}
+
+fn main() {
+    let path = "/appended";
+    let appending = Arc::new(OpenOptions::new().create(true).append(true).open(path).unwrap());
+    let plain = Arc::new(OpenOptions::new().write(true).open(path).unwrap());
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|writer| {
+            let appending = Arc::clone(&appending);
+            let plain = Arc::clone(&plain);
+            std::thread::spawn(move || {
+                for round in 0..ROUNDS {
+                    let line = record(writer, round);
+                    let bytes = line.as_bytes();
+                    let wrote = match writer {
+                        0 => appending.write_at(bytes, 0).unwrap() as isize,
+                        1 => unsafe { pwritev(appending.as_raw_fd(), halves(bytes).as_ptr(), 2, 0) },
+                        _ => unsafe { append_at_cursor(plain.as_raw_fd(), &halves(bytes)) },
+                    };
+                    assert_eq!(wrote, bytes.len() as isize, "writer {writer} round {round}");
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    let contents = std::fs::read_to_string(path).unwrap();
+    let mut found: Vec<&str> = contents.split_inclusive('\n').collect();
+    found.sort_unstable();
+    let mut expected: Vec<String> = (0..WRITERS)
+        .flat_map(|writer| (0..ROUNDS).map(move |round| record(writer, round)))
+        .collect();
+    expected.sort_unstable();
+    println!(
+        "APPEND len={} expected={} intact={}",
+        contents.len(),
+        expected.iter().map(String::len).sum::<usize>(),
+        found == expected
+    );
+}
+"#;
+
+    /// The `APPEND` line's `name=` field.
+    #[cfg(target_os = "linux")]
+    fn append_field<'a>(stdout: &'a str, name: &str) -> &'a str {
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with("APPEND "))
+            .unwrap_or_else(|| panic!("no APPEND line:\n{stdout}"));
+        line.split(' ')
+            .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("APPEND line carries no {name}=: {line}"))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_concurrent_appends_lose_no_bytes_under_pct_interleavings() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("concurrent_append.rs");
+        fs::write(&source, CONCURRENT_APPEND_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("concurrent-append");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let bin = bin.to_str().unwrap();
+        // The seeded scheduler, and PCT with its change points spread over the
+        // run's ~150 decisions rather than the default 2000 the run never reaches.
+        let pct = ["--sched-pct=2", "--sched-pct-steps", "150"];
+        for schedule in [&[][..], &pct[..]] {
+            for seed in ["1", "2", "3", "4"] {
+                let mut args = vec!["run", bin, "--seed", seed];
+                args.extend_from_slice(schedule);
+                let run = invoke(workspace, &args);
+                let stdout = String::from_utf8_lossy(&run.stdout);
+                assert_eq!(
+                    append_field(&stdout, "len"),
+                    append_field(&stdout, "expected"),
+                    "seed {seed} {schedule:?} lost appended bytes:\n{stdout}"
+                );
+                assert_eq!(
+                    append_field(&stdout, "intact"),
+                    "true",
+                    "seed {seed} {schedule:?} overwrote or split a record:\n{stdout}"
+                );
+            }
+        }
+
+        let trace = directory.path().join("append.patina");
+        let recorded = invoke(
+            workspace,
+            &[
+                "run",
+                bin,
+                "--seed",
+                "1",
+                "--sched-pct=2",
+                "--sched-pct-steps",
+                "150",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+        assert_eq!(
+            String::from_utf8_lossy(&recorded.stdout),
+            String::from_utf8_lossy(&replayed.stdout),
+            "record and replay diverged"
+        );
+    }
+
+    // With one number free, one thread creates a file while another takes the
+    // number with `dup`. Linux reserves the number before the open walks or
+    // creates anything, so whichever loses gets EMFILE, and an open that
+    // answers EMFILE has created nothing, whatever the interleaving.
+    #[cfg(target_os = "linux")]
+    const CONTENDED_LAST_NUMBER_SOURCE: &str = r#"
+use std::os::fd::IntoRawFd;
+
+unsafe extern "C" {
+    fn dup(fd: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
+    fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
+}
+
+const RLIMIT_NOFILE: i32 = 7;
+const EMFILE: i32 = 24;
+const ROUNDS: usize = 12;
+
+fn main() {
+    let mut limit = [0_u64; 2];
+    assert_eq!(unsafe { getrlimit(RLIMIT_NOFILE, &mut limit) }, 0);
+    let lowest = unsafe { dup(0) };
+    assert!(lowest >= 0);
+    unsafe { close(lowest) };
+    let one_free = [lowest as u64 + 1, limit[1]];
+    assert_eq!(unsafe { setrlimit(RLIMIT_NOFILE, &one_free) }, 0);
+    let (mut refused, mut created_anyway) = (0, 0);
+    for round in 0..ROUNDS {
+        let path = format!("/contended-{round}");
+        let opener = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map(IntoRawFd::into_raw_fd)
+                    .map_err(|error| error.raw_os_error())
+            })
+        };
+        let duplicator = std::thread::spawn(|| unsafe { dup(0) });
+        let opened = opener.join().unwrap();
+        let duplicate = duplicator.join().unwrap();
+        if opened == Err(Some(EMFILE)) {
+            refused += 1;
+            if std::path::Path::new(&path).exists() {
+                created_anyway += 1;
+            }
+        }
+        if let Ok(fd) = opened {
+            unsafe { close(fd) };
+        }
+        if duplicate >= 0 {
+            unsafe { close(duplicate) };
+        }
+    }
+    println!("CONTENDED refused={refused} created_anyway={created_anyway}");
+}
+"#;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_open_refused_at_the_descriptor_limit_creates_nothing_under_contention() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("contended_last_number.rs");
+        fs::write(&source, CONTENDED_LAST_NUMBER_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("contended-last-number");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let field = |stdout: &str, name: &str| -> u64 {
+            stdout
+                .lines()
+                .find(|line| line.starts_with("CONTENDED "))
+                .and_then(|line| {
+                    line.split(' ')
+                        .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+                })
+                .unwrap_or_else(|| panic!("no CONTENDED {name}= field:\n{stdout}"))
+                .parse()
+                .unwrap()
+        };
+        let mut refused = 0;
+        for seed in ["1", "2", "3"] {
+            let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            assert_eq!(
+                field(&stdout, "created_anyway"),
+                0,
+                "seed {seed}: an open that answered EMFILE created its file:\n{stdout}"
+            );
+            refused += field(&stdout, "refused");
+        }
+        assert!(refused > 0, "no seed made the open lose the last number");
+    }
+
+    // With the table full, one thread retries an open while a peer closes the
+    // descriptor that fills it. A refused open is still a boundary call and so a
+    // scheduling point, so the peer runs and the retry succeeds.
+    #[cfg(target_os = "linux")]
+    const RETRY_AT_THE_DESCRIPTOR_LIMIT_SOURCE: &str = r#"
+unsafe extern "C" {
+    fn dup(fd: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
+    fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
+}
+
+const RLIMIT_NOFILE: i32 = 7;
+const ATTEMPTS: usize = 10_000;
+
+fn main() {
+    let mut limit = [0_u64; 2];
+    assert_eq!(unsafe { getrlimit(RLIMIT_NOFILE, &mut limit) }, 0);
+    let last = unsafe { dup(0) };
+    assert!(last >= 0);
+    assert_eq!(unsafe { setrlimit(RLIMIT_NOFILE, &[last as u64 + 1, limit[1]]) }, 0);
+    let closer = std::thread::spawn(move || unsafe { close(last) });
+    let attempts = (1..=ATTEMPTS).find(|_| std::fs::File::create("/retried").is_ok());
+    assert_eq!(closer.join().unwrap(), 0);
+    println!("RETRY opened={}", attempts.is_some());
+}
+"#;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_open_retried_at_the_descriptor_limit_lets_a_closing_peer_run() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("retry_at_limit.rs");
+        fs::write(&source, RETRY_AT_THE_DESCRIPTOR_LIMIT_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("retry-at-limit");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        for seed in ["1", "2", "3", "4"] {
+            let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            assert!(
+                stdout.lines().any(|line| line == "RETRY opened=true"),
+                "seed {seed}: the retrying open never let the closing peer run:\n{stdout}"
+            );
+        }
     }
 }

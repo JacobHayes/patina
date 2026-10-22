@@ -35,7 +35,8 @@ use patina_dst_runtime::{Context, RuntimeError};
 
 use crate::fdtable::FdKind;
 use crate::{
-    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, resolve_fd, with_context,
+    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, resolve_fd,
+    with_context, with_context_bookkeeping,
 };
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
@@ -212,33 +213,27 @@ pub(crate) fn set_umask(mask: u32) -> u32 {
 
 /// The working directory's driver handle. `None` until first use (the default
 /// `/`, opened lazily so a run that never touches a relative path or `getcwd`
-/// pays no effect for it) or until install opened a configured directory.
+/// holds no handle for it) or until install opened a configured directory.
+/// Both opens are the shim's own (`fs_open_path_unrecorded`): no guest called
+/// open, so neither draws a fault, takes latency, counts toward an `open`
+/// crash ordinal or moves the clock.
 static CWD: SpinMutex<Option<Fd>> = SpinMutex::new(None);
 
 fn cwd_handle() -> Result<Fd, c_int> {
     if let Some(fd) = *CWD.lock() {
         return Ok(fd);
     }
-    // The open is a scheduling point, so it runs outside the lock; another
-    // task may have opened the root meanwhile, in which case ours is released.
-    let fd = with_context(|context| context.fs_open("/", OpenFlags::path_only()))?;
-    let existing = {
-        let mut guard = CWD.lock();
-        match *guard {
-            Some(existing) => Some(existing),
-            None => {
-                *guard = Some(fd);
-                None
-            }
-        }
-    };
-    match existing {
-        Some(existing) => {
-            let _ = with_context(|context| context.fs_close(fd));
-            Ok(existing)
-        }
-        None => Ok(fd),
+    // The runtime first: installing it opens a configured `--cwd`.
+    ensure_runtime()?;
+    let mut cwd = CWD.lock();
+    if let Some(fd) = *cwd {
+        return Ok(fd);
     }
+    // No scheduling point and no guest effect: the root opens inside the call
+    // that first needs it, and no other task runs before it is held.
+    let fd = with_context_bookkeeping(|context| context.fs_open_path_unrecorded("/"))?;
+    *cwd = Some(fd);
+    Ok(fd)
 }
 
 /// Where the working directory's node is NOW. `ENOENT` once its last name is
@@ -317,12 +312,15 @@ pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
 /// directly (there is no installed runtime yet). A path that is not an existing
 /// directory refuses the run by name: the alternative — a run whose every
 /// relative path answers `ENOENT` — is a misconfiguration the guest cannot
-/// distinguish from its own bug.
+/// distinguish from its own bug. The lookup and the open are the shim's own,
+/// unrecorded: replay reads the directory from the trace and opens it here
+/// again, before the guest runs, with no fault, latency, crash ordinal or
+/// clock movement on either side.
 pub(crate) fn install_cwd(context: &mut Context) -> Result<(), RuntimeError> {
     let Some(path) = context.guest_cwd().map(str::to_owned) else {
         return Ok(());
     };
-    let metadata = context.fs_metadata(&path).map_err(|error| {
+    let metadata = context.fs_metadata_unrecorded(&path).map_err(|error| {
         RuntimeError::Config(format!(
             "--cwd {path:?} is not a directory in the deterministic filesystem: {error}"
         ))
@@ -332,7 +330,7 @@ pub(crate) fn install_cwd(context: &mut Context) -> Result<(), RuntimeError> {
             "--cwd {path:?} is not a directory in the deterministic filesystem"
         )));
     }
-    let fd = context.fs_open(&path, OpenFlags::path_only())?;
+    let fd = context.fs_open_path_unrecorded(&path)?;
     #[cfg(target_os = "linux")]
     crate::fsnotify::bind(context, fd, &path)?;
     *CWD.lock() = Some(fd);

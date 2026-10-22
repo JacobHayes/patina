@@ -264,6 +264,140 @@ tempfile = "3"
         );
     }
 
+    // The working directory's handle is the shim's own, never a guest open: the
+    // configured `--cwd` opened at install and the root opened on first use draw
+    // no fs fault and count toward no `--fs-crash-at` ordinal. So `--cwd` runs
+    // under a full fs error rate, `getcwd` answers there, a relative path costs
+    // exactly the faults an absolute one does, and `open:1` is the guest's own
+    // first open.
+    const CWD_ADMIN_SOURCE: &str = r#"
+fn errno(error: std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(-1)
+}
+
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("absolute") => println!("CWD_ADMIN stat={:?}", std::fs::metadata("/missing").map_err(errno).err()),
+        Some("relative") => println!("CWD_ADMIN stat={:?}", std::fs::metadata("missing").map_err(errno).err()),
+        _ => {}
+    }
+    let cwd = std::env::current_dir().map(|path| path.display().to_string()).map_err(errno);
+    println!("CWD_ADMIN cwd={cwd:?}");
+    println!("CWD_ADMIN before-open");
+    let created = std::fs::File::create("created").is_ok();
+    println!("CWD_ADMIN after-open created={created}");
+}
+"#;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_cwd_handle_draws_no_fs_fault_and_no_crash_ordinal() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("cwd_admin.rs");
+        fs::write(&source, CWD_ADMIN_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("cwd-admin");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let bin = bin.to_str().unwrap();
+        let run = |args: &[&str]| {
+            let mut argv = vec!["run", bin, "--seed", "4"];
+            argv.extend_from_slice(args);
+            invoke(workspace, &argv)
+        };
+        let lines = |stream: &[u8], prefix: &str| -> Vec<String> {
+            String::from_utf8_lossy(stream)
+                .lines()
+                .filter(|line| line.starts_with(prefix))
+                .map(str::to_owned)
+                .collect()
+        };
+
+        // Under a full fs error rate the configured directory installs and
+        // `getcwd` answers it; with none configured, the root.
+        for (args, cwd) in [
+            (
+                &["--cwd", "/tmp", "--fs-error-permille", "1000"][..],
+                "/tmp",
+            ),
+            (&["--fs-error-permille", "1000"][..], "/"),
+        ] {
+            let output = run(args);
+            assert!(
+                lines(&output.stdout, "CWD_ADMIN cwd=")
+                    .contains(&format!("CWD_ADMIN cwd=Ok({cwd:?})")),
+                "{args:?}: getcwd must answer {cwd}:\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+
+        // A relative path resolves through the working directory without a
+        // fault draw of its own, so it meets exactly the faults the absolute
+        // spelling of the same path does.
+        let absolute = run(&["--fs-error-permille", "1000", "--", "absolute"]);
+        let relative = run(&["--fs-error-permille", "1000", "--", "relative"]);
+        for (absolute, relative, prefix) in [
+            (&absolute.stdout, &relative.stdout, "CWD_ADMIN stat="),
+            (
+                &absolute.stderr,
+                &relative.stderr,
+                "PATINA_FS_FAULT_REPORT ",
+            ),
+        ] {
+            let expected = lines(absolute, prefix);
+            assert!(!expected.is_empty(), "no {prefix} line");
+            assert_eq!(
+                expected,
+                lines(relative, prefix),
+                "relative vs absolute {prefix}"
+            );
+        }
+
+        // `open:1` is the guest's own first open: each incarnation reaches it,
+        // and only the restarted one gets past it.
+        for args in [
+            &["--fs-crash-at", "open:1"][..],
+            &["--fs-crash-at", "open:1", "--cwd", "/tmp"][..],
+        ] {
+            let output = run(args);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                lines(&output.stdout, "CWD_ADMIN before-open").len(),
+                2,
+                "{args:?}: both incarnations must reach the guest's first open:\n{stdout}"
+            );
+            assert_eq!(
+                lines(&output.stdout, "CWD_ADMIN after-open").len(),
+                1,
+                "{args:?}: the crash must fire at the guest's first open:\n{stdout}"
+            );
+        }
+
+        // The install reproduces on replay.
+        let trace = directory.path().join("cwd-admin.patina");
+        let recorded = run(&[
+            "--cwd",
+            "/tmp",
+            "--fs-error-permille",
+            "1000",
+            "--record",
+            trace.to_str().unwrap(),
+        ]);
+        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+        assert_eq!(
+            lines(&recorded.stdout, "CWD_ADMIN"),
+            lines(&replayed.stdout, "CWD_ADMIN"),
+            "record and replay diverged"
+        );
+    }
+
     // Guest-driven environment mutation is a deterministic in-process operation, so
     // `setenv`/`unsetenv` succeed and every reader agrees: the `getenv` interposer,
     // the `environ` array std::env::vars walks, and the seeded `--env` map share one

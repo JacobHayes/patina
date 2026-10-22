@@ -3,9 +3,11 @@
 
 use super::*;
 
-/// Bind a driver handle the filesystem just opened to a guest number. A table
-/// full (`EMFILE`) closes the handle again — through the recorded close, as the
-/// kernel's `fd_install` failure path releases the file — so nothing leaks.
+/// Bind a driver handle the filesystem just opened to a guest number. Its
+/// opener checked a number was free in the step that opened it
+/// ([`with_free_number`]) and took no scheduling point since, so the table has
+/// room; were it full (`EMFILE`), the handle is closed again through the
+/// recorded close, so nothing leaks.
 pub(crate) fn bind_fs_handle(fd: Fd, kind: FdKind, status: u32, cloexec: bool) -> c_int {
     match install_fd(kind, fd.0, status, cloexec) {
         Ok(number) => {
@@ -29,14 +31,16 @@ pub(crate) fn fifo_changed(raw_fd: c_int, mask: u32) {
     }
 }
 
-/// [`bind_fs_handle`] for a handle the filesystem opened on canonical `path`,
-/// which it holds the name of (`fsnotify::bound`).
-fn bound_fs_handle(fd: Fd, path: &str, kind: FdKind, status: u32, cloexec: bool) -> c_int {
-    #[cfg(target_os = "linux")]
-    fsnotify::bound(fd, path);
-    #[cfg(not(target_os = "linux"))]
-    let _ = path;
-    bind_fs_handle(fd, kind, status, cloexec)
+/// The driver open of canonical `path` for a new descriptor, while a number
+/// is free for it ([`with_free_number`]); the handle holds the name it was
+/// opened through (`fsnotify::bind`) from the same step.
+fn driver_open(path: &str, flags: OpenFlags) -> Result<Fd, c_int> {
+    with_free_number(|context| {
+        let fd = context.fs_open(path, flags)?;
+        #[cfg(target_os = "linux")]
+        let _ = fsnotify::bind(context, fd, path);
+        Ok(fd)
+    })
 }
 
 /// The deny an `O_PATH|O_NOFOLLOW` open of a SYMLINK gets — the one spelling
@@ -250,6 +254,21 @@ pub(crate) unsafe fn open_at(
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
+    // The number comes before the path walk, so a full table is `EMFILE`
+    // whatever the walk would answer. A refused open is still a boundary call:
+    // it takes its scheduling point and answers the check made after it, so a
+    // loop retrying the open lets the peer that frees a number run. An open
+    // with a number free takes its point in the driver step, which checks
+    // again.
+    if fd_table().lock().ensure_free(1).is_err() {
+        mark_boundary();
+        if let Err(errno) = ensure_runtime().and_then(|()| thread::sched_point()) {
+            return fail(errno);
+        }
+        if let Err(errno) = fd_table().lock().ensure_free(1) {
+            return fail(errno);
+        }
+    }
     let nofollow = flags & O_NOFOLLOW != 0;
     let nonblocking = flags & O_NONBLOCK != 0;
     let path_only = flags & O_PATH != 0;
@@ -331,16 +350,14 @@ pub(crate) unsafe fn open_at(
                     O_READ | O_OPENED | (flags & (O_NONBLOCK | O_DIRECTORY)),
                 )
             };
-            match with_context(|context| context.fs_open(&resolved.path, dir_flags)) {
+            match driver_open(&resolved.path, dir_flags) {
                 Ok(fd) => {
+                    let number = bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec);
                     #[cfg(target_os = "linux")]
-                    {
-                        fsnotify::bound(fd, &resolved.path);
-                        if !path_only {
-                            fsnotify::opened(fd);
-                        }
+                    if number >= 0 && !path_only {
+                        fsnotify::opened(fd);
                     }
-                    bind_fs_handle(fd, FdKind::Dir, dir_status, cloexec)
+                    number
                 }
                 Err(errno) => fail(errno),
             }
@@ -355,8 +372,8 @@ pub(crate) unsafe fn open_at(
             // AND permissions — and then declines to hand back a descriptor
             // (`EINVAL`), which is the seam where the pipe rendezvous begins.
             // Only an `O_PATH` open of a FIFO is a filesystem descriptor.
-            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
-                Ok(fd) => bound_fs_handle(fd, &resolved.path, kind, status, cloexec),
+            match driver_open(&resolved.path, open_flags) {
+                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
                 Err(errno) if errno == EINVAL && !path_only => {
                     let ino = resolved.metadata.expect("a FIFO entry has metadata").ino;
                     thread::fifo_open(
@@ -377,25 +394,25 @@ pub(crate) unsafe fn open_at(
         // descriptor, the open is the `ENXIO` the kernel's does (a socket
         // inode's `sock_no_open`, a device number no driver serves).
         Some(FsEntryKind::Socket | FsEntryKind::CharDevice) => {
-            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
-                Ok(fd) => bound_fs_handle(fd, &resolved.path, kind, status, cloexec),
+            match driver_open(&resolved.path, open_flags) {
+                Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
                 Err(errno) if errno == EINVAL && !path_only => fail(ENXIO),
                 Err(errno) => fail(errno),
             }
         }
         Some(FsEntryKind::File) | None => {
-            match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
+            match driver_open(&resolved.path, open_flags) {
                 Ok(fd) => {
                     // An `O_TRUNC` open of a mapped file empties its page cache.
                     if let (true, Some(metadata)) = (open_flags.truncate, resolved.metadata) {
                         mem::resized_ino(metadata.ino, 0);
                     }
+                    let number = bind_fs_handle(fd, kind, status, cloexec);
                     // A creating open shows the new entry, then the open;
                     // an `O_TRUNC` one of an existing file the truncation
                     // after it (`handle_truncate`).
                     #[cfg(target_os = "linux")]
-                    {
-                        fsnotify::bound(fd, &resolved.path);
+                    if number >= 0 {
                         if resolved.metadata.is_none() {
                             fsnotify::created(&resolved.path);
                         }
@@ -406,7 +423,7 @@ pub(crate) unsafe fn open_at(
                             fsnotify::on_handle(fd, fsnotify::IN_MODIFY);
                         }
                     }
-                    bind_fs_handle(fd, kind, status, cloexec)
+                    number
                 }
                 Err(errno) => fail(errno),
             }

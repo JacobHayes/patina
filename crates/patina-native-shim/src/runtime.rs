@@ -552,9 +552,10 @@ pub(crate) fn with_context_raw<T>(
     gateway(invoke)
 }
 
-/// [`with_context_raw`] for the shim's charge bookkeeping, which is no
-/// boundary effect of its own and marks none ([`BOUNDARY_SEEN`]): handing
-/// counted calls over, and a scheduling point showing the time they carried.
+/// [`with_context_raw`] for the shim's own bookkeeping, which is no boundary
+/// effect and marks none ([`BOUNDARY_SEEN`]): handing counted calls over, a
+/// scheduling point showing the time they carried, and the working
+/// directory's root handle.
 /// A harness's startup takes scheduling points (its locks and writes) before
 /// it installs the runtime.
 pub(crate) fn with_context_bookkeeping<T>(

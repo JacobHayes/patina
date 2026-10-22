@@ -34,7 +34,7 @@
 use super::owned::Owned;
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::owned;
-use crate::probe::{Deadline, Notify, Probe, neg};
+use crate::probe::{Deadline, Notify, Probe, Shown, neg};
 use crate::signals as support;
 use crate::vehicle::Vehicle;
 use libc::*;
@@ -106,6 +106,30 @@ pub fn run(p: &Probe) {
             0o600,
             Some((MAXMSG, 0)),
         )) == neg(EINVAL),
+    );
+    // The number comes first (`do_mq_open`), so with the table full a
+    // creating open is EMFILE and creates no queue.
+    let spare = p.dup(fd) as i32;
+    p.require("the lowest free number", spare >= 0);
+    p.close(spare);
+    let (limit_result, soft, hard) = p.getrlimit(RLIMIT_NOFILE as i32, Shown::Soft);
+    p.require("read RLIMIT_NOFILE", limit_result == 0);
+    p.require(
+        "lower RLIMIT_NOFILE to the numbers in use",
+        p.setrlimit_kept(RLIMIT_NOFILE as i32, spare as u64, hard) == 0,
+    );
+    let full = p.mq_open(&format!("{name}-full"), O_RDWR | O_CREAT, 0o600, None);
+    p.require(
+        "restore RLIMIT_NOFILE",
+        p.setrlimit_kept(RLIMIT_NOFILE as i32, soft, hard) == 0,
+    );
+    p.check(
+        "a creating open with the table full is EMFILE",
+        i64::from(full) == neg(EMFILE),
+    );
+    p.check(
+        "and creates no queue",
+        i64::from(p.mq_open(&format!("{name}-full"), O_RDWR, 0, None)) == neg(ENOENT),
     );
 
     // ---- order and sizes ----

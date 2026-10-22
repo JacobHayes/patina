@@ -2,6 +2,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
+use crate::iov::GuestIovec;
 
 // ---------------------------------------------------------------------------
 // The universal descriptor operations. Each resolves the guest number ONCE and
@@ -428,31 +429,17 @@ pub unsafe extern "C" fn patina_pread(
     transferred(&resolved, moved, false)
 }
 
-/// # Safety
-/// `source` must be readable for `length` bytes when nonzero.
-pub(crate) unsafe fn fs_pwrite(
-    handle: Fd,
-    source: *const c_void,
-    length: usize,
-    offset: i64,
-) -> isize {
-    let offset = match u64::try_from(offset) {
-        Ok(offset) => offset,
-        Err(_) => return fail(EINVAL) as isize,
-    };
-    let bytes = if length == 0 {
-        &[]
-    } else {
-        // SAFETY: Guaranteed by this function's contract.
-        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
-    };
-    match with_context(|context| context.fs_write_at(handle, offset, bytes)) {
-        Ok(written) => {
-            mem::written(handle.0, offset, &bytes[..written.min(bytes.len())]);
-            isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-        }
-        Err(errno) => fail(errno) as isize,
-    }
+/// Where a file write's bytes land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placement {
+    /// At this offset, the cursor staying where it is (`pwrite`, `pwritev`).
+    At(u64),
+    /// At the end of the file, the cursor staying where it is: a positional
+    /// write that appends.
+    End,
+    /// At the end of the file, the cursor moving past the bytes: `RWF_APPEND`
+    /// at position -1 (`pwritev2`).
+    EndAtCursor,
 }
 
 /// Where a positional write lands. On Linux a write through an `O_APPEND`
@@ -460,16 +447,70 @@ pub(crate) unsafe fn fs_pwrite(
 /// BUGS: `generic_write_checks` sets the position to `i_size` under
 /// `IOCB_APPEND`), and so does one carrying `RWF_APPEND`; the file's cursor
 /// stays where it was either way. Darwin's `pwrite` writes at the position.
-pub(crate) fn positional_write_offset(
-    resolved: Resolved,
-    offset: u64,
-    append: bool,
-) -> Result<u64, c_int> {
+pub(crate) fn positional_placement(resolved: Resolved, offset: u64, append: bool) -> Placement {
     let append = append || (cfg!(target_os = "linux") && resolved.status & O_APPEND != 0);
-    if !append || resolved.kind != FdKind::File {
-        return Ok(offset);
+    if append && resolved.kind == FdKind::File {
+        Placement::End
+    } else {
+        Placement::At(offset)
     }
-    with_context(|context| context.fs_fd_metadata(Fd(resolved.handle))).map(|metadata| metadata.len)
+}
+
+/// Write `segments` to filesystem handle `fd` contiguously from `placement`,
+/// as ONE step: the end of the file is found and every segment written inside
+/// a single Context closure, which takes no scheduling point, so neither
+/// another task nor a signal handler runs between them. Linux finds an
+/// appending write's position and writes the whole vector under `inode_lock`;
+/// a gateway between the size read and the write would let another task's
+/// append land there and be overwritten. The size is the kernel's `i_size`,
+/// not a guest `fstat`: read unrecorded and unfaulted, which the driver
+/// reproduces on replay. Each accepted segment reaches the file's page cache
+/// before the next is read, so a later segment that is a view of the file
+/// reads what the earlier one wrote. A segment written short ends the call,
+/// and so does a failed one once bytes have moved; the call answers the bytes
+/// moved.
+///
+/// # Safety
+/// Each segment must be readable for its length.
+pub(crate) unsafe fn fs_write_segments(
+    fd: Fd,
+    placement: Placement,
+    segments: &[GuestIovec],
+) -> Result<usize, c_int> {
+    with_context(|context| {
+        let start = match placement {
+            Placement::At(offset) => offset,
+            Placement::End => context.fs_fd_metadata_unrecorded(fd)?.len,
+            Placement::EndAtCursor => context.fs_seek(fd, 0, SeekWhence::End)?,
+        };
+        let mut moved = 0usize;
+        for segment in segments {
+            // Read at the segment's turn: an earlier segment may have stored
+            // into a view this one is.
+            let bytes: &[u8] = if segment.len == 0 {
+                &[]
+            } else {
+                // SAFETY: guaranteed by this function's contract.
+                unsafe { slice::from_raw_parts(segment.base.cast::<u8>(), segment.len) }
+            };
+            let at = start + moved as u64;
+            let written = match placement {
+                Placement::At(_) | Placement::End => context.fs_write_at(fd, at, bytes),
+                Placement::EndAtCursor => context.fs_write(fd, bytes),
+            };
+            let written = match written {
+                Ok(written) => written,
+                Err(RuntimeError::Effect(_)) if moved != 0 => break,
+                Err(error) => return Err(error),
+            };
+            mem::written_in(context, fd.0, at, &bytes[..written.min(bytes.len())]);
+            moved += written;
+            if written < bytes.len() {
+                break;
+            }
+        }
+        Ok(moved)
+    })
 }
 
 /// # Safety
@@ -479,30 +520,31 @@ unsafe fn fs_pwrite_resolved(
     source: *const c_void,
     length: usize,
     offset: u64,
-    append: bool,
 ) -> isize {
     if resolved.status & O_WRITE == 0 {
         return fail(EBADF) as isize;
     }
-    let offset = if length == 0 {
-        offset
+    // An empty write moves nothing, so it never needs the end of the file.
+    let placement = if length == 0 {
+        Placement::At(offset)
     } else {
-        match positional_write_offset(resolved, offset, append) {
-            Ok(offset) => offset,
-            Err(errno) => return fail(errno) as isize,
-        }
+        positional_placement(resolved, offset, false)
     };
-    let Ok(offset) = i64::try_from(offset) else {
-        return fail(EFBIG) as isize;
+    let segment = GuestIovec {
+        base: source.cast_mut(),
+        len: length,
     };
     // SAFETY: forwarded from this function's own contract.
-    unsafe { fs_pwrite(Fd(resolved.handle), source, length, offset) }
+    match unsafe { fs_write_segments(Fd(resolved.handle), placement, &[segment]) } {
+        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Err(errno) => fail(errno) as isize,
+    }
 }
 
 #[unsafe(no_mangle)]
 /// Positional write (`pwrite`): write at `offset` without moving the file
 /// cursor; see [`positional_target`] for the refusals and
-/// [`positional_write_offset`] for `O_APPEND`.
+/// [`positional_placement`] for `O_APPEND`.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
@@ -521,6 +563,6 @@ pub unsafe extern "C" fn patina_pwrite(
         return fail(EFAULT) as isize;
     }
     // SAFETY: forwarded from this function's own contract.
-    let moved = unsafe { fs_pwrite_resolved(resolved, source, length, offset, false) };
+    let moved = unsafe { fs_pwrite_resolved(resolved, source, length, offset) };
     transferred(&resolved, moved, true)
 }

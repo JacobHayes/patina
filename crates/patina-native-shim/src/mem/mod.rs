@@ -500,9 +500,12 @@ mod tests;
 )]
 pub(crate) use hooks::resized;
 #[cfg(target_os = "linux")]
+pub(crate) use hooks::written;
+#[cfg(target_os = "linux")]
 pub(crate) use hooks::{allocated, syncing_all};
 pub(crate) use hooks::{
-    crashed, inspecting, inspecting_ino, reading, resized_ino, syncing, written, written_at_cursor,
+    crashed, inspecting, inspecting_ino, reading, resized_ino, syncing, written_at_cursor,
+    written_in,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use locks::huge_page_size;

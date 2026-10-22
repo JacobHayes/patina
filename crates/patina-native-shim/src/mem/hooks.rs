@@ -71,6 +71,38 @@ pub(crate) fn written(handle: u64, offset: u64, bytes: &[u8]) {
     }
 }
 
+/// [`written`] from inside the Context closure that made the write, before
+/// the closure makes its next one: a vectored write whose later segment is a
+/// view of the same file reads the bytes the earlier segment stored, as one
+/// kernel write through the page cache does. The handle's inode is asked of
+/// `context` itself (a second gateway would need the lock the caller holds),
+/// and the page cache is reached whatever the held Context lock says about
+/// shim-critical sections: this is a guest write, not shim memory.
+pub(crate) fn written_in(
+    context: &mut patina_dst_runtime::Context,
+    handle: u64,
+    offset: u64,
+    bytes: &[u8],
+) {
+    if !CACHES.load(Ordering::Acquire) || bytes.is_empty() {
+        return;
+    }
+    let known = MAPPINGS.lock().handles.get(&handle).copied();
+    let ino = match known {
+        Some(ino) => ino,
+        None => match context.fs_fd_metadata_unrecorded(Fd(handle)) {
+            Ok(metadata) => {
+                MAPPINGS.lock().handles.insert(handle, metadata.ino);
+                metadata.ino
+            }
+            Err(_) => return,
+        },
+    };
+    if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
+        cache.store(offset, bytes);
+    }
+}
+
 /// After a cursor write of `bytes` to `handle`'s file: they end at the
 /// cursor.
 pub(crate) fn written_at_cursor(handle: u64, bytes: &[u8]) {

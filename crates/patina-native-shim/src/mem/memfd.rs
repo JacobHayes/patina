@@ -83,7 +83,7 @@ pub extern "C" fn patina_memfd_secret(flags: u32) -> c_int {
     if flags & !CLOEXEC != 0 {
         return crate::fail(EINVAL);
     }
-    let created = crate::with_context(|context| {
+    let created = crate::with_free_number(|context| {
         context.fs_create_anonymous("secretmem", 0o600, F_SEAL_SEAL, 0)
     });
     match created {
@@ -152,8 +152,9 @@ pub unsafe extern "C" fn patina_memfd_create(name: *const c_char, flags: u32) ->
         (0o777, F_SEAL_SEAL)
     };
     let name = String::from_utf8_lossy(&bytes);
-    let created =
-        crate::with_context(|context| context.fs_create_anonymous(&name, mode, seals, huge_page));
+    let created = crate::with_free_number(|context| {
+        context.fs_create_anonymous(&name, mode, seals, huge_page)
+    });
     match created {
         Ok(fd) => {
             MEMFDS.lock().insert(fd.0, huge_page);

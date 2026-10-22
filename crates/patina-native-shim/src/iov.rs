@@ -14,13 +14,13 @@
 use std::ffi::{c_int, c_void};
 use std::slice;
 
-use patina_dst_abi::{Fd, SeekWhence};
+use patina_dst_abi::Fd;
 
 use crate::fdtable::{FdKind, Resolved};
 use crate::{
-    EBADF, EFAULT, EINVAL, EOPNOTSUPP, O_NONBLOCK, O_READ, O_WRITE, fail, fdget, fs_pread,
-    fs_pwrite, positional_target, positional_write_offset, read_resolved, set_errno, transferred,
-    with_context, write_resolved,
+    EBADF, EFAULT, EINVAL, EOPNOTSUPP, O_NONBLOCK, O_READ, O_WRITE, Placement, fail, fdget,
+    fs_pread, fs_write_segments, positional_placement, positional_target, read_resolved, set_errno,
+    transferred, write_resolved,
 };
 
 /// Linux and Darwin `UIO_MAXIOV`: the most segments one vector may carry.
@@ -176,7 +176,8 @@ unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking:
 
 /// Gather writes at the description's cursor (`writev`, and `pwritev2` at
 /// position -1). `RWF_APPEND` moves the cursor to the end first, as
-/// `IOCB_APPEND` does, and `RWF_DSYNC`/`RWF_SYNC` make the written data
+/// `IOCB_APPEND` does, in the same step as the writes
+/// ([`fs_write_segments`]), and `RWF_DSYNC`/`RWF_SYNC` make the written data
 /// durable before the call returns (`generic_write_sync`).
 ///
 /// # Safety
@@ -187,13 +188,19 @@ unsafe fn cursor_writev(
     nonblocking: bool,
     flags: i32,
 ) -> isize {
-    let file = resolved.kind == FdKind::File;
-    if file
-        && flags & RWF_APPEND != 0
-        && let Err(errno) =
-            with_context(|context| context.fs_seek(Fd(resolved.handle), 0, SeekWhence::End))
-    {
-        return fail(errno) as isize;
+    if resolved.kind == FdKind::File && flags & RWF_APPEND != 0 {
+        let segments: Vec<GuestIovec> = segments
+            .iter()
+            .copied()
+            .filter(|segment| segment.len != 0)
+            .collect();
+        // SAFETY: forwarded from this function's own contract.
+        let written =
+            unsafe { fs_write_segments(Fd(resolved.handle), Placement::EndAtCursor, &segments) };
+        return match written {
+            Ok(moved) => sync_written(resolved, moved, flags, None),
+            Err(errno) => finish(0, Some(errno)),
+        };
     }
     let mut moved = 0usize;
     let mut stopped = None;
@@ -372,30 +379,17 @@ pub unsafe extern "C" fn patina_pwritev(
     if let Some(errno) = rwf_refusal(&resolved, flags) {
         return fail(errno) as isize;
     }
-    let base = match positional_write_offset(resolved, offset, flags & RWF_APPEND != 0) {
-        Ok(base) => base,
-        Err(errno) => return fail(errno) as isize,
+    let placement = positional_placement(resolved, offset, flags & RWF_APPEND != 0);
+    let segments: Vec<GuestIovec> = segments
+        .into_iter()
+        .filter(|segment| segment.len != 0)
+        .collect();
+    // SAFETY: each segment is guest memory readable for its length.
+    let moved = match unsafe { fs_write_segments(Fd(resolved.handle), placement, &segments) } {
+        Ok(moved) => sync_written(resolved, moved, flags, None),
+        Err(errno) => finish(0, Some(errno)),
     };
-    let mut moved = 0usize;
-    let mut stopped = None;
-    for segment in segments.iter().filter(|segment| segment.len != 0) {
-        // SAFETY: the segment is guest memory readable for its length.
-        let at = i64::try_from(base + moved as u64).unwrap_or(i64::MAX);
-        let put = unsafe { fs_pwrite(Fd(resolved.handle), segment.base, segment.len, at) };
-        if put < 0 {
-            stopped = Some(crate::patina_errno());
-            break;
-        }
-        moved += put as usize;
-        if (put as usize) < segment.len {
-            break;
-        }
-    }
-    transferred(
-        &resolved,
-        sync_written(resolved, moved, flags, stopped),
-        true,
-    )
+    transferred(&resolved, moved, true)
 }
 
 #[cfg(test)]

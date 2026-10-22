@@ -219,6 +219,12 @@ pub(crate) unsafe fn mq_open(
         Err(errno) => return fail(errno),
     };
     let mut state = lock_state();
+    // The number comes first (`do_mq_open`'s `get_unused_fd_flags`), so a full
+    // table creates no queue; nothing below takes a scheduling point before
+    // the number is installed.
+    if let Err(errno) = crate::fd_table().lock().ensure_free(1) {
+        return fail(errno);
+    }
     let ipc = &mut state.ipc;
     let queue = match ipc.mq_names.get(&name) {
         Some(&queue) => {

@@ -392,6 +392,27 @@ impl Context {
             .dirty_pages(fd, first, last)?)
     }
 
+    /// A path-only handle on canonical `path` the runtime's embedder holds
+    /// for itself (the native shim's working directory: the configured one at
+    /// install, or the root on first use), opened UNRECORDED, never faulted
+    /// ([`FsDriver::open_path_unfaulted`]), with no latency and no `open`
+    /// crash ordinal. No guest called open: the open happens at the same point
+    /// on replay (install reads the trace's working directory, the root opens
+    /// at the same guest call), and a path-only open changes nothing, so the
+    /// driver hands back the same handle there. A host-capture replay executes
+    /// no driver, so there it is the recorded open.
+    pub fn fs_open_path_unrecorded(&mut self, path: &str) -> Result<Fd, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_open(path, OpenFlags::path_only());
+        }
+        let clock = self.fs_clock()?;
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .open_path_unfaulted(clock, path)?)
+    }
+
     /// The metadata of the entry at canonical `path`, read UNRECORDED and
     /// never faulted as [`Self::fs_fd_metadata_unrecorded`] is: the directory
     /// an fs notification is reported to, looked up inside the call that

@@ -604,7 +604,11 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     }
 
     /// Never faulted, and draws nothing from the fault stream: the runtime's
-    /// unrecorded bookkeeping reads are no guest operation.
+    /// own handles and unrecorded bookkeeping reads are no guest operation.
+    fn open_path_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<Fd> {
+        self.inner.open_path_unfaulted(clock, path)
+    }
+
     fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
         self.inner.metadata_unfaulted(path)
     }

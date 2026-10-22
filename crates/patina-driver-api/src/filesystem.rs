@@ -322,6 +322,13 @@ pub trait FsDriver: Send {
     fn fd_ino(&mut self, fd: Fd) -> DriverResult<u64> {
         self.fd_metadata(fd).map(|metadata| metadata.ino)
     }
+    /// [`FsDriver::open`] of `path` with [`OpenFlags::path_only`], as a handle
+    /// the runtime holds for itself rather than for a guest open (the native
+    /// shim's working directory, configured or the root): never faulted, since
+    /// a path-only open reads and changes nothing that could fail.
+    fn open_path_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<Fd> {
+        self.open(clock, path, OpenFlags::path_only())
+    }
     /// [`FsDriver::metadata`] as bookkeeping the runtime reads without a trace
     /// op (the directory an fs notification is reported to): never faulted,
     /// since no storage access happens that could fail.
