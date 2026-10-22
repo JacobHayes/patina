@@ -43,11 +43,18 @@ _Static_assert(sizeof(struct rtnl_link_stats) == 96 && offsetof(struct rtnl_link
 #endif
 
 #ifdef __APPLE__
+#include <mach/host_info.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
 /* Layouts the Rust adapters declare themselves. */
 _Static_assert(sizeof(pthread_mutex_t) == 64 && offsetof(pthread_mutex_t, __sig) == 0 && _PTHREAD_RECURSIVE_MUTEX_SIG_init == 0x32AAABA2, "Rust recursive stream mutex initializer");
-_Static_assert(sizeof(struct vm_statistics64) == 248 && _Alignof(struct vm_statistics64) == 8 && offsetof(struct vm_statistics64, wire_count) == 12 && HOST_VM_INFO64_COUNT == 62, "Rust VmStatistics64 SDK layout");
+/*
+ * VmStatistics64 models HOST_VM_INFO64 through revision 3. Newer SDKs append
+ * fields past that prefix, so the struct's size and HOST_VM_INFO64_COUNT grow;
+ * the fixed revision counts and the modeled fields' offsets do not.
+ */
+_Static_assert(_Alignof(struct vm_statistics64) == 8 && offsetof(struct vm_statistics64, free_count) == 0 && offsetof(struct vm_statistics64, active_count) == 4 && offsetof(struct vm_statistics64, inactive_count) == 8 && offsetof(struct vm_statistics64, wire_count) == 12, "Rust VmStatistics64 modeled fields");
+_Static_assert(HOST_VM_INFO64_REV0_COUNT == 24 && HOST_VM_INFO64_REV1_COUNT == 38 && HOST_VM_INFO64_REV2_COUNT == 40 && HOST_VM_INFO64_REV3_COUNT == 62, "Rust VmStatistics64 revision counts");
 _Static_assert(sizeof(struct task_basic_info_32) == 32 && _Alignof(struct task_basic_info_32) == 4 && offsetof(struct task_basic_info_32, user_time) == 12, "Rust Basic32 layout");
 _Static_assert(sizeof(struct task_basic_info_64) == 40 && _Alignof(struct task_basic_info_64) == 4 && offsetof(struct task_basic_info_64, user_time) == 20, "Rust Basic64 layout");
 #ifdef __aarch64__

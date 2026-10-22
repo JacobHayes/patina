@@ -179,6 +179,15 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      # Build against the newest released Xcode the image installs rather than
+      # its default selection, so an SDK change surfaces here before it reaches
+      # a developer's Mac.
+      - name: Select the newest released Xcode
+        run: |
+          xcode=$(printf '%s\n' /Applications/Xcode_*.app | grep -Eiv 'beta|release_candidate' | sort -V | tail -n 1)
+          test -d "$xcode"
+          sudo xcode-select --switch "$xcode"
+          echo "$xcode: SDK $(xcrun --show-sdk-version)"
       - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:

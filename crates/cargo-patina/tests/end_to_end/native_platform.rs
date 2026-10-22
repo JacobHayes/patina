@@ -255,7 +255,7 @@ fn main() {
         host_statistics64(port, HOST_VM_INFO64, stat.as_mut_ptr() as *mut c_void, &mut count)
     };
     assert_eq!(vm, 0);
-    assert_eq!(count, 62); // The SDK's 248-byte reply, in 32-bit words.
+    assert_eq!(count, 62); // Revision 3's 248-byte reply, in 32-bit words.
     let fields = unsafe {
         std::slice::from_raw_parts(stat.as_ptr().cast::<u32>(), count as usize)
     };
@@ -291,6 +291,72 @@ fn main() {
                 patina_dst_abi::DEFAULT_CPUS
             )),
             "host-inventory surface did not resolve to the fixed deterministic values:\n{out}"
+        );
+    }
+
+    // `host_statistics64(HOST_VM_INFO64)` follows XNU's revision ladder (`vm_stats` in
+    // osfmk/kern/host.c): a caller's count gets the newest revision it holds, capped at
+    // the modeled host's revision 3, and `count` reports the words written; a count
+    // below revision 0 fails with KERN_FAILURE and leaves the buffer and count alone.
+    // 104 is the macOS 27 SDK's HOST_VM_INFO64_COUNT, which a guest built against it
+    // (or against libc's binding) passes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_vm_statistics_follow_the_kernel_revision_ladder() {
+        let out = native_source_prints_deterministically(
+            "vmladder.rs",
+            r#"use std::os::raw::{c_int, c_uint, c_void};
+
+unsafe extern "C" {
+    fn mach_host_self() -> c_uint;
+    fn host_statistics64(host: c_uint, flavor: c_int, out: *mut c_void, count: *mut c_uint) -> c_int;
+}
+
+const HOST_VM_INFO64: c_int = 4;
+const KERN_FAILURE: c_int = 5;
+const UNWRITTEN: u32 = u32::MAX;
+
+fn main() {
+    let port = unsafe { mach_host_self() };
+    // (caller count, return code, count after the call)
+    let ladder = [
+        (0, KERN_FAILURE, 0),
+        (23, KERN_FAILURE, 23),
+        (24, 0, 24),
+        (37, 0, 24),
+        (38, 0, 38),
+        (39, 0, 38),
+        (40, 0, 40),
+        (61, 0, 40),
+        (62, 0, 62),
+        (104, 0, 62),
+        (1024, 0, 62),
+    ];
+    for (requested, ret, reply) in ladder {
+        let mut stat = [u64::MAX; 512]; // 8-byte aligned, 1024 words.
+        let mut count: c_uint = requested;
+        let vm = unsafe {
+            host_statistics64(port, HOST_VM_INFO64, stat.as_mut_ptr().cast::<c_void>(), &mut count)
+        };
+        assert_eq!((vm, count), (ret, reply), "caller count {requested}");
+        let words = unsafe { std::slice::from_raw_parts(stat.as_ptr().cast::<u32>(), 1024) };
+        let written = if vm == 0 { count as usize } else { 0 };
+        assert!(
+            words[written..].iter().all(|&word| word == UNWRITTEN),
+            "caller count {requested} wrote past its {written}-word reply"
+        );
+        if written > 0 {
+            assert_eq!(&words[..4], &[524288, 786432, 524288, 262144], "caller count {requested}");
+            assert!(words[4..written].iter().all(|&word| word == 0), "caller count {requested}");
+        }
+        println!("requested={requested} ret={vm} count={count}");
+    }
+}
+"#,
+        );
+        assert!(
+            out.contains("requested=1024 ret=0 count=62"),
+            "the VM statistics revision ladder did not run to completion:\n{out}"
         );
     }
 

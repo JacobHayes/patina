@@ -139,9 +139,11 @@ extern "C" fn mach_host_self() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     0x484f5354 // HOST, synthetic port consumed only by models.
 }
-// libc's unversioned vm_statistics64 binding already includes fields newer
-// than the packaged SDK. Preserve that SDK's 248-byte reply, checked in C too.
-// Only the first four counts are modeled; every remaining field stays zero.
+// The modeled host reports HOST_VM_INFO64 through revision 3: the 248-byte
+// prefix of vm_statistics64 that every later SDK keeps, appending newer fields
+// past it (libc's binding already carries them). C checks the SDK's revision
+// counts and modeled offsets. Only the first four counts are modeled; every
+// remaining field stays zero.
 #[repr(C)]
 struct VmStatistics64 {
     free_count: u32,
@@ -150,13 +152,17 @@ struct VmStatistics64 {
     wire_count: u32,
     remaining: [u64; 29],
 }
-const VM_INFO_COUNT: u32 = (size_of::<VmStatistics64>() / size_of::<i32>()) as u32;
+/// HOST_VM_INFO64_REV0_COUNT through HOST_VM_INFO64_REV3_COUNT, in 32-bit
+/// words: each revision's reply is a prefix of the next.
+const VM_INFO_REVISION_COUNTS: [u32; 4] = [24, 38, 40, 62];
 const _: () = {
-    assert!(size_of::<VmStatistics64>() == 248 && align_of::<VmStatistics64>() == 8);
+    assert!(size_of::<VmStatistics64>() == VM_INFO_REVISION_COUNTS[3] as usize * size_of::<i32>());
+    assert!(align_of::<VmStatistics64>() == 8);
     assert!(core::mem::offset_of!(VmStatistics64, wire_count) == 12);
 };
 /// # Safety
-/// output/count follow the HOST_VM_INFO64 buffer contract.
+/// output/count follow the HOST_VM_INFO64 buffer contract: `*count` 32-bit
+/// words of writable output.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn host_statistics64(
     _host: u32,
@@ -169,23 +175,28 @@ unsafe extern "C" fn host_statistics64(
         return libc::KERN_INVALID_ARGUMENT;
     }
     // SAFETY: `count` is non-null and readable under the HOST_VM_INFO64 buffer contract.
-    if unsafe { count.read() } < VM_INFO_COUNT {
-        return libc::KERN_INVALID_ARGUMENT;
-    }
-    // SAFETY: the caller supplied output/count storage of the validated size; the local `stat`
-    // is initialized before its bytes are copied, and every written output is non-null.
+    let requested = unsafe { count.read() };
+    // XNU's vm_stats: fill the newest revision the caller's count holds and
+    // report that revision's count; a count below revision 0 fails untouched.
+    let Some(&reply) = VM_INFO_REVISION_COUNTS
+        .iter()
+        .rev()
+        .find(|&&revision| revision <= requested)
+    else {
+        return libc::KERN_FAILURE;
+    };
+    let stat = VmStatistics64 {
+        free_count: 524288,
+        active_count: 786432,
+        inactive_count: 524288,
+        wire_count: 262144,
+        remaining: [0; 29],
+    };
+    // SAFETY: `reply` words fit both the caller's `requested` words of output and the
+    // 62-word `stat`; `count` is non-null and writable.
     unsafe {
-        let mut stat: VmStatistics64 = core::mem::zeroed();
-        stat.free_count = 524288;
-        stat.active_count = 786432;
-        stat.inactive_count = 524288;
-        stat.wire_count = 262144;
-        ptr::copy_nonoverlapping(
-            (&raw const stat).cast::<u8>(),
-            output.cast(),
-            size_of::<VmStatistics64>(),
-        );
-        count.write(VM_INFO_COUNT);
+        ptr::copy_nonoverlapping((&raw const stat).cast::<i32>(), output, reply as usize);
+        count.write(reply);
     }
     libc::KERN_SUCCESS
 }
