@@ -134,7 +134,7 @@ mod layout;
 #[cfg(target_os = "linux")]
 mod limits;
 mod localtime;
-#[cfg(target_os = "linux")]
+// Memory mappings, and the page cache behind a mapped file. See `mem/mod.rs`.
 mod mem;
 // The caller's namespace files, `/proc/self/ns/*`. See `nsfs.rs`.
 #[cfg(target_os = "linux")]

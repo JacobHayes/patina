@@ -439,14 +439,16 @@ is stated plainly:
    For the classes
    no trap backs (thread-pointer writes, far transfers, `rdrand`/`rdseed`/
    `CNTVCT`/`CNTVCTSS`/`RNDR`) that last case has no run-time backstop either.
-4. **Flag-dependent behavior of an allowlisted symbol (macOS).** `mmap` is
+4. **Flag-dependent behavior of an allowlisted symbol.** `mmap` is
    allowlisted as process-local memory and the audit cannot see its
-   `MAP_SHARED` flag. On Linux the shim interposes `mmap` (a shared mapping is
-   process-local anonymous memory or a view of a modeled file's page cache);
-   on macOS `mmap` is not interposed, and a mapping of a descriptor number the
-   host happens to have open is not refused by any gate. Stated, not papered
-   over: `mmap` is deliberately **not** in the `shared-memory-ipc` list (it
-   would be a dead label, since the allowlist wins first).
+   `MAP_SHARED` flag. A guest linked with the POSIX layer binds `mmap` to the
+   shim on both platforms (anonymous memory is the host's; a mapping of a
+   descriptor is a view of a modeled file's page cache). The allowlist entry
+   covers a guest linked without it (the C-ABI staticlib mode), whose mapping
+   of a descriptor number the host happens to have open is not refused by any
+   gate. Stated, not papered over: `mmap` is deliberately **not** in the
+   `shared-memory-ipc` list (it would be a dead label, since the allowlist
+   wins first).
 5. **Interposed-but-unsupported symbols.** A symbol the shim *defines* to
    fail-closed at runtime (e.g. macOS `pthread_cancel`
    and any not-yet-modeled interposer) is not an import, so the symbol audit
@@ -507,14 +509,26 @@ is stated plainly:
    would show present. A guest branching on residency is deterministic on a
    host with memory to spare, not under memory pressure.
 
-8. **Host descriptors behind guest mappings (Linux).** Every page cache (one
-   per mapped file) and every System V segment is a host memfd the shim holds,
-   so the host's `RLIMIT_NOFILE` bounds how many a guest can have at once. The
-   shim raises the host soft limit to the hard limit at start, and a memfd the
-   host still refuses stops the run by name — the guest never sees the host's
-   `EMFILE` where the modeled kernel would succeed. A host with a low hard
-   limit therefore runs fewer mappings, and says so, rather than answering
-   differently.
+8. **Host descriptors behind guest mappings.** Every page cache (one per
+   mapped file) and, on Linux, every System V segment is a host page file the
+   shim holds: a memfd on Linux, an unlinked file in the per-user temporary
+   directory on macOS. So the host's `RLIMIT_NOFILE` bounds how many a guest
+   can have at once, and on macOS the temporary directory's volume bounds
+   their size. On Linux the shim raises the host soft limit to the hard limit
+   at start; on macOS it leaves the soft limit as the host set it. A page
+   file the host still refuses, or cannot grow, stops the run by name — the
+   guest never sees the host's `EMFILE` or `ENOSPC` where the modeled kernel
+   would succeed. A host with a low limit therefore runs fewer mappings, and
+   says so, rather than answering differently.
+
+   On macOS two more answers are the host's or refused. Mappings are in the
+   host's pages, 16 KiB on Apple silicon, while the virtual machine's page
+   (`sysconf(_SC_PAGESIZE)`, `vm_page_size`) is 4 KiB: a file mapping at an
+   offset or fixed address that is not a multiple of the host page is the
+   host's `EINVAL`, and a file's zero-filled tail before `SIGBUS` runs to the
+   end of a host page. `msync(MS_KILLPAGES)` over a shared file view is
+   refused by name (`ENOSYS`): it would discard the view's changed pages for
+   what the host last wrote of the page file, on the host's schedule.
 
 9. **Control transferred into glibc's executable segment (Linux).** SUD's
    allowed region is glibc's text, where the shim's own host calls run, so a

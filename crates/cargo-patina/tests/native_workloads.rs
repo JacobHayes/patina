@@ -923,7 +923,6 @@ empty_nonblocking={eagain} insecure=16 hashmap=1 getentropy=0 nonblocking_after=
 /// was `SIGBUS`, and an injected error failed `mmap` with `EIO`. Class pairing:
 /// the shim's `clippy.toml` keeps the faulted content reads out of everything
 /// but the guest's own read funnels.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_mapped_file_is_whole_under_filesystem_faults() {
     let g = Guest::assert_build("mmap_short_read_probe.rs");

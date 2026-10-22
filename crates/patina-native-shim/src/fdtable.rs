@@ -508,7 +508,6 @@ impl GuestFdTable {
 
     /// The description itself (for callers holding a [`DescId`], such as a
     /// mapping's retained reference).
-    #[cfg(any(target_os = "linux", patina_posix_exports, test))]
     pub(crate) fn description(&self, desc: DescId) -> Option<&Description> {
         self.descriptions.get(&desc)
     }

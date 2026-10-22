@@ -227,7 +227,7 @@ unsafe extern "C" fn host_processor_info(
     unsafe {
         // Real host mapping: consumers either munmap these pages or call the
         // no-op vm_deallocate below. Never give munmap a static data address.
-        let buffer = libc::mmap(
+        let buffer = (crate::hostapi::get().host_mmap)(
             ptr::null_mut(),
             bytes,
             libc::PROT_READ | libc::PROT_WRITE,

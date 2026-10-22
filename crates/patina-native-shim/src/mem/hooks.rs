@@ -47,6 +47,7 @@ pub(crate) fn syncing(handle: u64) -> Result<(), c_int> {
 }
 
 /// Before `sync`/`syncfs` of the volume: every mapped file's stores.
+#[cfg(target_os = "linux")]
 pub(crate) fn syncing_all() -> Result<(), c_int> {
     if !caching() {
         return Ok(());
@@ -83,6 +84,7 @@ pub(crate) fn written_at_cursor(handle: u64, bytes: &[u8]) {
 }
 
 /// After `handle`'s file became `len` bytes long.
+#[cfg_attr(not(any(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 pub(crate) fn resized(handle: u64, len: u64) {
     if let Some(ino) = cached_ino(handle) {
         resized_ino(ino, len);
@@ -103,6 +105,7 @@ pub(crate) fn resized_ino(ino: u64, len: u64) {
 /// After `fallocate` of `[offset, offset + len)` on `handle`'s file: a hole
 /// punch or a zeroed range cleared it, and without `keep_size` the file
 /// reaches its end.
+#[cfg(target_os = "linux")]
 pub(crate) fn allocated(
     handle: u64,
     offset: u64,
@@ -182,29 +185,17 @@ pub(crate) fn crashed() {
             .filter(|(_, _, object)| object.ino() == Some(old))
             .collect();
         for (start, end, object) in moved {
-            if let Object::File {
-                desc,
-                shared,
-                maywrite,
-                secret,
-                ..
-            } = object
-            {
-                let object = Object::File {
-                    ino,
-                    desc,
-                    shared,
-                    maywrite,
-                    secret,
-                };
-                mappings.views.set(start, end, object);
-            }
+            mappings.views.set(start, end, object.renumbered(ino));
         }
     }
     mappings.caches.extend(rekeyed);
     mappings.publish();
 }
 
+/// `msync(2)` as Linux judges it: the host's answer for the range, then a
+/// write-back and a sync of every file a shared view in it maps under
+/// `MS_SYNC`.
+#[cfg(target_os = "linux")]
 pub(crate) fn msync(addr: usize, len: usize, flags: c_int) -> crate::abi::SysResult<i64> {
     'result: {
         // The arena's region, as a range nothing maps, once the kernel has

@@ -72,6 +72,34 @@ pub(crate) mod hostapi {
     // `mach_msg_type_number_t`.
     pub type MachVmReadOverwrite = unsafe extern "C" fn(u32, u64, u64, u64, *mut u64) -> c_int;
     pub type MachVmWrite = unsafe extern "C" fn(u32, u64, usize, u32) -> c_int;
+    // `mach_vm_region(task, &address, &size, flavor, info, &count, &object)`:
+    // the region at or above `address`, moved to its start, or
+    // `KERN_INVALID_ADDRESS` past the last one. `mem` reads where this task's
+    // address space has holes from it.
+    pub type MachVmRegion = unsafe extern "C" fn(
+        u32,
+        *mut u64,
+        *mut u64,
+        c_int,
+        *mut c_int,
+        *mut u32,
+        *mut u32,
+    ) -> c_int;
+    // The address-space calls the shim's `mmap`/`munmap`/`mprotect`/`msync`
+    // interposers forward to (`mem`), and the descriptor calls behind a
+    // mapped file's page file: an unlinked file the shim names from a
+    // `mkostemp` template in the per-user temporary directory (`confstr`).
+    pub type HostMmap =
+        unsafe extern "C" fn(*mut c_void, usize, c_int, c_int, c_int, i64) -> *mut c_void;
+    pub type HostRange = unsafe extern "C" fn(*mut c_void, usize) -> c_int;
+    pub type HostRangeFlags = unsafe extern "C" fn(*mut c_void, usize, c_int) -> c_int;
+    pub type HostPread = unsafe extern "C" fn(c_int, *mut c_void, usize, i64) -> isize;
+    pub type HostPwrite = unsafe extern "C" fn(c_int, *const c_void, usize, i64) -> isize;
+    pub type HostFtruncate = unsafe extern "C" fn(c_int, i64) -> c_int;
+    pub type HostClose = unsafe extern "C" fn(c_int) -> c_int;
+    pub type HostMkostemp = unsafe extern "C" fn(*mut c_char, c_int) -> c_int;
+    pub type HostUnlink = unsafe extern "C" fn(*const c_char) -> c_int;
+    pub type HostConfstr = unsafe extern "C" fn(c_int, *mut c_char, usize) -> usize;
 
     /// Real host vehicles resolved once through `dlsym(RTLD_NEXT, ...)`. None of
     /// these names appears as an undefined external in the shim objects.
@@ -125,10 +153,25 @@ pub(crate) mod hostapi {
         pub task_self: MachPort,
         pub mach_vm_read_overwrite: MachVmReadOverwrite,
         pub mach_vm_write: MachVmWrite,
+        pub mach_vm_region: MachVmRegion,
         /// libc's own `srandom`, which the `srandomdev` model seeds libc's
         /// `random` state through.
         #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
         pub host_srandom: unsafe extern "C" fn(u32),
+        /// The real libSystem memory calls behind the shim's interposers of
+        /// the same names, and the page file's descriptor calls. See
+        /// [`HostMmap`].
+        pub host_mmap: HostMmap,
+        pub host_munmap: HostRange,
+        pub host_mprotect: HostRangeFlags,
+        pub host_msync: HostRangeFlags,
+        pub host_pread: HostPread,
+        pub host_pwrite: HostPwrite,
+        pub host_ftruncate: HostFtruncate,
+        pub host_close: HostClose,
+        pub host_mkostemp: HostMkostemp,
+        pub host_unlink: HostUnlink,
+        pub host_confstr: HostConfstr,
     }
 
     // SAFETY: the fields are all function pointers into libSystem/libdispatch;
@@ -250,9 +293,29 @@ pub(crate) mod hostapi {
                 mach_vm_write: std::mem::transmute::<*mut c_void, MachVmWrite>(resolve(
                     c"mach_vm_write",
                 )),
+                mach_vm_region: std::mem::transmute::<*mut c_void, MachVmRegion>(resolve(
+                    c"mach_vm_region",
+                )),
                 host_srandom: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(u32)>(
                     resolve(c"srandom"),
                 ),
+                host_mmap: std::mem::transmute::<*mut c_void, HostMmap>(resolve(c"mmap")),
+                host_munmap: std::mem::transmute::<*mut c_void, HostRange>(resolve(c"munmap")),
+                host_mprotect: std::mem::transmute::<*mut c_void, HostRangeFlags>(resolve(
+                    c"mprotect",
+                )),
+                host_msync: std::mem::transmute::<*mut c_void, HostRangeFlags>(resolve(c"msync")),
+                host_pread: std::mem::transmute::<*mut c_void, HostPread>(resolve(c"pread")),
+                host_pwrite: std::mem::transmute::<*mut c_void, HostPwrite>(resolve(c"pwrite")),
+                host_ftruncate: std::mem::transmute::<*mut c_void, HostFtruncate>(resolve(
+                    c"ftruncate",
+                )),
+                host_close: std::mem::transmute::<*mut c_void, HostClose>(resolve(c"close")),
+                host_mkostemp: std::mem::transmute::<*mut c_void, HostMkostemp>(resolve(
+                    c"mkostemp",
+                )),
+                host_unlink: std::mem::transmute::<*mut c_void, HostUnlink>(resolve(c"unlink")),
+                host_confstr: std::mem::transmute::<*mut c_void, HostConfstr>(resolve(c"confstr")),
             }
         }
     }

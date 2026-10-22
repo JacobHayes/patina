@@ -20,10 +20,6 @@ impl<T: Copy> Ranges<T> {
         self.map.is_empty()
     }
 
-    pub(super) fn clear(&mut self) {
-        self.map.clear();
-    }
-
     /// Remove `[from, to)`, answering the pieces it covered; the parts of a
     /// range outside it stay.
     pub(super) fn cut(&mut self, from: usize, to: usize) -> Vec<(usize, usize, T)> {
@@ -54,20 +50,6 @@ impl<T: Copy> Ranges<T> {
         }
     }
 
-    /// The range containing `addr`, whole.
-    pub(super) fn containing(&self, addr: usize) -> Option<(usize, usize, T)> {
-        self.map
-            .range(..=addr)
-            .next_back()
-            .filter(|(_, (end, _))| addr < *end)
-            .map(|(start, (end, value))| (*start, *end, *value))
-    }
-
-    /// The value at `addr`.
-    pub(super) fn at(&self, addr: usize) -> Option<T> {
-        self.containing(addr).map(|(_, _, value)| value)
-    }
-
     /// The ranges within `[from, to)`, clipped to it.
     pub(super) fn within(&self, from: usize, to: usize) -> Vec<(usize, usize, T)> {
         self.map
@@ -82,6 +64,28 @@ impl<T: Copy> Ranges<T> {
         self.map
             .iter()
             .map(|(start, (end, value))| (*start, *end, *value))
+    }
+}
+
+/// The queries of the lock and segment bookkeeping, which only Linux keeps.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl<T: Copy> Ranges<T> {
+    pub(super) fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    /// The range containing `addr`, whole.
+    pub(super) fn containing(&self, addr: usize) -> Option<(usize, usize, T)> {
+        self.map
+            .range(..=addr)
+            .next_back()
+            .filter(|(_, (end, _))| addr < *end)
+            .map(|(start, (end, value))| (*start, *end, *value))
+    }
+
+    /// The value at `addr`.
+    pub(super) fn at(&self, addr: usize) -> Option<T> {
+        self.containing(addr).map(|(_, _, value)| value)
     }
 
     /// The bytes the ranges cover within `[from, to)`.

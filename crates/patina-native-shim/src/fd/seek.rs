@@ -82,7 +82,6 @@ pub(crate) fn seek(raw_fd: c_int, offset: i64, whence: u32) -> crate::abi::SysRe
         SEEK_HOLE => SeekWhence::Hole,
         _ => return Err(crate::abi::failed(EINVAL)),
     };
-    #[cfg(target_os = "linux")]
     if matches!(whence, SeekWhence::Data | SeekWhence::Hole) {
         mem::inspecting(handle.0);
     }
@@ -128,7 +127,6 @@ pub(crate) fn fsync(raw_fd: c_int) -> crate::abi::SysResult<c_int> {
 /// `fsync` of a filesystem handle: what shared mappings of its file stored is
 /// written back first, so it becomes durable with the rest of the file.
 pub(crate) fn fs_sync_handle(handle: Fd) -> Result<(), c_int> {
-    #[cfg(target_os = "linux")]
     mem::syncing(handle.0)?;
     with_context(|context| context.fs_sync(handle))
 }
@@ -155,9 +153,9 @@ pub(crate) fn set_len(raw_fd: c_int, length: u64) -> crate::abi::SysResult<c_int
     }
     match with_context(|context| context.fs_set_len(handle, length)) {
         Ok(()) => {
+            mem::resized(handle.0, length);
             #[cfg(target_os = "linux")]
             {
-                mem::resized(handle.0, length);
                 mem::secret_resized(handle.0, length);
                 fsnotify::on_handle(handle, fsnotify::IN_MODIFY);
             }

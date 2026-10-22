@@ -361,7 +361,6 @@ pub unsafe extern "C" fn patina_metadata_at(
     let Some(metadata) = resolved.metadata else {
         return fail(ENOENT);
     };
-    #[cfg(target_os = "linux")]
     if metadata.kind == FsEntryKind::File && mem::inspecting_ino(metadata.ino) {
         return match with_context(|context| context.fs_inode_metadata(metadata.ino)) {
             Ok(metadata) => write_metadata(metadata, out),
@@ -608,7 +607,6 @@ pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut Patina
         Ok(fd) => fd,
         Err(errno) => return fail(errno),
     };
-    #[cfg(target_os = "linux")]
     mem::inspecting(fd.0);
     match with_context(|context| context.fs_fd_metadata(fd)) {
         Ok(metadata) => write_metadata(metadata, out),
@@ -1124,12 +1122,9 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
     };
     match with_context(|context| context.fs_set_len_by_path(&resolved.path, length)) {
         Ok(()) => {
-            #[cfg(target_os = "linux")]
             mem::resized_ino(ino, length);
             #[cfg(target_os = "linux")]
             fsnotify::on_path(&resolved.path, fsnotify::IN_MODIFY);
-            #[cfg(not(target_os = "linux"))]
-            let _ = ino;
             set_errno(0);
             0
         }

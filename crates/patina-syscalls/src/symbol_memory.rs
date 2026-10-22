@@ -1,10 +1,11 @@
-//! Memory-mapping and memory-locking libc contracts (Linux).
+//! Memory-mapping and memory-locking libc contracts: Linux's, and the
+//! mapping calls macOS defines over the same model.
 use super::inventory::s;
 use super::{Platform, Serves, SymbolRow, SymbolStatus};
 symbol_rows! {
     s(
         "mmap",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["mmap"]),
         SymbolStatus::Modeled,
     ),
@@ -16,13 +17,13 @@ symbol_rows! {
     ),
     s(
         "munmap",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["munmap"]),
         SymbolStatus::Modeled,
     ),
     s(
         "msync",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["msync"]),
         SymbolStatus::Modeled,
     ),
@@ -40,7 +41,7 @@ symbol_rows! {
     ),
     s(
         "mprotect",
-        Platform::Linux,
+        Platform::Both,
         Serves::Syscalls(&["mprotect"]),
         SymbolStatus::Modeled,
     ),

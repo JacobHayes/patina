@@ -233,6 +233,30 @@ impl FsDriver for MemFs {
         Ok(bytes)
     }
 
+    /// The file's bytes, for a load the runtime makes for itself (a mapped
+    /// file's page cache): a kernel fills its page cache from the file, not
+    /// through the description, so neither the handle's access mode nor its
+    /// cursor enters into it. A write-only descriptor maps without access on
+    /// macOS, and the pages a later `mprotect` exposes are the file's.
+    fn read_at_unfaulted(
+        &mut self,
+        clock: FsClock,
+        fd: Fd,
+        offset: u64,
+        max_len: usize,
+    ) -> DriverResult<Vec<u8>> {
+        let inode = self.handle_inode(fd)?;
+        let inode = self
+            .inodes
+            .get_mut(&inode)
+            .expect("open handle references a file");
+        let bytes = inode.contents.read(offset, max_len);
+        if max_len != 0 {
+            inode.times.accessed(clock);
+        }
+        Ok(bytes)
+    }
+
     fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
         let description = self.description(fd)?;
         if !description.writable {

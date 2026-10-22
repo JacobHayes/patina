@@ -2,16 +2,27 @@
 //! and the shadow of what the filesystem holds that tells which pages a view
 //! dirtied.
 //!
-//! The pages of a real run are a host memfd (`Memfd`) sized to the file, so
-//! a view maps exactly the kernel's shmem semantics: a page wholly past the
-//! end of the file faults `SIGBUS`, and a truncation zeroes the tail of the
-//! last page. The cache logic is over [`Pages`], so it is tested over a byte
-//! vector.
+//! The pages of a real run are a host page file ([`PageFile`]) sized to the
+//! file: a memfd on Linux, an unlinked host file on macOS. Either way a view
+//! maps exactly the host kernel's semantics for a mapped file: a page wholly
+//! past the end of the file faults `SIGBUS`, and a truncation zeroes the tail
+//! of the last page. The cache logic is over [`Pages`], so it is tested over
+//! a byte vector.
 
-use super::{PAGE, host};
+use super::PAGE;
+#[cfg(target_os = "linux")]
+use super::host;
+#[cfg(target_os = "linux")]
 use crate::registry::Syscall;
 use patina_dst_abi::Fd;
 use std::ffi::c_int;
+
+/// The host page file behind a page cache.
+#[cfg(target_os = "linux")]
+pub(super) type PageFile = Memfd;
+/// The host page file behind a page cache.
+#[cfg(target_os = "macos")]
+pub(super) type PageFile = HostFile;
 
 /// A file-sized array of bytes: bytes past its length read zero, growth
 /// zero-fills, shrinking discards.
@@ -52,14 +63,19 @@ impl Pages for Vec<u8> {
 }
 
 /// A host memfd: anonymous shmem the shim owns, which views map.
+#[cfg(target_os = "linux")]
 pub(super) struct Memfd {
     pub(super) fd: c_int,
 }
 
+#[cfg(target_os = "linux")]
 const FALLOC_FL_KEEP_SIZE: usize = 0x01;
+#[cfg(target_os = "linux")]
 const FALLOC_FL_PUNCH_HOLE: usize = 0x02;
+#[cfg(target_os = "linux")]
 const MFD_CLOEXEC: usize = 0x1;
 
+#[cfg(target_os = "linux")]
 impl Memfd {
     /// A new, empty memfd. The host refusing one (its descriptor limit, which
     /// `__libc_start_main` raised to the hard limit, or its memory) is the
@@ -98,6 +114,7 @@ impl Memfd {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Pages for Memfd {
     fn read(&self, offset: u64, buf: &mut [u8]) {
         let mut done = 0;
@@ -176,9 +193,144 @@ impl Pages for Memfd {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Memfd {
     fn drop(&mut self) {
         host(Syscall::N_close, [self.fd as usize, 0, 0, 0, 0, 0]);
+    }
+}
+
+/// An unlinked host file the shim owns, which views map: macOS has no memfd,
+/// and a regular file is what XNU maps through its unified buffer cache, so
+/// the shim's `pread`/`pwrite` and every shared view see one set of bytes and
+/// a private view is XNU's copy of it, as for a file the guest maps
+/// natively. The file is made in the per-user temporary directory
+/// (`_CS_DARWIN_USER_TEMP_DIR`) and unlinked at once, so only its descriptor
+/// names it.
+#[cfg(target_os = "macos")]
+pub(super) struct HostFile {
+    pub(super) fd: c_int,
+}
+
+#[cfg(target_os = "macos")]
+impl HostFile {
+    /// A new, empty page file. The host refusing one (its descriptor limit,
+    /// or its temporary directory) is the shim's failure, never the guest's
+    /// errno: the kernel being modeled would have succeeded.
+    pub(super) fn new() -> HostFile {
+        const NAME: &[u8] = b"patina-page-cache.XXXXXX\0";
+        let api = crate::hostapi::get();
+        let mut template = [0u8; 1024];
+        // SAFETY: `confstr` writes at most `template.len()` bytes into it.
+        let len = unsafe {
+            (api.host_confstr)(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                template.as_mut_ptr().cast(),
+                template.len(),
+            )
+        };
+        // `len` counts the NUL; the directory ends in a separator.
+        if len < 2 || len - 1 + NAME.len() > template.len() || template[len - 2] != b'/' {
+            Self::refused("a temporary directory", std::io::Error::last_os_error());
+        }
+        template[len - 1..len - 1 + NAME.len()].copy_from_slice(NAME);
+        // SAFETY: `template` is a NUL-terminated `mkostemp` template, which
+        // it rewrites in place.
+        let fd = unsafe { (api.host_mkostemp)(template.as_mut_ptr().cast(), libc::O_CLOEXEC) };
+        if fd < 0 {
+            crate::trap_fatal(&format!(
+                "the host refused a page file for guest memory ({}): every mapped file holds one \
+                 host descriptor, and the host's RLIMIT_NOFILE or its temporary directory is \
+                 exhausted",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let file = HostFile { fd };
+        // SAFETY: `template` now names the file `mkostemp` made.
+        if unsafe { (api.host_unlink)(template.as_ptr().cast()) } != 0 {
+            Self::refused("an unlink", std::io::Error::last_os_error());
+        }
+        file
+    }
+
+    /// The host refused shim memory: nothing the guest did can be answered.
+    fn refused(what: &str, error: std::io::Error) -> ! {
+        crate::trap_fatal(&format!(
+            "the page cache's host file refused {what} ({error}); the page cache cannot hold the \
+             file"
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Pages for HostFile {
+    fn read(&self, offset: u64, buf: &mut [u8]) {
+        let mut done = 0;
+        while done < buf.len() {
+            // SAFETY: `buf[done..]` is writable for its length.
+            let got = unsafe {
+                (crate::hostapi::get().host_pread)(
+                    self.fd,
+                    buf[done..].as_mut_ptr().cast(),
+                    buf.len() - done,
+                    (offset + done as u64) as i64,
+                )
+            };
+            if got < 0 {
+                Self::refused("a read", std::io::Error::last_os_error());
+            }
+            if got == 0 {
+                buf[done..].fill(0);
+                return;
+            }
+            done += got as usize;
+        }
+    }
+
+    fn write(&mut self, offset: u64, bytes: &[u8]) {
+        let mut done = 0;
+        while done < bytes.len() {
+            // SAFETY: `bytes[done..]` is readable for its length.
+            let put = unsafe {
+                (crate::hostapi::get().host_pwrite)(
+                    self.fd,
+                    bytes[done..].as_ptr().cast(),
+                    bytes.len() - done,
+                    (offset + done as u64) as i64,
+                )
+            };
+            if put <= 0 {
+                Self::refused("a write", std::io::Error::last_os_error());
+            }
+            done += put as usize;
+        }
+    }
+
+    fn set_len(&mut self, len: u64) {
+        // SAFETY: a resize of the shim's own descriptor.
+        if unsafe { (crate::hostapi::get().host_ftruncate)(self.fd, len as i64) } != 0 {
+            Self::refused("a resize", std::io::Error::last_os_error());
+        }
+    }
+
+    /// Zeroes written over the range: what reads back is what a punched
+    /// hole reads.
+    fn punch(&mut self, from: u64, to: u64) {
+        const ZEROES: [u8; PAGE] = [0; PAGE];
+        let mut at = from;
+        while at < to {
+            let chunk = (to - at).min(PAGE as u64) as usize;
+            self.write(at, &ZEROES[..chunk]);
+            at += chunk as u64;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for HostFile {
+    fn drop(&mut self) {
+        // SAFETY: the shim's own descriptor, closed once.
+        unsafe { (crate::hostapi::get().host_close)(self.fd) };
     }
 }
 
@@ -232,6 +384,8 @@ impl<P: Pages> Cache<P> {
         }
     }
 
+    /// The file's size. Its caller mirrors `fallocate`, which only Linux has.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(super) fn size(&self) -> u64 {
         self.size
     }
@@ -271,7 +425,9 @@ impl<P: Pages> Cache<P> {
         }
     }
 
-    /// The filesystem zeroed `[from, to)` (clipped to the file).
+    /// The filesystem zeroed `[from, to)` (clipped to the file). Its caller
+    /// mirrors `fallocate`, which only Linux has.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(super) fn zero(&mut self, from: u64, to: u64) {
         let to = to.min(self.size);
         if from >= to {

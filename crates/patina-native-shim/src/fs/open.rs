@@ -387,7 +387,6 @@ pub(crate) unsafe fn open_at(
             match with_context(|context| context.fs_open(&resolved.path, open_flags)) {
                 Ok(fd) => {
                     // An `O_TRUNC` open of a mapped file empties its page cache.
-                    #[cfg(target_os = "linux")]
                     if let (true, Some(metadata)) = (open_flags.truncate, resolved.metadata) {
                         mem::resized_ino(metadata.ino, 0);
                     }

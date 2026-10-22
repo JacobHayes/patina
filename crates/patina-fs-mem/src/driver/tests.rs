@@ -303,3 +303,23 @@ fn access_modes_and_unsafe_paths_are_rejected() {
         ErrorCode::InvalidInput
     );
 }
+
+/// A load the runtime makes for itself reads the file whatever the handle's
+/// access mode, and leaves the handle's cursor where the guest put it.
+#[test]
+fn an_unfaulted_load_reads_through_a_write_only_handle() {
+    let mut fs = MemFs::new();
+    let writer = fs
+        .open(FsClock::EPOCH, "/file", OpenFlags::create_truncate_write())
+        .unwrap();
+    fs.write(FsClock::EPOCH, writer, b"content").unwrap();
+    assert_eq!(
+        fs.read(FsClock::EPOCH, writer, 7).unwrap_err().code,
+        ErrorCode::NotReadable
+    );
+    assert_eq!(
+        fs.read_at_unfaulted(FsClock::EPOCH, writer, 3, 16).unwrap(),
+        b"tent"
+    );
+    assert_eq!(fs.seek(writer, 0, SeekWhence::Current).unwrap(), 7);
+}

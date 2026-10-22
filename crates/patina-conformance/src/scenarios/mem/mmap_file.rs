@@ -142,6 +142,12 @@ pub fn run(p: &Probe) {
         p.mmap("-", &null, page, PROT_READ, MAP_SHARED, writer, 0).0 == neg(EACCES),
     );
     p.check(
+        "a write-only descriptor is EACCES mapped private without access too",
+        p.mmap("-", &null, page, PROT_NONE, MAP_PRIVATE, writer, 0)
+            .0
+            == neg(EACCES),
+    );
+    p.check(
         "a misaligned offset is EINVAL",
         p.mmap("-", &null, page, PROT_READ, MAP_SHARED, fd, 1).0 == neg(EINVAL),
     );

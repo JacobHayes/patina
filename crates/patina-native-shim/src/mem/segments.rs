@@ -69,9 +69,14 @@ pub(crate) fn attach(
         id,
         maywrite: prot & PROT_WRITE != 0,
     };
-    let view = alias(fd, 0, rounded, addr, prot, MAP_SHARED, object, lock);
+    let view = alias(fd, 0, rounded, addr, prot, MAP_SHARED, object);
     if view < 0 && claimed {
         host(Syscall::N_munmap, [addr.unwrap_or(0), rounded, 0, 0, 0, 0]);
+    }
+    if view >= 0
+        && let Some(onfault) = lock
+    {
+        let _ignore_errors = lock_range(view as usize, rounded, onfault);
     }
     view
 }

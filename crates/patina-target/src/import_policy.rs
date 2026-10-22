@@ -628,10 +628,15 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
     // static init reaches it). Registration only records a callback in
     // process-local storage; nothing crosses the boundary Patina models.
     const FINALIZERS: &[&str] = &["atexit", "cxa_atexit"];
-    // Darwin's 64-bit mmap import backs the allocator and thread stacks, with
-    // `mprotect`/`munmap` for guard pages and `madvise` hints on process-local
-    // pages: libSystem's, as the shim does not define them on Darwin.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["madvise", "mmap", "mprotect", "munmap"];
+    // Process-local memory extent: Darwin's 64-bit `mmap` backs the allocator
+    // and thread stacks, with `mprotect`/`munmap` for guard pages. With the
+    // POSIX layer the shim's strong definitions take these names off the
+    // import table and the mapping model answers them; the entries cover a
+    // guest linked WITHOUT it (the C-ABI staticlib mode).
+    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap", "mprotect", "munmap"];
+    // `madvise` hints on process-local pages: libSystem's, as the shim does
+    // not define it on Darwin.
+    const PROCESS_LOCAL_ADVICE: &[&str] = &["madvise"];
     // Signal registration is used by Rust's panic/stack-overflow diagnostics;
     // Patina does not deliver ambient host signals into guest execution, so
     // installation is deterministic; admitted delivery comes from faults or
@@ -696,7 +701,8 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(MEMORY_FILL, Never),
         AllowedImports::exact(STARTUP_AND_IMAGE_GLUE, Never),
         AllowedImports::exact(FINALIZERS, Never),
-        AllowedImports::exact(PROCESS_LOCAL_MEMORY, HEAP),
+        AllowedImports::exact(PROCESS_LOCAL_MEMORY, Interposed),
+        AllowedImports::exact(PROCESS_LOCAL_ADVICE, HEAP),
         AllowedImports::exact(ZONE_ALLOCATOR, HEAP),
         AllowedImports::exact(PRNG_STATE, Never),
         AllowedImports::exact(

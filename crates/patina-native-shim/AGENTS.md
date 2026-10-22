@@ -146,11 +146,14 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   resolution and permissions and then declines to hand back a descriptor, and the
   caller reads the refused entry's kind on the failure path only.
 - A file mapping is a VIEW of the file's page cache, never a copy: the page
-  cache of a mapped file is a host memfd the shim holds (`src/mem/cache.rs`),
+  cache of a mapped file is a host page file the shim holds
+  (`src/mem/cache.rs`: a memfd on Linux, an unlinked host file on macOS),
   which `MAP_SHARED` views map directly and `MAP_PRIVATE` views map
   copy-on-write, so every view and the shim itself (through `pread`/`pwrite`
-  on the memfd) see one set of bytes and the kernel's shmem rules answer for
-  them. The page cache is the whole file: it is loaded, at the first mapping
+  on the page file) see one set of bytes and the host kernel's rules for a
+  mapped file answer for them. The rows are each platform's (`mem/mapping.rs`
+  judges as Linux does, `mem/darwin.rs` as XNU does) over the one view table
+  (`mem/views.rs`). The page cache is the whole file: it is loaded, at the first mapping
   and after an in-process crash, to the length the file's metadata reports,
   by unrecorded reads no filesystem fault reaches
   (`Context::fs_read_at_unrecorded`), since no kernel fills its page cache
@@ -174,8 +177,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   locks are bookkeeping against the shim's own `RLIMIT_MEMLOCK` (never a host
   `mlock`, whose answer depends on the host's limit), the hugetlb pool is
   virtually empty, THP is disabled at startup so residency is per page, and a
-  host memfd the shim cannot get (its descriptor limit) is a named fatal, not
-  the guest's `EMFILE`.
+  host page file the shim cannot get (its descriptor limit) is a named fatal,
+  not the guest's `EMFILE`.
   What stays host-decided (reclaim and swap evicting a page `mincore` reports)
   is listed in `crates/patina-target/ESCAPE-CLASSES.md`.
 - Model a rendezvous the way the kernel models it, counters and all. A blocking
@@ -384,7 +387,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   (`ThreadRuntime::next_task`); a new path that waits on the scheduler has to
   go through `block`/`block_timed` so idle time reaches the timers.
 - The memory and IPC models are Rust modules both doors call: `src/mem/`
-  (mappings and page caches in `mod.rs`, `cache.rs`, `ranges.rs`;
+  (mappings and page caches in `mod.rs`, `views.rs`, `cache.rs`, `ranges.rs`,
+  with Linux's rows in `mapping.rs` and macOS's in `darwin.rs`;
   `memfd_create` and seals in `memfd.rs`; `membarrier` in `barrier.rs`),
   `src/numa.rs` (memory policy on one node), `src/limits.rs` (the 16
   resource limits `getrlimit`/`setrlimit`/`prlimit64` answer, read by the

@@ -199,11 +199,9 @@ pub extern "C" fn patina_crash() -> c_int {
     }
     match with_context(Context::fs_crash) {
         Ok(()) => {
+            mem::crashed();
             #[cfg(target_os = "linux")]
-            {
-                mem::crashed();
-                fsnotify::crashed();
-            }
+            fsnotify::crashed();
             0
         }
         Err(errno) => fail(errno),

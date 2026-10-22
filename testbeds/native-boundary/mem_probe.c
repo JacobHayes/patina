@@ -1,29 +1,43 @@
 #define _GNU_SOURCE
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE /* MAP_ANON and MS_DEACTIVATE */
+#endif
 #include "patina_native.h"
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/falloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/ipc.h>
 #include <sys/mman.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <linux/falloc.h>
+#include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
 #include <sys/syscall.h>
-#include <unistd.h>
+#endif
 
 /* Virtual answers of the memory family that no host setting may reach, one
- * mode per argument:
+ * mode per argument (mprotect's file half, sigbus and msync-hole on every
+ * platform, the modes marked macOS there only, the rest on Linux):
  *   limits    RLIMIT_MEMLOCK is the virtual 8 MiB, lowered as an unprivileged
  *             process may, and mlock is judged against it (the test runs this
  *             with the host limit at zero); the other resources follow the
  *             same rule from their own virtual starting values;
  *   mprotect  a shared view that may not write refuses PROT_WRITE (EACCES)
- *             while a private copy takes it;
+ *             while a private copy takes it, and an unmapped page below it
+ *             is ENOMEM first;
+ *   msync-default, msync-deactivate (macOS)  msync with neither MS_ASYNC nor
+ *             a page-disposal flag makes a shared view's stores durable, and
+ *             one with MS_DEACTIVATE does not, MS_SYNC or not;
+ *   msync-hole  msync(MS_SYNC) over a hole makes the views on both sides
+ *             durable and answers ENOMEM;
+ *   wronly (macOS)  a write-only descriptor maps PROT_NONE, private and
+ *             shared, and mprotect then exposes the file's bytes;
  *   huge      no hugetlb pages are configured, across mmap, shmget and memfd,
  *             and a memfd's fallocate takes only KEEP_SIZE and PUNCH_HOLE;
  *   thp       transparent huge pages are off, so one touch is one page, and
@@ -41,10 +55,15 @@
 
 #define MIB (1024UL * 1024UL)
 
+/* A multiple of every page size a host maps in (4 KiB on x86_64 Linux,
+ * 16 KiB on Apple silicon), for ranges placed or split by address. */
+#define SPAN (64 * 1024)
+
 static int expect_errno(long result, int expected) {
     return result == -1 && errno == expected;
 }
 
+#ifdef __linux__
 static int limits(void) {
     struct rlimit limit;
     if (getrlimit(RLIMIT_MEMLOCK, &limit) != 0) return 10;
@@ -89,6 +108,8 @@ static int limits(void) {
     return 0;
 }
 
+#endif
+
 static int mprotect_views(void) {
     if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return 10;
     int fd = open("/state/mapped", O_CREAT | O_TRUNC | O_RDWR, 0600);
@@ -103,16 +124,94 @@ static int mprotect_views(void) {
     if (mprotect(private, 4096, PROT_READ | PROT_WRITE) != 0) return 16;
     private[0] = 'p';
     if (shared[0] != 0) return 17;
-    if (munmap(shared, 4096) != 0 || munmap(private, 4096) != 0 || close(fd) != 0) return 18;
+    if (munmap(shared, 4096) != 0 || munmap(private, 4096) != 0) return 18;
+    /* [unmapped][read-only shared view]: the hole is met first. */
+    char *base = mmap(NULL, 2 * SPAN, PROT_READ, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (base == MAP_FAILED) return 24;
+    if (mmap(base + SPAN, SPAN, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0) != base + SPAN) return 25;
+    if (munmap(base, SPAN) != 0) return 26;
+    if (!expect_errno(mprotect(base, 2 * SPAN, PROT_READ | PROT_WRITE), ENOMEM)) return 27;
+    if (munmap(base + SPAN, SPAN) != 0 || close(fd) != 0) return 28;
+#ifdef __linux__
     int id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
     if (id < 0) return 20;
     char *segment = shmat(id, NULL, SHM_RDONLY);
     if (segment == (void *)-1) return 21;
     if (!expect_errno(mprotect(segment, 4096, PROT_READ | PROT_WRITE), EACCES)) return 22;
     if (shmdt(segment) != 0 || shmctl(id, IPC_RMID, NULL) != 0) return 23;
+#endif
     return 0;
 }
 
+/* A file of `size` zero bytes at /state/synced whose name and contents are
+ * durable, mapped shared over its whole length. */
+static char *durable_view(size_t size) {
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return NULL;
+    int root = open("/", O_RDONLY | O_DIRECTORY);
+    if (root < 0 || fsync(root) != 0 || close(root) != 0) return NULL;
+    int fd = open("/state/synced", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (fd < 0 || ftruncate(fd, (off_t)size) != 0 || fsync(fd) != 0) return NULL;
+    int dir = open("/state", O_RDONLY | O_DIRECTORY);
+    if (dir < 0 || fsync(dir) != 0 || close(dir) != 0) return NULL;
+    char *view = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (view == MAP_FAILED || close(fd) != 0) return NULL;
+    return view;
+}
+
+#ifdef __APPLE__
+/* XNU synchronizes unless asked only to start (MS_ASYNC) or to dispose of
+ * the pages (MS_KILLPAGES, MS_DEACTIVATE). */
+static int msync_default(void) {
+    char *view = durable_view(SPAN);
+    if (view == NULL) return 10;
+    view[0] = 'a';
+    if (msync(view, SPAN, 0) != 0) return 11;
+    if (patina_crash() != 0) return 12;
+    if (view[0] != 'a') return 13;
+    return 0;
+}
+
+static int msync_deactivate(void) {
+    char *view = durable_view(SPAN);
+    if (view == NULL) return 10;
+    view[0] = 'b';
+    if (msync(view, SPAN, MS_SYNC | MS_DEACTIVATE) != 0) return 11;
+    if (patina_crash() != 0) return 12;
+    if (view[0] != 0) return 13;
+    return 0;
+}
+
+static int write_only(void) {
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return 10;
+    int fd = open("/state/contents", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (fd < 0 || pwrite(fd, "content", 7, 0) != 7 || close(fd) != 0) return 11;
+    fd = open("/state/contents", O_WRONLY);
+    if (fd < 0) return 12;
+    char *private = mmap(NULL, SPAN, PROT_NONE, MAP_PRIVATE, fd, 0);
+    if (private == MAP_FAILED) return 13;
+    char *shared = mmap(NULL, SPAN, PROT_NONE, MAP_SHARED, fd, 0);
+    if (shared == MAP_FAILED) return 14;
+    if (mprotect(private, SPAN, PROT_READ) != 0 || memcmp(private, "content", 7) != 0) return 15;
+    if (mprotect(shared, SPAN, PROT_READ) != 0 || memcmp(shared, "content", 7) != 0) return 16;
+    if (munmap(private, SPAN) != 0 || munmap(shared, SPAN) != 0 || close(fd) != 0) return 17;
+    return 0;
+}
+#endif
+
+/* [view][hole][view]: both views are synchronized, then the hole answers. */
+static int msync_hole(void) {
+    char *view = durable_view(3 * SPAN);
+    if (view == NULL) return 10;
+    if (munmap(view + SPAN, SPAN) != 0) return 11;
+    view[0] = 'c';
+    view[2 * SPAN] = 'd';
+    if (!expect_errno(msync(view, 3 * SPAN, MS_SYNC), ENOMEM)) return 12;
+    if (patina_crash() != 0) return 13;
+    if (view[0] != 'c' || view[2 * SPAN] != 'd') return 14;
+    return 0;
+}
+
+#ifdef __linux__
 static int huge(void) {
     int anon = MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB;
     void *view = mmap(NULL, 2 * MIB, PROT_READ | PROT_WRITE, anon, -1, 0);
@@ -172,17 +271,23 @@ static int thp(void) {
     return 0;
 }
 
+#endif
+
+/* 64 KiB is past the end of the 100-byte file by whole pages of any size a
+ * host maps in (4 KiB on x86_64 Linux, 16 KiB on Apple silicon). */
 static int sigbus(void) {
+    const long past = 64 * 1024;
     if (patina_mkdir(PATINA_AT_FDCWD, "/state", 0777) != 0) return 10;
     int fd = open("/state/short", O_CREAT | O_TRUNC | O_RDWR, 0600);
     if (fd < 0 || ftruncate(fd, 100) != 0) return 11;
-    volatile char *view = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    volatile char *view = mmap(NULL, 2 * past, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (view == MAP_FAILED) return 12;
     view[99] = 'x';
-    view[4096] = 'x';
+    view[past] = 'x';
     return 13;
 }
 
+#ifdef __linux__
 static int populate(void) {
     char *region = mmap(NULL, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (region == MAP_FAILED) return 10;
@@ -236,27 +341,43 @@ static int refusals(void) {
     refusal("shmctl-info-raw", syscall(SYS_shmctl, 0, IPC_INFO, table));
     return 0;
 }
+#endif
 
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
-    if (patina_init_seed(7) != 0) return 3;
+    /* The msync modes crash in process; the crash model is the seeded run's
+     * filesystem with crashes on. */
+    int crashes = strncmp(argv[1], "msync-", 6) == 0;
+    if ((crashes ? patina_init_crash(7) : patina_init_seed(7)) != 0) return 3;
     int status;
-    if (strcmp(argv[1], "limits") == 0) {
-        status = limits();
-    } else if (strcmp(argv[1], "mprotect") == 0) {
+    if (strcmp(argv[1], "mprotect") == 0) {
         status = mprotect_views();
+    } else if (strcmp(argv[1], "sigbus") == 0) {
+        status = sigbus();
+    } else if (strcmp(argv[1], "msync-hole") == 0) {
+        status = msync_hole();
+#ifdef __APPLE__
+    } else if (strcmp(argv[1], "msync-default") == 0) {
+        status = msync_default();
+    } else if (strcmp(argv[1], "msync-deactivate") == 0) {
+        status = msync_deactivate();
+    } else if (strcmp(argv[1], "wronly") == 0) {
+        status = write_only();
+#endif
+#ifdef __linux__
+    } else if (strcmp(argv[1], "limits") == 0) {
+        status = limits();
     } else if (strcmp(argv[1], "huge") == 0) {
         status = huge();
     } else if (strcmp(argv[1], "thp") == 0) {
         status = thp();
-    } else if (strcmp(argv[1], "sigbus") == 0) {
-        status = sigbus();
     } else if (strcmp(argv[1], "populate") == 0) {
         status = populate();
     } else if (strcmp(argv[1], "descriptors") == 0) {
         status = descriptors();
     } else if (strcmp(argv[1], "refusals") == 0) {
         status = refusals();
+#endif
     } else {
         return 4;
     }

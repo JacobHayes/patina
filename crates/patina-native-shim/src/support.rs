@@ -27,7 +27,6 @@ pub(crate) const EFAULT: c_int = 14;
 pub(crate) const EIO: c_int = 5;
 #[cfg(target_os = "linux")]
 pub(crate) const ENOTTY: c_int = 25;
-#[cfg(target_os = "linux")]
 pub(crate) const ENOMEM: c_int = 12;
 pub(crate) const EISDIR: c_int = 21;
 pub(crate) const ENOENT: c_int = 2;

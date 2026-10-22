@@ -15,7 +15,6 @@ use super::*;
 /// `destination` must be writable for `length` bytes when nonzero.
 #[expect(clippy::disallowed_methods, reason = "the guest's own read(2)")]
 unsafe fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
-    #[cfg(target_os = "linux")]
     mem::reading(fd.0);
     match with_context(|context| context.fs_read(fd, length)) {
         Ok(bytes) => {
@@ -214,7 +213,6 @@ unsafe fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
     };
     match with_context(|context| context.fs_write(fd, bytes)) {
         Ok(written) => {
-            #[cfg(target_os = "linux")]
             mem::written_at_cursor(fd.0, &bytes[..written.min(bytes.len())]);
             isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
         }
@@ -389,7 +387,6 @@ pub(crate) unsafe fn fs_pread(
         // SAFETY: forwarded from this function's own contract.
         return unsafe { thread::ipc::mq_read(resolved.handle, destination, length, Some(offset)) };
     }
-    #[cfg(target_os = "linux")]
     mem::reading(resolved.handle);
     match with_context(|context| context.fs_read_at(Fd(resolved.handle), offset, length)) {
         Ok(bytes) => {
@@ -451,7 +448,6 @@ pub(crate) unsafe fn fs_pwrite(
     };
     match with_context(|context| context.fs_write_at(handle, offset, bytes)) {
         Ok(written) => {
-            #[cfg(target_os = "linux")]
             mem::written(handle.0, offset, &bytes[..written.min(bytes.len())]);
             isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
         }

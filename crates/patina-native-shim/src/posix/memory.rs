@@ -1,8 +1,14 @@
-//! Linux memory adapters: the raw failure range is distinct from pointer bits.
+//! Memory adapters: the libc address-space calls over `mem`'s rows. On Linux
+//! the raw failure range is distinct from pointer bits; macOS defines the
+//! calls a mapping of a guest descriptor reaches (`mmap`, `munmap`,
+//! `mprotect`, `msync`), and the rest stay libSystem's process-local memory.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use core::ffi::{c_char, c_int, c_void};
+#[cfg(target_os = "linux")]
+use core::ffi::c_char;
+use core::ffi::{c_int, c_void};
 
+#[cfg(target_os = "linux")]
 fn result(value: i64) -> c_int {
     crate::abi::libc_result(crate::abi::LinuxReturn::new(value).decode().map(|_| 0), -1)
 }
@@ -26,6 +32,7 @@ unsafe extern "C" fn mmap(
 }
 /// # Safety
 /// Same range contract as mmap64.
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn mmap64(
     hint: *mut c_void,
@@ -63,6 +70,7 @@ extern "C" fn mprotect(address: *mut c_void, length: usize, protection: c_int) -
         -1,
     )
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn madvise(address: *mut c_void, length: usize, advice: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -72,26 +80,31 @@ extern "C" fn madvise(address: *mut c_void, length: usize, advice: c_int) -> c_i
         advice as usize,
     ))
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn mlock(address: *const c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlock(address as usize, length, 0))
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn mlock2(address: *const c_void, length: usize, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlock(address as usize, length, flags))
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn munlock(address: *const c_void, length: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_munlock(address as usize, length))
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn mlockall(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     result(crate::mem::patina_mlockall(flags))
 }
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn munlockall() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -99,6 +112,7 @@ extern "C" fn munlockall() -> c_int {
 }
 /// # Safety
 /// name is a guest C string, imported by the model through uaccess.
+#[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 unsafe extern "C" fn memfd_create(name: *const c_char, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
