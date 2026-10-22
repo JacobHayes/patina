@@ -60,6 +60,6 @@ url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/62060
 provenance = "github-attestations"
 
 [[tools.rust]]
-version = "1.99.0"
+version = "1.99.1"
 backend = "core:rust"
 specifiers = ["latest"]

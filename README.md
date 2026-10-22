@@ -51,7 +51,7 @@ pre-run refusal — never a silent escape to the host.
 
 ## Quickstart
 
-Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.0 in
+Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.1 in
 `mise.lock`, with a checked `rust-toolchain.toml` mirror for rustup users.
 `mise.toml` selects `latest`; normal installs honor the lock. Advance the lock
 and mirror together when upgrading Rust. Setup registers the pin with mise;

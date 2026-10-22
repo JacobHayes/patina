@@ -6,7 +6,7 @@
 # scripts/check-toolchain.py checks both pins and the active compiler, catching
 # older mise Rust install symlink registries that can bypass lock resolution.
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
 # Clippy checks OS/architecture cfg code without cross-linking or a cross SDK.
