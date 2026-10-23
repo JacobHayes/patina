@@ -152,3 +152,39 @@ fn an_allocator_reading_its_cpu_runs_threads() {
     let expected = if cfg!(target_os = "linux") { cpus } else { 1 };
     assert_eq!(seen, expected, "{}", text(&out));
 }
+
+/// An allocator that makes system calls on every allocation, as the
+/// program's `#[global_allocator]` and its C `malloc`, runs threads and lists
+/// a directory. The runtime reaches its C entry points from inside calls of
+/// its own: a new thread's TLS while it creates the host thread, holding its
+/// state, and a directory stream. Each call the allocator makes there
+/// (`syscall(SYS_getcpu)`; while listing, `getrusage`, a failing `getrusage`
+/// whose errno it reads, `sched_getaffinity`; and, where syscall-user-dispatch
+/// traps it, a raw `getcpu`) nests in the runtime's call, which carries on as
+/// the runtime's once the allocator returns. The CPUs it saw are the run's,
+/// repeatably and through a replay.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_allocator_making_system_calls_runs_threads() {
+    let mut bins = vec!["syscall_allocator"];
+    if kernel_supports(KernelFeature::Sud) {
+        bins.push("syscall_allocator_raw");
+    }
+    for bin in bins {
+        let g = Guest::assert_build_with("syscall-allocator", &["--bin", bin]);
+        let cpus = 3u32;
+        let count = cpus.to_string();
+        let flags = ["--cpus", count.as_str()];
+        let out = g.assert_seed_repeatability(1, 2, &flags);
+        g.assert_record_replay_identity(1, &flags, &out);
+        let fields = assert_fields(
+            &out,
+            "NATIVE_SYSCALL_ALLOC_RESULT ",
+            &["total", "asked", "cpus_seen", "read_state", "listed"],
+        );
+        for key in ["asked", "read_state", "listed"] {
+            assert_eq!(fields[key], "1", "{bin} {key}: {}", text(&out));
+        }
+        assert_eq!(fields["cpus_seen"], count, "{bin}: {}", text(&out));
+    }
+}

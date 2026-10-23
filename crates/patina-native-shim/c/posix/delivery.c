@@ -125,31 +125,51 @@ static int patina_trap_exit_drive(ucontext_t *uc, long ret) {
  * delivered them; a door that failed EINTR from a wait SA_RESTART restarts
  * runs again from the same registers.
  */
-extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
-extern void patina_trap_leave(void);
+/* A trap handler's hold on the thread (src/panic_boundary.rs `Claim`), kept
+ * in the handler's frame from `patina_trap_enter` to `patina_trap_leave`,
+ * which gives the thread back to what held it before. `took`: the hold took
+ * the thread from guest code, and its exit delivers. A hold that found the
+ * thread already the shim's (guest code the shim called, its C allocator
+ * say, made the call) took nothing: its call nests in the shim's, and its
+ * exit delivers nothing. */
+struct patina_claim {
+    uint8_t previous;
+    uint8_t took;
+};
+extern int patina_trap_enter(uintptr_t sp, stack_t *stack, struct patina_claim *claim);
+extern void patina_trap_leave(struct patina_claim claim);
 
-/* The errno the held door's call met: its handlers see it, as the kernel's
- * return delivers them before glibc's wrapper writes errno. */
-static __thread int patina_door_errno;
+/* A held door's state, in its thunk's frame (one 8-byte slot): the hold, and
+ * the errno the door's call met, which its handlers see, as the kernel's
+ * return delivers them before glibc's wrapper writes errno. A nested door's
+ * errno is the one it wrote. */
+struct patina_door_hold {
+    struct patina_claim claim;
+    int32_t call_errno;
+};
+_Static_assert(sizeof(struct patina_door_hold) == 8, "the door thunks' hold slot");
 
 /* The door's caller's stack pointer is `sp`. */
-__attribute__((visibility("hidden"))) void patina_door_hold(uintptr_t sp) {
-    patina_door_errno = errno;
-    (void)patina_trap_enter(sp, NULL);
+__attribute__((visibility("hidden"))) void patina_door_hold(uintptr_t sp,
+                                                            struct patina_door_hold *door) {
+    door->call_errno = errno;
+    (void)patina_trap_enter(sp, NULL, &door->claim);
 }
 
 /* After the Rust door returned: answers whether it runs again (still held).
  * The exit writes the errno the door owes once its handlers ran, if the door
  * does not run again; the next run meets what they left. */
-__attribute__((visibility("hidden"))) int patina_door_exit(void) {
-    struct patina_exit delivery;
-    memset(&delivery, 0, sizeof delivery);
-    errno = patina_door_errno;
-    if (patina_exit_drive(&delivery, 0)) {
-        patina_door_errno = errno;
-        return 1;
+__attribute__((visibility("hidden"))) int patina_door_exit(struct patina_door_hold *door) {
+    if (door->claim.took) {
+        struct patina_exit delivery;
+        memset(&delivery, 0, sizeof delivery);
+        errno = door->call_errno;
+        if (patina_exit_drive(&delivery, 0)) {
+            door->call_errno = errno;
+            return 1;
+        }
     }
-    patina_trap_leave();
+    patina_trap_leave(door->claim);
     return 0;
 }
 
@@ -158,10 +178,11 @@ __attribute__((visibility("hidden"))) int patina_door_exit(void) {
 extern long patina_libc_syscall_fixed(long number, const uint64_t (*words)[6]);
 __attribute__((visibility("hidden"))) long patina_libc_syscall_door(
     long number, const uint64_t (*words)[6], uintptr_t sp) {
-    patina_door_hold(sp);
+    struct patina_door_hold door;
+    patina_door_hold(sp, &door);
     long ret;
     do ret = patina_libc_syscall_fixed(number, words);
-    while (patina_door_exit());
+    while (patina_door_exit(&door));
     return ret;
 }
 #endif

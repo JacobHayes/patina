@@ -45,8 +45,6 @@ extern void patina_sud_complete(ucontext_t *uc, long ret);
 extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
                                 unsigned long a3, unsigned long a4, unsigned long a5,
                                 uintptr_t call_addr);
-extern int patina_trap_enter(uintptr_t sp, stack_t *stack);
-extern void patina_trap_leave(void);
 _Static_assert(offsetof(siginfo_t, si_call_addr) == 16 && offsetof(siginfo_t, si_syscall) == 24 &&
                    offsetof(siginfo_t, si_arch) == 28,
                "Rust SIGSYS siginfo words");
@@ -66,17 +64,20 @@ __attribute__((visibility("hidden"))) void patina_sud_sigsys(int sig, siginfo_t 
      * delivered from its exit (delivery.c), every Rust frame returned. A
      * call a handler with SA_RESTART interrupted runs again from its
      * registers, as the kernel's restart does. The guest's errno is the
-     * handlers' from the deliveries on. */
-    (void)patina_trap_enter(trap.sp, &uc->uc_stack);
+     * handlers' from the deliveries on. A call nested in a shim call (guest
+     * code the shim called, its C allocator say, made it) delivers nothing:
+     * that is left to the shim call it nests in. */
+    struct patina_claim claim;
+    (void)patina_trap_enter(trap.sp, &uc->uc_stack, &claim);
     long ret;
     do {
         ret = patina_sud_dispatch(trap.nr, trap.args[0], trap.args[1], trap.args[2],
                                   trap.args[3], trap.args[4], trap.args[5], trap.call_addr);
         errno = saved_errno;
-    } while (patina_trap_exit_drive(uc, ret));
+    } while (claim.took && patina_trap_exit_drive(uc, ret));
     int handled_errno = errno;
     patina_sud_complete(uc, ret);
-    patina_trap_leave();
+    patina_trap_leave(claim);
     errno = handled_errno;
 }
 
@@ -217,7 +218,9 @@ static void patina_run_guest_handler(int sig, siginfo_t *info, ucontext_t *uc,
 static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc, patina_route_fn route) {
     uintptr_t sp = patina_interrupted_sp(uc);
     int saved_errno = errno;
-    if (!patina_trap_enter(sp, &uc->uc_stack)) patina_trap_shim_fault(info, patina_frame_pc(uc));
+    struct patina_claim claim;
+    if (!patina_trap_enter(sp, &uc->uc_stack, &claim))
+        patina_trap_shim_fault(info, patina_frame_pc(uc));
     volatile uint64_t canary = 0;
     struct patina_fault_frame frame = {
         .sp = sp,
@@ -230,7 +233,7 @@ static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc, patina_
     };
     struct patina_signal_action handler;
     int routed = route(sig, info, uc, &frame, &handler);
-    patina_trap_leave();
+    patina_trap_leave(claim);
     errno = saved_errno;
     if (routed != PATINA_FAULT_HANDLER) return routed;
     patina_run_guest_handler(sig, info, uc, &frame, &handler);
@@ -239,13 +242,13 @@ static int patina_guest_signal(int sig, siginfo_t *info, ucontext_t *uc, patina_
     /* As it stands: a frame built over another resumes into that one's
      * shim handler, and restores the registration the kernel saved. */
     frame.resume = patina_frame_sp(uc);
-    (void)patina_trap_enter(frame.resume, NULL);
+    (void)patina_trap_enter(frame.resume, NULL, &claim);
     patina_signal_fault_return(&frame);
     errno = saved_errno;
     /* The signals the handler's mask held back are delivered as its return
      * unblocks them, from here (delivery.c): a later handler's errno stands. */
     (void)patina_trap_exit_drive(uc, 0);
-    patina_trap_leave();
+    patina_trap_leave(claim);
     return routed;
 }
 
@@ -310,7 +313,8 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
             unsigned int aux = 0;
             size_t length = 0;
             int saved_errno = errno;
-            if (!patina_trap_enter(sp, &uc->uc_stack)) patina_trap_shim_fault(info, rip);
+            struct patina_claim claim;
+            if (!patina_trap_enter(sp, &uc->uc_stack, &claim)) patina_trap_shim_fault(info, rip);
             int kind = patina_tsc_dispatch(bytes, available, &tsc, &aux, &length);
             if (kind == PATINA_TSC_NONE) {
                 static const char message[] = "patina: C and Rust counter classifiers disagree\n";
@@ -329,7 +333,7 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
              * fired, a signal a peer sent meanwhile) is delivered here, with
              * every Rust frame returned (delivery.c). */
             (void)patina_trap_exit_drive(uc, 0);
-            patina_trap_leave();
+            patina_trap_leave(claim);
             return;
         }
     }

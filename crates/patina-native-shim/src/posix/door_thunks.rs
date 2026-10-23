@@ -4,8 +4,11 @@
 //! `patina_door_<name>`) with the caller's argument registers, and then runs
 //! the door's exit (`patina_door_exit`, `c/posix/delivery.c`): what the call
 //! made deliverable is delivered there, with every Rust frame returned, and a
-//! call `SA_RESTART` restarts runs again from the same registers. The thunk
-//! keeps no state but its own frame and moves no stack argument, so it fits
+//! call `SA_RESTART` restarts runs again from the same registers. The hold
+//! (`struct patina_door_hold`) lives in the thunk's frame, in a slot of its
+//! own beside the saved return value, so a door nested in a shim call (guest
+//! code the shim called made it) keeps its own. The thunk keeps no state but its
+//! own frame and moves no stack argument, so it fits
 //! doors whose arguments all travel in registers: these all do (at most six
 //! integer words). That holds for `semctl`'s variadic fourth argument too: a
 //! `union semun` is one integer-class word, which both Linux ABIs pass in the
@@ -39,6 +42,7 @@ core::arch::global_asm!(
   movq %r8, -40(%rbp)
   movq %r9, -48(%rbp)
   leaq 16(%rbp), %rdi
+  leaq -64(%rbp), %rsi
   call patina_door_hold
 1:
   movq -8(%rbp), %rdi
@@ -49,6 +53,7 @@ core::arch::global_asm!(
   movq -48(%rbp), %r9
   call patina_door_\name
   movq %rax, -56(%rbp)
+  leaq -64(%rbp), %rdi
   call patina_door_exit
   testl %eax, %eax
   jnz 1b
@@ -151,6 +156,7 @@ core::arch::global_asm!(
   stp x2, x3, [sp, #32]
   stp x4, x5, [sp, #48]
   add x0, sp, #80
+  add x1, sp, #72
   bl patina_door_hold
 1:
   ldp x0, x1, [sp, #16]
@@ -158,6 +164,7 @@ core::arch::global_asm!(
   ldp x4, x5, [sp, #48]
   bl patina_door_\name
   str x0, [sp, #64]
+  add x0, sp, #72
   bl patina_door_exit
   cbnz w0, 1b
   ldr x0, [sp, #64]

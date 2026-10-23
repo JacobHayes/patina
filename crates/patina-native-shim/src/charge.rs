@@ -513,13 +513,14 @@ mod tests {
         // A trapped system call, or a libc door its C thunk holds the thread
         // around: the holder's first entry is the call; what it calls, and
         // the holder's glue, are not.
-        assert!(!claim(0));
+        let hold = claim(0);
+        assert!(hold.took());
         {
             let _door = PanicScope::enter_op(Op::Getpid);
             drop(PanicScope::enter());
         }
         drop(PanicScope::enter_glue());
-        release();
+        release(hold);
         let counts = take();
         assert_eq!(counts.calls(ChargeClass::Sync), 1);
         assert_eq!(counts.calls(ChargeClass::Syscall), 0);

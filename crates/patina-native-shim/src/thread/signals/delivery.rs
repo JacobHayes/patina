@@ -674,9 +674,12 @@ fn install_raw_mask(mask: u64) {
 
 /// Deliver what is pending, from Rust: every delivery point whose exit is
 /// not yet C. Under a trap handler's hold it leaves the signals pending for
-/// the handler's C exit, which delivers once every Rust frame returned.
+/// the handler's C exit, which delivers once every Rust frame returned. With
+/// a shim lock held it leaves them for the next delivery point: the call is
+/// nested in shim code that holds the lock (guest code the shim called, its
+/// C allocator say, made it), and no handler runs over a held shim lock.
 pub(crate) fn deliver() {
-    if !crate::panic_boundary::exit_owned() {
+    if !crate::panic_boundary::exit_owned() && !crate::in_shim_critical() {
         deliver_from_rust(&mut Exit::new());
     }
 }

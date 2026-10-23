@@ -182,9 +182,11 @@ pub(crate) struct SpinMutex<T> {
     /// there is no instant at which the lock is held by nobody in particular.
     /// A contended acquire whose holder is the acquiring thread itself can
     /// never succeed:
-    /// the only way one thread reaches a shim lock it already holds is a
-    /// signal handler running over shim code (a fault in the shim, the guest's
-    /// handler calling back into an interposer), and spinning there hangs the
+    /// one thread reaches a shim lock it already holds through code running
+    /// over shim code that holds it: a signal handler (a fault in the shim,
+    /// the guest's handler calling back into an interposer), or guest code
+    /// the shim called with the lock held (the C allocator a host thread's
+    /// creation reaches) making a call that takes it. Spinning there hangs the
     /// process where the kernel would have answered. [`SpinMutex::lock`] turns
     /// it into a named fatal instead.
     owner: AtomicUsize,
@@ -228,7 +230,8 @@ impl<T> SpinMutex<T> {
             let _ = host_write_all(
                 2,
                 b"patina native shim fatal: a shim lock was re-entered by the thread that \
-                  holds it (a signal handler ran over shim code); failing closed\n",
+                  holds it (a signal handler, or guest code the shim called, ran over shim \
+                  code holding it); failing closed\n",
             );
             host_abort()
         })

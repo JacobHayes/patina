@@ -325,17 +325,52 @@ pub extern "C" fn patina_planted_live_scopes() -> u64 {
     scopes_beneath(1)
 }
 
-/// A fault handler takes the thread for the shim before it does anything
-/// else, so a fault in its own glue (a stack switch, a prologue) is known to
-/// be the shim's. `sp` is the interrupted stack pointer. Answers whether shim
-/// code already owned the thread.
+/// A trap handler's hold on the thread ([`claim`]), which only [`release`]
+/// gives back: what held the thread before, restored then. The C handler
+/// keeps it in its frame (`struct patina_claim`, `c/posix/delivery.c`).
 #[cfg(target_os = "linux")]
-pub(crate) fn claim(sp: usize) -> bool {
-    let owned = IN_SHIM.with(|scope| scope.replace(Owner::Exit)) != Owner::Guest;
-    if !owned {
+#[repr(C)]
+#[must_use]
+pub struct Claim {
+    previous: Owner,
+    /// Whether the hold took the thread from guest code ([`Owner::Exit`]):
+    /// its C exit delivers. The C handler reads it.
+    took: bool,
+}
+
+/// A trap handler takes the thread for the shim before it does anything
+/// else, so a fault in its own glue (a stack switch, a prologue) is known to
+/// be the shim's. `sp` is the interrupted stack pointer. A hold that
+/// interrupted guest code holds the thread ([`Owner::Exit`]) and delivers at
+/// its C exit. A hold that found the thread already the shim's changes
+/// nothing: a fault there is the shim's, and a system call or held libc call
+/// there was made by guest code the shim called (its C allocator, say), and
+/// nests in the shim's running call as any entry that code makes does, its
+/// exit delivering nothing.
+#[cfg(target_os = "linux")]
+pub(crate) fn claim(sp: usize) -> Claim {
+    let previous = IN_SHIM.with(Cell::get);
+    let taken = previous == Owner::Guest;
+    if taken {
+        IN_SHIM.with(|scope| scope.set(Owner::Exit));
         took(sp);
     }
-    owned
+    Claim {
+        previous,
+        took: taken,
+    }
+}
+
+#[cfg(target_os = "linux")]
+const _: () = assert!(size_of::<Claim>() == 2, "C's struct patina_claim");
+
+#[cfg(target_os = "linux")]
+impl Claim {
+    /// Whether the hold took the thread from guest code: its C exit
+    /// delivers.
+    pub(crate) fn took(&self) -> bool {
+        self.took
+    }
 }
 
 /// Where the guest's stack stood when the shim took the thread from it, and
@@ -345,10 +380,29 @@ pub(crate) fn guest_entry() -> (usize, u64) {
     (GUEST_SP.get(), ENTRY.get().0)
 }
 
-/// Hand the thread back to the guest code a fault handler interrupted.
+/// End a trap handler's hold: the thread goes back to what held it before
+/// [`claim`]. Every entry under the hold has returned by now, so the thread
+/// is as the claim left it; a nested hold is only ever made under a shim
+/// entry ([`Owner::Shim`]): one under a trap handler's own hold would leave
+/// what its call owes that handler's exit for the outer call's.
 #[cfg(target_os = "linux")]
-pub(crate) fn release() {
-    IN_SHIM.with(|scope| scope.set(Owner::Guest));
+pub(crate) fn release(claim: Claim) {
+    let held = if claim.took {
+        Owner::Exit
+    } else {
+        claim.previous
+    };
+    if IN_SHIM.with(Cell::get) != held {
+        crate::trap_fatal(
+            "a trap handler's hold ended with the thread not as it held it: not modeled",
+        );
+    }
+    if !claim.took && claim.previous != Owner::Shim {
+        crate::trap_fatal(
+            "guest code called under a trap handler's hold made a held call: not modeled",
+        );
+    }
+    IN_SHIM.with(|scope| scope.set(claim.previous));
 }
 
 /// The entry a trap exit hands the thread to guest handlers from, and takes
@@ -450,7 +504,8 @@ mod tests {
         #[cfg(target_os = "linux")]
         std::thread::spawn(|| {
             use super::{claim, entered_by_trap_exit, exit_owned, hand_over, release, take_back};
-            assert!(!claim(0x1000) && exit_owned());
+            let hold = claim(0x1000);
+            assert!(hold.took() && exit_owned());
             {
                 let _step = PanicScope::enter();
                 assert!(exit_owned() && entered_by_trap_exit());
@@ -465,7 +520,35 @@ mod tests {
             }
             take_back(held);
             assert!(exit_owned());
-            release();
+            release(hold);
+            assert!(!in_shim());
+        })
+        .join()
+        .unwrap();
+        // A hold claimed in a guest callback (a suspended scope) takes the
+        // thread as from any guest code. One claimed while a shim entry owns
+        // the thread (guest code the shim called made a system call) nests:
+        // the thread stays the entry's, and is the entry's again when the
+        // hold ends.
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(|| {
+            use super::{claim, exit_owned, release};
+            let entry = PanicScope::enter();
+            let callback = PanicScope::suspend();
+            let in_callback = claim(0x1000);
+            assert!(in_callback.took() && exit_owned());
+            release(in_callback);
+            assert!(!in_shim());
+            drop(callback);
+            let nested = claim(0x2000);
+            assert!(!nested.took() && in_shim() && !exit_owned());
+            {
+                let _call = PanicScope::enter();
+                assert!(in_shim() && !exit_owned());
+            }
+            release(nested);
+            assert!(in_shim() && !exit_owned());
+            drop(entry);
             assert!(!in_shim());
         })
         .join()

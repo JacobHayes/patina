@@ -286,19 +286,33 @@ pub extern "C" fn patina_planted_fault(kind: i32) -> u8 {
 }
 
 /// The trap handler's first act: take the thread for the shim, with the
-/// interrupted stack pointer. Answers 1 when guest code was interrupted, 0
-/// when shim code already owned the thread (an entry, a shim lock held, or
-/// the trap's own glue), whose fault is [`patina_trap_shim_fault`]. An
-/// interrupted stack pointer on the private stack is shim code that let a
-/// delivery in (its unblock): the guest code it stands for is its entry's.
-/// Where `stack` names the frame's `uc_stack`, the handlers guest code has
-/// provably left are dropped ([`frames::resync`]).
+/// interrupted stack pointer ([`claim`](crate::panic_boundary::claim)),
+/// writing the hold to `claim` for [`patina_trap_leave`]. Answers 1 when
+/// guest code was interrupted, 0 when shim code already owned the thread (an
+/// entry, a shim lock held, or the trap's own glue), whose fault is
+/// [`patina_trap_shim_fault`]. A trapped or held call there, made by guest
+/// code the shim called, nests in the shim's running call: its hold took
+/// nothing (`claim.took`), and its exit delivers nothing. An interrupted
+/// stack pointer on the private stack is shim code that let a delivery in
+/// (its unblock): the guest code it stands for is its entry's. Where `stack`
+/// names the frame's `uc_stack`, the handlers guest code has provably left
+/// are dropped ([`frames::resync`]).
+///
+/// # Safety
+/// `claim` is writable: the C handler's `struct patina_claim`.
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_trap_enter(sp: usize, stack: *mut Stack) -> i32 {
+pub unsafe extern "C" fn patina_trap_enter(
+    sp: usize,
+    stack: *mut Stack,
+    claim: *mut crate::panic_boundary::Claim,
+) -> i32 {
     let (entry_sp, _) = crate::panic_boundary::guest_entry();
     let private = frames::private_contains(sp);
     let sp = if private { entry_sp } else { sp };
-    let owned = crate::panic_boundary::claim(sp) || crate::in_shim_critical();
+    let held = crate::panic_boundary::claim(sp);
+    let owned = !held.took() || crate::in_shim_critical();
+    // SAFETY: the C handler's own record, per this function's contract.
+    unsafe { claim.write(held) };
     if !owned && plan_pending() {
         crate::trap_fatal(
             "a call left its trap's exit a delivery plan that no exit carried out: not modeled",
@@ -310,10 +324,12 @@ pub extern "C" fn patina_trap_enter(sp: usize, stack: *mut Stack) -> i32 {
     i32::from(!owned)
 }
 
-/// The trap hands the thread back to the guest code it interrupted.
+/// The trap's hold ends: the thread goes back to what held it before
+/// [`patina_trap_enter`] (the guest code it interrupted, or the shim code a
+/// nested call returns to).
 #[unsafe(no_mangle)]
-pub extern "C" fn patina_trap_leave() {
-    crate::panic_boundary::release();
+pub extern "C" fn patina_trap_leave(claim: crate::panic_boundary::Claim) {
+    crate::panic_boundary::release(claim);
 }
 
 #[unsafe(no_mangle)]
