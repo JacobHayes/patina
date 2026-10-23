@@ -789,16 +789,37 @@ pub(super) const PATINA_SANCOV_STUB_OBJECT: ShimObject = ShimObject {
     what: "the Patina SanitizerCoverage stubs",
 };
 
+/// Environment the C compiler reads that changes an object's bytes without
+/// changing its command line: the macOS SDK and deployment target, and the
+/// include search paths.
+const COMPILER_ENVIRONMENT: &[&str] = &[
+    "SDKROOT",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "CPATH",
+    "C_INCLUDE_PATH",
+];
+
 /// Hash the inputs that determine a shim object's bytes: the compiler identity
-/// and its `--version` banner, the target triple, the object name, the exact cc
-/// flags, and the embedded C header/source. The staged path changes only when one
-/// of these does, so a rebuild of the same Patina against the same toolchain
-/// reuses the object and the `-Clink-arg` path stays stable.
+/// and its `--version` banner, the [`COMPILER_ENVIRONMENT`], the target triple,
+/// the object name, the exact cc flags, and the embedded C header/source. The
+/// staged path changes only when one of these does, so a rebuild of the same
+/// Patina against the same toolchain reuses the object and the `-Clink-arg`
+/// path stays stable.
 fn shim_object_hash(
     cc: &OsStr,
     object: &ShimObject,
     target: &str,
     defines: &[String],
+) -> Result<String, CliError> {
+    shim_object_hash_in(cc, object, target, defines, |name| env::var_os(name))
+}
+
+fn shim_object_hash_in(
+    cc: &OsStr,
+    object: &ShimObject,
+    target: &str,
+    defines: &[String],
+    environment: impl Fn(&str) -> Option<OsString>,
 ) -> Result<String, CliError> {
     let version = Command::new(cc)
         .arg("--version")
@@ -810,6 +831,16 @@ fn shim_object_hash(
     let mut hasher = Sha256::new();
     hash_os(&mut hasher, cc);
     hash_bytes(&mut hasher, &version.stdout);
+    for name in COMPILER_ENVIRONMENT {
+        hash_bytes(&mut hasher, name.as_bytes());
+        match environment(name) {
+            Some(value) => {
+                hasher.update([1]);
+                hash_os(&mut hasher, &value);
+            }
+            None => hasher.update([0]),
+        }
+    }
     hash_bytes(&mut hasher, target.as_bytes());
     hash_bytes(&mut hasher, object.object_name.as_bytes());
     for flag in object.cc_flags {
@@ -965,6 +996,32 @@ mod tests {
     use std::{env, fs};
 
     use crate::shim_cache;
+
+    #[test]
+    fn a_shim_object_is_keyed_by_the_sdk_the_compiler_reads() {
+        let hash = |sdk: Option<&str>| {
+            shim_object_hash_in(
+                OsStr::new("cc"),
+                &PATINA_YIELD_OBJECT,
+                "x86_64-unknown-linux-gnu",
+                &[],
+                |name| {
+                    (name == "SDKROOT")
+                        .then_some(sdk)
+                        .flatten()
+                        .map(OsString::from)
+                },
+            )
+            .unwrap()
+        };
+        let unset = hash(None);
+        let older = hash(Some("/sdks/MacOSX26.sdk"));
+        let newer = hash(Some("/sdks/MacOSX27.sdk"));
+        assert_eq!(older, hash(Some("/sdks/MacOSX26.sdk")));
+        assert_ne!(older, newer);
+        assert_ne!(unset, older);
+        assert_ne!(unset, hash(Some("")));
+    }
 
     #[test]
     fn a_relative_rustc_probes_as_one_program_from_both_directories() {
