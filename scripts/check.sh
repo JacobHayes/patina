@@ -25,13 +25,15 @@ testbed_env=(env PATINA_CLI="$patina_cli" PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_
 # builds of its own, so this keeps the suite inside the build cap the host
 # already sets. NEXTEST_TEST_THREADS (nextest's own variable) overrides it.
 test_threads=${NEXTEST_TEST_THREADS:-${CARGO_BUILD_JOBS:-$(( ($(getconf _NPROCESSORS_ONLN) + 1) / 2 ))}}
-# Host clippy plus one cross-cfg pass for the other OS family. CI's gates job
-# lints both Linux architectures natively.
-if [[ $(uname -s) == Darwin ]]; then
-  cross_clippy=('Linux-cfg clippy' x86_64-unknown-linux-gnu)
-else
-  cross_clippy=('Darwin-cfg clippy' aarch64-apple-darwin)
-fi
+# Host clippy plus cross-cfg passes for the other OS family and, on Linux, the
+# other Linux architecture: per-architecture constants and syscall tables
+# (aarch64 has no epoll_wait or open, and a different O_DIRECTORY) otherwise
+# fail only in CI's native gates job.
+case "$(uname -s)/$(uname -m)" in
+  Darwin/*) cross_clippy=(x86_64-unknown-linux-gnu) ;;
+  Linux/aarch64) cross_clippy=(aarch64-apple-darwin x86_64-unknown-linux-gnu) ;;
+  *) cross_clippy=(aarch64-apple-darwin aarch64-unknown-linux-gnu) ;;
+esac
 
 usage() {
   cat <<'EOF'
@@ -265,7 +267,9 @@ run_full() {
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
-  run_rung "${cross_clippy[0]}" cargo clippy --workspace --all-targets --locked --target "${cross_clippy[1]}" -- -D warnings || return $?
+  for target in "${cross_clippy[@]}"; do
+    run_rung "$target clippy" cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings || return $?
+  done
   run_rung 'documentation' cargo doc --workspace --no-deps --locked || return $?
   # Every workspace member packages cleanly (manifest metadata, readme paths,
   # include/exclude). --no-verify skips the per-crate verify build; the release
@@ -309,7 +313,9 @@ run_fast() {
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
-  run_rung "${cross_clippy[0]}" cargo clippy --workspace --all-targets --locked --target "${cross_clippy[1]}" -- -D warnings || return $?
+  for target in "${cross_clippy[@]}"; do
+    run_rung "$target clippy" cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings || return $?
+  done
 
   # The fast test rung is cargo-heavy enough to inflate every other cargo-using
   # smoke when overlapped, even though it no longer contains the e2e binary.
