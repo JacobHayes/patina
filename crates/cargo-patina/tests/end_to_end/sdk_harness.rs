@@ -55,16 +55,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 "#;
 
-    // Gate 1: a harness binary executed directly (no Patina control plane) fails
-    // loudly with NotUnderPatina BEFORE any application code runs — never a silent
-    // host-effect fallback.
+    // One harness binary, built once, carries three claims. Executed directly (no
+    // Patina control plane) it fails loudly with NotUnderPatina before any
+    // application code runs, never a silent host-effect fallback. Under
+    // `cargo patina run --harness` it succeeds with std::fs and the std clock
+    // interposed, and a second run at the same seed (the recording) prints the
+    // same bytes, std clock reads included. A flag-free replay of that recording
+    // carries `--harness` (deferred init) but no semantic flags, since the trace
+    // is authoritative, and prints the same bytes again.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn harness_direct_exec_without_patina_fails_closed() {
+    fn harness_fails_closed_outside_patina_and_runs_and_replays_deterministically() {
         let directory = tempdir().unwrap();
         let fixture = directory.path().join("det");
-        write_harness_fixture(&fixture, "harness-det-direct", HARNESS_DETERMINISM_SRC);
-        let bin = directory.path().join("harness-det-direct-bin");
+        write_harness_fixture(&fixture, "harness-det", HARNESS_DETERMINISM_SRC);
+        let bin = directory.path().join("harness-det-bin");
         build_harness_bin(&fixture, &bin);
 
         // Direct exec with a scrubbed environment: no PATINA_MODE, so the shim's
@@ -83,19 +88,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             !String::from_utf8_lossy(&output.stdout).contains("HARNESS_OUT"),
             "application code ran before the fail-closed check"
         );
-    }
-
-    // Gate 2: `cargo patina run --harness --target native` succeeds with std::fs and
-    // the std clock interposed, and is byte-identical across repeated runs at the same
-    // seed (determinism, including the std clock reads).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn harness_run_is_deterministic_with_std_interposed() {
-        let directory = tempdir().unwrap();
-        let fixture = directory.path().join("det");
-        write_harness_fixture(&fixture, "harness-det", HARNESS_DETERMINISM_SRC);
-        let bin = directory.path().join("harness-det-bin");
-        build_harness_bin(&fixture, &bin);
 
         let first = invoke(
             native_workspace(),
@@ -106,17 +98,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             baseline.contains("read=hello"),
             "std::fs was not interposed (unexpected output): {baseline}"
         );
-        for _ in 0..2 {
-            let again = invoke(
-                native_workspace(),
-                &["run", bin.to_str().unwrap(), "--harness", "--seed", "1"],
-            );
-            assert_eq!(
-                baseline,
-                harness_out_line(&again),
-                "harness output (incl. std clock reads) is not byte-identical across runs"
-            );
-        }
+
+        let trace = directory.path().join("harness.patina");
+        let recorded = invoke(
+            native_workspace(),
+            &[
+                "run",
+                bin.to_str().unwrap(),
+                "--harness",
+                "--seed",
+                "1",
+                "--record",
+                trace.to_str().unwrap(),
+                "--fingerprint",
+                "harness-replay",
+            ],
+        );
+        assert_eq!(
+            baseline,
+            harness_out_line(&recorded),
+            "harness output (incl. std clock reads) is not byte-identical across runs"
+        );
+        let replayed = invoke(
+            native_workspace(),
+            &[
+                "replay",
+                bin.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--harness",
+                "--fingerprint",
+                "harness-replay",
+            ],
+        );
+        assert_eq!(
+            baseline,
+            harness_out_line(&replayed),
+            "record and flag-free harness replay diverged"
+        );
     }
 
     // A harness fixture whose configuration is toggled by a guest argument: with
@@ -186,51 +204,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             jittered_elapsed,
             base_elapsed + 1_000_000,
             "harness-configured sleep jitter did not shift the std-observed elapsed time"
-        );
-    }
-
-    // Gate 4: record then flag-free replay of a harness-driven application is
-    // byte-identical. Replay of a harness binary carries `--harness` (deferred init)
-    // but no semantic flags — the trace is authoritative.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn harness_record_then_flag_free_replay_is_byte_identical() {
-        let directory = tempdir().unwrap();
-        let fixture = directory.path().join("det");
-        write_harness_fixture(&fixture, "harness-replay", HARNESS_DETERMINISM_SRC);
-        let bin = directory.path().join("harness-replay-bin");
-        build_harness_bin(&fixture, &bin);
-
-        let trace = directory.path().join("harness.patina");
-        let recorded = invoke(
-            native_workspace(),
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--harness",
-                "--seed",
-                "1",
-                "--record",
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "harness-replay",
-            ],
-        );
-        let replayed = invoke(
-            native_workspace(),
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--harness",
-                "--fingerprint",
-                "harness-replay",
-            ],
-        );
-        assert_eq!(
-            harness_out_line(&recorded),
-            harness_out_line(&replayed),
-            "record and flag-free harness replay diverged"
         );
     }
 

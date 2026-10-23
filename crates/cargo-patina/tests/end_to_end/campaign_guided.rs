@@ -14,6 +14,12 @@ mod tests {
     // function of (seed base, persisted novelty log) so a guided campaign is still
     // reproducible. Asserting only the first would pass for a nondeterministic
     // scheduler; asserting only the second would pass for a no-op.
+    //
+    // The repeat is a campaign that runs the first generations fresh and the rest
+    // through `--extend`. An extended guided campaign re-derives generation k from
+    // the PERSISTED novelty log rather than from loop-carried state, so matching
+    // the fresh stream also proves the log is a sufficient and faithful record of
+    // the guidance input.
     #[test]
     fn campaign_guided_steers_reproducibly_and_differs_from_unguided() {
         let directory = tempdir().unwrap();
@@ -24,12 +30,14 @@ mod tests {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
             invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
         };
-        let campaign = |out: &Path, guided: bool| {
+        let gens = 24;
+        let fresh_gens = 6;
+        let campaign_of = |out: &Path, guided: bool, gens: u64| {
             let mut args = vec![
                 "campaign".to_string(),
                 module_path.clone(),
                 "--gens".to_string(),
-                "24".to_string(),
+                gens.to_string(),
                 "--plateau-after".to_string(),
                 "8".to_string(),
                 "--progress-every".to_string(),
@@ -42,16 +50,27 @@ mod tests {
             }
             args
         };
+        let campaign = |out: &Path, guided: bool| campaign_of(out, guided, gens);
 
         let first_out = directory.path().join("guided-1");
-        let second_out = directory.path().join("guided-2");
+        let split_out = directory.path().join("guided-split");
         let plain_out = directory.path().join("unguided");
         let first = run(campaign(&first_out, true));
-        let second = run(campaign(&second_out, true));
+        let split_fresh = run(campaign_of(&split_out, true, fresh_gens));
+        let split_extended = run(vec![
+            "campaign".to_string(),
+            "--extend".to_string(),
+            (gens - fresh_gens).to_string(),
+            "--out-dir".to_string(),
+            split_out.to_str().unwrap().to_string(),
+            "--progress-every".to_string(),
+            "1".to_string(),
+        ]);
         let plain = run(campaign(&plain_out, false));
         for (label, output) in [
             ("guided-1", &first),
-            ("guided-2", &second),
+            ("guided-split fresh", &split_fresh),
+            ("guided-split extended", &split_extended),
             ("unguided", &plain),
         ] {
             assert!(
@@ -63,7 +82,11 @@ mod tests {
         }
         let first_stdout = String::from_utf8_lossy(&first.stdout).into_owned();
         let guided_stream = campaign_gen_lines(&first_stdout);
-        let repeat_stream = campaign_gen_lines(&String::from_utf8_lossy(&second.stdout));
+        let repeat_stream = [
+            campaign_gen_lines(&String::from_utf8_lossy(&split_fresh.stdout)),
+            campaign_gen_lines(&String::from_utf8_lossy(&split_extended.stdout)),
+        ]
+        .join("\n");
         let plain_stream = campaign_gen_lines(&String::from_utf8_lossy(&plain.stdout));
         // A guided line carries its decision as a trailing ` guided=…` field, which an
         // unguided line does not have. Strip it before comparing the two modes, so
@@ -79,7 +102,27 @@ mod tests {
 
         assert_eq!(
             guided_stream, repeat_stream,
-            "two fresh guided campaigns at one seed base must derive identical generations"
+            "a fresh guided campaign and one extended from its first generations must \
+             derive identical generations at one seed base"
+        );
+
+        // `--guided` is part of the recorded spec, so re-supplying it on the
+        // continuation is refused rather than silently ignored — the out-dir's spec
+        // is what actually decides the derivation.
+        let toggled = run(vec![
+            "campaign".to_string(),
+            "--extend".to_string(),
+            "2".to_string(),
+            "--guided".to_string(),
+            "--out-dir".to_string(),
+            split_out.to_str().unwrap().to_string(),
+        ]);
+        assert_eq!(toggled.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&toggled.stderr)
+                .contains("--guided cannot be used with --extend/--resume"),
+            "toggling guidance on a continuation must be refused:\n{}",
+            String::from_utf8_lossy(&toggled.stderr)
         );
         assert_ne!(
             derivation_only(&guided_stream),
@@ -146,93 +189,6 @@ mod tests {
         );
     }
 
-    // Resume/extend equivalence for the guided derivation. This is stricter than the
-    // unguided case: an extended guided campaign re-derives generation k from the
-    // PERSISTED novelty log rather than from loop-carried state, so this proves the
-    // log is a sufficient and faithful record of the guidance input.
-    #[test]
-    fn campaign_guided_extend_matches_a_fresh_guided_campaign() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("depth.wasm");
-        fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
-        let module_path = module.to_str().unwrap().to_string();
-        let run = |owned: Vec<String>| {
-            let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
-        };
-        let campaign = |out: &Path, gens: u64| {
-            vec![
-                "campaign".to_string(),
-                module_path.clone(),
-                "--gens".to_string(),
-                gens.to_string(),
-                "--plateau-after".to_string(),
-                "8".to_string(),
-                "--guided".to_string(),
-                "--progress-every".to_string(),
-                "1".to_string(),
-                "--out-dir".to_string(),
-                out.to_str().unwrap().to_string(),
-            ]
-        };
-
-        let fresh_out = directory.path().join("fresh");
-        let fresh = run(campaign(&fresh_out, 18));
-        assert!(
-            fresh.status.success(),
-            "fresh guided campaign failed:\nstderr:\n{}",
-            String::from_utf8_lossy(&fresh.stderr)
-        );
-        let fresh_stream = campaign_gen_lines(&String::from_utf8_lossy(&fresh.stdout));
-
-        let split_out = directory.path().join("split");
-        let split1 = run(campaign(&split_out, 6));
-        assert!(split1.status.success(), "first guided segment failed");
-        let split2 = run(vec![
-            "campaign".to_string(),
-            "--extend".to_string(),
-            "12".to_string(),
-            "--out-dir".to_string(),
-            split_out.to_str().unwrap().to_string(),
-            "--progress-every".to_string(),
-            "1".to_string(),
-        ]);
-        assert!(
-            split2.status.success(),
-            "extended guided campaign failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&split2.stdout),
-            String::from_utf8_lossy(&split2.stderr)
-        );
-        assert_eq!(
-            fresh_stream,
-            [
-                campaign_gen_lines(&String::from_utf8_lossy(&split1.stdout)),
-                campaign_gen_lines(&String::from_utf8_lossy(&split2.stdout)),
-            ]
-            .join("\n"),
-            "6-then-extend-12 must reproduce the fresh guided stream exactly"
-        );
-
-        // `--guided` is part of the recorded spec, so re-supplying it on the
-        // continuation is refused rather than silently ignored — the out-dir's spec
-        // is what actually decides the derivation.
-        let toggled = run(vec![
-            "campaign".to_string(),
-            "--extend".to_string(),
-            "2".to_string(),
-            "--guided".to_string(),
-            "--out-dir".to_string(),
-            split_out.to_str().unwrap().to_string(),
-        ]);
-        assert_eq!(toggled.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&toggled.stderr)
-                .contains("--guided cannot be used with --extend/--resume"),
-            "toggling guidance on a continuation must be refused:\n{}",
-            String::from_utf8_lossy(&toggled.stderr)
-        );
-    }
-
     // Fail closed, loudly: a campaign asked to steer with no novelty signal is not a
     // campaign with slightly worse selection, it is a different mode than the
     // operator asked for. A plain (non-yield-point) native binary has no edge
@@ -294,8 +250,8 @@ mod tests {
     // different generation than the one it is supposedly resuming.
     //
     // The torn generation must be one that was NOVEL, or the truncation is a no-op
-    // and the test proves nothing — so the campaign length is chosen from a probe
-    // run's novelty log rather than fixed.
+    // and the test proves nothing — so the campaign checks its novelty log before
+    // tearing it.
     #[test]
     fn campaign_guided_resume_after_a_tear_re_derives_the_same_generation() {
         let directory = tempdir().unwrap();
@@ -323,52 +279,17 @@ mod tests {
                 out.to_str().unwrap().to_string(),
             ]
         };
-        let exploited_generations = |stdout: &str| -> Vec<u64> {
-            campaign_gen_lines(stdout)
-                .lines()
-                .filter(|line| line.contains(" guided=exploit:"))
-                .filter_map(|line| {
-                    line.split_whitespace()
-                        .find_map(|token| token.strip_prefix("generation="))
-                        .and_then(|value| value.parse::<u64>().ok())
-                })
-                .collect()
-        };
 
         // The torn generation has to satisfy BOTH conditions or the truncation is a
         // no-op and this test would pass with or without it: its own novelty entry
         // must be in the log (novel), and it must actually consult the ancestor set
-        // (exploited). Whether any generation qualifies depends on the fixture's
-        // rolls, so search seed bases rather than hard-coding one and hoping.
-        // Derivation for generation g depends only on generations below it, so a
-        // qualifying g found in a long probe behaves identically in a `--gens g+1`
-        // campaign.
-        let mut chosen: Option<(u64, u64)> = None;
-        for seed_start in 0..8 {
-            let probe_out = directory.path().join(format!("probe-{seed_start}"));
-            let probe = run(campaign(&probe_out, 24, seed_start));
-            assert!(
-                probe.status.success(),
-                "probe campaign failed:\nstderr:\n{}",
-                String::from_utf8_lossy(&probe.stderr)
-            );
-            let novel: Vec<u64> = campaign_depth_meta(&probe_out)["new_depth_log"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|entry| entry[0].as_u64().unwrap())
-                .collect();
-            let exploited = exploited_generations(&String::from_utf8_lossy(&probe.stdout));
-            if let Some(generation) = novel
-                .iter()
-                .rfind(|generation| **generation >= 1 && exploited.contains(generation))
-            {
-                chosen = Some((seed_start, *generation));
-                break;
-            }
-        }
-        let (seed_start, torn) =
-            chosen.expect("no seed base produced a generation that is both novel and exploited");
+        // (exploited). Whether a generation qualifies depends on the fixture's
+        // rolls; generation 5 of seed base 3 does, which the fresh campaign below
+        // checks. Derivation for generation g depends only on generations below
+        // it, so the campaign that ends on it derives it as any longer one would.
+        // A fixture change that moves it fails those checks; a probe of a few seed
+        // bases with long campaigns finds the next qualifying pair.
+        let (seed_start, torn) = (3, 5);
 
         // Run a campaign whose LAST generation is that one, so tearing the cursor by
         // one lands exactly on it.
@@ -384,6 +305,12 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(fresh_lines.len() as u64, torn + 1);
+        let novel = campaign_depth_meta(&out)["new_depth_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry[0].as_u64() == Some(torn));
+        assert!(novel, "the torn generation must be novel");
         assert!(
             fresh_lines[torn as usize].contains(" guided=exploit:"),
             "the torn generation must consult the ancestor set: {}",
@@ -447,12 +374,15 @@ mod tests {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
             invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
         };
+        // A pool that ever filled would steer from generation 1 on, so a few
+        // generations past the bootstrap show it never did.
+        let gens = 4;
         let args = |out: &Path, guided: bool| {
             let mut args = vec![
                 "campaign".to_string(),
                 module_path.clone(),
                 "--gens".to_string(),
-                "12".to_string(),
+                gens.to_string(),
                 "--progress-every".to_string(),
                 "1".to_string(),
                 "--out-dir".to_string(),
@@ -490,7 +420,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.contains(" guided=none"))
                 .count(),
-            12,
+            gens,
             "every generation had no ancestor to steer toward"
         );
 

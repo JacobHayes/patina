@@ -137,68 +137,6 @@ fn main() {
         assert_eq!(verdict_lines(&first).len(), 3);
     }
 
-    // An `always!` violation lowers to a `VIOLATION` verdict on the same label, and
-    // that verdict is the failure's ONLY announcement: Wave B of the outcome-channel
-    // arc deleted the embedder's legacy `PATINA_ALWAYS_VIOLATION` marker once the
-    // campaign classifier started reading the envelope instead of grepping.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_always_violation_lowers_to_a_verdict_and_prints_no_legacy_marker() {
-        let directory = tempdir().unwrap();
-        let pkg = directory.path().join("pkg");
-        write_sdk_fixture(
-            &pkg,
-            r#"
-fn main() {
-    patina_dst::always!(1 + 1 == 3, "arithmetic-holds");
-    println!("UNREACHABLE");
-}
-"#,
-        );
-        let workspace = native_workspace();
-        let bin = directory.path().join("always-verdict");
-        invoke(
-            workspace,
-            &[
-                "build",
-                pkg.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-
-        let violated = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", bin.to_str().unwrap(), "--seed", "1"],
-        );
-        assert!(
-            !violated.status.success(),
-            "an always! violation must fail the run"
-        );
-        let stderr = String::from_utf8_lossy(&violated.stderr);
-        let lines = verdict_lines(&violated);
-        assert_eq!(
-            lines.len(),
-            1,
-            "expected exactly one verdict from the violation:\n{stderr}"
-        );
-        assert!(
-            lines[0].contains("kind=violation") && lines[0].contains("label=arithmetic-holds"),
-            "verdict did not carry the violated invariant's label: {}",
-            lines[0]
-        );
-        // No second channel: the verdict is the source, so the legacy marker is gone.
-        assert!(
-            !stderr.contains("PATINA_ALWAYS_VIOLATION"),
-            "the legacy always-violation marker must no longer print:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("UNREACHABLE"),
-            "the violation must abort before the guest continues:\n{stderr}"
-        );
-    }
-
     /// A built `always!` guest and its recorded run.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct AlwaysRecording {
@@ -305,59 +243,54 @@ fn main() {
 }
 "#;
 
+    // An `always!` violation lowers to a `VIOLATION` verdict on the same label, and
+    // that verdict is the failure's ONLY announcement: Wave B of the outcome-channel
+    // arc deleted the embedder's legacy `PATINA_ALWAYS_VIOLATION` marker once the
+    // campaign classifier started reading the envelope instead of grepping.
+    //
     // A failing `always!` finalizes the run before it aborts, so the failure the
     // oracle exists to find leaves a trace: the trace holds the violation as a
     // recorded verdict, a flag-free replay reproduces the run byte for byte, and
     // both runs still fail with the same status.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_always_violation_records_a_trace_that_replays() {
-        let recording = record_always_violation(ALWAYS_FAILS_MAIN);
-        assert!(
-            String::from_utf8_lossy(&recording.recorded.stdout).contains("GUEST_BEFORE"),
-            "the guest's output before the violation must reach stdout"
-        );
-        assert_replays_identically(&recording);
-    }
-
-    // Finalization prints the end-of-run reports after the runtime is gone, so
-    // it must not wait on a lock a guest thread can hold: here a worker is
-    // parked holding std's stderr lock when main fails its invariant.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_always_violation_finalizes_while_a_parked_thread_holds_stderr() {
-        let recording = record_always_violation(
-            r#"
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static HOLDING: AtomicBool = AtomicBool::new(false);
-
-fn main() {
-    std::thread::spawn(|| {
-        let _stderr = std::io::stderr().lock();
-        HOLDING.store(true, Ordering::Release);
-        loop {
-            std::thread::yield_now();
-        }
-    });
-    while !HOLDING.load(Ordering::Acquire) {
-        std::thread::yield_now();
-    }
-    patina_dst::always!(std::env::args().count() > 64, "never-holds");
-}
-"#,
-        );
-        assert_replays_identically(&recording);
-    }
-
+    //
     // A replay that stops at the violation with recorded events still unconsumed
     // has diverged from the recording. That must surface as the shim fatal the
     // minimizer's divergence check reads, never as the finding alone, or a
     // reducer would accept a candidate that no longer reproduces the run.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_always_violation_replay_with_unconsumed_events_is_a_shim_fatal() {
+    fn native_always_violation_is_one_verdict_whose_trace_replays_and_detects_divergence() {
         let recording = record_always_violation(ALWAYS_FAILS_MAIN);
+        let stdout = String::from_utf8_lossy(&recording.recorded.stdout);
+        let stderr = String::from_utf8_lossy(&recording.recorded.stderr);
+        assert!(
+            stdout.contains("GUEST_BEFORE"),
+            "the guest's output before the violation must reach stdout"
+        );
+        let lines = verdict_lines(&recording.recorded);
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one verdict from the violation:\n{stderr}"
+        );
+        assert!(
+            lines[0].contains("kind=violation") && lines[0].contains("label=never-holds"),
+            "verdict did not carry the violated invariant's label: {}",
+            lines[0]
+        );
+        // No second channel: the verdict is the source, so the legacy marker is gone.
+        assert!(
+            !stderr.contains("PATINA_ALWAYS_VIOLATION"),
+            "the legacy always-violation marker must no longer print:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("UNREACHABLE") && !stderr.contains("UNREACHABLE"),
+            "the violation must abort before the guest continues:\n{stdout}\n{stderr}"
+        );
+        assert_replays_identically(&recording);
+
+        // One more recorded decision than the run makes: the replay reaches the
+        // violation with it unconsumed.
         let mut bundle = patina_dst_trace::TraceBundle::load(&recording.trace).unwrap();
         let timeline = &mut bundle.timelines[0];
         let mut trailing = timeline.decisions.last().unwrap().clone();
@@ -394,6 +327,36 @@ fn main() {
             envelope["refusal"]["class"], "shim_fatal",
             "the unconsumed trace must fail the replay as a divergence: {envelope:#}"
         );
+    }
+
+    // Finalization prints the end-of-run reports after the runtime is gone, so
+    // it must not wait on a lock a guest thread can hold: here a worker is
+    // parked holding std's stderr lock when main fails its invariant.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_always_violation_finalizes_while_a_parked_thread_holds_stderr() {
+        let recording = record_always_violation(
+            r#"
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static HOLDING: AtomicBool = AtomicBool::new(false);
+
+fn main() {
+    std::thread::spawn(|| {
+        let _stderr = std::io::stderr().lock();
+        HOLDING.store(true, Ordering::Release);
+        loop {
+            std::thread::yield_now();
+        }
+    });
+    while !HOLDING.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    patina_dst::always!(std::env::args().count() > 64, "never-holds");
+}
+"#,
+        );
+        assert_replays_identically(&recording);
     }
 
     // The WASI half: the `patina_sdk` `verdict` import is backed by the same runtime

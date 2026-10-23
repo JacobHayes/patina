@@ -121,19 +121,23 @@ mod tests {
     fn the_clean_rerun_sample_catches_a_leak_on_a_passing_run() {
         let directory = tempdir().unwrap();
         let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        // One stride of generations holds exactly one sampled generation.
-        let stride = 16;
+        // The campaign seed picks which generation of each stride is sampled;
+        // seed base 2 samples generation 1, so two generations hold one
+        // sampled generation and one that is not. That one sample per stride
+        // is the selftest's `clean-rerun-sample-is-one-per-stride` check.
+        let gens = 2;
+        let seed = ["--seed-start", "2"];
 
         let (code, envelope) = campaign(
             &guest,
             &directory.path().join("leak"),
-            stride,
-            &[],
+            gens,
+            &seed,
             "leak-clean",
         );
         assert_eq!(code, Some(1), "{envelope:#}");
         assert_eq!(envelope["classes"]["NONDETERMINISM"], 1, "{envelope:#}");
-        assert_eq!(envelope["classes"]["OK"], stride - 1, "{envelope:#}");
+        assert_eq!(envelope["classes"]["OK"], gens - 1, "{envelope:#}");
         assert_eq!(
             envelope["verification"]["clean"]["reruns"], 1,
             "{envelope:#}"
@@ -159,12 +163,12 @@ mod tests {
         let (code, envelope) = campaign(
             &guest,
             &directory.path().join("det"),
-            stride,
-            &[],
+            gens,
+            &seed,
             "det-clean",
         );
         assert_eq!(code, Some(0), "{envelope:#}");
-        assert_eq!(envelope["classes"]["OK"], stride, "{envelope:#}");
+        assert_eq!(envelope["classes"]["OK"], gens, "{envelope:#}");
         assert_eq!(
             envelope["verification"]["clean"]["reruns"], 1,
             "{envelope:#}"

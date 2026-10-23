@@ -305,8 +305,10 @@ fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
             .join("\n")
     };
 
+    // A fresh campaign, and the same one split with generations on each side.
+    let (gens, first_segment) = (4, 2);
     let fresh_out = directory.path().join("fresh");
-    let fresh = run(campaign_args(&fresh_out, 6));
+    let fresh = run(campaign_args(&fresh_out, gens));
     assert!(
         fresh.status.success(),
         "fresh aux campaign failed:\nstdout:\n{}\nstderr:\n{}",
@@ -316,13 +318,13 @@ fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
     let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
     let fresh_sites = fs::read_to_string(fresh_out.join("sites.json")).unwrap();
     let fresh_site_json: serde_json::Value = serde_json::from_str(&fresh_sites).unwrap();
-    assert_eq!(fresh_site_json["generations_observed"], 6);
-    assert_eq!(fresh_site_json["sites"][0]["registered_gens"], 6);
+    assert_eq!(fresh_site_json["generations_observed"], gens);
+    assert_eq!(fresh_site_json["sites"][0]["registered_gens"], gens);
     let fresh_coverage_hashes = campaign_coverage_file_hashes(&fresh_out);
     let fresh_state = campaign_state_without_invocations(&fresh_out.join("campaign-state.json"));
 
     let split_out = directory.path().join("split");
-    let split1 = run(campaign_args(&split_out, 2));
+    let split1 = run(campaign_args(&split_out, first_segment));
     assert!(
         split1.status.success(),
         "first split aux segment failed:\nstdout:\n{}\nstderr:\n{}",
@@ -332,7 +334,7 @@ fn campaign_extend_reproduces_aux_store_bytes_for_sites_and_coverage() {
     let split2 = run(vec![
         "campaign".to_string(),
         "--extend".to_string(),
-        "4".to_string(),
+        (gens - first_segment).to_string(),
         "--out-dir".to_string(),
         split_out.to_str().unwrap().to_string(),
         "--progress-every".to_string(),

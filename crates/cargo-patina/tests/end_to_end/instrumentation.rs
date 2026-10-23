@@ -31,136 +31,18 @@ fn main() {
 }
 "#;
 
-    // A `--yield-points` binary schedules under a denser policy than a plain build,
-    // so their traces are different guests. The two are different executables, so
-    // a trace recorded from an instrumented binary is refused by its build identity
-    // before the guest starts when replayed against a plain one (and the reverse),
-    // never producing a silently different run. The instrumented binary replays its
-    // own trace exactly.
+    // A `--yield-points` binary and a plain build of the same source, built once.
+    // `--coverage-out` is legal only on the yield-point build (D1 plain-binary
+    // refusal); a yield-point run writes the `patina.covmap/v1` artifact, emits the
+    // numeric report, and the full map is byte-identical for same-seed repeats and
+    // record→replay at two seeds, so the instrumented binary replays its own trace
+    // exactly. It schedules under a denser policy than the plain build, so their
+    // traces are different guests: the two are different executables, and a trace
+    // recorded from either is refused by its build identity before the guest starts
+    // when replayed against the other, never producing a silently different run.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_yield_points_trace_fails_closed_against_plain_binary() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("yp.rs");
-        fs::write(&source, YIELD_POINTS_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let plain = directory.path().join("plain");
-        let instrumented = directory.path().join("instrumented");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                plain.to_str().unwrap(),
-            ],
-        );
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                instrumented.to_str().unwrap(),
-                "--yield-points",
-            ],
-        );
-
-        let yp_trace = directory.path().join("yp.patina");
-        invoke(
-            workspace,
-            &[
-                "run",
-                instrumented.to_str().unwrap(),
-                "--seed",
-                "3",
-                "--record",
-                yp_trace.to_str().unwrap(),
-            ],
-        );
-
-        // The instrumented binary replays its own trace exactly.
-        let self_replay = invoke(
-            workspace,
-            &[
-                "replay",
-                instrumented.to_str().unwrap(),
-                yp_trace.to_str().unwrap(),
-            ],
-        );
-        assert!(
-            self_replay.status.success(),
-            "an instrumented binary must replay its own yield-points trace"
-        );
-
-        // The plain binary must refuse the yield-points trace: the fingerprint suffix
-        // makes the policies incompatible, so replay fails closed rather than running
-        // a silently different schedule.
-        let rejected = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                plain.to_str().unwrap(),
-                yp_trace.to_str().unwrap(),
-            ],
-        );
-        let rejected_stderr = String::from_utf8_lossy(&rejected.stderr);
-        assert!(
-            !rejected.status.success(),
-            "a yield-points trace must not replay against a plain binary; got success\nstdout:\n{}\nstderr:\n{rejected_stderr}",
-            String::from_utf8_lossy(&rejected.stdout),
-        );
-        // Fail-closed, but say WHY: the refusal names the executable as the
-        // component that differs.
-        assert!(
-            rejected_stderr.contains("fingerprint mismatch")
-                && rejected_stderr.contains("executable"),
-            "cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_stderr}"
-        );
-
-        // And the reverse: a plain trace must not replay against the instrumented
-        // binary.
-        let plain_trace = directory.path().join("plain.patina");
-        invoke(
-            workspace,
-            &[
-                "run",
-                plain.to_str().unwrap(),
-                "--seed",
-                "3",
-                "--record",
-                plain_trace.to_str().unwrap(),
-            ],
-        );
-        let rejected_reverse = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                instrumented.to_str().unwrap(),
-                plain_trace.to_str().unwrap(),
-            ],
-        );
-        let rejected_reverse_stderr = String::from_utf8_lossy(&rejected_reverse.stderr);
-        assert!(
-            !rejected_reverse.status.success(),
-            "a plain trace must not replay against a yield-points binary:\nstderr:\n{rejected_reverse_stderr}"
-        );
-        assert!(
-            rejected_reverse_stderr.contains("fingerprint mismatch")
-                && rejected_reverse_stderr.contains("executable"),
-            "reverse cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_reverse_stderr}"
-        );
-    }
-
-    // Wave-A coverage detector/determinism gate. `--coverage-out` is legal only on
-    // the yield-point build (D1 plain-binary refusal); a yield-point run writes the
-    // `patina.covmap/v1` artifact, emits the numeric report, and the full map is
-    // byte-identical for same-seed repeats and record→replay at two seeds.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_coverage_out_writes_covmap_and_is_byte_identical() {
+    fn native_yield_points_covmaps_are_byte_identical_and_traces_fail_closed_across_builds() {
         let directory = tempdir().unwrap();
         let source = directory.path().join("yp_cov.rs");
         fs::write(&source, YIELD_POINTS_SOURCE).unwrap();
@@ -278,6 +160,69 @@ fn main() {
                 "record→replay coverage maps must be byte-identical for seed {seed}"
             );
         }
+
+        // The yield-points trace the loop recorded at seed 3.
+        let yp_trace = directory.path().join("seed-3.patina");
+
+        // The plain binary must refuse the yield-points trace: the fingerprint suffix
+        // makes the policies incompatible, so replay fails closed rather than running
+        // a silently different schedule.
+        let rejected = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                plain.to_str().unwrap(),
+                yp_trace.to_str().unwrap(),
+            ],
+        );
+        let rejected_stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            !rejected.status.success(),
+            "a yield-points trace must not replay against a plain binary; got success\nstdout:\n{}\nstderr:\n{rejected_stderr}",
+            String::from_utf8_lossy(&rejected.stdout),
+        );
+        // Fail-closed, but say WHY: the refusal names the executable as the
+        // component that differs.
+        assert!(
+            rejected_stderr.contains("fingerprint mismatch")
+                && rejected_stderr.contains("executable"),
+            "cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_stderr}"
+        );
+
+        // And the reverse: a plain trace must not replay against the instrumented
+        // binary.
+        let plain_trace = directory.path().join("plain.patina");
+        invoke(
+            workspace,
+            &[
+                "run",
+                plain.to_str().unwrap(),
+                "--seed",
+                "3",
+                "--record",
+                plain_trace.to_str().unwrap(),
+            ],
+        );
+        let rejected_reverse = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                instrumented.to_str().unwrap(),
+                plain_trace.to_str().unwrap(),
+            ],
+        );
+        let rejected_reverse_stderr = String::from_utf8_lossy(&rejected_reverse.stderr);
+        assert!(
+            !rejected_reverse.status.success(),
+            "a plain trace must not replay against a yield-points binary:\nstderr:\n{rejected_reverse_stderr}"
+        );
+        assert!(
+            rejected_reverse_stderr.contains("fingerprint mismatch")
+                && rejected_reverse_stderr.contains("executable"),
+            "reverse cross-replay rejection must name the fingerprint mismatch:\nstderr:\n{rejected_reverse_stderr}"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

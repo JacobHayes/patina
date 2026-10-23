@@ -8,7 +8,8 @@
 //!
 //! `deep-stack` (Linux) first raises the soft stack limit to 16 MiB and
 //! recurses through 11 MiB of main stack, past the 8 MiB a process starts
-//! with, then reports the same layout.
+//! with, then reports the same layout. `no-churn` reports the first layout
+//! and stops, for a run that only needs some output the layout decides.
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -106,6 +107,9 @@ fn main() {
         .collect();
     let order: Vec<String> = ordered.values().map(usize::to_string).collect();
     println!("pointer-order={}", order.join(","));
+    if std::env::args().nth(1).as_deref() == Some("no-churn") {
+        return;
+    }
 
     churn();
     // Blocks of each size class an allocator keeps, one past the C

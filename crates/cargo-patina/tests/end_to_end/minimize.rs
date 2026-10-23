@@ -220,8 +220,11 @@ fn main() {
             &[
                 "campaign",
                 guest.to_str().unwrap(),
+                // The planted short write fires within the first three
+                // generations of the default seed base; a generation is a
+                // pure function of the seed and its index.
                 "--gens",
-                "24",
+                "3",
                 "--faults",
                 "--timeout-secs",
                 "30",
@@ -247,7 +250,7 @@ fn main() {
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "no generation recorded a torn-write violation verdict in 24 generations:\n{}",
+                    "no generation recorded a torn-write violation verdict in 3 generations:\n{}",
                     serde_json::to_string_pretty(&state["notable_runs"]).unwrap()
                 )
             });
@@ -869,8 +872,11 @@ fn main() {
             &[
                 "campaign",
                 guest.to_str().unwrap(),
+                // The planted short write fires within the first three
+                // generations of the default seed base; a generation is a
+                // pure function of the seed and its index.
                 "--gens",
-                "24",
+                "3",
                 "--faults",
                 "--timeout-secs",
                 "30",
@@ -908,7 +914,7 @@ fn main() {
             }
         }
         let (generation, flag_tokens) = caught.expect(
-        "no generation reproduced GUEST_TORN; the short-write band never fired in 24 generations",
+        "no generation reproduced GUEST_TORN; the short-write band never fired in 3 generations",
     );
         assert!(
             flag_tokens > 4,

@@ -116,10 +116,11 @@ mod tests {
     // End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
     // the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
     // and prove the campaign catches the planted liveness violation, deduplicates the
-    // signature across the generations that fire it, records a working reproduce
-    // command, and produces byte-identical outcomes/signatures on a deterministic
-    // re-run. Native (single-threaded guest), so it does not touch the known
-    // main-thread TLS-teardown race.
+    // signature across the generations that fire it, and records a working reproduce
+    // command. Native (single-threaded guest), so it does not touch the known
+    // main-thread TLS-teardown race. That the same sweep re-derives byte-identical
+    // outcomes, stores and state is `campaign_extend_equals_fresh_campaign`, which
+    // reruns this guest under these flags as a split campaign.
     #[test]
     fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
         let workspace = native_workspace();
@@ -228,36 +229,6 @@ mod tests {
                     .contains("PATINA_VIOLATION liveness "),
             "reproduce command did not re-trigger the liveness violation: {reproduce}\nstderr:\n{}",
             String::from_utf8_lossy(&reproduced.stderr)
-        );
-
-        // Determinism: a re-run with the same spec yields byte-identical per-generation
-        // outcomes and an identical signature store.
-        let out2 = directory.path().join("camp2");
-        let owned2 = campaign_args(&out2);
-        let ran2 = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &owned2.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
-        assert_eq!(
-            campaign_gen_lines(&stdout),
-            campaign_gen_lines(&String::from_utf8_lossy(&ran2.stdout)),
-            "a deterministic re-run must produce identical per-generation outcomes"
-        );
-        assert_eq!(
-            fs::read_to_string(out.join("signatures.json")).unwrap(),
-            fs::read_to_string(out2.join("signatures.json")).unwrap(),
-            "a deterministic re-run must produce an identical signature store"
-        );
-        assert_eq!(
-            fs::read_to_string(out.join("sites.json")).unwrap(),
-            fs::read_to_string(out2.join("sites.json")).unwrap(),
-            "a deterministic re-run must produce an identical sites.json store"
-        );
-        assert_eq!(
-            campaign_state_without_invocations(&out.join("campaign-state.json")),
-            campaign_state_without_invocations(&out2.join("campaign-state.json")),
-            "a deterministic re-run must produce identical persisted state except audit invocations"
         );
     }
 

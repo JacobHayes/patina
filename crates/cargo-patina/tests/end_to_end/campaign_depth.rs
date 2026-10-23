@@ -34,8 +34,12 @@ mod tests {
             ]
         };
 
+        // A fresh campaign, and the same one split after its first segment. The
+        // plateau window fits inside the campaign, so either plateau verdict can
+        // arise and is checked against the log.
+        let (gens, first_segment) = (8, 4);
         let fresh_out = directory.path().join("fresh");
-        let fresh = run(campaign_args(&fresh_out, 12));
+        let fresh = run(campaign_args(&fresh_out, gens));
         assert!(
             fresh.status.success(),
             "fresh WASI depth campaign failed:\nstdout:\n{}\nstderr:\n{}",
@@ -50,10 +54,10 @@ mod tests {
         // Non-vacuity: every generation ran to completion, so every generation must
         // have contributed a measurement. `generations_with_depth=0` would be a store
         // that cannot tell "no data" from "zero depth".
-        assert_eq!(meta["generations_applied"], 12);
-        assert_eq!(meta["generations_with_depth"], 12);
+        assert_eq!(meta["generations_applied"], gens);
+        assert_eq!(meta["generations_with_depth"], gens);
         assert_eq!(meta["hostcall_kinds"], 3);
-        assert_eq!(meta["hostcalls"]["fd_write"], 12);
+        assert_eq!(meta["hostcalls"]["fd_write"], gens);
         assert!(meta["fuel_max"].as_u64().unwrap() > 0);
         assert!(meta["fuel_total"].as_u64().unwrap() >= meta["fuel_max"].as_u64().unwrap());
         assert!(
@@ -64,7 +68,7 @@ mod tests {
         // The plateau flag is exactly the arc's rule over the persisted log, not an
         // approximation of it.
         let last_new = meta["last_new_depth_gen"].as_u64().unwrap();
-        let expected_plateau = 11 - last_new >= 4;
+        let expected_plateau = gens - 1 - last_new >= 4;
         assert_eq!(
             meta["depth_plateaued"].as_bool().unwrap(),
             expected_plateau,
@@ -80,12 +84,12 @@ mod tests {
         );
 
         let split_out = directory.path().join("split");
-        let split1 = run(campaign_args(&split_out, 4));
+        let split1 = run(campaign_args(&split_out, first_segment));
         assert!(split1.status.success(), "first WASI depth segment failed");
         let split2 = run(vec![
             "campaign".to_string(),
             "--extend".to_string(),
-            "8".to_string(),
+            (gens - first_segment).to_string(),
             "--out-dir".to_string(),
             split_out.to_str().unwrap().to_string(),
             "--progress-every".to_string(),

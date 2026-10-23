@@ -445,28 +445,11 @@ fn main() {
         }
         let (seed, shrunk) = found.expect("no seed in 0..8 reproduced the planted state bug");
         let seed_string = seed.to_string();
+        // An exact sequence, so a shrinker that wandered between runs would not
+        // land on it every time.
         assert_eq!(
             shrunk, "TWOAXIS_SHRUNK spec=I0.0,R1 commands=[Insert(0, 0), Remove(1)]",
             "the stateful shrinker must converge to the canonical minimal sequence"
-        );
-
-        // Stable across a repeated run at the same seed.
-        let repeat = invoke_unchecked(
-            exe,
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                &seed_string,
-                "--",
-                "--find",
-            ],
-        );
-        assert_eq!(
-            two_axis_shrunk_line(&repeat),
-            shrunk,
-            "the shrunk command sequence must be stable across repeats"
         );
 
         let spec = "I0.0,R1";

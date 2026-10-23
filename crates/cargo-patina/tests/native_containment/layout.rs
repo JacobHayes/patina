@@ -12,6 +12,10 @@ fn address_layout(output: &[u8]) -> std::collections::BTreeMap<&str, &str> {
         .collect()
 }
 
+/// The probe's mode that reports the first layout and skips the churn, for
+/// the tests about the layout policy rather than about the layout itself.
+const NO_CHURN: &str = "no-churn";
+
 // With randomization off, the kernel puts the guest's image where it was
 // linked, in every run of a seed, recorded or replayed. On Linux the initial
 // stack the control plane cannot resize puts the main stack and its first
@@ -325,7 +329,7 @@ fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
     let trace = g.dir.path().join("randomized.patina");
     let trace = trace.to_str().unwrap();
     let recorded = assert_success(under_docker_seccomp(&[
-        "run", binary, "--seed", "1", "--record", trace, FLAG, "--format", "json",
+        "run", binary, "--seed", "1", "--record", trace, FLAG, "--format", "json", "--", NO_CHURN,
     ]));
     let result = envelope(&recorded);
     let kinds: Vec<&str> = result["qualifications"]
@@ -355,7 +359,7 @@ fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
 
     let fixed = g.dir.path().join("fixed.patina");
     let fixed = fixed.to_str().unwrap();
-    g.assert_run_success(1, &["--record", fixed]);
+    g.assert_run_success(1, &["--record", fixed, "--", NO_CHURN]);
     assert_refused(g.command("replay", &[fixed, FLAG]), &[FLAG]);
 }
 
@@ -366,7 +370,7 @@ fn a_trace_without_a_layout_replays_only_as_randomized() {
     const FLAG: &str = "--allow-randomized-address-layout";
     let g = Guest::assert_build("address_layout_probe.rs");
     let fixed = g.dir.path().join("fixed.patina");
-    g.assert_run_success(1, &["--record", fixed.to_str().unwrap()]);
+    g.assert_run_success(1, &["--record", fixed.to_str().unwrap(), "--", NO_CHURN]);
     let mut bundle = patina_dst_trace::TraceBundle::load(&fixed).unwrap();
     assert_eq!(
         bundle.metadata.address_layout,
@@ -399,6 +403,8 @@ fn a_campaign_with_the_opt_out_runs_every_generation_under_it() {
         "--out-dir",
         out,
         "--allow-randomized-address-layout",
+        "--",
+        NO_CHURN,
     ]));
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(std::path::Path::new(out).join("campaign-state.json")).unwrap(),
@@ -407,12 +413,13 @@ fn a_campaign_with_the_opt_out_runs_every_generation_under_it() {
     assert_eq!(state["spec"]["address_layout"], "randomized", "{state}");
 }
 
-/// `g`'s binary launched directly, without the supervisor, replaying `trace`
-/// through an inherited descriptor.
+/// `g`'s binary launched directly with `args`, without the supervisor,
+/// replaying `trace` through an inherited descriptor.
 fn replay_standalone(
     g: &Guest,
     trace: &std::path::Path,
     fingerprint: &str,
+    args: &[&str],
 ) -> std::process::Output {
     let mut command = std::process::Command::new("/bin/sh");
     command
@@ -420,6 +427,7 @@ fn replay_standalone(
         .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "replay"])
         .arg(trace)
         .arg(&g.binary)
+        .args(args)
         .envs([
             ("PATINA_MODE", "replay"),
             ("PATINA_TRACE_FD", "3"),
@@ -437,8 +445,8 @@ fn replay_standalone(
 fn a_standalone_replay_refuses_a_fixed_recording() {
     let g = Guest::assert_build("address_layout_probe.rs");
     let fixed = g.dir.path().join("fixed.patina");
-    g.assert_run_success(1, &["--record", fixed.to_str().unwrap()]);
-    let refused = replay_standalone(&g, &fixed, "patina-native");
+    g.assert_run_success(1, &["--record", fixed.to_str().unwrap(), "--", NO_CHURN]);
+    let refused = replay_standalone(&g, &fixed, "patina-native", &[NO_CHURN]);
     assert!(!refused.status.success(), "{refused:?}");
     assert!(!text(&refused.stdout).contains("code="), "{refused:?}");
     assert!(
@@ -446,9 +454,14 @@ fn a_standalone_replay_refuses_a_fixed_recording() {
         "{refused:?}"
     );
 
-    let (recorded, standalone) = g.record_standalone(&[]);
+    let (recorded, standalone) = g.record_standalone(&[NO_CHURN]);
     assert_success(recorded);
-    let replayed = assert_success(replay_standalone(&g, &standalone, "native-boundary"));
+    let replayed = assert_success(replay_standalone(
+        &g,
+        &standalone,
+        "native-boundary",
+        &[NO_CHURN],
+    ));
     assert!(text(&replayed.stdout).contains("code="), "{replayed:?}");
 }
 
@@ -472,7 +485,15 @@ fn a_campaign_from_before_layout_control_is_not_continued() {
     };
     let out_dir = out.to_str().unwrap();
     let binary = g.binary.to_str().unwrap();
-    assert_success(campaign(&[binary, "--gens", "1", "--out-dir", out_dir]));
+    assert_success(campaign(&[
+        binary,
+        "--gens",
+        "1",
+        "--out-dir",
+        out_dir,
+        "--",
+        NO_CHURN,
+    ]));
     // The continuation itself works on the state as written.
     assert_success(campaign(&["--extend", "1", "--out-dir", out_dir]));
     let state_path = out.join("campaign-state.json");

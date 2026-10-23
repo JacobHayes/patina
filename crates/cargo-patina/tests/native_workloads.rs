@@ -21,25 +21,31 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     );
 }
 
+/// One build of the watchdog guest covers each stop path a starved guest can be
+/// caught in: a custom perform replays its committed prefix (`custom-spin`); a
+/// looping or allocating abort handler is never called (`handler-loop`,
+/// `handler-alloc`); the byte-prefix export does not enter the held allocator
+/// (`payload-held`); and on Linux a synchronous replay salvages buffered C
+/// stdout (`sync-buffer`). Each mode keeps its own record/replay pair and hazard
+/// checks, and a failure names its mode.
 #[test]
-fn compute_watchdog_custom_perform_replays_the_committed_prefix() {
-    assert_compute_watchdog_cases(&["custom-spin"], false);
-}
-
-#[test]
-fn compute_watchdog_never_calls_looping_or_allocating_abort_handlers() {
-    assert_compute_watchdog_cases(&["handler-loop", "handler-alloc"], false);
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn compute_watchdog_synchronous_replay_salvages_buffered_c_stdout() {
-    assert_compute_watchdog_cases(&["sync-buffer"], false);
-}
-
-#[test]
-fn compute_watchdog_byte_prefix_export_does_not_enter_the_held_allocator() {
-    assert_compute_watchdog_cases(&["payload-held"], false);
+fn compute_watchdog_stop_paths_replay_their_prefix_and_never_reenter_the_guest() {
+    let linux_only: &[&str] = if cfg!(target_os = "linux") {
+        &["sync-buffer"]
+    } else {
+        &[]
+    };
+    let modes = [
+        "custom-spin",
+        "handler-loop",
+        "handler-alloc",
+        "payload-held",
+    ]
+    .iter()
+    .chain(linux_only)
+    .copied()
+    .collect::<Vec<_>>();
+    assert_compute_watchdog_cases(&modes, false);
 }
 
 #[test]
@@ -90,10 +96,12 @@ fn compute_watchdog_host_bound_is_not_a_fixed_one_second_timeout() {
     let g = Guest::assert_build("compute_watchdog.rs");
     let mut short = Vec::new();
     let mut long = Vec::new();
-    // Interleave bounds and use minimums to avoid making a descheduled short
-    // run into a false regression. No synchronization sleeps or tight upper
-    // wall-clock ceilings; both legs must reach the same named terminal stop.
-    for bound in [25, 4000, 4000, 25] {
+    // Bracket the long bound with short ones and use the shorter of those to
+    // avoid making a descheduled short run into a false regression; a long
+    // run can only be late, never early, so one is enough. No synchronization
+    // sleeps or tight upper wall-clock ceilings; both legs must reach the same
+    // named terminal stop.
+    for bound in [25, 4000, 25] {
         let started = Instant::now();
         let output = common::output_with_deadline(
             Command::new(&g.binary)
@@ -581,7 +589,9 @@ fn std_runs_seeded_and_replayable_but_not_standalone() {
         .output()
         .unwrap();
     assert_refused(standalone, &["must run under"]);
-    let out = g.assert_seeded_record_replay_identity(9, &[]);
+    let out = g.assert_seed_repeatability(9, 2, &[]);
+    let trace = g.assert_record_replay_identity(9, &[], &out);
+    g.assert_fingerprint_refused(&trace);
     assert_exact_line(&out, "PATINA_STRACE_MARKER");
     let fields = assert_fields(
         &out,
@@ -787,9 +797,9 @@ fn main_thread_pthread_exit_ends_only_the_main_thread() {
             "MAIN_EXIT cleanup\nMAIN_EXIT joined 7\nMAIN_EXIT atexit\n",
         ),
     ] {
+        // Both recordings and the replay print exactly the expected lines.
         let env = format!("MAIN_EXIT_MODE={mode}");
-        let out = g.assert_seeded_record_replay_identity(1, &["--env", &env]);
-        assert_eq!(text(&out), expected, "{mode}");
+        g.assert_record_replay_identity(1, &["--env", &env], expected.as_bytes());
     }
 }
 
@@ -1027,9 +1037,10 @@ fn condvar_waits_use_exact_virtual_deadlines() {
     let g = Guest::assert_build("timed_wait_probe.rs");
     g.assert_audit_clean();
     let expected = "NATIVE_TIMED_WAIT_RESULT signalled_elapsed_ms=25 timeout_elapsed_ms=100\n";
+    // Every run prints the exact line, so one run per seed is a same-seed
+    // comparison too.
     for seed in [5, 6] {
-        let baseline = g.assert_seed_repeatability(seed, 2, &[]);
-        assert_eq!(text(&baseline), expected);
+        assert_eq!(text(&g.assert_run_success(seed, &[]).stdout), expected);
     }
     g.assert_record_replay_identity(5, &[], expected.as_bytes());
 }
@@ -1102,9 +1113,10 @@ fn recv_timeout_delivers_five_messages_and_five_timeouts() {
     g.assert_audit_clean();
     g.assert_no_imports(&["dispatch_semaphore"]);
     let expected = "NATIVE_RECV_TIMEOUT_RESULT delivered=[0, 1, 2, 3, 4] timeouts=5\n";
+    // Every run prints the exact line, so one run per seed is a same-seed
+    // comparison too.
     for seed in [5, 6, 7] {
-        let baseline = g.assert_seed_repeatability(seed, 3, &[]);
-        assert_eq!(text(&baseline), expected);
+        assert_eq!(text(&g.assert_run_success(seed, &[]).stdout), expected);
     }
     g.assert_record_replay_identity(5, &[], expected.as_bytes());
 }
@@ -1163,9 +1175,12 @@ fn a_blocking_receive_that_earns_an_escalation_reaches_its_cpu_timer() {
     // them to a streak) makes the blocking receive's poll the streak's last:
     // a smaller one leaves it short of the streak, a larger one fires the
     // one-shot timer during the polls. At seed 5 the hits sit near 510; the
-    // search starts a little below them, so small drift in the per-poll charge
-    // still lands inside the range, and stops at the first hit.
-    let polls = (496..560)
+    // search spirals out from there over a range wide enough that small drift
+    // in the per-poll charge still lands inside it, and stops at the first hit.
+    let mut counts: Vec<u32> = (496..560).collect();
+    counts.sort_by_key(|polls| polls.abs_diff(510));
+    let polls = counts
+        .into_iter()
         .find(|polls| {
             let output = g.command("run", &["--seed", "5", "--", &polls.to_string()]);
             output.status.success()
@@ -1215,7 +1230,7 @@ fn a_yield_loop_reaches_a_sleeping_peer_and_a_real_timer() {
     );
     let budget = ["--budget", "2000000"];
     for seed in [1, 7] {
-        assert_eq!(g.assert_seed_repeatability(seed, 2, &budget), expected);
+        assert_eq!(g.assert_run_success(seed, &budget).stdout, expected);
     }
     g.assert_record_replay_identity(1, &budget, &expected);
 }
@@ -1232,8 +1247,7 @@ fn an_empty_udp_poll_on_a_sleeping_peer_lets_virtual_time_reach_it() {
     let expected =
         "NATIVE_POLL_CLOCK_RESULT first_empty=true payload=ping polled=true waited_1ms=true\n";
     for seed in [5, 6] {
-        let baseline = g.assert_seed_repeatability(seed, 2, &budget);
-        assert_eq!(text(&baseline), expected);
+        assert_eq!(text(&g.assert_run_success(seed, &budget).stdout), expected);
     }
     g.assert_record_replay_identity(5, &budget, expected.as_bytes());
 }
@@ -1253,7 +1267,7 @@ fn a_poll_that_never_reads_the_clock_reaches_its_sleeping_peer() {
         "NATIVE_POLL_SLEEPER_RESULT first_empty=true payload=ping polled=true",
     );
     for seed in [5, 6] {
-        assert_eq!(g.assert_seed_repeatability(seed, 2, &budget), expected);
+        assert_eq!(g.assert_run_success(seed, &budget).stdout, expected);
     }
     g.assert_record_replay_identity(5, &budget, &expected);
 }
@@ -1333,8 +1347,7 @@ fn tcp_shutdown_dns_and_peer_are_deterministic() {
     let expected =
         "NATIVE_TCP_RESULT reply=PING peer=127.0.0.1:32768 ipv6_loopback=true dns_nxdomain=true\n";
     for seed in [5, 6] {
-        let baseline = g.assert_seed_repeatability(seed, 2, &[]);
-        assert_eq!(text(&baseline), expected);
+        assert_eq!(text(&g.assert_run_success(seed, &[]).stdout), expected);
     }
     g.assert_record_replay_identity(5, &[], expected.as_bytes());
 }

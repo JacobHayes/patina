@@ -233,7 +233,7 @@ impl Guest {
         assert!(outputs.len() >= 2, "output did not vary across {seeds:?}");
     }
 
-    /// Require repeatability plus full stdout/trace identity and fingerprint refusal.
+    /// Require repeatability plus full stdout/trace identity.
     pub fn assert_seeded_record_replay_identity(&self, seed: u64, flags: &[&str]) -> Vec<u8> {
         let baseline = self.assert_seed_repeatability(seed, 2, flags);
         self.assert_record_replay_identity(seed, flags, &baseline);
@@ -277,6 +277,13 @@ impl Guest {
             ],
         ));
         assert_eq!(baseline, replay.stdout, "record/replay stdout identity");
+        trace
+    }
+
+    /// Require that a replay of `trace` under another fingerprint is refused.
+    /// The check reads only the trace and the flag, whatever the guest does,
+    /// so one guest's trace proves it.
+    pub fn assert_fingerprint_refused(&self, trace: &Path) {
         assert_refused(
             self.command(
                 "replay",
@@ -284,7 +291,6 @@ impl Guest {
             ),
             &["fingerprint"],
         );
-        trace
     }
 
     /// Require that no undefined symbol contains any of the given names.

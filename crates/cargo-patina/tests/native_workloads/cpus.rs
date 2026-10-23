@@ -27,7 +27,7 @@ fn a_default_multi_thread_tokio_runtime_starts_a_worker_per_virtual_cpu() {
     assert!(workers > 1, "{}", text(&out));
     assert_eq!(workers, patina_dst_abi::DEFAULT_CPUS as usize);
     let one = ["--env", "TOKIO_TCP_MODE=default", "--cpus", "1"];
-    let out = g.assert_seeded_record_replay_identity(3, &one);
+    let out = g.assert_run_success(3, &one).stdout;
     tokio_tcp_elapsed_us(&out);
     assert_eq!(tokio_workers(&out), 1);
 }

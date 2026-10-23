@@ -215,8 +215,13 @@ exit "$status"
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
         let real_cargo = active_toolchain_binary("cargo");
         let target = common::guest_target_dir("cargo-cache-reuse");
+        // The shim builds through the same Cargo as the guest, which is not the
+        // Cargo the other tests build the shared shim with, so it gets a
+        // persistent base of its own rather than rebuilding theirs.
+        let shim_target = common::guest_target_dir("cargo-cache-reuse-shim");
         let envs = [
             ("CARGO", cargo.to_str().unwrap()),
+            ("PATINA_SHIM_TARGET_DIR", shim_target.to_str().unwrap()),
             ("PATINA_TEST_REAL_CARGO", real_cargo.to_str().unwrap()),
             ("PATINA_TEST_CARGO_RECEIPTS", receipts.to_str().unwrap()),
             ("CARGO_TARGET_DIR", target.to_str().unwrap()),
@@ -469,9 +474,9 @@ exit "$status"
     // mtimes are exactly what a skipped link leaves untouched, so neither is
     // trusted here.
     //
-    // `CARGO_TARGET_DIR` redirects the whole build into the tempdir so the doctored
-    // staticlib is private to this test and the real workspace artifact is never
-    // touched, and a stub `CARGO` skips the shim's own `cargo build -p
+    // `PATINA_SHIM_TARGET_DIR` names a shim base of this test's own, so the
+    // doctored staticlib is private to it and the shared shim is never touched,
+    // and a stub `CARGO` skips the shim's own `cargo build -p
     // patina-dst-native-shim` (which would overwrite the doctored copy) while
     // forwarding every other Cargo invocation unchanged. Because the observable is
     // guest output rather than a rebuild count, a machine-global `build.build-dir`
@@ -484,7 +489,12 @@ exit "$status"
         let workspace = native_workspace();
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
 
-        let shim_target = directory.path().join("shim-target");
+        // The shim base is this test's own and persistent: the first run builds
+        // its private shim, later runs find it fresh. Cargo re-uplifts the
+        // staticlib on every build, and the doctoring only ever replaces the
+        // probe member, so a run starts from whatever probe the last one left.
+        let shim_target = common::guest_target_dir("shim-relink");
+        let guest_target = directory.path().join("target");
         let package = directory.path().join("probe-pkg");
         write_plain_package(
             &package,
@@ -493,9 +503,9 @@ exit "$status"
          println!(\"RELINK_PROBE={}\", unsafe { patina_relink_probe() });\n}\n",
         );
 
-        // Build once through cargo-patina so the private explicit CARGO_TARGET_DIR is
-        // populated at the exact namespaced path `build_native_shim` selected. The
-        // primer does not call the doctored symbol; only the later builds do.
+        // Build once through cargo-patina so the private shim base is populated at
+        // the exact namespaced path `build_native_shim` selected. The primer does
+        // not call the doctored symbol; only the later builds do.
         let primer = directory.path().join("primer-pkg");
         write_plain_package(
             &primer,
@@ -513,8 +523,8 @@ exit "$status"
                 pristine.to_str().unwrap(),
             ],
             &[
-                ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
-                ("PATINA_SHIM_TARGET_DIR", ""),
+                ("CARGO_TARGET_DIR", guest_target.to_str().unwrap()),
+                ("PATINA_SHIM_TARGET_DIR", shim_target.to_str().unwrap()),
             ],
         );
         assert!(
@@ -543,12 +553,10 @@ exit "$status"
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
 
-        // An empty PATINA_SHIM_TARGET_DIR clears an inherited shared shim base,
-        // so CARGO_TARGET_DIR places the shim this test inspects.
         let envs: &[(&str, &str)] = &[
             ("CARGO", stub.to_str().unwrap()),
-            ("CARGO_TARGET_DIR", shim_target.to_str().unwrap()),
-            ("PATINA_SHIM_TARGET_DIR", ""),
+            ("CARGO_TARGET_DIR", guest_target.to_str().unwrap()),
+            ("PATINA_SHIM_TARGET_DIR", shim_target.to_str().unwrap()),
         ];
         let mut printed = Vec::new();
         for (generation, binary) in [(1u32, "gen1"), (2u32, "gen2")] {
@@ -700,25 +708,21 @@ exit "$status"
         );
     }
 
+    /// The staticlib the primer build just produced. The base is persistent, so
+    /// it can also hold other compilers' or profiles' work dirs; Cargo re-uplifts
+    /// the archive on every build, so the current one is the newest.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn find_private_shim_staticlib(target_base: &Path) -> PathBuf {
         let mut files = Vec::new();
         // Mutate only Cargo scratch, never the immutable published link inputs.
         collect_files(&target_base.join("patina-native-shim/builds"), &mut files);
-        let mut staticlibs: Vec<_> = files
+        files
             .into_iter()
             .filter(|path| {
                 path.file_name() == Some(std::ffi::OsStr::new("libpatina_dst_native_shim.a"))
             })
-            .collect();
-        staticlibs.sort();
-        assert_eq!(
-            staticlibs.len(),
-            1,
-            "expected exactly one private shim staticlib under {}, found {staticlibs:?}",
-            target_base.display()
-        );
-        staticlibs.remove(0)
+            .max_by_key(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+            .unwrap_or_else(|| panic!("no private shim staticlib under {}", target_base.display()))
     }
 
     // Append (or replace) an archive member defining `patina_relink_probe`, so the
