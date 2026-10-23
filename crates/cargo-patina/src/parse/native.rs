@@ -123,6 +123,9 @@ pub(crate) fn parse_native_build(
     let release = args.flag("--release");
     let instrumentation = instrumentation_of(&args)?;
 
+    if args.flag("--go") {
+        return parse_go_build(&args, path, output, release, instrumentation, rustc_args);
+    }
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
             return Err(CliError::usage(format!(
@@ -164,6 +167,47 @@ pub(crate) fn parse_native_build(
             instrumentation,
         })
     }
+}
+
+/// A `build --go` of the Go main package in `path`: the trailing arguments are
+/// `go build` options, and only the options a Go build has a meaning for are
+/// accepted. `--release` builds the shim in release mode; the Go code is
+/// compiled as `go build` always compiles it.
+fn parse_go_build(
+    args: &cli::Args,
+    path: PathBuf,
+    output: Option<PathBuf>,
+    release: bool,
+    instrumentation: GuestInstrumentation,
+    go_args: Vec<OsString>,
+) -> Result<NativeBuildInvocation, CliError> {
+    for (flag, given) in [
+        ("--edition", args.string("--edition").is_some()),
+        ("--package", args.string("--package").is_some()),
+        ("--bin", args.string("--bin").is_some()),
+    ] {
+        if given {
+            return Err(CliError::usage(format!(
+                "{flag} applies to a Rust build, not a Go package (--go)"
+            )));
+        }
+    }
+    if instrumentation != GuestInstrumentation::None {
+        return Err(CliError::usage(
+            "--yield-points and --coverage-points instrument Rust code through LLVM; a Go package (--go) takes neither",
+        ));
+    }
+    crate::go_build::check_go_args(&go_args)?;
+    let output = output.ok_or_else(|| CliError::usage("build --go requires --output <PATH>"))?;
+    Ok(NativeBuildInvocation {
+        target: NativeBuildTarget::Go {
+            package_dir: path,
+            go_args,
+        },
+        output: Some(output),
+        release,
+        instrumentation,
+    })
 }
 
 /// Classify a `native-build` path by shape (no filesystem access, so parsing

@@ -42,6 +42,12 @@ unknown option.
   trace never cross-replays across modes or strides. The two flags are mutually
   exclusive. Prints `PATINA_NATIVE_BUILD output=...` /
   `PATINA_WASI_BUILD output=...`.
+- `cargo patina build <GO PACKAGE DIR> --go --output PATH [--release] [-- GO BUILD OPTIONS]`
+  Build a Go main package as a native guest (Linux): `go build` in cgo mode
+  (`CGO_ENABLED=1`), linked externally with the shim, so goroutine threads
+  start through the shim's `pthread_create`. Patina sets `-ldflags` and `-o`
+  and refuses them in the pass-through options; other `go build` options pass
+  through. The `go` on PATH builds it (pin it with `GOTOOLCHAIN` or mise).
 - `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
   `--record PATH` writes a trace. Native runs take `--env K=V` (the guest's

@@ -42,6 +42,7 @@ mod coverage;
 #[cfg(unix)]
 mod crash_restart;
 mod depth;
+mod go_build;
 mod guided;
 mod harness;
 mod help;
@@ -415,8 +416,8 @@ struct NativeBuildInvocation {
 }
 
 /// What `build` compiles for the native target: a single Rust source linked
-/// directly with `rustc`, or a whole Cargo package driven through its own
-/// `cargo build`.
+/// directly with `rustc`, a whole Cargo package driven through its own
+/// `cargo build`, or a Go main package driven through `go build`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NativeBuildTarget {
     Source {
@@ -428,6 +429,12 @@ enum NativeBuildTarget {
         manifest: PathBuf,
         package: Option<String>,
         bin: Option<String>,
+    },
+    /// A Go main package (`--go`): built by `go build` in cgo mode and linked
+    /// externally with the shim ([`go_build`]).
+    Go {
+        package_dir: PathBuf,
+        go_args: Vec<OsString>,
     },
 }
 

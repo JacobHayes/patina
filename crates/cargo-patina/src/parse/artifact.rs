@@ -261,6 +261,9 @@ pub(super) fn apply_package_selection(
                 NativeBuildTarget::Source { .. } => Err(CliError::usage(
                     "--package and --bin apply to a Cargo-package build, not a single source file",
                 )),
+                NativeBuildTarget::Go { .. } => Err(CliError::usage(
+                    "--package and --bin apply to a Cargo-package build, not a Go package",
+                )),
             },
             BuildSpecKind::Wasi(invocation) => {
                 if package.is_some() {

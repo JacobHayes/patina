@@ -280,6 +280,20 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             yield_object.as_deref(),
             &rustc,
         ),
+        NativeBuildTarget::Go {
+            package_dir,
+            go_args,
+        } => crate::go_build::build_go_package(
+            &package_dir,
+            invocation
+                .output
+                .as_deref()
+                .expect("a Go native-build requires --output"),
+            &object,
+            &built_shim,
+            &built_shim.allocator_linker_args(&host_target)?,
+            &go_args,
+        ),
     }
 }
 
@@ -304,8 +318,8 @@ fn sancov_rustc_flags() -> [&'static str; 8] {
     ]
 }
 
-/// Add the platform-specific shim link arguments a native binary needs to
-/// `configure`. On Linux the shim interposes thread creation with a plain strong
+/// The platform-specific shim arguments a native binary's link needs, as
+/// compiler-driver arguments. On Linux the shim interposes thread creation with a plain strong
 /// `pthread_create` def and reaches the real glibc creator through its host-alias
 /// table (`dlsym(RTLD_NEXT, ...)`), so no link-time wrap is needed — and none is
 /// used: gcc ships its own `__wrap_pthread_create` in libgcc's x86 split-stack
@@ -315,24 +329,26 @@ fn sancov_rustc_flags() -> [&'static str; 8] {
 /// `libc_nonshared.a` (reached through the `libc.so` linker script); GNU ld scans
 /// archives in a single pass, so libc must be scanned again after the shim
 /// objects introduce their references.
-fn push_platform_link_args(mut configure: impl FnMut(&str)) {
-    #[cfg(target_os = "linux")]
-    {
-        // Wrap `dlsym` so the shim's host-alias table can reach the real glibc
-        // resolver through `__real_dlsym` while guest/std references to `dlsym`
-        // still bind to the shim's `__wrap_dlsym` interposer (which resolves only
-        // its deterministic entropy routing table — never a host symbol). This is
-        // the Linux half of the host-alias doctrine: `dlsym(RTLD_NEXT, ...)`
-        // resolves the trace-fd I/O, baton-semaphore, and host-thread-creation
-        // vehicles at runtime, so `__read`/`__write`/`sem_*`/`pthread_create` no
-        // longer appear in the guest import table.
-        configure("link-arg=-Wl,--wrap=dlsym");
-        configure("link-arg=-lc");
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = &mut configure;
-    }
+///
+/// Linux wraps `dlsym` so the shim's host-alias table can reach the real glibc
+/// resolver through `__real_dlsym` while guest/std references to `dlsym`
+/// still bind to the shim's `__wrap_dlsym` interposer (which resolves only
+/// its deterministic entropy routing table — never a host symbol). This is
+/// the Linux half of the host-alias doctrine: `dlsym(RTLD_NEXT, ...)`
+/// resolves the trace-fd I/O, baton-semaphore, and host-thread-creation
+/// vehicles at runtime, so `__read`/`__write`/`sem_*`/`pthread_create` no
+/// longer appear in the guest import table.
+pub(super) const PLATFORM_LINKER_ARGS: &[&str] = if cfg!(target_os = "linux") {
+    &["-Wl,--wrap=dlsym", "-lc"]
+} else {
+    &[]
+};
+
+/// [`PLATFORM_LINKER_ARGS`] as rustc `-C` values.
+fn platform_link_args() -> impl Iterator<Item = OsString> {
+    PLATFORM_LINKER_ARGS
+        .iter()
+        .map(|arg| OsString::from(format!("link-arg={arg}")))
 }
 
 // Audit and execute the same symbol-bearing artifact. Cargo does not expose a
@@ -385,9 +401,9 @@ fn build_native_source(
     for arg in allocator {
         command.arg("-C").arg(arg);
     }
-    push_platform_link_args(|arg| {
+    for arg in platform_link_args() {
         command.arg("-C").arg(arg);
-    });
+    }
     if release {
         // Match cargo's `release` profile so a single-source guest behaves
         // identically to a package guest under `--release`: optimize, and compile
@@ -436,7 +452,7 @@ const SINGLE_SOURCE_LINK_NAME: &str = "patina-guest";
 /// Copy a freshly linked executable to `output` through a sibling file and a
 /// rename, so a running copy of the previous build is replaced rather than
 /// rewritten in place.
-fn install_built_executable(linked: &Path, output: &Path) -> Result<(), CliError> {
+pub(super) fn install_built_executable(linked: &Path, output: &Path) -> Result<(), CliError> {
     let name = output.file_name().ok_or_else(|| {
         CliError(format!(
             "native build output {} has no file name",
@@ -881,10 +897,10 @@ pub(super) fn native_package_link_args(
         args.push(OsString::from("-C"));
         args.push(arg.clone());
     }
-    push_platform_link_args(|arg| {
+    for arg in platform_link_args() {
         args.push(OsString::from("-C"));
-        args.push(OsString::from(arg));
-    });
+        args.push(arg);
+    }
     args
 }
 

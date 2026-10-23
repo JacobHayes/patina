@@ -111,9 +111,33 @@ impl BuiltNativeShim {
     /// (`allocator_routing.rs`): the wraps, and the routing object staged for
     /// `host_target`. Empty where the platform routes nothing.
     pub(super) fn allocator_link_args(&self, host_target: &str) -> Result<Vec<OsString>, CliError> {
+        Ok(self
+            .allocator_routing(host_target)?
+            .map(|(routing, object)| routing.link_args(&object, &self.staticlib))
+            .unwrap_or_default())
+    }
+
+    /// [`Self::allocator_link_args`] as plain compiler-driver arguments, for a
+    /// link rustc does not drive (a Go guest's external link).
+    pub(super) fn allocator_linker_args(
+        &self,
+        host_target: &str,
+    ) -> Result<Vec<OsString>, CliError> {
+        Ok(self
+            .allocator_routing(host_target)?
+            .map(|(routing, object)| routing.linker_args(&object, &self.staticlib))
+            .unwrap_or_default())
+    }
+
+    /// The archive's allocator routing and its staged object, or `None` where
+    /// the platform routes nothing.
+    fn allocator_routing(
+        &self,
+        host_target: &str,
+    ) -> Result<Option<(crate::allocator_routing::AllocatorRouting, PathBuf)>, CliError> {
         let routing = crate::allocator_routing::AllocatorRouting::read(&self.staticlib)?;
         let Some(defines) = routing.defines() else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let object = stage_shim_object(
             self,
@@ -121,7 +145,7 @@ impl BuiltNativeShim {
             host_target,
             &defines,
         )?;
-        Ok(routing.link_args(&object, &self.staticlib))
+        Ok(Some((routing, object)))
     }
 }
 

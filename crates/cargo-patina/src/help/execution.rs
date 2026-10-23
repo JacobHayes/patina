@@ -430,6 +430,7 @@ pub(super) const BUILD: Verb = Verb {
         "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points | --coverage-points[=STRIDE]] [-- RUSTC OPTIONS]",
         "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points | --coverage-points[=STRIDE]]",
         "cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]",
+        "cargo patina build <GO PACKAGE DIR> --go --output <PATH> [--release] [-- GO BUILD OPTIONS]",
     ],
     prose: "\
 `build` (default --target native) packages the native linked-shim target: it \
@@ -456,7 +457,13 @@ countdown is per-thread, so the sampled sites are a pure function of the seed. \
 The two flags are mutually exclusive. Both are native-only and rejected under \
 --target wasi (wasip1 has no threads to preempt). `build --target wasi` compiles a \
 Cargo package for wasm32-wasip1 and is package-only (a single .rs source is \
-native-only).",
+native-only).\n\
+\n\
+`--go` builds the Go main package in DIR (Linux): `go build` in cgo mode, linked \
+externally with the shim, so goroutine threads start through the shim's \
+pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
+and -o; other `go build` options follow `--`. `--release` builds the shim in \
+release mode; the yield/coverage instrumentation is Rust-only.",
     families: &[
         fam(Family::Native, "`build`", None),
         fam(
@@ -528,6 +535,16 @@ native-only).",
                 Value::Required("NAME", Kind::Str),
                 "Select the binary when the package defines more than one.",
                 false,
+            ),
+            only(
+                f(
+                    "--go",
+                    None,
+                    Value::None,
+                    "Build the path as a Go main package, cgo mode, externally linked with the shim (Linux).",
+                    false,
+                ),
+                &[Family::Native],
             ),
             TARGET_FLAG,
         ],

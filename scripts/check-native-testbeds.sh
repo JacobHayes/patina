@@ -9,7 +9,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 usage() {
   printf '%s\n' 'usage: scripts/check-native-testbeds.sh [--selftest|--help]' \
-    'Runs FIFO, rustix-default and cap-std-dirfd; requires SUD execution receipts on capable kernels.'
+    'Runs FIFO, rustix-default, cap-std-dirfd and go-guest; requires SUD execution receipts on capable kernels.' \
+    'go-guest runs where a go is on PATH and the kernel has SUD, and is reported NOT RUN elsewhere;' \
+    'PATINA_REQUIRE_GO=1 makes NOT RUN a failure.'
 }
 
 require_receipt() {
@@ -29,6 +31,15 @@ require_receipt() {
 require_sud() {
   if [[ ${PATINA_REQUIRE_SUD:-0} == 1 && $1 != 1 ]]; then
     echo 'FAIL: PATINA_REQUIRE_SUD=1 but the host lacks syscall-user-dispatch' >&2
+    return 1
+  fi
+}
+
+# go-guest needs a Go toolchain and, since the Go runtime issues raw syscalls,
+# syscall-user-dispatch. $1: whether both are present; $2: why not.
+require_go() {
+  if [[ ${PATINA_REQUIRE_GO:-0} == 1 && $1 != 1 ]]; then
+    echo "FAIL: PATINA_REQUIRE_GO=1 but go-guest cannot run: $2" >&2
     return 1
   fi
 }
@@ -63,7 +74,15 @@ selftest() {
   fi
   PATINA_REQUIRE_SUD=1 require_sud 1
   PATINA_REQUIRE_SUD=0 require_sud 0
-  echo 'NATIVE_TESTBEDS_SELFTEST_RAN cases=false-negative-probe,valid,duplicate,failed-child,required-sud'
+  if PATINA_REQUIRE_GO=1 require_go 0 'no go on PATH' >"$tmp/required-go.log" 2>&1; then
+    echo 'FAIL: required go-guest absence accepted' >&2; return 1
+  fi
+  if ! grep -q 'PATINA_REQUIRE_GO=1' "$tmp/required-go.log"; then
+    echo 'FAIL: required go-guest absence lacked its diagnostic' >&2; return 1
+  fi
+  PATINA_REQUIRE_GO=1 require_go 1 ''
+  PATINA_REQUIRE_GO=0 require_go 0 'no go on PATH'
+  echo 'NATIVE_TESTBEDS_SELFTEST_RAN cases=false-negative-probe,valid,duplicate,failed-child,required-sud,required-go'
 
 }
 
@@ -103,4 +122,21 @@ else
   done
 fi
 
-printf 'native ecosystem: passed=%s skipped=%s\n' "$((1 + 2 * sud))" "$((2 - 2 * sud))"
+go=0
+if ! command -v go >/dev/null; then
+  why='no go on PATH'
+elif ((!sud)); then
+  why="host lacks syscall-user-dispatch, which the Go runtime's raw syscalls need: $(uname -s) $(uname -m)"
+else
+  go=1
+fi
+require_go "$go" "${why:-}"
+if ((go)); then
+  require_receipt testbeds/go-guest/run-patina.sh \
+    'GO_GUEST_LEGS_RAN legs=audit-clean,run,seed-stable,record-replay,seed-sweep'
+else
+  echo "go-guest: NOT RUN ($why)" >&2
+fi
+
+printf 'native ecosystem: passed=%s skipped=%s not-run=%s\n' \
+  "$((1 + 2 * sud + go))" "$((2 - 2 * sud))" "$((1 - go))"

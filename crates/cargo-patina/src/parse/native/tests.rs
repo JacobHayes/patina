@@ -125,7 +125,7 @@ fn parses_native_build_with_output_edition_and_forwarded_rustc_args() {
             assert_eq!(edition, "2021");
             assert_eq!(rustc_args, strings(&["-C", "opt-level=2"]));
         }
-        NativeBuildTarget::Package { .. } => panic!("expected a single-source target"),
+        _ => panic!("expected a single-source target"),
     }
     // The default edition applies and --output is required.
     let invocation =
@@ -140,12 +140,54 @@ fn parses_native_build_with_output_edition_and_forwarded_rustc_args() {
             assert_eq!(edition, DEFAULT_NATIVE_EDITION);
             assert!(rustc_args.is_empty());
         }
-        NativeBuildTarget::Package { .. } => panic!("expected a single-source target"),
+        _ => panic!("expected a single-source target"),
     }
     assert!(parse_native_build(strings(&["probe.rs"])).is_err());
     assert!(parse_native_build(strings(&["--output", "probe"])).is_err());
     // Package-only options are rejected for a single source.
     assert!(parse_native_build(strings(&["probe.rs", "--output", "probe", "--bin", "x"])).is_err());
+}
+
+#[test]
+fn parses_a_go_build_with_its_go_build_options() {
+    let invocation = native_build_invocation(&[
+        "native-build",
+        "./cmd/tool",
+        "--go",
+        "--output",
+        "tool",
+        "--release",
+        "--",
+        "-trimpath",
+        "-tags",
+        "netgo",
+    ]);
+    assert_eq!(invocation.output.as_deref(), Some(Path::new("tool")));
+    assert!(invocation.release);
+    match invocation.target {
+        NativeBuildTarget::Go {
+            package_dir,
+            go_args,
+        } => {
+            assert_eq!(package_dir, PathBuf::from("./cmd/tool"));
+            assert_eq!(go_args, strings(&["-trimpath", "-tags", "netgo"]));
+        }
+        _ => panic!("expected a Go target"),
+    }
+    // A Go build needs --output, and refuses the options it has no meaning
+    // for and the go build options Patina sets itself.
+    for refused in [
+        &["pkg", "--go"][..],
+        &["pkg", "--go", "--output", "o", "--edition", "2021"],
+        &["pkg", "--go", "--output", "o", "--package", "p"],
+        &["pkg", "--go", "--output", "o", "--bin", "b"],
+        &["pkg", "--go", "--output", "o", "--yield-points"],
+        &["pkg", "--go", "--output", "o", "--coverage-points"],
+        &["pkg", "--go", "--output", "o", "--", "-ldflags=-s"],
+        &["pkg", "--go", "--output", "o", "--", "-o", "elsewhere"],
+    ] {
+        assert!(parse_native_build(strings(refused)).is_err(), "{refused:?}");
+    }
 }
 
 #[test]
@@ -174,7 +216,7 @@ fn parses_native_build_for_cargo_packages() {
             assert_eq!(package.as_deref(), Some("demo"));
             assert_eq!(bin.as_deref(), Some("app"));
         }
-        NativeBuildTarget::Source { .. } => panic!("expected a package target"),
+        _ => panic!("expected a package target"),
     }
 
     // --output is optional for packages; a Cargo.toml path is used as-is.
@@ -190,7 +232,7 @@ fn parses_native_build_for_cargo_packages() {
             assert_eq!(package, None);
             assert_eq!(bin, None);
         }
-        NativeBuildTarget::Source { .. } => panic!("expected a package target"),
+        _ => panic!("expected a package target"),
     }
 
     // Single-source options are rejected for a package.

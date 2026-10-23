@@ -118,6 +118,9 @@ jobs:
       # check-native-testbeds.sh requires each SUD receipt on x86_64. (strace
       # and the host-oracle requirement belong to the test suite, in `tests`.)
       PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
+      # ...and the go-guest receipt there too (Go guests on aarch64 are not
+      # gated yet), so a missing Go fails instead of reporting NOT RUN.
+      PATINA_REQUIRE_GO: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
       # The gate scripts each default to a private target dir so the local
       # check runner can overlap them; here they run one after another, so they
       # share one and build the release cargo-patina and native shim once.
@@ -140,7 +143,11 @@ jobs:
       # small allowlist of non-patina flags).
       - run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
-      - run: scripts/check-native-testbeds.sh
+      # On x86_64 mise supplies the Go release testbeds/go-guest/go.mod pins.
+      - if: matrix.runner == 'ubuntu-latest'
+        run: mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- scripts/check-native-testbeds.sh
+      - if: matrix.runner != 'ubuntu-latest'
+        run: scripts/check-native-testbeds.sh
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-cross-target.sh
