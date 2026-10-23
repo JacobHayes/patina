@@ -163,7 +163,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         return;
     }
     let cache = tempfile::tempdir().unwrap();
-    let make_bundle = |key: &'static str, answer: u32| {
+    let make_bundle = |key: &'static str, answer: u32, lock_tail: &str| {
         let lease = shim_cache::acquire(&cache.path().join("shim-src"), key, 4).unwrap();
         // Even an ambient/configured Cargo intermediate directory must not
         // escape the leased, size-bounded scratch target.
@@ -216,6 +216,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
             ),
         )
         .unwrap();
+        lock.push_str(lock_tail);
         fs::write(lease.dir.join("Cargo.lock"), lock).unwrap();
         ShimSources {
             cache_root: cache.path().into(),
@@ -224,8 +225,8 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
             _lease: lease,
         }
     };
-    let a = make_bundle("a", 17);
-    let b = make_bundle("b", 29);
+    let a = make_bundle("a", 17, "");
+    let b = make_bundle("b", 29, "");
     let mut rustc = check_native_toolchain_agreement(&a.dir).unwrap();
     let quote = |path: &OsStr| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
     // Reproduce clonefile-preserved timestamps on every platform. Without
@@ -343,6 +344,19 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         "a switch discarded incremental history"
     );
     assert!(!cache.path().join("escaped-build-dir").exists());
+    // A bundle that differs from A only in its lock, which also pins a
+    // package no closure crate uses (the workspace lock pins the whole
+    // workspace): the switch must leave a lock the `--locked` build accepts.
+    let relocked = make_bundle(
+        "a-relocked",
+        17,
+        "\n[[package]]\nname = \"itoa\"\nversion = \"1.0.15\"\n\
+         source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+         checksum = \"4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c\"\n",
+    );
+    let built =
+        build_native_shim_at(false, &rustc, &relocked, None, GuestInstrumentation::None).unwrap();
+    link(&built, 17);
 
     // A compiler-wrapper server can outlive the command that started it.
     // It may pin shared state, but the next real build must acquire the

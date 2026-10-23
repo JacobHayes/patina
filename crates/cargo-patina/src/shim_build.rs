@@ -439,6 +439,11 @@ fn build_native_shim_at(
 /// whole reset handles. The lock is not compared: Cargo rewrites the copy's
 /// (a newer lock format), the switch restores the bundle's, and Cargo
 /// fingerprints the dependency versions it resolves.
+///
+/// A switch in which no package differs is also a whole reset. The bundle's
+/// lock pins the whole workspace it was packed from, and only the clean a
+/// switch runs before building may prune it to the closure: the `--locked`
+/// build refuses to. A switch that cleans nothing would leave it unpruned.
 fn changed_packages<'a>(bundle: &Path, copy: &Path) -> Result<Option<Vec<&'a str>>, CliError> {
     let package = |name: &std::ffi::OsStr| {
         shim_bundle::EMBEDDED_SHIM_SOURCES
@@ -467,7 +472,7 @@ fn changed_packages<'a>(bundle: &Path, copy: &Path) -> Result<Option<Vec<&'a str
             changed.push(*package);
         }
     }
-    Ok(Some(changed))
+    Ok((!changed.is_empty()).then_some(changed))
 }
 
 /// The archive digest also distinguishes ambient Cargo configuration changes.
