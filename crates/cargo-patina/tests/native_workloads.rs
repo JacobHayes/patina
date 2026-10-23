@@ -18,6 +18,9 @@ mod fs_faults;
 #[cfg(target_os = "linux")]
 #[path = "native_workloads/path_races.rs"]
 mod path_races;
+#[cfg(target_os = "linux")]
+#[path = "native_workloads/two_copy.rs"]
+mod two_copy;
 
 /// One build of the watchdog guest covers the class: call-free code with a
 /// runnable peer is a named terminal limit, recorded with an eligible prefix

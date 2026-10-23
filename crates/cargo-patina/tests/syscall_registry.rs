@@ -425,3 +425,171 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
         );
     }
 }
+
+/// The seal's gate over the engine and the façade `cargo patina build`
+/// links: the shim archive seals, and each plant is refused, naming it: an
+/// engine export that is neither a registry row nor the runtime ABI, a raw
+/// system call in the engine's text, and a C seam exporting a name that is
+/// neither.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let seams = dir.path().join("seams");
+    std::fs::create_dir_all(&seams).unwrap();
+    let posix = compile_posix_object(&seams);
+    let archive = shim_archive();
+    cargo_patina::seal_shim(&archive, &posix, &dir.path().join("pristine"))
+        .unwrap_or_else(|error| panic!("the shim archive does not seal: {error}"));
+    let trap = if cfg!(target_arch = "x86_64") {
+        "syscall"
+    } else {
+        "svc #0"
+    };
+    for (plant, source, in_seams) in [
+        (
+            "planted_unlisted_export",
+            "int planted_unlisted_export(void) { return 1; }\n".to_owned(),
+            false,
+        ),
+        (
+            "patina_planted_raw_syscall",
+            format!("void patina_planted_raw_syscall(void) {{ __asm__ volatile(\"{trap}\"); }}\n"),
+            false,
+        ),
+        (
+            "planted_unlisted_seam",
+            "int planted_unlisted_seam(void) { return 1; }\n".to_owned(),
+            true,
+        ),
+    ] {
+        let work = dir.path().join(plant);
+        std::fs::create_dir_all(&work).unwrap();
+        // A workspace crate's member name, so the gate holds it to the inventory.
+        let object = compile_plant(&work, "patina_dst_planted", &source);
+        let refused = if in_seams {
+            let planted = work.join("patina_posix.o");
+            run_tool(
+                std::process::Command::new("ld")
+                    .arg("-r")
+                    .arg(&posix)
+                    .arg(&object)
+                    .arg("-o")
+                    .arg(&planted),
+            );
+            cargo_patina::seal_shim(&archive, &planted, &work.join("sealed"))
+        } else {
+            cargo_patina::seal_shim(
+                &plant_member(&archive, &work, &object),
+                &posix,
+                &work.join("sealed"),
+            )
+        }
+        .expect_err("the seal accepted a plant");
+        assert!(refused.to_string().contains(plant), "{refused}");
+    }
+}
+
+/// A COMDAT group the engine localised is the engine's alone: a guest
+/// defining a group of the same name links beside it, and each side calls
+/// its own definition.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engine_comdat_group_survives_a_guests_group_of_the_same_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let posix = compile_posix_object(dir.path());
+    let archive = shim_archive();
+    let returns = |value: u32| {
+        let body = if cfg!(target_arch = "x86_64") {
+            format!("movl ${value}, %eax\\n ret")
+        } else {
+            format!("mov w0, #{value}\\n ret")
+        };
+        format!(
+            "__asm__(\".section .text.planted_comdat,\\\"axG\\\",%progbits,planted_comdat,comdat\\n\"\n\
+             \".globl planted_comdat\\n.type planted_comdat, %function\\nplanted_comdat:\\n {body}\\n.text\");\n\
+             int planted_comdat(void);\n"
+        )
+    };
+    // A dependency's member: its globals are localised unseen.
+    let dependency = compile_plant(
+        dir.path(),
+        "planted_dependency",
+        &format!(
+            "{}int patina_planted_comdat_user(void) {{ return planted_comdat(); }}\n",
+            returns(1)
+        ),
+    );
+    let planted = plant_member(&archive, dir.path(), &dependency);
+    let sealed = cargo_patina::seal_shim(&planted, &posix, &dir.path().join("sealed"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let guest = dir.path().join("guest.c");
+    std::fs::write(
+        &guest,
+        format!(
+            "{}int patina_planted_comdat_user(void);\n\
+             int main(void) {{ return planted_comdat() * 10 + patina_planted_comdat_user(); }}\n",
+            returns(2)
+        ),
+    )
+    .unwrap();
+    // The guest's group first, as the guest's objects precede the shim's.
+    run_tool(
+        common::c_compiler()
+            .arg(&guest)
+            .args(sealed)
+            .args(common::shim_linker_args(&planted, dir.path()))
+            .arg("-o")
+            .arg(dir.path().join("guest")),
+    );
+}
+
+/// Compile the C `source` to `<dir>/<member>.o`.
+#[cfg(target_os = "linux")]
+fn compile_plant(dir: &std::path::Path, member: &str, source: &str) -> std::path::PathBuf {
+    let c = dir.join(format!("{member}.c"));
+    std::fs::write(&c, source).unwrap();
+    let object = dir.join(format!("{member}.o"));
+    run_tool(
+        common::c_compiler()
+            .arg("-c")
+            .arg(&c)
+            .arg("-o")
+            .arg(&object),
+    );
+    object
+}
+
+/// A copy of `archive` in `dir` with `object` added as a member.
+#[cfg(target_os = "linux")]
+fn plant_member(
+    archive: &std::path::Path,
+    dir: &std::path::Path,
+    object: &std::path::Path,
+) -> std::path::PathBuf {
+    let planted = dir.join("libpatina_dst_native_shim.a");
+    std::fs::copy(archive, &planted).unwrap();
+    // Cargo writes its artifacts read-only; `ar` rewrites the copy.
+    std::fs::set_permissions(
+        &planted,
+        std::os::unix::fs::PermissionsExt::from_mode(0o644),
+    )
+    .unwrap();
+    run_tool(
+        std::process::Command::new("ar")
+            .arg("rs")
+            .arg(&planted)
+            .arg(object),
+    );
+    planted
+}
+
+#[cfg(target_os = "linux")]
+fn run_tool(command: &mut std::process::Command) {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{command:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

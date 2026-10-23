@@ -419,35 +419,36 @@ fn build_native_guest(mut cc: Command, name: &str, link: CLink, flags: &[&str]) 
     };
     let stage = |cc: &mut Command| {
         static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
-        static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
         match link {
             CLink::Unlinked => {}
             CLink::Shim => {
                 static PREFIXED: OnceLock<PathBuf> = OnceLock::new();
                 cc.arg(PREFIXED.get_or_init(super::prefixed_shim_archive));
             }
-            CLink::PosixShim | CLink::PosixShimWithoutSud | CLink::PosixShimPlanted => {
+            CLink::PosixShimPlanted => {
+                // The planted reentry is a raw system call in the engine,
+                // which the seal refuses by design: linked unsealed.
                 static PLANTED: OnceLock<PathBuf> = OnceLock::new();
+                static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+                let archive = PLANTED.get_or_init(|| super::shim_archive_with(&["planted-faults"]));
                 let (_, object) = POSIX.get_or_init(|| {
                     let dir = tempfile::tempdir().unwrap();
-                    let obj = super::compile_posix_object(dir.path());
-                    (dir, obj)
+                    let object = super::compile_posix_object(dir.path());
+                    (dir, object)
                 });
-                let archive = if matches!(link, CLink::PosixShimPlanted) {
-                    PLANTED.get_or_init(|| super::shim_archive_with(&["planted-faults"]))
-                } else {
-                    ARCHIVE.get_or_init(super::shim_archive)
+                cc.arg(object)
+                    .arg(archive)
+                    .args(super::shim_linker_args(archive, dir.path()));
+            }
+            CLink::PosixShim | CLink::PosixShimWithoutSud => {
+                // Sealed as `cargo patina build` seals: the façade and the
+                // engine in place of the POSIX object and the archive.
+                let archive = ARCHIVE.get_or_init(super::shim_archive);
+                let seams: &[&str] = match link {
+                    CLink::PosixShimWithoutSud => &["-DPATINA_TEST_NO_SUD"],
+                    _ => &[],
                 };
-                if matches!(link, CLink::PosixShimWithoutSud) {
-                    super::compile_posix_object(dir.path());
-                    cc.arg(super::compile_staged_posix_object(
-                        dir.path(),
-                        &["-DPATINA_TEST_NO_SUD"],
-                    ));
-                } else {
-                    cc.arg(object);
-                }
-                cc.arg(archive)
+                cc.args(super::sealed_shim(variant, archive, seams))
                     .args(super::shim_linker_args(archive, dir.path()));
             }
         }

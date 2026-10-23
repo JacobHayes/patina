@@ -98,9 +98,11 @@ pub fn workspace_manifest() -> PathBuf {
 
 /// The linker arguments a guest linked by hand needs beside the shim archive
 /// `archive`, as `cargo patina build` passes them: on Linux the `dlsym` wrap
-/// behind the host-alias table and the allocator routing that keeps the
+/// behind the host-alias table, the allocator routing that keeps the
 /// runtime's allocations off the guest's heap, whose object is compiled into
-/// `dir`.
+/// `dir`, and libc again: the shim's objects follow the driver's own `-lc`,
+/// and `atexit` is in `libc_nonshared.a`, which GNU ld scans once (LLVM's
+/// linker, rustc's default on x86_64, remembers it).
 pub fn shim_linker_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsString> {
     if !cfg!(target_os = "linux") {
         return Vec::new();
@@ -110,6 +112,7 @@ pub fn shim_linker_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsString> {
         cargo_patina::shim_allocator_linker_args(archive, dir)
             .unwrap_or_else(|error| panic!("{error}")),
     );
+    args.push("-lc".into());
     args
 }
 
@@ -123,6 +126,29 @@ pub fn shim_rustc_link_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsStrin
             value
         })
         .collect()
+}
+
+/// The façade and engine `cargo patina build` seals from `archive`, with the
+/// POSIX object compiled under `flags`, for a guest linked by hand: sealed
+/// once per nextest run for each `variant`. Darwin seals nothing yet: the
+/// POSIX object and the archive.
+pub fn sealed_shim(variant: &str, archive: &Path, flags: &[&str]) -> Vec<PathBuf> {
+    let name = format!("sealed-{variant}");
+    once_per_run(&name, || {
+        let dir = guest_target_dir(&name);
+        let seams = dir.join("seams");
+        std::fs::create_dir_all(&seams).unwrap();
+        let mut posix = compile_posix_object(&seams);
+        if !flags.is_empty() {
+            posix = compile_staged_posix_object(&seams, flags);
+        }
+        if !cfg!(target_os = "linux") {
+            return vec![posix, archive.to_path_buf()];
+        }
+        cargo_patina::seal_shim(archive, &posix, &dir)
+            .unwrap_or_else(|error| panic!("{error}"))
+            .to_vec()
+    })
 }
 
 /// Build (idempotently) and locate `libpatina_dst_native_shim.a`.
