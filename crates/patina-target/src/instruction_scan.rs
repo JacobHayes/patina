@@ -29,6 +29,39 @@ use std::collections::BTreeSet;
 /// note says plainly what is not guaranteed across hosts.
 pub const HOST_IDENTITY_CATEGORY: &str = "host-identity";
 
+/// The category of a *Go build marker*: one of Go's
+/// `crypto/internal/boring/sig` functions (`StandardCrypto`, `BoringCrypto`,
+/// `FIPSOnly`), each a `jmp` over 29 fixed bytes of data that
+/// `rsc.io/goversion` searches for, then the `ret` it lands on. Every Go
+/// binary that links `crypto/sha1` or `crypto/tls` carries `StandardCrypto`.
+///
+/// Its data is not code: decoded as instructions it reads as `lret` (a far
+/// transfer, refused) or an undecodable byte. The scan matches a marker by
+/// every one of its 32 bytes and steps over the data as its `jmp` does,
+/// reporting the site instead of a refusal. Informational, like
+/// [`HOST_IDENTITY_CATEGORY`]: the audit keeps it out of the denied set and
+/// the report prints it under its own heading
+/// ([`crate::render_go_build_marker_note`]).
+pub const GO_BUILD_MARKER_CATEGORY: &str = "go-build-marker";
+
+/// Whether a native finding is a Go build marker ([`GO_BUILD_MARKER_CATEGORY`])
+/// — informational, never part of the refusal set.
+pub fn native_escape_is_go_build_marker(escape: &NativeEscape) -> bool {
+    escape.category == GO_BUILD_MARKER_CATEGORY
+}
+
+/// The Go build-marker sites in a native binary, with provenance; see
+/// [`native_host_identity_sites`], whose contract this shares.
+pub fn native_go_build_marker_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    NativeFormat::from_binary(file.format())?;
+    let provenance = NativeProvenanceIndex::new(&file);
+    Ok(scan_instruction_classes(&file, &provenance)?
+        .into_iter()
+        .filter(native_escape_is_go_build_marker)
+        .collect())
+}
+
 /// Whether a native finding is a host-identity read ([`HOST_IDENTITY_CATEGORY`])
 /// — informational, never part of the refusal set.
 pub fn native_escape_is_host_identity(escape: &NativeEscape) -> bool {

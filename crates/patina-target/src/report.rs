@@ -56,6 +56,39 @@ pub fn render_host_identity_note(sites: &[NativeEscape]) -> Option<String> {
     Some(note)
 }
 
+/// Render the "Go build markers" heading for the sites
+/// [`native_go_build_marker_sites`] found, or `None` when there are none.
+///
+/// [`native_go_build_marker_sites`]: crate::native_go_build_marker_sites
+pub fn render_go_build_marker_note(sites: &[NativeEscape]) -> Option<String> {
+    if sites.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "Go build markers ({} site{}): data, not code. Each is one of Go's \
+         crypto/internal/boring/sig functions, a jmp over 29 fixed bytes that tools read to tell \
+         which crypto a binary was built with, then a ret. The scan matched each by every byte and \
+         stepped over its data as the jmp does, so the far-transfer and undecodable readings of \
+         those bytes are not refusals.",
+        sites.len(),
+        if sites.len() == 1 { "" } else { "s" }
+    );
+    for site in sites {
+        note.push_str(&format!(
+            "\n  {} ({})",
+            site.symbol,
+            site.mnemonic.unwrap_or(site.category)
+        ));
+        for provenance in &site.provenance {
+            note.push_str(&format!("\n    {}", provenance.label()));
+            if let Some(label) = provenance.site_label() {
+                note.push_str(&format!(" [{label}]"));
+            }
+        }
+    }
+    Some(note)
+}
+
 /// Render the "inert weak imports" heading for an audit's
 /// [`NativeAudit::inert_weak_imports`], or `None` when there are none.
 ///

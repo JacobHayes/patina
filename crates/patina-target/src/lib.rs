@@ -144,16 +144,17 @@ use import_xrefs::collect_import_xref_provenance;
 #[cfg(test)]
 use instruction_scan::scan_instruction_classes;
 pub use instruction_scan::{
-    FAR_TRANSFER_CATEGORY, HOST_IDENTITY_CATEGORY, THREAD_POINTER_CATEGORY,
-    native_escape_is_host_identity, native_host_identity_sites,
+    FAR_TRANSFER_CATEGORY, GO_BUILD_MARKER_CATEGORY, HOST_IDENTITY_CATEGORY,
+    THREAD_POINTER_CATEGORY, native_escape_is_go_build_marker, native_escape_is_host_identity,
+    native_go_build_marker_sites, native_host_identity_sites,
 };
 pub use native_audit::NativeAudit;
 pub use provenance::NativeProvenance;
 use provenance::NativeProvenanceIndex;
 pub use report::{
-    render_compat_mode_note, render_cpu_nondeterminism_note, render_host_identity_note,
-    render_inert_weak_imports, render_native_escapes_grouped, render_thread_pointer_note,
-    render_tsc_managed_note,
+    render_compat_mode_note, render_cpu_nondeterminism_note, render_go_build_marker_note,
+    render_host_identity_note, render_inert_weak_imports, render_native_escapes_grouped,
+    render_thread_pointer_note, render_tsc_managed_note,
 };
 pub use shim::{
     NATIVE_LINUX_LIVE_INTERPOSERS, NativeDenyTrap, NativeDenyTrapSymbol,

@@ -1,5 +1,6 @@
 //! Boundary-aware x86-64 instruction decoding and forbidden-opcode scanning tests.
 
+use super::super::{FAR_TRANSFER_CATEGORY, GO_BUILD_MARKER_CATEGORY};
 use super::*;
 /// Decode one instruction, panicking if the decoder fails closed. Returns
 /// `(length, forbidden_category)`, dropping the mnemonic (the mnemonic is
@@ -734,4 +735,50 @@ fn x86_decoder_matches_objdump_external_corpus() {
         first,
         last
     );
+}
+
+/// A Go build marker is reported as one informational finding and its data
+/// is never decoded, so the far-transfer and undecodable readings of it do not
+/// appear; decoding resumes at the `ret` its `jmp` lands on, so a real `lret`
+/// right after it is still refused. A marker short of one byte is decoded as
+/// code like any other bytes.
+#[test]
+fn go_build_markers_are_reported_and_their_data_is_stepped_over() {
+    for (name, body) in GO_BUILD_MARKERS {
+        let mut marker = GO_BUILD_MARKER_HEAD.to_vec();
+        marker.extend(body);
+        marker.push(0xc3);
+        let mut data = marker.clone();
+        data.push(0xcb);
+        let mut escapes = Vec::new();
+        scan_test(&data, &mut escapes);
+        let found: Vec<_> = escapes
+            .iter()
+            .map(|e| (e.symbol.as_str(), e.category, e.mnemonic))
+            .collect();
+        let lret_at = format!("instruction@.text+0x{:x}", marker.len());
+        assert_eq!(
+            found,
+            [
+                (
+                    "instruction@.text+0x0",
+                    GO_BUILD_MARKER_CATEGORY,
+                    Some(name)
+                ),
+                (lret_at.as_str(), FAR_TRANSFER_CATEGORY, Some("lret")),
+            ],
+            "{name}"
+        );
+
+        let mut altered = marker;
+        altered[GO_BUILD_MARKER_HEAD.len() + 3] ^= 1;
+        let mut escapes = Vec::new();
+        scan_test(&altered, &mut escapes);
+        assert!(
+            escapes
+                .iter()
+                .all(|e| e.category != GO_BUILD_MARKER_CATEGORY),
+            "{name}: an altered marker is not a marker"
+        );
+    }
 }

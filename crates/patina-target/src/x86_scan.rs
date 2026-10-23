@@ -68,10 +68,61 @@ enum Step {
     Undecodable,
 }
 
+/// The head every Go build-marker function starts with
+/// (`crypto/internal/boring/sig`, `sig_amd64.s`): a two-byte `jmp` over the
+/// next 29 bytes, then the first five of them, an indicator sequence
+/// `rsc.io/goversion` searches for.
+const GO_BUILD_MARKER_HEAD: [u8; 7] = [0xEB, 0x1D, 0xF4, 0x48, 0xF4, 0x4B, 0xF4];
+
+/// Each Go build marker's remaining 24 data bytes, by function. The `ret`
+/// the `jmp` lands on follows them.
+const GO_BUILD_MARKERS: [(&str, [u8; 24]); 3] = [
+    (
+        "BoringCrypto",
+        [
+            0xB3, 0x32, 0xF5, 0x28, 0x13, 0xA3, 0xB4, 0x50, 0xD4, 0x41, 0xCC, 0x24, 0x85, 0xF0,
+            0x01, 0x45, 0x4E, 0x92, 0x10, 0x1B, 0x1D, 0x2F, 0x19, 0x50,
+        ],
+    ),
+    (
+        "StandardCrypto",
+        [
+            0xBA, 0xEE, 0x4D, 0xFA, 0x98, 0x51, 0xCA, 0x56, 0xA9, 0x11, 0x45, 0xE8, 0x3E, 0x99,
+            0xC5, 0x9C, 0xF9, 0x11, 0xCB, 0x8E, 0x80, 0xDA, 0xF1, 0x2F,
+        ],
+    ),
+    (
+        "FIPSOnly",
+        [
+            0x36, 0x3C, 0xB9, 0xCE, 0x9D, 0x68, 0x04, 0x7D, 0x31, 0xF2, 0x8D, 0x32, 0x5D, 0x5C,
+            0xA5, 0x87, 0x3F, 0x5D, 0x80, 0xCA, 0xF6, 0xD6, 0x15, 0x1B,
+        ],
+    ),
+];
+
+/// The bytes a Go build marker's `jmp` skips: never executed, so never
+/// decoded as instructions.
+const GO_BUILD_MARKER_DATA: usize = 29;
+
+/// The Go build marker `b` starts with, exactly: its head, its data and the
+/// `ret` its `jmp` lands on. Anything short of every byte is not one.
+fn go_build_marker(b: &[u8]) -> Option<&'static str> {
+    let data = b.strip_prefix(&GO_BUILD_MARKER_HEAD)?;
+    GO_BUILD_MARKERS
+        .iter()
+        .find(|(_, body)| {
+            data.strip_prefix(body)
+                .is_some_and(|rest| rest.first() == Some(&0xC3))
+        })
+        .map(|(name, _)| *name)
+}
+
 /// Walk one declared code range in `data` (or the whole section when no
 /// metadata exists), pushing a finding at each classified boundary and one
 /// `undecodable-instruction` finding (then stopping) if the decoder cannot
-/// measure an instruction.
+/// measure an instruction. A Go build marker at a boundary is reported as an
+/// informational finding and its data bytes are stepped over, as its `jmp`
+/// steps over them.
 pub(super) fn scan(
     data: &[u8],
     range: std::ops::Range<usize>,
@@ -82,6 +133,18 @@ pub(super) fn scan(
 ) {
     let mut offset = range.start;
     while offset < range.end {
+        if let Some(marker) = go_build_marker(&data[offset..range.end]) {
+            escapes.push(
+                super::NativeEscape::new(
+                    format!("instruction@{name}+0x{offset:x}"),
+                    super::GO_BUILD_MARKER_CATEGORY,
+                    vec![provenance.for_address(section_address + offset as u64, Some(name))],
+                )
+                .with_mnemonic(marker),
+            );
+            offset += 2 + GO_BUILD_MARKER_DATA;
+            continue;
+        }
         match decode_one(&data[offset..range.end]) {
             Step::Insn { len, cat } => {
                 if let Some((category, mnemonic)) = cat {

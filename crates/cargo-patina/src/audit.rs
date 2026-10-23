@@ -6,9 +6,9 @@ use crate::{ArtifactRef, CliError, NativeAuditInvocation, output};
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, native_binary_has_sud_marker,
     native_binary_has_tsc_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
-    native_escape_is_tsc_manageable, native_host_identity_sites, render_compat_mode_note,
-    render_host_identity_note, render_inert_weak_imports, render_native_escapes_grouped,
-    render_thread_pointer_note,
+    native_escape_is_tsc_manageable, native_go_build_marker_sites, native_host_identity_sites,
+    render_compat_mode_note, render_go_build_marker_note, render_host_identity_note,
+    render_inert_weak_imports, render_native_escapes_grouped, render_thread_pointer_note,
 };
 use std::fs;
 use std::path::Path;
@@ -86,6 +86,13 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     // message an operator sees.
     let host_identity =
         native_host_identity_sites(&bytes).map_err(|error| CliError(error.to_string()))?;
+    // Go build markers are informational too, and on stderr in both output
+    // modes; printed once here, they precede every outcome's report.
+    let go_markers =
+        native_go_build_marker_sites(&bytes).map_err(|error| CliError(error.to_string()))?;
+    if let Some(note) = render_go_build_marker_note(&go_markers) {
+        eprintln!("{note}");
+    }
     let audit = match NativeAudit::audit(&bytes, &effective) {
         Ok(audit) => audit,
         Err(TargetError::UnsupportedNativeImports(denied)) => {

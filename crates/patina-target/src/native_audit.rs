@@ -6,7 +6,9 @@ use crate::import_policy::{
     elf_shim_dlsym_vehicle, elf_wrapped_resolver, native_import_decision, normalize_native_symbol,
 };
 use crate::import_xrefs::collect_import_provenance;
-use crate::instruction_scan::{native_escape_is_host_identity, scan_instruction_ranges};
+use crate::instruction_scan::{
+    native_escape_is_go_build_marker, native_escape_is_host_identity, scan_instruction_ranges,
+};
 use crate::provenance::{NativeProvenance, NativeProvenanceIndex};
 use crate::shim::native_binary_is_shim_linked;
 use crate::{NativeEscape, TargetError, code_ranges};
@@ -69,15 +71,19 @@ impl NativeAudit {
                     .unwrap_or_else(|| vec![NativeProvenance::unknown()]),
             ));
         }
-        // Host-identity reads are informational, so they are dropped here rather
-        // than joining the refusal set (`render_host_identity_note` over
-        // `native_host_identity_sites` is what reports them, on every outcome).
+        // Host-identity reads and Go build markers are informational, so they
+        // are dropped here rather than joining the refusal set
+        // (`render_host_identity_note` over `native_host_identity_sites`, and
+        // its Go-marker twin, are what report them, on every outcome).
         // The scan still classifies them in one place; only the disposition
         // differs.
         denied.extend(
             scan_instruction_ranges(&file, &provenance, &code_ranges)?
                 .into_iter()
-                .filter(|escape| !native_escape_is_host_identity(escape)),
+                .filter(|escape| {
+                    !native_escape_is_host_identity(escape)
+                        && !native_escape_is_go_build_marker(escape)
+                }),
         );
         denied.extend(early_init_escapes(&file, &provenance));
         // A versioned reference pins a glibc symbol version that the shim's own
