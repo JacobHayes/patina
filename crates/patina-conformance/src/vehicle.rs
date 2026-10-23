@@ -907,6 +907,10 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_getegid => getegid() as i64,
             Syscall::N_setuid => setuid(a[0] as uid_t) as i64,
             Syscall::N_setgid => setgid(a[0] as gid_t) as i64,
+            Syscall::N_setreuid => setreuid(a[0] as uid_t, a[1] as uid_t) as i64,
+            Syscall::N_setregid => setregid(a[0] as gid_t, a[1] as gid_t) as i64,
+            Syscall::N_setresuid => setresuid(a[0] as uid_t, a[1] as uid_t, a[2] as uid_t) as i64,
+            Syscall::N_setresgid => setresgid(a[0] as gid_t, a[1] as gid_t, a[2] as gid_t) as i64,
             Syscall::N_setgroups => setgroups(a[0] as size_t, a[1] as *const gid_t) as i64,
             Syscall::N_setsid => setsid() as i64,
             Syscall::N_setpgid => setpgid(a[0] as pid_t, a[1] as pid_t) as i64,
@@ -954,10 +958,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_getcpu
             | Syscall::N_getresuid
             | Syscall::N_getresgid
-            | Syscall::N_setreuid
-            | Syscall::N_setregid
-            | Syscall::N_setresuid
-            | Syscall::N_setresgid
             | Syscall::N_setfsuid
             | Syscall::N_setfsgid
             | Syscall::N_getgroups

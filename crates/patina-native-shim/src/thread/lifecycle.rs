@@ -434,6 +434,25 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     }
 }
 
+/// Whether `attr` (NULL for the defaults) creates its thread detached.
+///
+/// # Safety
+/// `attr` must be NULL or point at initialized `pthread_attr_t`.
+unsafe fn creates_detached(attr: *const c_void) -> bool {
+    if attr.is_null() {
+        return false;
+    }
+    let mut detach_state: c_int = 0;
+    // SAFETY: the real host accessor over the caller's initialized attributes.
+    let rc = unsafe {
+        (crate::hostapi::get().host_pthread_attr_getdetachstate)(attr, &mut detach_state)
+    };
+    if rc != 0 {
+        fatal("host pthread_attr_getdetachstate failed");
+    }
+    detach_state == libc::PTHREAD_CREATE_DETACHED
+}
+
 #[unsafe(no_mangle)]
 /// Create a managed thread. `pthread_create` semantics: register a task,
 /// spawn a real host thread that parks until it receives the baton, and hand
@@ -455,6 +474,8 @@ pub unsafe extern "C" fn patina_thread_create(
     if thread_out.is_null() {
         return EINVAL;
     }
+    // SAFETY: `attr` is NULL or the caller's initialized attributes.
+    let created_detached = unsafe { creates_detached(attr) };
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
         return c_int::from(error.into_posix());
@@ -464,6 +485,10 @@ pub unsafe extern "C" fn patina_thread_create(
         Err(message) => fatal(&message),
     };
     state.table.register(task);
+    // The host thread starts detached too, so nothing ever joins it.
+    if created_detached && state.table.detach(task).is_err() {
+        fatal("a new thread could not be recorded detached");
+    }
     #[cfg(target_os = "linux")]
     state.signals.spawn(task, Some(current_task()));
     #[cfg(target_os = "linux")]

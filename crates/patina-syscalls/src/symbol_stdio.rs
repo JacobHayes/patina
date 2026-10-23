@@ -31,6 +31,18 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
+        "__vfprintf_chk",
+        Platform::Linux,
+        Serves::Syscalls(&["write"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "__fprintf_chk",
+        Platform::Linux,
+        Serves::Syscalls(&["write"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "printf",
         Platform::Both,
         Serves::Syscalls(&["write"]),

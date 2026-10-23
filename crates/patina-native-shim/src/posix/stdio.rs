@@ -583,6 +583,53 @@ fn formatter() -> Formatter {
         }
     })
 }
+/// glibc's fortified `__vsnprintf_chk(s, maxlen, flag, slen, format, ap)`.
+#[cfg(target_os = "linux")]
+type CheckedFormatter =
+    unsafe extern "C" fn(*mut c_char, usize, c_int, usize, *const c_char, VaList<'_>) -> c_int;
+#[cfg(target_os = "linux")]
+fn checked_formatter() -> CheckedFormatter {
+    static HOST: OnceLock<CheckedFormatter> = OnceLock::new();
+    *HOST.get_or_init(|| {
+        // SAFETY: the private resolver returns glibc's `__vsnprintf_chk`
+        // entry, whose ABI is exactly `CheckedFormatter`.
+        unsafe {
+            core::mem::transmute::<*mut c_void, CheckedFormatter>(crate::host::hostapi::resolve(
+                c"__vsnprintf_chk",
+            ))
+        }
+    })
+}
+/// How a stdio door formats: plainly, or under a fortified entry's check
+/// level (`_FORTIFY_SOURCE`'s `flag`), which glibc's checked formatter
+/// enforces exactly as its own `__fprintf_chk` does.
+#[derive(Clone, Copy)]
+enum Fortify {
+    Off,
+    #[cfg(target_os = "linux")]
+    Level(c_int),
+}
+/// Format into `length` bytes at `buffer` the way `fortify` asks.
+///
+/// # Safety
+/// `buffer` is writable for `length` bytes; format and arguments obey
+/// vsnprintf's contract.
+unsafe fn format_into(
+    fortify: Fortify,
+    buffer: *mut c_char,
+    length: usize,
+    format: *const c_char,
+    args: VaList<'_>,
+) -> c_int {
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        match fortify {
+            Fortify::Off => formatter()(buffer, length, format, args),
+            #[cfg(target_os = "linux")]
+            Fortify::Level(flag) => checked_formatter()(buffer, length, flag, length, format, args),
+        }
+    }
+}
 #[cfg(target_os = "macos")]
 pub(crate) unsafe fn format_buffer(
     buffer: *mut c_char,
@@ -612,26 +659,51 @@ pub(crate) unsafe fn format_to(
     };
     // SAFETY: the caller forwards printf-compatible arguments and explicit
     // streams are reduced to the two sentinel states.
-    unsafe { vprintf(s, format, args) }
+    unsafe { vprintf(s, Fortify::Off, format, args) }
 }
-unsafe fn vprintf(stream: StreamId, format: *const c_char, args: VaList<'_>) -> c_int {
+/// `__fprintf_chk`'s engine: [`format_to`] on an explicit stream under
+/// glibc's fortify `flag`.
+///
+/// # Safety
+/// Format/arguments obey printf's ABI; the stream must be a sentinel.
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn format_to_checked(
+    stream: *mut libc::FILE,
+    flag: c_int,
+    format: *const c_char,
+    args: VaList<'_>,
+) -> c_int {
+    let s = stream_of(stream, c"__fprintf_chk");
+    // SAFETY: forwarded from this function's contract.
+    unsafe { vprintf(s, Fortify::Level(flag), format, args) }
+}
+unsafe fn vprintf(
+    stream: StreamId,
+    fortify: Fortify,
+    format: *const c_char,
+    args: VaList<'_>,
+) -> c_int {
     // SAFETY: `format` and `args` satisfy printf's ABI contract; formatter output
     // is stored in live stack/heap memory before the locked stream write.
     unsafe {
         let saved = super::get_errno();
-        let formatter = formatter();
+        let _ = formatter();
+        #[cfg(target_os = "linux")]
+        if let Fortify::Level(_) = fortify {
+            let _ = checked_formatter();
+        }
         crate::abi::restore_host_errno(saved);
         let second = args.clone();
         let mut stack = [0 as c_char; 512];
         let mut message = stack.as_mut_ptr();
-        let mut needed = formatter(message, stack.len(), format, args);
+        let mut needed = format_into(fortify, message, stack.len(), format, args);
         if needed >= stack.len() as c_int {
             message = libc::malloc(needed as usize + 1).cast();
             if message.is_null() {
                 super::errno(libc::ENOMEM);
                 return -1;
             }
-            needed = formatter(message, needed as usize + 1, format, second);
+            needed = format_into(fortify, message, needed as usize + 1, format, second);
         }
         if needed > 0 {
             let held = lock(stream);
@@ -656,7 +728,25 @@ unsafe extern "C" fn vfprintf(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the C caller supplies the format and va_list under vfprintf's ABI.
-    unsafe { vprintf(stream_of(stream, c"vfprintf"), format, args) }
+    unsafe { vprintf(stream_of(stream, c"vfprintf"), Fortify::Off, format, args) }
+}
+/// glibc's fortified `vfprintf` (`_FORTIFY_SOURCE` lowers `vfprintf` onto it):
+/// the same stream door, formatting under the caller's check level.
+///
+/// # Safety
+/// Stream, format and arguments obey vfprintf's contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __vfprintf_chk(
+    stream: *mut libc::FILE,
+    flag: c_int,
+    format: *const c_char,
+    args: VaList<'_>,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let s = stream_of(stream, c"__vfprintf_chk");
+    // SAFETY: the C caller supplies the format and va_list under vfprintf's ABI.
+    unsafe { vprintf(s, Fortify::Level(flag), format, args) }
 }
 /// # Safety
 /// String is readable and NUL-terminated; stream obeys fputs's contract.

@@ -21,6 +21,23 @@ unsafe extern "C" fn fprintf(stream: *mut libc::FILE, format: *const c_char, arg
     unsafe { format_to(stream, format, args, 0) }
 }
 
+/// glibc's fortified `fprintf` (`_FORTIFY_SOURCE` lowers `fprintf` onto it):
+/// the same stream door, formatting under the caller's check level.
+/// # Safety
+/// Stream, format and arguments obey fprintf's contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __fprintf_chk(
+    stream: *mut libc::FILE,
+    flag: c_int,
+    format: *const c_char,
+    args: ...
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the engine validates the sentinel before formatting.
+    unsafe { crate::posix::stdio::format_to_checked(stream, flag, format, args) }
+}
+
 /// Internal assertion formatter using the same modeled stream door.
 /// # Safety
 /// Stream, format and arguments obey fprintf's contract.

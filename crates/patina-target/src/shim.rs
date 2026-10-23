@@ -150,7 +150,8 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// The enumerated deny-trap-armed symbols the native shim strong-defines: the
 /// process-spawn/identity family (`posix/signal_process.rs` `process_trap`),
 /// `dlopen`/`dlclose` (loading host code is never modeled, yet extension
-/// loaders such as `libloading` link them), the macOS CoreFoundation/Security
+/// loaders such as `libloading` link them), glibc's group-database lookups
+/// (Go's `os/user` links them), the macOS CoreFoundation/Security
 /// framework helpers left unreachable by the honest empty-trust-store /
 /// UTC-timezone models, the IOKit registry walk left unreachable by
 /// `IOServiceMatching` returning NULL, and Darwin's `fsctl`, which SQLite's
@@ -197,6 +198,11 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     // never these interposable names.
     ("dlclose", "dynamic-loading"),
     ("dlopen", "dynamic-loading"),
+    // host-introspection: glibc's group database, which NSS reads from the
+    // host and the virtual machine does not model.
+    ("getgrgid_r", "host-introspection"),
+    ("getgrnam_r", "host-introspection"),
+    ("getgrouplist", "host-introspection"),
     // host-introspection: IOKit registry walk, unreachable while
     // IOServiceMatching returns NULL.
     ("IOIteratorNext", "host-introspection"),

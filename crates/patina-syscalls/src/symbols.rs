@@ -35,6 +35,8 @@ mod ipc;
 
 #[path = "symbol_darwin.rs"]
 mod darwin;
+#[path = "symbol_identity.rs"]
+mod identity;
 
 pub const SYMBOLS: &[SymbolRow] = join_rows!(
     ROWS,
@@ -42,7 +44,8 @@ pub const SYMBOLS: &[SymbolRow] = join_rows!(
     stdio::ROWS,
     memory::ROWS,
     ipc::ROWS,
-    darwin::ROWS
+    darwin::ROWS,
+    identity::ROWS
 );
 #[doc(hidden)]
 pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] = join_rows!(
@@ -51,7 +54,8 @@ pub const ALL_SYMBOLS_WITH_ARCH: &[(SymbolRow, Option<&str>)] = join_rows!(
     stdio::METADATA,
     memory::METADATA,
     ipc::METADATA,
-    darwin::METADATA
+    darwin::METADATA,
+    identity::METADATA
 );
 
 symbol_rows! {
@@ -110,30 +114,6 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
-        "getuid",
-        Platform::Both,
-        Serves::Syscalls(&["getuid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "geteuid",
-        Platform::Both,
-        Serves::Syscalls(&["geteuid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "getgid",
-        Platform::Both,
-        Serves::Syscalls(&["getgid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "getegid",
-        Platform::Both,
-        Serves::Syscalls(&["getegid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
         "uname",
         Platform::Both,
         Serves::Syscalls(&["uname"]),
@@ -141,12 +121,6 @@ symbol_rows! {
     ),
     s(
         "gethostname",
-        Platform::Both,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "getpwuid_r",
         Platform::Both,
         Serves::LibcOnly,
         SymbolStatus::Modeled,
@@ -1032,27 +1006,9 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
-        "setuid",
-        Platform::Both,
-        Serves::Syscalls(&["setuid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setgid",
-        Platform::Both,
-        Serves::Syscalls(&["setgid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
         "setpgid",
         Platform::Both,
         Serves::Syscalls(&["setpgid"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setgroups",
-        Platform::Both,
-        Serves::Syscalls(&["setgroups"]),
         SymbolStatus::Modeled,
     ),
     s(
@@ -1969,24 +1925,6 @@ symbol_rows! {
         Platform::Both,
         Serves::LibcOnly,
         SymbolStatus::Deny("dynamic-loading"),
-    ),
-    s(
-        "getpwent",
-        Platform::Linux,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "setpwent",
-        Platform::Linux,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "endpwent",
-        Platform::Linux,
-        Serves::LibcOnly,
-        SymbolStatus::Modeled,
     ),
     s(
         "fgetxattr",

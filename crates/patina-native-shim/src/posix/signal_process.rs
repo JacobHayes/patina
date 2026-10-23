@@ -147,6 +147,76 @@ extern "C" fn setuid(uid: libc::uid_t) -> c_int {
     }
 }
 
+/// glibc's `seteuid`/`setegid`: `setresuid(-1, id, -1)` (and its group
+/// twin), refusing `-1` as no id; `setreuid`/`setregid` and
+/// `setresuid`/`setresgid` are the calls themselves. Each forwards to the
+/// credential model's row, which grants only ids the caller holds.
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_seteuid")]
+extern "C" fn seteuid(uid: libc::uid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if uid == libc::uid_t::MAX {
+        return super::error(libc::EINVAL);
+    }
+    let unchanged = libc::uid_t::MAX.word();
+    // SAFETY: setresuid forwards three scalar identifiers and no pointers.
+    unsafe { crate::sud::forward(libc::SYS_setresuid, &[unchanged, uid.word(), unchanged]) }
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_setegid")]
+extern "C" fn setegid(gid: libc::gid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if gid == libc::gid_t::MAX {
+        return super::error(libc::EINVAL);
+    }
+    let unchanged = libc::gid_t::MAX.word();
+    // SAFETY: setresgid forwards three scalar identifiers and no pointers.
+    unsafe { crate::sud::forward(libc::SYS_setresgid, &[unchanged, gid.word(), unchanged]) }
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_setreuid")]
+extern "C" fn setreuid(real: libc::uid_t, effective: libc::uid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: setreuid forwards two scalar identifiers and no pointers.
+    unsafe { crate::sud::forward(libc::SYS_setreuid, &[real.word(), effective.word()]) }
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_setregid")]
+extern "C" fn setregid(real: libc::gid_t, effective: libc::gid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: setregid forwards two scalar identifiers and no pointers.
+    unsafe { crate::sud::forward(libc::SYS_setregid, &[real.word(), effective.word()]) }
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_setresuid")]
+extern "C" fn setresuid(real: libc::uid_t, effective: libc::uid_t, saved: libc::uid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: setresuid forwards three scalar identifiers and no pointers.
+    unsafe {
+        crate::sud::forward(
+            libc::SYS_setresuid,
+            &[real.word(), effective.word(), saved.word()],
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "patina_door_setresgid")]
+extern "C" fn setresgid(real: libc::gid_t, effective: libc::gid_t, saved: libc::gid_t) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: setresgid forwards three scalar identifiers and no pointers.
+    unsafe {
+        crate::sud::forward(
+            libc::SYS_setresgid,
+            &[real.word(), effective.word(), saved.word()],
+        )
+    }
+}
+
 #[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_setpgid"))]
 #[cfg_attr(not(target_os = "linux"), unsafe(no_mangle))]
 extern "C" fn setpgid(pid: libc::pid_t, pgid: libc::pid_t) -> c_int {

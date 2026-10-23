@@ -11,6 +11,8 @@
 //!   the caller's buffer (the reentrant contract); a buffer too small for
 //!   the entry is ERANGE with no result, and a uid no entry has answers 0
 //!   with no result; errno is the answer, 0 on both (`getXXbyYY_r` sets it);
+//! * `getpwnam_r("root")` finds the same entry, and a name no entry has
+//!   answers 0 with no result;
 //! * `setpwent`/`getpwent`/`endpwent` enumerate the database from root (its
 //!   first entry) past at least one more entry (a fact of the host's
 //!   database, which any passwd a model serves must match), end with NULL,
@@ -105,6 +107,32 @@ fn by_uid(p: &Probe, uid: uid_t, buflen: usize) -> (i64, Value, Option<bool>, i3
     (r, found, owned, errno)
 }
 
+/// `getpwnam_r(name)` into a 1024-byte buffer: its returned error number in
+/// the kernel convention and the entry found.
+fn by_name(p: &Probe, name: &CStr) -> (i64, Value) {
+    // SAFETY: all-zero is a valid out-parameter.
+    let mut pw: passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as c_char; 1024];
+    let mut result: *mut passwd = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated name, live out-parameters and a 1024-byte buffer.
+    let r = -i64::from(unsafe {
+        getpwnam_r(
+            name.as_ptr(),
+            &mut pw,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    });
+    let found = entry(result);
+    p.rec
+        .event("getpwnam_r", r)
+        .arg("name", name.to_string_lossy())
+        .field("entry", found.clone())
+        .emit();
+    (r, found)
+}
+
 /// Root's entry as Ubuntu 24.04's passwd has it.
 fn is_root(found: &Value) -> bool {
     found["name"] == "root"
@@ -142,6 +170,13 @@ pub fn run(p: &Probe) {
         "errno is the answer, 0, found or not",
         found_errno == 0 && missing_errno == 0,
     );
+    let (r, root) = by_name(p, c"root");
+    p.check("the name root is root", r == 0 && is_root(&root));
+    let (r, none) = by_name(p, c"no-such-user");
+    p.check(
+        "a name no entry has answers 0 and no entry",
+        r == 0 && none.is_null(),
+    );
 
     // SAFETY: the enumeration, one thread.
     let (first, rest, after_end, rewound) = unsafe {
@@ -177,6 +212,7 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "__res_init",
         "getpwuid_r",
+        "getpwnam_r",
         "setpwent",
         "getpwent",
         "endpwent",

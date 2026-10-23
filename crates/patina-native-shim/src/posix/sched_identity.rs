@@ -477,6 +477,48 @@ unsafe extern "C" fn getpwuid_r(
     result: *mut *mut libc::passwd,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from this function's contract.
+    unsafe { passwd_lookup(pwd, buf, buflen, result, |entry| entry.pw_uid == uid) }
+}
+
+/// # Safety
+/// name is a NUL-terminated string; pwd, buf and result follow libc's passwd
+/// lookup buffer contract; result is nonnull.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn getpwnam_r(
+    name: *const c_char,
+    pwd: *mut libc::passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::passwd,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller supplies a NUL-terminated name.
+    let name = unsafe { core::ffi::CStr::from_ptr(name) };
+    // SAFETY: forwarded from this function's contract; each parsed entry's
+    // name points at a NUL-terminated field in `buf`.
+    unsafe {
+        passwd_lookup(pwd, buf, buflen, result, |entry| {
+            core::ffi::CStr::from_ptr(entry.pw_name) == name
+        })
+    }
+}
+
+/// Walk the passwd database for the first entry `wanted` accepts, the
+/// `getpwXXX_r` contract: 0 with `*result` set on a match, 0 with a NULL
+/// `*result` when none matches, or the error (ERANGE for a short buffer),
+/// which is also errno.
+///
+/// # Safety
+/// pwd, buf and result follow libc's passwd lookup buffer contract; result is nonnull.
+unsafe fn passwd_lookup(
+    pwd: *mut libc::passwd,
+    buf: *mut c_char,
+    buflen: usize,
+    result: *mut *mut libc::passwd,
+    wanted: impl Fn(&libc::passwd) -> bool,
+) -> c_int {
     // SAFETY: the caller contract requires a nonnull writable result pointer.
     unsafe {
         result.write(ptr::null_mut());
@@ -500,7 +542,7 @@ unsafe extern "C" fn getpwuid_r(
             return error;
         }
         // SAFETY: successful parsing above initialized the caller-provided passwd struct.
-        if unsafe { (*pwd).pw_uid } == uid {
+        if wanted(unsafe { &*pwd }) {
             // SAFETY: result was required writable by the caller contract.
             unsafe {
                 result.write(pwd);

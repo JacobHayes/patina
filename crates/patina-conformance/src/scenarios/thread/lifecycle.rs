@@ -1,7 +1,8 @@
 //! thread/lifecycle — glibc's thread lifecycle (nptl): `pthread_create`
 //! runs the start routine on a new thread and `pthread_join` hands back
 //! its return value; a detached
-//! thread is not joinable and cannot be detached again (`EINVAL`, both
+//! thread, whether detached by `pthread_detach` or created detached by its
+//! attributes, is not joinable and cannot be detached again (`EINVAL`, both
 //! checked while it still runs, the only time its handle is valid);
 //! `pthread_once` runs its routine exactly once, and a thread calling it
 //! while another runs the routine waits until the routine returns; `pthread_getname_np` reads the thread's kernel name (`comm`, which a
@@ -73,6 +74,26 @@ fn create(p: &Probe, start: Start, arg: usize) -> (i64, pthread_t) {
     // SAFETY: `start` is a valid start routine and `thread` is writable.
     let error = unsafe { pthread_create(&mut thread, null(), start, arg as *mut c_void) };
     (recorded(p, "pthread_create", error), thread)
+}
+
+/// Create a thread whose attributes make it detached from the start.
+fn create_detached(p: &Probe, start: Start) -> (i64, pthread_t) {
+    let mut thread: pthread_t = 0;
+    // SAFETY: `attr` is initialized before use and destroyed after; `start`
+    // is a valid start routine and `thread` is writable.
+    let error = unsafe {
+        let mut attr: pthread_attr_t = std::mem::zeroed();
+        pthread_attr_init(&mut attr);
+        pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_DETACHED);
+        let error = pthread_create(&mut thread, &attr, start, null_mut());
+        pthread_attr_destroy(&mut attr);
+        error
+    };
+    p.rec
+        .event("pthread_create", code(error))
+        .arg("attr", "detached")
+        .emit();
+    (code(error), thread)
 }
 
 /// Join `thread`, recording the result and the value it answered.
@@ -459,6 +480,28 @@ pub fn run(p: &Probe) {
     p.rec
         .quiet(|| support::wait_until(Duration::from_millis(1), || DONE.load(Ordering::SeqCst)));
     p.require("the detached worker finished", DONE.load(Ordering::SeqCst));
+
+    reset();
+    let (created, worker) = create_detached(p, held);
+    p.require("pthread_create of a detached thread", created == 0);
+    wait_started(p);
+    let (joined, _) = join(p, worker, "created detached");
+    p.check(
+        "a thread created detached is not joinable",
+        joined == neg(EINVAL),
+    );
+    p.check(
+        "a thread created detached cannot be detached",
+        // SAFETY: the worker is still held.
+        recorded(p, "pthread_detach", unsafe { pthread_detach(worker) }) == neg(EINVAL),
+    );
+    RELEASED.store(true, Ordering::SeqCst);
+    p.rec
+        .quiet(|| support::wait_until(Duration::from_millis(1), || DONE.load(Ordering::SeqCst)));
+    p.require(
+        "the worker created detached finished",
+        DONE.load(Ordering::SeqCst),
+    );
 
     p.check("pthread_once", once(p) == 0);
     p.check("pthread_once again", once(p) == 0);

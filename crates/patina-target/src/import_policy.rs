@@ -310,6 +310,10 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         // the size the caller passed and the bound the compiler knew.
         "strlcat_chk",
         "strlcpy_chk",
+        // `strerror` formats the same message as `strerror_r` (glibc's
+        // `__strerror_l`, untranslated in the C locale a guest never leaves),
+        // into a per-thread buffer for an unknown number.
+        "strerror",
         "strerror_r",
         "strlen",
         "strncasecmp",
@@ -384,7 +388,11 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "pthread_attr_destroy",
         "pthread_attr_getguardsize",
         "pthread_attr_getstack",
+        "pthread_attr_getstacksize",
         "pthread_attr_init",
+        // Records the detach state in the caller's attributes; the shim's
+        // `pthread_create` reads it back and creates the thread detached.
+        "pthread_attr_setdetachstate",
         "pthread_attr_setstacksize",
         "pthread_cleanup_pop",
         "pthread_cleanup_push",
@@ -557,7 +565,8 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
     // `memcpy`/`strtol` intrinsics above (aws-lc and DataFusion reach them). An
     // EXPLICIT list, never a prefix: the effectful stdio `*printf`/`*scanf`
     // variants that touch a real stream stay refused. The `_chk` forms
-    // (`vsnprintf_chk`/`snprintf_chk`) are the fortified bounds-checked entries
+    // (`vsnprintf_chk`/`snprintf_chk`/`sprintf_chk`, the last formatting into
+    // a buffer the compiler knows the size of) are the fortified bounds-checked entries
     // libc lowers a constant-sized buffer onto — the same "add bounds checks
     // before doing the same work" family as the already-listed `memcpy_chk`; the
     // shim's own C layer formats through them in its interposed `fprintf`/
@@ -565,6 +574,7 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
     const FORMAT_PARSE_SEARCH: &[&str] = &[
         "bsearch",
         "snprintf_chk",
+        "sprintf_chk",
         "sscanf",
         "vsnprintf",
         "vsnprintf_chk",

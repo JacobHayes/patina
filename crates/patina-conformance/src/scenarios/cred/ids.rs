@@ -8,6 +8,9 @@
 //!   ids succeed, and either id another is `EPERM`;
 //! * `setresuid`/`setresgid` likewise (-1 is "unchanged" in any position),
 //!   and a refusal leaves all three ids as they were;
+//! * `seteuid`/`setegid` (glibc: `setresuid`/`setresgid` with only the
+//!   effective id) to the own id succeed, to another are `EPERM`, and to -1
+//!   `EINVAL`;
 //! * `setfsuid`/`setfsgid` never fail loudly: each answers the previous
 //!   filesystem id — to the own id, to another (refused, unchanged), and to
 //!   -1 (a pure query).
@@ -19,6 +22,7 @@
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Id;
 use crate::probe::{Cred, Probe, neg};
+use crate::vehicle::fold_errno;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -107,6 +111,16 @@ pub fn run(p: &Probe) {
         );
     }
 
+    for (set, own) in [
+        (seteuid as unsafe extern "C" fn(u32) -> c_int, uid),
+        (setegid as unsafe extern "C" fn(u32) -> c_int, gid),
+    ] {
+        let call = |id: u32| fold_errno(i64::from(unsafe { set(id) }));
+        p.check("the own effective id succeeds", call(own) == 0);
+        p.check("another effective id is EPERM", call(own + 1) == neg(EPERM));
+        p.check("-1 is EINVAL", call(u32::MAX) == neg(EINVAL));
+    }
+
     for (row, own, kind) in [
         (Syscall::N_setfsuid, uid, Id::User),
         (Syscall::N_setfsgid, gid, Id::Group),
@@ -146,7 +160,19 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setfsgid,
     ],
     symbols: &[
-        "getuid", "getgid", "geteuid", "getegid", "setuid", "setgid", "syscall",
+        "getuid",
+        "getgid",
+        "geteuid",
+        "getegid",
+        "setuid",
+        "setgid",
+        "setreuid",
+        "setregid",
+        "setresuid",
+        "setresgid",
+        "seteuid",
+        "setegid",
+        "syscall",
     ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS

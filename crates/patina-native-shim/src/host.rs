@@ -129,6 +129,10 @@ pub(crate) mod hostapi {
         pub host_pthread_join: PthreadJoin,
         pub host_abort: unsafe extern "C" fn() -> !,
         pub host_pthread_detach: unsafe extern "C" fn(*mut c_void) -> c_int,
+        /// The real `pthread_attr_getdetachstate`: `pthread_create` reads
+        /// whether its attributes create the thread detached.
+        pub host_pthread_attr_getdetachstate:
+            unsafe extern "C" fn(*const c_void, *mut c_int) -> c_int,
         pub pthread_mach_thread_np: PthreadMachThread,
         pub thread_resume: ThreadResume,
         /// The non-cancel-point host `read`/`write` for the trace control plane
@@ -260,6 +264,12 @@ pub(crate) mod hostapi {
                     *mut c_void,
                     unsafe extern "C" fn(*mut c_void) -> c_int,
                 >(resolve(c"pthread_detach")),
+                host_pthread_attr_getdetachstate: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*const c_void, *mut c_int) -> c_int,
+                >(resolve(
+                    c"pthread_attr_getdetachstate",
+                )),
                 host_pthread_join: std::mem::transmute::<*mut c_void, PthreadJoin>(resolve(
                     c"pthread_join",
                 )),
@@ -467,6 +477,10 @@ pub(crate) mod hostapi {
         /// threads deterministically at the managed-join point.
         pub host_pthread_join: HostPthreadJoin,
         pub host_pthread_detach: unsafe extern "C" fn(*mut c_void) -> c_int,
+        /// The real `pthread_attr_getdetachstate`: `pthread_create` reads
+        /// whether its attributes create the thread detached.
+        pub host_pthread_attr_getdetachstate:
+            unsafe extern "C" fn(*const c_void, *mut c_int) -> c_int,
         /// The real glibc `pthread_exit`: the C `pthread_exit` interposer calls
         /// it (never Rust, whose frames cannot be unwound) once the model has
         /// the thread's value, so glibc's own forced unwind runs the cleanup
@@ -565,6 +579,12 @@ pub(crate) mod hostapi {
                     *mut c_void,
                     unsafe extern "C" fn(*mut c_void) -> c_int,
                 >(resolve(c"pthread_detach")),
+                host_pthread_attr_getdetachstate: std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*const c_void, *mut c_int) -> c_int,
+                >(resolve(
+                    c"pthread_attr_getdetachstate",
+                )),
                 host_pthread_join: std::mem::transmute::<*mut c_void, HostPthreadJoin>(resolve(
                     c"pthread_join",
                 )),
