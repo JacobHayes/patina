@@ -53,6 +53,7 @@ mod output;
 mod parse;
 mod render;
 mod rollup;
+mod run_cache;
 mod sdk_report;
 mod seal;
 mod shim_build;

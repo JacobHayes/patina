@@ -392,7 +392,7 @@ fn the_trace_names_its_build_and_refuses_any_other(
     );
     assert_eq!(
         native["supervisor_sha256"].as_str(),
-        Some(file_digest(Path::new(env!("CARGO_BIN_EXE_cargo-patina"))).as_str()),
+        Some(supervisor_identity().as_str()),
         "the trace must name the cargo-patina that recorded it"
     );
 

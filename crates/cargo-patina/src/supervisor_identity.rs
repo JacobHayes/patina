@@ -5,15 +5,19 @@
 //! inherited descriptors and filesystem image, and decides which host traps it
 //! arms. The package version cannot name that build, because it stays the same
 //! across every development build of one release, so the supervisor is named by
-//! the SHA-256 of its own executable. A byte-identical rebuild keeps the digest;
-//! any other change gives a new one, including ones that cannot change a run
-//! (help text, debug info). That conservative choice costs a re-record, while
-//! one that accepted a stale supervisor would let a replay pass that no longer
-//! means anything.
+//! the build ID its linker derived from the linked bytes (an ELF
+//! `NT_GNU_BUILD_ID` note or a Mach-O `LC_UUID`), carried as the SHA-256 of
+//! that ID. Reading the ID costs a header parse where hashing the executable
+//! costs tens of milliseconds per run for a debug build. A byte-identical
+//! rebuild keeps the ID; any other change gives a new one, including ones that
+//! cannot change a run (help text, debug info). That conservative choice costs
+//! a re-record, while one that accepted a stale supervisor would let a replay
+//! pass that no longer means anything. An executable linked without a build ID
+//! is named by the SHA-256 of its bytes instead.
 
 use std::fs;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -21,6 +25,7 @@ use patina_dst_trace::Sha256Digest;
 use sha2::{Digest, Sha256};
 
 use crate::CliError;
+use crate::run_cache::Image;
 
 /// The environment variable a `cargo-patina` sets on the `cargo-patina`
 /// children it runs (campaign generations, their verification replays, a
@@ -40,13 +45,13 @@ static DIGEST: OnceLock<Result<Sha256Digest, String>> = OnceLock::new();
 /// `cargo-patina` build. Called first thing in the entry point, before any
 /// build or launch.
 ///
-/// The digest is computed later, the first time it is needed, but from the
+/// The identity is read later, the first time it is needed, but from the
 /// descriptor opened here, so a verb that never records pays nothing for it.
 /// That descriptor pins the file this process started from: replacing the
 /// executable by a rename, which is how cargo installs a rebuild, leaves it
 /// naming the original. An in-place rewrite of the same file would still show
-/// through it. A child told its parent's digest hashes at once, because it has
-/// to refuse before it runs anything.
+/// through it. A child told its parent's identity reads its own at once,
+/// because it has to refuse before it runs anything.
 pub(crate) fn establish() -> Result<(), CliError> {
     executable()
         .as_ref()
@@ -65,13 +70,50 @@ pub(crate) fn establish() -> Result<(), CliError> {
     Ok(())
 }
 
-/// The SHA-256 of the running `cargo-patina` executable, hashed once, from the
-/// descriptor [`establish`] opened.
+/// The identity of the running `cargo-patina` executable, read from the
+/// descriptor [`establish`] opened: the SHA-256 of its build ID, or of its
+/// bytes when it carries none.
 pub(crate) fn supervisor_sha256() -> Result<Sha256Digest, CliError> {
     DIGEST
         .get_or_init(|| {
+            let image = image()?;
+            let digest = match build_id_bytes(image) {
+                Some(id) => Sha256::new()
+                    .chain_update(b"cargo-patina build id\0")
+                    .chain_update(&id)
+                    .finalize(),
+                None => Sha256::digest(image.bytes()),
+            };
+            Ok(Sha256Digest(digest.into()))
+        })
+        .clone()
+        .map_err(CliError)
+}
+
+/// The build ID the linker gave the running `cargo-patina` (an ELF
+/// `NT_GNU_BUILD_ID` note or a Mach-O `LC_UUID`), in hex: it names the
+/// supervisor's run cache. `None` when it carries none.
+pub(crate) fn build_id() -> Option<String> {
+    build_id_bytes(image().ok()?).map(|id| crate::hex(&id))
+}
+
+fn build_id_bytes(image: &Image) -> Option<Vec<u8>> {
+    let file = object::File::parse(image.bytes()).ok()?;
+    let id = match object::Object::build_id(&file) {
+        Ok(Some(id)) => id.to_vec(),
+        _ => object::Object::mach_uuid(&file).ok()??.to_vec(),
+    };
+    (!id.is_empty()).then_some(id)
+}
+
+/// The running executable's bytes, mapped once from the descriptor
+/// [`establish`] opened.
+fn image() -> Result<&'static Image, String> {
+    static IMAGE: OnceLock<Result<Image, String>> = OnceLock::new();
+    IMAGE
+        .get_or_init(|| {
             let (path, file) = executable().as_ref().map_err(Clone::clone)?;
-            stream_sha256(file).map_err(|error| {
+            Image::map(file).map_err(|error| {
                 format!(
                     "failed to read the running cargo-patina executable {} to compute its build \
                      identity: {error}",
@@ -79,8 +121,8 @@ pub(crate) fn supervisor_sha256() -> Result<Sha256Digest, CliError> {
                 )
             })
         })
-        .clone()
-        .map_err(CliError)
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn executable() -> &'static Result<(PathBuf, fs::File), String> {
@@ -123,22 +165,4 @@ fn running_executable() -> io::Result<PathBuf> {
 #[cfg(not(target_os = "linux"))]
 fn running_executable() -> io::Result<PathBuf> {
     std::env::current_exe()
-}
-
-/// Stream `path` through SHA-256 in a bounded window, so hashing a large
-/// executable adds no memory pressure of its own.
-pub(crate) fn file_sha256(path: &Path) -> io::Result<Sha256Digest> {
-    stream_sha256(&fs::File::open(path)?)
-}
-
-fn stream_sha256(mut file: &fs::File) -> io::Result<Sha256Digest> {
-    let mut hasher = Sha256::new();
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut chunk)?;
-        if read == 0 {
-            return Ok(Sha256Digest(hasher.finalize().into()));
-        }
-        hasher.update(&chunk[..read]);
-    }
 }

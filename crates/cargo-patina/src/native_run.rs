@@ -12,6 +12,7 @@ use crate::native_build::{
 };
 use crate::output;
 use crate::parse::{knob_env_pairs, knob_env_vars, liveness_env_pairs, schedule_env_pairs};
+use crate::run_cache::Image;
 use crate::{
     CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
 };
@@ -92,6 +93,16 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             resolved.path.display()
         ))
     })?;
+    // The executable's bytes, mapped once: the build identity and the pre-run
+    // gate both judge exactly these.
+    let image = fs::File::open(&binary)
+        .and_then(|file| Image::map(&file))
+        .map_err(|error| {
+            CliError(format!(
+                "failed to read native program {}: {error}",
+                binary.display()
+            ))
+        })?;
 
     // A replay reads its trace once: the build identity, the guest arguments,
     // the fingerprint components and the crash-restart plan all come from this
@@ -106,7 +117,10 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // A replay restores the recorded environment; a new run of a Go guest
     // gets the settings its runtime needs under Patina.
     if replay_trace.is_none() {
-        crate::go_build::apply_go_guest_defaults(&binary, &mut invocation.environment)?;
+        let metered = image.remember("go-meter", || {
+            Ok::<_, CliError>(crate::go_build::carries_meter(image.bytes()))
+        })?;
+        crate::go_build::apply_go_guest_defaults(metered, &mut invocation.environment);
     }
 
     // The build identity a recording stores and a replay must match. A replay
@@ -116,7 +130,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let identity = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
         NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
-            Some(native_identity(&binary)?)
+            Some(native_identity(&image)?)
         }
     };
     if let (NativeRunMode::Replay { path, .. }, Some(bundle), Some(identity)) =
@@ -161,19 +175,19 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // a host thread outside the scheduler. `--allow-unsupported-symbols`
     // downgrades matching denials to a loud warning for programs that carry
     // unsupported surface the scenario never reaches.
-    let downgraded =
-        match native_prerun_gate(&binary, &invocation.allow, &invocation.allow_unsupported) {
-            Ok(downgraded) => downgraded,
-            Err(error) if output::facts_active() => {
-                output::emit_native_refusal(
-                    &binary,
-                    output::NATIVE_PRERUN_REFUSAL,
-                    error.to_string(),
-                );
-                return Ok(2);
-            }
-            Err(error) => return Err(error),
-        };
+    let downgraded = match native_prerun_gate(
+        &binary,
+        &image,
+        &invocation.allow,
+        &invocation.allow_unsupported,
+    ) {
+        Ok(downgraded) => downgraded,
+        Err(error) if output::facts_active() => {
+            output::emit_native_refusal(&binary, output::NATIVE_PRERUN_REFUSAL, error.to_string());
+            return Ok(2);
+        }
+        Err(error) => return Err(error),
+    };
     if invocation.allow_randomized_layout {
         eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
     }
@@ -183,7 +197,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // Detect the linked hook's marker and fold it into the compatibility
     // fingerprint; the same binary is inspected on record and replay, so the
     // suffix is applied consistently and a policy mismatch is rejected.
-    let instrumentation = binary_instrumentation(&binary)?;
+    let instrumentation = image.remember("instrumentation", || {
+        binary_instrumentation(image.bytes(), &binary)
+    })?;
     if invocation.coverage_out.is_some() && !instrumentation.has_coverage() {
         return Err(CliError::usage(
             "--coverage-out requires a native binary built with `cargo patina build --yield-points` or `--coverage-points`; coverage rides the SanitizerCoverage edge counters",

@@ -59,7 +59,15 @@ pub(super) fn initialize_edge_coverage(
     // build modes emit. `--coverage-points` emits them without the per-block
     // scheduler hook, so a guided campaign no longer has to pay --yield-points'
     // preemption cost just to see coverage.
-    let instrumentation = crate::binary_instrumentation(&artifact_path)?;
+    let image = fs::File::open(&artifact_path)
+        .and_then(|file| crate::run_cache::Image::map(&file))
+        .map_err(|error| {
+            CliError(format!(
+                "failed to read {} to detect its instrumentation: {error}",
+                artifact_path.display()
+            ))
+        })?;
+    let instrumentation = crate::binary_instrumentation(image.bytes(), &artifact_path)?;
     if !instrumentation.has_coverage() {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",

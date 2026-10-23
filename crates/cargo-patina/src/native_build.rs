@@ -61,7 +61,7 @@ const PATINA_COV_FINGERPRINT_SUFFIX: &str = "+covpoints";
 /// recoverable from the built binary's own bytes ([`binary_instrumentation`]), so
 /// `run`/`replay` never need the flag re-passed and a cross-mode replay fails
 /// closed on the fingerprint.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum GuestInstrumentation {
     /// A plain build: no SanitizerCoverage, no edge counters, and preemption only
     /// at the boundaries Patina interposes.
@@ -912,40 +912,38 @@ pub(super) fn native_package_link_args(
     args
 }
 
-/// Pre-run default-deny gate for `native-run`. Audits the guest binary against
-/// the baked shim control-plane vehicle plus any operator `--allow`, then
-/// applies the `--allow-unsupported-symbols` policy. Returns the symbols that
-/// were downgraded to warnings (empty when the binary audits clean), or a hard
-/// error listing the symbols that remain unsupported.
-/// Which instrumentation `binary` was built with, recovered from the linked
-/// hook's embedded marker.
+/// Which instrumentation the program whose bytes are `image` was built with,
+/// recovered from the linked hook's embedded marker; `binary` names it in an
+/// error.
 ///
 /// This classification is load-bearing: it selects the compatibility-fingerprint
 /// suffix, so a false negative silently records under — or cross-replays against
 /// — the wrong schedule policy. The `--coverage-points` marker therefore carries
 /// its sampling STRIDE as well as its mode, because the stride is part of that
 /// policy: the run side reads it out of the bytes it is about to execute rather
-/// than trusting a flag to be re-passed.
-///
-/// A read failure is NOT treated as "not instrumented". That fail-open is what,
-/// under memory pressure, let an ENOMEM whole-file read misclassify an
-/// instrumented binary as plain and bypass the fingerprint gate; the error
-/// propagates instead. The scan streams the image in a bounded window rather than
-/// allocating the whole (large, instrumented) binary, so the detection itself
-/// never adds the memory pressure it must survive.
-pub(super) fn binary_instrumentation(binary: &Path) -> Result<GuestInstrumentation, CliError> {
+/// than trusting a flag to be re-passed. Those bytes are the run's mapping of the
+/// executable, so a read failure stops the run before this is asked, and never
+/// reads as "not instrumented".
+pub(super) fn binary_instrumentation(
+    image: &[u8],
+    binary: &Path,
+) -> Result<GuestInstrumentation, CliError> {
     // The yield-point marker wins wherever it sits: the two hook objects are
     // mutually exclusive at link, so at most one can be present, and a binary
     // carrying both bytes could only be a doctored artifact — classify it under
     // the DENSER policy rather than the cheaper one.
-    let tail = match scan_instrumentation_markers(binary)? {
-        MarkerScan::YieldPoints => return Ok(GuestInstrumentation::YieldPoints),
-        MarkerScan::CoveragePoints(tail) => tail,
-        MarkerScan::None => return Ok(GuestInstrumentation::None),
+    if memchr::memmem::find(image, PATINA_YIELD_MARKER).is_some() {
+        return Ok(GuestInstrumentation::YieldPoints);
+    }
+    // The first coverage-points marker names the stride.
+    let Some(at) = memchr::memmem::find(image, PATINA_COV_MARKER_PREFIX) else {
+        return Ok(GuestInstrumentation::None);
     };
+    let tail = &image[at + PATINA_COV_MARKER_PREFIX.len()..];
     let digits: Vec<u8> = tail
         .iter()
         .copied()
+        .take(PATINA_COV_MARKER_TRAILING)
         .take_while(|byte| *byte != b';')
         .collect();
     let stride = std::str::from_utf8(&digits)
@@ -964,82 +962,6 @@ pub(super) fn binary_instrumentation(binary: &Path) -> Result<GuestInstrumentati
 /// The decimal digits (a `u32`: at most 10) plus the `;` terminator that follow
 /// the coverage-points marker prefix.
 const PATINA_COV_MARKER_TRAILING: usize = 11;
-
-/// What [`scan_instrumentation_markers`] found in a binary's bytes.
-enum MarkerScan {
-    /// The yield-point marker, anywhere in the image.
-    YieldPoints,
-    /// No yield-point marker; the bytes following the FIRST coverage-points
-    /// prefix (up to [`PATINA_COV_MARKER_TRAILING`]; fewer when the image ends).
-    CoveragePoints(Vec<u8>),
-    /// Neither marker.
-    None,
-}
-
-/// Stream `binary` once for both instrumentation markers.
-///
-/// The image streams through a bounded window rather than being allocated whole,
-/// so the detection itself never adds the memory pressure it must survive. A
-/// marker straddling a chunk boundary is caught by carrying the trailing overlap,
-/// sized to hold the longer marker AND the bytes wanted after it. Both markers
-/// are found with `memmem` in the same pass: a plain binary, which carries
-/// neither, is read and searched once, not once per marker byte by byte.
-fn scan_instrumentation_markers(binary: &Path) -> Result<MarkerScan, CliError> {
-    use std::io::Read;
-
-    let mut file = fs::File::open(binary).map_err(|error| {
-        CliError(format!(
-            "failed to open {} to detect yield-point instrumentation: {error}",
-            binary.display()
-        ))
-    })?;
-    let yield_marker = memchr::memmem::Finder::new(PATINA_YIELD_MARKER);
-    let cov_marker = memchr::memmem::Finder::new(PATINA_COV_MARKER_PREFIX);
-    let overlap = PATINA_YIELD_MARKER
-        .len()
-        .max(PATINA_COV_MARKER_PREFIX.len() + PATINA_COV_MARKER_TRAILING)
-        - 1;
-    let mut window: Vec<u8> = Vec::with_capacity(overlap + 64 * 1024);
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut cov_tail = None;
-    loop {
-        let read = file.read(&mut chunk).map_err(|error| {
-            CliError(format!(
-                "failed to read {} to detect yield-point instrumentation: {error}",
-                binary.display()
-            ))
-        })?;
-        if read == 0 {
-            // End of file: the retained window may still hold a coverage prefix
-            // whose trailing bytes are simply short (a marker at the very end).
-            if cov_tail.is_none() {
-                cov_tail = cov_marker
-                    .find(&window)
-                    .map(|at| window[at + PATINA_COV_MARKER_PREFIX.len()..].to_vec());
-            }
-            return Ok(cov_tail.map_or(MarkerScan::None, MarkerScan::CoveragePoints));
-        }
-        window.extend_from_slice(&chunk[..read]);
-        if yield_marker.find(&window).is_some() {
-            return Ok(MarkerScan::YieldPoints);
-        }
-        if cov_tail.is_none()
-            && let Some(at) = cov_marker.find(&window)
-        {
-            let from = at + PATINA_COV_MARKER_PREFIX.len();
-            // Without all its trailing bytes yet, the match lies within the
-            // retained overlap and is found again once they are read.
-            if window.len() - from >= PATINA_COV_MARKER_TRAILING {
-                cov_tail = Some(window[from..from + PATINA_COV_MARKER_TRAILING].to_vec());
-            }
-        }
-        // Retain only the trailing `overlap` bytes so a marker split across the
-        // next chunk boundary is still found without unbounded growth.
-        if window.len() > overlap {
-            window.drain(..window.len() - overlap);
-        }
-    }
-}
 
 /// Append the instrumentation policy suffix to a base fingerprint, leaving a
 /// plain binary's fingerprint untouched (the suffix is empty). A `--yield-points`
@@ -1164,7 +1086,6 @@ mod tests {
     use crate::native_run::target_has_sud;
     use crate::parse::parse_native_build;
     use crate::tests::{native_build_invocation, strings};
-    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -1360,98 +1281,51 @@ mod tests {
     }
 
     // The instrumentation classification is load-bearing for the compatibility
-    // fingerprint, so its detector must (a) find the marker even when it straddles
-    // the streaming chunk boundary, (b) report a clean absence as `None`, (c) FAIL
-    // CLOSED on an unreadable image rather than silently reporting "not
-    // instrumented" — the fail-open that let a memory-pressure read failure
-    // misclassify an instrumented binary as plain and bypass the fingerprint gate
-    // — and (d) recover the coverage-point stride from the binary's own bytes,
-    // since no flag re-states it at run time.
+    // fingerprint, so its detector must report a clean absence as `None`, find
+    // either marker anywhere in the image, and recover the coverage-point stride
+    // from the binary's own bytes, since no flag re-states it at run time.
     #[test]
-    fn yield_point_detection_streams_and_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Absent marker -> not instrumented.
-        let plain = dir.path().join("plain.bin");
-        fs::write(&plain, vec![0u8; 200_000]).unwrap();
+    fn instrumentation_is_read_from_the_image_bytes() {
+        let classify = |image: &[u8]| binary_instrumentation(image, Path::new("guest")).ok();
         assert_eq!(
-            binary_instrumentation(&plain).ok(),
+            classify(&vec![0u8; 200_000]),
             Some(GuestInstrumentation::None)
         );
 
-        // Marker present, and deliberately positioned to straddle the 64 KiB
-        // streaming boundary so the trailing-overlap carry is exercised.
-        let boundary = 64 * 1024 - (PATINA_YIELD_MARKER.len() / 2);
         let mut image = vec![0u8; 200_000];
-        image[boundary..boundary + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
-        let instrumented = dir.path().join("instrumented.bin");
-        fs::write(&instrumented, &image).unwrap();
-        assert_eq!(
-            binary_instrumentation(&instrumented).ok(),
-            Some(GuestInstrumentation::YieldPoints)
-        );
+        let at = 64 * 1024 - (PATINA_YIELD_MARKER.len() / 2);
+        image[at..at + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
+        assert_eq!(classify(&image), Some(GuestInstrumentation::YieldPoints));
 
-        // The coverage-point marker carries its stride, and it too must survive a
-        // chunk boundary landing in the middle of the DIGITS (the part read after
-        // the marker), not only in the middle of the prefix.
-        for stride in [0u32, 7, 4_294_967_295] {
-            let marker = format!(
-                "{}{stride};",
-                std::str::from_utf8(PATINA_COV_MARKER_PREFIX).unwrap()
-            );
-            let marker = marker.as_bytes();
-            for offset in [0usize, 3, 8] {
-                let at = 64 * 1024 - PATINA_COV_MARKER_PREFIX.len() + offset;
-                let mut image = vec![0u8; 200_000];
-                image[at..at + marker.len()].copy_from_slice(marker);
-                let path = dir.path().join(format!("cov-{stride}-{offset}.bin"));
-                fs::write(&path, &image).unwrap();
-                assert_eq!(
-                    binary_instrumentation(&path).ok(),
-                    Some(GuestInstrumentation::CoveragePoints { stride }),
-                    "stride {stride} at chunk offset {offset}"
-                );
-            }
-        }
-
-        // Both markers are found in one pass, so neither may shadow the other's
-        // rule: a yield-point marker wins even when a coverage prefix precedes it
-        // (and even across a chunk boundary), and among coverage prefixes the
-        // FIRST names the stride.
         let cov = |stride: u32| {
             format!(
                 "{}{stride};",
                 std::str::from_utf8(PATINA_COV_MARKER_PREFIX).unwrap()
             )
         };
+        for stride in [0u32, 7, 4_294_967_295] {
+            let mut image = vec![0u8; 200_000];
+            image[1000..1000 + cov(stride).len()].copy_from_slice(cov(stride).as_bytes());
+            assert_eq!(
+                classify(&image),
+                Some(GuestInstrumentation::CoveragePoints { stride }),
+                "stride {stride}"
+            );
+        }
+
+        // A yield-point marker wins even when a coverage prefix precedes it, and
+        // among coverage prefixes the FIRST names the stride.
         let mut image = vec![0u8; 200_000];
         image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
         let late = 150_000;
         image[late..late + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
-        let yield_after_cov = dir.path().join("yield-after-cov.bin");
-        fs::write(&yield_after_cov, &image).unwrap();
-        assert_eq!(
-            binary_instrumentation(&yield_after_cov).ok(),
-            Some(GuestInstrumentation::YieldPoints)
-        );
+        assert_eq!(classify(&image), Some(GuestInstrumentation::YieldPoints));
         let mut image = vec![0u8; 200_000];
         image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
         image[late..late + cov(4).len()].copy_from_slice(cov(4).as_bytes());
-        let two_strides = dir.path().join("two-strides.bin");
-        fs::write(&two_strides, &image).unwrap();
         assert_eq!(
-            binary_instrumentation(&two_strides).ok(),
+            classify(&image),
             Some(GuestInstrumentation::CoveragePoints { stride: 9 })
-        );
-
-        // An unreadable image is a hard error, never a silent "not instrumented".
-        let missing = dir.path().join("does-not-exist.bin");
-        let error = binary_instrumentation(&missing).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("detect yield-point instrumentation"),
-            "read failure must fail closed with a named error, got: {error}"
         );
     }
 }

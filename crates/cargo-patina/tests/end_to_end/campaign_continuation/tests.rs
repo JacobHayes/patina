@@ -477,16 +477,7 @@ fn campaign_continuation_refusals_are_loud() {
     let read_state = || -> serde_json::Value {
         serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap()
     };
-    let digest_of = |path: &str| {
-        format!(
-            "sha256:{}",
-            Sha256::digest(fs::read(path).unwrap())
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        )
-    };
-    let own = digest_of(patina);
+    let own = supervisor_identity();
     assert_eq!(
         read_state()["supervisor_sha256"].as_str(),
         Some(own.as_str()),

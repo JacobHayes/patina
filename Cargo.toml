@@ -118,6 +118,12 @@ clap = { version = "~4.6", default-features = false, features = ["std", "error-c
 # The Linux kernel's uapi constants for the target architecture: the native
 # shim decodes the kernel ABI's flag words and errno values with them.
 linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno", "general", "no_std", "ptrace"] }
+# The content address of the run cache: every run hashes the whole guest
+# executable, so the hash must run at memory speed. `pure` keeps it to Rust
+# (SSE4.1/AVX2 intrinsics on x86_64) so cross-target checks need no C toolchain.
+blake3 = { version = "1.8.7", features = ["pure"] }
+# The run maps the guest executable once rather than reading it per pass.
+memmap2 = "0.9.11"
 # Substring search for the instrumentation markers in guest binaries.
 memchr = "2.8.3"
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }

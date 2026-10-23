@@ -1,24 +1,21 @@
 //! The native build identity: what a native recording can be replayed against.
 
 use super::*;
+use crate::run_cache::Image;
 use crate::shim_build::embedded_shim_bundle_sha256;
-use crate::supervisor_identity::{file_sha256, supervisor_sha256};
+use crate::supervisor_identity::supervisor_sha256;
 use patina_dst_trace::{NativeIdentityRecord, Sha256Digest};
 
-/// The build identity of running `binary` under this `cargo-patina`.
+/// The build identity of running `image`, the guest executable, under this
+/// `cargo-patina`.
 ///
-/// The executable is hashed as the file it is, so the digest names exactly the
-/// bytes the guest executes; the supervisor is named by its own digest. The
-/// rest are facts of this `cargo-patina`.
-pub(super) fn native_identity(binary: &Path) -> Result<NativeIdentityRecord, CliError> {
+/// The executable is hashed as the bytes the run maps, so the digest names
+/// exactly the bytes the guest executes; the supervisor is named by its own
+/// digest. The rest are facts of this `cargo-patina`.
+pub(super) fn native_identity(image: &Image) -> Result<NativeIdentityRecord, CliError> {
     let bundle = embedded_shim_bundle_sha256();
     Ok(NativeIdentityRecord {
-        executable_sha256: file_sha256(binary).map_err(|error| {
-            CliError(format!(
-                "failed to read native program {} to compute its build identity: {error}",
-                binary.display()
-            ))
-        })?,
+        executable_sha256: image.sha256(),
         supervisor_sha256: supervisor_sha256()?,
         patina_version: env!("CARGO_PKG_VERSION").to_string(),
         shim_bundle_sha256: Sha256Digest::parse(&format!("sha256:{bundle}")).map_err(|error| {

@@ -477,6 +477,93 @@ fn main() {
 }
 "#;
 
+    // The run cache remembers a passing gate verdict by the executable's
+    // content, so a program rewritten in place, keeping its size, inode and
+    // modification time, is judged again rather than run on its old verdict.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn a_program_rewritten_in_place_is_judged_again() {
+        // `mov eax, imm32` and three `nop`s: eight bytes the test overwrites in
+        // place with `rdrand eax` and five `nop`s, which no host can trap.
+        const PLAIN: [u8; 8] = [0xb8, 0x00, 0xed, 0x17, 0x5a, 0x90, 0x90, 0x90];
+        const PLANTED: [u8; 8] = [0x0f, 0xc7, 0xf0, 0x90, 0x90, 0x90, 0x90, 0x90];
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("plant.rs");
+        fs::write(
+            &source,
+            r#"#[inline(never)]
+fn plant() -> u32 {
+    let value: u32;
+    unsafe { core::arch::asm!("mov eax, 0x5a17ed00", "nop", "nop", "nop", out("eax") value) };
+    value
+}
+fn main() { println!("PLANT_RAN {:x}", plant()); }
+"#,
+        )
+        .unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("plant");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let run = || {
+            invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                workspace,
+                &["run", bin.to_str().unwrap(), "--seed", "1"],
+            )
+        };
+        // The second run is judged from the cache the first one filled.
+        for _ in 0..2 {
+            let ran = run();
+            assert!(
+                ran.status.success(),
+                "the unmodified program must run:\n{}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            assert!(String::from_utf8_lossy(&ran.stdout).contains("PLANT_RAN 5a17ed00"));
+        }
+
+        let before = fs::metadata(&bin).unwrap();
+        let mut bytes = fs::read(&bin).unwrap();
+        let sites: Vec<usize> = bytes
+            .windows(PLAIN.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == PLAIN).then_some(at))
+            .collect();
+        assert_eq!(sites.len(), 1, "the planted site must be unique");
+        bytes[sites[0]..sites[0] + PLANTED.len()].copy_from_slice(&PLANTED);
+        let mut file = fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.set_modified(before.modified().unwrap()).unwrap();
+        drop(file);
+        let after = fs::metadata(&bin).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        }
+
+        let refused = run();
+        assert!(
+            !refused.status.success(),
+            "the rewritten program must be judged again and refused"
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("rdrand"),
+            "the refusal must name the planted instruction:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&refused.stdout).contains("PLANT_RAN"));
+    }
+
     // Gate-level per-class detection: native-run refuses a guest reaching one
     // uninterposed symbol of each class, naming every class. Demonstrably able to
     // fail — it depends on the run being refused with each label present.

@@ -73,44 +73,21 @@ const METER_MARKER: &[u8] = b"PATINA_GO_METER_V1";
 const GUEST_GOMAXPROCS: &str = "1";
 
 /// Give a metered Go guest's environment the settings its run needs: one P
-/// ([`GUEST_GOMAXPROCS`]) unless the run names `GOMAXPROCS`. The map is the
-/// run's recorded environment, so a replay restores it.
+/// ([`GUEST_GOMAXPROCS`]) unless the run names `GOMAXPROCS`. `metered` is
+/// whether the program [`carries_meter`]. The map is the run's recorded
+/// environment, so a replay restores it.
 pub(super) fn apply_go_guest_defaults(
-    binary: &Path,
+    metered: bool,
     environment: &mut std::collections::BTreeMap<String, String>,
-) -> Result<(), CliError> {
-    if environment.contains_key("GOMAXPROCS") || !carries_meter(binary)? {
-        return Ok(());
+) {
+    if metered && !environment.contains_key("GOMAXPROCS") {
+        environment.insert("GOMAXPROCS".into(), GUEST_GOMAXPROCS.into());
     }
-    environment.insert("GOMAXPROCS".into(), GUEST_GOMAXPROCS.into());
-    Ok(())
 }
 
-/// Whether `binary` carries the Go meter's marker, read in bounded chunks.
-fn carries_meter(binary: &Path) -> Result<bool, CliError> {
-    use std::io::Read;
-    let failed = |error: std::io::Error| {
-        CliError(format!(
-            "failed to read {} to detect a Go guest: {error}",
-            binary.display()
-        ))
-    };
-    let mut file = std::fs::File::open(binary).map_err(failed)?;
-    let finder = memchr::memmem::Finder::new(METER_MARKER);
-    let mut window = Vec::with_capacity(METER_MARKER.len() + 64 * 1024);
-    let mut chunk = vec![0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut chunk).map_err(failed)?;
-        if read == 0 {
-            return Ok(false);
-        }
-        window.extend_from_slice(&chunk[..read]);
-        if finder.find(&window).is_some() {
-            return Ok(true);
-        }
-        let keep = METER_MARKER.len() - 1;
-        window.drain(..window.len().saturating_sub(keep));
-    }
+/// Whether the program whose bytes are `image` carries the Go meter's marker.
+pub(super) fn carries_meter(image: &[u8]) -> bool {
+    memchr::memmem::find(image, METER_MARKER).is_some()
 }
 
 /// Refuse a `go build` option that would replace Patina's link line or
@@ -730,28 +707,23 @@ mod tests {
 
     #[test]
     fn a_metered_go_guest_runs_on_one_p_unless_the_run_names_gomaxprocs() {
-        let dir = tempfile::tempdir().unwrap();
-        // The marker lands across a read-chunk boundary.
-        let mut image = vec![0u8; 64 * 1024 - 5];
-        image.extend_from_slice(METER_MARKER);
-        let go = dir.path().join("go-guest");
-        std::fs::write(&go, &image).unwrap();
-        let plain = dir.path().join("plain");
-        std::fs::write(&plain, vec![0u8; 3 * 64 * 1024]).unwrap();
+        let mut go = vec![0u8; 64 * 1024 - 5];
+        go.extend_from_slice(METER_MARKER);
+        let plain = vec![0u8; 3 * 64 * 1024];
 
         let mut environment = std::collections::BTreeMap::new();
-        apply_go_guest_defaults(&go, &mut environment).unwrap();
+        apply_go_guest_defaults(carries_meter(&go), &mut environment);
         assert_eq!(
             environment.get("GOMAXPROCS").map(String::as_str),
             Some(GUEST_GOMAXPROCS)
         );
 
         let mut chosen = std::collections::BTreeMap::from([("GOMAXPROCS".into(), "4".into())]);
-        apply_go_guest_defaults(&go, &mut chosen).unwrap();
+        apply_go_guest_defaults(carries_meter(&go), &mut chosen);
         assert_eq!(chosen.get("GOMAXPROCS").map(String::as_str), Some("4"));
 
         let mut untouched = std::collections::BTreeMap::new();
-        apply_go_guest_defaults(&plain, &mut untouched).unwrap();
+        apply_go_guest_defaults(carries_meter(&plain), &mut untouched);
         assert!(untouched.is_empty());
     }
 

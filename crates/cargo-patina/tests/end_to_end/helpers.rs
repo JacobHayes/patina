@@ -767,3 +767,25 @@ pub(super) fn build_facts_guest(directory: &Path, name: &str, source: &str) -> P
     );
     binary
 }
+
+/// The `sha256:` identity of the `cargo-patina` under test, as a recording or
+/// a campaign names it: the SHA-256 of its linker build ID, or of its bytes
+/// when it carries none.
+pub(super) fn supervisor_identity() -> String {
+    use object::Object;
+    let bytes = fs::read(env!("CARGO_BIN_EXE_cargo-patina")).unwrap();
+    let file = object::File::parse(&*bytes).unwrap();
+    let id = match file.build_id() {
+        Ok(Some(id)) => Some(id.to_vec()),
+        _ => file.mach_uuid().ok().flatten().map(|id| id.to_vec()),
+    };
+    let digest = match id {
+        Some(id) => Sha256::new()
+            .chain_update(b"cargo-patina build id\0")
+            .chain_update(&id)
+            .finalize(),
+        None => Sha256::digest(&bytes),
+    };
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("sha256:{hex}")
+}

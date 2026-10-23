@@ -1,6 +1,7 @@
 //! Native platform capabilities and pre-run audit gates.
 
 use super::*;
+use crate::run_cache::{self, Image};
 #[cfg(unix)]
 /// Does `policy` downgrade the denied import `escape` from a hard error to a
 /// warning? Matches the raw import name and its underscore-stripped alias so an
@@ -114,20 +115,27 @@ pub(crate) fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<
 /// json` envelope is unaffected. A read/parse hiccup here must never fail the
 /// caller's real operation, so it is swallowed (the note is best-effort).
 pub(crate) fn emit_native_deny_trap_note(bytes: &[u8]) {
+    if let Some(note) = native_deny_trap_note(bytes) {
+        eprintln!("{note}");
+    }
+}
+
+/// The note [`emit_native_deny_trap_note`] prints, if `bytes` has one.
+fn native_deny_trap_note(bytes: &[u8]) -> Option<String> {
     let armed = match native_deny_trap_armed(bytes) {
         Ok(armed) if !armed.is_empty() => armed,
-        _ => return,
+        _ => return None,
     };
     let list = armed
         .iter()
         .map(|trap| format!("{} ({})", trap.symbol, trap.class))
         .collect::<Vec<_>>()
         .join(", ");
-    eprintln!(
+    Some(format!(
         "note: {} linked symbol(s) are deny-trap armed under patina (a call aborts \
 deterministically): {list}",
         armed.len()
-    );
+    ))
 }
 
 /// Whether a *build* target has kernel syscall-user-dispatch, so a shim-linked
@@ -142,23 +150,85 @@ pub(crate) fn target_has_sud(target: &str) -> bool {
     target.starts_with("x86_64") && target.contains("linux")
 }
 
+/// The pre-run gate over `image`, the bytes of `binary` the run executes.
+///
+/// A verdict that lets the run proceed with nothing downgraded is remembered
+/// in the run cache, with the notes it printed, under the bytes' digest and
+/// every other input it read: the program's path (the notes name it), the
+/// effective allow set and the two host capabilities. The policy is not among
+/// them: it only splits findings into downgraded and blocked ones, and such a
+/// verdict has neither. Any other verdict is judged afresh on every run.
 pub(super) fn native_prerun_gate(
     binary: &Path,
+    image: &Image,
     allow: &BTreeSet<String>,
     policy: &UnsupportedPolicy,
 ) -> Result<Vec<NativeEscape>, CliError> {
-    let bytes = fs::read(binary).map_err(|error| {
-        CliError(format!(
-            "failed to read native program {} for the pre-run audit: {error}",
-            binary.display()
-        ))
-    })?;
     let effective = effective_native_allow(allow);
-    let denied = match NativeAudit::audit(&bytes, &effective) {
+    let host = HostTraps {
+        sud: kernel_supports_sud(),
+        tsc: platform_supports_tsc_trap(),
+    };
+    let entry = verdict_entry(binary, image, &effective, host);
+    if let Some(notes) = run_cache::load(&entry) {
+        eprint!("{notes}");
+        return Ok(Vec::new());
+    }
+    let mut notes = String::new();
+    let outcome = judge(binary, image.bytes(), &effective, policy, host, &mut notes);
+    eprint!("{notes}");
+    if matches!(&outcome, Ok(downgraded) if downgraded.is_empty()) {
+        image.store_unchanged(&entry, &notes);
+    }
+    outcome
+}
+
+/// What this host can trap: syscall-user-dispatch and the timestamp counter.
+#[derive(Clone, Copy)]
+struct HostTraps {
+    sud: bool,
+    tsc: bool,
+}
+
+/// The run-cache entry naming a gate verdict on these inputs.
+fn verdict_entry(
+    binary: &Path,
+    image: &Image,
+    allow: &BTreeSet<String>,
+    host: HostTraps,
+) -> String {
+    let mut inputs = blake3::Hasher::new();
+    inputs.update(&[u8::from(host.sud), u8::from(host.tsc)]);
+    for part in std::iter::once(binary.as_os_str().as_encoded_bytes())
+        .chain(allow.iter().map(String::as_bytes))
+    {
+        inputs.update(&(part.len() as u64).to_le_bytes());
+        inputs.update(part);
+    }
+    format!("{}.gate-{}", image.digest(), inputs.finalize().to_hex())
+}
+
+/// Judge `bytes`, appending each note the run prints before it starts (or
+/// before its refusal) to `notes`.
+fn judge(
+    binary: &Path,
+    bytes: &[u8],
+    effective: &BTreeSet<String>,
+    policy: &UnsupportedPolicy,
+    host: HostTraps,
+    notes: &mut String,
+) -> Result<Vec<NativeEscape>, CliError> {
+    let mut note = |text: &str| {
+        notes.push_str(text);
+        notes.push('\n');
+    };
+    let denied = match NativeAudit::audit(bytes, effective) {
         Ok(_) => {
             // Clean import audit: the run proceeds. Surface the "fails later"
             // deny-trap note once, up front, before the guest is launched.
-            emit_native_deny_trap_note(&bytes);
+            if let Some(text) = native_deny_trap_note(bytes) {
+                note(&text);
+            }
             return Ok(Vec::new());
         }
         Err(TargetError::UnsupportedNativeImports(denied)) => denied,
@@ -179,15 +249,14 @@ pub(super) fn native_prerun_gate(
     // refusal. cpu-nondeterminism findings are never SUD-manageable (register
     // reads SUD cannot trap), so they never enter this split.
     let shim_linked =
-        native_binary_is_shim_linked(&bytes).map_err(|error| CliError(error.to_string()))?;
-    let sud_marker = native_binary_has_sud_marker(&bytes).unwrap_or(false);
-    let sud_ok = sud_marker && kernel_supports_sud();
+        native_binary_is_shim_linked(bytes).map_err(|error| CliError(error.to_string()))?;
+    let sud_marker = native_binary_has_sud_marker(bytes).unwrap_or(false);
+    let sud_ok = sud_marker && host.sud;
     // The timestamp-counter trap downgrade, on the same two conditions: the
     // binary carries the trap dispatcher AND this platform can arm PR_SET_TSC.
     // Only rdtsc/rdtscp enter this split — rdrand/rdseed/CNTVCT share the
     // category but no mechanism traps them, so they stay in `remaining`.
-    let tsc_ok =
-        native_binary_has_tsc_marker(&bytes).unwrap_or(false) && platform_supports_tsc_trap();
+    let tsc_ok = native_binary_has_tsc_marker(bytes).unwrap_or(false) && host.tsc;
     let (sud_instructions, rest): (Vec<_>, Vec<_>) = denied
         .into_iter()
         .partition(native_escape_is_sud_manageable);
@@ -196,10 +265,10 @@ pub(super) fn native_prerun_gate(
     let mut sud_managed = Vec::new();
     let mut remaining = rest;
     if tsc_ok {
-        if let Some(note) =
+        if let Some(text) =
             render_tsc_managed_note(&tsc_instructions, &binary.display().to_string())
         {
-            eprintln!("{note}");
+            note(&text);
         }
     } else {
         // Not trappable here: fold back so the counter reads are blocked (with
@@ -217,13 +286,13 @@ pub(super) fn native_prerun_gate(
     }
 
     if !sud_managed.is_empty() {
-        eprintln!(
+        note(&format!(
             "patina: {} direct-syscall instruction site(s) in {} are SUD-managed: trapped into the \
 deterministic runtime via syscall-user-dispatch (kernel SUD present, shim dispatcher linked). \
 These are contained, not escapes — the run stays deterministic.",
             sud_managed.len(),
             binary.display()
-        );
+        ));
     }
 
     let (downgraded, blocked): (Vec<_>, Vec<_>) = remaining
@@ -243,7 +312,7 @@ pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warnin
             message.push_str(&format!("\n  {}", native_escape_summary(escape)));
             push_native_escape_provenance_lines(&mut message, escape, "    ");
         }
-        if has_raw_syscall && !kernel_supports_sud() {
+        if has_raw_syscall && !host.sud {
             // A genuine kernel capability gap; preserve today's explanation.
             message.push_str(
                 "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
@@ -253,7 +322,7 @@ backend emits interposable imports instead), or run on an x86_64 SUD kernel wher
 them.",
             );
         }
-        if has_raw_syscall && kernel_supports_sud() && !shim_linked {
+        if has_raw_syscall && host.sud && !shim_linked {
             message.push_str(
                 "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
 binary is not linked with Patina's shim (for example, it is static, stock, or built without \
@@ -262,7 +331,7 @@ from source with `cargo patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the so
 `cargo patina run` to build and run it with the shim.",
             );
         }
-        if has_raw_syscall && kernel_supports_sud() && shim_linked && !sud_marker {
+        if has_raw_syscall && host.sud && shim_linked && !sud_marker {
             message.push_str(
                 "\nnote: this binary is linked with Patina, but its shim has no SUD dispatcher marker \
 (for example, it may have been built with an older shim); raw inline syscalls cannot be trapped \
@@ -331,28 +400,30 @@ run that reaches one is not reproducible, so it is refused; pass --allow-unsuppo
     }
 
     if !downgraded.is_empty() {
-        eprintln!(
+        note(&format!(
             "patina: WARNING: running {} with {} UNSUPPORTED symbol(s) downgraded from error by \
 --allow-unsupported-symbols:",
             binary.display(),
             downgraded.len()
-        );
+        ));
         for escape in &downgraded {
-            eprintln!("patina:   {}", native_escape_summary(escape));
+            note(&format!("patina:   {}", native_escape_summary(escape)));
             for provenance in &escape.provenance {
-                eprintln!("patina:     {}", provenance.label());
+                note(&format!("patina:     {}", provenance.label()));
             }
         }
-        eprintln!(
+        note(
             "patina: these host symbols are NOT interposed by the deterministic runtime; if the \
 guest reaches them at run time it can block, read host time, or otherwise escape the scheduler. \
-This run's determinism is NOT guaranteed and any \"deterministic\" claim on it is qualified."
+This run's determinism is NOT guaranteed and any \"deterministic\" claim on it is qualified.",
         );
     }
 
     // The run proceeds (clean, or with downgraded symbols). Surface the "fails
     // later" deny-trap note once, up front, before the guest is launched.
-    emit_native_deny_trap_note(&bytes);
+    if let Some(text) = native_deny_trap_note(bytes) {
+        note(&text);
+    }
     Ok(downgraded)
 }
 

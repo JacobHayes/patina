@@ -80,7 +80,7 @@ pub(super) fn link_arg(path: &Path) -> OsString {
 /// default, its build: `$XDG_CACHE_HOME/patina` when set (any platform), else
 /// `~/Library/Caches/patina` on macOS and `~/.cache/patina` elsewhere. No `HOME`
 /// is a loud error, never a fallback into the working directory.
-fn patina_cache_root() -> Result<PathBuf, CliError> {
+pub(crate) fn patina_cache_root() -> Result<PathBuf, CliError> {
     if let Some(xdg) = env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
         let xdg = PathBuf::from(xdg);
         if !xdg.is_absolute() {
