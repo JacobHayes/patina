@@ -75,13 +75,17 @@ pub(crate) enum FlockMode {
 }
 
 /// What an advisory lock is taken ON: the kernel keys `flock` by inode, so two
-/// descriptions open on one deterministic-fs inode contend, while every other
-/// kind of description is its own inode (a socket, an eventfd) — modeled as the
-/// description itself. (The two ends of one anonymous pipe share an inode on
+/// descriptions open on one deterministic-fs inode contend, and so do two open
+/// on one procfs node, while every other kind of description is its own inode
+/// (a socket, an eventfd) — modeled as the description itself. (The two ends of one anonymous pipe share an inode on
 /// Linux and do not here; no supported guest locks a pipe.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LockIdentity {
     Inode(u64),
+    /// A procfs node, by its inode number (procfs's own numbering, apart
+    /// from the volume's).
+    #[cfg(target_os = "linux")]
+    Procfs(u64),
     Description(DescId),
 }
 
@@ -89,11 +93,16 @@ pub(crate) enum LockIdentity {
 /// read through the recorded, never-faulted `fs_fd_ino` lookup, so the
 /// conflict decision keys on the same file identity under record and replay
 /// and a lock (bookkeeping that does no I/O) cannot fail with an injected
-/// error; a FIFO endpoint's is its node's.
+/// error; a FIFO endpoint's is its node's, and a procfs descriptor's its
+/// node's.
 pub(crate) fn lock_identity(resolved: &Resolved) -> Result<LockIdentity, c_int> {
     if resolved.kind.is_fs() {
         return with_context(|context| context.fs_fd_ino(Fd(resolved.handle)))
             .map(LockIdentity::Inode);
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(resolved.kind, FdKind::Proc | FdKind::ProcDir) {
+        return Ok(LockIdentity::Procfs(crate::procfs::ino_of(resolved.handle)));
     }
     let fifo = (resolved.kind == FdKind::Pipe)
         .then(|| thread::fifo_end_ino(resolved.handle))

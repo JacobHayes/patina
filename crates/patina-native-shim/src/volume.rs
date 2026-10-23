@@ -12,7 +12,9 @@
 //! answer through `simple_statfs`: an anonymous pipe on pipefs, a socket on
 //! sockfs, an eventfd, signalfd or epoll instance on
 //! anon_inodefs. The entropy device `/dev/urandom` is on a mount of its own,
-//! devtmpfs (a tmpfs), described by constants like the volume. Every `f_fsid`
+//! devtmpfs (a tmpfs), described by constants like the volume; the procfs
+//! entries the model answers (`crate::procfs`) are on procfs, mounted at
+//! `/proc`, which answers through `simple_statfs` too. Every `f_fsid`
 //! is derived from the filesystem's device. This is the Linux description;
 //! macOS describes the same volume as APFS (`posix/fs/darwin_volume.rs`).
 
@@ -84,11 +86,13 @@ const TMPFS_MAGIC: i64 = 0x0102_1994;
 const MQUEUE_MAGIC: i64 = 0x1980_0202;
 const NSFS_MAGIC: i64 = 0x6e73_6673;
 const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
+const PROC_SUPER_MAGIC: i64 = 0x9fa0;
 
 /// `statfs(2)` `f_flags`: the answer is valid (`ST_VALID`, set by
 /// `calculate_f_flags` on every answer) and the mount's atime policy.
 const ST_VALID: i64 = 0x0020;
 const ST_NOSUID: i64 = 0x0002;
+const ST_NODEV: i64 = 0x0004;
 const ST_NOEXEC: i64 = 0x0008;
 const ST_RELATIME: i64 = 0x1000;
 
@@ -111,11 +115,12 @@ enum Filesystem {
     Mqueue,
     Nsfs,
     Devpts,
+    Proc,
 }
 
 impl Filesystem {
     #[cfg(any(target_arch = "x86_64", test))]
-    const ALL: [Filesystem; 8] = [
+    const ALL: [Filesystem; 9] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
         Filesystem::Sockfs,
@@ -124,6 +129,7 @@ impl Filesystem {
         Filesystem::Mqueue,
         Filesystem::Nsfs,
         Filesystem::Devpts,
+        Filesystem::Proc,
     ];
 
     /// The filesystem type as the kernel registers it (`register_filesystem`,
@@ -138,6 +144,7 @@ impl Filesystem {
             Filesystem::Devtmpfs => Some("devtmpfs"),
             Filesystem::Mqueue => Some("mqueue"),
             Filesystem::Devpts => Some("devpts"),
+            Filesystem::Proc => Some("proc"),
         }
     }
 
@@ -151,6 +158,7 @@ impl Filesystem {
             Filesystem::Mqueue => MQUEUE_DEVICE,
             Filesystem::Nsfs => fs_device(crate::PATINA_FS_NSFS),
             Filesystem::Devpts => fs_device(crate::PATINA_FS_DEVPTS),
+            Filesystem::Proc => fs_device(crate::PATINA_FS_PROC),
         }
     }
 
@@ -205,6 +213,16 @@ impl Filesystem {
                 f_flags: ST_VALID | ST_NOSUID | ST_NOEXEC | ST_RELATIME,
                 ..KernelStatfs::default()
             },
+            // `simple_statfs`, on the mount at `/proc`.
+            Filesystem::Proc => KernelStatfs {
+                f_type: PROC_SUPER_MAGIC,
+                f_bsize: crate::PAGE_SIZE as i64,
+                f_fsid: self.fsid(),
+                f_namelen: NAME_MAX,
+                f_frsize: crate::PAGE_SIZE as i64,
+                f_flags: ST_VALID | ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RELATIME,
+                ..KernelStatfs::default()
+            },
             Filesystem::Pipefs
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
@@ -254,6 +272,7 @@ impl Filesystem {
             Filesystem::Volume => MOUNTS[0].ids(),
             Filesystem::Devtmpfs => MOUNTS[1].ids(),
             Filesystem::Devpts => MOUNTS[3].ids(),
+            Filesystem::Proc => MOUNTS[4].ids(),
             Filesystem::Nsfs => internal(3, 4),
             Filesystem::Sockfs => internal(9, 10),
             Filesystem::Pipefs => internal(15, 17),
@@ -272,16 +291,17 @@ impl Filesystem {
             | Filesystem::AnonInodefs
             | Filesystem::Mqueue
             | Filesystem::Nsfs
-            | Filesystem::Devpts => false,
+            | Filesystem::Devpts
+            | Filesystem::Proc => false,
         }
     }
 
     /// The superblock's block size (`s_blocksize`, what `FIGETBSZ`
-    /// answers): `statfs`'s `f_bsize`, but devpts's 1 KiB, which
-    /// `simple_statfs` does not report.
+    /// answers): `statfs`'s `f_bsize`, but devpts's and procfs's 1 KiB,
+    /// which `simple_statfs` does not report.
     fn block_size(self) -> i32 {
         match self {
-            Filesystem::Devpts => 1024,
+            Filesystem::Devpts | Filesystem::Proc => 1024,
             _ => self.describe().f_bsize as i32,
         }
     }
@@ -295,6 +315,7 @@ impl Filesystem {
             crate::PATINA_FS_DEVTMPFS | crate::PATINA_FS_PTMX => Filesystem::Devtmpfs,
             crate::PATINA_FS_DEVPTS => Filesystem::Devpts,
             crate::PATINA_FS_ANON_INODE | crate::PATINA_FS_ANON_OWN => Filesystem::AnonInodefs,
+            crate::PATINA_FS_PROC | crate::PATINA_FS_PROC_OWN => Filesystem::Proc,
             _ => Filesystem::Volume,
         }
     }
@@ -370,6 +391,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
         FdKind::Urandom | FdKind::PtyMaster => Ok(Filesystem::Devtmpfs),
         FdKind::PtySlave => Ok(Filesystem::Devpts),
+        FdKind::Proc | FdKind::ProcDir => Ok(Filesystem::Proc),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
     }
 }
@@ -441,6 +463,9 @@ pub(crate) unsafe fn statfs(
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
             entry.unmodeled("the filesystem statistics")
         }
+        Ok(paths::Resolution::Virtual(paths::Virtual::Proc(_))) => {
+            copy_out(Filesystem::Proc.describe(), out)
+        }
         Err(errno) => Err(crate::abi::failed(errno)),
     }
 }
@@ -507,7 +532,7 @@ const ANON_INODE_INO: u64 = 69;
 /// nanoseconds: its monotonic clock counts from boot and nothing sets its
 /// realtime clock, so it is their difference at any instant (0 before the
 /// runtime is installed).
-fn boot_instant() -> u64 {
+pub(crate) fn boot_instant() -> u64 {
     crate::with_bookkeeping(|context| {
         let realtime = context.fs_time_unrecorded()?;
         let monotonic = context.monotonic_now_unrecorded()?;
@@ -583,6 +608,8 @@ pub(crate) struct Mount {
 const MNT_UNIQUE_ID_BASE: u64 = 1 << 32;
 /// `MOUNT_ATTR_NOSUID`.
 const MOUNT_ATTR_NOSUID: u64 = 0x2;
+/// `MOUNT_ATTR_NODEV`.
+const MOUNT_ATTR_NODEV: u64 = 0x4;
 /// `MOUNT_ATTR_NOEXEC`.
 const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 
@@ -591,11 +618,12 @@ const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 /// namespace's root; the entropy device, a bind of devtmpfs's `urandom`
 /// node onto `/dev/urandom` (what `statfs` reports it on, and the crossing
 /// `RESOLVE_NO_XDEV` refuses); the pseudoterminal multiplexer, a bind of
-/// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; and devpts at
-/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`). The
+/// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; devpts at
+/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`); and
+/// procfs at `/proc` (`nosuid,nodev,noexec`, as hosts mount it). The
 /// kernel's internal mounts (pipefs, sockfs, anon_inodefs, the IPC
 /// namespace's mqueue) are in no namespace, as in the kernel.
-pub(crate) const MOUNTS: [Mount; 4] = [
+pub(crate) const MOUNTS: [Mount; 5] = [
     Mount {
         id: 1,
         unique: MNT_UNIQUE_ID_BASE + 1,
@@ -631,6 +659,15 @@ pub(crate) const MOUNTS: [Mount; 4] = [
         root: "/",
         point: paths::DEVPTS,
         attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC,
+    },
+    Mount {
+        id: 6,
+        unique: MNT_UNIQUE_ID_BASE + 6,
+        parent: 0,
+        filesystem: Filesystem::Proc,
+        root: "/",
+        point: crate::procfs::ROOT,
+        attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
     },
 ];
 
@@ -672,13 +709,12 @@ impl Mount {
 /// The filesystem types the virtual kernel registers, in the order 6.8
 /// registers them at boot (the order the pinned host's `/proc/filesystems`
 /// lists them in): each filesystem a node can be on that has a registered
-/// type, and nothing else. procfs, whose `/proc/self/ns` links the model
-/// answers, is left out: no node the model keeps is on it (a namespace
-/// file opens an nsfs inode), and the kernel registers many more types than
-/// the model has (tmpfs, sysfs, proc, …), which a caller listing them finds
-/// missing either way.
+/// type, and nothing else. The kernel registers many more types than the
+/// model has (tmpfs, sysfs, cgroup, …), which a caller listing them finds
+/// missing.
 #[cfg(target_arch = "x86_64")]
-const REGISTERED: [Filesystem; 6] = [
+const REGISTERED: [Filesystem; 7] = [
+    Filesystem::Proc,
     Filesystem::Devtmpfs,
     Filesystem::Sockfs,
     Filesystem::Pipefs,

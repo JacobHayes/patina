@@ -1003,7 +1003,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Signal,
                 Disposition::Modeled,
-                "A flag is `EINVAL` (6.8 defines none), a descriptor that is no pidfd `EBADF` (the virtual machine mounts no procfs, so no directory is a `/proc/<pid>` one); a caller's siginfo is copied (`EFAULT`), must carry `sig` (`EINVAL`) and may forge a kernel or `tkill` code only to its own thread's pid (`EPERM`); the signal is then generated for the process as `kill` generates it (`SI_USER` without a siginfo), under the same permission check (init is root's: `EPERM`).",
+                "A flag is `EINVAL` (6.8 defines none), a descriptor that is neither a pidfd nor a procfs `/proc/<pid>` directory `EBADF`; a caller's siginfo is copied (`EFAULT`), must carry `sig` (`EINVAL`) and may forge a kernel or `tkill` code only to its own thread's pid (`EPERM`); the signal is then generated for the process as `kill` generates it (`SI_USER` without a siginfo), under the same permission check (init is root's: `EPERM`).",
                 None,
             ),
             Syscall::N_io_uring_setup => r(

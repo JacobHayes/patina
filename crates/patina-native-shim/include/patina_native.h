@@ -89,6 +89,8 @@ enum {
     PATINA_FD_INOTIFY = 20,  /* an inotify instance (Linux) */
     PATINA_FD_PTY_MASTER = 21,  /* a pseudoterminal master, /dev/ptmx (Linux) */
     PATINA_FD_PTY_SLAVE = 22,   /* a pseudoterminal slave, /dev/pts/N (Linux) */
+    PATINA_FD_PROC = 23,        /* a procfs file, /proc/uptime, /proc/<pid>/stat, ... (Linux) */
+    PATINA_FD_PROC_DIR = 24,    /* a procfs directory, /proc or /proc/<pid> (Linux) */
 };
 
 enum {
@@ -542,6 +544,11 @@ enum {
     PATINA_FS_ANON_INODE = 7,
     /* A userfaultfd's own anonymous inode (Linux): its creator's, on anon_inodefs */
     PATINA_FS_ANON_OWN = 8,
+    /* A procfs node root owns (Linux): procfs's root, /proc/self, the
+     * machine-wide files, init's directory and files */
+    PATINA_FS_PROC = 9,
+    /* A guest process's procfs directory and files (Linux): the caller's */
+    PATINA_FS_PROC_OWN = 10,
 };
 enum {
     PATINA_VOLUME_DEV_MAJOR = 8,
@@ -552,6 +559,7 @@ enum {
     PATINA_DEVTMPFS_DEV_MINOR = 5,
     PATINA_DEVPTS_DEV_MINOR = 24,
     PATINA_ANON_INODEFS_DEV_MINOR = 15,
+    PATINA_PROC_DEV_MINOR = 25,
 };
 
 /*

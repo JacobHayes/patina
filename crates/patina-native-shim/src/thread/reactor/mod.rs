@@ -155,9 +155,10 @@ fn poll_description(
         FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
             (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
         }
-        // An nsfs inode has no poll method either.
+        // An nsfs inode has no poll method either, nor has a procfs node
+        // (`proc_reg_poll` answers the default for a file without one).
         #[cfg(target_os = "linux")]
-        FdKind::Namespace | FdKind::NamespacePath => {
+        FdKind::Namespace | FdKind::NamespacePath | FdKind::Proc | FdKind::ProcDir => {
             (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
         }
         // `timerfd_poll`: readable while an expiration is unread; every

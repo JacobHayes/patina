@@ -156,6 +156,10 @@ mod nsfs;
 mod numa;
 mod panic_boundary;
 mod paths;
+// procfs, mounted at `/proc`: the entries the model answers. See
+// `procfs/mod.rs`.
+#[cfg(target_os = "linux")]
+mod procfs;
 mod watchdog;
 // Guest memory copied the way the kernel's `copy_from_user`/`copy_to_user` do:
 // whole or `EFAULT`, never a fault in shim code. See `uaccess.rs`.

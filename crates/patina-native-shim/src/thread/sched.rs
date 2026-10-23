@@ -191,6 +191,8 @@ pub(super) struct SchedRuntime {
     /// Each managed thread's [`CpuSlot`], and the slots of finished ones.
     slots: BTreeMap<i32, &'static CpuSlot>,
     free_slots: Vec<&'static CpuSlot>,
+    /// The highest thread id a spawn has handed out (0 before the first).
+    last_tid: i32,
 }
 
 impl SchedRuntime {
@@ -245,6 +247,7 @@ impl SchedRuntime {
             attrs.reset_on_fork = false;
         }
         let tid = tid_of(child);
+        self.last_tid = self.last_tid.max(tid);
         let slot = self
             .free_slots
             .pop()
@@ -260,6 +263,48 @@ impl SchedRuntime {
         if let Some(slot) = self.slots.remove(&tid) {
             self.free_slots.push(slot);
         }
+    }
+}
+
+/// What procfs reports of a thread's scheduling (`/proc/<pid>/stat`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Scheduling {
+    /// Its name (`comm`), NUL-padded.
+    pub(crate) comm: [u8; COMM_LEN],
+    pub(crate) nice: i32,
+    /// `task_prio`: `20 + nice` under a fair or idle policy, `-1 -
+    /// rt_priority` under a realtime one, -101 under `SCHED_DEADLINE`.
+    pub(crate) prio: i32,
+    pub(crate) policy: u32,
+    pub(crate) rt_priority: u32,
+}
+
+/// Thread `tid`'s [`Scheduling`].
+pub(crate) fn scheduling(tid: i32) -> Scheduling {
+    let attrs = lock_state().sched.get(tid);
+    let prio = match attrs.policy {
+        SCHED_DEADLINE => -101,
+        policy if rt_policy(policy) => -1 - attrs.rt_priority as i32,
+        _ => 20 + attrs.nice,
+    };
+    Scheduling {
+        comm: attrs.comm,
+        nice: attrs.nice,
+        prio,
+        policy: attrs.policy,
+        rt_priority: attrs.rt_priority,
+    }
+}
+
+impl SchedRuntime {
+    /// The highest thread id handed out so far (0 before the first spawn).
+    pub(super) fn last_tid(&self) -> i32 {
+        self.last_tid
+    }
+
+    /// Thread `tid`'s nice value.
+    pub(super) fn nice(&self, tid: i32) -> i32 {
+        self.get(tid).nice
     }
 }
 

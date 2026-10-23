@@ -194,11 +194,18 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     // Linux directory iteration needs an opened directory (`fdget_pos`): a
     // number that names nothing, or an `O_PATH` one, is EBADF; anything else
     // (a file, a socket) is ENOTDIR.
-    match c_int::try_from(fd).map(crate::fdget) {
+    let desc = match c_int::try_from(fd).map(crate::fdget) {
         Err(_) | Ok(Err(_)) => return -EBADF,
-        Ok(Ok(resolved)) if resolved.kind == crate::fdtable::FdKind::Dir => {}
+        Ok(Ok(resolved))
+            if matches!(
+                resolved.kind,
+                crate::fdtable::FdKind::Dir | crate::fdtable::FdKind::ProcDir
+            ) =>
+        {
+            resolved.desc
+        }
         Ok(Ok(_)) => return -ENOTDIR,
-    }
+    };
     // `iterate_dir` reaches the directory before anything is copied out.
     crate::dir_accessed(fd as c_int);
     if dirp == 0 {
@@ -217,7 +224,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     // step.
     let needs_snapshot = DIR_ITERATIONS
         .lock()
-        .get(&fd)
+        .get(&desc)
         .is_none_or(|dir| dir.snapshot == 0);
     let mut fresh: *mut c_void = std::ptr::null_mut();
     if needs_snapshot {
@@ -232,7 +239,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         }
     }
     let mut map = DIR_ITERATIONS.lock();
-    let dir = map.entry(fd).or_insert(DirIteration {
+    let dir = map.entry(desc).or_insert(DirIteration {
         snapshot: 0,
         position: 0,
         pending: None,

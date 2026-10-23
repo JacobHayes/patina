@@ -28,8 +28,18 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
 pub(crate) fn seek(raw_fd: c_int, offset: i64, whence: u32) -> crate::abi::SysResult<i64> {
     let handle = match resolve_fd(raw_fd) {
         #[cfg(target_os = "linux")]
-        Ok(resolved) if resolved.kind == FdKind::Dir => {
-            return match crate::sud::seek_dir_iteration(raw_fd, offset, whence) {
+        Ok(resolved) if resolved.kind == FdKind::Proc => {
+            return match crate::procfs::seek(resolved.handle, offset, whence) {
+                Ok(position) => {
+                    set_errno(0);
+                    Ok(position as i64)
+                }
+                Err(errno) => Err(crate::abi::failed(errno)),
+            };
+        }
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if matches!(resolved.kind, FdKind::Dir | FdKind::ProcDir) => {
+            return match crate::sud::seek_dir_iteration(resolved.desc, offset, whence) {
                 Some(position) => {
                     set_errno(0);
                     Ok(position as i64)

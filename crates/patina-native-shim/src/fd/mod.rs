@@ -144,16 +144,13 @@ pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -
 }
 
 /// Per-NUMBER teardown when a slot is vacated (close, dup2/dup3 over it,
-/// close_range): the state the two doors key by guest number rather than by
-/// description — the SUD `getdents64` snapshot on Linux, the kqueue knotes
-/// (which BSD drops when the NUMBER closes, whatever the file's other
-/// references) on macOS.
+/// close_range): the state keyed by guest number rather than by description —
+/// the kqueue knotes (which BSD drops when the NUMBER closes, whatever the
+/// file's other references) on macOS.
 fn retire_number(raw_fd: c_int) {
-    #[cfg(target_os = "linux")]
-    crate::sud::release_dir_iteration(raw_fd);
     #[cfg(target_os = "macos")]
     thread::kqueue_forget_number(raw_fd);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     let _ = raw_fd;
 }
 

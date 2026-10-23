@@ -10,12 +10,14 @@
 //! the decode from kernel flag words onto the runtime's vocabulary.
 //!
 //! Linux directory ITERATION (`getdents64`) is the one thing a plain filesystem
-//! fd cannot answer, so this layer keeps a per-dir-fd position and entry
-//! snapshot on the side, taken through `crate::fs::read_dir`. The snapshot is taken
-//! by the first `getdents64` after an open or a seek, and dropped by a seek and
-//! by `close`. The C `readdir` family reads through this row into its `DIR`'s
-//! buffer, as glibc's does, so a guest mixing `readdir(d)` with a raw
-//! `getdents64(dirfd(d))` reads one cursor.
+//! fd cannot answer, so this layer keeps a position and entry snapshot per open
+//! directory DESCRIPTION on the side (the kernel's `f_pos`, which every `dup`
+//! of the description shares), taken through `crate::fs::read_dir`. The
+//! snapshot is taken by the first `getdents64` after an open or a seek, and
+//! dropped by a seek and when the description's last reference goes. The C
+//! `readdir` family reads through this row into its `DIR`'s buffer, as glibc's
+//! does, so a guest mixing `readdir(d)` with a raw `getdents64(dirfd(d))` reads
+//! one cursor.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -46,9 +48,9 @@ pub(super) struct DirRecord {
     ino: u64,
 }
 
-/// Live `getdents64` snapshots, keyed by the runtime directory fd. Only fds the
-/// runtime's own directory table already knows ever appear here.
-pub(super) static DIR_ITERATIONS: crate::SpinMutex<BTreeMap<i32, DirIteration>> =
+/// Live `getdents64` snapshots, keyed by the directory description. Only
+/// descriptions the runtime's own table already knows ever appear here.
+pub(super) static DIR_ITERATIONS: crate::SpinMutex<BTreeMap<crate::fdtable::DescId, DirIteration>> =
     crate::SpinMutex::new(BTreeMap::new());
 
 /// What `fd` names, per the descriptor table shared with the C interposers:
@@ -311,31 +313,32 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
     })
 }
 
-/// Drop any live `getdents64` snapshot for `fd` (a rewind through
-/// `patina_seek`, and every close of the descriptor). The next `getdents64`
-/// takes a fresh one from the start.
-///
-/// The universal `patina_close` calls this for every vacated number, so a
-/// descriptor opened with a raw `openat` and iterated with a raw `getdents64`
-/// but closed through *libc* still releases its snapshot — the two entry paths
-/// share the descriptor, so they must share its teardown.
-pub(crate) fn release_dir_iteration(fd: c_int) {
-    if let Some(iteration) = DIR_ITERATIONS.lock().remove(&fd) {
-        // SAFETY: `snapshot` is null or the live `read_dir` box for this fd.
+/// Drop any live `getdents64` snapshot and position of description `desc`,
+/// whose last reference went (`crate::release_description`, which every
+/// close through either door reaches, so a descriptor opened with a raw
+/// `openat` and iterated with a raw `getdents64` but closed through *libc*
+/// still releases its snapshot).
+pub(crate) fn release_dir_iteration(desc: crate::fdtable::DescId) {
+    if let Some(iteration) = DIR_ITERATIONS.lock().remove(&desc) {
+        // SAFETY: `snapshot` is null or the live `read_dir` box for this description.
         unsafe { crate::fs::free_dir(iteration.snapshot as *mut c_void) };
     }
 }
 
-/// `lseek(2)` on directory descriptor `fd`, as tmpfs's `dcache_dir_lseek`
+/// `lseek(2)` on directory description `desc`, as tmpfs's `dcache_dir_lseek`
 /// answers it: `SEEK_SET` and `SEEK_CUR` move the position (a negative result
 /// is `EINVAL`), `SEEK_CUR 0` only reports it, and every other `whence` is
 /// `EINVAL` (`None`). A move drops the snapshot, so the next `getdents64`
 /// takes a fresh one and resumes that many entries in — which is what a
 /// `d_off` cookie resumes from, and what `lseek(fd, 0, SEEK_SET)` (rustix
 /// `Dir::rewind`) rewinds to.
-pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<u64> {
+pub(crate) fn seek_dir_iteration(
+    desc: crate::fdtable::DescId,
+    offset: i64,
+    whence: u32,
+) -> Option<u64> {
     let mut map = DIR_ITERATIONS.lock();
-    let position = map.get(&fd).map_or(0, |dir| dir.position);
+    let position = map.get(&desc).map_or(0, |dir| dir.position);
     let target = match whence {
         uapi::SEEK_SET => offset,
         uapi::SEEK_CUR if offset == 0 => return Some(position),
@@ -344,14 +347,14 @@ pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<
     };
     let target = u64::try_from(target).ok()?;
     if let Some(dir) = map.insert(
-        fd,
+        desc,
         DirIteration {
             snapshot: 0,
             position: target,
             pending: None,
         },
     ) {
-        // SAFETY: `snapshot` is null or the live `read_dir` box for this fd.
+        // SAFETY: `snapshot` is null or the live `read_dir` box for this description.
         unsafe { crate::fs::free_dir(dir.snapshot as *mut c_void) };
     }
     Some(target)

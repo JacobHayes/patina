@@ -207,7 +207,9 @@ fn parent_beneath(parent: c_int) -> Answer {
         | FdKind::OPath
         | FdKind::Urandom
         | FdKind::PtyMaster
-        | FdKind::PtySlave => Ok(0),
+        | FdKind::PtySlave
+        | FdKind::Proc
+        | FdKind::ProcDir => Ok(0),
         FdKind::Pipe => match crate::thread::pipe_filesystem(parent) {
             Some(crate::PATINA_FS_PIPEFS) => refuse(errno::EBADFD),
             Some(_) => Ok(0),

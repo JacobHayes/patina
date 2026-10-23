@@ -45,11 +45,23 @@ pub(crate) const VOLUME: VolumeGeometry = VolumeGeometry {
     free_files: 1 << 19,
 };
 
-/// `st_blksize`: the virtual volume's 4 KiB block, or devpts' 1 KiB block.
+/// `st_blksize`: the virtual volume's 4 KiB block, or the 1 KiB block of
+/// devpts and procfs.
 pub(crate) fn stat_blksize(values: &PatinaMetadata) -> u64 {
-    if values.fs == PATINA_FS_DEVPTS {
+    if values.fs == PATINA_FS_DEVPTS || is_proc(values.fs) {
         1024
     } else {
         u64::from(VOLUME.block_size)
+    }
+}
+
+/// Whether `fs` is procfs (Linux).
+fn is_proc(fs: u32) -> bool {
+    #[cfg(any(target_os = "linux", patina_posix_exports))]
+    return fs == super::metadata::PATINA_FS_PROC || fs == super::metadata::PATINA_FS_PROC_OWN;
+    #[cfg(not(any(target_os = "linux", patina_posix_exports)))]
+    {
+        let _ = fs;
+        false
     }
 }

@@ -126,6 +126,15 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             FdKind::Dir | FdKind::OPath | FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => {
                 fail(ENOTTY)
             }
+            // A procfs file is a regular one of size 0: the size less the
+            // position, as an `int`.
+            #[cfg(target_os = "linux")]
+            FdKind::Proc => put_int(
+                arg,
+                0_i64.wrapping_sub_unsigned(crate::procfs::position(resolved.handle)) as i32,
+            ),
+            #[cfg(target_os = "linux")]
+            FdKind::ProcDir => fail(ENOTTY),
             // Not a regular file: the request goes to the device's own
             // ioctl (`random_ioctl`), which refuses what it does not know.
             #[cfg(target_os = "linux")]
@@ -307,6 +316,9 @@ mod vfs {
         /// Neither: a pipe, a socket, a device, an anonymous inode; `fasync`
         /// where the file has one (pipes, sockets, the entropy device).
         Special { fasync: bool },
+        /// A procfs file or directory: no file attributes, extent map or
+        /// block map, and no `fasync`.
+        Proc { directory: bool },
         /// A captured standard stream, which has no modeled inode.
         Stream,
     }
@@ -339,6 +351,8 @@ mod vfs {
             FdKind::Inotify => Inode::Special { fasync: true },
             // `fdget` refused these before any request is looked at.
             FdKind::OPath | FdKind::NamespacePath => Inode::Special { fasync: false },
+            FdKind::Proc => Inode::Proc { directory: false },
+            FdKind::ProcDir => Inode::Proc { directory: true },
         }
     }
 
@@ -377,25 +391,28 @@ mod vfs {
                     Inode::Special { fasync: true } | Inode::Stream => {
                         stop("FIOASYNC turning on SIGIO delivery", request)
                     }
-                    Inode::Volume { .. } | Inode::Regular { .. } | Inode::Special { .. } => {
-                        fail(ENOTTY)
-                    }
+                    Inode::Volume { .. }
+                    | Inode::Regular { .. }
+                    | Inode::Special { .. }
+                    | Inode::Proc { .. } => fail(ENOTTY),
                 },
             },
             // `inode_get_bytes` of a regular file or directory, a `loff_t`.
             FIOQSIZE => match inode {
                 Inode::Stream => stop("FIOQSIZE on a captured standard stream", request),
                 Inode::Special { .. } => fail(ENOTTY),
-                Inode::Volume { .. } | Inode::Regular { .. } => match bytes(raw_fd, resolved) {
-                    Ok(bytes) => match uaccess::write(arg as usize, &bytes) {
-                        Ok(()) => {
-                            set_errno(0);
-                            0
-                        }
+                Inode::Volume { .. } | Inode::Regular { .. } | Inode::Proc { .. } => {
+                    match bytes(raw_fd, resolved) {
+                        Ok(bytes) => match uaccess::write(arg as usize, &bytes) {
+                            Ok(()) => {
+                                set_errno(0);
+                                0
+                            }
+                            Err(errno) => fail(errno),
+                        },
                         Err(errno) => fail(errno),
-                    },
-                    Err(errno) => fail(errno),
-                },
+                    }
+                }
             },
             // The superblock's block size, as `statfs` reports it.
             FIGETBSZ => match inode {
@@ -412,7 +429,9 @@ mod vfs {
             // `ioctl_fiemap`: only the volume's inodes map extents.
             FS_IOC_FIEMAP => match inode {
                 Inode::Volume { .. } | Inode::Stream => stop("FS_IOC_FIEMAP", request),
-                Inode::Regular { .. } | Inode::Special { .. } => fail(EOPNOTSUPP),
+                Inode::Regular { .. } | Inode::Special { .. } | Inode::Proc { .. } => {
+                    fail(EOPNOTSUPP)
+                }
             },
             FICLONE | FICLONERANGE | FIDEDUPERANGE => {
                 stop("cloning or deduplicating a file range", request)
@@ -424,7 +443,9 @@ mod vfs {
                     Inode::Volume { .. } | Inode::Regular { attributes: true } | Inode::Stream => {
                         stop("file attributes", request)
                     }
-                    Inode::Regular { attributes: false } | Inode::Special { .. } => return None,
+                    Inode::Regular { attributes: false }
+                    | Inode::Special { .. }
+                    | Inode::Proc { .. } => return None,
                 }
             }
             // `file_ioctl`, a regular file's: `ioctl_fibmap` needs
@@ -432,15 +453,20 @@ mod vfs {
             // `fallocate` by another name.
             FIBMAP | FS_IOC_RESVSP | FS_IOC_UNRESVSP | FS_IOC_RESVSP64 | FS_IOC_UNRESVSP64
             | FS_IOC_ZERO_RANGE => match inode {
-                Inode::Volume { directory: false } | Inode::Regular { .. }
+                Inode::Volume { directory: false }
+                | Inode::Regular { .. }
+                | Inode::Proc { directory: false }
                     if request == FIBMAP && !capable(Capability::SysRawio) =>
                 {
                     fail(EPERM)
                 }
-                Inode::Volume { directory: false } | Inode::Regular { .. } | Inode::Stream => {
-                    stop("a regular file's block map or preallocation", request)
-                }
-                Inode::Volume { directory: true } | Inode::Special { .. } => return None,
+                Inode::Volume { directory: false }
+                | Inode::Regular { .. }
+                | Inode::Proc { directory: false }
+                | Inode::Stream => stop("a regular file's block map or preallocation", request),
+                Inode::Volume { directory: true }
+                | Inode::Special { .. }
+                | Inode::Proc { directory: true } => return None,
             },
             _ => return None,
         })

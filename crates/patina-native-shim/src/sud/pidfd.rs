@@ -21,9 +21,7 @@ const PIDFD_NONBLOCK: u32 = uapi::O_NONBLOCK;
 
 /// The process a descriptor names, as `pidfd_pid` finds it: `EBADF` for a
 /// descriptor not open (`fdget`, which an `O_PATH` one does not pass) or one
-/// that is no pidfd. `pidfd_send_signal` also takes a procfs `/proc/<pid>`
-/// directory (`tgid_pidfd_to_pid`), but the virtual machine mounts no procfs,
-/// so no directory it holds is one.
+/// that is no pidfd.
 pub(super) fn target(fd: c_int) -> Result<Process, u32> {
     let resolved = crate::fdget(fd).map_err(|code| code as u32)?;
     if resolved.kind != FdKind::Pidfd {
@@ -67,7 +65,8 @@ pub(super) fn sys_pidfd_open(pid: u64, flags: u64) -> i64 {
 type KernelSiginfo = [u64; 6];
 
 /// `pidfd_send_signal(pidfd, sig, info, flags)`: a flag (6.8 defines none),
-/// then the descriptor ([`target`]); with `info`, its copy (`EFAULT`), a
+/// then the descriptor ([`signal_target`]: a pidfd or a `/proc/<pid>`
+/// directory); with `info`, its copy (`EFAULT`), a
 /// signal number other than `sig` (`EINVAL`), and a kernel or `tkill` code
 /// sent anywhere but to the caller's own thread's pid (`EPERM`); then the
 /// signal goes to the process as `kill` sends it (`SI_USER` without `info`),
@@ -77,7 +76,7 @@ pub(super) fn sys_pidfd_send_signal(a: [u64; 6]) -> i64 {
     if a[3] as u32 != 0 {
         return -EINVAL;
     }
-    let pid = match target(arg_fd(a[0]) as c_int) {
+    let pid = match signal_target(arg_fd(a[0]) as c_int) {
         Ok(process) => process.pid(),
         Err(code) => return -i64::from(code),
     };
@@ -101,6 +100,23 @@ pub(super) fn sys_pidfd_send_signal(a: [u64; 6]) -> i64 {
     }
     // SAFETY: `info` is a local record, alive for the call.
     unsafe { generate_signal(target, sig, GenerationInfo::Queued(&info)) }
+}
+
+/// The process `pidfd_send_signal` signals (`pidfd_to_pid`): a pidfd's
+/// ([`target`]), or that of a procfs process directory open on it
+/// (`tgid_pidfd_to_pid`); any other descriptor is `EBADF`.
+fn signal_target(fd: c_int) -> Result<Process, u32> {
+    if let Ok(resolved) = crate::fdget(fd)
+        && resolved.kind == FdKind::ProcDir
+    {
+        return match crate::procfs::node_of(resolved.handle) {
+            crate::procfs::Node::Process(pid) => crate::identity::lookup(pid)
+                .map(|(process, _)| process)
+                .ok_or(errno::ESRCH),
+            _ => Err(errno::EBADF),
+        };
+    }
+    target(fd)
 }
 
 /// `SI_TKILL`: the code `tkill`/`tgkill` send with.

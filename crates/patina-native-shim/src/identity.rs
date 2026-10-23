@@ -311,6 +311,33 @@ pub(crate) fn lookup(pid: i32) -> Option<(Process, bool)> {
     crate::thread::live_tid(pid).then_some((caller, pid == caller.0))
 }
 
+/// A process as procfs lists it: its pid, its parent's, its group and its
+/// session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) process: Process,
+    pub(crate) parent: i32,
+    pub(crate) pgid: i32,
+    pub(crate) sid: i32,
+}
+
+/// The pid namespace's processes, in pid order (`next_tgid`'s walk).
+pub(crate) fn processes() -> Vec<Listed> {
+    with_table(|table| {
+        let mut listed: Vec<Listed> = table
+            .records()
+            .map(|record| Listed {
+                process: record.process,
+                parent: record.parent,
+                pgid: record.membership.pgid,
+                sid: record.membership.sid,
+            })
+            .collect();
+        listed.sort_by_key(|listed| listed.process);
+        listed
+    })
+}
+
 /// The caller's process group.
 pub(crate) fn pgid() -> i32 {
     Process::current().membership().pgid

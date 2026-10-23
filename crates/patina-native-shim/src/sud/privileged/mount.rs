@@ -243,7 +243,9 @@ pub(in crate::sud) fn fsconfig(_: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::Namespace
             | FdKind::NamespacePath
             | FdKind::PtyMaster
-            | FdKind::PtySlave => refuse(errno::EINVAL),
+            | FdKind::PtySlave
+            | FdKind::Proc
+            | FdKind::ProcDir => refuse(errno::EINVAL),
         },
     }
 }

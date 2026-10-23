@@ -247,6 +247,10 @@ pub(crate) unsafe fn read_resolved(
         FdKind::PtyMaster | FdKind::PtySlave => unsafe {
             thread::pty::read(resolved, destination, length, nonblocking)
         },
+        #[cfg(target_os = "linux")]
+        FdKind::Proc => crate::procfs::read_to(resolved.handle, destination, length, None),
+        #[cfg(target_os = "linux")]
+        FdKind::ProcDir => fail(EISDIR) as isize,
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -340,6 +344,9 @@ pub(crate) unsafe fn write_resolved(
         // Read-only (or `O_PATH`): no write access.
         #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => fail(EBADF) as isize,
+        // procfs opens only for reading.
+        #[cfg(target_os = "linux")]
+        FdKind::Proc | FdKind::ProcDir => fail(EBADF) as isize,
         // An instance is opened `O_RDONLY`.
         #[cfg(target_os = "linux")]
         FdKind::Inotify => fail(EBADF) as isize,
@@ -387,6 +394,9 @@ pub(crate) fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved,
         // be read nor (read-only) written.
         #[cfg(target_os = "linux")]
         FdKind::Namespace => Ok((resolved, offset)),
+        // A procfs file is positioned (`seq_read`), a procfs directory too.
+        #[cfg(target_os = "linux")]
+        FdKind::Proc | FdKind::ProcDir => Ok((resolved, offset)),
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -429,6 +439,14 @@ pub(crate) unsafe fn fs_pread(
     #[cfg(target_os = "linux")]
     if resolved.kind == FdKind::Namespace {
         return fail(EINVAL) as isize;
+    }
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::ProcDir {
+        return fail(EISDIR) as isize;
+    }
+    #[cfg(target_os = "linux")]
+    if resolved.kind == FdKind::Proc {
+        return crate::procfs::read_to(resolved.handle, destination, length, Some(offset));
     }
     #[cfg(target_os = "linux")]
     if resolved.kind == FdKind::MessageQueue {

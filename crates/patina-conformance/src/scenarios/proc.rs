@@ -9,6 +9,7 @@ pub mod namespaces;
 pub mod pidfd;
 pub mod pidfd_spawn;
 pub mod prctl;
+pub mod procfs;
 pub mod ptrace;
 pub mod seccomp;
 pub mod spawn;

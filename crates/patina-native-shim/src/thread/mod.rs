@@ -136,7 +136,9 @@ fn socket_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         | FdKind::Namespace
         | FdKind::NamespacePath
         | FdKind::PtyMaster
-        | FdKind::PtySlave => Err(super::ENOTSOCK),
+        | FdKind::PtySlave
+        | FdKind::Proc
+        | FdKind::ProcDir => Err(super::ENOTSOCK),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(super::ENOTSOCK),
     }
@@ -169,7 +171,9 @@ fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         | FdKind::Namespace
         | FdKind::NamespacePath
         | FdKind::PtyMaster
-        | FdKind::PtySlave => Err(super::EBADF),
+        | FdKind::PtySlave
+        | FdKind::Proc
+        | FdKind::ProcDir => Err(super::EBADF),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(super::EBADF),
     }
@@ -446,6 +450,77 @@ fn live_tid_locked(state: &ThreadRuntime, tid: i32) -> bool {
 #[cfg(target_os = "linux")]
 pub(crate) fn live_threads() -> usize {
     lock_state().signals.task_count().max(1)
+}
+
+/// What procfs counts of the virtual process's threads ([`census`]).
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Census {
+    /// The live threads.
+    pub(crate) live: usize,
+    /// How many of them sleep in a modeled wait; the rest are running or
+    /// runnable.
+    pub(crate) waiting: usize,
+    /// Whether the main thread is one of them.
+    pub(crate) main_waiting: bool,
+    /// The highest thread id handed out so far (the pid before the first
+    /// spawn): the pid namespace's last allocated id.
+    pub(crate) last_tid: i32,
+    /// The live threads at a positive nice value, whose user time the
+    /// kernel accounts as niced.
+    pub(crate) niced: Vec<TaskId>,
+    /// Every live thread, by id: the main thread alone before the thread
+    /// subsystem manages any.
+    pub(crate) threads: Vec<CensusThread>,
+}
+
+/// A live thread as the [`Census`] counts it.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CensusThread {
+    pub(crate) tid: i32,
+    /// Its task, `None` for the unmanaged main thread.
+    pub(crate) task: Option<TaskId>,
+    /// Whether it sleeps in a modeled wait.
+    pub(crate) waiting: bool,
+}
+
+/// The [`Census`] of the virtual process's threads now.
+#[cfg(target_os = "linux")]
+pub(crate) fn census() -> Census {
+    let state = lock_state();
+    let tasks: Vec<TaskId> = state.signals.task_ids().collect();
+    let waiting = tasks
+        .iter()
+        .filter(|task| state.signals.blocked.contains_key(task))
+        .count();
+    let mut threads: Vec<CensusThread> = tasks
+        .iter()
+        .map(|task| CensusThread {
+            tid: tid_of(*task),
+            task: Some(*task),
+            waiting: state.signals.blocked.contains_key(task),
+        })
+        .collect();
+    if threads.is_empty() {
+        threads.push(CensusThread {
+            tid: crate::patina_pid(),
+            task: None,
+            waiting: false,
+        });
+    }
+    threads.sort_unstable_by_key(|thread| thread.tid);
+    Census {
+        live: tasks.len().max(1),
+        waiting,
+        main_waiting: state.signals.blocked.contains_key(&MAIN_TASK),
+        last_tid: state.sched.last_tid().max(crate::patina_pid()),
+        niced: tasks
+            .into_iter()
+            .filter(|task| state.sched.nice(tid_of(*task)) > 0)
+            .collect(),
+        threads,
+    }
 }
 
 /// Detach the thread subsystem from the runtime at shutdown. Later boundary

@@ -134,6 +134,8 @@ fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         paths::Virtual::Devpts => entry.unmodeled("an open"),
         #[cfg(target_os = "linux")]
         paths::Virtual::Tty => thread::pty::open_tty(flags),
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Proc(node) => crate::procfs::open(node, flags, cloexec),
     }
 }
 

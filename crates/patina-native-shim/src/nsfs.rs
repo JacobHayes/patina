@@ -10,8 +10,8 @@
 //! live).
 //!
 //! Like `/dev/urandom`, the entries are recognized lexically by the resolver
-//! (`paths::resolve`); the virtual machine mounts no procfs, so nothing else
-//! of `/proc` exists. An open follows the link: read-only gives a
+//! (`paths::resolve`), before procfs (`crate::procfs`) is walked; any other
+//! way to the namespace files stops the run by name. An open follows the link: read-only gives a
 //! `FdKind::Namespace` description, `O_PATH` a `FdKind::NamespacePath` one
 //! (which every operation that takes an opened file refuses, `EBADF`), whose
 //! handle is the entry's index in [`ENTRIES`]; what a namespace file refuses,
@@ -89,7 +89,7 @@ pub(crate) fn entry_at(path: &str) -> Option<usize> {
 /// Whether a canonical path names procfs's namespace files other than the
 /// caller's own entries: the `/proc/self/ns` directory itself, or the
 /// `ns` directory (and anything in it) of `/proc/thread-self` or a process
-/// by number. The virtual machine mounts no procfs to answer them.
+/// by number. The model answers none of them.
 pub(crate) fn names_procfs(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/proc/") else {
         return false;

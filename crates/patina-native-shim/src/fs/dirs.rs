@@ -1,5 +1,6 @@
-//! Directory iteration: a snapshot of a directory's entries, read through
-//! its descriptor and handed out one entry at a time.
+//! Directory iteration: a snapshot of a directory's entries (the volume's
+//! or a procfs one), read through its descriptor and handed out one entry
+//! at a time.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
@@ -44,6 +45,20 @@ pub(crate) unsafe fn read_dir_after_point(
 ) -> crate::abi::SysResult<()> {
     if state_out.is_null() {
         return Err(crate::abi::failed(EINVAL));
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(resolved) = resolve_fd(raw_fd)
+        && resolved.kind == FdKind::ProcDir
+    {
+        let node = crate::procfs::node_of(resolved.handle);
+        let state = Box::new(ReadDirState {
+            entries: crate::procfs::listing(node),
+            position: 0,
+        });
+        // SAFETY: `state_out` was checked and is required to be writable.
+        unsafe { state_out.write(Box::into_raw(state).cast()) };
+        set_errno(0);
+        return Ok(());
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,

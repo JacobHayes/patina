@@ -138,6 +138,9 @@ pub(crate) enum Virtual {
     /// virtual process never has.
     #[cfg(target_os = "linux")]
     Tty,
+    /// A node of procfs, mounted at `/proc` (`crate::procfs`).
+    #[cfg(target_os = "linux")]
+    Proc(crate::procfs::Node),
 }
 
 impl Virtual {
@@ -157,6 +160,8 @@ impl Virtual {
             Virtual::Devpts => DEVPTS.to_owned(),
             #[cfg(target_os = "linux")]
             Virtual::Tty => TTY.to_owned(),
+            #[cfg(target_os = "linux")]
+            Virtual::Proc(node) => node.path(),
         }
     }
 
@@ -281,8 +286,13 @@ pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved,
         Resolution::Virtual(entry @ Virtual::Devpts) => {
             entry.unmodeled("holding as the working or root directory")
         }
+        #[cfg(target_os = "linux")]
+        Resolution::Virtual(entry @ Virtual::Proc(node)) if node.is_directory() => {
+            entry.unmodeled("holding as the working or root directory")
+        }
         Resolution::Virtual(entry) if !entry.exists() => return Err(ENOENT),
-        // The devices and the namespace files are no directories.
+        // The devices, the namespace files and procfs's files are no
+        // directories.
         Resolution::Virtual(_) => return Err(ENOTDIR),
     };
     let metadata = resolved.metadata.as_ref().ok_or(ENOENT)?;
@@ -452,6 +462,14 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         ),
         #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => return Err(ENOTDIR),
+        // A procfs directory is a base by its path, which the walk enters
+        // procfs at again; a procfs file is one for the empty-path form.
+        #[cfg(target_os = "linux")]
+        FdKind::ProcDir => return Ok(crate::procfs::node_of(resolved.handle).path()),
+        #[cfg(target_os = "linux")]
+        FdKind::Proc if empty_path => return Ok(crate::procfs::node_of(resolved.handle).path()),
+        #[cfg(target_os = "linux")]
+        FdKind::Proc => return Err(ENOTDIR),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return Err(ENOTDIR),
     };
@@ -478,6 +496,10 @@ enum Step {
     /// A symlink was expanded into the work list; resolve again from the
     /// updated state.
     Again,
+    /// The walk reached `/proc`, procfs's mount: what remains is resolved
+    /// in procfs ([`in_procfs`]).
+    #[cfg(target_os = "linux")]
+    Proc,
 }
 
 /// Resolve `(dirfd, path)` to the canonical absolute path the driver accepts.
@@ -518,6 +540,14 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
     } else {
         fd_path(dirfd, path.is_empty() && empty_path)?
     };
+    #[cfg(target_os = "linux")]
+    let procfs_base = crate::procfs::node_at(&base);
+    #[cfg(target_os = "linux")]
+    if let Some(node) = procfs_base
+        && path.is_empty()
+    {
+        return Ok(Resolution::Virtual(Virtual::Proc(node)));
+    }
     if path.is_empty() {
         let metadata = metadata(&base)?;
         return Ok(Resolution::Volume(Resolved {
@@ -539,6 +569,24 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
         root: if scoped { resolved.len() } else { 0 },
     };
     let mut remaining: VecDeque<String> = components(path).map(str::to_owned).collect();
+    let mut hops = 0usize;
+    // A base in procfs (a procfs directory descriptor's) starts the walk
+    // there.
+    #[cfg(target_os = "linux")]
+    if let Some(start) = procfs_base {
+        let walked = in_procfs(
+            start,
+            &mut remaining,
+            rules,
+            flags,
+            requires_directory,
+            &mut hops,
+        );
+        match walked? {
+            Some(resolution) => return Ok(resolution),
+            None => resolved.clear(),
+        }
+    }
     if !remaining.iter().any(|component| component == "..") {
         let lexical: Vec<String> = resolved
             .iter()
@@ -587,18 +635,16 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
             return Ok(Resolution::Virtual(Virtual::Namespace(index)));
         }
         // Another spelling of the namespace files (their directory, another
-        // process's or thread's view of them) names procfs, which the
-        // virtual machine does not mount.
+        // process's or thread's view of them) is not modeled.
         #[cfg(target_os = "linux")]
         if crate::nsfs::names_procfs(&join(&lexical)) {
             crate::trap_fatal(&format!(
-                "{} names procfs beyond the /proc/self/ns entries, which is not modeled; \
-                 failing closed",
+                "{} names procfs's namespace files other than as /proc/self/ns/<entry>, which \
+                 is not modeled; failing closed",
                 join(&lexical)
             ));
         }
     }
-    let mut hops = 0usize;
     loop {
         let step = if remaining.iter().any(|component| component == "..") {
             walk(&mut resolved, &mut remaining, rules, &mut hops)?
@@ -610,6 +656,24 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
         };
         match step {
             Step::Again => continue,
+            #[cfg(target_os = "linux")]
+            Step::Proc => {
+                if flags & RESOLVE_NO_XDEV != 0 {
+                    return Err(EXDEV);
+                }
+                let root = crate::procfs::Node::Root;
+                match in_procfs(
+                    root,
+                    &mut remaining,
+                    rules,
+                    flags,
+                    requires_directory,
+                    &mut hops,
+                )? {
+                    Some(resolution) => return Ok(resolution),
+                    None => resolved.clear(),
+                }
+            }
             Step::Done(path, metadata) => {
                 if path.len() >= PATH_MAX {
                     return Err(ENAMETOOLONG);
@@ -622,6 +686,36 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
                 return Ok(Resolution::Volume(Resolved { path, metadata }));
             }
         }
+    }
+}
+
+/// The rest of a resolution in procfs, from `start`
+/// (`crate::procfs::walk`): the node it ends at (`ENOTDIR` for a file under
+/// a trailing `/`), or `None` when it left procfs by `..` at its root, the
+/// walk going on from the volume's root with what remains (a mount crossing
+/// `RESOLVE_NO_XDEV` refuses, `EXDEV`). A scoped resolution through procfs
+/// is not modeled.
+#[cfg(target_os = "linux")]
+fn in_procfs(
+    start: crate::procfs::Node,
+    remaining: &mut VecDeque<String>,
+    rules: Rules,
+    flags: u32,
+    requires_directory: bool,
+    hops: &mut usize,
+) -> Result<Option<Resolution>, c_int> {
+    if flags & (RESOLVE_BENEATH | RESOLVE_IN_ROOT) != 0 {
+        Virtual::Proc(start).unmodeled("a scoped resolution (RESOLVE_BENEATH, RESOLVE_IN_ROOT) in");
+    }
+    match crate::procfs::walk(start, remaining, rules.nofollow, rules.no_symlinks, hops)? {
+        crate::procfs::Walked::At(node) => {
+            if requires_directory && !node.is_directory() {
+                return Err(ENOTDIR);
+            }
+            Ok(Some(Resolution::Virtual(Virtual::Proc(node))))
+        }
+        crate::procfs::Walked::Left if flags & RESOLVE_NO_XDEV != 0 => Err(EXDEV),
+        crate::procfs::Walked::Left => Ok(None),
     }
 }
 
@@ -727,6 +821,14 @@ fn fast(
         .collect();
     let mut full = resolved.clone();
     full.extend(names.iter().cloned());
+    // procfs is no part of the volume: the walk enters its mount.
+    #[cfg(target_os = "linux")]
+    if full
+        .first()
+        .is_some_and(|first| first == crate::procfs::MOUNT_POINT_NAME)
+    {
+        return Ok(None);
+    }
     let candidate = join(&full);
     match metadata(&candidate) {
         Ok(Some(metadata)) => {
@@ -789,6 +891,11 @@ fn walk(
                 return Err(EXDEV);
             }
             continue;
+        }
+        // `/proc` is procfs's mount point: the walk crosses into it.
+        #[cfg(target_os = "linux")]
+        if resolved.is_empty() && component == crate::procfs::MOUNT_POINT_NAME {
+            return Ok(Step::Proc);
         }
         let candidate = child(resolved, &component);
         let is_final = remaining.is_empty();

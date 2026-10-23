@@ -438,8 +438,14 @@ pub(crate) unsafe fn ctl_core(
     };
     if matches!(
         target.kind,
-        FdKind::File | FdKind::Dir | FdKind::Urandom | FdKind::LandlockRuleset | FdKind::Namespace
-    ) {
+        FdKind::File
+            | FdKind::Dir
+            | FdKind::Urandom
+            | FdKind::LandlockRuleset
+            | FdKind::Namespace
+            | FdKind::ProcDir
+    ) || (target.kind == FdKind::Proc && !crate::procfs::is_machine_file(target.handle))
+    {
         return Err(failed(EPERM));
     }
     let id = match id {

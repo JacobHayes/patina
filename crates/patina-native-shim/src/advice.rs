@@ -53,6 +53,8 @@ fn has_mapping(resolved: &Resolved) -> bool {
         // An mqueue inode and a namespace file's nsfs inode are regular
         // files.
         FdKind::File | FdKind::Dir | FdKind::MessageQueue | FdKind::Namespace => true,
+        // So are procfs's files and directories.
+        FdKind::Proc | FdKind::ProcDir => true,
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
@@ -273,7 +275,9 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::Namespace
             | FdKind::NamespacePath
             | FdKind::PtyMaster
-            | FdKind::PtySlave => false,
+            | FdKind::PtySlave
+            | FdKind::Proc
+            | FdKind::ProcDir => false,
         };
         if on_volume {
             crate::fs_sync_volume()

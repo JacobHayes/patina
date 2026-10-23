@@ -282,12 +282,13 @@ pub fn short_pause() {
 }
 
 /// The helper's wait before it signals the main thread, keyed on the main
-/// thread actually being asleep in its blocking call: natively
+/// thread actually being asleep in its blocking call:
 /// `/proc/self/task/<tid>/stat` reports state `S` once it is, whatever the
 /// host's load (a fixed pause could fire before the call was entered, and a
-/// handler that runs BEFORE the call leaves it blocking forever); the virtual
-/// kernel has no `/proc`, so under patina this is the plain `short_pause`,
-/// where virtual time makes the order deterministic. Unobserved either way.
+/// handler that runs BEFORE the call leaves it blocking forever), natively
+/// and under patina alike (whose procfs reports a thread waiting in a
+/// modeled wait as sleeping). Where that file cannot be read, this is the
+/// plain `short_pause`. Unobserved either way.
 pub fn until_parked(main_tid: pid_t) {
     let path = format!("/proc/self/task/{main_tid}/stat");
     let state = |text: &str| {

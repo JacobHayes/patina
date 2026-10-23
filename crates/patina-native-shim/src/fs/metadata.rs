@@ -59,6 +59,14 @@ pub(crate) const PATINA_FS_ANON_INODE: u32 = 7;
 /// anon_inodefs like the shared one.
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_ANON_OWN: u32 = 8;
+/// A procfs node root owns (`crate::procfs`: its root, `self`, the
+/// machine-wide files, init's directory and files), on procfs (0:25).
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(crate) const PATINA_FS_PROC: u32 = 9;
+/// A guest process's procfs directory and files: the process's own, so
+/// the caller's, on procfs.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(crate) const PATINA_FS_PROC_OWN: u32 = 10;
 
 /// The `(major, minor)` device a `PATINA_FS_*` filesystem reports through
 /// `st_dev`/`stx_dev_*` (`PATINA_*_DEV_*` in `patina_native.h`): the volume is
@@ -73,6 +81,7 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_DEVTMPFS | PATINA_FS_PTMX => (0, 5),
         PATINA_FS_DEVPTS => (0, 24),
         PATINA_FS_ANON_INODE | PATINA_FS_ANON_OWN => (0, 15),
+        PATINA_FS_PROC | PATINA_FS_PROC_OWN => (0, 25),
         _ => (8, 1),
     }
 }
@@ -456,7 +465,7 @@ pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
     let caller = caller();
     match fs {
         #[cfg(target_os = "linux")]
-        PATINA_FS_NSFS | PATINA_FS_DEVTMPFS | PATINA_FS_ANON_INODE => (0, 0),
+        PATINA_FS_NSFS | PATINA_FS_DEVTMPFS | PATINA_FS_ANON_INODE | PATINA_FS_PROC => (0, 0),
         #[cfg(target_os = "linux")]
         PATINA_FS_PTMX => (0, thread::pty::TTY_GID),
         #[cfg(target_os = "linux")]
@@ -501,9 +510,20 @@ pub(crate) fn read_namespace_link(index: usize, buf: *mut c_char, len: usize) ->
 /// immutable (`notify_change`: `EPERM`); the entropy device and the
 /// pseudoterminal multiplexer are root's, so changing their mode is `EPERM`
 /// (not the owner, no `CAP_FOWNER`); a devpts name no pair has is `ENOENT`;
+/// a procfs node's mode never changes (`proc_setattr`: `EPERM`), and
+/// truncating one is `EISDIR` for a directory, `EACCES` for a file (`0444`);
 /// anything else about them (a slave node is its opener's to change) is not
 /// modeled.
 fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
+    #[cfg(target_os = "linux")]
+    if let paths::Virtual::Proc(node) = entry {
+        return match operation {
+            "chmod" => EPERM,
+            "truncating" if node.is_directory() => EISDIR,
+            "truncating" => EACCES,
+            _ => entry.unmodeled(operation),
+        };
+    }
     let root_owned_device = match entry {
         paths::Virtual::Urandom => true,
         #[cfg(target_os = "linux")]
@@ -512,7 +532,8 @@ fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
         paths::Virtual::Namespace(_)
         | paths::Virtual::Pts(_)
         | paths::Virtual::Devpts
-        | paths::Virtual::Tty => false,
+        | paths::Virtual::Tty
+        | paths::Virtual::Proc(_) => false,
     };
     match entry {
         #[cfg(target_os = "linux")]
@@ -563,6 +584,8 @@ fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetad
         paths::Virtual::Pts(index) => thread::pty::node(index),
         #[cfg(target_os = "linux")]
         paths::Virtual::Devpts | paths::Virtual::Tty => None,
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Proc(node) => Some(crate::procfs::metadata(node)),
     }
 }
 
@@ -672,6 +695,10 @@ pub(crate) unsafe fn fd_metadata_full(
         }
         if resolved.kind == FdKind::Urandom {
             return write_patina_metadata(volume::urandom_metadata(), out);
+        }
+        if matches!(resolved.kind, FdKind::Proc | FdKind::ProcDir) {
+            let node = crate::procfs::node_of(resolved.handle);
+            return write_patina_metadata(crate::procfs::metadata(node), out);
         }
         if volume::on_anon_inode(resolved.kind) {
             return write_patina_metadata(volume::anon_inode_metadata(), out);
@@ -785,11 +812,15 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         return 0;
     }
     // A namespace file's nsfs inode is root's and immutable
-    // (`notify_change`'s `IS_IMMUTABLE`); the entropy device is root's (not
-    // the owner, no `CAP_FOWNER`).
+    // (`notify_change`'s `IS_IMMUTABLE`); a procfs node's mode never changes
+    // (`proc_setattr`); the entropy device is root's (not the owner, no
+    // `CAP_FOWNER`).
     #[cfg(target_os = "linux")]
     if let Ok(resolved) = resolve_fd(raw_fd) {
-        if resolved.kind == FdKind::Namespace {
+        if matches!(
+            resolved.kind,
+            FdKind::Namespace | FdKind::Proc | FdKind::ProcDir
+        ) {
             return fail(EPERM);
         }
         if resolved.kind == FdKind::Urandom {
@@ -1001,6 +1032,8 @@ pub extern "C" fn patina_futimens(
             Err(errno) => fail(errno),
         };
     }
+    #[cfg(target_os = "linux")]
+    procfs_setattr(&resolved, "futimens");
     if !resolved.kind.is_fs() {
         return deny("patina: futimens on a descriptor without a modeled inode; failing closed\n");
     }
@@ -1013,6 +1046,16 @@ pub extern "C" fn patina_futimens(
             0
         }
         Err(errno) => fail(errno),
+    }
+}
+
+/// An owner or time change through a procfs descriptor: `proc_setattr`
+/// stores it on the node (its `ctime` at least), which the model does not,
+/// so it stops the run by name.
+#[cfg(target_os = "linux")]
+fn procfs_setattr(resolved: &crate::fdtable::Resolved, operation: &str) {
+    if matches!(resolved.kind, FdKind::Proc | FdKind::ProcDir) {
+        paths::Virtual::Proc(crate::procfs::node_of(resolved.handle)).unmodeled(operation);
     }
 }
 
@@ -1153,6 +1196,8 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
             Err(errno) => fail(errno),
         };
     }
+    #[cfg(target_os = "linux")]
+    procfs_setattr(&resolved, "fchown");
     if !resolved.kind.is_fs() {
         return deny("patina: fchown on a descriptor without a modeled inode; failing closed\n");
     }
@@ -1316,6 +1361,9 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::NamespacePath
         | FdKind::PtyMaster
         | FdKind::PtySlave => return fail(ENODEV),
+        // Opened read-only, refused above.
+        #[cfg(target_os = "linux")]
+        FdKind::Proc | FdKind::ProcDir => return fail(EBADF),
         // A queue is a regular file (judged after the range, below).
         #[cfg(target_os = "linux")]
         FdKind::MessageQueue => {}

@@ -1120,6 +1120,13 @@ impl Context {
         self.cpus
     }
 
+    /// The machine's uptime when the guest started: the run's initial
+    /// monotonic (and boot clock) reading, configured, replayed or
+    /// [`DEFAULT_BOOT_ORIGIN_NANOS`].
+    pub const fn boot_origin_nanos(&self) -> u64 {
+        self.boot_origin_nanos
+    }
+
     // ---- Cooperative-SUT (buggify) surface -----------------------------------
     //
     // These methods are the runtime side of the `patina` crate's `buggify!`,

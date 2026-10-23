@@ -605,6 +605,14 @@ pub(crate) unsafe fn read_link(
                 Ok(result)
             };
         }
+        // procfs's one link names the caller's process directory.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(paths::Virtual::Proc(node))) => {
+            return match crate::procfs::link_target(node) {
+                Some(target) => copy_link(&target, buf, len),
+                None => Err(crate::abi::failed(EINVAL)),
+            };
+        }
         // The terminal nodes and devpts's root are no links either.
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(entry)) => {
@@ -633,20 +641,23 @@ pub(crate) unsafe fn read_link(
         }
     }
     match with_context(|context| context.fs_read_link(&resolved.path)) {
-        Ok(target) => {
-            let bytes = target.as_bytes();
-            let copied = bytes.len().min(len);
-            // SAFETY: The destination buffer was checked and is required to be
-            // writable for `len` bytes by this function's C ABI.
-            unsafe {
-                slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
-                    .copy_from_slice(&bytes[..copied]);
-            }
-            set_errno(0);
-            isize::try_from(copied).map_err(|_| crate::abi::failed(EOVERFLOW))
-        }
+        Ok(target) => copy_link(&target, buf, len),
         Err(errno) => Err(crate::abi::failed(errno)),
     }
+}
+
+/// A link's target copied into `buf`, cut at `len` bytes, unterminated.
+fn copy_link(target: &str, buf: *mut c_char, len: usize) -> crate::abi::SysResult<isize> {
+    let bytes = target.as_bytes();
+    let copied = bytes.len().min(len);
+    // SAFETY: `read_link`'s caller checked the buffer, which its C ABI
+    // requires to be writable for `len` bytes.
+    unsafe {
+        slice::from_raw_parts_mut(buf.cast::<u8>(), len)[..copied]
+            .copy_from_slice(&bytes[..copied]);
+    }
+    set_errno(0);
+    isize::try_from(copied).map_err(|_| crate::abi::failed(EOVERFLOW))
 }
 
 /// Copy a NUL-terminated `path` into `buf` when it fits, returning its length
@@ -737,6 +748,11 @@ pub unsafe extern "C" fn patina_resolve_path(
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
             entry.unmodeled("the canonical path")
+        }
+        // A procfs node is at its own name.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(paths::Virtual::Proc(node))) => {
+            (node.path(), crate::procfs::metadata(node).kind)
         }
         Err(errno) => return fail(errno) as isize,
     };

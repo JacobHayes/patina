@@ -65,17 +65,69 @@ fn pipe_of(resolved: &Resolved) -> Option<u64> {
         .map(|_| resolved.handle)
 }
 
-fn cursor(handle: Fd) -> Result<i64, c_int> {
-    with_context(|context| context.fs_cursor_unrecorded(handle))
-        .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+/// A file a transfer reads or writes at a position: one on the volume, or a
+/// procfs file (read only, as its `read_iter` reads).
+#[derive(Clone, Copy)]
+enum File {
+    Volume(Fd),
+    Proc(u64),
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the guest's transfer moves its description's offset, as the call itself does"
-)]
-fn set_cursor(handle: Fd, position: i64) -> Result<(), c_int> {
-    with_context(|context| context.fs_seek(handle, position, SeekWhence::Start)).map(|_| ())
+impl From<Fd> for File {
+    fn from(handle: Fd) -> Self {
+        Self::Volume(handle)
+    }
+}
+
+impl File {
+    /// The file a description reads from in a splice: a volume file but
+    /// secret memory, or a procfs file whose operations have a
+    /// `splice_read`; `None` for anything else (`EINVAL`).
+    fn spliced_from(resolved: &Resolved) -> Option<Self> {
+        match resolved.kind {
+            FdKind::File if !secret(resolved) => Some(Self::Volume(Fd(resolved.handle))),
+            FdKind::Proc if crate::procfs::is_machine_file(resolved.handle) => {
+                Some(Self::Proc(resolved.handle))
+            }
+            _ => None,
+        }
+    }
+
+    fn cursor(self) -> Result<i64, c_int> {
+        let position = match self {
+            Self::Volume(handle) => with_context(|context| context.fs_cursor_unrecorded(handle))?,
+            Self::Proc(handle) => crate::procfs::position(handle),
+        };
+        Ok(i64::try_from(position).unwrap_or(i64::MAX))
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guest's transfer moves its description's offset, as the call itself does"
+    )]
+    fn set_cursor(self, position: i64) -> Result<(), c_int> {
+        match self {
+            Self::Volume(handle) => {
+                with_context(|context| context.fs_seek(handle, position, SeekWhence::Start))
+                    .map(|_| ())
+            }
+            Self::Proc(handle) => {
+                crate::procfs::set_position(handle, u64::try_from(position).map_err(|_| EINVAL)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn read_at(self, offset: i64, len: usize) -> Result<Vec<u8>, c_int> {
+        match self {
+            Self::Volume(handle) => read_file_at(handle, offset, len),
+            Self::Proc(handle) => crate::procfs::read(
+                handle,
+                len,
+                Some(u64::try_from(offset).map_err(|_| EINVAL)?),
+            ),
+        }
+    }
 }
 
 /// Where a transfer reads or writes a file: at `*offset` (written back
@@ -88,9 +140,9 @@ struct Position {
 impl Position {
     /// # Safety
     /// A non-null `pointer` is the guest's readable `loff_t`.
-    unsafe fn of(handle: Fd, pointer: *mut i64) -> Result<Self, c_int> {
+    unsafe fn of(handle: impl Into<File>, pointer: *mut i64) -> Result<Self, c_int> {
         let at = if pointer.is_null() {
-            cursor(handle)?
+            handle.into().cursor()?
         } else {
             // SAFETY: per this function's contract.
             unsafe { pointer.read_unaligned() }
@@ -99,10 +151,10 @@ impl Position {
     }
 
     /// Record that `moved` bytes went through this position.
-    fn advance(&self, handle: Fd, moved: usize) -> Result<(), c_int> {
+    fn advance(&self, handle: impl Into<File>, moved: usize) -> Result<(), c_int> {
         let next = self.at + moved as i64;
         if self.pointer.is_null() {
-            set_cursor(handle, next)
+            handle.into().set_cursor(next)
         } else {
             // SAFETY: the guest's `loff_t`, read in `of`.
             unsafe { self.pointer.write_unaligned(next) };
@@ -172,10 +224,12 @@ pub unsafe extern "C" fn patina_copy_file_range(
         if flags != 0 {
             return Err(EINVAL);
         }
-        if input.kind == FdKind::Dir || output.kind == FdKind::Dir {
+        let directory = |kind| matches!(kind, FdKind::Dir | FdKind::ProcDir);
+        let regular = |kind| matches!(kind, FdKind::File | FdKind::Proc);
+        if directory(input.kind) || directory(output.kind) {
             return Err(EISDIR);
         }
-        if input.kind != FdKind::File || output.kind != FdKind::File {
+        if !regular(input.kind) || !regular(output.kind) {
             return Err(EINVAL);
         }
         if input.status & O_READ == 0
@@ -183,6 +237,12 @@ pub unsafe extern "C" fn patina_copy_file_range(
             || output.status & O_APPEND != 0
         {
             return Err(EBADF);
+        }
+        // procfs has no copy operation and is another filesystem than the
+        // volume (a procfs file is never open for writing, so both are not
+        // procfs's).
+        if input.kind == FdKind::Proc || output.kind == FdKind::Proc {
+            return Err(crate::EXDEV);
         }
         let (from, to) = (Fd(input.handle), Fd(output.handle));
         // SAFETY: per this function's contract.
@@ -261,13 +321,19 @@ pub unsafe extern "C" fn patina_sendfile(
         if input.status & O_READ == 0 {
             return Err(EBADF);
         }
-        let addressable = matches!(input.kind, FdKind::File | FdKind::Dir) && !secret(&input);
+        let addressable = matches!(
+            input.kind,
+            FdKind::File | FdKind::Dir | FdKind::Proc | FdKind::ProcDir
+        ) && !secret(&input);
         if !offset.is_null() && !addressable {
             return Err(ESPIPE);
         }
         let position = if input.kind == FdKind::File {
             // SAFETY: per this function's contract.
             Some(unsafe { Position::of(Fd(input.handle), offset)? })
+        } else if input.kind == FdKind::Proc {
+            // SAFETY: per this function's contract.
+            Some(unsafe { Position::of(File::Proc(input.handle), offset)? })
         } else if offset.is_null() {
             None
         } else {
@@ -288,14 +354,13 @@ pub unsafe extern "C" fn patina_sendfile(
         if into_pipe.is_none() && output.status & O_APPEND != 0 {
             return Err(EINVAL);
         }
-        let (Some(position), FdKind::File) = (position, input.kind) else {
+        // Secret memory has no splice operation, either way.
+        let (Some(position), Some(from)) = (position, File::spliced_from(&input)) else {
             return Err(EINVAL);
         };
-        // Secret memory has no splice operation, either way.
-        if secret(&input) || secret(&output) {
+        if secret(&output) {
             return Err(EINVAL);
         }
-        let from = Fd(input.handle);
         let moved = match into_pipe {
             Some(pipe) => {
                 let nonblocking = (input.status | output.status) & O_NONBLOCK != 0;
@@ -305,7 +370,7 @@ pub unsafe extern "C" fn patina_sendfile(
                 if count == 0 {
                     return Ok(0);
                 }
-                let bytes = read_file_at(from, position.at, count)?;
+                let bytes = from.read_at(position.at, count)?;
                 if bytes.is_empty() {
                     return Ok(0);
                 }
@@ -334,7 +399,7 @@ pub unsafe extern "C" fn patina_sendfile(
 /// Splice a file into a pipe: wait for room, then read at most that much from
 /// the file at `offset` and put it in the pipe.
 fn file_to_pipe(
-    from: Fd,
+    from: File,
     offset: i64,
     pipe: u64,
     len: usize,
@@ -344,7 +409,7 @@ fn file_to_pipe(
         return Ok(0);
     }
     let room = thread::pipe_await_space(pipe, nonblocking)?;
-    let bytes = read_file_at(from, offset, len.min(room))?;
+    let bytes = from.read_at(offset, len.min(room))?;
     Ok(thread::pipe_put(pipe, &bytes))
 }
 
@@ -465,10 +530,9 @@ pub unsafe extern "C" fn patina_splice(
                 }
             }
             (None, Some(to)) => {
-                if input.kind != FdKind::File || secret(&input) {
+                let Some(from) = File::spliced_from(&input) else {
                     return Err(EINVAL);
-                }
-                let from = Fd(input.handle);
+                };
                 // SAFETY: per this function's contract.
                 let position = unsafe { Position::of(from, off_in)? };
                 if position.at < 0 {

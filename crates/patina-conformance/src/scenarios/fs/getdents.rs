@@ -6,7 +6,8 @@
 //! closed descriptor. Through getdents64: an unlinked entry drops out, and the
 //! cursor (the position after a call is its last record's d_off, and seeking
 //! to a d_off resumes after that record; SEEK_END is filesystem-specific —
-//! refused, or a position whose listing is a suffix of the whole). The libc
+//! refused, or a position whose listing is a suffix of the whole; a dup of the
+//! descriptor shares its position). The libc
 //! door of getdents64 is glibc's `getdents64`; glibc has no getdents wrapper,
 //! so that row's libc spelling is `syscall(2)`.
 
@@ -181,6 +182,21 @@ pub fn run(p: &Probe) {
         end == neg(EINVAL)
             || (end >= 0 && after_end.0 >= 0 && listed.ends_with(&names(&after_end.1))),
     );
+    // A dup names the same description, and so the same position.
+    p.check("rewind once more", p.lseek(fresh, 0, SEEK_SET) == 0);
+    let twin = p.call_unrecorded(Syscall::N_dup, [i64::from(fresh), 0, 0, 0, 0, 0]);
+    p.require("dup the directory descriptor", twin >= 0);
+    let twin = twin as i32;
+    let (_, one) = p.getdents64_cookies(fresh, 24);
+    let (_, next) = p.getdents64_cookies(twin, 24);
+    p.check(
+        "a dup reads on where the descriptor's last call ended, at their one position",
+        one.len() == 1
+            && all.len() == 6
+            && names(&next) == names(&all[1..2])
+            && lseek_raw(twin, 0, SEEK_CUR) == lseek_raw(fresh, 0, SEEK_CUR),
+    );
+    p.close(twin);
     p.close(fresh);
 }
 

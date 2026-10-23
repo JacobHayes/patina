@@ -119,6 +119,16 @@ pub(crate) enum FdKind {
     /// master; `pty_unix98_ops`); `handle` is the pair's devpts index.
     #[cfg(target_os = "linux")]
     PtySlave,
+    /// A procfs file (`/proc/uptime`, `/proc/<pid>/stat`, …;
+    /// `crate::procfs`), opened read-only; `handle` keys procfs's open
+    /// table, which holds the node, the text reads serve and the read
+    /// position.
+    #[cfg(target_os = "linux")]
+    Proc,
+    /// A procfs directory (`/proc`, `/proc/<pid>`) opened for reading;
+    /// `handle` keys procfs's open table.
+    #[cfg(target_os = "linux")]
+    ProcDir,
     /// A virtual kqueue; `handle` is the registry id.
     #[cfg(target_os = "macos")]
     Kqueue,
@@ -164,6 +174,10 @@ impl FdKind {
             FdKind::PtyMaster => 21,
             #[cfg(target_os = "linux")]
             FdKind::PtySlave => 22,
+            #[cfg(target_os = "linux")]
+            FdKind::Proc => 23,
+            #[cfg(target_os = "linux")]
+            FdKind::ProcDir => 24,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => 11,
         }
@@ -193,7 +207,9 @@ impl FdKind {
             | FdKind::Namespace
             | FdKind::NamespacePath
             | FdKind::PtyMaster
-            | FdKind::PtySlave => false,
+            | FdKind::PtySlave
+            | FdKind::Proc
+            | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -230,7 +246,9 @@ impl FdKind {
             | FdKind::Inotify
             | FdKind::Namespace
             | FdKind::PtyMaster
-            | FdKind::PtySlave => false,
+            | FdKind::PtySlave
+            | FdKind::Proc
+            | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }
@@ -266,7 +284,9 @@ impl FdKind {
             | FdKind::Namespace
             | FdKind::NamespacePath
             | FdKind::PtyMaster
-            | FdKind::PtySlave => false,
+            | FdKind::PtySlave
+            | FdKind::Proc
+            | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => false,
         }

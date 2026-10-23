@@ -1077,8 +1077,8 @@ checks its flags, the descriptor and a caller's siginfo (copied, carrying
 `sig`, a kernel or `tkill` code only to the caller's own thread's pid) in
 `pidfd_send_signal`'s order, then generates for the process as `kill` does,
 so a signal through init's pidfd is `EPERM`: init is root's, as the pinned
-oracle's pid 1 is. Its 6.8 fallback to a `/proc/<pid>` directory
-has nothing to find: the virtual machine mounts no procfs. `process_mrelease`
+oracle's pid 1 is. It also takes a `/proc/<pid>` directory open on a
+process, as 6.8's `tgid_pidfd_to_pid` does. `process_mrelease`
 finds every process alive and not exiting: `EINVAL`. `setns` through a pidfd
 checks its namespace flags (`EINVAL`), then `validate_nsset` through the
 credential gate: init's namespaces need `CAP_SYS_PTRACE` (`EPERM`), the one

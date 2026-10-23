@@ -224,7 +224,8 @@ mod directory_iteration_tests {
     fn a_directory_seeks_like_tmpfs_and_never_answers_espipe() {
         use crate::sud::{release_dir_iteration, seek_dir_iteration};
         use linux_raw_sys::general::{SEEK_CUR, SEEK_DATA, SEEK_END, SEEK_SET};
-        // A number no other test touches; the position table is keyed by it.
+        // A description no other test touches; the position table is keyed
+        // by it.
         let fd = 900;
         assert_eq!(seek_dir_iteration(fd, 0, SEEK_CUR), Some(0));
         assert_eq!(seek_dir_iteration(fd, 3, SEEK_SET), Some(3));

@@ -588,6 +588,7 @@ macro_rules! for_each_scenario {
             proc_pidfd => proc::pidfd,
             proc_pidfd_spawn => proc::pidfd_spawn,
             proc_prctl => proc::prctl,
+            proc_procfs => proc::procfs,
             proc_ptrace => proc::ptrace,
             proc_seccomp => proc::seccomp,
             proc_spawn => proc::spawn,

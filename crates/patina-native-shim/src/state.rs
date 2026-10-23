@@ -146,6 +146,9 @@ pub(crate) fn install_fd(
 /// wakes parked waiters.
 pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
     flock_release(release.desc);
+    // A directory's iteration is its description's (`f_pos`).
+    #[cfg(target_os = "linux")]
+    crate::sud::release_dir_iteration(release.desc);
     thread::locks::release_description_locks(release.desc);
     // An epoll interest is on the FILE (the kernel's `(fd, struct file)` key
     // drops with the file's last reference), whatever kind it was.
@@ -203,6 +206,11 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
         }
         #[cfg(target_os = "linux")]
         FdKind::Pidfd | FdKind::LandlockRuleset => Ok(()),
+        #[cfg(target_os = "linux")]
+        FdKind::Proc | FdKind::ProcDir => {
+            crate::procfs::released(release.handle);
+            Ok(())
+        }
         #[cfg(target_os = "linux")]
         FdKind::Userfaultfd => {
             mem::userfaultfd::released(release.handle);
