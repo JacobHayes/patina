@@ -2,19 +2,7 @@
 
 use super::*;
 #[test]
-fn packets_observe_delivery_time_and_can_reorder() {
-    let mut net = SimNet::new();
-    let left = net.bind("left").unwrap();
-    let right = net.bind("right").unwrap();
-    net.send(left, "right", b"late", 20).unwrap();
-    net.send(left, "right", b"early", 10).unwrap();
-    assert_eq!(net.recv(right, 9).unwrap(), None);
-    assert_eq!(net.recv(right, 10).unwrap().unwrap().bytes, b"early");
-    assert_eq!(net.recv(right, 20).unwrap().unwrap().bytes, b"late");
-}
-
-#[test]
-fn next_delivery_reports_the_earliest_future_arrival_and_ignores_dropped_packets() {
+fn packets_arrive_in_delivery_order_and_next_delivery_ignores_dropped_ones() {
     let mut net = SimNet::builder()
         .base_latency_nanos(5)
         .partition("left", "blocked")
@@ -29,22 +17,14 @@ fn next_delivery_reports_the_earliest_future_arrival_and_ignores_dropped_packets
     assert_eq!(net.next_delivery(right, 0).unwrap(), Some(15));
     assert_eq!(net.next_delivery(right, 15).unwrap(), Some(25));
     assert_eq!(net.next_delivery(right, 25).unwrap(), None);
+    // Packets arrive in delivery-time order, not send order.
+    assert_eq!(net.recv(right, 14).unwrap(), None);
+    assert_eq!(net.recv(right, 15).unwrap().unwrap().bytes, b"early");
+    assert_eq!(net.recv(right, 25).unwrap().unwrap().bytes, b"late");
     assert_eq!(
         net.next_delivery(SocketId(999), 0).unwrap_err().code,
         ErrorCode::InvalidHandle
     );
-}
-
-#[test]
-fn next_delivery_after_close_sees_no_packets() {
-    let mut net = SimNet::new();
-    let sender = net.bind("sender").unwrap();
-    let receiver = net.bind("receiver").unwrap();
-    net.send(sender, "receiver", b"data", 100).unwrap();
-    assert_eq!(net.next_delivery(receiver, 0).unwrap(), Some(100));
-    net.close(receiver).unwrap();
-    let rebound = net.bind("receiver").unwrap();
-    assert_eq!(net.next_delivery(rebound, 0).unwrap(), None);
 }
 
 #[test]
@@ -61,10 +41,18 @@ fn close_keeps_in_flight_sends_and_drops_undelivered_arrivals() {
             .disposition,
         SendDisposition::Unreachable
     );
+
+    // A closed socket's undelivered arrivals do not reach a rebinding.
+    let late = net.bind("late").unwrap();
+    net.send(receiver, "late", b"data", 100).unwrap();
+    assert_eq!(net.next_delivery(late, 0).unwrap(), Some(100));
+    net.close(late).unwrap();
+    let rebound = net.bind("late").unwrap();
+    assert_eq!(net.next_delivery(rebound, 0).unwrap(), None);
 }
 
 #[test]
-fn a_wildcard_bind_receives_traffic_dialed_at_any_address_on_its_port() {
+fn a_wildcard_bind_receives_traffic_on_its_port_unless_an_exact_bind_exists() {
     // The producer-side enabler: ordinary server code binds INADDR_ANY as it
     // would in production, and a client that resolved a name to some virtual
     // IP reaches it by dialing that IP.
@@ -89,17 +77,12 @@ fn a_wildcard_bind_receives_traffic_dialed_at_any_address_on_its_port() {
         net.tcp_recv(accepted.socket, 8, 0).unwrap().unwrap(),
         b"ping"
     );
-}
 
-#[test]
-fn an_exact_binding_always_wins_over_a_wildcard_one() {
-    let mut net = SimNet::new();
-    let wildcard = net.bind("0.0.0.0:80").unwrap();
+    // An exact binding always wins over the wildcard.
     let exact = net.bind("10.0.0.5:80").unwrap();
-    let client = net.bind("10.0.0.9:5000").unwrap();
     net.send(client, "10.0.0.5:80", b"exact", 0).unwrap();
     assert!(
-        net.recv(wildcard, 0).unwrap().is_none(),
+        net.recv(server, 0).unwrap().is_none(),
         "the wildcard socket must not steal an exactly-bound address"
     );
     assert_eq!(net.recv(exact, 0).unwrap().unwrap().bytes, b"exact");
@@ -159,6 +142,8 @@ fn a_shared_binding_hands_each_sender_to_one_fixed_member() {
         ErrorCode::AlreadyBound,
         "an unshared bind cannot join a shared binding"
     );
+    net.bind("addr").unwrap();
+    assert_eq!(net.bind("addr").unwrap_err().code, ErrorCode::AlreadyBound);
     let senders: Vec<SocketId> = (0..8)
         .map(|port| net.bind(&format!("127.0.0.1:{}", 6000 + port)).unwrap())
         .collect();
@@ -313,32 +298,6 @@ fn a_connected_wildcard_member_outranks_an_exact_open_binding() {
 }
 
 #[test]
-fn duplicate_bind_is_rejected() {
-    let mut net = SimNet::new();
-    net.bind("addr").unwrap();
-    assert_eq!(net.bind("addr").unwrap_err().code, ErrorCode::AlreadyBound);
-}
-
-#[test]
-fn tcp_connect_accept_and_transfer_round_trip() {
-    let mut net = SimNet::new();
-    let listener = net.tcp_listen("127.0.0.1:80", 8).unwrap();
-    let client = net
-        .tcp_connect("127.0.0.1:49152", "127.0.0.1:80", 0)
-        .unwrap();
-    let accepted = net.tcp_accept(listener, 0).unwrap().unwrap();
-    assert_eq!(accepted.peer, "127.0.0.1:49152");
-    net.tcp_send(client, b"hello", 0).unwrap();
-    net.tcp_send(client, b" world", 0).unwrap();
-    assert_eq!(
-        net.tcp_recv(accepted.socket, 64, 0).unwrap().unwrap(),
-        b"hello world"
-    );
-    net.tcp_send(accepted.socket, b"reply", 0).unwrap();
-    assert_eq!(net.tcp_recv(client, 64, 0).unwrap().unwrap(), b"reply");
-}
-
-#[test]
 fn tcp_connect_without_listener_or_full_backlog_is_refused() {
     let mut net = SimNet::builder()
         .partition("127.0.0.1:1", "127.0.0.1:2")
@@ -381,7 +340,7 @@ fn tcp_backpressure_caps_the_inbox_and_reads_reopen_it() {
 }
 
 #[test]
-fn tcp_half_close_drains_buffered_data_then_reads_eof() {
+fn tcp_shutdown_drains_then_reads_eof_and_read_shutdown_discards() {
     let mut net = SimNet::new();
     let listener = net.tcp_listen("server", 1).unwrap();
     let client = net.tcp_connect("client", "server", 0).unwrap();
@@ -398,18 +357,13 @@ fn tcp_half_close_drains_buffered_data_then_reads_eof() {
         net.tcp_send(client, b"again", 0).unwrap_err().code,
         ErrorCode::BrokenPipe
     );
-}
 
-#[test]
-fn tcp_shutdown_read_discards_and_peer_sends_are_swallowed() {
-    let mut net = SimNet::new();
-    let listener = net.tcp_listen("server", 1).unwrap();
-    let client = net.tcp_connect("client", "server", 0).unwrap();
-    let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    net.tcp_send(client, b"queued", 0).unwrap();
-    net.tcp_shutdown(server, ShutdownHow::Read).unwrap();
-    assert_eq!(net.tcp_recv(server, 8, 0).unwrap().unwrap(), b"");
-    assert_eq!(net.tcp_send(client, b"discarded", 0).unwrap(), 9);
+    // Shutting down the read side discards what is queued and swallows the
+    // peer's later sends.
+    net.tcp_send(server, b"queued", 0).unwrap();
+    net.tcp_shutdown(client, ShutdownHow::Read).unwrap();
+    assert_eq!(net.tcp_recv(client, 8, 0).unwrap().unwrap(), b"");
+    assert_eq!(net.tcp_send(server, b"discarded", 0).unwrap(), 9);
 }
 
 #[test]
@@ -438,17 +392,4 @@ fn tcp_close_resets_pending_and_gracefully_eofs_established() {
         net.tcp_send(server, b"late", 0).unwrap_err().code,
         ErrorCode::ConnectionReset
     );
-}
-
-#[test]
-fn tcp_next_delivery_reports_future_segments() {
-    let mut net = SimNet::new();
-    let listener = net.tcp_listen("server", 1).unwrap();
-    let client = net.tcp_connect("client", "server", 0).unwrap();
-    let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    net.tcp_send(client, b"later", 100).unwrap();
-    assert_eq!(net.next_delivery(server, 0).unwrap(), Some(100));
-    assert_eq!(net.tcp_recv(server, 16, 99).unwrap(), None);
-    assert_eq!(net.tcp_recv(server, 16, 100).unwrap().unwrap(), b"later");
-    assert_eq!(net.next_delivery(server, 100).unwrap(), None);
 }

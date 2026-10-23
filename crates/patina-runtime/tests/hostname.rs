@@ -42,14 +42,11 @@ fn assert_config_refusal<T: std::fmt::Debug>(result: Result<T, RuntimeError>) {
 }
 
 #[test]
-fn a_default_runtime_reports_the_identity_hostname() {
-    let context = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
-    assert_eq!(context.hostname(), IDENTITY_HOSTNAME);
-    assert_eq!(RuntimeConfig::seeded(0).hostname(), IDENTITY_HOSTNAME);
-}
-
-#[test]
 fn a_configured_hostname_overrides_the_default_directly_and_through_the_control_plane() {
+    let default = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
+    assert_eq!(default.hostname(), IDENTITY_HOSTNAME);
+    drop(default);
+
     let direct =
         Context::from_config(RuntimeConfig::seeded(0).with_hostname(NAME).unwrap()).unwrap();
     assert_eq!(direct.hostname(), NAME);
@@ -126,15 +123,4 @@ fn replay_reproduces_a_recorded_hostname_without_resupplying_it() {
         .with_hostname(IDENTITY_HOSTNAME)
         .unwrap();
     assert_config_refusal(replay(conflicting));
-}
-
-#[test]
-fn a_default_run_records_the_default_hostname() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("default.patina");
-    record(RuntimeConfig::record(3, &path, "hostname-v1"));
-    assert_eq!(
-        TraceBundle::load(&path).unwrap().metadata.hostname,
-        IDENTITY_HOSTNAME
-    );
 }

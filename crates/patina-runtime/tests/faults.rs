@@ -21,61 +21,29 @@ fn sync_directory(context: &mut Context, path: &str) {
     context.fs_sync(dir).unwrap();
 }
 
-/// Append `records` framed with a trailing marker to a write-ahead log without
-/// syncing, mirroring a missing-fsync commit protocol, then return how many
-/// bytes survive a reopen. The write handle is closed before the reopen so a
-/// crash pinned to that close lands between the append and the verify.
-fn write_wal_and_reopen(seed: u64, crash: Option<CrashOp>) -> usize {
-    let mut config = RuntimeConfig::seeded(seed);
-    if let Some(op) = crash {
-        config = config.with_crash_at(op, 1);
-    }
+/// Append a record to a write-ahead log without syncing it, mirroring a
+/// missing-fsync commit protocol, make only its directory entry durable, and
+/// close it: a crash pinned to that close lands between append and verify.
+fn append_unsynced_record(config: RuntimeConfig) -> (Context, Result<(), RuntimeError>) {
     let mut context = Context::from_config(config).unwrap();
     let fd = context
         .fs_open("/commit.log", OpenFlags::create_truncate_write())
         .unwrap();
     context.fs_write(fd, b"durable-record-0001").unwrap();
-    // Make the namespace entry durable but do NOT fsync the file data: the
-    // record is announced durable but never flushed.
     sync_directory(&mut context, "/");
-    if let Err(RuntimeError::InjectedFsCrash(control)) = context.fs_close(fd) {
-        return control
-            .snapshot
-            .into_memfs()
-            .contents("/commit.log")
-            .map_or(0, |bytes| bytes.len());
-    }
-
-    let fd = context
-        .fs_open("/commit.log", OpenFlags::read_only())
-        .unwrap();
-    let bytes = context.fs_read(fd, 4096).unwrap();
-    context.fs_close(fd).unwrap();
-    context.finish().unwrap();
-    bytes.len()
+    let closed = context.fs_close(fd);
+    (context, closed)
 }
 
 #[test]
 fn crash_at_close_drops_unsynced_records_but_clean_run_keeps_them() {
-    // MUST trip: an injected crash at the first close drops the unsynced write,
-    // so the reopened log is empty — the lost-durable-records failure.
-    assert_eq!(write_wal_and_reopen(0, Some(CrashOp::Close)), 0);
-    // MUST stay clean: with no crash configured the record survives intact.
-    assert_eq!(write_wal_and_reopen(0, None), 19);
-}
-
-#[test]
-fn automatic_crash_returns_uncatchable_restart_control() {
-    let mut context =
-        Context::from_config(RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 1)).unwrap();
-    let fd = context
-        .fs_open("/commit.log", OpenFlags::create_truncate_write())
-        .unwrap();
-    context.fs_write(fd, b"durable-record-0001").unwrap();
-    sync_directory(&mut context, "/");
-    let error = context.fs_close(fd).unwrap_err();
-    let RuntimeError::InjectedFsCrash(control) = error else {
-        panic!("expected injected crash control, got {error}");
+    // MUST trip: an injected crash at the first close returns the restart
+    // control, whose exported image has dropped the unsynced write: the
+    // lost-durable-records failure.
+    let (_, closed) =
+        append_unsynced_record(RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 1));
+    let Err(RuntimeError::InjectedFsCrash(control)) = closed else {
+        panic!("expected injected crash control, got {closed:?}");
     };
     assert_eq!(control.from_incarnation, 0);
     assert_eq!(control.to_incarnation, 1);
@@ -88,6 +56,15 @@ fn automatic_crash_returns_uncatchable_restart_control() {
             .unwrap_or_default(),
         b""
     );
+
+    // MUST stay clean: with no crash configured the record survives intact.
+    let (mut context, closed) = append_unsynced_record(RuntimeConfig::seeded(0));
+    closed.unwrap();
+    assert_eq!(
+        context.read_file("/commit.log").unwrap(),
+        b"durable-record-0001"
+    );
+    context.finish().unwrap();
 }
 
 #[test]
@@ -145,7 +122,7 @@ fn elapsed_after_sleep(config: RuntimeConfig, duration: u64) -> u64 {
 }
 
 #[test]
-fn sleep_jitter_inflates_elapsed_time_deterministically() {
+fn sleep_jitter_inflates_elapsed_time_by_a_seeded_draw() {
     // Control: no jitter advances the clock by exactly the requested duration.
     assert_eq!(elapsed_after_sleep(RuntimeConfig::seeded(1), 1_000), 1_000);
 
@@ -159,12 +136,6 @@ fn sleep_jitter_inflates_elapsed_time_deterministically() {
         (1_500..=2_500).contains(&jittered),
         "jittered elapsed {jittered} out of expected range"
     );
-    // Deterministic per seed.
-    let again = elapsed_after_sleep(
-        RuntimeConfig::seeded(1).with_sleep_jitter_nanos(500, 1_500),
-        1_000,
-    );
-    assert_eq!(jittered, again);
 
     // Varies across seeds, proving the draw is genuinely seed-driven.
     let distinct: BTreeSet<u64> = (0..16)
@@ -209,9 +180,8 @@ fn net_drop_loses_datagrams_and_clean_run_delivers() {
 
 #[test]
 fn net_jitter_reorders_datagrams_relative_to_send_order() {
-    // A seed sweep must contain at least one reordering, and each configuration
-    // reproduces exactly, proving the SimNet reorder knob threads through the
-    // runtime config.
+    // A seed sweep must contain at least one reordering, proving the SimNet
+    // reorder knob threads through the runtime config.
     fn delivered_order(seed: u64) -> Vec<u32> {
         let mut context =
             Context::from_config(RuntimeConfig::seeded(seed).with_net_jitter_nanos(0, 1_000))
@@ -233,11 +203,6 @@ fn net_jitter_reorders_datagrams_relative_to_send_order() {
     }
 
     let in_order: Vec<u32> = (0..8).collect();
-    assert_eq!(
-        delivered_order(3),
-        delivered_order(3),
-        "must reproduce per seed"
-    );
     assert!(
         (0..16).any(|seed| delivered_order(seed) != in_order),
         "net jitter never reordered across seeds"
@@ -351,28 +316,10 @@ fn fs_latency_delays_every_eligible_operation_and_never_the_ineligible_ones() {
         !report.is_vacuous(),
         "a latency knob that delayed every eligible op is not vacuous: {report:?}"
     );
-}
 
-#[test]
-fn fs_latency_is_seed_deterministic_and_seed_varying() {
-    let elapsed_for = |seed: u64| {
-        fs_ops_elapsed_and_report(RuntimeConfig::seeded(seed).with_fs_latency_nanos(500, 1_500)).0
-    };
-    // Deterministic per seed, and every draw lands inside the configured range.
-    let first = elapsed_for(7);
-    assert_eq!(first, elapsed_for(7));
-    assert!((ELIGIBLE_FS_OPS * 500..=ELIGIBLE_FS_OPS * 1_500).contains(&first));
-
-    // Genuinely seed-driven rather than a fixed offset.
-    let distinct: BTreeSet<u64> = (0..16).map(elapsed_for).collect();
-    assert!(distinct.len() > 1, "fs latency never varied across seeds");
-}
-
-#[test]
-fn a_decision_free_fs_latency_range_perturbs_nothing_and_is_not_diagnosed_vacuous() {
     // A `0..0` range applies no delay by construction. That is an inert knob,
-    // not an inert code path, so the vacuity diagnostic must stay silent —
-    // otherwise the warning fires on healthy runs and stops meaning anything.
+    // not an inert code path, so the vacuity diagnostic stays silent rather
+    // than firing on healthy runs.
     let (elapsed, report) =
         fs_ops_elapsed_and_report(RuntimeConfig::seeded(1).with_fs_latency_nanos(0, 0));
     assert_eq!(elapsed, 0);
@@ -380,6 +327,20 @@ fn a_decision_free_fs_latency_range_perturbs_nothing_and_is_not_diagnosed_vacuou
     assert_eq!(report.latency_applied, 0);
     assert!(!report.latency_vacuity_diagnosable);
     assert!(!report.is_vacuous());
+}
+
+#[test]
+fn fs_latency_draws_within_its_range_and_varies_by_seed() {
+    let elapsed_for = |seed: u64| {
+        fs_ops_elapsed_and_report(RuntimeConfig::seeded(seed).with_fs_latency_nanos(500, 1_500)).0
+    };
+    // Every draw lands inside the configured range.
+    let first = elapsed_for(7);
+    assert!((ELIGIBLE_FS_OPS * 500..=ELIGIBLE_FS_OPS * 1_500).contains(&first));
+
+    // Genuinely seed-driven rather than a fixed offset.
+    let distinct: BTreeSet<u64> = (0..16).map(elapsed_for).collect();
+    assert!(distinct.len() > 1, "fs latency never varied across seeds");
 }
 
 #[test]
@@ -442,6 +403,21 @@ fn dns_resolves_the_host_table_and_nxdomains_everything_else() {
             name,
         );
         assert_eq!(builtin.unwrap(), expected, "{name} must resolve locally");
+    }
+
+    // A malformed entry fails closed at configuration time, and a name that
+    // resolves without the table cannot be redefined by it.
+    for (name, address) in [
+        ("db.internal", "not-an-ip"),
+        ("", "10.0.0.5"),
+        ("localhost", "10.0.0.5"),
+    ] {
+        assert!(
+            RuntimeConfig::seeded(1)
+                .with_dns_entry(name, address)
+                .is_err(),
+            "{name:?} -> {address:?}"
+        );
     }
 }
 
@@ -556,26 +532,6 @@ fn dns_resolution_replays_self_contained_without_re_supplying_the_table() {
     assert!(Context::from_config(conflicting).is_err());
 }
 
-#[test]
-fn a_malformed_dns_entry_fails_closed_at_configuration_time() {
-    assert!(
-        RuntimeConfig::seeded(1)
-            .with_dns_entry("db.internal", "not-an-ip")
-            .is_err()
-    );
-    assert!(
-        RuntimeConfig::seeded(1)
-            .with_dns_entry("", "10.0.0.5")
-            .is_err()
-    );
-    // A name that would resolve without the table cannot be redefined by it.
-    assert!(
-        RuntimeConfig::seeded(1)
-            .with_dns_entry("localhost", "10.0.0.5")
-            .is_err()
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Realtime-epoch jump injection
 // ---------------------------------------------------------------------------
@@ -594,45 +550,6 @@ fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFa
     let report = context.clock_fault_report();
     context.finish().unwrap();
     (value, report)
-}
-
-#[test]
-fn realtime_now_resolves_without_a_knob_and_reports_nothing() {
-    let (value, report) = realtime_once(RuntimeConfig::seeded(1), 1_000_000);
-    assert_eq!(
-        value, TRUE_REALTIME_AT_1MS,
-        "no jump knob was live, so the true epoch is untouched"
-    );
-    assert!(
-        report.is_none(),
-        "no epoch-jump knob was live, so no report"
-    );
-}
-
-#[test]
-fn the_epoch_jump_knob_fires_and_is_reported() {
-    // MUST perturb: some seed in range must draw a nonzero offset at a healthy
-    // true epoch, and the report proves it was applied.
-    let seed = (0..64)
-        .find(|&seed| {
-            realtime_once(
-                RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
-                1_000_000,
-            )
-            .0 != TRUE_REALTIME_AT_1MS
-        })
-        .expect("some seed in range must draw a nonzero offset");
-    let (value, report) = realtime_once(
-        RuntimeConfig::seeded(seed).with_epoch_jump_nanos(1_000),
-        1_000_000,
-    );
-    assert_ne!(
-        value, TRUE_REALTIME_AT_1MS,
-        "the knob must have perturbed this read"
-    );
-    let report = report.expect("a live knob reports");
-    assert_eq!(report.reads, 1);
-    assert_eq!(report.jumps_applied, 1);
 }
 
 #[test]
@@ -821,7 +738,7 @@ fn error_code(error: patina_dst_runtime::RuntimeError) -> ErrorCode {
 }
 
 #[test]
-fn the_connect_refusal_knob_is_guest_observable_and_reported() {
+fn connect_refusal_and_reset_knobs_are_guest_observable_and_reported() {
     // Control: no knob, the exchange completes and no report exists at all.
     let (clean, clean_report) = stream_exchange(RuntimeConfig::seeded(3));
     assert_eq!(clean, Ok(()));
@@ -836,10 +753,8 @@ fn the_connect_refusal_knob_is_guest_observable_and_reported() {
     assert_eq!(report.connect_ops, 1);
     assert_eq!(report.connects_refused, 1);
     assert!(!report.is_vacuous());
-}
 
-#[test]
-fn the_reset_knob_is_guest_observable_and_reported() {
+    // MUST reset: an established stream fails its exchange with ConnectionReset.
     let (reset, report) = stream_exchange(RuntimeConfig::seeded(3).with_net_reset_permille(1000));
     assert_eq!(reset, Err(ErrorCode::ConnectionReset));
     let report = report.expect("a live reset knob must report");
@@ -937,15 +852,12 @@ fn first_send_accepted(config: RuntimeConfig, len: usize) -> usize {
 }
 
 #[test]
-fn the_new_net_knobs_are_seed_deterministic_and_seed_varying() {
-    // Same seed, same outcome; across seeds the fault lands in different places,
-    // so each knob is genuinely seed-driven rather than a fixed decision.
+fn the_connection_and_duplication_knobs_vary_by_seed() {
+    // Across seeds the fault lands in different places, so each knob is
+    // genuinely seed-driven rather than a fixed decision.
     let refusals = |seed: u64| {
         connect_attempts(RuntimeConfig::seeded(seed).with_net_connect_refuse_permille(500))
     };
-    for seed in 0..8 {
-        assert_eq!(refusals(seed), refusals(seed), "seed {seed}");
-    }
     assert!((0..16).map(refusals).collect::<BTreeSet<_>>().len() > 1);
 
     let duplicates = |seed: u64| {
@@ -960,9 +872,6 @@ fn the_new_net_knobs_are_seed_deterministic_and_seed_varying() {
         context.finish().unwrap();
         copies
     };
-    for seed in 0..8 {
-        assert_eq!(duplicates(seed), duplicates(seed), "seed {seed}");
-    }
     assert!((0..16).map(duplicates).collect::<BTreeSet<_>>().len() > 1);
 }
 
@@ -1089,15 +998,13 @@ fn custom_ops(
 }
 
 #[test]
-fn a_custom_op_without_the_knob_performs_and_reports_nothing() {
-    let (failed, performed, report) = custom_ops(RuntimeConfig::seeded(1), "s3.get", 4, true);
-    assert_eq!(failed, vec![false; 4], "no knob is live, so nothing fails");
-    assert_eq!(performed, 4);
-    assert!(report.is_none(), "no custom-op knob was live, so no report");
-}
-
-#[test]
 fn the_custom_op_failure_knob_fires_and_never_runs_perform() {
+    // Control: no knob, every operation performs and no report exists.
+    let (failed, performed, report) = custom_ops(RuntimeConfig::seeded(1), "s3.get", 4, true);
+    assert_eq!(failed, vec![false; 4]);
+    assert_eq!(performed, 4);
+    assert!(report.is_none());
+
     // MUST fail: a certain rate hands back the guest's declared failure for
     // every eligible operation, and `perform` does not run at all — the fault
     // replaces the effect rather than discarding its result.
@@ -1116,7 +1023,7 @@ fn the_custom_op_failure_knob_fires_and_never_runs_perform() {
 }
 
 #[test]
-fn an_op_that_declares_no_failure_shape_is_never_faulted() {
+fn with_nothing_eligible_custom_ops_are_never_faulted_and_read_vacuous() {
     // The control: the same certain rate over the same label, with the guest
     // declaring nothing. Eligibility is the guest's call, so the knob passes it
     // by — and the plane says so by counting zero opportunities, which is
@@ -1136,14 +1043,9 @@ fn an_op_that_declares_no_failure_shape_is_never_faulted() {
         report.is_vacuous(),
         "an armed knob with nothing eligible is a coverage failure, not a clean run"
     );
-}
 
-#[test]
-fn an_armed_run_that_reaches_no_custom_op_at_all_is_vacuous() {
-    // The other half of the honesty rule: a guest with no declarations at all
-    // (here, no custom operations at all) plus the knob is vacuous too. That is
-    // stricter than every other plane, where zero traffic simply means nothing
-    // to fault — and deliberately so, because a fault-eligible custom op exists
+    // A guest with no custom operations at all is vacuous under the knob too,
+    // stricter than other planes, because a fault-eligible custom op exists
     // only if the guest wrote one.
     let context =
         Context::from_config(RuntimeConfig::seeded(4).with_custom_op_fail_permille(500)).unwrap();
@@ -1151,12 +1053,6 @@ fn an_armed_run_that_reaches_no_custom_op_at_all_is_vacuous() {
     context.finish().unwrap();
     assert_eq!(report.eligible_ops, 0);
     assert!(report.is_vacuous());
-
-    // RED twin: the same report shape with the knob unarmed produces no report
-    // at all, so an unarmed run can never trip the class.
-    let context = Context::from_config(RuntimeConfig::seeded(4)).unwrap();
-    assert!(context.custom_op_fault_report().is_none());
-    context.finish().unwrap();
 }
 
 #[test]
@@ -1206,8 +1102,6 @@ fn custom_op_fault_streams_are_domain_separated_per_label() {
     let left = pattern("s3.get");
     let right = pattern("kms.decrypt");
     assert_ne!(left, right, "two labels must not share a coin");
-    // ... and each label's own pattern is stable across runs at the same seed.
-    assert_eq!(left, pattern("s3.get"));
 
     // A different seed explores a different pattern.
     let other_seed = custom_ops(

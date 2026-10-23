@@ -2,8 +2,8 @@
 
 use super::*;
 use patina_dst_abi::{
-    ClockKind, Datagram, Fd, Operation, Outcome, SendDisposition, SendReport, SignalTarget,
-    SocketId, TaskId,
+    ClockKind, Datagram, EffectError, ErrorCode, Fd, FsAllocateMode, FsEntryKind, FsMetadata,
+    Operation, Outcome, SeekWhence, SendDisposition, SendReport, SignalTarget, SocketId, TaskId,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -14,11 +14,17 @@ pub(super) fn operation() -> Operation {
     }
 }
 
+/// The run facts a current bundle must state: epoch, boot origin, node name,
+/// CPU count and time model are required, the CPU count must be one a run can
+/// have, and a bundle from another time model is refused by that model.
 #[test]
-fn a_current_bundle_must_state_its_run_facts() {
-    // Epoch, boot origin, node name, CPU count and time model are required: a
-    // bundle missing any does not parse.
+fn a_current_bundle_must_state_valid_run_facts() {
     let bytes = include_bytes!("../tests/fixtures/format-22.patina");
+    let edited = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        edit(value["metadata"].as_object_mut().unwrap());
+        TraceBundle::from_slice(&serde_json::to_vec(&value).unwrap())
+    };
     for field in [
         "realtime_epoch_nanos",
         "boot_origin_nanos",
@@ -26,73 +32,63 @@ fn a_current_bundle_must_state_its_run_facts() {
         "cpus",
         "time_model",
     ] {
-        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        assert!(
-            value["metadata"]
-                .as_object_mut()
-                .unwrap()
-                .remove(field)
-                .is_some()
-        );
-        let bytes = serde_json::to_vec(&value).unwrap();
         assert!(
             matches!(
-                TraceBundle::from_slice(&bytes),
+                edited(&|metadata| assert!(metadata.remove(field).is_some())),
                 Err(TraceError::Parse { .. })
             ),
             "a bundle without {field} must not parse"
         );
     }
-}
-
-#[test]
-fn a_bundle_must_state_a_cpu_count_a_run_can_have() {
-    let bytes = include_bytes!("../tests/fixtures/format-22.patina");
     for cpus in [0, patina_dst_abi::MAX_CPUS + 1] {
-        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        value["metadata"]["cpus"] = cpus.into();
-        let bytes = serde_json::to_vec(&value).unwrap();
         assert!(
-            matches!(TraceBundle::from_slice(&bytes), Err(TraceError::Invalid(_))),
+            matches!(
+                edited(&|metadata| {
+                    metadata.insert("cpus".into(), cpus.into());
+                }),
+                Err(TraceError::Invalid(_))
+            ),
             "a bundle stating {cpus} CPUs must be invalid"
         );
     }
-    for cpus in [1, patina_dst_abi::MAX_CPUS] {
-        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        value["metadata"]["cpus"] = cpus.into();
-        let bytes = serde_json::to_vec(&value).unwrap();
-        let bundle = TraceBundle::from_slice(&bytes).unwrap();
-        assert_eq!(bundle.metadata.cpus, cpus);
-    }
-}
-
-#[test]
-fn a_bundle_from_another_time_model_is_refused() {
-    let bytes = include_bytes!("../tests/fixtures/format-22.patina");
+    let bundle = edited(&|metadata| {
+        metadata.insert("cpus".into(), patina_dst_abi::MAX_CPUS.into());
+    })
+    .unwrap();
+    assert_eq!(bundle.metadata.cpus, patina_dst_abi::MAX_CPUS);
     for model in [
-        0,
         patina_dst_abi::TIME_MODEL - 1,
         patina_dst_abi::TIME_MODEL + 1,
     ] {
-        let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        value["metadata"]["time_model"] = model.into();
-        let bytes = serde_json::to_vec(&value).unwrap();
         assert!(matches!(
-            TraceBundle::from_slice(&bytes),
+            edited(&|metadata| {
+                metadata.insert("time_model".into(), model.into());
+            }),
             Err(TraceError::UnsupportedTimeModel { found }) if found == model
         ));
     }
 }
 
-#[test]
-fn memory_operations_fixture_decodes_and_replays() {
-    // Checked-in feature fixture pins the page cache's and anonymous
-    // files' operations and one of the filesystem family's.
-    let bytes = include_bytes!("../tests/fixtures/format-22-memory.patina");
+/// Decode a checked-in feature fixture, require it to be the canonical
+/// encoding, and strictly replay `expected` from it.
+fn assert_fixture_replays(bytes: &[u8], expected: impl IntoIterator<Item = (Operation, Outcome)>) {
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
-    let expected = [
+    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
+    for (operation, outcome) in expected {
+        assert_eq!(replay.expect(&operation).unwrap(), outcome);
+    }
+    replay.finish().unwrap();
+}
+
+/// Checked-in feature fixtures pin the on-disk encoding of each operation
+/// family: the page cache's and anonymous files', a sparse file's allocation
+/// and seek whences, the network family with a marked datagram, and both
+/// signal target encodings.
+#[test]
+fn feature_fixtures_decode_canonically_and_replay() {
+    let memory = [
         (
             Operation::FsCreateAnonymous {
                 name: "buffer".into(),
@@ -127,26 +123,12 @@ fn memory_operations_fixture_decodes_and_replays() {
             Outcome::Unit,
         ),
     ];
-    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
-    for (operation, outcome) in expected {
-        assert_eq!(replay.expect(&operation).unwrap(), outcome);
-    }
-    replay.finish().unwrap();
-}
+    assert_fixture_replays(
+        include_bytes!("../tests/fixtures/format-22-memory.patina"),
+        memory,
+    );
 
-#[test]
-fn sparse_file_operations_fixture_decodes_and_replays() {
-    // Checked-in feature fixture pins a file's allocation at the boundary:
-    // `fs_allocate`'s mode, `fs_seek`'s data and hole whences and their
-    // `ENXIO` answer, and the allocated blocks a metadata outcome carries.
-    use patina_dst_abi::{
-        EffectError, ErrorCode, FsAllocateMode, FsEntryKind, FsMetadata, SeekWhence,
-    };
-    let bytes = include_bytes!("../tests/fixtures/format-22-sparse.patina");
-    let bundle = TraceBundle::from_slice(bytes).unwrap();
-    bundle.validate().unwrap();
-    assert_eq!(bundle.to_bytes().unwrap(), bytes);
-    let expected = [
+    let sparse = [
         (
             Operation::FsAllocate {
                 fd: Fd(3),
@@ -189,19 +171,12 @@ fn sparse_file_operations_fixture_decodes_and_replays() {
             }),
         ),
     ];
-    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
-    for (operation, outcome) in expected {
-        assert_eq!(replay.expect(&operation).unwrap(), outcome);
-    }
-    replay.finish().unwrap();
-}
+    assert_fixture_replays(
+        include_bytes!("../tests/fixtures/format-22-sparse.patina"),
+        sparse,
+    );
 
-#[test]
-fn network_operations_fixture_decodes_and_replays() {
-    // Checked-in feature fixture pins the network family's operations and
-    // a marked datagram's encoding.
-    let bytes = include_bytes!("../tests/fixtures/format-22-network.patina");
-    let expected = [
+    let network = [
         (
             Operation::NetBindShared {
                 address: "127.0.0.1:80".into(),
@@ -254,44 +229,16 @@ fn network_operations_fixture_decodes_and_replays() {
             })),
         ),
     ];
-    // The fixture is exactly what a recording of these decisions writes.
-    let recorded = TraceBundle::new(
-        RunMetadata::new(42, "fixture-fingerprint", 0, "patina").with_boot_origin_nanos(1000),
-        expected
-            .iter()
-            .enumerate()
-            .map(|(sequence, (operation, outcome))| {
-                TraceEvent::new(sequence as u64, operation.clone(), outcome.clone())
-            })
-            .collect(),
+    assert_fixture_replays(
+        include_bytes!("../tests/fixtures/format-22-network.patina"),
+        network,
     );
-    assert_eq!(
-        String::from_utf8(recorded.to_bytes().unwrap()).unwrap(),
-        String::from_utf8(bytes.to_vec()).unwrap()
-    );
-    let bundle = TraceBundle::from_slice(bytes).unwrap();
-    bundle.validate().unwrap();
-    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
-    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
-    for (operation, outcome) in expected {
-        assert_eq!(replay.expect(&operation).unwrap(), outcome);
-    }
-    replay.finish().unwrap();
-}
 
-#[test]
-fn signal_operations_fixture_decodes_and_replays() {
-    // Checked-in feature fixture pins both target encodings and every field.
     const SIGUSR1: u8 = 10;
     const SIGUSR2: u8 = 12;
     const SI_USER: i32 = 0;
     const SI_TKILL: i32 = -6;
-    let bytes = include_bytes!("../tests/fixtures/format-22-signals.patina");
-    let bundle = TraceBundle::from_slice(bytes).unwrap();
-    bundle.validate().unwrap();
-    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
-    assert_eq!(bundle.to_bytes().unwrap(), bytes);
-    let expected = [
+    let signals = [
         Operation::SignalGenerated {
             seq: 1,
             sig: SIGUSR1,
@@ -307,11 +254,10 @@ fn signal_operations_fixture_decodes_and_replays() {
             value: 123,
         },
     ];
-    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
-    for operation in expected {
-        assert_eq!(replay.expect(&operation).unwrap(), Outcome::Unit);
-    }
-    replay.finish().unwrap();
+    assert_fixture_replays(
+        include_bytes!("../tests/fixtures/format-22-signals.patina"),
+        signals.map(|operation| (operation, Outcome::Unit)),
+    );
 }
 
 #[test]
@@ -320,27 +266,31 @@ fn records_loads_and_strictly_replays() {
     let path = directory.path().join("run.patina");
     let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
     recorder.observe(operation(), Outcome::U64(10));
+    recorder.observe(Operation::FsDup { fd: Fd(3) }, Outcome::Handle(Fd(4)));
     recorder.finish(&path).unwrap();
-
-    let mut replay = Replayer::open(&path, "fingerprint").unwrap();
-    assert_eq!(replay.root_seed(), 7);
-    assert_eq!(replay.expect(&operation()).unwrap(), Outcome::U64(10));
-    replay.finish().unwrap();
-    assert_eq!(
-        TraceBundle::load(&path).unwrap().format_version,
-        TRACE_FORMAT_VERSION
-    );
     assert_eq!(
         fs::read_dir(directory.path()).unwrap().count(),
         1,
         "atomic write must not leave a temporary file"
     );
+    let bundle = TraceBundle::load(&path).unwrap();
+    assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
+    assert_eq!(bundle.to_bytes().unwrap(), fs::read(&path).unwrap());
+
+    let mut replay = Replayer::open(&path, "fingerprint").unwrap();
+    assert_eq!(replay.root_seed(), 7);
+    assert_eq!(replay.expect(&operation()).unwrap(), Outcome::U64(10));
+    assert_eq!(
+        replay.expect(&Operation::FsDup { fd: Fd(3) }).unwrap(),
+        Outcome::Handle(Fd(4))
+    );
+    replay.finish().unwrap();
 }
 
 /// An abandoned trace must never be replayable as if it were a recording.
 /// The marker is what a reader sees in place of a bundle, so loading one
-/// has to refuse by NAME — "the recorder abandoned this trace" — rather
-/// than as an unexplained parse failure.
+/// refuses it as an incomplete trace carrying its reason, rather than as an
+/// unexplained parse failure.
 #[test]
 fn an_abandoned_trace_marker_is_refused_by_name() {
     let directory = tempdir().unwrap();
@@ -361,11 +311,8 @@ fn an_abandoned_trace_marker_is_refused_by_name() {
     let error = TraceBundle::load(&path).unwrap_err();
     let message = error.to_string();
     assert!(
-        matches!(&error, TraceError::Incomplete { .. })
-            && message.contains("abandoned this trace")
-            && message.contains("resource-limit")
-            && message.contains("cannot be replayed"),
-        "an abandoned trace must be refused by name; got {message}"
+        matches!(&error, TraceError::Incomplete { .. }) && message.contains("resource-limit"),
+        "an abandoned trace must be refused as one, with its reason; got {message}"
     );
     assert!(
         TraceBundle::from_slice(&marker).is_err(),

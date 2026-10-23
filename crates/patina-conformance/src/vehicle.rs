@@ -40,9 +40,19 @@ impl Vehicle {
         Vehicle::Raw,
     ];
 
-    /// The vehicles that issue the row's number: a scenario whose rows glibc
-    /// has no wrapper for, where the libc spelling would be `syscall(2)`
-    /// again.
+    /// The vehicles a scenario runs through unless the trapped instruction
+    /// is its subject: the libc door and `syscall(2)`. Under patina `raw`
+    /// reaches the very dispatcher `syscall(2)` does (`patina_sud_dispatch`),
+    /// so for a row's answer it would repeat the `syscall` leg; a scenario
+    /// adds it ([`Vehicle::ALL`], [`Vehicle::KERNEL`]) where what it observes
+    /// is the trap itself: a signal delivered to, interrupting or restarting
+    /// a trapped call, the frames and sigreturn around it, a thread's own
+    /// exit. A scenario whose rows glibc has no wrapper for, where the libc
+    /// spelling would be `syscall(2)` again, runs through `syscall` alone.
+    pub const DOORS: &'static [Vehicle] = &[Vehicle::Libc, Vehicle::Syscall];
+
+    /// The vehicles that issue the row's number, the trapped instruction
+    /// among them: a trap-entry scenario whose rows glibc has no wrapper for.
     pub const KERNEL: &'static [Vehicle] = &[
         Vehicle::Syscall,
         #[cfg(target_arch = "x86_64")]
@@ -741,7 +751,7 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             // make the pre-run import audit refuse the whole probe binary, so
             // the libc spelling is glibc's own `syscall(2)` until the shim
             // defines it. A scenario made only of such rows runs through
-            // `Vehicle::KERNEL`, not `syscall(2)` twice.
+            // the `syscall` vehicle alone, not `syscall(2)` twice.
             Syscall::N_brk
             | Syscall::N_mincore
             | Syscall::N_mq_open

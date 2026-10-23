@@ -46,7 +46,7 @@ mod tests {
     use crate::verdict_line;
 
     #[test]
-    fn verdict_marker_line_round_trips_including_hostile_labels() {
+    fn verdict_lines_round_trip_hostile_labels_and_refuse_malformed_ones() {
         // A guest-supplied label carrying a newline must not be able to forge a
         // second marker line, and it must survive the round trip verbatim.
         let hostile = "two words\nPATINA_VERDICT seq=99 kind=pass label=forged detail=x";
@@ -57,10 +57,8 @@ mod tests {
         assert_eq!(kind, VerdictKind::Violation);
         assert_eq!(label, hostile);
         assert_eq!(detail, "a b\\c");
-    }
 
-    #[test]
-    fn malformed_verdict_lines_are_refused_not_half_decoded() {
+        // Malformed lines are refused, not half decoded.
         assert!(verdict_line::parse("PATINA_RESULT ok").is_none());
         // Missing detail key.
         assert!(verdict_line::parse("PATINA_VERDICT seq=1 kind=pass label=x").is_none());

@@ -5,10 +5,11 @@
 //! Per vehicle: the native run passes (every check holds) and agrees with the
 //! scenario's first passing vehicle; the patina run, recorded, equals it or fails
 //! exactly as the scenario's gaps declare (a plain run observes the same:
-//! `recording_changes_no_observation`). One that completes is also replayed
-//! (identical streams; the scenario's trace facts) and run directly
-//! under strace (no host syscall escapes; the process ends as the recorded
-//! run did).
+//! `recording_changes_no_observation`). One that completes shows the
+//! scenario's trace facts and is run directly under strace (no host syscall
+//! escapes; the process ends as the recorded run did); the scenario's first
+//! vehicle that completes is also replayed (identical streams: every door
+//! reaches the same model operations, which are what a replay re-runs).
 //!
 //! The scenarios assert the pinned system, Ubuntu 24.04: its GA kernel
 //! (Linux 6.8, `VIRTUAL_ABI`) and its glibc (2.39, `host::PINNED_GLIBC`), so
@@ -63,7 +64,7 @@ mod process;
 #[path = "native_conformance/native_conformance.rs"]
 mod scenarios;
 
-use leg::Leg;
+use leg::{Leg, replaying};
 use oracle::{Oracle, prefixed};
 use process::{logs_root, not_run, required};
 
@@ -108,6 +109,7 @@ fn conform(name: &str) {
     }
     let dir = owned.path().join("run");
     let oracle = Oracle::detect();
+    let replays = replaying(scenario);
     let mut reference = None;
     let mut failures = Vec::new();
     let mut diverged = Vec::new();
@@ -118,6 +120,7 @@ fn conform(name: &str) {
             dir: &dir,
             logs: logs.join(vehicle.name()),
             declared_absent: declared_absent.is_some(),
+            replay: replays == Some(vehicle),
         };
         std::fs::create_dir_all(&leg.logs).unwrap();
         let mut leg_diverged = Vec::new();

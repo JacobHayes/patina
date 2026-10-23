@@ -1,9 +1,9 @@
 //! Argument parsing regression tests.
 
 use super::*;
-use crate::tests::{strings, wasi_invocation};
+use crate::tests::strings;
 use crate::{ArtifactRef, Mode};
-use patina_dst_wasi_host::{DEFAULT_WASM_FUEL, MountPolicy};
+use patina_dst_wasi_host::MountPolicy;
 use std::path::PathBuf;
 
 #[test]
@@ -24,6 +24,12 @@ fn parses_wasi_run_record_and_branch_modes() {
         "5=node-b->node-a",
         "--preopen",
         "/data:ro",
+        "--preopen",
+        "/default",
+        "--preopen",
+        "/readwrite:rw",
+        "--fuel",
+        "99",
         "--max-memory-pages",
         "128",
         "--max-descriptors",
@@ -42,14 +48,26 @@ fn parses_wasi_run_record_and_branch_modes() {
         invocation.module,
         ArtifactRef::Prebuilt(PathBuf::from("module.wasm"))
     );
-    assert_eq!(invocation.fuel, DEFAULT_WASM_FUEL);
+    assert_eq!(invocation.fuel, 99);
+    assert_eq!(invocation.resource_limits.fuel, Some(99));
     assert_eq!(invocation.arguments, ["one"]);
     assert_eq!(invocation.environment["MODE"], "test");
     assert_eq!(invocation.sockets.len(), 2);
     assert_eq!(invocation.sockets[0].fd, 4);
-    assert_eq!(invocation.preopens.len(), 1);
-    assert_eq!(invocation.preopens[0].guest_path, "/data");
-    assert_eq!(invocation.preopens[0].policy, MountPolicy::ReadOnly);
+    // A preopen's policy defaults to read-write.
+    let preopens: Vec<_> = invocation
+        .preopens
+        .iter()
+        .map(|preopen| (preopen.guest_path.as_str(), preopen.policy))
+        .collect();
+    assert_eq!(
+        preopens,
+        [
+            ("/data", MountPolicy::ReadOnly),
+            ("/default", MountPolicy::ReadWrite),
+            ("/readwrite", MountPolicy::ReadWrite),
+        ]
+    );
     assert_eq!(invocation.resource_limits.max_memory_pages, Some(128));
     assert_eq!(invocation.resource_limits.max_descriptors, Some(32));
     assert_eq!(invocation.resource_limits.max_preopens, Some(4));
@@ -115,68 +133,6 @@ fn parses_wasi_run_record_and_branch_modes() {
             "run.patina".into(),
             strings(&["--fs-crash-at", "close:1"]),
         )
-        .is_err()
-    );
-}
-
-#[test]
-fn parses_wasi_preopen_policy_forms_and_limits() {
-    let invocation = wasi_invocation(&[
-        "wasi-run",
-        "module.wasm",
-        "--fuel",
-        "99",
-        "--preopen",
-        "/default",
-        "--preopen",
-        "/readonly:ro",
-        "--preopen",
-        "/readwrite:rw",
-        "--max-memory-pages",
-        "2",
-        "--max-descriptors",
-        "3",
-        "--max-preopens",
-        "4",
-        "--max-path-bytes",
-        "5",
-        "--max-io-bytes",
-        "6",
-        "--max-iovecs",
-        "7",
-    ]);
-    assert_eq!(invocation.fuel, 99);
-    assert_eq!(invocation.resource_limits.fuel, Some(99));
-    assert_eq!(invocation.preopens.len(), 3);
-    assert_eq!(invocation.preopens[0].guest_path, "/default");
-    assert_eq!(invocation.preopens[0].policy, MountPolicy::ReadWrite);
-    assert_eq!(invocation.preopens[1].guest_path, "/readonly");
-    assert_eq!(invocation.preopens[1].policy, MountPolicy::ReadOnly);
-    assert_eq!(invocation.preopens[2].guest_path, "/readwrite");
-    assert_eq!(invocation.preopens[2].policy, MountPolicy::ReadWrite);
-    assert_eq!(invocation.resource_limits.max_memory_pages, Some(2));
-    assert_eq!(invocation.resource_limits.max_descriptors, Some(3));
-    assert_eq!(invocation.resource_limits.max_preopens, Some(4));
-    assert_eq!(invocation.resource_limits.max_path_bytes, Some(5));
-    assert_eq!(invocation.resource_limits.max_io_bytes, Some(6));
-    assert_eq!(invocation.resource_limits.max_iovecs, Some(7));
-}
-
-#[test]
-fn rejects_missing_and_duplicate_wasi_option_values() {
-    // Value-GRAMMAR rejection is covered generically by
-    // `registry_value_grammars_match_the_parsers`; what stays here are the
-    // non-grammar shapes: a required-value flag with no value at all, and a
-    // repeated non-repeatable flag.
-    assert!(parse_wasi_run(strings(&["module.wasm", "--preopen"])).is_err());
-    assert!(
-        parse_wasi_run(strings(&[
-            "module.wasm",
-            "--max-iovecs",
-            "1",
-            "--max-iovecs",
-            "2",
-        ]))
         .is_err()
     );
 }

@@ -140,22 +140,6 @@ fn replay_reproduces_a_recorded_non_default_epoch_without_resupplying_it() {
 }
 
 #[test]
-fn a_default_epoch_run_records_the_default_epoch() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("default.patina");
-    let recorded = record(RuntimeConfig::record(3, &path, "epoch-v1"));
-    assert_eq!(
-        recorded,
-        DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS + STEP
-    );
-    let bundle = TraceBundle::load(&path).unwrap();
-    assert_eq!(
-        bundle.metadata.realtime_epoch_nanos,
-        DEFAULT_REALTIME_EPOCH_NANOS
-    );
-}
-
-#[test]
 fn an_installed_clock_owns_its_epoch_and_is_reconciled_like_a_configured_one() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("clock.patina");

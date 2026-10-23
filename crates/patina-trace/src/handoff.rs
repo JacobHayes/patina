@@ -509,16 +509,6 @@ mod tests {
     }
 
     #[test]
-    fn handoff_seal_key_debug_is_redacted() {
-        let text = format!("{:?}", key());
-        assert_eq!(text, "HandoffSealKey([redacted; 32])");
-        assert!(
-            !text.contains("07"),
-            "debug output must not leak key bytes: {text}"
-        );
-    }
-
-    #[test]
     fn handoff_seal_open_is_canonical_and_validates_snapshot() {
         let encoded = handoff().seal(&key()).unwrap();
         let verified = IncarnationHandoff::open(&encoded, &key()).unwrap();
@@ -538,10 +528,15 @@ mod tests {
 
         let repeated = handoff().seal(&key()).unwrap();
         assert_eq!(encoded, repeated, "handoff encoding must be canonical");
+        let debug = format!("{:?}", key());
+        assert!(
+            !debug.contains("07"),
+            "debug output must not leak key bytes: {debug}"
+        );
     }
 
     #[test]
-    fn handoff_refuses_corruption_wrong_key_and_trailing_bytes() {
+    fn handoff_refuses_corruption_wrong_key_trailing_bytes_and_other_versions() {
         let encoded = handoff().seal(&key()).unwrap();
         let mut corrupted = encoded.clone();
         let payload_byte = MAGIC.len() + 4 + 8 + 12;
@@ -554,17 +549,13 @@ mod tests {
             IncarnationHandoff::open(&encoded, &HandoffSealKey::from_bytes([8; 32])),
             Err(HandoffError::SealMismatch)
         ));
-        let mut trailing = encoded;
+        let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(matches!(
             IncarnationHandoff::open(&trailing, &key()),
             Err(HandoffError::TrailingBytes)
         ));
-    }
-
-    #[test]
-    fn handoff_of_another_layout_version_is_refused_by_its_version() {
-        let mut encoded = handoff().seal(&key()).unwrap();
+        let mut encoded = encoded;
         let older = VERSION - 1;
         encoded[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&older.to_le_bytes());
         assert!(matches!(
@@ -574,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn handoff_refuses_digest_mismatch_even_with_matching_seal() {
+    fn handoff_validates_its_snapshot_even_under_a_matching_seal() {
         let mut encoded = handoff().seal(&key()).unwrap();
         let digest_offset = encoded.len() - SEAL_LEN - DIGEST_LEN;
         encoded[digest_offset] ^= 0x80;
@@ -585,10 +576,8 @@ mod tests {
             IncarnationHandoff::open(&encoded, &key()),
             Err(HandoffError::SnapshotDigestMismatch)
         ));
-    }
 
-    #[test]
-    fn handoff_refuses_bad_nested_snapshot() {
+        // A correctly sealed and digested payload whose snapshot is not one.
         let mut payload = Vec::new();
         encode_string(&mut payload, "fingerprint").unwrap();
         payload.extend_from_slice(&0u64.to_le_bytes());
@@ -633,11 +622,8 @@ mod tests {
         let mut after_garbage = MAGIC.to_vec();
         after_garbage.extend_from_slice(&channel);
         assert_eq!(CrashReport::decode_all(&after_garbage), None);
-    }
 
-    /// A long reason is cut so one incarnation's reports fit a pipe buffer.
-    #[test]
-    fn a_crash_report_reason_is_bounded() {
+        // A long reason is cut so one incarnation's reports fit a pipe buffer.
         let encoded = CrashReport::Failed("é".repeat(MAX_CRASH_REPORT_REASON_BYTES)).encode();
         let reports = CrashReport::decode_all(&encoded);
         let Some([CrashReport::Failed(reason)]) = reports.as_deref() else {

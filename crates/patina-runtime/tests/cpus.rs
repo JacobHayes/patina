@@ -79,7 +79,7 @@ fn cpu_counts_are_bounded_by_the_machine_cap() {
 }
 
 #[test]
-fn a_replay_adopts_the_recorded_cpu_count() {
+fn a_replay_adopts_the_recorded_cpu_count_and_refuses_another() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("cpus.patina");
     let recorded = RuntimeConfig::record(3, &path, "cpus-v1")
@@ -99,16 +99,8 @@ fn a_replay_adopts_the_recorded_cpu_count() {
         .with_cpus(CPUS)
         .unwrap();
     assert_eq!(run(matching).unwrap(), CPUS);
-}
 
-#[test]
-fn a_replay_refuses_a_conflicting_cpu_count() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("cpus.patina");
-    run(RuntimeConfig::record(3, &path, "cpus-v1")
-        .with_cpus(CPUS)
-        .unwrap())
-    .unwrap();
+    // A conflicting count is refused, directly and through the control plane.
     let conflicting = RuntimeConfig::replay(&path, "cpus-v1")
         .with_cpus(DEFAULT_CPUS)
         .unwrap();

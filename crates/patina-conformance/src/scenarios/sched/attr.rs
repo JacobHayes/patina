@@ -226,7 +226,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // Every row's libc spelling is glibc's syscall(2): a libc leg would
     // repeat the syscall one.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[Syscall::N_sched_setattr, Syscall::N_sched_getattr],
     needs: &[Need::Unprivileged, Need::RootInit, Need::NiceZero],
     kernel_floor: Some(KernelFloor {

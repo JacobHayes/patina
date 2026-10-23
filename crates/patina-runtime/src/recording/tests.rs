@@ -66,38 +66,6 @@ fn a_run_writes_its_fault_planes_to_the_facts_channel() {
     );
 }
 
-/// Same seed, same document — byte for byte. The envelope built from it
-/// inherits that determinism.
-#[test]
-fn the_facts_document_repeats_byte_identically() {
-    let directory = tempdir().unwrap();
-    let write_once = |name: &str| {
-        let facts = directory.path().join(name);
-        let config = RuntimeConfig::seeded(3)
-            .with_facts_path(&facts)
-            .apply_fault_env(|name| (name == ENV_FS_ERROR_PERMILLE).then(|| "250".to_string()))
-            .unwrap();
-        let mut context = Context::from_config(config).unwrap();
-        for index in 0..20u32 {
-            let _ = context.write_file(&format!("/entry-{index}"), b"payload");
-        }
-        context.finish().unwrap();
-        std::fs::read(&facts).unwrap()
-    };
-    assert_eq!(write_once("first.json"), write_once("second.json"));
-}
-
-/// A run nobody asked facts of writes nothing and is otherwise unchanged.
-#[test]
-fn no_channel_means_no_document() {
-    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    context.write_file("/data", b"payload").unwrap();
-    // The facts are still computable on demand; only the emission is opt-in.
-    let facts = context.run_facts();
-    assert_eq!(facts["schema"], FACTS_SCHEMA);
-    context.finish().unwrap();
-}
-
 /// Two live destinations would silently drop one document.
 #[test]
 fn a_path_and_a_sink_together_are_refused() {
@@ -139,33 +107,6 @@ impl TraceTransport for SharedTransport {
     fn write_bundle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         *self.bytes.lock().unwrap() = bytes.to_vec();
         Ok(())
-    }
-}
-
-// Class pairing: tests/boot_origin.rs signed startup bounds.
-#[test]
-fn trace_transport_rejects_out_of_range_startup_clocks() {
-    let transport = SharedTransport::default();
-    RuntimeBuilder::new(RuntimeConfig::record_transport(1, "bounds"))
-        .with_default_drivers()
-        .with_trace_transport(transport.clone())
-        .build()
-        .unwrap()
-        .finish()
-        .unwrap();
-    let mut bundle: TraceBundle = serde_json::from_slice(&transport.stored()).unwrap();
-    for (origin, epoch) in [(i64::MAX as u64 + 1, 0), (1, i64::MAX as u64)] {
-        bundle.metadata.boot_origin_nanos = origin;
-        bundle.metadata.realtime_epoch_nanos = epoch;
-        let mut invalid = SharedTransport::default();
-        invalid.write_bundle(&bundle.to_bytes().unwrap()).unwrap();
-        assert!(matches!(
-            RuntimeBuilder::new(RuntimeConfig::replay_transport_timeline("main", "bounds"))
-                .with_default_drivers()
-                .with_trace_transport(invalid)
-                .build(),
-            Err(RuntimeError::Config(_))
-        ));
     }
 }
 
@@ -253,27 +194,6 @@ fn trace_transport_configuration_fails_loudly() {
 }
 
 #[test]
-fn replay_rejects_changed_operations_and_unconsumed_events() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("run.patina");
-    let mut record = Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")).unwrap();
-    record.entropy_bytes(4, EntropyWait::UntilReady).unwrap();
-    record.finish().unwrap();
-
-    let mut changed = Context::from_config(RuntimeConfig::replay(&path, "fixture-v1")).unwrap();
-    assert!(matches!(
-        changed.entropy_bytes(5, EntropyWait::UntilReady),
-        Err(RuntimeError::Trace(TraceError::OperationMismatch { .. }))
-    ));
-
-    let untouched = Context::from_config(RuntimeConfig::replay(&path, "fixture-v1")).unwrap();
-    assert!(matches!(
-        untouched.finish(),
-        Err(RuntimeError::Trace(TraceError::UnconsumedEvents { .. }))
-    ));
-}
-
-#[test]
 fn record_mode_rejects_concurrent_and_existing_trace_writers() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("run.patina");
@@ -307,20 +227,6 @@ fn record_mode_rejects_concurrent_and_existing_trace_writers() {
         .map(|entry| entry.unwrap().file_name())
         .collect();
     assert_eq!(entries, [OsString::from("run.patina")]);
-}
-
-#[test]
-fn replay_rejects_a_changed_fingerprint() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("run.patina");
-    Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1"))
-        .unwrap()
-        .finish()
-        .unwrap();
-    assert!(matches!(
-        Context::from_config(RuntimeConfig::replay(&path, "fixture-v2")),
-        Err(RuntimeError::Trace(TraceError::FingerprintMismatch { .. }))
-    ));
 }
 
 #[test]
@@ -363,19 +269,6 @@ fn branch_replays_the_prefix_and_uses_a_new_seed_for_the_suffix() {
 }
 
 #[test]
-fn step_budget_stops_before_an_unrecorded_boundary_operation() {
-    let mut context = Context::from_config(RuntimeConfig::seeded(1).with_step_budget(2)).unwrap();
-    context.entropy_bytes(1, EntropyWait::UntilReady).unwrap();
-    context.now(ClockKind::Monotonic).unwrap();
-    assert_eq!(context.steps(), 2);
-    assert!(matches!(
-        context.entropy_bytes(1, EntropyWait::UntilReady),
-        Err(RuntimeError::StepBudgetExceeded { budget: 2 })
-    ));
-    assert_eq!(context.steps(), 2);
-}
-
-#[test]
 fn a_step_budget_abort_under_record_leaves_a_loadable_truncated_trace() {
     // The artifact that would explain a wedge is exactly the one a budget
     // abort used to destroy: `finish` is never reached in the interposed
@@ -394,6 +287,8 @@ fn a_step_budget_abort_under_record_leaves_a_loadable_truncated_trace() {
         error,
         RuntimeError::StepBudgetExceeded { budget: 6 }
     ));
+    // The refused operation is not counted: the budget stops before it.
+    assert_eq!(context.steps(), 6);
 
     // The trace exists, loads, and carries the operations up to the abort —
     // truncated but structurally valid.

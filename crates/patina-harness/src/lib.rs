@@ -578,7 +578,7 @@ mod tests {
     // cargo-patina `end_to_end` harness gates.
 
     #[test]
-    fn run_outside_patina_reports_not_under_patina_without_running_entry() {
+    fn outside_patina_or_after_a_configure_error_the_entry_never_runs() {
         let ran = Cell::new(false);
         let result = run(|| {
             ran.set(true);
@@ -586,11 +586,7 @@ mod tests {
         });
         assert!(matches!(result, Err(HarnessError::NotUnderPatina)));
         assert!(!ran.get(), "application closure ran without Patina");
-    }
 
-    #[test]
-    fn configure_error_short_circuits_before_running_entry() {
-        let ran = Cell::new(false);
         let result = run_with(
             |_| Err(HarnessError::Config("rejected".into())),
             || {
@@ -634,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn buggify_sub_knobs_enable_buggify() {
+    fn buggify_sub_knobs_enable_buggify_without_clobbering_its_rate() {
         let overlay = HarnessBuilder::new()
             .buggify_activation_permille(500)
             .into_overlay()
@@ -645,10 +641,19 @@ mod tests {
             "activation knob must enable buggify"
         );
         assert_eq!(overlay[rt::ENV_BUGGIFY_ACTIVATION], "500");
+
+        // A later sub-knob must not clobber an explicit firing per-mille.
+        let overlay = HarnessBuilder::new()
+            .buggify_fire_permille(250)
+            .buggify_after_setup()
+            .into_overlay()
+            .unwrap();
+        assert_eq!(overlay[rt::ENV_BUGGIFY], "250");
+        assert_eq!(overlay[rt::ENV_BUGGIFY_AFTER_SETUP], "1");
     }
 
     #[test]
-    fn dns_entries_and_services_fold_into_one_host_table() {
+    fn dns_entries_and_services_fold_into_one_host_table_or_none() {
         // Services allocate in registration order and SKIP an address an explicit
         // entry already claims: two names resolving to one address would make a
         // multi-service test pass for the wrong reason.
@@ -663,16 +668,11 @@ mod tests {
             overlay[rt::ENV_DNS_ENTRIES],
             r#"{"cache.internal":"10.0.0.3","db.internal":"10.0.0.1","pinned.internal":"10.0.0.2"}"#
         );
-    }
 
-    #[test]
-    fn a_run_without_dns_names_carries_no_dns_control_plane_entry() {
         let overlay = HarnessBuilder::new().step_budget(1).into_overlay().unwrap();
         assert!(!overlay.contains_key(rt::ENV_DNS_ENTRIES));
-    }
 
-    #[test]
-    fn a_name_that_is_both_a_service_and_a_pinned_entry_is_refused() {
+        // A name that is both a service and a pinned entry is refused.
         let error = HarnessBuilder::new()
             .dns_entry("db.internal", "10.9.9.9")
             .dns_service("db.internal")
@@ -682,17 +682,5 @@ mod tests {
             matches!(&error, HarnessError::Config(message) if message.contains("db.internal")),
             "expected a loud conflict, got {error:?}"
         );
-    }
-
-    #[test]
-    fn explicit_fire_permille_survives_enable() {
-        // A later buggify sub-knob must not clobber an explicit firing per-mille.
-        let overlay = HarnessBuilder::new()
-            .buggify_fire_permille(250)
-            .buggify_after_setup()
-            .into_overlay()
-            .unwrap();
-        assert_eq!(overlay[rt::ENV_BUGGIFY], "250");
-        assert_eq!(overlay[rt::ENV_BUGGIFY_AFTER_SETUP], "1");
     }
 }

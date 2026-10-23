@@ -412,7 +412,7 @@ fn directory_fd_sync_commits_namespace_durability() {
 }
 
 #[test]
-fn read_only_preopen_denies_mutations_but_allows_reads() {
+fn read_only_preopen_denies_every_mutation_but_allows_reads() {
     let context = seeded_context(1, &[("/ro/seed", b"data"), ("/ro/old", b"x")]);
     // fd 3 = /ro (read-only), fd 4 = /rw (read-write).
     let mut host = Preview1Host::new(context)
@@ -448,57 +448,32 @@ fn read_only_preopen_denies_mutations_but_allows_reads() {
         Err(WasiHostError::ReadOnly)
     ));
 
-    // The sibling read-write mount is unaffected.
-    let out = host.path_open(4, b"out", create_write_open()).unwrap();
-    assert_eq!(host.fd_write(out, &[b"ok"]).unwrap(), 2);
-    host.fd_close(out).unwrap();
-    host.finish().unwrap();
-}
-
-#[test]
-fn path_link_denies_read_only_source_alias_bypass() {
-    let context = seeded_context(
-        12,
-        &[
-            ("/ro/secret", b"secret"),
-            ("/rw/source", b"data"),
-            ("/rw/.keep", b""),
-        ],
-    );
-    let mut host = Preview1Host::new(context)
-        .with_preopen("/ro", MountPolicy::ReadOnly)
-        .unwrap()
-        .with_preopen("/rw", MountPolicy::ReadWrite)
-        .unwrap();
-
+    // A hard link may not alias a read-only file into a writable mount.
     assert!(matches!(
-        host.path_link(3, b"secret", 4, b"alias"),
+        host.path_link(3, b"seed", 4, b"alias"),
         Err(WasiHostError::ReadOnly)
     ));
-    let secret = host.path_open(3, b"secret", read_open()).unwrap();
-    assert_eq!(host.fd_read(secret, 16).unwrap(), b"secret");
-    host.fd_close(secret).unwrap();
     assert!(matches!(
         host.path_open(4, b"alias", read_open()),
         Err(WasiHostError::Runtime(RuntimeError::Effect(error)))
             if error.code == ErrorCode::NotFound
     ));
 
-    host.path_link(4, b"source", 4, b"source-link").unwrap();
-    let linked = host.path_open(4, b"source-link", read_open()).unwrap();
-    assert_eq!(host.fd_read(linked, 16).unwrap(), b"data");
+    // The sibling read-write mount is unaffected.
+    let out = host.path_open(4, b"out", create_write_open()).unwrap();
+    assert_eq!(host.fd_write(out, &[b"ok"]).unwrap(), 2);
+    host.fd_close(out).unwrap();
+    host.path_link(4, b"out", 4, b"out-link").unwrap();
+    let linked = host.path_open(4, b"out-link", read_open()).unwrap();
+    assert_eq!(host.fd_read(linked, 16).unwrap(), b"ok");
     host.fd_close(linked).unwrap();
-    host.finish().unwrap();
-}
 
-#[test]
-fn fd_filestat_set_size_denies_read_only_mount_even_with_write_right() {
-    let context = seeded_context(13, &[("/ro/seed", b"data")]);
-    let mut host = Preview1Host::new(context);
+    // A descriptor holding the write right still cannot resize a file once
+    // its mount is read-only.
     let fd = host
         .path_open(
-            3,
-            b"ro/seed",
+            4,
+            b"out",
             WasiPathOpen {
                 oflags: 0,
                 rights: WASI_RIGHT_FD_READ | WASI_RIGHT_FD_WRITE,
@@ -508,20 +483,18 @@ fn fd_filestat_set_size_denies_read_only_mount_even_with_write_right() {
             },
         )
         .unwrap();
-    host.mounts.clear();
-    host.mounts.insert("/ro".to_owned(), MountPolicy::ReadOnly);
-
+    host.mounts.insert("/rw".to_owned(), MountPolicy::ReadOnly);
     assert!(matches!(
         host.fd_filestat_set_size(fd, 99),
         Err(WasiHostError::ReadOnly)
     ));
-    assert_eq!(host.fd_metadata(fd).unwrap().0.len, 4);
+    assert_eq!(host.fd_metadata(fd).unwrap().0.len, 2);
     host.fd_close(fd).unwrap();
     host.finish().unwrap();
 }
 
 #[test]
-fn descriptor_and_path_length_limits_are_enforced() {
+fn resource_limits_and_preopen_rules_are_enforced() {
     let context = seeded_context(3, &[("/a", b"1"), ("/b", b"2"), ("/c", b"3")]);
     let mut host = Preview1Host::new(context).with_resource_limits(ResourceLimits {
         max_descriptors: 3,
@@ -553,4 +526,22 @@ fn descriptor_and_path_length_limits_are_enforced() {
         .unwrap()
         .with_preopen("/second", MountPolicy::ReadWrite);
     assert!(matches!(over, Err(WasiHostError::TooManyPreopens(1))));
+
+    // Preopens may neither nest nor repeat, and must be absolute.
+    let nested = Preview1Host::new(seeded_context(2, &[]))
+        .with_preopen("/data", MountPolicy::ReadWrite)
+        .unwrap()
+        .with_preopen("/data/inner", MountPolicy::ReadWrite);
+    assert!(matches!(nested, Err(WasiHostError::PreopenOverlap { .. })));
+    let duplicate = Preview1Host::new(seeded_context(2, &[]))
+        .with_preopen("/data", MountPolicy::ReadWrite)
+        .unwrap()
+        .with_preopen("/data", MountPolicy::ReadOnly);
+    assert!(matches!(
+        duplicate,
+        Err(WasiHostError::PreopenOverlap { .. })
+    ));
+    let relative =
+        Preview1Host::new(seeded_context(2, &[])).with_preopen("relative", MountPolicy::ReadWrite);
+    assert!(matches!(relative, Err(WasiHostError::InvalidPreopen(_))));
 }

@@ -186,7 +186,7 @@ mod tests {
     // fatal duplicate the evaluation path rejects, and must surface the SAME
     // named marker rather than a generic host configuration failure.
     #[test]
-    fn wasm_static_site_duplicate_label_reports_the_duplicate_marker() {
+    fn wasm_static_site_table_declares_sites_and_refuses_a_duplicate_label() {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         let mut payload = static_site_record(6, "dup", "src/main.rs:3");
         payload.extend(static_site_record(6, "dup", "src/main.rs:4"));
@@ -198,11 +198,8 @@ mod tests {
                 .contains("PATINA_BUGGIFY_DUPLICATE_LABEL label=dup"),
             "expected the named duplicate marker, got: {error}"
         );
-    }
 
-    // The same table without a conflict declares the site without evaluating it.
-    #[test]
-    fn wasm_static_site_table_declares_without_registering() {
+        // A table without a conflict declares the site without evaluating it.
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         let payload = static_site_record(6, "never", "src/main.rs:9");
         parse_wasm_static_site_payload(&mut context, &payload).unwrap();

@@ -35,7 +35,6 @@
 use super::thread_pointer;
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -226,7 +225,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/tls",
     run,
-    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_set_thread_area,
         Syscall::N_get_thread_area,

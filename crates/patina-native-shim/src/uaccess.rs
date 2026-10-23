@@ -649,8 +649,16 @@ mod tests {
         assert_eq!(target, [1, 2, 3, 4]);
     }
 
+    /// An unmapped, protected or address-space-wrapping range is `EFAULT`
+    /// both ways without faulting (as `access_ok`, and on Linux the copy
+    /// vehicle, answers), and so is one running into an inaccessible page; an
+    /// empty range touches nothing.
     #[test]
-    fn an_unmapped_or_protected_range_is_efault_without_faulting() {
+    fn an_inaccessible_range_is_efault_without_faulting() {
+        assert_eq!(read_bytes(1, 0), Ok(Vec::new()));
+        assert_eq!(write_bytes(1, &[]), Ok(()));
+        assert_eq!(read_bytes(usize::MAX - 3, 8), Err(EFAULT));
+        assert_eq!(write_bytes(usize::MAX - 3, &[0; 8]), Err(EFAULT));
         assert_eq!(read_bytes(1, 8), Err(EFAULT));
         assert_eq!(read_bytes(0, 8), Err(EFAULT));
         let none = Page::new(libc::PROT_NONE);
@@ -659,10 +667,7 @@ mod tests {
         let read_only = Page::new(libc::PROT_READ);
         assert_eq!(read_bytes(read_only.0, 4), Ok(vec![0; 4]));
         assert_eq!(write_bytes(read_only.0, b"x"), Err(EFAULT));
-    }
 
-    #[test]
-    fn a_range_running_into_an_inaccessible_page_is_efault() {
         let readable = Page::new(libc::PROT_READ | libc::PROT_WRITE);
         let guard = Page::new(libc::PROT_NONE);
         // Only a straddling range when the kernel placed the two adjacently;
@@ -760,9 +765,6 @@ mod tests {
         assert_eq!(read_bytes(mapped.0, 1), Ok(vec![7]));
     }
 
-    /// A range whose end wraps past the top of the address space is no
-    /// user range: `EFAULT` both ways, as `access_ok` (and on Linux the copy
-    /// vehicle) answers.
     /// The host pid the copies target sits on a read-only page: a guest
     /// store through the kernel's own user access is refused, and the pid
     /// stays this process's.
@@ -775,12 +777,6 @@ mod tests {
         assert_ne!(page, 0);
         assert_eq!(write_bytes(page, &[0; 8]), Err(EFAULT));
         assert_eq!(host_pid(), pid);
-    }
-
-    #[test]
-    fn a_range_that_wraps_the_address_space_is_efault() {
-        assert_eq!(read_bytes(usize::MAX - 3, 8), Err(EFAULT));
-        assert_eq!(write_bytes(usize::MAX - 3, &[0; 8]), Err(EFAULT));
     }
 
     /// The Darwin vehicle itself, called as `kernel_copy` calls it: an
@@ -818,11 +814,5 @@ mod tests {
         }
         // SAFETY: a readable page of the test's own.
         assert_eq!(unsafe { *(read_only.0 as *const u8) }, 0);
-    }
-
-    #[test]
-    fn an_empty_range_touches_nothing() {
-        assert_eq!(read_bytes(1, 0), Ok(Vec::new()));
-        assert_eq!(write_bytes(1, &[]), Ok(()));
     }
 }

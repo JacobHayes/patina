@@ -645,66 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_replay_schedule_policy_enforces_the_authoritative_trace_contract() {
-        let stored = patina_dst_trace::SchedulePolicyRecord {
-            pct: Some(patina_dst_trace::PctPolicyRecord {
-                depth: 3,
-                steps: 100,
-            }),
-            starvation: None,
-        };
-        // A default-policy trace (None) yields no override.
-        assert_eq!(
-            reconcile_replay_schedule_policy(&RuntimeConfig::seeded(0), None).unwrap(),
-            None
-        );
-        // Flag-free replay adopts the stored policy verbatim.
-        let adopted = reconcile_replay_schedule_policy(&RuntimeConfig::seeded(0), Some(&stored))
-            .unwrap()
-            .expect("stored policy adopted");
-        assert_eq!(adopted.pct.unwrap().depth, 3);
-        // A conflicting supplied policy fails closed.
-        let conflicting = RuntimeConfig::seeded(0).with_schedule_policy(SchedulePolicy {
-            pct: Some(PctConfig {
-                depth: 9,
-                steps: 100,
-            }),
-            starvation: None,
-        });
-        assert!(reconcile_replay_schedule_policy(&conflicting, Some(&stored)).is_err());
-    }
-
-    #[test]
-    fn reconcile_replay_buggify_enforces_the_authoritative_trace_contract() {
-        let stored = patina_dst_trace::BuggifyConfigRecord {
-            fire_permille: 250,
-            activation_permille: 250,
-            cutoff_nanos: 300_000_000_000,
-            after_setup: false,
-            active_sites: vec!["s".into()],
-            knobs: BTreeMap::new(),
-        };
-        // A trace without buggify yields no override.
-        assert_eq!(
-            reconcile_replay_buggify(&RuntimeConfig::seeded(0), None).unwrap(),
-            None
-        );
-        // Flag-free replay adopts the stored config verbatim.
-        let adopted = reconcile_replay_buggify(&RuntimeConfig::seeded(0), Some(&stored))
-            .unwrap()
-            .expect("stored config adopted");
-        assert!(adopted.enabled);
-        assert_eq!(adopted.fire_permille, 250);
-        // Conflicting knobs fail closed.
-        let conflicting = RuntimeConfig::seeded(0).with_buggify(BuggifyConfig {
-            enabled: true,
-            fire_permille: 999,
-            ..BuggifyConfig::default()
-        });
-        assert!(reconcile_replay_buggify(&conflicting, Some(&stored)).is_err());
-    }
-
-    #[test]
     fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {
         use patina_dst_trace::{CrashPointRecord, FaultConfigRecord, FaultCrashOp};
 
@@ -759,5 +699,51 @@ mod tests {
             reconcile_replay_faults(&mismatched, Some(&stored)),
             Err(RuntimeError::Config(_))
         ));
+    }
+
+    /// The schedule policy and buggify config follow the same contract: a
+    /// trace without one adopts nothing, and a conflicting supplied value fails
+    /// closed. (Flag-free adoption is proven end to end by the PCT and buggify
+    /// record/replay tests.)
+    #[test]
+    fn reconcile_replay_schedule_and_buggify_refuse_a_conflict() {
+        assert_eq!(
+            reconcile_replay_schedule_policy(&RuntimeConfig::seeded(0), None).unwrap(),
+            None
+        );
+        let stored_policy = patina_dst_trace::SchedulePolicyRecord {
+            pct: Some(patina_dst_trace::PctPolicyRecord {
+                depth: 3,
+                steps: 100,
+            }),
+            starvation: None,
+        };
+        let conflicting = RuntimeConfig::seeded(0).with_schedule_policy(SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 9,
+                steps: 100,
+            }),
+            starvation: None,
+        });
+        assert!(reconcile_replay_schedule_policy(&conflicting, Some(&stored_policy)).is_err());
+
+        assert_eq!(
+            reconcile_replay_buggify(&RuntimeConfig::seeded(0), None).unwrap(),
+            None
+        );
+        let stored_buggify = patina_dst_trace::BuggifyConfigRecord {
+            fire_permille: 250,
+            activation_permille: 250,
+            cutoff_nanos: 300_000_000_000,
+            after_setup: false,
+            active_sites: vec!["s".into()],
+            knobs: BTreeMap::new(),
+        };
+        let conflicting = RuntimeConfig::seeded(0).with_buggify(BuggifyConfig {
+            enabled: true,
+            fire_permille: 999,
+            ..BuggifyConfig::default()
+        });
+        assert!(reconcile_replay_buggify(&conflicting, Some(&stored_buggify)).is_err());
     }
 }

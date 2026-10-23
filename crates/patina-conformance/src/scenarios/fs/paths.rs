@@ -326,8 +326,8 @@ pub fn run(p: &Probe) {
     p.close(file_fd);
 
     // Creation permissions are enforced on the NEXT open, not merely
-    // reported by stat (native_raw::creation_modes_are_enforced_on_later_open pairs the
-    // modern spelling with x86's legacy open/creat/mkdir aliases).
+    // reported by stat (fs/legacy_paths stores the requested modes through
+    // x86's legacy open/creat/mkdir aliases).
     let fd = p.openat(AT_FDCWD, "strict", O_WRONLY | O_CREAT, 0o400);
     p.require("create strict file", fd >= 0);
     let (rc, st) = p.fstat(fd);

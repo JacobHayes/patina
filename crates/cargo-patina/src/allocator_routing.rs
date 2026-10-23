@@ -165,13 +165,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_platform_without_routing_links_nothing() {
-        let none = AllocatorRouting { prefix: None };
-        assert_eq!(none.defines(), None);
-        assert!(none.link_args(Path::new("o"), Path::new("a")).is_empty());
-    }
-
     /// The routing object, assembled for this host: every function it
     /// defines starts with the architecture's landing pad, and its property
     /// note marks it compatible with the control-flow protections, so it
@@ -226,6 +219,8 @@ mod tests {
         assert_eq!((word(4), word(5), word(6)), (property, 4, features));
     }
 
+    /// An incomplete entry-point set is no routing, and no routing defines
+    /// and links nothing.
     #[test]
     fn an_incomplete_set_is_no_routing() {
         for missing in 0..ENTRY_POINTS.len() {
@@ -233,5 +228,8 @@ mod tests {
             some.remove(missing);
             assert_eq!(AllocatorRouting::from_names(&names(&some)), None);
         }
+        let none = AllocatorRouting { prefix: None };
+        assert_eq!(none.defines(), None);
+        assert!(none.link_args(Path::new("o"), Path::new("a")).is_empty());
     }
 }

@@ -211,7 +211,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_migrate_pages,
         Syscall::N_set_mempolicy_home_node,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::OneNumaNode],
     kernel_floor: Some(KernelFloor {
         release: "5.17",

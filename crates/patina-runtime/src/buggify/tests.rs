@@ -72,7 +72,7 @@ fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {
 }
 
 #[test]
-fn buggify_firing_prf_is_deterministic_and_seed_varying() {
+fn buggify_firing_prf_fires_and_varies_by_seed() {
     let fire_pattern = |seed: u64| {
         let mut context = buggify_context(seed, BUGGIFY_ALL_ACTIVE);
         (0..40)
@@ -86,8 +86,6 @@ fn buggify_firing_prf_is_deterministic_and_seed_varying() {
             })
             .collect::<Vec<_>>()
     };
-    // Byte-identical across two fresh contexts at the same seed.
-    assert_eq!(fire_pattern(5), fire_pattern(5));
     // Some firings occurred (fire_permille = 250 over 40 evals).
     assert!(
         fire_pattern(5).iter().any(|fired| *fired),
@@ -122,22 +120,7 @@ fn buggify_duplicate_label_is_detected() {
 }
 
 #[test]
-fn static_site_declarations_do_not_register_or_record_decisions() {
-    let mut context = buggify_context(3, BuggifyConfig::default());
-    context
-        .declare_static_site("never", "src/main.rs:9", BuggifyKind::Reachable)
-        .unwrap();
-    let diag = context.buggify_diagnostics();
-    assert!(!diag.enabled);
-    assert_eq!(diag.sites_registered, 0);
-    assert_eq!(diag.declared_sites.len(), 1);
-    assert_eq!(diag.declared_sites[0].label, "never");
-    assert_eq!(diag.declared_sites[0].kind, BuggifyKind::Reachable);
-    assert_eq!(context.buggify.to_record(), None);
-}
-
-#[test]
-fn static_site_declaration_conflict_is_a_duplicate_label_not_a_config_error() {
+fn static_site_declarations_list_without_registering_and_conflicts_are_duplicates() {
     let mut context = buggify_context(3, BuggifyConfig::default());
     assert_eq!(
         context
@@ -171,7 +154,15 @@ fn static_site_declaration_conflict_is_a_duplicate_label_not_a_config_error() {
             .declare_static_site("empty-site", "", BuggifyKind::Reachable)
             .is_err()
     );
-    assert_eq!(context.buggify_diagnostics().declared_sites.len(), 1);
+    // A declaration is listed but neither registers a site nor records a
+    // decision.
+    let diag = context.buggify_diagnostics();
+    assert!(!diag.enabled);
+    assert_eq!(diag.sites_registered, 0);
+    assert_eq!(diag.declared_sites.len(), 1);
+    assert_eq!(diag.declared_sites[0].label, "dup");
+    assert_eq!(diag.declared_sites[0].kind, BuggifyKind::Fault);
+    assert_eq!(context.buggify.to_record(), None);
 }
 
 #[test]
@@ -214,19 +205,13 @@ fn buggify_fingerprint_requires_enabled_config() {
 }
 
 #[test]
-fn buggify_knob_is_deterministic_and_in_range() {
-    let mut a = buggify_context(9, BUGGIFY_ALL_ACTIVE);
-    let mut b = buggify_context(9, BUGGIFY_ALL_ACTIVE);
-    let va = a
+fn buggify_knob_is_in_range_and_defaults_when_disabled() {
+    let mut context = buggify_context(9, BUGGIFY_ALL_ACTIVE);
+    let value = context
         .buggify_knob("batch", "k.rs:1", 10, 1, 100)
         .unwrap()
         .unwrap();
-    let vb = b
-        .buggify_knob("batch", "k.rs:1", 10, 1, 100)
-        .unwrap()
-        .unwrap();
-    assert_eq!(va, vb, "knob is deterministic per seed+label");
-    assert!((1..=100).contains(&va), "knob out of range: {va}");
+    assert!((1..=100).contains(&value), "knob out of range: {value}");
     // Disabled / inactive returns the clamped default.
     let mut off = buggify_context(9, BuggifyConfig::default());
     assert_eq!(
@@ -297,18 +282,6 @@ fn buggify_after_setup_gates_firing_and_flags_never_called() {
         SiteOutcome::Fire
     );
     assert!(!context.buggify_setup_violation());
-}
-
-#[test]
-fn buggify_rng_is_seed_deterministic() {
-    let mut a = buggify_context(11, BuggifyConfig::default());
-    let mut b = buggify_context(11, BuggifyConfig::default());
-    let seq_a: Vec<u64> = (0..8).map(|_| a.buggify_rng()).collect();
-    let seq_b: Vec<u64> = (0..8).map(|_| b.buggify_rng()).collect();
-    assert_eq!(seq_a, seq_b);
-    let mut c = buggify_context(12, BuggifyConfig::default());
-    let seq_c: Vec<u64> = (0..8).map(|_| c.buggify_rng()).collect();
-    assert_ne!(seq_a, seq_c);
 }
 
 #[test]

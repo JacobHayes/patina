@@ -268,108 +268,9 @@ fn main() {
         );
     }
 
-    // `run --release` must reprofile the GUEST for a single `.rs` source, not just the
-    // shim staticlib: a `debug_assert!` is a live failure oracle under the default
-    // (debug) build and compiled out under `--release`, exactly as it is for a package
-    // guest. The debug leg here is also the pre-fix release behavior — before the
-    // release profile was threaded into the single-source `rustc` invocation, a
-    // `run --release <source.rs>` produced a byte-for-byte debug guest, so its assert
-    // fired identically. That makes the release-clean assertion below non-vacuous: it
-    // can only pass because the fix strips the assert.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_single_source_release_strips_debug_asserts() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("assert-guest.rs");
-        fs::write(
-            &source,
-            r#"fn main() {
-    debug_assert!(false, "SINGLE_SOURCE_DEBUG_ASSERT");
-    println!("SINGLE_SOURCE_RELEASE_CLEAN");
-}
-"#,
-        )
-        .unwrap();
-
-        // Default (debug) build-on-run: the debug_assert fires, aborting the guest.
-        let debug = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", source.to_str().unwrap(), "--seed", "0"],
-        );
-        assert!(
-            !debug.status.success(),
-            "default single-source run must fire the debug_assert:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&debug.stdout),
-            String::from_utf8_lossy(&debug.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&debug.stderr).contains("SINGLE_SOURCE_DEBUG_ASSERT"),
-            "the debug run must name the fired assert:\n{}",
-            String::from_utf8_lossy(&debug.stderr)
-        );
-
-        // `--release` build-on-run: the debug_assert is compiled out, so the guest
-        // reaches its clean exit — proof the guest itself (not only the shim) was built
-        // release.
-        let release = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", "--release", source.to_str().unwrap(), "--seed", "0"],
-        );
-        assert!(
-            release.status.success(),
-            "single-source run --release must compile out the debug_assert:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&release.stdout),
-            String::from_utf8_lossy(&release.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&release.stdout).contains("SINGLE_SOURCE_RELEASE_CLEAN"),
-            "the release guest must run to its clean exit:\n{}",
-            String::from_utf8_lossy(&release.stdout)
-        );
-    }
-
-    // Detection guard (RED-proven): no future link change (gc flags, sectioning,
-    // visibility, staging) may silently drop a load-bearing interposer. On ELF the
-    // printf family, the stdout/stderr sentinels, and the deterministic-IO interposers
-    // are reached through glibc-internal paths a defined/undefined scan cannot see, so
-    // a plain guest references none of them directly — yet ALL must survive the link.
-    // If one ever went missing, a determinism hole (host stdio leak / sentinel abort)
-    // would reopen silently; this turns that into a loud test failure.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn native_live_interposers_survive_the_link() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("plain.rs");
-        fs::write(&source, "fn main() { println!(\"PLAIN_OK\"); }\n").unwrap();
-        let bin = directory.path().join("plain-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let bytes = fs::read(&bin).unwrap();
-        let missing = patina_dst_target::native_missing_live_interposers(
-            &bytes,
-            patina_dst_target::NATIVE_LINUX_LIVE_INTERPOSERS,
-        )
-        .unwrap();
-        assert!(
-            missing.is_empty(),
-            "the link dropped load-bearing interposer(s) from the emitted ELF: {missing:?}"
-        );
-    }
-
     // The live-interposer guard's detection logic, proven both directions on a real
     // binary (macOS-gated because it only needs to build one; the Linux gc-safety
-    // invariant is `native_live_interposers_survive_the_link`). A guest that calls
+    // invariant is checked in `native_run_dlopen_is_a_deny_trap_and_release_strips_debug_asserts`). A guest that calls
     // `printf` links+defines it, so the guard confirms a present interposer and, with a
     // name no binary defines, flags an absent one — the assertion is non-vacuous.
     #[cfg(target_os = "macos")]
@@ -842,7 +743,7 @@ fn main() {
 
     // The dynamic-loading surface an extension loader links (`libloading`:
     // `dlopen`, `dlerror`, `dlclose`), reached only when the guest is asked to
-    // load something.
+    // load something; `assert` reaches a `debug_assert!` instead.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const EXTENSION_LOADER_SOURCE: &str = r#"
 use std::ffi::{c_char, c_int, c_void};
@@ -853,6 +754,9 @@ unsafe extern "C" {
 }
 fn main() {
     println!("BEFORE_LOAD");
+    if std::env::args().any(|arg| arg == "assert") {
+        debug_assert!(false, "SINGLE_SOURCE_DEBUG_ASSERT");
+    }
     if std::env::args().any(|arg| arg == "--load") {
         let handle = unsafe { dlopen(c"libpatina-extension.so".as_ptr(), 2) };
         if handle.is_null() {
@@ -868,9 +772,18 @@ fn main() {
     // `dlopen`/`dlclose` are deny-traps: a guest that links them runs, and one
     // that calls `dlopen` aborts deterministically, naming it. Paired with the
     // registry gate `deny_rows_agree_with_patina_target`.
+    //
+    // The default build is debug, so a `debug_assert!` is a live failure oracle;
+    // `run --release` on a single `.rs` source reprofiles the guest itself, not
+    // only the shim, so the same assert is compiled out.
+    //
+    // On ELF the printf family, the stdout/stderr sentinels, and the
+    // deterministic-IO interposers are reached through glibc-internal paths a
+    // defined/undefined scan cannot see, so the guest references none of them
+    // directly, yet every one must survive the link.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_run_dlopen_is_a_deny_trap_not_a_refusal() {
+    fn native_run_dlopen_is_a_deny_trap_and_release_strips_debug_asserts() {
         let directory = tempdir().unwrap();
         let source = directory.path().join("extension_loader.rs");
         fs::write(&source, EXTENSION_LOADER_SOURCE).unwrap();
@@ -885,41 +798,61 @@ fn main() {
                 bin.to_str().unwrap(),
             ],
         );
+        #[cfg(target_os = "linux")]
+        {
+            let missing = patina_dst_target::native_missing_live_interposers(
+                &fs::read(&bin).unwrap(),
+                patina_dst_target::NATIVE_LINUX_LIVE_INTERPOSERS,
+            )
+            .unwrap();
+            assert!(
+                missing.is_empty(),
+                "the link dropped load-bearing interposer(s) from the emitted ELF: {missing:?}"
+            );
+        }
+        let run = |target: &Path, release: bool, mode: &str| {
+            let mut args = vec!["run"];
+            if release {
+                args.push("--release");
+            }
+            args.extend([target.to_str().unwrap(), "--seed", "1", "--", mode]);
+            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+        };
+        let stdout = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = |output: &Output| String::from_utf8_lossy(&output.stderr).into_owned();
 
-        let dormant = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", bin.to_str().unwrap(), "--seed", "1"],
-        );
+        let dormant = run(&bin, false, "dormant");
         assert!(
             dormant.status.success(),
             "a guest that only links dlopen must run:\nstderr:\n{}",
-            String::from_utf8_lossy(&dormant.stderr)
+            stderr(&dormant)
         );
-        assert!(String::from_utf8_lossy(&dormant.stdout).contains("AFTER_LOAD"));
+        assert!(stdout(&dormant).contains("AFTER_LOAD"));
 
-        let load = || {
-            invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                workspace,
-                &["run", bin.to_str().unwrap(), "--seed", "1", "--", "--load"],
-            )
-        };
-        let first = load();
+        let load = run(&bin, false, "--load");
         assert!(
-            !first.status.success(),
+            !load.status.success(),
             "a guest that calls dlopen must abort"
         );
-        let stderr = String::from_utf8_lossy(&first.stderr);
         assert!(
-            stderr.contains("reached under patina: dlopen"),
-            "the deny-trap must name dlopen:\n{stderr}"
+            stderr(&load).contains("reached under patina: dlopen"),
+            "the deny-trap must name dlopen:\n{}",
+            stderr(&load)
         );
-        let stdout = String::from_utf8_lossy(&first.stdout);
-        assert!(stdout.contains("BEFORE_LOAD"), "{stdout}");
-        assert!(!stdout.contains("AFTER_LOAD"), "{stdout}");
-        let second = load();
-        assert_eq!(first.stdout, second.stdout);
-        assert_eq!(first.stderr, second.stderr);
+        assert!(stdout(&load).contains("BEFORE_LOAD"), "{}", stdout(&load));
+        assert!(!stdout(&load).contains("AFTER_LOAD"), "{}", stdout(&load));
+
+        let debug = run(&bin, false, "assert");
+        assert!(
+            !debug.status.success() && stderr(&debug).contains("SINGLE_SOURCE_DEBUG_ASSERT"),
+            "the default build must fire the debug_assert:\nstderr:\n{}",
+            stderr(&debug)
+        );
+        let release = run(&source, true, "assert");
+        assert!(
+            release.status.success() && stdout(&release).contains("AFTER_LOAD"),
+            "single-source run --release must compile out the debug_assert:\nstderr:\n{}",
+            stderr(&release)
+        );
     }
 }

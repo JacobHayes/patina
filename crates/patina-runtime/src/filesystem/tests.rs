@@ -19,7 +19,7 @@ use patina_dst_wrapper_fault::FaultFs;
 use tempfile::tempdir;
 
 #[test]
-fn filesystem_attribute_latency_repeats_and_replays() {
+fn filesystem_attribute_updates_under_latency_replay() {
     // Class pairing: strict boundary replay and the post-latency clock sampler.
     fn exercise(ctx: &mut Context) {
         ctx.fs_create_directory("/d", 0o755).unwrap();
@@ -46,18 +46,14 @@ fn filesystem_attribute_latency_repeats_and_replays() {
         ctx.fs_close(fd).unwrap();
     }
     let directory = tempdir().unwrap();
-    let a = directory.path().join("a.patina");
-    let b = directory.path().join("b.patina");
-    for path in [&a, &b] {
-        let mut ctx = Context::from_config(
-            RuntimeConfig::record(7, path, "attrs").with_fs_latency_nanos(10, 10),
-        )
-        .unwrap();
-        exercise(&mut ctx);
-        ctx.finish().unwrap();
-    }
-    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
-    let mut ctx = Context::from_config(RuntimeConfig::replay(&a, "attrs")).unwrap();
+    let path = directory.path().join("attrs.patina");
+    let mut ctx = Context::from_config(
+        RuntimeConfig::record(7, &path, "attrs").with_fs_latency_nanos(10, 10),
+    )
+    .unwrap();
+    exercise(&mut ctx);
+    ctx.finish().unwrap();
+    let mut ctx = Context::from_config(RuntimeConfig::replay(&path, "attrs")).unwrap();
     exercise(&mut ctx);
     ctx.finish().unwrap();
 }

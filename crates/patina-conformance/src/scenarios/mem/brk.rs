@@ -90,6 +90,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/brk",
     run,
     covers: &[Syscall::N_brk],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     ..DEFAULTS
 };

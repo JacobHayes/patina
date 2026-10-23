@@ -298,55 +298,55 @@ mod tests {
             !rerun.contains("--record /") && !rerun.contains("--record out/"),
             "the re-run repro baked an output-directory path into --record: {rerun}"
         );
-    }
-
-    #[test]
-    fn compute_watchdog_configuration_survives_campaign_reproduction() {
-        let args = ["art", "--compute-watchdog-ms", "5000"]
-            .into_iter()
-            .map(OsString::from)
-            .collect();
-        let spec = parse(args).unwrap().spec;
-        assert_eq!(spec.compute_watchdog_ms, Some(5000));
-        assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
-        assert_eq!(
-            non_native_invocation_flag(&spec),
-            Some("--compute-watchdog-ms")
-        );
-        let flags = invocation_flags(&spec, "native");
-        assert_eq!(flags, ["--compute-watchdog-ms", "5000"]);
-        assert!(invocation_flags(&spec, "wasi").is_empty());
-        let derived = derive_flags(&spec, &generation_hash(0, 0), "native");
-        assert_eq!(
-            derived
-                .iter()
-                .filter(|flag| *flag == "--compute-watchdog-ms")
-                .count(),
-            1
-        );
-        for trace in [None, Some("stop.patina")] {
-            let command = reproduce_command(
-                Path::new("guest"),
-                7,
-                &derived,
-                &flags,
-                &[],
-                trace,
-                "stop.patina",
+        // The native compute watchdog is invocation shape too: recorded, forwarded once, and in
+        // both repro forms.
+        {
+            let args = ["art", "--compute-watchdog-ms", "5000"]
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+            let spec = parse(args).unwrap().spec;
+            assert_eq!(spec.compute_watchdog_ms, Some(5000));
+            assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+            assert_eq!(
+                non_native_invocation_flag(&spec),
+                Some("--compute-watchdog-ms")
             );
-            assert!(command.contains("--compute-watchdog-ms 5000"), "{command}");
-        }
-        assert!(
-            spec_to_json(&CampaignSpec::default())
-                .get("compute_watchdog_ms")
-                .is_none()
-        );
-        for bound in [0, 86_400_001] {
+            let flags = invocation_flags(&spec, "native");
+            assert_eq!(flags, ["--compute-watchdog-ms", "5000"]);
+            assert!(invocation_flags(&spec, "wasi").is_empty());
+            let derived = derive_flags(&spec, &generation_hash(0, 0), "native");
+            assert_eq!(
+                derived
+                    .iter()
+                    .filter(|flag| *flag == "--compute-watchdog-ms")
+                    .count(),
+                1
+            );
+            for trace in [None, Some("stop.patina")] {
+                let command = reproduce_command(
+                    Path::new("guest"),
+                    7,
+                    &derived,
+                    &flags,
+                    &[],
+                    trace,
+                    "stop.patina",
+                );
+                assert!(command.contains("--compute-watchdog-ms 5000"), "{command}");
+            }
             assert!(
-                CampaignSpec::default()
-                    .apply_json(&serde_json::json!({"compute_watchdog_ms": bound}))
-                    .is_err()
+                spec_to_json(&CampaignSpec::default())
+                    .get("compute_watchdog_ms")
+                    .is_none()
             );
+            for bound in [0, 86_400_001] {
+                assert!(
+                    CampaignSpec::default()
+                        .apply_json(&serde_json::json!({"compute_watchdog_ms": bound}))
+                        .is_err()
+                );
+            }
         }
     }
 }

@@ -1,6 +1,17 @@
+/* The direct POSIX ABI over the deterministic kernel: file I/O, the
+ * descriptor table, the *at family, realpath and the environment. On macOS
+ * `realpath` is asm-renamed to `realpath$DARWIN_EXTSN` (the malloc-on-NULL
+ * variant Rust std references) only under _DARWIN_C_SOURCE, which the shim
+ * defines, so the probe calls that same symbol. */
+#ifdef __linux__
+#define _GNU_SOURCE 1
+#elif defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "patina_native.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +117,34 @@ int main(void) {
     if (unsetenv("GAMMA") != 0) return 77;
     if (environ[0] != NULL) return 78;
 #endif
+
+    /* openat/renameat/unlinkat: AT_FDCWD names a plain path; a dirfd that
+     * names nothing is EBADF for a relative path, as the kernel answers, and
+     * an absolute path ignores the dirfd entirely. */
+    int at = openat(AT_FDCWD, "/state/at", O_CREAT | O_TRUNC | O_RDWR, 0600);
+    if (at < 0 || write(at, "openat", 6) != 6 || close(at) != 0) return 90;
+    errno = 0;
+    if (openat(99, "at", O_RDONLY) != -1 || errno != EBADF) return 91;
+    at = openat(99, "/state/at", O_RDONLY);
+    if (at < 0 || close(at) != 0) return 92;
+    if (renameat(AT_FDCWD, "/state/at", AT_FDCWD, "/state/at-renamed") != 0) return 93;
+    errno = 0;
+    if (renameat(99, "at-renamed", AT_FDCWD, "/x") != -1 || errno != EBADF) return 94;
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state/at-dir", 0777) != 0) return 95;
+    if (unlinkat(AT_FDCWD, "/state/at-dir", AT_REMOVEDIR) != 0) return 96;
+    if (unlinkat(AT_FDCWD, "/state/at-renamed", 0) != 0) return 97;
+
+    /* realpath, allocating (the NULL convention std::fs::canonicalize uses on
+     * macOS) and into the caller's buffer (Linux), resolves a plain and a
+     * `..`/`.`/`//`-laden spelling to the same canonical path. */
+    if (patina_mkdir(PATINA_AT_FDCWD, "/state/fragments", 0777) != 0) return 100;
+    char *allocated = realpath("/state/fragments", NULL);
+    char buffer[PATH_MAX];
+    char *filled = realpath("/state/../state/./fragments//", buffer);
+    if (allocated == NULL || filled != buffer) return 101;
+    if (strcmp(allocated, "/state/fragments") != 0 || strcmp(allocated, filled) != 0) return 102;
+    free(allocated);
+    if (patina_rmdir(PATINA_AT_FDCWD, "/state/fragments") != 0) return 103;
 
     if (rename("/state/value", "/state/renamed") != 0) return 20;
     if (unlink("/state/renamed") != 0) return 21;

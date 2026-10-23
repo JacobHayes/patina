@@ -271,7 +271,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "sys/keys_session",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_add_key,
         Syscall::N_request_key,

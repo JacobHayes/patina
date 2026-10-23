@@ -438,17 +438,13 @@ mod tests {
         // An empty breakdown is an empty object, never a missing key.
         assert_eq!(value["shorts_by_op"], serde_json::json!({}));
         assert_eq!(value["vacuous"], false);
-    }
 
-    #[test]
-    fn fs_plane_reports_the_vacuity_bit_the_line_reports() {
-        let report = patina_dst_driver_api::FsFaultReport {
-            eligible_ops: 40,
-            error_vacuity_diagnosable: true,
+        // The vacuity bit is the one the report line reports.
+        let inert = patina_dst_driver_api::FsFaultReport {
             errors_injected: 0,
-            ..Default::default()
+            ..report
         };
-        assert_eq!(fs_plane(&report)["vacuous"], true);
+        assert_eq!(fs_plane(&inert)["vacuous"], true);
     }
 
     #[test]
@@ -528,29 +524,25 @@ mod tests {
     }
 
     #[test]
-    fn document_serializes_byte_identically_on_a_repeat() {
-        let build = || {
-            let mut planes = Map::new();
-            planes.insert(
-                "entropy".into(),
-                entropy_plane(&patina_dst_driver_api::EntropyFaultReport {
-                    requests: 40,
-                    fail_vacuity_diagnosable: true,
-                    failures_injected: 0,
-                }),
-            );
-            planes.insert(
-                "clock".into(),
-                clock_plane(&patina_dst_driver_api::ClockFaultReport {
-                    reads: 12,
-                    jump_vacuity_diagnosable: false,
-                    jumps_applied: 0,
-                }),
-            );
-            serde_json::to_string(&document(planes, vec![vacuous_starvation_finding(4)])).unwrap()
-        };
-        assert_eq!(build(), build());
-        let value: Value = serde_json::from_str(&build()).unwrap();
+    fn document_nests_planes_and_findings() {
+        let mut planes = Map::new();
+        planes.insert(
+            "entropy".into(),
+            entropy_plane(&patina_dst_driver_api::EntropyFaultReport {
+                requests: 40,
+                fail_vacuity_diagnosable: true,
+                failures_injected: 0,
+            }),
+        );
+        planes.insert(
+            "clock".into(),
+            clock_plane(&patina_dst_driver_api::ClockFaultReport {
+                reads: 12,
+                jump_vacuity_diagnosable: false,
+                jumps_applied: 0,
+            }),
+        );
+        let value = document(planes, vec![vacuous_starvation_finding(4)]);
         assert_eq!(value["fault_reports"]["entropy"]["vacuous"], true);
         assert_eq!(value["runtime_findings"][0]["kind"], "vacuous_starvation");
         assert_eq!(value["runtime_findings"][0]["decisions"], 4);

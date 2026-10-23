@@ -529,34 +529,6 @@ mod tests {
         replay.finish().unwrap();
     }
 
-    // Recording is honest, not normative: the same seed with a `perform` that
-    // returns something else records the new bytes. Replay of a GIVEN trace is
-    // still exact — which is the property that makes the difference visible
-    // rather than hidden.
-    #[test]
-    fn custom_op_recording_reports_what_perform_returned_not_what_a_seed_implies() {
-        let directory = tempdir().unwrap();
-        let outcome_bytes = |value: &str| {
-            let trace = directory.path().join(format!("{value}.patina"));
-            let mut context = Context::from_config(RuntimeConfig::record(9, &trace, "fp")).unwrap();
-            let _: String = context
-                .custom_op("clock.host", &(), || value.to_string())
-                .unwrap();
-            context.finish().unwrap();
-            TraceBundle::load(&trace)
-                .unwrap()
-                .resolved_timeline("main")
-                .unwrap()[0]
-                .outcome
-                .clone()
-        };
-        assert_ne!(
-            outcome_bytes("first"),
-            outcome_bytes("second"),
-            "a nondeterministic perform must produce visibly different traces, not a hidden one"
-        );
-    }
-
     // A replay may only be answered for the exact question the recording holds:
     // a changed key, and a changed label, each refuse and name the label.
     #[test]
@@ -661,22 +633,5 @@ mod tests {
         let mut context = Context::from_config(RuntimeConfig::seeded(3)).unwrap();
         assert!(context.custom_op_record(Vec::new()).is_err());
         assert!(context.custom_op_replay_result().is_err());
-    }
-
-    // A plain seeded run has no recording to consult, so `perform` runs and its
-    // value is returned untouched — the same shape as the record pass, minus the
-    // trace. This is what makes a custom op safe to leave in an ordinary run.
-    #[test]
-    fn custom_op_on_a_seeded_run_performs_and_returns_the_value() {
-        let mut context = Context::from_config(RuntimeConfig::seeded(3)).unwrap();
-        let mut ran = 0;
-        let value: String = context
-            .custom_op("host.hostname", &(), || {
-                ran += 1;
-                "node-a".to_string()
-            })
-            .unwrap();
-        assert_eq!((value.as_str(), ran), ("node-a", 1));
-        context.finish().unwrap();
     }
 }

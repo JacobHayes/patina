@@ -123,6 +123,27 @@ fn every_defined_public_symbol_has_a_row_and_every_row_is_defined() {
             .filter(|name| !toolchain_glue(name)),
     );
 
+    // Non-vacuity: a doctored set reports each gap direction, and a
+    // definition from both producers is a duplicate (a prefixed bootstrap
+    // hook is not).
+    let mut planted: BTreeSet<String> = SYMBOLS
+        .iter()
+        .filter(|symbol| symbol.platform.defines_on(Os::Linux))
+        .map(|symbol| symbol.name.to_owned())
+        .collect();
+    assert_eq!(gaps(&planted, Os::Linux), Gaps::default());
+    planted.insert("nonesuch".to_owned()); // defined, no row
+    planted.remove("read"); // a row the objects lost
+    planted.insert("patina_planted".to_owned()); // runtime ABI: excluded by rule
+    let planted_gaps = gaps(&planted, Os::Linux);
+    assert_eq!(planted_gaps.unlisted, vec!["nonesuch".to_owned()]);
+    assert_eq!(planted_gaps.undefined, vec!["read".to_owned()]);
+    let both = BTreeSet::from(["fcntl".to_owned(), "patina_sud_arm_thread".to_owned()]);
+    assert_eq!(
+        duplicate_libc_definitions(&both, &both),
+        vec![&"fcntl".to_owned()]
+    );
+
     let gaps = gaps(&defined, host_os());
     assert_eq!(
         gaps,
@@ -145,39 +166,6 @@ fn duplicate_libc_definitions<'a>(
     c.intersection(rust)
         .filter(|name| !is_control_plane_abi(name))
         .collect()
-}
-
-#[test]
-fn planted_duplicate_interposer_is_reported() {
-    // Class pairing: object-level uniqueness across both definition producers.
-    let c = BTreeSet::from(["fcntl".to_owned(), "patina_sud_arm_thread".to_owned()]);
-    let rust = c.clone();
-    assert_eq!(
-        duplicate_libc_definitions(&c, &rust),
-        vec![&"fcntl".to_owned()]
-    );
-    assert!(duplicate_libc_definitions(&c, &BTreeSet::new()).is_empty());
-}
-
-/// Non-vacuity: a doctored definition set reports each gap direction.
-#[test]
-fn planted_gaps_are_reported() {
-    let mut defined: BTreeSet<String> = SYMBOLS
-        .iter()
-        .filter(|symbol| symbol.platform.defines_on(Os::Linux))
-        .map(|symbol| symbol.name.to_owned())
-        .collect();
-    assert_eq!(
-        gaps(&defined, Os::Linux),
-        Gaps::default(),
-        "the control set is clean"
-    );
-    defined.insert("nonesuch".to_owned()); // defined, no row
-    defined.remove("read"); // a row the objects lost
-    defined.insert("patina_planted".to_owned()); // runtime ABI: excluded by rule
-    let gaps = gaps(&defined, Os::Linux);
-    assert_eq!(gaps.unlisted, vec!["nonesuch".to_owned()]);
-    assert_eq!(gaps.undefined, vec!["read".to_owned()]);
 }
 
 /// (e) Registry agreement on the deny-trap surface, and the interposed rows
@@ -236,6 +224,26 @@ fn deny_rows_agree_with_patina_target() {
         missing.is_empty(),
         "NATIVE_LINUX_LIVE_INTERPOSERS names symbols the registry does not define on Linux: {missing:?}"
     );
+    // Class pairing with the named timer-family refusal: a lost timer door is
+    // either caught by the object gate or refused as an import; changing the
+    // safe allowlist cannot silently make a timer row host-reaching.
+    let timers: Vec<_> = SYMBOLS
+        .iter()
+        .filter(|row| {
+            let name = row.name.trim_start_matches('_');
+            matches!(name, "setitimer" | "getitimer" | "alarm" | "ualarm")
+                || name.starts_with("timer_")
+                || name.starts_with("timerfd_")
+        })
+        .collect();
+    assert!(!timers.is_empty(), "timer contracts must be inventoried");
+    for row in timers {
+        assert!(
+            !patina_dst_target::native_elf_import_allowed(row.name),
+            "host-reaching timer import allowed: {}",
+            row.name
+        );
+    }
 }
 
 /// Every glibc cancellation point is a compiled shim definition or remains an
@@ -255,6 +263,12 @@ fn unimplemented_cancellation_points_are_refused_imports() {
         allowed.is_empty(),
         "unimplemented glibc cancellation points escape through allowed host imports: {allowed:?}"
     );
+    // Non-vacuity: granting an unimplemented cancellation import is a
+    // finding even though there is no compiled shim wrapper.
+    assert_eq!(
+        unprotected_cancellation_imports(&BTreeSet::new(), |name| name == "aio_suspend"),
+        vec!["aio_suspend"]
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -267,45 +281,6 @@ fn unprotected_cancellation_imports(
         .copied()
         .filter(|name| !defined.contains(*name) && import_allowed(name))
         .collect()
-}
-
-/// Standalone detector selftest: granting an unimplemented cancellation import
-/// must be a finding even though there is no compiled shim wrapper.
-#[cfg(target_os = "linux")]
-#[test]
-fn cancellation_refusal_detector_rejects_planted_allowance() {
-    // The planted definition set deliberately lacks this import, independently
-    // of how many cancellation points the real shim eventually implements.
-    let defined = BTreeSet::new();
-    assert_eq!(
-        unprotected_cancellation_imports(&defined, |name| name == "aio_suspend"),
-        vec!["aio_suspend"]
-    );
-    assert!(unprotected_cancellation_imports(&defined, |_| false).is_empty());
-}
-
-/// Class pairing: compiled symbol/row bijection plus named timer-family refusal.
-/// A lost door is either caught by the object gate or refused as an import;
-/// changing the safe allowlist cannot silently make timer rows host-reaching.
-#[test]
-fn timer_rows_never_allow_host_imports() {
-    let timers: Vec<_> = SYMBOLS
-        .iter()
-        .filter(|row| {
-            let name = row.name.trim_start_matches('_');
-            matches!(name, "setitimer" | "getitimer" | "alarm" | "ualarm")
-                || name.starts_with("timer_")
-                || name.starts_with("timerfd_")
-        })
-        .collect();
-    assert!(!timers.is_empty(), "timer contracts must be inventoried");
-    for row in timers {
-        assert!(
-            !patina_dst_target::native_elf_import_allowed(row.name),
-            "host-reaching timer import allowed: {}",
-            row.name
-        );
-    }
 }
 
 /// The allowlist claims that disagree with the rows for `os`: an
@@ -376,12 +351,8 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
             "allowlisted imports whose kernel entry disagrees with the registry: {misdeclared:?}"
         );
     }
-}
-
-/// Non-vacuity: a lost interposer behind an `Interposed` group, and a shim
-/// definition behind a group that claims libc's text, are each reported.
-#[test]
-fn planted_allowlist_misdeclarations_are_reported() {
+    // Non-vacuity: a lost interposer behind an `Interposed` group, and a shim
+    // definition behind a group that claims libc's text, are each reported.
     let interposed = [AllowedImports {
         names: &["read"],
         prefix: false,

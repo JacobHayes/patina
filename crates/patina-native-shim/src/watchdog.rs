@@ -555,7 +555,7 @@ mod delivery_tests;
 mod tests {
     use super::*;
     #[test]
-    fn terminal_sample_only_pins_its_target_and_first_acknowledgement() {
+    fn terminal_sample_pins_its_target_and_first_acknowledgement_within_its_budget() {
         let sample = Sample::new();
         sample.target.store(42, Ordering::Release);
         assert!(!sample.capture(7, 0x777));
@@ -563,36 +563,9 @@ mod tests {
         assert!(sample.capture(42, 0x123));
         assert!(!sample.capture(42, 0x456));
         assert_eq!(sample.pc.load(Ordering::Acquire), 0x123);
-    }
 
-    #[test]
-    fn observer_blocks_guest_signals() {
-        std::thread::spawn(|| unsafe {
-            let empty: libc::sigset_t = std::mem::zeroed();
-            assert_eq!(
-                libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()),
-                0
-            );
-            platform::enter_observer();
-            let mut mask: libc::sigset_t = std::mem::zeroed();
-            assert_eq!(
-                libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask),
-                0
-            );
-            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGSYS] {
-                assert_eq!(
-                    libc::sigismember(&mask, signal),
-                    1,
-                    "observer left signal {signal} unblocked"
-                );
-            }
-        })
-        .join()
-        .unwrap();
-    }
-
-    #[test]
-    fn terminal_sample_observes_acknowledgement_during_the_last_wait() {
+        // The acknowledgement is observed during the last wait of any budget,
+        // and the budget is never exceeded.
         for budget in [1, 2, 7, 50, 51, 127] {
             let waits = std::cell::Cell::new(0);
             let published = std::cell::Cell::new(0);
@@ -621,6 +594,32 @@ mod tests {
                 Some(0x1234)
             );
         }
+    }
+
+    #[test]
+    fn observer_blocks_guest_signals() {
+        std::thread::spawn(|| unsafe {
+            let empty: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()),
+                0
+            );
+            platform::enter_observer();
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, std::ptr::null(), &mut mask),
+                0
+            );
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGSYS] {
+                assert_eq!(
+                    libc::sigismember(&mask, signal),
+                    1,
+                    "observer left signal {signal} unblocked"
+                );
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

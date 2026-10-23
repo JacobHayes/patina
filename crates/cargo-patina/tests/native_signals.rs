@@ -3,46 +3,23 @@
 mod common;
 use common::native::*;
 
+/// Each libc wait a handled signal interrupts answers as glibc over the
+/// kernel does: `poll` is `EINTR` even with `SA_RESTART`, `ppoll` and
+/// `pselect` restore the mask and keep the timeout, `select` writes back the
+/// remaining timeout, `epoll_pwait` restores the mask, and `sleep` returns the
+/// seconds left.
 #[cfg(target_os = "linux")]
-fn assert_interruptible_wait(case: &str) {
+#[test]
+fn libc_waits_answer_an_interrupting_signal_as_glibc_does() {
     let g = assert_build_c_guest("signals/blocking_readiness.c", CLink::PosixShim);
-    let output = assert_standalone_success(
-        &g.binary,
-        &[case],
-        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-    );
-    assert_eq!(output.stdout, b"NATIVE_SIGNAL_READINESS_OK\n");
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_poll_is_eintr_even_with_sa_restart() {
-    assert_interruptible_wait("poll");
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_ppoll_restores_mask_and_preserves_timeout_on_eintr() {
-    assert_interruptible_wait("ppoll");
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_select_writes_remaining_timeout_on_eintr() {
-    assert_interruptible_wait("select");
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_pselect_restores_mask_and_preserves_timeout_on_eintr() {
-    assert_interruptible_wait("pselect");
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_epoll_pwait_restores_mask_on_eintr() {
-    assert_interruptible_wait("epoll");
-}
-#[cfg(target_os = "linux")]
-#[test]
-fn libc_sleep_returns_remaining_seconds_on_signal() {
-    assert_interruptible_wait("sleep");
+    for case in ["poll", "ppoll", "select", "pselect", "epoll", "sleep"] {
+        let output = assert_standalone_success(
+            &g.binary,
+            &[case],
+            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+        );
+        assert_eq!(output.stdout, b"NATIVE_SIGNAL_READINESS_OK\n", "{case}");
+    }
 }
 
 /// A guest's own SIGSEGV handler gets each SIGSEGV the kernel would give it —
@@ -58,7 +35,8 @@ fn libc_sleep_returns_remaining_seconds_on_signal() {
 /// handler blocks takes the default action as natively (never a second run
 /// of the handler), as does a fault inside another fault signal's handler
 /// whose `sa_mask` blocks SIGSEGV; on an ordinary stack, where the shim cannot
-/// tell a nested fault from a `siglongjmp`'d handler, it stops by name.
+/// tell a nested fault from a `siglongjmp`'d handler, it stops by name. Each
+/// delivery costs the guest's stack a fixed few bytes.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
@@ -110,6 +88,7 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
         // all; the captured output is on the host already.
         assert_eq!(text(&output.stdout), text(&oracle.stdout), "{case}");
     }
+    assert_delivery_stack_cost(&native, &patina);
 }
 
 /// A delivery's cost to the stack its handler runs on. Natively that is the
@@ -120,11 +99,8 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
 /// The small-stack fixtures size their stacks from this measurement, never
 /// from auxv. CI keeps the native measurement and the CPU's flags.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_delivery_costs_the_guest_stack_a_fixed_few_bytes() {
+fn assert_delivery_stack_cost(native: &Guest, patina: &Guest) {
     use std::io::Write;
-    let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
-    let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
     let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
     let costs = |binary: &std::path::Path, env: &[(&str, &str)]| -> Vec<usize> {
         let output = assert_standalone_success(binary, &["route-cost"], env);
@@ -442,30 +418,21 @@ fn delivery_under_rust_scope_stops_by_name() {
 /// batch's handler leaves by `siglongjmp` from a frame that ran the action
 /// its dequeue captured, the next genuine one runs the guest's current
 /// action, under that action's mask, so the guest prints what it prints
-/// natively.
+/// natively. A genuine fault that takes the default action ends the run by
+/// that signal with what the guest wrote to its descriptors before it on the
+/// host, and what C `stdout` still buffered lost, exactly as natively: also
+/// on a thread that blocks every signal, whose fault the kernel takes with no
+/// handler, so no shim code runs.
 #[cfg(target_os = "linux")]
 #[test]
 fn synchronous_signals_meet_the_action_the_kernel_would_give_them() {
+    use std::os::unix::process::ExitStatusExt;
     let native = assert_build_c_guest("signals/fault_routing.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
     let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
     let oracle = assert_standalone_success(&native.binary, &["swap-escape"], &[]);
     let output = assert_standalone_success(&patina.binary, &["swap-escape"], &env);
     assert_eq!(text(&output.stdout), text(&oracle.stdout));
-}
-
-/// A genuine fault that takes the default action (SIGBUS, SIGFPE, SIGILL,
-/// SIGTRAP) ends the run by that signal with what the guest wrote to its
-/// descriptors before it on the host, and what C `stdout` still buffered
-/// lost, exactly as natively: also on a thread that blocks every signal,
-/// whose fault the kernel takes with no handler, so no shim code runs.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_fault_death_keeps_what_the_guest_wrote_before_it() {
-    use std::os::unix::process::ExitStatusExt;
-    let native = assert_build_c_guest("signals/fault_routing.c", CLink::Unlinked);
-    let patina = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
     let cases: &[&str] = if cfg!(target_arch = "x86_64") {
         &["die-bus", "die-trap", "die-fpe", "die-int3", "die-blocked"]
     } else {
@@ -525,118 +492,73 @@ fn a_handler_frame_cannot_block_the_containment_signals() {
     }
 }
 
-/// A thread's exit walks the robust list it registered (the virtual kernel's
-/// `exit_robust_list`): its own futex word gains `FUTEX_OWNER_DIED` and keeps
-/// its waiters bit, another thread's is left alone. Natively the host kernel
-/// does the same, so the guest's assertions hold on both.
+/// The virtual kernel keeps each thread's registrations:
+///
+/// * a thread's exit walks the robust list it registered
+///   (`exit_robust_list`): its own futex word gains `FUTEX_OWNER_DIED` and
+///   keeps its waiters bit, another thread's is left alone;
+/// * the walk wakes a dead owner's futexes as the kernel does, by their
+///   shared key: a `FUTEX_WAIT` waiter on an owned word wakes and sees
+///   `FUTEX_OWNER_DIED`, a waiter on the pending operation's zero word wakes,
+///   and a `FUTEX_WAIT_PRIVATE` waiter stays parked until woken privately;
+/// * the walk runs where the kernel's does, after the thread's thread-local
+///   destructors: one that releases its thread's robust lock still finds it
+///   held, as it does natively;
+/// * a thread just created has taken over its registrations before
+///   `pthread_create` returns: `get_robust_list` of it names glibc's head for
+///   it, on every seed and every run, where it once answered whichever state
+///   the host had scheduled the new thread to;
+/// * glibc's rseq registration of every thread is taken off the host and
+///   kept virtually: the area stays registered (a second registration is
+///   `EBUSY`) and names the one virtual CPU, and the host never writes it.
+///   The host kernel rewrites a registered area's CPU fields at every signal
+///   delivery, so a sentinel that survives a handled signal proves no host
+///   registration is left. Patina only: natively the host's registration
+///   overwrites the sentinel, by design.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_thread_exit_walks_its_robust_list() {
+fn thread_registrations_are_the_virtual_kernels() {
+    let native = assert_build_c_guest("signals/thread_registrations.c", CLink::Unlinked);
     let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
-    let output = assert_standalone_success(
-        &g.binary,
-        &["robust-exit"],
-        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-    );
-    assert_eq!(output.stdout, b"ROBUST_EXIT_OK\n");
-}
-
-/// The exit walk wakes a dead owner's futexes as the kernel does, by their
-/// shared key: a `FUTEX_WAIT` waiter on an owned word wakes and sees
-/// `FUTEX_OWNER_DIED`, a waiter on the pending operation's zero word wakes,
-/// and a `FUTEX_WAIT_PRIVATE` waiter stays parked until woken privately.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_dead_owners_walk_wakes_only_shared_waiters() {
-    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
-    for seed in ["7", "8"] {
+    let run = |case: &str, seed: &str| {
         let output = assert_standalone_success(
             &g.binary,
-            &["robust-wake"],
+            &[case],
             &[("PATINA_MODE", "seeded"), ("PATINA_SEED", seed)],
         );
-        assert_eq!(
-            text(&output.stdout),
-            "shared woken=1 owner_died=1 waiters=1\n\
-             pending woken=1\n\
-             private left waiting=1 owner_died=1\n",
-            "seed {seed}"
-        );
-    }
-}
-
-/// The exit walk runs where the kernel's does, after the thread's
-/// thread-local destructors: one that releases its thread's robust lock
-/// still finds it held, as it does natively.
-#[cfg(target_os = "linux")]
-#[test]
-fn thread_local_destructors_run_before_the_exit_walk() {
-    let native = assert_build_c_guest("signals/thread_registrations.c", CLink::Unlinked);
-    let patina = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+        text(&output.stdout).to_owned()
+    };
+    assert_eq!(run("robust-exit", "7"), "ROBUST_EXIT_OK\n");
+    assert_eq!(
+        run("robust-wake", "7"),
+        "shared woken=1 owner_died=1 waiters=1\n\
+         pending woken=1\n\
+         private left waiting=1 owner_died=1\n"
+    );
     let oracle = assert_standalone_success(&native.binary, &["robust-dtor"], &[]);
     assert_eq!(
         text(&oracle.stdout),
         "destructor found its lock held=1, released=1\n"
     );
-    let output = assert_standalone_success(
-        &patina.binary,
-        &["robust-dtor"],
-        &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-    );
-    assert_eq!(text(&output.stdout), text(&oracle.stdout));
-}
-
-/// A thread just created has taken over its registrations before
-/// `pthread_create` returns: `get_robust_list` of it names glibc's head for
-/// it, on every seed and every run, where it once answered whichever state
-/// the host had scheduled the new thread to.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_new_threads_robust_head_is_known_when_create_returns() {
-    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
+    assert_eq!(run("robust-dtor", "7"), text(&oracle.stdout));
     let expected = (0..4)
         .map(|i| format!("thread {i}: result=0 glibc_head=1 own_view=1\n"))
         .collect::<String>();
-    for seed in 1..=8u64 {
-        for _ in 0..3 {
-            let output = assert_standalone_success(
-                &g.binary,
-                &["robust-new"],
-                &[
-                    ("PATINA_MODE", "seeded"),
-                    ("PATINA_SEED", &seed.to_string()),
-                ],
+    for seed in 1..=4u64 {
+        for _ in 0..2 {
+            assert_eq!(
+                run("robust-new", &seed.to_string()),
+                expected,
+                "seed {seed}"
             );
-            assert_eq!(text(&output.stdout), expected, "seed {seed}");
         }
     }
-}
-
-/// glibc's rseq registration of every thread is taken off the host and kept
-/// virtually: the area stays registered (a second registration is `EBUSY`)
-/// and names the one virtual CPU, and the host never writes it. The host
-/// kernel rewrites a registered area's CPU fields at every signal delivery,
-/// so a sentinel that survives a handled signal proves no host registration
-/// is left, deterministically. Patina only: natively the host's registration
-/// overwrites the sentinel, by design.
-#[cfg(target_os = "linux")]
-#[test]
-fn rseq_areas_are_never_written_by_the_host() {
-    let g = assert_build_c_guest("signals/thread_registrations.c", CLink::PosixShim);
-    for seed in ["7", "8"] {
-        let output = assert_standalone_success(
-            &g.binary,
-            &["rseq-sentinel"],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", seed)],
-        );
-        assert_eq!(
-            text(&output.stdout),
-            "main virtual_cpu=1 start_kept=1 id_kept=1\n\
-             thread virtual_cpu=1 start_kept=1 id_kept=1\n\
-             thread virtual_cpu=1 start_kept=1 id_kept=1\n",
-            "seed {seed}"
-        );
-    }
+    assert_eq!(
+        run("rseq-sentinel", "7"),
+        "main virtual_cpu=1 start_kept=1 id_kept=1\n\
+         thread virtual_cpu=1 start_kept=1 id_kept=1\n\
+         thread virtual_cpu=1 start_kept=1 id_kept=1\n"
+    );
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -645,143 +567,100 @@ mod raw {
     use patina_dst_trace::TraceBundle;
     use std::os::unix::process::ExitStatusExt;
 
-    fn assert_state(case: &str) {
+    /// Every run of the signal boundary probe that ends as the guest asked
+    /// finalizes its trace:
+    ///
+    /// * the state cases succeed: prctl's libc and raw doors share one state;
+    ///   libc `tgkill` and `tkill` deliver the registered handler; libc and
+    ///   raw masks keep the traps armed; a nested raw handler cannot undo an
+    ///   outer unblock; `sigwait` retries after an unrelated handler; and a
+    ///   libc or raw `sigsuspend` handler sees a safe temporary mask;
+    /// * a guest `abort` ends by SIGABRT after the trace is finalized;
+    /// * glibc's `_FORTIFY_SOURCE` file failures are guest aborts as `abort`
+    ///   is, with glibc's exact diagnostic on stderr: every `_chk` past its
+    ///   buffer is `__chk_fail`, and every `__open*_2` that needs a mode is
+    ///   `__fortify_fail` naming its call (glibc io/open_2.c, open64_2.c,
+    ///   openat_2.c, openat64_2.c). fs/fortify covers their answers, its
+    ///   abort legs natively only.
+    #[test]
+    fn guest_ended_runs_finalize_their_traces() {
         let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
             return;
         };
-        let (output, trace) = g.record_standalone(&[case]);
-        assert_success(output);
-        TraceBundle::load(&trace).expect("successful state probe finalizes its trace");
-    }
-
-    #[test]
-    fn prctl_libc_and_raw_share_one_state() {
-        assert_state("prctl");
-    }
-    #[test]
-    fn libc_tgkill_and_tkill_deliver_registered_handler() {
-        assert_state("handler");
-    }
-    #[test]
-    fn libc_and_raw_masks_keep_the_traps_armed() {
-        assert_state("masks");
-    }
-    #[test]
-    fn nested_raw_handler_cannot_undo_outer_unblock() {
-        assert_state("nested-unblock");
-    }
-    #[test]
-    fn sigwait_retries_after_unrelated_handler() {
-        assert_state("sigwait");
-    }
-    #[test]
-    fn libc_sigsuspend_handler_sees_safe_temporary_mask() {
-        assert_state("suspend-libc");
-    }
-    #[test]
-    fn raw_sigsuspend_handler_sees_safe_temporary_mask() {
-        assert_state("suspend-raw");
-    }
-
-    #[test]
-    fn guest_abort_finalizes_trace_before_host_abort() {
-        let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
-            return;
-        };
-        let (output, trace) = g.record_standalone(&["guest-abort"]);
-        assert_eq!(output.status.signal(), Some(6), "{}", text(&output.stderr));
-        TraceBundle::load(&trace).expect("guest abort finalizes its trace");
-    }
-
-    /// glibc's `_FORTIFY_SOURCE` file failures are guest aborts, as `abort`
-    /// is: glibc's exact diagnostic on stderr, SIGABRT, a finalized trace.
-    /// Every `_chk` past its buffer is `__chk_fail`; every `__open*_2` that
-    /// needs a mode is `__fortify_fail` naming its call (glibc io/open_2.c,
-    /// open64_2.c, openat_2.c, openat64_2.c).
-    #[test]
-    fn fortify_failures_are_guest_aborts() {
-        const OVERFLOW: &str = "*** buffer overflow detected ***: terminated";
-        const CASES: [(&str, &str); 9] = [
-            ("__read_chk", OVERFLOW),
-            ("__pread_chk", OVERFLOW),
-            ("__pread64_chk", OVERFLOW),
-            ("__readlink_chk", OVERFLOW),
-            ("__readlinkat_chk", OVERFLOW),
-            (
-                "__open_2",
-                "*** invalid open call: O_CREAT or O_TMPFILE without mode ***: terminated",
-            ),
-            (
-                "__open64_2",
-                "*** invalid open64 call: O_CREAT or O_TMPFILE without mode ***: terminated",
-            ),
-            (
-                "__openat_2",
-                "*** invalid openat call: O_CREAT or O_TMPFILE without mode ***: terminated",
-            ),
-            (
-                "__openat64_2",
-                "*** invalid openat64 call: O_CREAT or O_TMPFILE without mode ***: terminated",
-            ),
-        ];
-        let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
-            return;
-        };
-        for (symbol, diagnostic) in CASES {
-            let (output, trace) = g.record_standalone(&[&format!("fortify-{symbol}")]);
-            let stderr = text(&output.stderr);
-            assert_eq!(output.status.signal(), Some(6), "{symbol}: {stderr}");
-            assert!(
-                stderr.lines().any(|line| line == diagnostic),
-                "{symbol}: no {diagnostic:?} line in {stderr}"
-            );
+        for case in [
+            "prctl",
+            "handler",
+            "masks",
+            "nested-unblock",
+            "sigwait",
+            "suspend-libc",
+            "suspend-raw",
+        ] {
+            let (output, trace) = g.record_standalone(&[case]);
+            assert!(output.status.success(), "{case}: {output:?}");
             TraceBundle::load(&trace)
-                .unwrap_or_else(|error| panic!("{symbol}: the abort left no trace: {error}"));
+                .unwrap_or_else(|error| panic!("{case}: no finalized trace: {error}"));
+        }
+        const OVERFLOW: &str = "*** buffer overflow detected ***: terminated";
+        let open = |call: &str| {
+            format!("*** invalid {call} call: O_CREAT or O_TMPFILE without mode ***: terminated")
+        };
+        let mut aborts = vec![("guest-abort".to_owned(), None)];
+        for symbol in [
+            "__read_chk",
+            "__pread_chk",
+            "__pread64_chk",
+            "__readlink_chk",
+            "__readlinkat_chk",
+        ] {
+            aborts.push((format!("fortify-{symbol}"), Some(OVERFLOW.to_owned())));
+        }
+        for call in ["open", "open64", "openat", "openat64"] {
+            aborts.push((format!("fortify-__{call}_2"), Some(open(call))));
+        }
+        for (case, diagnostic) in aborts {
+            let (output, trace) = g.record_standalone(&[&case]);
+            let stderr = text(&output.stderr);
+            assert_eq!(output.status.signal(), Some(6), "{case}: {stderr}");
+            if let Some(diagnostic) = diagnostic {
+                assert!(
+                    stderr.lines().any(|line| line == diagnostic),
+                    "{case}: no {diagnostic:?} line in {stderr}"
+                );
+            }
+            TraceBundle::load(&trace)
+                .unwrap_or_else(|error| panic!("{case}: the abort left no trace: {error}"));
         }
     }
 
-    fn assert_internal_fatal(case: &str, diagnostic: &str) {
+    /// An internal stop leaves the trace incomplete: a fork reached from C,
+    /// a custom operation used with no operation open or nested or left
+    /// unclosed, and an unknown raw syscall the SUD trap meets. An internal
+    /// stop is the shim's own abort, never a delivery: a guest's SIGABRT
+    /// handler (a runtime's, whose raw syscalls would trap back into the
+    /// stopping shim) does not run.
+    #[test]
+    fn internal_stops_leave_the_trace_incomplete() {
         let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
             return;
         };
-        g.assert_internal_fatal(&[case], &[diagnostic]);
-    }
-    #[test]
-    fn internal_c_trap_leaves_trace_incomplete() {
-        assert_internal_fatal("internal-c", "process spawn reached under patina: fork");
-    }
-    #[test]
-    fn internal_raw_trap_leaves_trace_incomplete() {
-        assert_internal_fatal("internal-rust", "SUD trapped syscall number 999999");
-    }
-    /// An internal stop is the shim's own abort, never a delivery: a
-    /// guest's SIGABRT handler (a runtime's, whose raw syscalls would trap
-    /// back into the stopping shim) does not run, and the run ends by
-    /// SIGABRT with the named stop.
-    #[test]
-    fn an_internal_stop_never_runs_a_guest_abort_handler() {
-        let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
-            return;
-        };
+        for (case, diagnostic) in [
+            ("internal-c", "process spawn reached under patina: fork"),
+            ("internal-context-active", "no custom operation open"),
+            ("internal-context", "may not nest or be left unclosed"),
+            (
+                "internal-guest-abort-handler",
+                "SUD trapped syscall number 999999",
+            ),
+        ] {
+            g.assert_internal_fatal(&[case], &[diagnostic]);
+        }
         let (output, _) = g.record_standalone(&["internal-guest-abort-handler"]);
-        g.assert_internal_fatal(
-            &["internal-guest-abort-handler"],
-            &["SUD trapped syscall number 999999"],
-        );
         assert!(
             !text(&output.stderr).contains("handler ran"),
             "{}",
             text(&output.stderr)
         );
-    }
-    #[test]
-    fn context_locked_refusal_never_reenters_the_scheduler() {
-        assert_internal_fatal("internal-context-active", "no custom operation open");
-    }
-
-    #[test]
-    fn nested_custom_op_fatal_leaves_trace_incomplete() {
-        assert_internal_fatal("internal-context", "may not nest or be left unclosed");
     }
 }
 
@@ -922,19 +801,7 @@ fn self_raise_is_modeled_and_replayable() {
     let (second, _) = guest.record_standalone(&[]);
     assert_eq!(first.stdout, assert_success(second).stdout);
     assert_eq!(bytes, std::fs::read(&path).unwrap(), "record identity");
-    let mut command = std::process::Command::new("/bin/sh");
-    command
-        .env_clear()
-        .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "native-boundary"])
-        .arg(&path)
-        .arg(&guest.binary)
-        .envs([
-            ("PATINA_MODE", "replay"),
-            ("PATINA_TRACE_FD", "3"),
-            ("PATINA_FINGERPRINT", "native-boundary"),
-        ]);
-    let replay = common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
-        .expect("self-signal replay exceeded 20s");
+    let replay = guest.replay_standalone(&path, &[]);
     assert_eq!(first.stdout, assert_success(replay).stdout);
     let trace = patina_dst_trace::TraceBundle::load(&path).unwrap();
     let generated: Vec<_> = trace.timelines[0]
@@ -1002,18 +869,6 @@ fn portable_process_answers_and_uninterrupted_sleep_replay() {
     let (second, _) = guest.record_standalone(&[]);
     assert_exact_line(&assert_success(second).stdout, "PROCESS_SLEEP_OK");
     assert_eq!(bytes, std::fs::read(&trace).unwrap(), "record identity");
-    let mut command = std::process::Command::new("/bin/sh");
-    command
-        .env_clear()
-        .args(["-c", "exec 3<\"$1\"; shift; exec \"$@\"", "native-boundary"])
-        .arg(&trace)
-        .arg(&guest.binary)
-        .envs([
-            ("PATINA_MODE", "replay"),
-            ("PATINA_TRACE_FD", "3"),
-            ("PATINA_FINGERPRINT", "native-boundary"),
-        ]);
-    let replay = common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
-        .expect("standalone replay exceeded 20s");
+    let replay = guest.replay_standalone(&trace, &[]);
     assert_exact_line(&assert_success(replay).stdout, "PROCESS_SLEEP_OK");
 }

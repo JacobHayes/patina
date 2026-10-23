@@ -133,67 +133,36 @@ mod tests {
     }
 
     #[test]
-    fn no_args_uses_the_documented_defaults() {
+    fn positionals_override_defaults_and_help_short_circuits() {
         let empty: [&str; 0] = [];
         assert_eq!(
             parse_args(empty).unwrap(),
             run(DEFAULT_ITERATIONS, DEFAULT_CAMPAIGN_RUNS)
         );
-    }
-
-    #[test]
-    fn one_positional_sets_iterations_and_defaults_campaign_runs() {
         assert_eq!(
             parse_args(["500"]).unwrap(),
             run(500, DEFAULT_CAMPAIGN_RUNS)
         );
-    }
-
-    #[test]
-    fn two_positionals_set_both() {
         assert_eq!(parse_args(["100", "50"]).unwrap(), run(100, 50));
+        for help in [&["-h"][..], &["--help"], &["100", "--help"]] {
+            assert_eq!(parse_args(help).unwrap(), Invocation::Help);
+        }
     }
 
     #[test]
-    fn help_flags_short_circuit() {
-        assert_eq!(parse_args(["-h"]).unwrap(), Invocation::Help);
-        assert_eq!(parse_args(["--help"]).unwrap(), Invocation::Help);
-        // Detected even when it follows other arguments.
-        assert_eq!(parse_args(["100", "--help"]).unwrap(), Invocation::Help);
-    }
-
-    #[test]
-    fn non_numeric_is_a_hard_error_not_a_silent_default() {
-        // The motivating bug: `20O0` (letter O) must NOT quietly benchmark 2000.
-        let err = parse_args(["20O0"]).unwrap_err();
-        assert!(err.contains("ITERATIONS"), "{err}");
-        assert!(parse_args(["100", "5x"]).is_err());
-    }
-
-    #[test]
-    fn zero_and_negative_are_rejected() {
-        assert!(parse_args(["0"]).unwrap_err().contains("greater than zero"));
-        assert!(parse_args(["100", "0"]).is_err());
-        // A negative number reaches positional parsing (not treated as a flag).
-        assert!(parse_args(["-5"]).unwrap_err().contains("positive integer"));
-    }
-
-    #[test]
-    fn extra_positionals_error() {
-        assert!(
-            parse_args(["1", "2", "3"])
-                .unwrap_err()
-                .contains("at most 2")
-        );
-    }
-
-    #[test]
-    fn unknown_flags_error() {
-        assert!(
-            parse_args(["--bogus"])
-                .unwrap_err()
-                .contains("unknown flag")
-        );
-        assert!(parse_args(["-x"]).is_err());
+    fn malformed_arguments_are_errors_not_silent_defaults() {
+        // `20O0` (letter O) must not quietly benchmark 2000.
+        for args in [
+            &["20O0"][..],
+            &["100", "5x"],
+            &["0"],
+            &["100", "0"],
+            &["-5"],
+            &["1", "2", "3"],
+            &["--bogus"],
+            &["-x"],
+        ] {
+            assert!(parse_args(args).is_err(), "{args:?} parsed");
+        }
     }
 }

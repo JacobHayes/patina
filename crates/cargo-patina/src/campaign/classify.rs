@@ -120,8 +120,8 @@ pub enum CampaignClass {
 }
 
 impl CampaignClass {
-    /// Every class, in severity order. A new variant that is not added here fails
-    /// [`every_class_round_trips_its_token`].
+    /// Every class, in severity order. [`every_class_is_reachable_from_structured_facts`]
+    /// requires each class a single run's facts reach to be listed here, in order.
     pub const ALL: &'static [CampaignClass] = &[
         CampaignClass::Ok,
         CampaignClass::Nondeterminism,
@@ -1098,47 +1098,24 @@ mod tests {
     use super::*;
     use patina_dst_runtime::FaultKnob;
 
-    /// Every class token round-trips, and [`CampaignClass::ALL`] is complete and
-    /// in the declaration (severity) order [`ClassifyRules`] relies on.
+    /// A stack limit the host could not apply, or a crash patina could not
+    /// carry out, ends the guest at the host's hand: INFRA, never a finding.
     #[test]
-    fn every_class_round_trips_its_token() {
-        for class in CampaignClass::ALL {
-            assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
+    fn a_host_side_failure_is_infra() {
+        for generation in [
+            planted(
+                RunFacts::ok().exit(134).signal(6).refusal(HOST_LIMIT_CLASS),
+                "PATINA_INFRA host_limit reason=\"setrlimit(RLIMIT_STACK)\"\n",
+            ),
+            planted(
+                RunFacts::ok().exit(113).refusal(FS_CRASH_FAILED_CLASS),
+                "PATINA_INFRA fs_crash_failed selector=sync:1 reason=\"export failed\"\n",
+            ),
+        ] {
+            let class = classify(&generation, &ClassifyRules::default());
+            assert_eq!(class, CampaignClass::Infra);
+            assert!(!class.is_finding());
         }
-        let mut sorted = CampaignClass::ALL.to_vec();
-        sorted.sort();
-        assert_eq!(
-            sorted,
-            CampaignClass::ALL.to_vec(),
-            "CampaignClass::ALL must be in `Ord` (severity) order"
-        );
-        assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
-    }
-
-    /// A stack limit the host could not apply aborts the guest, but the abort
-    /// is the host's: INFRA, never a GUEST_ABORT finding.
-    #[test]
-    fn a_host_limit_is_infra() {
-        let generation = planted(
-            RunFacts::ok().exit(134).signal(6).refusal(HOST_LIMIT_CLASS),
-            "PATINA_INFRA host_limit reason=\"setrlimit(RLIMIT_STACK)\"\n",
-        );
-        let class = classify(&generation, &ClassifyRules::default());
-        assert_eq!(class, CampaignClass::Infra);
-        assert!(!class.is_finding());
-    }
-
-    /// A crash patina could not carry out is the harness failing: INFRA, and
-    /// so no finding and no novel signature.
-    #[test]
-    fn a_failed_fs_crash_is_infra() {
-        let generation = planted(
-            RunFacts::ok().exit(113).refusal(FS_CRASH_FAILED_CLASS),
-            "PATINA_INFRA fs_crash_failed selector=sync:1 reason=\"export failed\"\n",
-        );
-        let class = classify(&generation, &ClassifyRules::default());
-        assert_eq!(class, CampaignClass::Infra);
-        assert!(!class.is_finding());
     }
 
     #[test]
@@ -1190,6 +1167,20 @@ mod tests {
             .filter(|class| !class.is_cross_run())
             .collect();
         assert_eq!(fired, single_run);
+        // Every class token round-trips, and ALL is in Ord (severity) order.
+        {
+            for class in CampaignClass::ALL {
+                assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
+            }
+            let mut sorted = CampaignClass::ALL.to_vec();
+            sorted.sort();
+            assert_eq!(
+                sorted,
+                CampaignClass::ALL.to_vec(),
+                "CampaignClass::ALL must be in `Ord` (severity) order"
+            );
+            assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
+        }
     }
 
     /// The structural half of the guest-agnostic doctrine: no built-in class may

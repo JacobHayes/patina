@@ -740,16 +740,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_selftest_verification_check_lands_where_it_says() {
-        for (name, want, got) in selftest_class_checks() {
-            assert_eq!(want, got, "{name}");
-        }
-        for (name, ok, detail) in selftest_sampling() {
-            assert!(ok, "{name}: {detail}");
-        }
-    }
-
-    #[test]
     fn a_verification_round_trips_through_its_json() {
         let observed = Observation {
             class: CampaignClass::Unclassified,
@@ -771,24 +761,22 @@ mod tests {
             Verification::from_json(&verification.to_json()).unwrap(),
             verification
         );
-    }
-
-    /// A nondeterministic signature is keyed by the OBSERVED outcome alone, so
-    /// two generations that observed the same failure dedup onto one record
-    /// whatever their reproductions did.
-    #[test]
-    fn a_nondeterminism_signature_is_keyed_by_the_observed_outcome() {
-        let observed = Signature {
-            class: CampaignClass::GuestAbort,
-            shape: "guest_abort unattributed PLANTED".into(),
-            policy: "bug_depth=#".into(),
-        };
-        let filed = nondeterminism_signature(Some(&observed));
-        assert_eq!(filed.class, CampaignClass::Nondeterminism);
-        assert!(
-            filed.shape.contains(observed.class.as_str()) && filed.shape.contains(&observed.shape)
-        );
-        assert_eq!(filed.policy, observed.policy);
-        assert_ne!(filed.key(), nondeterminism_signature(None).key());
+        // A nondeterministic signature is keyed by the OBSERVED outcome alone, so two generations
+        // that observed the same failure dedup onto one record.
+        {
+            let observed = Signature {
+                class: CampaignClass::GuestAbort,
+                shape: "guest_abort unattributed PLANTED".into(),
+                policy: "bug_depth=#".into(),
+            };
+            let filed = nondeterminism_signature(Some(&observed));
+            assert_eq!(filed.class, CampaignClass::Nondeterminism);
+            assert!(
+                filed.shape.contains(observed.class.as_str())
+                    && filed.shape.contains(&observed.shape)
+            );
+            assert_eq!(filed.policy, observed.policy);
+            assert_ne!(filed.key(), nondeterminism_signature(None).key());
+        }
     }
 }

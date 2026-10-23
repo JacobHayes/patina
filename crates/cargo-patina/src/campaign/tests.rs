@@ -64,16 +64,6 @@ fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
 }
 
 #[test]
-fn generation_hash_is_pure_and_stable() {
-    // Determinism: the same (seed_base, generation) always derives the same seed.
-    let a = generation_hash(0, 7);
-    let b = generation_hash(0, 7);
-    assert_eq!(a, b);
-    assert_ne!(generation_hash(0, 7), generation_hash(0, 8));
-    assert_ne!(generation_hash(1, 7), generation_hash(0, 7));
-}
-
-#[test]
 fn native_only_knobs_are_skipped_for_wasi() {
     let spec = CampaignSpec {
         buggify: true,
@@ -102,6 +92,19 @@ fn native_only_knobs_are_skipped_for_wasi() {
     ] {
         assert!(wasi.iter().any(|f| f == banded), "wasi lacks {banded}");
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
+    }
+    // Crash-restart is never banded: campaign record/replay cannot represent
+    // a native crash-restart lifecycle.
+    for family in ["native", "wasi", "cargo"] {
+        for generation in 0..64 {
+            let flags = derive_flags(&spec, &generation_hash(0, generation), family);
+            assert!(
+                !flags
+                    .iter()
+                    .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
+                "{family} generation {generation} emitted crash restart flags: {flags:?}"
+            );
+        }
     }
 }
 
@@ -220,120 +223,6 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
     }
 }
 
-/// The direction pin, and the reason this dial needed one where the fault
-/// dial needed only a "left alone" list. `--starve` (how many holds) and
-/// `--starve-max-len` (how long a hold, and the scheduler's aging cap) are
-/// monotone in harshness, so they dampen. `--starve-window` is NOT: it is
-/// where the holds land, and which end of it hurts depends on the guest's own
-/// schedule. Measured on `turso_stress`, a window of 512 puts every hold in
-/// the startup prefix where the policy defers nothing at all (`starve_events=0`,
-/// run completes), while the same shaped holds at 65536 land in the
-/// concurrent phase and wedge the run. A uniform multiply would have
-/// concentrated every hold into a prefix, and dilating it would have pushed
-/// the starts past the end of a short guest's schedule and made the plane
-/// inert rather than rare — neither is right for both. So the window keeps
-/// its full log sweep at every scale, and an edit that "just scales
-/// everything" has to argue with this test.
-#[test]
-fn the_starve_scale_leaves_the_placement_window_alone() {
-    let at = |permille: u64, generation: u64| {
-        derive_flags(
-            &CampaignSpec {
-                starve: true,
-                starve_scale_permille: permille,
-                ..CampaignSpec::default()
-            },
-            &generation_hash(0, generation),
-            "native",
-        )
-    };
-    let value = |flags: &[String], name: &str| -> Option<u64> {
-        let inline = format!("{name}=");
-        let at = flags
-            .iter()
-            .position(|flag| flag == name || flag.starts_with(&inline))?;
-        flags[at]
-            .strip_prefix(&inline)
-            .map(str::to_string)
-            .or_else(|| flags.get(at + 1).cloned())?
-            .parse()
-            .ok()
-    };
-    let mut compared = 0;
-    let mut windows: BTreeSet<u64> = BTreeSet::new();
-    let mut shortened = 0;
-    let mut fewer = 0;
-    for generation in 0..256 {
-        let full = at(STARVE_SCALE_FULL, generation);
-        let low = at(100, generation);
-        assert!(
-            value(&full, "--starve").is_some(),
-            "generation {generation}: full scale must starve every generation, as it always has"
-        );
-        let Some(low_window) = value(&low, "--starve-window") else {
-            continue; // the gate closed this generation
-        };
-        compared += 1;
-        windows.insert(low_window);
-        assert_eq!(
-            Some(low_window),
-            value(&full, "--starve-window"),
-            "generation {generation}: the start window is placement, not intensity — \
-                 scaling it DOWN concentrates the holds a gentler campaign asked to spread, and \
-                 scaling it UP pushes them past a short guest's schedule entirely"
-        );
-        let (low_len, full_len) = (
-            value(&low, "--starve-max-len").expect("a gated generation has a hold length"),
-            value(&full, "--starve-max-len").expect("full scale always holds"),
-        );
-        assert!(
-            low_len <= full_len && low_len >= 1,
-            "generation {generation}: the hold length must dampen toward, but never past, one \
-                 decision — got {low_len} from {full_len}"
-        );
-        shortened += u64::from(low_len < full_len);
-        let (low_count, full_count) = (
-            value(&low, "--starve").expect("a gated generation has intervals"),
-            value(&full, "--starve").expect("full scale always starves"),
-        );
-        assert!(
-            low_count <= full_count && low_count >= 1,
-            "generation {generation}: the interval count must dampen toward, but never past, \
-                 one hold — got {low_count} from {full_count}"
-        );
-        fewer += u64::from(low_count < full_count);
-    }
-    assert!(
-        compared > 8 && windows.len() > 2,
-        "the dampened sweep left too little to prove anything: {compared} starving \
-             generation(s) over {} distinct window(s)",
-        windows.len()
-    );
-    assert!(
-        shortened > 0 && fewer > 0,
-        "nothing was actually dampened: {shortened} shorter hold(s), {fewer} smaller count(s)"
-    );
-}
-
-#[test]
-fn campaign_fault_bands_do_not_emit_crash_restart() {
-    let spec = CampaignSpec {
-        faults: FaultPlanes::ALL,
-        ..CampaignSpec::default()
-    };
-    for family in ["native", "wasi", "cargo"] {
-        for generation in 0..64 {
-            let flags = derive_flags(&spec, &generation_hash(0, generation), family);
-            assert!(
-                !flags
-                    .iter()
-                    .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
-                "{family} generation {generation} unexpectedly emitted crash restart flags: {flags:?}"
-            );
-        }
-    }
-}
-
 #[test]
 fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
     let bare = CampaignSpec {
@@ -370,15 +259,7 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
         !wasi.iter().any(|f| f.starts_with("--dns-")),
         "the WASI family must never receive DNS flags: {wasi:?}"
     );
-}
-
-#[test]
-fn the_dns_band_varies_the_failure_rate_and_latency_across_generations() {
-    let spec = CampaignSpec {
-        faults: FaultPlanes::ALL,
-        dns_entries: vec!["db.internal=10.0.0.5".into()],
-        ..CampaignSpec::default()
-    };
+    // The band actually varies the failure rate and latency per generation.
     let mut rates = BTreeSet::new();
     let mut latencies = BTreeSet::new();
     for generation in 0..64 {
@@ -464,9 +345,3 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
         assert!(!bare.iter().any(|f| f == flag), "unasked-for {flag}");
     }
 }
-
-// The forwarded flags must be spelled exactly as `run <BINARY>` declares them.
-// Campaign builds each child flag through `push_run_flag`, which reads RUN's
-// arity, so a campaign row that disagreed with run's would emit a value shape
-// the child rejects — in every generation, as an INFRA storm rather than a
-// parse error here.

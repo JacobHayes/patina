@@ -119,45 +119,6 @@ fn elf_with_symbol_bindings(
     elf
 }
 
-// The fixture itself must present the shape the rule reasons about, or every
-// assertion below would be vacuous: the undefined entries have to reach
-// `imports()`, and the weak/defined bits have to survive the round trip.
-#[test]
-fn symbol_binding_fixture_presents_real_weak_and_defined_bindings() {
-    let bytes = elf_with_symbol_bindings(
-        &[("weak_undef", true, false), ("strong_undef", false, false)],
-        &[("weak_def", true, true)],
-    );
-    let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
-    let imports: Vec<String> = file
-        .imports()
-        .expect("imports parse")
-        .into_iter()
-        .map(|import| String::from_utf8_lossy(import.name()).into_owned())
-        .collect();
-    assert_eq!(imports, vec!["weak_undef", "strong_undef"]);
-    let weak: Vec<(String, bool, bool)> = file
-        .dynamic_symbols()
-        .chain(file.symbols())
-        .filter_map(|symbol| symbol.name().ok().filter(|name| !name.is_empty()))
-        .zip(
-            file.dynamic_symbols()
-                .chain(file.symbols())
-                .filter(|symbol| symbol.name().is_ok_and(|name| !name.is_empty()))
-                .map(|symbol| (symbol.is_weak(), symbol.is_definition())),
-        )
-        .map(|(name, (weak, defined))| (name.to_owned(), weak, defined))
-        .collect();
-    assert_eq!(
-        weak,
-        vec![
-            ("weak_undef".to_owned(), true, false),
-            ("strong_undef".to_owned(), false, false),
-            ("weak_def".to_owned(), true, true),
-        ]
-    );
-}
-
 // Undefined weak imports are inert. aws-lc references its allocator-override
 // hooks (`OPENSSL_memory_alloc`/`_free`/`_get_size`/`_realloc`) and `sdallocx`
 // weakly: nothing in the link defines them, so each resolves to NULL and the
@@ -175,7 +136,10 @@ fn undefined_weak_imports_are_inert_not_refused() {
         "OPENSSL_memory_realloc",
         "sdallocx",
     ];
-    let dynamic: Vec<(&str, bool, bool)> = hooks.iter().map(|name| (*name, true, false)).collect();
+    let mut dynamic: Vec<(&str, bool, bool)> =
+        hooks.iter().map(|name| (*name, true, false)).collect();
+    // A known-safe strong import beside them audits clean but is not inert.
+    dynamic.push(("__isoc23_sscanf", false, false));
     let bytes = elf_with_symbol_bindings(&dynamic, &[]);
     let audit = NativeAudit::audit(&bytes, &BTreeSet::new())
         .expect("undefined weak imports must not refuse the audit");
@@ -225,13 +189,9 @@ fn a_defined_weak_symbol_keeps_the_full_classification_path() {
     assert_eq!(denied.len(), 1);
     assert_eq!(denied[0].symbol, "host_side_door");
     assert_eq!(denied[0].category, "unknown-import");
-}
 
-// Fail-closed guard 2: the rule is about weak bindings only. A STRONG
-// undefined import is exactly today's escape — the dynamic linker must bind it
-// to a real definition or the process will not start — so it is untouched.
-#[test]
-fn a_strong_undefined_import_is_untouched_by_the_weak_rule() {
+    // The rule is about weak bindings only: a STRONG undefined import must be
+    // bound by the dynamic linker, so it refuses as before.
     let bytes = elf_with_symbol_bindings(&[("host_side_door", false, false)], &[]);
     let error = NativeAudit::audit(&bytes, &BTreeSet::new())
         .expect_err("a strong undefined import must still refuse");
@@ -241,7 +201,7 @@ fn a_strong_undefined_import_is_untouched_by_the_weak_rule() {
     assert_eq!(denied[0].symbol, "host_side_door");
 }
 
-// Fail-closed guard 3: the rule is narrowed to symbols with no known escape
+// Fail-closed guard 2: the rule is narrowed to symbols with no known escape
 // class, and that narrowing is load-bearing rather than cosmetic. An undefined
 // weak reference is NULL only while nothing defines it — and the dynamic
 // linker searches the loaded libraries too, so a weak undefined `open` binds
@@ -249,7 +209,16 @@ fn a_strong_undefined_import_is_untouched_by_the_weak_rule() {
 // a loaded library defines, so a weak binding never rescues one.
 #[test]
 fn a_weak_undefined_import_of_a_classified_escape_still_refuses() {
-    for (symbol, category) in [("open", "filesystem"), ("socket", "network")] {
+    // Named timer classification keeps a future libc timer with no shim door
+    // out of the inert class too.
+    for (symbol, category) in [
+        ("open", "filesystem"),
+        ("socket", "network"),
+        ("timer_gettime", "signals-timers"),
+        ("timerfd_create", "signals-timers"),
+        ("___timer_settime64", "signals-timers"),
+        ("timer_future", "signals-timers"),
+    ] {
         let bytes = elf_with_symbol_bindings(&[(symbol, true, false)], &[]);
         let error = NativeAudit::audit(&bytes, &BTreeSet::new()).expect_err(
             "a weak reference to a symbol the loaded libraries define must still refuse",
@@ -259,60 +228,6 @@ fn a_weak_undefined_import_of_a_classified_escape_still_refuses() {
         };
         assert_eq!(denied[0].symbol, symbol);
         assert_eq!(denied[0].category, category);
-    }
-}
-
-// The acceptance shape the three rules above were built for: the exact
-// seven-symbol residual a glibc `slatedb-dst --features aws` build carries
-// (aws-lc-sys), auditing clean with an EMPTY allow set. The bindings are the
-// ones aws-lc's own source produces — `crypto/mem.c` declares the five hooks
-// through `WEAK_SYMBOL_FUNC`, which on ELF is `__attribute__((weak))` with no
-// definition in the closure — and the two glibc entry points are ordinary
-// strong references.
-#[test]
-fn the_aws_lc_import_residual_audits_clean_with_no_allowance() {
-    let weak_hooks = [
-        "OPENSSL_memory_alloc",
-        "OPENSSL_memory_free",
-        "OPENSSL_memory_get_size",
-        "OPENSSL_memory_realloc",
-        "sdallocx",
-    ];
-    let mut dynamic: Vec<(&str, bool, bool)> =
-        weak_hooks.iter().map(|name| (*name, true, false)).collect();
-    // aws-lc's `__assert_fail` binds to the shim's definition in a linked
-    // guest, so it is no longer part of the import residual.
-    dynamic.push(("__isoc23_sscanf", false, false));
-
-    let bytes = elf_with_symbol_bindings(&dynamic, &[]);
-    let audit = NativeAudit::audit(&bytes, &BTreeSet::new())
-        .expect("the aws-lc residual must audit clean with zero --allow");
-    assert_eq!(
-        audit.inert_weak_imports, weak_hooks,
-        "the five weak hooks are inert; the glibc symbol is known-safe, not inert"
-    );
-}
-
-/// Class pairing: named timer classification prevents the inert-weak rule
-/// from admitting host effects even when a future libc timer has no shim door.
-#[test]
-fn weak_timer_imports_are_never_inert() {
-    for name in [
-        "timer_gettime",
-        "timer_getoverrun",
-        "timerfd_create",
-        "timerfd_settime",
-        "timerfd_gettime",
-        "___timer_gettime_new",
-        "___timer_settime64",
-        "timer_future",
-    ] {
-        let bytes = elf_with_symbol_bindings(&[(name, true, false)], &[]);
-        let error = NativeAudit::audit(&bytes, &BTreeSet::new()).expect_err("host timer import");
-        let TargetError::UnsupportedNativeImports(denied) = error else {
-            panic!("{error:?}")
-        };
-        assert_eq!(denied[0].category, "signals-timers");
     }
 }
 
@@ -605,39 +520,6 @@ fn retype_section(elf: &mut [u8], index: usize, sh_type: u32) {
     elf[at..at + 4].copy_from_slice(&sh_type.to_le_bytes());
 }
 
-// The version-aware parser reads each undefined dynamic symbol's GNU version
-// requirement from `.gnu.version`/`.gnu.version_r`, keeps its weak/strong
-// binding, and leaves an unversioned reference without a version. The fixture
-// has to present that shape, or every refusal test below would be vacuous.
-#[test]
-fn versioned_import_parsing_reads_name_version_and_binding() {
-    let bytes = elf_with_versioned_imports(
-        &[
-            ("dlsym", true, Some("GLIBC_2.34")),
-            ("dlsym", false, Some("GLIBC_2.2.5")),
-            ("mmap", false, Some("GLIBC_2.2.5")),
-            ("plain", false, None),
-        ],
-        &[],
-    );
-    let file = object::File::parse(&*bytes).expect("synthesized versioned ELF parses");
-    let mut parsed: Vec<(String, String, bool)> = dynamic_versions(&file)
-        .imports
-        .into_iter()
-        .map(|import| (import.name, import.version, import.weak))
-        .collect();
-    parsed.sort();
-    assert_eq!(
-        parsed,
-        vec![
-            ("dlsym".to_owned(), "GLIBC_2.2.5".to_owned(), false),
-            ("dlsym".to_owned(), "GLIBC_2.34".to_owned(), true),
-            ("mmap".to_owned(), "GLIBC_2.2.5".to_owned(), false),
-        ],
-        "the unversioned `plain` import carries no version and is excluded"
-    );
-}
-
 // The whole point: a versioned `dlsym` import reached around
 // `-Wl,--wrap=dlsym`, and a versioned `mmap` import the executable does not
 // define itself goes to glibc's. Both are refused by their versioned name,
@@ -753,29 +635,6 @@ fn an_exact_versioned_allowance_clears_only_that_finding() {
         .map(|escape| escape.symbol)
         .collect();
     assert_eq!(refused, vec!["mmap@GLIBC_2.2.5".to_owned()]);
-}
-
-// Fail-closed through the whole audit: a shim-linked binary (the planted
-// `patina_init_from_env` definition is the marker) carrying a strong versioned
-// `dlsym` import is refused, naming the versioned symbol and the class.
-#[test]
-fn audit_refuses_a_shim_linked_versioned_dlsym_bypass() {
-    let bytes = elf_with_versioned_imports(
-        &[("dlsym", false, Some("GLIBC_2.2.5"))],
-        &["patina_init_from_env"],
-    );
-    let error = NativeAudit::audit(&bytes, &BTreeSet::new())
-        .expect_err("a shim-linked versioned dlsym bypass must refuse");
-    let TargetError::UnsupportedNativeImports(denied) = error else {
-        panic!("expected an unsupported-import refusal, got {error:?}");
-    };
-    assert!(
-        denied
-            .iter()
-            .any(|escape| escape.symbol == "dlsym@GLIBC_2.2.5"
-                && escape.category == VERSIONED_BYPASS_CATEGORY),
-        "{denied:?}"
-    );
 }
 
 // A binary that is NOT shim-linked does not get the versioned-bypass pass:

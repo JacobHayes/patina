@@ -117,7 +117,7 @@ mod tests {
     /// The list is the declared stack, in load order, 8 bytes a module,
     /// into room for one more.
     #[test]
-    fn list_modules_answers_the_declared_stack() {
+    fn the_declared_stack_lists_and_context_lengths_are_checked() {
         let declared = KERNEL_CONFIG.lsm_modules;
         let mut ids = vec![0u64; declared.len() + 1];
         let mut size = std::mem::size_of_val(ids.as_slice()) as u32;
@@ -129,13 +129,10 @@ mod tests {
         assert_eq!(size as usize, std::mem::size_of_val(declared));
         assert_eq!(ids[..declared.len()], *declared);
         assert_eq!(ids[declared.len()], 0);
-    }
 
-    /// A context whose `len` is past the size, or short of its header plus
-    /// `ctx_len` (overflow included), is refused before any module is
-    /// asked.
-    #[test]
-    fn set_self_attr_checks_the_context_lengths() {
+        // A context whose `len` is past the size, or short of its header
+        // plus `ctx_len` (overflow included), is refused before any module is
+        // asked.
         let set = |header: ContextHeader| {
             lsm_set_self_attr(credential(), &[100, header.as_ptr() as u64, 32, 0, 0, 0])
         };

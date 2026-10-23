@@ -58,16 +58,6 @@ mod tests {
     use super::*;
     use crate::{ENTRIES, SYMBOLS};
 
-    #[test]
-    fn every_darwin_symbol_association_resolves() {
-        assert!(
-            SYMBOLS
-                .iter()
-                .any(|s| matches!(s.serves, Serves::Darwin(_)))
-        );
-        validate_associations(SYMBOLS, ENTRIES);
-    }
-
     // Class pairing: the const validator checks the real symbol inventory
     // during compilation; this test exercises its rejection diagnostic.
     #[test]

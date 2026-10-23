@@ -4,7 +4,6 @@ use crate::CrashFs;
 use crate::tests::write;
 use patina_dst_abi::{ErrorCode, FsClock};
 use patina_dst_driver_api::FsDriver;
-use patina_dst_fs_mem::MemFs;
 
 #[test]
 fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
@@ -14,10 +13,10 @@ fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
     // crash exactly as with an empty filesystem. `CrashFs::new` here uses the
     // same default policy as `CrashFs::default()` (torn-write probability 1),
     // so the mount does not change crash behavior.
-    let image = patina_dst_fs_mem::FsImage::new(vec![patina_dst_fs_mem::FsImageEntry::file(
-        "/corpus/data.txt",
-        "mounted-and-durable",
-    )]);
+    let image = patina_dst_fs_mem::FsImage::new(vec![
+        patina_dst_fs_mem::FsImageEntry::file("/corpus/data.txt", "mounted-and-durable"),
+        patina_dst_fs_mem::FsImageEntry::symlink("/corpus/link", "/etc/target"),
+    ]);
     let mounted = image.into_memfs().unwrap();
     let mut fs = CrashFs::new(mounted);
 
@@ -34,26 +33,13 @@ fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
         fs.contents("/corpus/data.txt").unwrap(),
         b"mounted-and-durable"
     );
+    assert_eq!(
+        fs.read_link(FsClock::EPOCH, "/corpus/link").unwrap(),
+        "/etc/target"
+    );
     // The unsynced guest write's namespace entry was never made durable.
     assert_eq!(
         fs.metadata("/scratch/out.txt").unwrap_err().code,
         ErrorCode::NotFound
-    );
-}
-
-#[test]
-fn seed_image_symlink_survives_crash() {
-    let mut base = MemFs::new();
-    base.symlink(FsClock::EPOCH, "/etc/target", "/link")
-        .unwrap();
-    let mut fs = CrashFs::new(base);
-    assert_eq!(
-        fs.read_link(FsClock::EPOCH, "/link").unwrap(),
-        "/etc/target"
-    );
-    fs.crash().unwrap();
-    assert_eq!(
-        fs.read_link(FsClock::EPOCH, "/link").unwrap(),
-        "/etc/target"
     );
 }

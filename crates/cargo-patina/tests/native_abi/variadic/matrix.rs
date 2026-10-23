@@ -9,7 +9,9 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
     // Class pairing: exported-boundary ownership is enforced by ast-grep;
     // real C calls detect operand-decoding errors through model behavior.
     // Failpoints are explicitly armed after startup, never source patches.
-    // Ownership is inspected in a debug and an optimized build.
+    // Ownership and every family's panic containment are inspected in a debug
+    // and an optimized build; operand decoding, which the panic strategy does
+    // not touch, in the optimized one.
     for (strategy, opt_level) in [("unwind", 0), ("abort", 3)] {
         let dir = tempfile::tempdir().unwrap();
         let archive = common::test_panic_shim("variadic", strategy, opt_level).archive;
@@ -18,6 +20,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
             (7, 0, "printf"),
             (7, 1, "fprintf"),
             (7, 2, "patina_stream_printf"),
+            (9, 0, "fprintf"),
             (4, 0, "ioctl"),
             (1, 0, "fcntl"),
             (3, 0, "open"),
@@ -95,35 +98,37 @@ fn main() {
         }
         assert_success(rustc.output().unwrap());
         let guest = Guest { dir, binary };
-        for (family, variant, name) in cases {
+        let diagnostics: &[&str] = match (strategy, cfg!(target_os = "linux")) {
+            ("unwind", _) => &["patina native shim panic: unwinding an owned boundary"],
+            ("abort", true) => &["patina native shim panic: aborting an owned boundary"],
+            _ => &[],
+        };
+        for (index, (family, variant, name)) in cases.into_iter().enumerate() {
             let family = family.to_string();
             let variant = variant.to_string();
-            let (normal, trace) = guest.record_standalone(&[&family, "0", &variant]);
-            assert_success(normal);
-            patina_dst_trace::TraceBundle::load(&trace)
-                .unwrap()
-                .validate()
-                .unwrap();
-            let (mutated, _) = guest.record_standalone(&[&family, "2", &variant]);
-            assert_eq!(
-                mutated.status.code(),
-                Some(family.parse::<i32>().unwrap() * 10),
-                "{name} operand mutation must fail the semantic assertion: {mutated:?}"
-            );
+            if opt_level > 0 {
+                let (normal, trace) = guest.record_standalone(&[&family, "0", &variant]);
+                assert_success(normal);
+                patina_dst_trace::TraceBundle::load(&trace)
+                    .unwrap()
+                    .validate()
+                    .unwrap();
+                let (mutated, _) = guest.record_standalone(&[&family, "2", &variant]);
+                assert_eq!(
+                    mutated.status.code(),
+                    Some(family.parse::<i32>().unwrap() * 10),
+                    "{name} operand mutation must fail the semantic assertion: {mutated:?}"
+                );
+            }
             guest.assert_internal_fatal(
                 &[&family, "1", &variant],
                 &["planted variadic boundary panic"],
             );
-            let diagnostics: &[&str] = match (strategy, cfg!(target_os = "linux")) {
-                ("unwind", _) => &["patina native shim panic: unwinding an owned boundary"],
-                ("abort", true) => &["patina native shim panic: aborting an owned boundary"],
-                _ => &[],
-            };
-            guest.assert_internal_fatal(&[&family, "1", &variant, "replace"], diagnostics);
-            eprintln!(
-                "matrix {strategy}: {name}[{variant}]: control=0, planted operand failure={}, original hook and replaced hook passed",
-                mutated.status.code().unwrap()
-            );
+            // The guest's panic hook is process-global, so one family proves
+            // a replaced hook cannot publish a trace either.
+            if index == 0 {
+                guest.assert_internal_fatal(&[&family, "1", &variant, "replace"], diagnostics);
+            }
         }
     }
 }
@@ -326,10 +331,11 @@ extern int __open64(const char *, int, ...);
 extern int patina_stream_printf(FILE *, const char *, ...);
 extern void patina_variadic_test_arm(unsigned family, unsigned fault);
 /* Each representative supplies a valid extra operand so fault=2 can read the
- * wrong variadic position without invoking undefined behavior in the probe. */
+ * wrong variadic position without invoking undefined behavior in the probe.
+ * A family's semantic failure is its number times ten; 99 is a setup failure. */
 int variadic_call(unsigned family, unsigned fault, unsigned variant) {
     int fd = open("/variadic-fault", O_CREAT | O_RDWR, 0600);
-    if (fd < 0) return 90;
+    if (fd < 0) return 99;
     switch (family) {
     case 1:
         patina_variadic_test_arm(family, fault);
@@ -343,7 +349,7 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
     case 2: {
         void *source = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         void *target = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if (source == MAP_FAILED || target == MAP_FAILED) return 90;
+        if (source == MAP_FAILED || target == MAP_FAILED) return 99;
         ((char *)source)[0] = 73;
         patina_variadic_test_arm(family, fault);
         void *result = mremap(source, 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, target, (void *)0);
@@ -363,7 +369,7 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         case 4: created = __open("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
         case 5: created = __open64("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
 #endif
-        default: return 90;
+        default: return 99;
         }
         struct stat value;
         return created >= 0 && !fstat(created, &value) && (value.st_mode & 0777) == 0623 ? 0 : 30;
@@ -372,14 +378,14 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
 #ifdef __linux__
         if (variant == 2) {
             int master = posix_openpt(O_RDWR | O_NOCTTY);
-            if (master < 0 || grantpt(master) || unlockpt(master)) return 90;
+            if (master < 0 || grantpt(master) || unlockpt(master)) return 99;
             patina_variadic_test_arm(family, fault);
             int peer = ioctl(master, TIOCGPTPEER, O_RDWR, O_RDONLY);
             return peer >= 0 && (fcntl(peer, F_GETFL) & O_ACCMODE) == O_RDWR ? 0 : 40;
         }
         if (variant == 1) {
             int watches = (int)syscall(SYS_inotify_init1, IN_NONBLOCK);
-            if (watches < 0) return 90;
+            if (watches < 0) return 99;
             errno = 0;
             patina_variadic_test_arm(family, fault);
             return ioctl(watches, _IOW('I', 0, int), 0x100000001UL) == -1 && errno == EINVAL ? 0 : 40;
@@ -408,17 +414,28 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         if (variant == 0) return printf(format, 123, 7) == 3 ? 0 : 70;
         if (variant == 1) return fprintf(stderr, format, 123, 7) == 3 ? 0 : 70;
         if (variant == 2) return patina_stream_printf(stderr, format, 123, 7) == 3 ? 0 : 70;
-        return 90;
+        return 99;
+    }
+    case 9: {
+        /* A failed write sets the stream's error flag, which the planted
+         * operand fault suppresses. */
+        if (close(2)) return 99;
+        patina_variadic_test_arm(family, fault);
+        errno = 0;
+        if (fprintf(stderr, "%s", "failed") != EOF || errno != EBADF) return 99;
+        if (!ferror(stderr)) return 90;
+        clearerr(stderr);
+        return ferror(stderr) ? 90 : 0;
     }
 #ifdef __linux__
     case 8: {
         char byte = 0;
-        if (write(fd, "q", 1) != 1 || lseek(fd, 0, SEEK_SET)) return 90;
+        if (write(fd, "q", 1) != 1 || lseek(fd, 0, SEEK_SET)) return 99;
         patina_variadic_test_arm(family, fault);
         return syscall(SYS_read, fd, &byte, (size_t)1) == 1 && byte == 'q' ? 0 : 80;
     }
 #endif
-    default: return 90;
+    default: return 99;
     }
 }
 "#;

@@ -1,119 +1,72 @@
 //! Tests for WASI Preview 1 import registration.
 
 use super::*;
-use crate::tests::{create_write_open, read_open, read_stdout_u64s, seeded_context, seeded_memfs};
+use crate::tests::{read_stdout_u64s, seeded_context};
 use crate::{MountPolicy, execute_preview1};
 use patina_dst_runtime::{Context, RuntimeConfig};
 use tempfile::tempdir;
 
+/// The file and link imports marshal their arguments and results through
+/// guest memory: open, set times, set and read back the append flag,
+/// symlink, read the link back, renumber and write through the new number.
 #[test]
-fn wasm_engine_exercises_symlink_readlink_and_set_times_imports() {
+fn wasm_engine_exercises_file_and_link_imports() {
     let module = wat::parse_str(
         r#"(module
                 (import "wasi_snapshot_preview1" "path_open"
                     (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "fd_filestat_set_times"
                     (func $fd_filestat_set_times (param i32 i64 i64 i32) (result i32)))
-                (import "wasi_snapshot_preview1" "path_symlink"
-                    (func $path_symlink (param i32 i32 i32 i32 i32) (result i32)))
-                (import "wasi_snapshot_preview1" "path_readlink"
-                    (func $path_readlink (param i32 i32 i32 i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
-                (data (i32.const 32) "target")
-                (data (i32.const 48) "link")
-                (func (export "_start")
-                    i32.const 3 i32.const 0 i32.const 32 i32.const 6 i32.const 1
-                    i64.const 66 i64.const 0 i32.const 0 i32.const 100
-                    call $path_open
-                    if unreachable end
-                    i32.const 100
-                    i32.load
-                    i64.const 11
-                    i64.const 22
-                    i32.const 5
-                    call $fd_filestat_set_times
-                    if unreachable end
-                    i32.const 32 i32.const 6 i32.const 3 i32.const 48 i32.const 4
-                    call $path_symlink
-                    if unreachable end
-                    i32.const 3 i32.const 48 i32.const 4 i32.const 80 i32.const 4 i32.const 120
-                    call $path_readlink
-                    if unreachable end
-                    i32.const 120
-                    i32.load
-                    i32.const 4
-                    i32.ne
-                    if unreachable end))"#,
-    )
-    .unwrap();
-    let context = Context::from_config(RuntimeConfig::seeded(11)).unwrap();
-    assert_eq!(
-        execute_preview1(&module, Preview1Host::new(context))
-            .unwrap()
-            .exit_code,
-        0
-    );
-}
-
-#[test]
-fn wasm_engine_exercises_fdstat_set_flags_and_renumber_imports() {
-    let module = wat::parse_str(
-        r#"(module
-                (import "wasi_snapshot_preview1" "path_open"
-                    (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "fd_fdstat_set_flags"
                     (func $fd_fdstat_set_flags (param i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "fd_fdstat_get"
                     (func $fd_fdstat_get (param i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "path_symlink"
+                    (func $path_symlink (param i32 i32 i32 i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "path_readlink"
+                    (func $path_readlink (param i32 i32 i32 i32 i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "fd_renumber"
                     (func $fd_renumber (param i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "fd_write"
                     (func $fd_write (param i32 i32 i32 i32) (result i32)))
                 (memory (export "memory") 1)
                 (data (i32.const 0) "\40\00\00\00\01\00\00\00")
-                (data (i32.const 32) "wat")
+                (data (i32.const 32) "target")
+                (data (i32.const 48) "link")
                 (data (i32.const 64) "A")
                 (func (export "_start")
-                    i32.const 3
-                    i32.const 0
-                    i32.const 32
-                    i32.const 3
-                    i32.const 1
-                    i64.const 66
-                    i64.const 0
-                    i32.const 0
-                    i32.const 100
+                    i32.const 3 i32.const 0 i32.const 32 i32.const 6 i32.const 1
+                    i64.const 66 i64.const 0 i32.const 0 i32.const 100
                     call $path_open
                     if unreachable end
-                    i32.const 100
-                    i32.load
-                    i32.const 1
+                    i32.const 100 i32.load i64.const 11 i64.const 22 i32.const 5
+                    call $fd_filestat_set_times
+                    if unreachable end
+                    i32.const 100 i32.load i32.const 1
                     call $fd_fdstat_set_flags
                     if unreachable end
-                    i32.const 100
-                    i32.load
-                    i32.const 104
+                    i32.const 100 i32.load i32.const 104
                     call $fd_fdstat_get
                     if unreachable end
-                    i32.const 106
-                    i32.load16_u
-                    i32.const 1
-                    i32.ne
+                    i32.const 106 i32.load16_u i32.const 1 i32.ne
                     if unreachable end
-                    i32.const 100
-                    i32.load
-                    i32.const 8
+                    i32.const 32 i32.const 6 i32.const 3 i32.const 48 i32.const 4
+                    call $path_symlink
+                    if unreachable end
+                    i32.const 3 i32.const 48 i32.const 4 i32.const 80 i32.const 4 i32.const 140
+                    call $path_readlink
+                    if unreachable end
+                    i32.const 140 i32.load i32.const 4 i32.ne
+                    if unreachable end
+                    i32.const 100 i32.load i32.const 8
                     call $fd_renumber
                     if unreachable end
-                    i32.const 8
-                    i32.const 0
-                    i32.const 1
-                    i32.const 120
+                    i32.const 8 i32.const 0 i32.const 1 i32.const 144
                     call $fd_write
                     if unreachable end))"#,
     )
     .unwrap();
-    let context = Context::from_config(RuntimeConfig::seeded(8)).unwrap();
+    let context = Context::from_config(RuntimeConfig::seeded(11)).unwrap();
     assert_eq!(
         execute_preview1(&module, Preview1Host::new(context))
             .unwrap()
@@ -281,47 +234,33 @@ fn wasi_stat_and_readdir_report_hard_link_identity() {
     assert_eq!(dirent_ino, survivor_ino);
 }
 
+/// Every preopen appears through `fd_prestat_get` and the descriptor past
+/// them does not (EBADF = 8); the namespace calls that run inside the linker
+/// honor a read-only mount (EROFS = 69).
 #[test]
-fn read_only_mount_denies_inline_namespace_calls() {
-    // path_create_directory and path_unlink_file run inside the linker and
-    // must also honor the read-only mount (EROFS = 69).
+fn preopens_appear_through_fd_prestat_and_read_only_mounts_deny_inline_namespace_calls() {
     let module = wat::parse_str(
         r#"(module
+                (import "wasi_snapshot_preview1" "fd_prestat_get"
+                    (func $prestat (param i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "path_create_directory"
                     (func $mkdir (param i32 i32 i32) (result i32)))
                 (import "wasi_snapshot_preview1" "path_unlink_file"
                     (func $unlink (param i32 i32 i32) (result i32)))
                 (memory (export "memory") 1)
-                (data (i32.const 0) "dir")
-                (data (i32.const 16) "file")
-                (func (export "_start")
-                    (if (i32.ne (call $mkdir (i32.const 3) (i32.const 0) (i32.const 3))
-                                (i32.const 69)) (then unreachable))
-                    (if (i32.ne (call $unlink (i32.const 3) (i32.const 16) (i32.const 4))
-                                (i32.const 69)) (then unreachable))))"#,
-    )
-    .unwrap();
-    let context = Context::from_config(RuntimeConfig::seeded(7)).unwrap();
-    let host = Preview1Host::new(context)
-        .with_preopen("/ro", MountPolicy::ReadOnly)
-        .unwrap();
-    assert_eq!(execute_preview1(&module, host).unwrap().exit_code, 0);
-}
-
-#[test]
-fn multiple_preopens_appear_through_fd_prestat() {
-    let module = wat::parse_str(
-        r#"(module
-                (import "wasi_snapshot_preview1" "fd_prestat_get"
-                    (func $prestat (param i32 i32) (result i32)))
-                (memory (export "memory") 1)
+                (data (i32.const 32) "dir")
+                (data (i32.const 48) "file")
                 (func (export "_start")
                     (if (i32.ne (call $prestat (i32.const 3) (i32.const 0)) (i32.const 0))
                         (then unreachable))
                     (if (i32.ne (call $prestat (i32.const 4) (i32.const 0)) (i32.const 0))
                         (then unreachable))
                     (if (i32.ne (call $prestat (i32.const 5) (i32.const 0)) (i32.const 8))
-                        (then unreachable))))"#,
+                        (then unreachable))
+                    (if (i32.ne (call $mkdir (i32.const 4) (i32.const 32) (i32.const 3))
+                                (i32.const 69)) (then unreachable))
+                    (if (i32.ne (call $unlink (i32.const 4) (i32.const 48) (i32.const 4))
+                                (i32.const 69)) (then unreachable))))"#,
     )
     .unwrap();
     let context = Context::from_config(RuntimeConfig::seeded(6)).unwrap();
@@ -331,52 +270,4 @@ fn multiple_preopens_appear_through_fd_prestat() {
         .with_preopen("/beta", MountPolicy::ReadOnly)
         .unwrap();
     assert_eq!(execute_preview1(&module, host).unwrap().exit_code, 0);
-}
-
-#[test]
-fn preopen_policy_reads_and_denials_record_and_replay() {
-    fn exercise(host: &mut Preview1Host) -> Result<Vec<u8>, WasiHostError> {
-        let fd = host.path_open(3, b"seed", read_open())?;
-        let bytes = host.fd_read(fd, 16)?;
-        host.fd_close(fd)?;
-        // A denied write leaves no boundary operation in the trace.
-        assert!(matches!(
-            host.path_open(3, b"seed", create_write_open()),
-            Err(WasiHostError::ReadOnly)
-        ));
-        let out = host.path_open(4, b"out", create_write_open())?;
-        host.fd_write(out, &[b"z"])?;
-        host.fd_close(out)?;
-        Ok(bytes)
-    }
-
-    fn host_for(context: Context) -> Preview1Host {
-        Preview1Host::new(context)
-            .with_preopen("/ro", MountPolicy::ReadOnly)
-            .unwrap()
-            .with_preopen("/rw", MountPolicy::ReadWrite)
-            .unwrap()
-    }
-
-    let directory = tempdir().unwrap();
-    let trace = directory.path().join("preopen.patina");
-    let record_context =
-        patina_dst_runtime::RuntimeBuilder::new(RuntimeConfig::record(9, &trace, "preopen-v1"))
-            .with_default_drivers()
-            .with_filesystem(seeded_memfs(&[("/ro/seed", b"data")]))
-            .build()
-            .unwrap();
-    let mut record = host_for(record_context);
-    let expected = exercise(&mut record).unwrap();
-    record.finish().unwrap();
-
-    let replay_context =
-        patina_dst_runtime::RuntimeBuilder::new(RuntimeConfig::replay(&trace, "preopen-v1"))
-            .with_default_drivers()
-            .with_filesystem(seeded_memfs(&[("/ro/seed", b"data")]))
-            .build()
-            .unwrap();
-    let mut replay = host_for(replay_context);
-    assert_eq!(exercise(&mut replay).unwrap(), expected);
-    replay.finish().unwrap();
 }

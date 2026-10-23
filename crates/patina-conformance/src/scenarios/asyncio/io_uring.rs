@@ -19,7 +19,7 @@
 //!   exactly the opcodes it lacks).
 //!
 //! glibc wraps none of the rows (liburing is a separate library), so the
-//! scenario runs through the kernel vehicles. The host must offer io_uring
+//! scenario runs through the `syscall` vehicle. The host must offer io_uring
 //! to the caller (`Need::IoUring`). The no-op round trip writes through the
 //! ring geometry setup reports, so the probe stops, rather than writing
 //! out of bounds, unless that geometry is exactly one submission and two
@@ -406,7 +406,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "asyncio/io_uring",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_io_uring_setup,
         Syscall::N_io_uring_enter,
@@ -416,7 +416,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[
         Gap {
             status: Status::ByDesign,
-            vehicles: Vehicle::KERNEL,
+            vehicles: &[Vehicle::Syscall],
             what: "the io_uring rows are SoftDeny(ENOSYS) in the registry: the virtual kernel is built without io_uring (CONFIG_IO_URING=n), which tokio-uring, liburing's feature checks and mio/monoio probe for at io_uring_setup and fall back from, so every setup answers ENOSYS where the host kernel has rings",
             failure: Failure::Differs(&[
                 Difference::field(0, "io_uring_setup", "errno", Observed::Str("ENOSYS")),
@@ -436,7 +436,7 @@ pub const SCENARIO: Scenario = Scenario {
         },
         Gap {
             status: Status::ByDesign,
-            vehicles: Vehicle::KERNEL,
+            vehicles: &[Vehicle::Syscall],
             what: "with no ring to create (io_uring_setup is ENOSYS), the scenario stops before its ring checks",
             failure: Failure::Stops {
                 events: 9,

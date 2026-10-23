@@ -101,18 +101,16 @@ fn tsc_manageability_is_the_timestamp_counter_only() {
     assert!(!native_escape_is_tsc_manageable(&by_name));
 }
 
+/// Every capability probe fails closed on input it cannot parse as a native
+/// binary: an error, never a capable/clean answer that would downgrade or
+/// admit the guest.
 #[test]
-fn tsc_marker_detection_fails_closed_on_unparseable_input() {
-    // A malformed binary must never be treated as trap-capable: the marker
-    // probe returns an error, not `false`-as-capable or `true`.
+fn capability_probes_fail_closed_on_unparseable_or_foreign_input() {
     assert!(native_binary_has_tsc_marker(b"not an object file").is_err());
-}
-
-#[test]
-fn sud_marker_detection_fails_closed_on_unparseable_input() {
-    // A malformed binary must never be treated as SUD-capable: the marker
-    // check is a downgrade precondition, so parse failure ⇒ error, not false.
     assert!(native_binary_has_sud_marker(b"not an object file").is_err());
+    let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
+    assert!(native_deny_trap_armed(&wasm).is_err());
+    assert!(native_missing_live_interposers(&wasm, NATIVE_LINUX_LIVE_INTERPOSERS).is_err());
 }
 
 #[test]
@@ -243,27 +241,4 @@ fn shim_host_alias_violation_flags_planted_vehicle_names() {
             "{symbol} must not be reported as a host-alias violation"
         );
     }
-}
-
-#[test]
-fn deny_trap_armed_scan_fails_closed_on_a_foreign_input() {
-    // A non-native (here, wasm) blob must fail closed rather than report clean:
-    // either a native-format rejection or a parse rejection, never `Ok`.
-    let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
-    assert!(
-        native_deny_trap_armed(&wasm).is_err(),
-        "a foreign input must never be reported as carrying no armed surface"
-    );
-}
-
-#[test]
-fn live_interposer_scan_fails_closed_on_a_foreign_input() {
-    // The guard must never report a foreign blob as fully satisfying the
-    // required set (which would read as "all interposers present"); a
-    // non-native input is an error, not an empty missing-list.
-    let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
-    assert!(
-        native_missing_live_interposers(&wasm, NATIVE_LINUX_LIVE_INTERPOSERS).is_err(),
-        "a foreign input must fail closed, never report zero missing interposers"
-    );
 }

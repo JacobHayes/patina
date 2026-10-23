@@ -11,7 +11,7 @@
 //! and thread scenarios (the process class is a non-goal; `fs/fortify`
 //! meets it too): under patina the registrations answer but the run stops
 //! at the fork, so the child oracle and the handlers run natively only. The same deaths are compared in-process
-//! through every vehicle by `signal/core_term`, `signal/handler_flags` and
+//! through every vehicle they have by `signal/core_term`, `signal/handler_flags` and
 //! `signal/pipe_term`, so this scenario has the libc vehicle only.
 
 use crate::catalog::{DEFAULTS, Gap, Scenario, Status};

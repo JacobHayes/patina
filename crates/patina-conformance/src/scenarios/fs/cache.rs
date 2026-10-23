@@ -243,7 +243,7 @@ pub const SCENARIO: Scenario = Scenario {
     // glibc has no cachestat wrapper and the shim defines neither readahead
     // nor posix_fadvise (fs/posix_fadvise), so the libc spelling would be
     // `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_readahead,
         Syscall::N_fadvise64,

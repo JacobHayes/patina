@@ -1,98 +1,18 @@
 //! Tests for file contents, positional writes, size limits and seals.
 
-use crate::tests::{read_write, times};
+use crate::tests::{read_write, times, write_only};
 use crate::{MemFs, VOLUME_MAX_BYTES};
 use patina_dst_abi::seals::{F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_WRITE};
 use patina_dst_abi::{ErrorCode, FsAllocateMode, FsClock, FsEntryKind, OpenFlags, SeekWhence};
 use patina_dst_driver_api::FsDriver;
 
+/// An append description writes at the current end whoever moved it, a
+/// positional write stays where it was asked for, and neither a positional
+/// write nor a description's own start moves the shared cursor.
 #[test]
-fn writes_reads_and_truncates_files() {
-    let mut fs = MemFs::new();
-    let write_fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/state/value",
-            OpenFlags::create_truncate_write(),
-        )
-        .unwrap();
-    assert_eq!(fs.write(FsClock::EPOCH, write_fd, b"patina").unwrap(), 6);
-    fs.close(write_fd).unwrap();
-
-    let read_fd = fs
-        .open(FsClock::EPOCH, "/state//./value", OpenFlags::read_only())
-        .unwrap();
-    assert_eq!(fs.read(FsClock::EPOCH, read_fd, 3).unwrap(), b"pat");
-    assert_eq!(fs.read(FsClock::EPOCH, read_fd, 99).unwrap(), b"ina");
-    assert!(fs.read(FsClock::EPOCH, read_fd, 1).unwrap().is_empty());
-    fs.close(read_fd).unwrap();
-    assert_eq!(fs.contents("/state/value").unwrap(), b"patina");
-
-    let truncate_fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/state/value",
-            OpenFlags::create_truncate_write(),
-        )
-        .unwrap();
-    fs.close(truncate_fd).unwrap();
-    assert!(fs.contents("/state/value").unwrap().is_empty());
-}
-
-#[test]
-fn append_descriptions_use_current_eof_and_write_at_stays_positional() {
+fn append_descriptions_use_current_eof_and_positional_writes_keep_the_cursor() {
     let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
     let append = fs
-        .open(
-            FsClock::EPOCH,
-            "/log",
-            OpenFlags {
-                read: false,
-                write: true,
-                create: false,
-                truncate: false,
-                append: true,
-                exclusive: false,
-                path_only: false,
-                mode: patina_dst_abi::CREATE_MODE_UNUSED,
-            },
-        )
-        .unwrap();
-    let duplicate = fs.dup(append).unwrap();
-
-    let regular = fs
-        .open(
-            FsClock::EPOCH,
-            "/log",
-            OpenFlags {
-                read: false,
-                write: true,
-                create: false,
-                truncate: false,
-                append: false,
-                exclusive: false,
-                path_only: false,
-                mode: patina_dst_abi::CREATE_MODE_UNUSED,
-            },
-        )
-        .unwrap();
-    fs.seek(regular, 0, SeekWhence::End).unwrap();
-    fs.write(FsClock::EPOCH, regular, b"-intervening").unwrap();
-    fs.close(regular).unwrap();
-
-    fs.seek(append, 0, SeekWhence::Start).unwrap();
-    fs.write(FsClock::EPOCH, append, b"-a").unwrap();
-    fs.write(FsClock::EPOCH, duplicate, b"-d").unwrap();
-    fs.write_at(FsClock::EPOCH, append, 1, b"EA").unwrap();
-    fs.write(FsClock::EPOCH, append, b"-tail").unwrap();
-
-    assert_eq!(fs.contents("/log").unwrap(), b"hEAd-intervening-a-d-tail");
-}
-
-#[test]
-fn an_append_description_starts_at_zero_and_reads_from_the_start() {
-    let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
-    let fd = fs
         .open(
             FsClock::EPOCH,
             "/log",
@@ -102,10 +22,28 @@ fn an_append_description_starts_at_zero_and_reads_from_the_start() {
             },
         )
         .unwrap();
-    assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 0);
-    assert_eq!(fs.read(FsClock::EPOCH, fd, 8).unwrap(), b"head");
-    fs.write(FsClock::EPOCH, fd, b"!").unwrap();
-    assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 5);
+    // It starts at zero and reads from the start.
+    assert_eq!(fs.seek(append, 0, SeekWhence::Current).unwrap(), 0);
+    assert_eq!(fs.read(FsClock::EPOCH, append, 8).unwrap(), b"head");
+    let duplicate = fs.dup(append).unwrap();
+
+    let regular = fs.open(FsClock::EPOCH, "/log", write_only()).unwrap();
+    fs.seek(regular, 0, SeekWhence::End).unwrap();
+    fs.write(FsClock::EPOCH, regular, b"-intervening").unwrap();
+    fs.close(regular).unwrap();
+
+    fs.seek(append, 0, SeekWhence::Start).unwrap();
+    fs.write(FsClock::EPOCH, append, b"-a").unwrap();
+    fs.write(FsClock::EPOCH, duplicate, b"-d").unwrap();
+    fs.write_at(FsClock::EPOCH, append, 1, b"EA").unwrap();
+    fs.write(FsClock::EPOCH, append, b"-tail").unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), b"hEAd-intervening-a-d-tail");
+
+    let plain = fs.open(FsClock::EPOCH, "/log", read_write()).unwrap();
+    fs.seek(plain, 2, SeekWhence::Start).unwrap();
+    fs.write_at(FsClock::EPOCH, plain, 0, b"X").unwrap();
+    fs.write(FsClock::EPOCH, plain, b"Y").unwrap();
+    assert!(fs.contents("/log").unwrap().starts_with(b"XEYd-"));
 }
 
 #[test]
@@ -130,32 +68,6 @@ fn set_append_places_later_cursor_writes_through_every_handle_of_the_description
         fs.set_append(location, true).unwrap_err().code,
         ErrorCode::InvalidHandle
     );
-}
-
-#[test]
-fn positional_write_does_not_move_the_shared_cursor() {
-    let mut fs = MemFs::new().with_file("/value", b"abcde").unwrap();
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/value",
-            OpenFlags {
-                read: true,
-                write: true,
-                create: false,
-                truncate: false,
-                append: false,
-                exclusive: false,
-                path_only: false,
-                mode: patina_dst_abi::CREATE_MODE_UNUSED,
-            },
-        )
-        .unwrap();
-    fs.seek(fd, 2, SeekWhence::Start).unwrap();
-    fs.write_at(FsClock::EPOCH, fd, 0, b"X").unwrap();
-    fs.write(FsClock::EPOCH, fd, b"Y").unwrap();
-
-    assert_eq!(fs.contents("/value").unwrap(), b"XbYde");
 }
 
 #[test]
@@ -677,8 +589,10 @@ fn sparse_allocation_is_ext4s() {
     }
 }
 
+/// The cursor is the description's alone: zero-length I/O moves nothing,
+/// and a truncation below the cursor leaves it where it was, at EOF.
 #[test]
-fn zero_io_preserves_times_size_and_cursor() {
+fn zero_io_and_a_truncate_under_the_cursor_leave_it_alone() {
     let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
     let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
     fs.seek(fd, 20, SeekWhence::Start).unwrap();
@@ -689,15 +603,10 @@ fn zero_io_preserves_times_size_and_cursor() {
     assert_eq!(times(&mut fs, "/f"), before);
     assert_eq!(fs.metadata("/f").unwrap().len, 3);
     assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 20);
-}
 
-#[test]
-fn read_after_truncate_past_cursor_returns_eof_without_rewinding() {
-    let mut fs = MemFs::new().with_file("/f", b"abc".to_vec()).unwrap();
-    let fd = fs.open(FsClock::at(10), "/f", read_write()).unwrap();
     fs.seek(fd, 3, SeekWhence::Start).unwrap();
-    fs.set_len(FsClock::at(20), fd, 0).unwrap();
-    assert!(fs.read(FsClock::at(30), fd, 8).unwrap().is_empty());
+    fs.set_len(FsClock::at(60), fd, 0).unwrap();
+    assert!(fs.read(FsClock::at(70), fd, 8).unwrap().is_empty());
     assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 3);
 }
 

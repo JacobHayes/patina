@@ -28,24 +28,19 @@ fn a_marker_matches_any_alternative() {
     assert!(saw("boom: GUEST_VIOLATION no-loss"));
     assert!(saw("GUEST_ABORT final-wal wal corruption"));
     assert!(!saw("clean run"));
-}
-
-#[test]
-fn a_guests_unfinished_line_does_not_run_into_the_supervisors() {
-    let target = Target::Marker(Marker::parse("MRE_FAILURE").unwrap());
-    let stderr = candidate_stderr("guest stopped at MRE", b"_FAILURE is the supervisor's\n");
-    assert!(stderr.lines().any(|line| line == "guest stopped at MRE"));
-    assert!(!target.preserved(&CandidateOutcome {
-        stdout: "",
-        stderr: &stderr,
-        verdicts: &[],
-    }));
-}
-
-#[test]
-fn an_empty_marker_is_refused() {
     assert!(Marker::parse("").is_err());
     assert!(Marker::parse("|").is_err());
+    // A guest's unfinished line does not run into the supervisor's.
+    {
+        let target = Target::Marker(Marker::parse("MRE_FAILURE").unwrap());
+        let stderr = candidate_stderr("guest stopped at MRE", b"_FAILURE is the supervisor's\n");
+        assert!(stderr.lines().any(|line| line == "guest stopped at MRE"));
+        assert!(!target.preserved(&CandidateOutcome {
+            stdout: "",
+            stderr: &stderr,
+            verdicts: &[],
+        }));
+    }
 }
 
 #[test]
@@ -65,14 +60,9 @@ fn a_verdict_target_captures_only_the_failure_verdicts_deduplicated() {
         target.render(),
         "abort_intent:final-wal,violation:durability,violation:wal-integrity"
     );
-}
-
-#[test]
-fn a_generation_whose_only_verdicts_are_passes_has_no_target() {
-    assert!(
-        VerdictTarget::capture(&[verdict("pass", "queue-drained")]).is_none(),
-        "a `pass` reports that a property HELD; there is no failure in it to preserve"
-    );
+    // A `pass` reports that a property HELD; there is no failure in it to
+    // preserve, so a generation of passes alone has no target.
+    assert!(VerdictTarget::capture(&[verdict("pass", "queue-drained")]).is_none());
     assert!(VerdictTarget::capture(&[]).is_none());
 }
 

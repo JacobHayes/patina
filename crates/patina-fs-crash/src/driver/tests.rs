@@ -162,17 +162,6 @@ fn written_pages_are_dirty_until_made_durable() {
 }
 
 #[test]
-fn sync_persists_a_checkpoint_and_later_changes_are_lost() {
-    let mut fs = CrashFs::default();
-    let fd = write(&mut fs, "/state", b"stable");
-    fs.sync(fd).unwrap();
-    fs.sync_directory("/").unwrap();
-    fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
-    fs.crash().unwrap();
-    assert_eq!(fs.contents("/state").unwrap(), b"stable");
-}
-
-#[test]
 fn sync_all_makes_every_change_durable_at_once() {
     let mut fs = lossy();
     let fd = write(&mut fs, "/d/f", b"data");

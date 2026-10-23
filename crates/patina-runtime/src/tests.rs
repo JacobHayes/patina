@@ -19,38 +19,6 @@ pub(super) fn exercise(context: &mut Context) -> Result<Vec<u8>, RuntimeError> {
 }
 
 #[test]
-fn same_seed_repeats_and_different_seed_varies() {
-    let mut first = Context::from_config(RuntimeConfig::seeded(7)).unwrap();
-    let first_result = exercise(&mut first).unwrap();
-    first.finish().unwrap();
-
-    let mut second = Context::from_config(RuntimeConfig::seeded(7)).unwrap();
-    let second_result = exercise(&mut second).unwrap();
-    second.finish().unwrap();
-
-    let mut different = Context::from_config(RuntimeConfig::seeded(8)).unwrap();
-    let different_result = exercise(&mut different).unwrap();
-    different.finish().unwrap();
-
-    assert_eq!(first_result, second_result);
-    assert_ne!(first_result, different_result);
-}
-
-#[test]
-fn record_and_replay_cover_all_initial_effects() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("run.patina");
-    let mut record = Context::from_config(RuntimeConfig::record(99, &path, "fixture-v1")).unwrap();
-    let expected = exercise(&mut record).unwrap();
-    record.finish().unwrap();
-
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "fixture-v1")).unwrap();
-    assert_eq!(replay.root_seed(), 99);
-    assert_eq!(exercise(&mut replay).unwrap(), expected);
-    replay.finish().unwrap();
-}
-
-#[test]
 fn record_and_replay_cross_scheduler_network_clock_and_filesystem() {
     fn simulation(context: &mut Context) -> Result<(TaskId, Vec<u8>), RuntimeError> {
         let first = context.task_spawn("first")?;

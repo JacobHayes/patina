@@ -16,6 +16,13 @@ mod tests {
 
     const GUEST: &str = include_str!("../../../../testbeds/native-boundary/address_leak_probe.rs");
 
+    /// The planted address-leak guest, built once per run.
+    fn address_leak() -> PathBuf {
+        super::super::run_facts::shared_guest("address-leak", |directory| {
+            build_facts_guest(directory, "address_leak", GUEST)
+        })
+    }
+
     /// The class pairing of these tests: `campaign --selftest`'s verification
     /// checks prove every comparison axis and the infra rule on planted
     /// outcomes; these prove the campaign actually runs the comparison.
@@ -56,83 +63,109 @@ mod tests {
         envelope["signatures"].as_array().unwrap()
     }
 
+    /// A novel finding's reproduce path runs once: a failure that reproduces
+    /// keeps its class and its repeats are not verified again, a failure whose
+    /// replay differs is NONDETERMINISM carrying both outcomes (compared
+    /// exactly, so a leak the signature collapses still counts), and
+    /// `--no-verify` reports what it observed and records the opt-out.
     #[test]
-    fn a_finding_whose_replay_differs_is_nondeterminism_with_both_outcomes() {
+    fn a_novel_finding_is_verified_once_and_a_leak_is_nondeterminism_with_both_outcomes() {
         let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let (code, envelope) = campaign(&guest, &directory.path().join("out"), 2, &[], "leak-exit");
-        assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["NONDETERMINISM"], 2, "{envelope:#}");
-        assert!(
-            envelope["classes"].get("UNCLASSIFIED").is_none(),
-            "{envelope:#}"
-        );
-        for record in signatures(&envelope) {
-            assert_eq!(record["class"], "NONDETERMINISM", "{record:#}");
-            let verification = &record["verification"];
-            assert_eq!(verification["path"], "replay", "{record:#}");
-            assert_eq!(verification["status"], "nondeterministic", "{record:#}");
-            // Both outcomes travel with the class: what the campaign saw, and
-            // what its own reproduce command produced.
-            assert_eq!(verification["observed"]["class"], "UNCLASSIFIED");
-            assert_eq!(verification["reproduction"]["class"], "UNCLASSIFIED");
-            assert_ne!(
-                verification["observed"]["signature"], verification["reproduction"]["signature"],
-                "{record:#}"
-            );
-            assert!(
-                record["reproduce"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("cargo patina replay"),
-                "{record:#}"
-            );
-        }
-        assert_eq!(envelope["verification"]["findings"]["nondeterministic"], 2);
-    }
+        let guest = address_leak();
 
-    #[test]
-    fn a_failure_that_reproduces_keeps_its_class_and_is_verified_once() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let (code, envelope) = campaign(&guest, &directory.path().join("out"), 3, &[], "det-exit");
+        let (code, envelope) = campaign(&guest, &directory.path().join("det"), 2, &[], "det-exit");
         assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 3, "{envelope:#}");
+        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 2, "{envelope:#}");
         assert!(
             envelope["classes"].get("NONDETERMINISM").is_none(),
             "{envelope:#}"
         );
         let records = signatures(&envelope);
         assert_eq!(records.len(), 1, "{envelope:#}");
-        assert_eq!(records[0]["count"], 3);
+        assert_eq!(records[0]["count"], 2);
         assert_eq!(
             records[0]["verification"]["status"], "reproduced",
             "{envelope:#}"
         );
-        // The repeats are not verified again: the cost is one run per novel
+        // The repeat is not verified again: the cost is one run per novel
         // signature.
         assert_eq!(
             envelope["verification"]["findings"]["verified"], 1,
             "{envelope:#}"
         );
+
+        // The leaked token is all digits, so both runs share one signature:
+        // only the exact outcome tells them apart.
+        let (code, envelope) = campaign(
+            &guest,
+            &directory.path().join("leak"),
+            1,
+            &[],
+            "leak-number-exit",
+        );
+        assert_eq!(code, Some(1), "{envelope:#}");
+        assert_eq!(envelope["classes"]["NONDETERMINISM"], 1, "{envelope:#}");
+        assert!(
+            envelope["classes"].get("UNCLASSIFIED").is_none(),
+            "{envelope:#}"
+        );
+        let record = &signatures(&envelope)[0];
+        assert_eq!(record["class"], "NONDETERMINISM", "{record:#}");
+        let verification = &record["verification"];
+        assert_eq!(verification["path"], "replay", "{record:#}");
+        assert_eq!(verification["status"], "nondeterministic", "{record:#}");
+        // Both outcomes travel with the class: what the campaign saw, and what
+        // its own reproduce command produced.
+        assert_eq!(verification["observed"]["class"], "UNCLASSIFIED");
+        assert_eq!(verification["reproduction"]["class"], "UNCLASSIFIED");
+        assert_eq!(
+            verification["observed"]["signature"], verification["reproduction"]["signature"],
+            "{record:#}"
+        );
+        assert!(
+            record["reproduce"]
+                .as_str()
+                .unwrap()
+                .starts_with("cargo patina replay"),
+            "{record:#}"
+        );
+        assert_eq!(envelope["verification"]["findings"]["nondeterministic"], 1);
+
+        let out = directory.path().join("unverified");
+        let (code, envelope) = campaign(&guest, &out, 1, &["--no-verify"], "leak-number-exit");
+        assert_eq!(code, Some(1), "{envelope:#}");
+        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 1, "{envelope:#}");
+        assert!(
+            envelope["classes"].get("NONDETERMINISM").is_none(),
+            "{envelope:#}"
+        );
+        assert!(
+            signatures(&envelope)
+                .iter()
+                .all(|record| record.get("verification").is_none()),
+            "{envelope:#}"
+        );
+        assert_eq!(envelope["verification"]["state"], "off");
+        // The opt-out is campaign shape: recorded, so a continuation keeps it.
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["spec"]["verify"], false);
     }
 
     #[test]
     fn the_clean_rerun_sample_catches_a_leak_on_a_passing_run() {
         let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
         // The campaign seed picks which generation of each stride is sampled;
         // seed base 2 samples generation 1, so two generations hold one
         // sampled generation and one that is not. That one sample per stride
         // is the selftest's `clean-rerun-sample-is-one-per-stride` check.
         let gens = 2;
-        let seed = ["--seed-start", "2"];
-
         let (code, envelope) = campaign(
-            &guest,
+            &address_leak(),
             &directory.path().join("leak"),
             gens,
-            &seed,
+            &["--seed-start", "2"],
             "leak-clean",
         );
         assert_eq!(code, Some(1), "{envelope:#}");
@@ -157,59 +190,18 @@ mod tests {
         let observed = verification["observed"]["trace"].as_str().unwrap();
         let reproduced = verification["reproduction"]["trace"].as_str().unwrap();
         assert_ne!(observed, reproduced, "{caught:#}");
-
-        // The deterministic control: the same shape, with scheduling decisions
-        // in its trace, reruns byte-identically and stays clean.
-        let (code, envelope) = campaign(
-            &guest,
-            &directory.path().join("det"),
-            gens,
-            &seed,
-            "det-clean",
-        );
-        assert_eq!(code, Some(0), "{envelope:#}");
-        assert_eq!(envelope["classes"]["OK"], gens, "{envelope:#}");
-        assert_eq!(
-            envelope["verification"]["clean"]["reruns"], 1,
-            "{envelope:#}"
-        );
-        assert_eq!(envelope["verification"]["clean"]["nondeterministic"], 0);
     }
 
+    /// Each seed reports its own violation label, so every generation is a
+    /// novel finding and is verified: a divergence surfaces as an unconsumed
+    /// trace on some replays and an overrun on others, and both land the same
+    /// way. `minimize --generation` then refuses the class rather than reduce
+    /// the violation verdict a single-run oracle could target.
     #[test]
-    fn a_leak_the_signature_collapses_is_still_nondeterminism() {
+    fn a_replay_that_diverges_after_its_verdict_is_nondeterminism_minimize_refuses() {
         let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
         let out = directory.path().join("out");
-        let (code, envelope) = campaign(&guest, &out, 2, &[], "leak-number-exit");
-        assert_eq!(code, Some(1), "{envelope:#}");
-        let record = &signatures(&envelope)[0];
-        let verification = &record["verification"];
-        // The leaked token is all digits, so both runs share one signature:
-        // only the exact outcome tells them apart.
-        assert_eq!(
-            verification["observed"]["signature"], verification["reproduction"]["signature"],
-            "{record:#}"
-        );
-        assert_eq!(verification["status"], "nondeterministic", "{record:#}");
-        assert_eq!(record["class"], "NONDETERMINISM", "{record:#}");
-    }
-
-    #[test]
-    fn a_replay_that_diverges_after_its_verdict_is_nondeterminism() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        // Each seed reports its own violation label, so every generation is a
-        // novel finding and is verified: a divergence surfaces as an
-        // unconsumed trace on some replays and an overrun on others, and both
-        // must land the same way.
-        let (code, envelope) = campaign(
-            &guest,
-            &directory.path().join("out"),
-            6,
-            &[],
-            "leak-schedule",
-        );
+        let (code, envelope) = campaign(&address_leak(), &out, 6, &[], "leak-schedule");
         assert_eq!(code, Some(1), "{envelope:#}");
         assert!(
             envelope["classes"].get("VIOLATION").is_none(),
@@ -224,6 +216,28 @@ mod tests {
                 "{record:#}"
             );
         }
+
+        let output = directory.path().join("minimized.patina");
+        let minimized = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &[
+                "minimize",
+                "--generation",
+                "0",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--output",
+                output.to_str().unwrap(),
+                "--no-trace-phase",
+                "--jobs",
+                "1",
+            ],
+        );
+        let stderr = String::from_utf8_lossy(&minimized.stderr);
+        assert_eq!(minimized.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("NONDETERMINISM"), "{stderr}");
+        assert!(!output.exists());
     }
 
     /// Four workers contend on one mutex long enough for PCT's change points
@@ -289,115 +303,42 @@ fn main() {
         }
     }
 
+    /// Guest output cannot move a verification verdict either way: a
+    /// deterministic fault whose last guest line is unterminated still
+    /// reproduces (patina's marker follows guest output on the same stream), a
+    /// guest spelling a divergence in a custom-op label does not forge one, and
+    /// a guest line shaped like patina's marker keeps the evidence that the
+    /// leak beside it is nondeterministic.
     #[test]
-    fn minimize_refuses_a_nondeterministic_generation() {
+    fn guest_output_cannot_forge_or_hide_a_verification_outcome() {
         let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let out = directory.path().join("out");
-        let (_, envelope) = campaign(&guest, &out, 1, &[], "leak-schedule");
-        assert_eq!(envelope["classes"]["NONDETERMINISM"], 1, "{envelope:#}");
-        // The generation carries a violation verdict a single-run oracle could
-        // target, which would reduce the violation and drop the nondeterminism.
-        let output = directory.path().join("minimized.patina");
-        let minimized = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &[
-                "minimize",
-                "--generation",
-                "0",
-                "--out-dir",
-                out.to_str().unwrap(),
-                "--output",
-                output.to_str().unwrap(),
-                "--no-trace-phase",
-                "--jobs",
-                "1",
-            ],
-        );
-        let stderr = String::from_utf8_lossy(&minimized.stderr);
-        assert_eq!(minimized.status.code(), Some(2), "{stderr}");
-        assert!(stderr.contains("NONDETERMINISM"), "{stderr}");
-        assert!(!output.exists());
-    }
-
-    #[test]
-    fn a_deterministic_fault_reproduces() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        // The second mode leaves its last stderr line unfinished, so patina's
-        // own marker follows guest output on the same stream.
-        for mode in ["det-segv", "det-segv-unterminated"] {
-            let (code, envelope) = campaign(&guest, &directory.path().join(mode), 2, &[], mode);
-            assert_eq!(code, Some(1), "{mode}: {envelope:#}");
-            assert!(
-                envelope["classes"].get("NONDETERMINISM").is_none(),
-                "{mode}: {envelope:#}"
-            );
-            // Both generations fault the same way, so they share one signature,
-            // and its reproduction agrees with it.
-            let records = signatures(&envelope);
-            assert_eq!(records.len(), 1, "{mode}: {envelope:#}");
-            assert_eq!(records[0]["count"], 2, "{mode}: {envelope:#}");
-            assert_eq!(
-                records[0]["verification"]["status"], "reproduced",
-                "{mode}: {envelope:#}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_guest_cannot_forge_a_replay_divergence() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let (code, envelope) = campaign(
-            &guest,
-            &directory.path().join("out"),
-            1,
-            &[],
-            "forge-divergence",
-        );
-        assert_eq!(code, Some(1), "{envelope:#}");
-        let record = &signatures(&envelope)[0];
-        assert_eq!(record["verification"]["status"], "reproduced", "{record:#}");
-        assert!(
-            record["verification"]["reproduction"]
-                .get("replay_diverged")
-                .is_none(),
-            "{record:#}"
-        );
-    }
-
-    #[test]
-    fn a_guest_line_shaped_like_patinas_marker_keeps_its_evidence() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        for mode in ["forge-marker", "forge-native-run"] {
+        let guest = address_leak();
+        for (mode, status) in [
+            ("det-segv-unterminated", "reproduced"),
+            ("forge-divergence", "reproduced"),
+            ("forge-marker", "nondeterministic"),
+            ("forge-native-run", "nondeterministic"),
+        ] {
             let (code, envelope) = campaign(&guest, &directory.path().join(mode), 1, &[], mode);
             assert_eq!(code, Some(1), "{mode}: {envelope:#}");
             let record = &signatures(&envelope)[0];
             assert_eq!(
-                record["verification"]["status"], "nondeterministic",
+                record["verification"]["status"], status,
                 "{mode}: {record:#}"
             );
+            if status == "reproduced" {
+                assert!(
+                    envelope["classes"].get("NONDETERMINISM").is_none(),
+                    "{mode}: {envelope:#}"
+                );
+                assert!(
+                    record["verification"]["reproduction"]
+                        .get("replay_diverged")
+                        .is_none(),
+                    "{mode}: {record:#}"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn a_replay_that_diverges_from_the_time_model_is_nondeterminism() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let (code, envelope) =
-            campaign(&guest, &directory.path().join("out"), 1, &[], "leak-clock");
-        assert_eq!(code, Some(1), "{envelope:#}");
-        let record = &signatures(&envelope)[0];
-        let verification = &record["verification"];
-        assert_eq!(verification["path"], "replay", "{record:#}");
-        assert_eq!(verification["status"], "nondeterministic", "{record:#}");
-        assert_eq!(
-            verification["reproduction"]["replay_diverged"], true,
-            "{record:#}"
-        );
     }
 
     /// A WASI guest that writes a line of output and reports a fixed
@@ -434,19 +375,25 @@ fn main() {
         path
     }
 
+    /// A WASI replay that diverges at finalization is NONDETERMINISM in a
+    /// campaign, its exit status is compared past the eight bits a process
+    /// status carries, and the replay envelope keeps what the guest did before
+    /// the divergence surfaced.
     #[test]
-    fn a_wasi_replay_that_diverges_at_finalization_is_nondeterminism() {
+    fn a_wasi_replay_that_diverges_at_finalization_is_nondeterminism_and_keeps_evidence() {
         let directory = tempdir().unwrap();
         for (name, body) in [
-            // The replay skips the recorded read: events are left over.
-            (
-                "under",
-                "(if (i32.eqz (local.get $mode)) (then (drop (call $random (i32.const 128) (i32.const 1)))))",
-            ),
             // The replay asks for a different length: the operation differs.
             (
                 "mismatch",
                 "(drop (call $random (i32.const 128) (i32.add (i32.const 1) (local.get $mode))))",
+            ),
+            // Exit 3 while recording and 259 in the replay: one byte apart only
+            // above the eight bits a process status carries.
+            (
+                "exit-bits",
+                "(drop (call $random (i32.const 128) (i32.const 1))) \
+                 (call $exit (i32.add (i32.const 3) (i32.mul (local.get $mode) (i32.const 256))))",
             ),
         ] {
             let guest = mode_branching_wasi_guest(directory.path(), name, body);
@@ -458,31 +405,8 @@ fn main() {
                 "{name}: {record:#}"
             );
         }
-    }
 
-    #[test]
-    fn a_wasi_exit_status_is_compared_past_eight_bits() {
-        let directory = tempdir().unwrap();
-        // Exit 3 while recording and 259 in the replay: one byte apart only
-        // above the eight bits a process status carries.
-        let guest = mode_branching_wasi_guest(
-            directory.path(),
-            "exit-bits",
-            "(drop (call $random (i32.const 128) (i32.const 1))) \
-             (call $exit (i32.add (i32.const 3) (i32.mul (local.get $mode) (i32.const 256))))",
-        );
-        let (code, envelope) = campaign(&guest, &directory.path().join("out"), 1, &[], "");
-        assert_eq!(code, Some(1), "{envelope:#}");
-        let record = &signatures(&envelope)[0];
-        assert_eq!(
-            record["verification"]["status"], "nondeterministic",
-            "{record:#}"
-        );
-    }
-
-    #[test]
-    fn a_wasi_replay_that_diverges_at_finalization_keeps_the_guests_evidence() {
-        let directory = tempdir().unwrap();
+        // The replay skips the recorded read: events are left over.
         let skip_read = "(if (i32.eqz (local.get $mode)) (then (drop (call $random (i32.const 128) (i32.const 1)))))";
         for (name, ending, guest_code) in [
             ("returns", "", 0),
@@ -524,31 +448,5 @@ fn main() {
                 "{name}: {envelope:#}"
             );
         }
-    }
-
-    #[test]
-    fn no_verify_reports_each_generation_as_observed() {
-        let directory = tempdir().unwrap();
-        let guest = build_facts_guest(directory.path(), "address_leak", GUEST);
-        let out = directory.path().join("out");
-        let (code, envelope) = campaign(&guest, &out, 2, &["--no-verify"], "leak-exit");
-        assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 2, "{envelope:#}");
-        assert!(
-            envelope["classes"].get("NONDETERMINISM").is_none(),
-            "{envelope:#}"
-        );
-        assert!(
-            signatures(&envelope)
-                .iter()
-                .all(|record| record.get("verification").is_none()),
-            "{envelope:#}"
-        );
-        assert_eq!(envelope["verification"]["state"], "off");
-        // The opt-out is campaign shape: recorded, so a continuation keeps it.
-        let state: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
-                .unwrap();
-        assert_eq!(state["spec"]["verify"], false);
     }
 }

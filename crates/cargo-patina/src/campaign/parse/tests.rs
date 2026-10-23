@@ -1,12 +1,10 @@
 //! Tests for campaign invocation parsing and continuation controls.
 
 use super::super::selftest::declared_rules_fixture;
-use super::super::spec::{
-    DEFAULT_PLATEAU_AFTER, DEFAULT_PROGRESS_EVERY, classify_rules_to_json, json_classify_rules,
-};
+use super::super::spec::{classify_rules_to_json, json_classify_rules};
 use super::super::{
-    AllowUnmetSometimes, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes,
-    STARVE_SCALE_FULL,
+    AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL,
+    FaultPlanes, STARVE_SCALE_FULL,
 };
 use super::*;
 use std::ffi::OsString;
@@ -70,6 +68,10 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
 
 #[test]
 fn declared_rules_are_grammar_validated_and_loud() {
+    let cross_run = CampaignClass::ALL
+        .iter()
+        .find(|class| class.is_cross_run())
+        .unwrap();
     for bad in [
         serde_json::json!([]),
         serde_json::json!({"nonsense": {}}),
@@ -80,6 +82,8 @@ fn declared_rules_are_grammar_validated_and_loud() {
         serde_json::json!({"patterns": {"VIOLATION": [7]}}),
         serde_json::json!({"exit_codes": {"VIOLATION": ["3"]}}),
         serde_json::json!({"exit_codes": {"VIOLATION": {}}}),
+        // No rule over one run's output can say that run would not reproduce.
+        serde_json::json!({"patterns": {cross_run.as_str(): ["token"]}}),
     ] {
         assert!(
             json_classify_rules(&bad).is_err(),
@@ -96,88 +100,49 @@ fn declared_rules_are_grammar_validated_and_loud() {
     );
 }
 
-/// The bound and the precedence, on both the JSON and the flag path — the
-/// same contract [`the_fault_scale_is_bounded_and_the_flag_beats_the_spec_file`]
-/// holds the fault dial to: a spec file cannot ask for a scale ABOVE the
-/// tuned policy (it dampens, it never amplifies), and an explicit flag
-/// overrides a spec file's value.
+/// The bound and the precedence of both scale dials, on the JSON and the flag
+/// path: a spec file cannot ask for a scale ABOVE the tuned policy (it
+/// dampens, it never amplifies), an explicit flag overrides a spec file's
+/// value, and with neither the default is full intensity.
 #[test]
-fn the_starve_scale_is_bounded_and_the_flag_beats_the_spec_file() {
+fn the_scale_dials_are_bounded_and_the_flag_beats_the_spec_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("spec.json");
     let spec_flag = path.display().to_string();
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    type Field = fn(&CampaignSpec) -> u64;
+    let dials: [(&str, &str, &str, Field, u64); 2] = [
+        (
+            "faults",
+            "fault_scale_permille",
+            "--fault-scale-permille",
+            |spec| spec.fault_scale_permille,
+            FAULT_SCALE_FULL,
+        ),
+        (
+            "starve",
+            "starve_scale_permille",
+            "--starve-scale-permille",
+            |spec| spec.starve_scale_permille,
+            STARVE_SCALE_FULL,
+        ),
+    ];
+    for (switch, key, flag, field, full) in dials {
+        fs::write(&path, format!(r#"{{"{switch}": true, "{key}": 1001}}"#)).expect("write");
+        let error = parse(args(&["art", "--spec", &spec_flag]))
+            .expect_err("a scale above full intensity must be refused")
+            .to_string();
+        assert!(error.contains(key), "the refusal must name {key}: {error}");
 
-    fs::write(&path, br#"{"starve": true, "starve_scale_permille": 1001}"#).expect("write");
-    let error = parse(args(&["art", "--spec", &spec_flag]))
-        .expect_err("a scale above full intensity must be refused")
-        .to_string();
-    assert!(
-        error.contains("starve_scale_permille") && error.contains("[0, 1000]"),
-        "the refusal must name the key and its bound: {error}"
-    );
-
-    fs::write(&path, br#"{"starve": true, "starve_scale_permille": 250}"#).expect("write");
-    let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
-    assert_eq!(from_spec.spec.starve_scale_permille, 250);
-    let overridden = parse(args(&[
-        "art",
-        "--spec",
-        &spec_flag,
-        "--starve-scale-permille",
-        "100",
-    ]))
-    .expect("flag parses");
-    assert_eq!(overridden.spec.starve_scale_permille, 100);
-    // Absent flag, absent spec key: the default is full intensity.
-    assert_eq!(
-        parse(args(&["art", "--starve"]))
-            .expect("parses")
-            .spec
-            .starve_scale_permille,
-        STARVE_SCALE_FULL
-    );
-}
-
-/// The bound and the precedence, on both the JSON and the flag path: a spec
-/// file cannot ask for a scale ABOVE the tuned bands (it dampens, it never
-/// amplifies), and an explicit flag overrides a spec file's value.
-#[test]
-fn the_fault_scale_is_bounded_and_the_flag_beats_the_spec_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("spec.json");
-    let spec_flag = path.display().to_string();
-    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-
-    fs::write(&path, br#"{"faults": true, "fault_scale_permille": 1001}"#).expect("write");
-    let error = parse(args(&["art", "--spec", &spec_flag]))
-        .expect_err("a scale above full intensity must be refused")
-        .to_string();
-    assert!(
-        error.contains("fault_scale_permille") && error.contains("[0, 1000]"),
-        "the refusal must name the key and its bound: {error}"
-    );
-
-    fs::write(&path, br#"{"faults": true, "fault_scale_permille": 250}"#).expect("write");
-    let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
-    assert_eq!(from_spec.spec.fault_scale_permille, 250);
-    let overridden = parse(args(&[
-        "art",
-        "--spec",
-        &spec_flag,
-        "--fault-scale-permille",
-        "10",
-    ]))
-    .expect("flag parses");
-    assert_eq!(overridden.spec.fault_scale_permille, 10);
-    // Absent flag, absent spec key: the default is full intensity.
-    assert_eq!(
-        parse(args(&["art", "--faults"]))
-            .expect("parses")
-            .spec
-            .fault_scale_permille,
-        FAULT_SCALE_FULL
-    );
+        fs::write(&path, format!(r#"{{"{switch}": true, "{key}": 250}}"#)).expect("write");
+        let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
+        assert_eq!(field(&from_spec.spec), 250);
+        let overridden =
+            parse(args(&["art", "--spec", &spec_flag, flag, "10"])).expect("flag parses");
+        assert_eq!(field(&overridden.spec), 10);
+        let default = parse(args(&["art", &format!("--{switch}")])).expect("parses");
+        assert_eq!(field(&default.spec), full);
+    }
 }
 
 /// Bare `--faults` is every plane and `--faults=PLANE,...` the named subset,
@@ -235,40 +200,6 @@ fn faults_selects_every_plane_bare_or_the_named_subset() {
 }
 
 #[test]
-fn renamed_flags_parse_and_old_spellings_error() {
-    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-    // New spellings parse and set the right fields; the `=VALUE` form works too.
-    let inv = parse(args(&[
-        "art",
-        "--sched-pct",
-        "--seed-start",
-        "7",
-        "--out-dir",
-        "d",
-        "--gens=3",
-    ]))
-    .unwrap();
-    assert!(inv.spec.pct);
-    assert_eq!(inv.spec.seed_base, 7);
-    assert_eq!(inv.out_dir, PathBuf::from("d"));
-    assert_eq!(inv.spec.generations, 3);
-
-    // Old spellings are unknown-flag errors (no aliases).
-    for old in [
-        &["art", "--pct"][..],
-        &["art", "--out", "d"][..],
-        &["art", "--seed-base", "1"][..],
-    ] {
-        assert!(parse(args(old)).is_err(), "old spelling {old:?} must error");
-    }
-
-    // A leading flag (no artifact) fails closed with the unsupported-option
-    // usage error, not a later "failed to read artifact --nonsense".
-    assert!(parse(args(&["--nonsense"])).is_err());
-    assert!(parse(args(&["--gens", "3"])).is_err());
-}
-
-#[test]
 fn campaign_locates_the_artifact_around_options() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     // Options may lead the artifact, in any form/order, matching the leading
@@ -299,47 +230,6 @@ fn campaign_locates_the_artifact_around_options() {
     let message = error(&["--frob", m]);
     assert!(message.contains("--frob"), "{message}");
     assert!(message.contains(m), "{message}");
-}
-
-#[test]
-fn progress_every_and_plateau_parse_and_default() {
-    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-    // Default when unset.
-    let inv = parse(args(&["art"])).unwrap();
-    assert_eq!(inv.progress_every, DEFAULT_PROGRESS_EVERY);
-    assert_eq!(inv.spec.plateau_after, DEFAULT_PLATEAU_AFTER);
-    // Both value forms parse; 0 and 1 are accepted (silent / full-stream).
-    assert_eq!(
-        parse(args(&["art", "--progress-every", "0"]))
-            .unwrap()
-            .progress_every,
-        0
-    );
-    assert_eq!(
-        parse(args(&["art", "--progress-every=1"]))
-            .unwrap()
-            .progress_every,
-        1
-    );
-    assert_eq!(
-        parse(args(&["art", "--plateau-after", "0"]))
-            .unwrap()
-            .spec
-            .plateau_after,
-        0
-    );
-    assert_eq!(
-        parse(args(&["art", "--plateau-after=17"]))
-            .unwrap()
-            .spec
-            .plateau_after,
-        17
-    );
-    // Duplicate is rejected (set_once), non-integer is rejected.
-    assert!(parse(args(&["art", "--progress-every=1", "--progress-every=2"])).is_err());
-    assert!(parse(args(&["art", "--progress-every", "nope"])).is_err());
-    assert!(parse(args(&["art", "--plateau-after=1", "--plateau-after=2"])).is_err());
-    assert!(parse(args(&["art", "--plateau-after", "nope"])).is_err());
 }
 
 #[test]

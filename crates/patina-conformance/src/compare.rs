@@ -947,41 +947,11 @@ mod tests {
         }
     }
 
+    /// Patina conforms when its stream and ending equal the native run's,
+    /// or differ exactly as a declared gap says: each declared difference
+    /// observed at its event with its patina value, and nothing else.
     #[test]
-    fn identical_streams_conform() {
-        assert_eq!(judge(&native(), &native(), &[]), Ok(Verdict::default()));
-    }
-
-    #[test]
-    fn an_undeclared_difference_fails() {
-        let failures = judge(&native(), &patina_enosys(), &[]).unwrap_err();
-        assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("seq 1 newfstatat errno"))
-        );
-        assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("an unknown flag is EINVAL"))
-        );
-    }
-
-    #[test]
-    fn a_declared_difference_is_confirmed() {
-        let verdict = judge(&native(), &patina_enosys(), &[gap(&ENOSYS_GAP)]).unwrap();
-        assert_eq!(verdict.confirmed.len(), 1);
-    }
-
-    #[test]
-    fn a_stale_gap_fails_once_patina_conforms() {
-        let failures = judge(&native(), &native(), &[gap(&ENOSYS_GAP)]).unwrap_err();
-        assert_eq!(failures.len(), 2, "{failures:?}");
-        assert!(failures.iter().all(|line| line.contains("not observed")));
-    }
-
-    #[test]
-    fn a_declared_check_pins_its_event() {
+    fn a_stream_conforms_only_as_declared() {
         const ELSEWHERE: Failure = Failure::Differs(&[
             Difference::Field {
                 seq: 1,
@@ -991,54 +961,86 @@ mod tests {
             },
             Difference::check(0, "an unknown flag is EINVAL"),
         ]);
-        let failures = judge(&native(), &patina_enosys(), &[gap(&ELSEWHERE)]).unwrap_err();
-        assert!(failures.iter().any(|line| line.contains("not observed")));
-        assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("undeclared difference: seq 2 check"))
-        );
-    }
-
-    #[test]
-    fn a_declared_difference_pins_the_patina_value() {
-        let mut patina = patina_enosys();
-        patina.events[1].errno = Some("EPERM".to_string());
-        let failures = judge(&native(), &patina, &[gap(&ENOSYS_GAP)]).unwrap_err();
-        assert!(failures.iter().any(|line| line.contains("not observed")));
-        assert!(
-            failures
-                .iter()
-                .any(|line| line.contains("undeclared difference: seq 1"))
-        );
-    }
-
-    #[test]
-    fn event_count_drift_fails_in_both_directions() {
+        let mut other_value = patina_enosys();
+        other_value.events[1].errno = Some("EPERM".to_string());
         let mut shorter = native();
         shorter.events.pop();
-        assert!(judge(&native(), &shorter, &[]).is_err());
-        assert!(judge(&shorter, &native(), &[]).is_err());
-    }
-
-    #[test]
-    fn a_termination_difference_fails() {
-        let mut died = native();
-        died.termination = Termination::Signaled {
-            signal: 15,
-            core: Some(false),
-        };
-        let failures = judge(&native(), &died, &[]).unwrap_err();
-        assert!(failures[0].starts_with("termination:"), "{failures:?}");
-    }
-
-    #[test]
-    fn a_core_flag_difference_fails() {
-        let signaled = |core| Observation {
-            termination: Termination::Signaled { signal: 6, core },
+        let ended = |termination| Observation {
+            termination,
             ..native()
         };
-        assert!(judge(&signaled(Some(true)), &signaled(None), &[]).is_err());
+        let signaled = |core| Termination::Signaled { signal: 6, core };
+        let cases = [
+            ("identical streams", native(), native(), vec![], true),
+            (
+                "an undeclared difference",
+                native(),
+                patina_enosys(),
+                vec![],
+                false,
+            ),
+            (
+                "a declared difference",
+                native(),
+                patina_enosys(),
+                vec![gap(&ENOSYS_GAP)],
+                true,
+            ),
+            (
+                "a check declared at another event",
+                native(),
+                patina_enosys(),
+                vec![gap(&ELSEWHERE)],
+                false,
+            ),
+            (
+                "another patina value",
+                native(),
+                other_value,
+                vec![gap(&ENOSYS_GAP)],
+                false,
+            ),
+            (
+                "fewer patina events",
+                native(),
+                shorter.clone(),
+                vec![],
+                false,
+            ),
+            ("fewer native events", shorter, native(), vec![], false),
+            (
+                "another termination",
+                native(),
+                ended(Termination::Signaled {
+                    signal: 15,
+                    core: Some(false),
+                }),
+                vec![],
+                false,
+            ),
+            (
+                "another core flag",
+                ended(signaled(Some(true))),
+                ended(signaled(None)),
+                vec![],
+                false,
+            ),
+        ];
+        for (case, native, patina, gaps, holds) in cases {
+            assert_eq!(judge(&native, &patina, &gaps).is_ok(), holds, "{case}");
+        }
+        let verdict = judge(&native(), &patina_enosys(), &[gap(&ENOSYS_GAP)]).unwrap();
+        assert_eq!(verdict.confirmed.len(), 1, "the one gap is confirmed");
+    }
+
+    /// A gap patina no longer shows fails, once per declared difference.
+    #[test]
+    fn a_stale_gap_fails_once_patina_conforms() {
+        let Failure::Differs(declared) = ENOSYS_GAP else {
+            unreachable!("ENOSYS_GAP declares differences")
+        };
+        let failures = judge(&native(), &native(), &[gap(&ENOSYS_GAP)]).unwrap_err();
+        assert_eq!(failures.len(), declared.len(), "{failures:?}");
     }
 
     const STOP: Failure = Failure::Stops {
@@ -1059,28 +1061,66 @@ mod tests {
         }
     }
 
+    /// A declared stop holds only when patina stops at the declared point,
+    /// with the declared ending and diagnostic, after a prefix that conforms
+    /// (or differs only as declared); a run that completes makes it stale.
     #[test]
-    fn a_declared_stop_is_confirmed() {
-        assert!(judge(&native(), &stopped("patina: trapped fork"), &[gap(&STOP)]).is_ok());
-    }
-
-    #[test]
-    fn a_declared_stop_pins_its_diagnostic() {
-        let failures = judge(&native(), &stopped("other"), &[gap(&STOP)]).unwrap_err();
-        assert!(failures[0].contains("diagnostic"), "{failures:?}");
-    }
-
-    #[test]
-    fn a_declared_stop_pins_its_ending() {
-        let mut exited = stopped("trapped fork");
-        exited.termination = Termination::Exited(101);
-        assert!(judge(&native(), &exited, &[gap(&STOP)]).is_err());
-    }
-
-    #[test]
-    fn a_declared_stop_is_stale_once_patina_completes() {
-        let failures = judge(&native(), &native(), &[gap(&STOP)]).unwrap_err();
-        assert!(failures[0].contains("stale"), "{failures:?}");
+    fn a_declared_stop_holds_only_as_declared() {
+        let exited = Observation {
+            termination: Termination::Exited(101),
+            ..stopped("trapped fork")
+        };
+        let mut differing = stopped("trapped fork");
+        differing.events[0].ret = Value::from(4);
+        let early = Observation {
+            events: vec![],
+            ..stopped("trapped fork")
+        };
+        const BEFORE: Failure = Failure::Differs(&[Difference::Field {
+            seq: 0,
+            op: "openat",
+            path: "ret",
+            patina: Observed::Int(4),
+        }]);
+        let cases = [
+            (
+                "the declared stop",
+                stopped("patina: trapped fork"),
+                vec![gap(&STOP)],
+                true,
+            ),
+            (
+                "another diagnostic",
+                stopped("other"),
+                vec![gap(&STOP)],
+                false,
+            ),
+            ("another ending", exited, vec![gap(&STOP)], false),
+            ("a completed run", native(), vec![gap(&STOP)], false),
+            ("a hang", hung(1), vec![gap(&STOP)], false),
+            (
+                "a differing prefix",
+                differing.clone(),
+                vec![gap(&STOP)],
+                false,
+            ),
+            (
+                "a declared difference before it",
+                differing,
+                vec![gap(&STOP), gap(&BEFORE)],
+                true,
+            ),
+            (
+                "two stops for one vehicle",
+                stopped("trapped fork"),
+                vec![gap(&STOP), gap(&STOP)],
+                false,
+            ),
+            ("an early stop", early, vec![gap(&STOP)], false),
+        ];
+        for (case, patina, gaps, holds) in cases {
+            assert_eq!(judge(&native(), &patina, &gaps).is_ok(), holds, "{case}");
+        }
     }
 
     const HANG: Failure = Failure::Hangs {
@@ -1097,88 +1137,42 @@ mod tests {
         }
     }
 
+    /// A declared hang holds only when patina hangs after the declared number
+    /// of events, the prefix conforming; a run that ends makes it stale.
     #[test]
-    fn a_declared_hang_is_confirmed() {
-        assert!(judge(&native(), &hung(1), &[gap(&HANG)]).is_ok());
-    }
-
-    #[test]
-    fn a_hang_with_no_event_is_confirmed_by_its_marker_alone() {
+    fn a_declared_hang_holds_only_as_declared() {
         const AT_START: Failure = Failure::Hangs {
             events: 0,
             within: Duration::from_secs(5),
         };
-        assert!(judge(&native(), &hung(0), &[gap(&AT_START)]).is_ok());
-        assert!(judge(&native(), &hung(1), &[gap(&AT_START)]).is_err());
-    }
-
-    #[test]
-    fn a_declared_hang_pins_its_event_count() {
-        let failures = judge(&native(), &hung(0), &[gap(&HANG)]).unwrap_err();
-        assert!(failures[0].contains("hung after 0"), "{failures:?}");
-    }
-
-    #[test]
-    fn a_declared_hang_is_stale_once_patina_ends() {
-        let failures = judge(&native(), &native(), &[gap(&HANG)]).unwrap_err();
-        assert!(failures[0].contains("stale"), "{failures:?}");
-        let failures = judge(&native(), &stopped("trapped fork"), &[gap(&HANG)]).unwrap_err();
-        assert!(failures[0].contains("stale"), "{failures:?}");
-    }
-
-    #[test]
-    fn an_undeclared_hang_fails_a_stop() {
-        let failures = judge(&native(), &hung(1), &[gap(&STOP)]).unwrap_err();
-        assert!(
-            failures.iter().any(|f| f.contains("declared to end")),
-            "{failures:?}"
-        );
-    }
-
-    #[test]
-    fn a_hang_compares_the_prefix_before_it() {
-        let mut hung = hung(1);
-        hung.events[0].ret = Value::from(4);
-        assert!(judge(&native(), &hung, &[gap(&HANG)]).is_err());
-    }
-
-    #[test]
-    fn a_stop_compares_the_prefix_before_it() {
-        let mut stopped = stopped("trapped fork");
-        stopped.events[0].ret = Value::from(4);
-        assert!(judge(&native(), &stopped, &[gap(&STOP)]).is_err());
-    }
-
-    #[test]
-    fn a_stop_admits_the_declared_differences_before_it() {
-        let mut stopped = stopped("trapped fork");
-        stopped.events[0].ret = Value::from(4);
-        const BEFORE: Failure = Failure::Differs(&[Difference::Field {
-            seq: 0,
-            op: "openat",
-            path: "ret",
-            patina: Observed::Int(4),
-        }]);
-        assert!(judge(&native(), &stopped, &[gap(&STOP), gap(&BEFORE)]).is_ok());
-    }
-
-    #[test]
-    fn two_stops_for_one_vehicle_fail() {
-        assert!(
-            judge(
-                &native(),
-                &stopped("trapped fork"),
-                &[gap(&STOP), gap(&STOP)]
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn an_early_stop_fails() {
-        let mut early = stopped("trapped fork");
-        early.events.clear();
-        assert!(judge(&native(), &early, &[gap(&STOP)]).is_err());
+        let mut differing = hung(1);
+        differing.events[0].ret = Value::from(4);
+        let cases = [
+            ("the declared hang", hung(1), &HANG, true),
+            (
+                "a hang at the start, by its marker alone",
+                hung(0),
+                &AT_START,
+                true,
+            ),
+            (
+                "a hang after an event, declared at the start",
+                hung(1),
+                &AT_START,
+                false,
+            ),
+            ("a hang after another count", hung(0), &HANG, false),
+            ("a completed run", native(), &HANG, false),
+            ("a stop", stopped("trapped fork"), &HANG, false),
+            ("a differing prefix", differing, &HANG, false),
+        ];
+        for (case, patina, failure, holds) in cases {
+            assert_eq!(
+                judge(&native(), &patina, &[gap(failure)]).is_ok(),
+                holds,
+                "{case}"
+            );
+        }
     }
 
     fn renamed(errno: &str) -> Observation {
@@ -1191,12 +1185,8 @@ mod tests {
     }
 
     #[test]
-    fn documented_alternatives_compare_equal() {
+    fn documented_alternatives_compare_equal_and_nothing_else_does() {
         assert!(judge(&renamed("EEXIST"), &renamed("ENOTEMPTY"), &[]).is_ok());
-    }
-
-    #[test]
-    fn a_value_outside_the_alternatives_still_differs() {
         assert!(judge(&renamed("EEXIST"), &renamed("ENOTDIR"), &[]).is_err());
     }
 
@@ -1210,12 +1200,8 @@ mod tests {
     }
 
     #[test]
-    fn a_mask_ignores_bits_outside_it() {
+    fn a_mask_compares_only_the_bits_inside_it() {
         assert!(judge(&masked(0x7ff, 0x0ff), &masked(0x0ff, 0x0ff), &[]).is_ok());
-    }
-
-    #[test]
-    fn a_mask_keeps_bits_inside_it() {
         assert!(judge(&masked(0x7ff, 0x7ff), &masked(0x3ff, 0x7ff), &[]).is_err());
     }
 
@@ -1237,11 +1223,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_native_stream_is_not_an_oracle() {
-        assert!(verdict(&observation(vec![])).is_err());
-    }
-
-    #[test]
     fn a_gap_pins_the_raw_alternative() {
         let found = found(&renamed("ENOTDIR").events, &renamed("EEXIST").events);
         assert_eq!(
@@ -1256,71 +1237,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_passing_native_run_is_an_oracle() {
-        assert_eq!(verdict(&native()), Ok(()));
-    }
-
-    #[test]
-    fn a_native_failed_check_is_not_an_oracle() {
-        assert!(verdict(&patina_enosys()).is_err());
-    }
-
-    #[test]
-    fn an_unannounced_native_signal_death_is_not_an_oracle() {
-        let died = Observation {
-            termination: Termination::Signaled {
-                signal: 11,
-                core: Some(true),
-            },
-            ..native()
-        };
-        assert!(verdict(&died).is_err());
-    }
-
-    #[test]
-    fn an_announced_native_signal_death_is_an_oracle() {
-        let mut announced = event(3, EXPECT_DEATH_OP, 0);
-        announced.args.insert("signal".to_string(), Value::from(15));
-        let mut died = native();
-        died.events.push(announced);
-        died.termination = Termination::Signaled {
-            signal: 15,
-            core: Some(false),
-        };
-        assert_eq!(verdict(&died), Ok(()));
-    }
-
     fn exit_announced(code: i64) -> Event {
         let mut announced = event(3, EXPECT_EXIT_OP, 0);
         announced.args.insert("code".to_string(), Value::from(code));
         announced
     }
 
+    /// A native run is an oracle when every check passed and it ended as it
+    /// announced (or exited 0 announcing nothing); any other is not.
     #[test]
-    fn an_announced_native_exit_is_an_oracle() {
-        let mut exited = native();
-        exited.events.push(exit_announced(3));
-        exited.termination = Termination::Exited(3);
-        assert_eq!(verdict(&exited), Ok(()));
-    }
-
-    #[test]
-    fn an_unannounced_nonzero_native_exit_is_not_an_oracle() {
-        let exited = Observation {
-            termination: Termination::Exited(3),
-            ..native()
+    fn a_native_run_is_an_oracle_only_when_it_passed_and_ended_as_announced() {
+        let ended = |announced: Option<Event>, termination| {
+            let mut run = native();
+            run.events.extend(announced);
+            run.termination = termination;
+            run
         };
-        assert!(verdict(&exited).is_err());
-    }
-
-    #[test]
-    fn a_native_exit_other_than_announced_is_not_an_oracle() {
-        for termination in [Termination::Exited(0), Termination::Exited(4)] {
-            let mut exited = native();
-            exited.events.push(exit_announced(3));
-            exited.termination = termination;
-            assert!(verdict(&exited).is_err(), "{termination}");
+        let death_announced = |signal: i64| {
+            let mut announced = event(3, EXPECT_DEATH_OP, 0);
+            announced
+                .args
+                .insert("signal".to_string(), Value::from(signal));
+            announced
+        };
+        let signaled = |signal, core| Termination::Signaled {
+            signal,
+            core: Some(core),
+        };
+        let cases = [
+            ("a passing run", native(), true),
+            ("an empty stream", observation(vec![]), false),
+            ("a failed check", patina_enosys(), false),
+            (
+                "an announced signal death",
+                ended(Some(death_announced(15)), signaled(15, false)),
+                true,
+            ),
+            (
+                "an unannounced signal death",
+                ended(None, signaled(11, true)),
+                false,
+            ),
+            (
+                "an announced exit",
+                ended(Some(exit_announced(3)), Termination::Exited(3)),
+                true,
+            ),
+            (
+                "an unannounced nonzero exit",
+                ended(None, Termination::Exited(3)),
+                false,
+            ),
+            (
+                "an exit 0 where 3 was announced",
+                ended(Some(exit_announced(3)), Termination::Exited(0)),
+                false,
+            ),
+            (
+                "an exit 4 where 3 was announced",
+                ended(Some(exit_announced(3)), Termination::Exited(4)),
+                false,
+            ),
+        ];
+        for (case, run, oracle) in cases {
+            assert_eq!(verdict(&run).is_ok(), oracle, "{case}");
         }
     }
 

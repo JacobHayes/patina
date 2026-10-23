@@ -10,7 +10,7 @@
 //! trampoline entries (`uretprobe`, `uprobe`) take none: a kernel that has
 //! them kills a caller outside its trampoline with SIGILL, and
 //! `rseq_slice_yield` takes none either (at most it yields the CPU). glibc
-//! wraps none of the rows, so the scenario runs through the kernel vehicles.
+//! wraps none of the rows, so the scenario runs through the `syscall` vehicle.
 //! Natively the host kernel must lack the rows too; on a kernel that
 //! implements one, the native run answers it with the declared ENOSYS
 //! (`asserts_absent`) and never issues it.
@@ -77,7 +77,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "abi/newer_than_virtual",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     asserts_absent: &ABSENT,
     ..DEFAULTS
 };

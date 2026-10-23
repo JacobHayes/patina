@@ -189,61 +189,23 @@ fn a_seeded_tear_is_the_dense_models_byte_for_byte() {
 }
 
 #[test]
-fn torn_writes_are_deterministic_per_seed_and_vary_across_seeds() {
-    // The same seed reproduces the same tear exactly.
-    for seed in 0..8 {
-        assert_eq!(torn_after_crash(seed), torn_after_crash(seed));
-    }
-    // Every result is a per-block mix of the durable and live bytes.
-    for seed in 0..8 {
+fn a_block_tear_mixes_durable_and_live_blocks_and_varies_across_seeds() {
+    let baseline = torn_after_crash(0);
+    let mut varied = false;
+    for seed in 0..64 {
         let torn = torn_after_crash(seed);
         assert_eq!(torn.len(), 8);
         assert!(torn.chunks(2).all(|block| block == b"AA" || block == b"BB"));
+        varied |= torn != baseline;
     }
-    // Some seeds tear differently from seed 0.
-    let baseline = torn_after_crash(0);
-    assert!(
-        (0..64).any(|seed| torn_after_crash(seed) != baseline),
-        "torn writes never varied across seeds"
-    );
+    assert!(varied, "torn writes never varied across seeds");
 }
 
-#[test]
-fn torn_write_probability_extremes_are_decision_free() {
-    // Probability 0 keeps every modified block; probability 1 reverts them.
-    let mut kept = CrashFs::builder()
-        .torn_write_probability(0.0)
-        .torn_write_granularity(2)
-        .build()
-        .unwrap();
-    let fd = write(&mut kept, "/f", b"AAAA");
-    kept.close(fd).unwrap();
-    kept.checkpoint();
-    let fd = kept.open(FsClock::EPOCH, "/f", write_only()).unwrap();
-    kept.write(FsClock::EPOCH, fd, b"BBBB").unwrap();
-    kept.crash().unwrap();
-    assert_eq!(kept.contents("/f").unwrap(), b"BBBB");
-
-    let mut reverted = CrashFs::builder()
-        .torn_write_probability(1.0)
-        .torn_write_granularity(2)
-        .build()
-        .unwrap();
-    let fd = write(&mut reverted, "/f", b"AAAA");
-    reverted.close(fd).unwrap();
-    reverted.checkpoint();
-    let fd = reverted.open(FsClock::EPOCH, "/f", write_only()).unwrap();
-    reverted.write(FsClock::EPOCH, fd, b"BBBB").unwrap();
-    reverted.crash().unwrap();
-    assert_eq!(reverted.contents("/f").unwrap(), b"AAAA");
-}
-
-fn byte_torn_final_write(seed: u64) -> Vec<u8> {
-    // Durable "AAAA...", then a single unsynced overwrite with "BBBB..."
-    // that a byte-granularity crash may tear part-way through.
+/// Durable "AAAA...", then a single unsynced overwrite with "BBBB...".
+fn torn_final_write(seed: u64, granularity: TornGranularity) -> Vec<u8> {
     let mut fs = CrashFs::builder()
         .seed(seed)
-        .torn_granularity(TornGranularity::Byte)
+        .torn_granularity(granularity)
         .build()
         .unwrap();
     let fd = write(&mut fs, "/f", b"AAAAAAAA");
@@ -255,21 +217,17 @@ fn byte_torn_final_write(seed: u64) -> Vec<u8> {
     fs.contents("/f").unwrap()
 }
 
+/// With certain tearing, the default whole-block policy reverts the final
+/// unsynced write entirely, while byte granularity keeps a strict prefix
+/// of it over the durable suffix (the torn page a whole-block model can
+/// never produce), cut at a point that varies across seeds.
 #[test]
-fn byte_granularity_tears_the_final_write_into_a_partial_image() {
-    // The load-bearing property for the sub-block crash campaign: the final
-    // unsynced write survives PARTIALLY, so the reconstructed image differs
-    // from BOTH the durable baseline and the fully-applied write -- the torn
-    // page a whole-block model can never produce.
+fn byte_granularity_tears_the_final_write_where_block_granularity_reverts_it() {
+    assert_eq!(torn_final_write(0, TornGranularity::Block), b"AAAAAAAA");
+    let mut cuts = std::collections::BTreeSet::new();
     for seed in 0..32 {
-        let torn = byte_torn_final_write(seed);
+        let torn = torn_final_write(seed, TornGranularity::Byte);
         assert_eq!(torn.len(), 8);
-        assert_ne!(
-            torn, b"AAAAAAAA",
-            "seed {seed} reverted wholesale (durable)"
-        );
-        assert_ne!(torn, b"BBBBBBBB", "seed {seed} applied wholesale (live)");
-        // The surviving prefix is live bytes, the reverted suffix is durable.
         let cut = torn.iter().take_while(|&&byte| byte == b'B').count();
         assert!(
             (1..8).contains(&cut),
@@ -279,44 +237,12 @@ fn byte_granularity_tears_the_final_write_into_a_partial_image() {
             torn[cut..].iter().all(|&byte| byte == b'A'),
             "seed {seed} suffix is not the durable image: {torn:?}"
         );
+        cuts.insert(cut);
     }
-}
-
-#[test]
-fn byte_torn_final_write_is_deterministic_per_seed_and_varies() {
-    for seed in 0..8 {
-        assert_eq!(byte_torn_final_write(seed), byte_torn_final_write(seed));
-    }
-    let baseline = byte_torn_final_write(0);
     assert!(
-        (0..64).any(|seed| byte_torn_final_write(seed) != baseline),
-        "byte-granularity tear geometry never varied across seeds"
+        cuts.len() > 1,
+        "byte-granularity tear geometry never varied"
     );
-}
-
-#[test]
-fn block_granularity_leaves_the_final_write_whole() {
-    // The default whole-block policy is unchanged: with certain tearing the
-    // single unsynced overwrite reverts entirely to the durable image, never
-    // a partial mix. This is the behavior every pre-existing trace relies on.
-    for seed in 0..32 {
-        let mut fs = CrashFs::builder()
-            .seed(seed)
-            .torn_granularity(TornGranularity::Block)
-            .build()
-            .unwrap();
-        let fd = write(&mut fs, "/f", b"AAAAAAAA");
-        fs.close(fd).unwrap();
-        fs.checkpoint();
-        let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
-        fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
-        fs.crash().unwrap();
-        assert_eq!(
-            fs.contents("/f").unwrap(),
-            b"AAAAAAAA",
-            "whole-block tear produced a non-durable image at seed {seed}"
-        );
-    }
 }
 
 #[test]

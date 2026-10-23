@@ -246,10 +246,7 @@ Obligations:
 
 | crate | test (its path is this, or ends in `::` + this) | what it must assert |
 |---|---|---|
-| `patina-dst-native-shim` | `sud::signal_process::tests::prctl_no_new_privs_accepts_only_one_with_zero_tail` | PR_SET_NO_NEW_PRIVS answers 0 only for (1, 0, 0, 0): 0 is EINVAL, a nonzero trailing argument is EINVAL, and once set PR_GET reads 1 and setting 0 is still EINVAL — through the one entry both doors call. |
-| `patina-dst-native-shim` | `sud::signal_process::tests::prctl_dumpable_refuses_two` | PR_SET_DUMPABLE accepts 0 and 1 and refuses 2 (and every other value) with EINVAL; PR_GET_DUMPABLE starts at 1 and reads back what was set. |
-| `patina-dst-native-shim` | `sud::signal_process::tests::prctl_pdeathsig_range` | PR_SET_PDEATHSIG accepts 0..=64 (0 clears) and refuses 65 with EINVAL; PR_GET_PDEATHSIG writes the stored value and is EFAULT for a null pointer. |
-| `patina-dst-native-shim` | `sud::signal_process::tests::prctl_timerslack_zero_restores_default` | PR_GET_TIMERSLACK starts at 50000; a set value reads back; PR_SET_TIMERSLACK 0 restores 50000. |
+| `patina-dst-native-shim` | `sud::signal_process::tests::prctl_attributes_answer_as_the_kernel_does` | Through the one entry both doors call: PR_SET_NO_NEW_PRIVS answers 0 only for (1, 0, 0, 0): 0 is EINVAL, a nonzero trailing argument is EINVAL, and once set PR_GET reads 1 and setting 0 is still EINVAL; PR_SET_DUMPABLE accepts 0 and 1 and refuses 2 (and every other value) with EINVAL, and PR_GET_DUMPABLE starts at 1 and reads back what was set; PR_SET_PDEATHSIG accepts signal numbers up to 64 (0 clears) and refuses 65 with EINVAL, and PR_GET_PDEATHSIG writes the stored value and is EFAULT for a null pointer; PR_GET_TIMERSLACK starts at 50000, a set value reads back and PR_SET_TIMERSLACK 0 restores 50000; PR_GET_SECCOMP reads no mode whatever the arguments. |
 | `patina-dst-native-shim` | `sud::signal_process::tests::wait_rows_answer_echild_and_einval` | wait4 and waitid answer ECHILD for a childless process (with and without WNOHANG) and waitid answers EINVAL for unknown option bits or none of WEXITED|WSTOPPED|WCONTINUED. |
 
 
@@ -265,10 +262,9 @@ Obligations:
 
 | crate | test (its path is this, or ends in `::` + this) | what it must assert |
 |---|---|---|
-| `patina-dst-abi` | `signal_generated_round_trips_and_mismatches` | Operation::SignalGenerated serializes with the tag `signal_generated` and its seq/sig/target/code/value fields, deserializes to an equal value, and two ops differing in seq, sig or target compare unequal (so replay reconciliation mismatches). |
-| `patina-dst-trace` | `signal_operations_fixture_decodes_and_replays` | A committed current-format trace carrying signal_generated decodes, re-encodes byte-for-byte and replays. |
-| `patina-dst-native-shim` | `signal_state_is_per_task` | With two tasks in one ThreadRuntime, blocking a signal on task A leaves task B's mask unchanged, a thread-directed instance queued to A is absent from B's pending set, and each task's altstack is its own. |
-| `patina-dst-native-shim` | `mask_is_inherited_at_spawn` | A task spawned while its creator blocks a signal starts with that signal blocked in its virtual mask and with no private pending signals and no altstack. |
+| `patina-dst-abi` | `operation_variant_tags_are_pinned_by_name_not_declaration_order` | Operation::SignalGenerated serializes with the tag `signal_generated` and deserializes to an equal value, its seq/sig/target/code/value fields intact. |
+| `patina-dst-trace` | `feature_fixtures_decode_canonically_and_replay` | A committed current-format trace carrying signal_generated (both target encodings) decodes, re-encodes byte-for-byte and replays. |
+| `patina-dst-native-shim` | `signal_state_is_per_task_and_only_the_mask_is_inherited` | With two tasks in one ThreadRuntime, a thread-directed instance queued to a task that blocks it is absent from the other task's rt_sigpending and is delivered when that task unblocks, and each task's altstack is its own; a task spawned while its creator blocks a signal starts with that signal blocked in its virtual mask, with no private pending signals and no altstack, and a mask change in it leaves its creator's mask unchanged. |
 | `patina-dst-native-shim` | `same_task_kill_delivers_at_syscall_return` | A process-directed generation by the running task with the signal unblocked records SignalGenerated, enqueues, wakes nobody, and the delivery point at that call's return dequeues it for the handler — generation itself invokes no handler and issues no host signal. |
 | `patina-dst-native-shim` | `unmask_delivers_pending_before_return` | A signal generated while blocked stays pending (no delivery at the generating call's return); the rt_sigprocmask that unblocks it reaches a delivery point that dequeues it before that call returns, for both SIG_UNBLOCK and SIG_SETMASK. |
 | `patina-dst-native-shim` | `stacked_delivery_releases_frames_with_one_host_unblock` | When several signals become deliverable at one delivery point they are all queued on the host while blocked and released by ONE host mask change, in dequeue order (lowest first), never one host signal per instance with a handler run in between. |
@@ -295,11 +291,9 @@ Obligations:
 |---|---|---|
 | `patina-dst-native-shim` | `process_directed_signal_picks_the_leader_when_unblocked_else_lowest_unblocked` | For a process-directed generation the chosen task is the main task when it does not block the signal, else the lowest TaskId that does not, else nobody (it stays shared-pending) — independent of which task generated it. |
 | `patina-dst-native-shim` | `generation_wakes_only_the_chosen_parked_task` | With two tasks parked in registered waits, a generation records at most one TaskWake — for the chosen task — and leaves the other parked and on its waiter list. |
-| `patina-dst-native-shim` | `interrupted_waiter_is_unlinked_before_wake` | The chosen task is removed from its primitive's waiter list (pipe, futex, readiness, sleep timer) before it is woken, so a later data wake neither finds nor double-wakes it. |
+| `patina-dst-native-shim` | `interrupted_waiter_is_unlinked_before_wake` | The chosen task is removed from its primitive's waiter list (pipe, futex, readiness, sleep timer) before it is woken, so a later data wake neither finds nor double-wakes it; each of those waits interrupted by a handler without SA_RESTART returns EINTR. |
 | `patina-dst-native-shim` | `sa_restart_restarts_pipe_read` | A pipe read resumed as Step::Interrupted by a handler installed with SA_RESTART re-enters the wait and returns the byte written later. |
-| `patina-dst-native-shim` | `no_sa_restart_pipe_read_is_eintr` | The same read without SA_RESTART returns EINTR after the handler's delivery point. |
-| `patina-dst-native-shim` | `nanosleep_interrupted_reports_remaining_and_never_restarts` | An interrupted sleep returns EINTR even under SA_RESTART with remaining = deadline - virtual now, 0 < remaining <= request, on both doors' out-pointers. |
-| `patina-dst-native-shim` | `absolute_clock_nanosleep_leaves_rem_untouched` | An interrupted TIMER_ABSTIME clock_nanosleep returns EINTR and does not write rem. |
+| `patina-dst-native-shim` | `interrupted_sleeps_report_remaining_and_never_restart` | An interrupted sleep returns EINTR even under SA_RESTART with remaining = deadline - virtual now, 0 < remaining <= request, on both doors' out-pointers; an interrupted TIMER_ABSTIME clock_nanosleep returns EINTR and does not write rem. |
 | `patina-dst-native-shim` | `epoll_wait_is_eintr_even_with_sa_restart` | A readiness wait resumed as interrupted returns EINTR regardless of SA_RESTART and leaves no readiness waiter registered. |
 | `patina-dst-native-shim` | `timed_futex_wait_is_eintr_under_a_handler` | A FUTEX_WAIT with a timeout interrupted by a handler is EINTR regardless of SA_RESTART; without a timeout it restarts under SA_RESTART and is EINTR otherwise. |
 | `patina-dst-native-shim` | `sigsuspend_parks_until_an_unblocked_signal` | rt_sigsuspend installs its mask and parks; a signal the temporary mask blocks only becomes pending; one it does not wakes the task, which returns EINTR with the previous mask restored; pause and a NULL-timeout rt_sigtimedwait park the same way. |
@@ -323,8 +317,7 @@ Obligations:
 |---|---|---|
 | `cargo-patina` | `guest_exit_reports_the_core_flag` | The patina.result/v1 envelope's guest_exit carries core: true|false taken from the child's wait status (ExitStatusExt::core_dumped) whenever signal is present, and no core key for a normal exit. |
 | `cargo-patina` | `default_terminate_finalizes_then_dies_by_the_signal` | End to end: a guest that sends itself a SIG_DFL SIGTERM under `run --record` leaves a COMPLETE trace, the child's wait status is signaled 15 (not an exit code), and replay reproduces the same death. |
-| `patina-dst-native-shim` | `broken_pipe_generates_sigpipe_before_epipe` | A write to a reader-less pipe records a thread-directed SignalGenerated for SIGPIPE with the runtime lock released, then answers EPIPE; with SIG_IGN the generation is recorded and dropped. |
-| `patina-dst-native-shim` | `msg_nosignal_suppresses_sigpipe` | A socketpair send to a closed peer with MSG_NOSIGNAL answers EPIPE and records no generation; without the flag it records one. |
+| `patina-dst-native-shim` | `a_broken_pipe_or_socket_generates_sigpipe_before_epipe` | A write to a reader-less pipe records a thread-directed SignalGenerated for SIGPIPE with the runtime lock released, then answers EPIPE; with SIG_IGN the generation is recorded and dropped. A socketpair send to a closed peer with MSG_NOSIGNAL answers EPIPE and records no generation; without the flag it records one. |
 | `patina-dst-native-shim` | `sigstop_to_self_is_a_named_trap` | A default-action Stop-class signal reaching delivery is the named fatal trap; SIGTSTP/SIGTTIN/SIGTTOU with a handler run the handler. |
 
 - Recorded traces (format ≥ 9; `signal_generated` ops, in order): `signal/core_term` [6:p]; `signal/handler_flags` [10:p 10:p 10:p 10:p 12:p 12:p]; `signal/pipe_term` [13:t 13:t 13:t 13:t].
@@ -342,7 +335,6 @@ Obligations:
 | crate | test (its path is this, or ends in `::` + this) | what it must assert |
 |---|---|---|
 | `patina-dst-native-shim` | `thread_directed_signal_targets_only_that_task` | tgkill/tkill queue to the named task's private set, choose that task alone for the wake, and deliver at ITS next delivery point; the generating task neither runs the handler nor is marked interrupted. |
-| `patina-dst-native-shim` | `pending_for_a_blocking_task_is_invisible_to_another_tasks_sigpending` | A thread-directed signal pending for a task that blocks it is absent from every other task's rt_sigpending and is delivered when that task unblocks. |
 | `patina-dst-native-shim` | `set_tid_address_is_cleared_and_woken_at_thread_finish` | set_tid_address returns the managed tid and records the word per task; thread_finish writes 0 to it and futex-wakes its waiters. |
 | `patina-dst-native-shim` | `raw_exit_from_main_keeps_the_process_alive` | A raw exit from the main task completes that task only; the process ends with the status of a later exit_group from another task, and a raw exit_group runs no atexit handlers. |
 
@@ -356,7 +348,7 @@ Done: every pending gap gone, every obligation held, the by-design gaps intact, 
 
 - **Where the host signal is sent from.** The frame vehicle (`rt_tgsigqueueinfo`/`tgkill` to self) is legitimate at a delivery point and the shortcut at generation; the syscall is the same, so no grep separates them. It is held indirectly: the trace obligation (generation must record an op, so it goes through the runtime), `same_task_kill_delivers_at_syscall_return` and `stacked_delivery_releases_frames_with_one_host_unblock` (substance for the vet), and `signal/per_thread`/`signal/one_wake`.
 - **Whether a unit test asserts what its row says.** A suite sees a name and a pass.
-- **Process-global signal state, in C or in Rust, under any name.** No grep names it reliably; it is held by `signal_state_is_per_task`, `signal/per_thread`, `signal/one_wake` and the vet.
+- **Process-global signal state, in C or in Rust, under any name.** No grep names it reliably; it is held by `signal_state_is_per_task_and_only_the_mask_is_inherited`, `signal/per_thread`, `signal/one_wake` and the vet.
 - **Host passthrough of a modeled row** (`wait4`, `rt_sigpending`, `rt_sigtimedwait`, `set_tid_address` handed to the host). The strace leak run's filter sees the syscalls it lists; the registry's dispositions and reasoning strings are the vet's.
 - **`exit(128 + sig)` as source text.** `128 +` is legitimate in `cargo-patina`'s exit-code mapping; the direct-run `waitpid` check is the mechanical form.
 - **No duplicated logic across the C and SUD doors, no compat shims, honest reasoning strings.** Phase D.

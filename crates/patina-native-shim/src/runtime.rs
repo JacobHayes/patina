@@ -1379,11 +1379,12 @@ mod identity_home_tests {
     use super::*;
     use patina_dst_driver_api::FsDriver;
 
-    /// A corpus with `/home` but not the identity's home gains the home, and
-    /// `/home` keeps the mode and mtime it was captured with, a mode that
-    /// denies writing it included.
+    /// The home `getpwuid_r` answers for the identity is a directory in every
+    /// image: a corpus with `/home` but not the identity's home gains the
+    /// home, and `/home` keeps the mode and mtime it was captured with (a mode
+    /// that denies writing it included).
     #[test]
-    fn a_corpus_home_keeps_its_captured_metadata_when_the_identity_home_is_added() {
+    fn every_image_holds_the_identity_home() {
         use patina_dst_fs_mem::FsImageEntry;
         let captured = 1_704_067_200 * 1_000_000_000;
         for mode in [0o755, 0o555] {
@@ -1399,12 +1400,9 @@ mod identity_home_tests {
             let identity = fs.metadata(registry::IDENTITY_HOME).unwrap();
             assert_eq!(identity.kind, patina_dst_abi::FsEntryKind::Directory);
         }
-    }
 
-    /// The home `getpwuid_r` answers for the identity is a directory in a
-    /// fresh image, with the pinned system's modes.
-    #[test]
-    fn a_fresh_image_holds_the_identity_home() {
+        // A fresh image holds the identity's home with the pinned system's
+        // modes.
         let mut fs = with_identity_home(MemFs::new()).unwrap();
         for (path, mode) in [("/home", 0o755), (registry::IDENTITY_HOME, 0o750)] {
             let metadata = fs.metadata(path).unwrap();

@@ -341,7 +341,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // glibc has no wrapper for these rows (libkeyutils does): the libc
     // spelling would be `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_add_key,
         Syscall::N_request_key,

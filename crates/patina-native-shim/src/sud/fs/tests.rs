@@ -19,7 +19,7 @@ fn openat2(fields: [u64; 4], size: usize) -> i64 {
 }
 
 #[test]
-fn open_how_is_copied_as_copy_struct_from_user_copies_it() {
+fn open_how_is_copied_then_judged_as_the_kernel_does() {
     assert_eq!(openat2([0; 4], OPEN_HOW_SIZE - 1), -EINVAL);
     assert_eq!(openat2([0; 4], crate::PAGE_SIZE + 1), -E2BIG);
     assert_eq!(openat2([0, 0, 0, 1], OPEN_HOW_SIZE + 8), -E2BIG);
@@ -29,10 +29,7 @@ fn open_how_is_copied_as_copy_struct_from_user_copies_it() {
         sys_openat2(AT_FDCWD, c"/".as_ptr() as u64, 0, OPEN_HOW_SIZE as u64),
         -EFAULT
     );
-}
-
-#[test]
-fn open_how_is_judged_as_build_open_flags_judges_it() {
+    // Then judged as `build_open_flags` judges it.
     assert_eq!(openat2([1 << 40, 0, 0, 0], OPEN_HOW_SIZE), -EINVAL);
     assert_eq!(openat2([0, 0o644, 0, 0], OPEN_HOW_SIZE), -EINVAL);
     assert_eq!(openat2([O_CREAT, 0o10644, 0, 0], OPEN_HOW_SIZE), -EINVAL);

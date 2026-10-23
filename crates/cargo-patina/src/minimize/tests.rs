@@ -49,47 +49,47 @@ fn executes_trace_minimization_with_an_external_oracle() {
         minimized.timelines[0].decisions[0].outcome,
         Outcome::U64(999)
     );
-}
+    // The same oracle with its exits swapped ("found the failure" read as success) is refused
+    // rather than obeyed, writing no output.
+    {
+        use patina_dst_trace::RunMetadata;
 
-#[test]
-fn an_oracle_with_inverted_exit_polarity_is_refused_rather_than_obeyed() {
-    use patina_dst_trace::RunMetadata;
-
-    let directory = tempfile::tempdir().unwrap();
-    let input = directory.path().join("input.patina");
-    let output = directory.path().join("output.patina");
-    let decisions = (0..6)
-        .map(|sequence| clock_event(sequence, if sequence == 4 { 999 } else { sequence }))
-        .collect();
-    TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions)
-        .write_atomic(&input)
-        .unwrap();
-    // The same oracle as above with its exits swapped — the footgun a
-    // reader writes by accident, because "found the failure" reads like
-    // success. Every verdict is backwards, so the search would "succeed" by
-    // deleting the entire trace.
-    let error = execute_trace(TraceMinimize {
-        trace: input,
-        output: output.clone(),
-        timeline: None,
-        prune: false,
-        jobs: Some(1),
-        oracle: strings(&[
-            "sh",
-            "-c",
-            "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 0; exit 1",
-        ]),
-    })
-    .unwrap_err();
-    assert!(
-        error.0.contains("inverted exit polarity"),
-        "unexpected error: {}",
-        error.0
-    );
-    assert!(
-        !output.exists(),
-        "a refused minimization must not write an output trace"
-    );
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.patina");
+        let output = directory.path().join("output.patina");
+        let decisions = (0..6)
+            .map(|sequence| clock_event(sequence, if sequence == 4 { 999 } else { sequence }))
+            .collect();
+        TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions)
+            .write_atomic(&input)
+            .unwrap();
+        // The same oracle as above with its exits swapped — the footgun a
+        // reader writes by accident, because "found the failure" reads like
+        // success. Every verdict is backwards, so the search would "succeed" by
+        // deleting the entire trace.
+        let error = execute_trace(TraceMinimize {
+            trace: input,
+            output: output.clone(),
+            timeline: None,
+            prune: false,
+            jobs: Some(1),
+            oracle: strings(&[
+                "sh",
+                "-c",
+                "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 0; exit 1",
+            ]),
+        })
+        .unwrap_err();
+        assert!(
+            error.0.contains("inverted exit polarity"),
+            "unexpected error: {}",
+            error.0
+        );
+        assert!(
+            !output.exists(),
+            "a refused minimization must not write an output trace"
+        );
+    }
 }
 
 pub(super) fn branch_lifecycle(
@@ -147,73 +147,45 @@ pub(super) fn branched_input(path: &Path) {
     bundle.write_atomic(path).unwrap();
 }
 
+/// A branched bundle with no `--timeline` shrinks each timeline's safe suffix
+/// under the branch-tree policy and keeps every subtree; `--prune-branches`
+/// also drops the subtree the oracle never needs.
 #[test]
-fn executes_non_leaf_branch_tree_minimization_automatically() {
+fn executes_branch_tree_minimization_with_and_without_pruning() {
     use patina_dst_abi::Outcome;
 
-    let directory = tempfile::tempdir().unwrap();
-    let input = directory.path().join("input.patina");
-    let output = directory.path().join("output.patina");
-    branched_input(&input);
+    for (prune, kept) in [
+        (false, &["main", "keeper", "disposable"][..]),
+        (true, &["main", "keeper"][..]),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input.patina");
+        let output = directory.path().join("output.patina");
+        branched_input(&input);
+        execute_trace(TraceMinimize {
+            trace: input,
+            output: output.clone(),
+            timeline: None,
+            prune,
+            jobs: Some(1),
+            oracle: strings(&[
+                "sh",
+                "-c",
+                "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
+            ]),
+        })
+        .unwrap();
 
-    // A branched bundle with no --timeline automatically uses the branch-tree
-    // policy: each timeline's safe suffix shrinks, but no subtree is dropped.
-    execute_trace(TraceMinimize {
-        trace: input,
-        output: output.clone(),
-        timeline: None,
-        prune: false,
-        jobs: Some(1),
-        oracle: strings(&[
-            "sh",
-            "-c",
-            "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
-        ]),
-    })
-    .unwrap();
-
-    let minimized = TraceBundle::load(output).unwrap();
-    let ids: Vec<&str> = minimized.timelines.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(ids, vec!["main", "keeper", "disposable"]);
-    assert_eq!(minimized.timelines[1].decisions.len(), 1);
-    assert_eq!(
-        minimized.timelines[1].decisions[0].outcome,
-        Outcome::U64(999)
-    );
-    minimized.validate().unwrap();
-}
-
-#[test]
-fn executes_branch_pruning_dropping_and_shrinking() {
-    use patina_dst_abi::Outcome;
-
-    let directory = tempfile::tempdir().unwrap();
-    let input = directory.path().join("input.patina");
-    let output = directory.path().join("output.patina");
-    branched_input(&input);
-
-    execute_trace(TraceMinimize {
-        trace: input,
-        output: output.clone(),
-        timeline: None,
-        prune: true,
-        jobs: Some(1),
-        oracle: strings(&[
-            "sh",
-            "-c",
-            "grep -q 999 \"$PATINA_MINIMIZE_TRACE\" && exit 1; exit 0",
-        ]),
-    })
-    .unwrap();
-
-    let minimized = TraceBundle::load(output).unwrap();
-    let ids: Vec<&str> = minimized.timelines.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(ids, vec!["main", "keeper"]);
-    assert_eq!(minimized.timelines[1].decisions.len(), 1);
-    assert_eq!(
-        minimized.timelines[1].decisions[0].outcome,
-        Outcome::U64(999)
-    );
+        let minimized = TraceBundle::load(output).unwrap();
+        let ids: Vec<&str> = minimized.timelines.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, kept, "prune={prune}");
+        assert_eq!(minimized.timelines[1].decisions.len(), 1);
+        assert_eq!(
+            minimized.timelines[1].decisions[0].outcome,
+            Outcome::U64(999)
+        );
+        minimized.validate().unwrap();
+    }
 }
 
 #[test]

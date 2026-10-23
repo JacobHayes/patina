@@ -848,12 +848,55 @@ mod tests {
         );
     }
 
+    /// Build the campaign envelope for `state`, with no coverage or depth
+    /// signal, written under `out/`.
+    fn envelope_for(state: &CampaignState, result: &str, exit_code: i32) -> serde_json::Value {
+        let coverage = CoverageTally {
+            generations_observed: state.generations_done,
+            ..CoverageTally::default()
+        };
+        let coverage_verdict = coverage_verdict(&coverage, None);
+        let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
+        let depth = DepthState::Unavailable {
+            reason: "not-wasi",
+            hint: None,
+        };
+        build_campaign_envelope(CampaignEnvelopeInput {
+            result,
+            exit_code,
+            state,
+            coverage: &coverage,
+            coverage_verdict: &coverage_verdict,
+            edge_coverage: &edge_coverage,
+            depth: &depth,
+            guidance: None,
+            out_dir: Path::new("out"),
+            state_path: Path::new("out/campaign-state.json"),
+            sites_path: Path::new("out/sites.json"),
+        })
+    }
+
+    fn fresh_state(generations: u64) -> CampaignState {
+        CampaignState::fresh(
+            ArtifactIdentity {
+                path: "guest".to_string(),
+                sha256: "abc".to_string(),
+                family: "native",
+            },
+            CampaignSpec {
+                generations,
+                ..CampaignSpec::default()
+            },
+        )
+    }
+
+    /// The envelope is summary first: the class histogram and deduped
+    /// signatures, per-run detail (`notable_runs`) ONLY for the novel or
+    /// failing generations, and machine-readable pointers to the on-disk
+    /// detail. A clean campaign advertises no failures dir (it is never
+    /// created).
     #[test]
     fn envelope_is_summary_first_with_artifact_pointers() {
-        // A campaign of four generations: two OK, one failing (non-novel repeat),
-        // one novel failing. The v2 envelope must expose the class histogram and
-        // deduped signatures, but per-run detail (`notable_runs`) ONLY for the
-        // novel/failing generations — the two OK generations are elided.
         let mk = |generation: u64, class: CampaignClass, novel: bool| GenerationOutcome {
             generation,
             seed: generation,
@@ -864,23 +907,14 @@ mod tests {
             verdicts: Vec::new(),
             verification: None,
         };
+        // Two OK generations, one novel failure and one non-novel repeat.
         let outcomes = vec![
             mk(0, CampaignClass::Ok, false),
             mk(1, CampaignClass::Liveness, true),
             mk(2, CampaignClass::Ok, false),
             mk(3, CampaignClass::Liveness, false),
         ];
-        let mut state = CampaignState::fresh(
-            ArtifactIdentity {
-                path: "guest".to_string(),
-                sha256: "abc".to_string(),
-                family: "native",
-            },
-            CampaignSpec {
-                generations: 4,
-                ..CampaignSpec::default()
-            },
-        );
+        let mut state = fresh_state(4);
         state.classes.insert("OK".to_string(), 2);
         state.classes.insert("LIVENESS".to_string(), 2);
         state.generations_done = 4;
@@ -888,120 +922,41 @@ mod tests {
             .into_iter()
             .filter(GenerationOutcome::is_notable)
             .collect();
-        let coverage = CoverageTally {
-            generations_observed: 4,
-            ..CoverageTally::default()
-        };
-        let coverage_verdict = coverage_verdict(&coverage, None);
-        let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
-        let depth = DepthState::Unavailable {
-            reason: "not-wasi",
-            hint: None,
-        };
-        let envelope = build_campaign_envelope(CampaignEnvelopeInput {
-            result: "failure",
-            exit_code: 1,
-            state: &state,
-            coverage: &coverage,
-            coverage_verdict: &coverage_verdict,
-            edge_coverage: &edge_coverage,
-            depth: &depth,
-            guidance: None,
-            out_dir: Path::new("out"),
-            state_path: Path::new("out/campaign-state.json"),
-            sites_path: Path::new("out/sites.json"),
-        });
+        let envelope = envelope_for(&state, "failure", 1);
 
         assert_eq!(envelope["schema"], CAMPAIGN_ENVELOPE_SCHEMA);
-        assert_eq!(envelope["schema"], "patina.campaign/v2");
         assert_eq!(envelope["classes"]["OK"], 2);
         assert_eq!(envelope["classes"]["LIVENESS"], 2);
-
-        // Only the two novel/failing generations appear in `notable_runs`; the OK
-        // generations are represented solely by the class histogram.
         let notable = envelope["notable_runs"].as_array().unwrap();
-        assert_eq!(
-            notable.len(),
-            2,
-            "OK generations must be elided: {envelope:#}"
-        );
         let gens: Vec<u64> = notable
             .iter()
             .map(|r| r["generation"].as_u64().unwrap())
             .collect();
-        assert_eq!(gens, vec![1, 3]);
+        assert_eq!(gens, vec![1, 3], "OK generations must be elided");
         assert!(notable.iter().all(|r| r["class"] == "LIVENESS"));
 
-        // Machine-readable pointers keep the full on-disk detail reachable.
         let artifacts = &envelope["artifacts"];
         assert_eq!(artifacts["out_dir"], "out");
-        assert!(
-            artifacts["campaign_state"]
-                .as_str()
-                .unwrap()
-                .ends_with("campaign-state.json")
-        );
-        assert!(
-            artifacts["signature_store"]
-                .as_str()
-                .unwrap()
-                .ends_with("signatures.json")
-        );
-        assert!(
-            artifacts["failures_dir"]
-                .as_str()
-                .unwrap()
-                .ends_with("failures"),
-            "a failing campaign must point at its saved-trace dir: {envelope:#}"
-        );
-        assert!(
-            artifacts["site_coverage"]
-                .as_str()
-                .unwrap()
-                .ends_with("sites.json")
-        );
+        for (key, suffix) in [
+            ("campaign_state", "campaign-state.json"),
+            ("signature_store", "signatures.json"),
+            ("failures_dir", "failures"),
+            ("site_coverage", "sites.json"),
+        ] {
+            assert!(
+                artifacts[key].as_str().unwrap().ends_with(suffix),
+                "{key}: {envelope:#}"
+            );
+        }
         assert_eq!(envelope["sdk_sites"]["labels_seen"], 0);
         assert_eq!(envelope["coverage"]["gate"], "pass");
         // No `--report`, so no reports pointer is promised.
         assert!(artifacts.get("reports_dir").is_none());
-    }
 
-    #[test]
-    fn envelope_clean_campaign_omits_failure_pointers() {
-        // A clean campaign advertises no failures dir (it is never created).
-        let mut state = CampaignState::fresh(
-            ArtifactIdentity {
-                path: "guest".to_string(),
-                sha256: "abc".to_string(),
-                family: "native",
-            },
-            CampaignSpec::default(),
-        );
-        state.classes.insert("OK".to_string(), 1);
-        state.generations_done = 1;
-        let coverage = CoverageTally {
-            generations_observed: 1,
-            ..CoverageTally::default()
-        };
-        let coverage_verdict = coverage_verdict(&coverage, None);
-        let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
-        let depth = DepthState::Unavailable {
-            reason: "not-wasi",
-            hint: None,
-        };
-        let envelope = build_campaign_envelope(CampaignEnvelopeInput {
-            result: "ok",
-            exit_code: 0,
-            state: &state,
-            coverage: &coverage,
-            coverage_verdict: &coverage_verdict,
-            edge_coverage: &edge_coverage,
-            depth: &depth,
-            guidance: None,
-            out_dir: Path::new("out"),
-            state_path: Path::new("out/campaign-state.json"),
-            sites_path: Path::new("out/sites.json"),
-        });
+        let mut clean = fresh_state(1);
+        clean.classes.insert("OK".to_string(), 1);
+        clean.generations_done = 1;
+        let envelope = envelope_for(&clean, "ok", 0);
         assert_eq!(envelope["failures"], 0);
         assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
         assert!(envelope["artifacts"].get("failures_dir").is_none());

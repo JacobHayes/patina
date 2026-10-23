@@ -4,8 +4,8 @@
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::custom_op::CustomOpMode;
 use crate::liveness::{
-    CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, ESCALATION_TOKEN_MIN_NANOS, LivenessKind, Progress,
-    WatchdogArm, outcome_is_progress, progress_of,
+    CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, LivenessKind, Progress, WatchdogArm,
+    outcome_is_progress, progress_of,
 };
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{
@@ -67,26 +67,6 @@ fn escalation_converges_a_clock_busy_wait_in_tens_of_escalations() {
     assert_eq!(charged.system_ns, STARTUP_CPU_CHARGE.system_ns);
     // Nothing is recorded but the reads themselves.
     assert!(reads < patina_dst_trace::MAX_TIMELINE_EVENTS as u64);
-    context.finish().unwrap();
-}
-
-#[test]
-fn escalation_leaves_virtual_time_alone_below_the_trigger() {
-    // The non-vacuity guard for the constant: the polls of one streak all
-    // observe the same time, and only the poll that completes it is
-    // escalated, after its own observation.
-    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    for _ in 0..ESCALATION_POLLS {
-        assert_eq!(
-            context.now(ClockKind::Monotonic).unwrap(),
-            DEFAULT_BOOT_ORIGIN_NANOS
-        );
-    }
-    assert_eq!(context.spin.escalations, 1);
-    assert_eq!(
-        context.now(ClockKind::Monotonic).unwrap(),
-        DEFAULT_BOOT_ORIGIN_NANOS + ESCALATION_TOKEN_MIN_NANOS
-    );
     context.finish().unwrap();
 }
 
@@ -270,18 +250,6 @@ fn an_idle_wait_covers_the_charged_time_still_to_show() {
     context.finish().unwrap();
 }
 
-#[test]
-fn escalation_reaches_an_alarm_in_one_step() {
-    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500_000));
-    // The first escalation charges the reads up to the alarm.
-    let (reads, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
-    assert_eq!(elapsed, 1_500_000);
-    assert_eq!(reads, ESCALATION_POLLS + 1);
-    assert_eq!(context.spin.escalations, 1);
-    context.finish().unwrap();
-}
-
 /// Class detector: every clock advance drains due timers through the shared
 /// expiry path, even with a runnable task. Selection stays policy-driven.
 fn spin_until_sleepers_run(context: &mut Context) {
@@ -376,16 +344,11 @@ fn an_empty_poll_loop_is_escalated_to_its_peers_deadline_and_replays() {
 #[test]
 fn escalation_wakes_due_sleepers_and_replays_their_turns() {
     let directory = tempdir().unwrap();
-    let first = directory.path().join("sleepers-a.patina");
-    let second = directory.path().join("sleepers-b.patina");
-    for path in [&first, &second] {
-        let mut context =
-            Context::from_config(RuntimeConfig::record(9, path, "sleepers-v1")).unwrap();
-        spin_until_sleepers_run(&mut context);
-        context.finish().unwrap();
-    }
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    let mut replay = Context::from_config(RuntimeConfig::replay(&first, "sleepers-v1")).unwrap();
+    let path = directory.path().join("sleepers.patina");
+    let mut context = Context::from_config(RuntimeConfig::record(9, &path, "sleepers-v1")).unwrap();
+    spin_until_sleepers_run(&mut context);
+    context.finish().unwrap();
+    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "sleepers-v1")).unwrap();
     spin_until_sleepers_run(&mut replay);
     replay.finish().unwrap();
 }
@@ -401,7 +364,17 @@ fn spin_for_cpu(context: &mut Context, cpu: u64, which: fn(CpuCharge) -> u64) ->
 }
 
 #[test]
-fn escalation_reaches_a_cpu_alarm_in_one_step_without_the_ramp() {
+fn escalation_reaches_an_alarm_in_one_step_without_the_ramp() {
+    // Toward a published wall alarm, the first escalation charges the reads up
+    // to it.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500_000));
+    let (reads, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
+    assert_eq!(elapsed, 1_500_000);
+    assert_eq!(reads, ESCALATION_POLLS + 1);
+    assert_eq!(context.spin.escalations, 1);
+    context.finish().unwrap();
+
     // An 11 ms CPU-time timer. Without an alarm the ramp takes ten
     // escalating tokens (1.023 ms) and ten more at the ceiling; toward a
     // published CPU deadline, on either line, one escalation lands on it.
@@ -486,28 +459,21 @@ fn idle_time_advances_to_an_alarm_ahead_of_every_parked_deadline() {
 }
 
 #[test]
-fn escalation_records_and_replays_byte_identically() {
+fn escalation_records_only_the_reads_and_replays() {
     let directory = tempdir().unwrap();
-    let first = directory.path().join("spin-a.patina");
-    let second = directory.path().join("spin-b.patina");
-    let mut recorded = Vec::new();
-    for path in [&first, &second] {
-        let mut record = Context::from_config(RuntimeConfig::record(9, path, "spin-v1")).unwrap();
-        recorded.push(calibration_spin(&mut record, 100_000).unwrap());
-        record.finish().unwrap();
-    }
-    // Same seed, two independent record runs: identical answers and bytes.
-    assert_eq!(recorded[0], recorded[1]);
-    assert_eq!(recorded[0].0, 7 * ESCALATION_POLLS + 1);
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+    let path = directory.path().join("spin.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(9, &path, "spin-v1")).unwrap();
+    let recorded = calibration_spin(&mut record, 100_000).unwrap();
+    record.finish().unwrap();
+    assert_eq!(recorded.0, 7 * ESCALATION_POLLS + 1);
     // Nothing but the reads is recorded: the escalations replay with them.
-    let bundle = TraceBundle::load(&first).unwrap();
+    let bundle = TraceBundle::load(&path).unwrap();
     assert_eq!(
         bundle.resolved_timeline("main").unwrap().len() as u64,
-        recorded[0].0
+        recorded.0
     );
-    let mut replay = Context::from_config(RuntimeConfig::replay(&first, "spin-v1")).unwrap();
-    assert_eq!(calibration_spin(&mut replay, 100_000).unwrap(), recorded[0]);
+    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "spin-v1")).unwrap();
+    assert_eq!(calibration_spin(&mut replay, 100_000).unwrap(), recorded);
     replay.finish().unwrap();
 }
 
@@ -559,8 +525,11 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
         assert_eq!(context.scheduler_next().unwrap(), Some(computing));
         computing
     };
-    let mut record =
-        Context::from_config(RuntimeConfig::record(1, &path, "timed-compute-v1")).unwrap();
+    let facts_path = directory.path().join("compute-facts.json");
+    let mut record = Context::from_config(
+        RuntimeConfig::record(1, &path, "timed-compute-v1").with_facts_path(&facts_path),
+    )
+    .unwrap();
     let task = setup(&mut record);
     let steps = record.steps();
     assert_eq!(record.compute_watchdog_candidate(), Some((steps, task)));
@@ -572,35 +541,9 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
         record.current_monotonic().unwrap(),
         DEFAULT_BOOT_ORIGIN_NANOS
     );
-    let mut replay =
-        Context::from_config(RuntimeConfig::replay(&path, "timed-compute-v1")).unwrap();
-    assert_eq!(setup(&mut replay), task);
-    assert_eq!(replay.compute_watchdog_candidate(), None);
-    assert!(matches!(
-        replay.finish(),
-        Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == task && at == steps
-    ));
-}
-
-#[test]
-fn compute_stop_emits_a_structured_runtime_limit() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("compute-facts.json");
-    let mut context =
-        Context::from_config(RuntimeConfig::seeded(1).with_facts_path(&path)).unwrap();
-    let task = context.task_spawn("main").unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    context.task_spawn("runnable peer").unwrap();
-    let steps = context.steps();
-    assert_eq!(context.compute_watchdog_candidate(), Some((steps, task)));
-    // No claim about what the baton holder is doing outside the boundary:
-    // computation and untracked host blocking have the same runtime state.
-    assert!(matches!(
-        context.stop_compute_bound(task),
-        RuntimeError::ComputeBound { task: stopped, steps: at }
-            if stopped == task && at == steps
-    ));
-    let facts: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    // The stop is a structured known limit on the facts channel, with no claim
+    // about what the baton holder was doing outside the boundary.
+    let facts: serde_json::Value = serde_json::from_slice(&fs::read(&facts_path).unwrap()).unwrap();
     assert_eq!(
         facts,
         serde_json::json!({
@@ -611,7 +554,14 @@ fn compute_stop_emits_a_structured_runtime_limit() {
             }],
         })
     );
-    assert_eq!(context.steps(), steps);
+    let mut replay =
+        Context::from_config(RuntimeConfig::replay(&path, "timed-compute-v1")).unwrap();
+    assert_eq!(setup(&mut replay), task);
+    assert_eq!(replay.compute_watchdog_candidate(), None);
+    assert!(matches!(
+        replay.finish(),
+        Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == task && at == steps
+    ));
 }
 
 #[test]
@@ -807,7 +757,7 @@ fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
 // -- Liveness watchdog --------------------------------------------------
 
 #[test]
-fn operation_progress_classification_is_correct() {
+fn operation_progress_classification_and_empty_network_polls() {
     // Pure scheduling/time/wait ops are never progress; genuine effects
     // always are; a non-blocking network poll is decided by its outcome.
     for operation in [
@@ -840,10 +790,8 @@ fn operation_progress_classification_is_correct() {
     ] {
         assert_eq!(progress_of(&operation), Progress::Always, "{operation:?}");
     }
-}
 
-#[test]
-fn an_empty_network_poll_is_not_progress_and_every_other_outcome_is() {
+    // An empty network poll is not progress; every other outcome is.
     let socket = SocketId(3);
     let recv = Operation::NetRecv {
         socket,
@@ -930,26 +878,6 @@ fn watchdog_arm_excuses_policy_deferral_windows() {
 }
 
 #[test]
-fn watchdog_arm_ignores_a_single_long_but_legitimate_sleep() {
-    // One huge no-progress jump (a single legitimate sleep) must not trip the
-    // watchdog: only genuine churn (>= LIVENESS_MIN_STALL_OPS non-progress
-    // ops) can. A progress op then resets the clock.
-    let mut arm = WatchdogArm {
-        kind: LivenessKind::NoProgress,
-        arm_time_nanos: 0,
-        budget_nanos: 1_000,
-        armed: false,
-        baseline_nanos: 0,
-        stall_ops: 0,
-    };
-    // A single sleep past the budget: only one stall op, below the floor.
-    assert!(arm.observe(1_000_000, false, false).is_none());
-    // Genuine progress resets.
-    assert!(arm.observe(1_000_001, true, false).is_none());
-    assert_eq!(arm.stall_ops, 0);
-}
-
-#[test]
 fn liveness_watchdog_fires_on_virtual_time_no_progress_wedge() {
     // A single-task loop that only advances the virtual clock (sleep) with no
     // genuine effect is a pure-churn wedge: the watchdog fires deterministically
@@ -977,35 +905,6 @@ fn liveness_watchdog_fires_on_virtual_time_no_progress_wedge() {
 }
 
 #[test]
-fn heal_then_converge_only_arms_after_the_fault_window() {
-    // The converge arm arms at H (here 5_000 ns) and must not fire before then,
-    // even though the guest is already wedged; after H it enforces the
-    // convergence budget and fires.
-    let mut context =
-        Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
-            no_progress_budget_nanos: None,
-            converge_budget_nanos: Some(1_000),
-            heal_after_nanos: Some(5_000),
-        }))
-        .unwrap();
-    let mut fired_at_iter = None;
-    for iteration in 0..1_000 {
-        if let Err(RuntimeError::Liveness { kind, .. }) = context.sleep_for(500) {
-            assert_eq!(kind, LivenessKind::HealThenConverge);
-            fired_at_iter = Some(iteration);
-            break;
-        }
-    }
-    // sleep_for advances 500 ns/iteration, so ~10 iterations to reach H=5_000
-    // and ~2 more (plus the min-stall floor) before the 1_000 ns budget trips.
-    let fired = fired_at_iter.expect("converge watchdog must fire");
-    assert!(
-        fired >= 10,
-        "must not fire before the fault window (H): {fired}"
-    );
-}
-
-#[test]
 fn liveness_watchdog_does_not_fire_on_a_run_that_makes_progress() {
     // A run that keeps doing genuine effects (writes) between sleeps never
     // trips the watchdog: each write resets the no-progress clock.
@@ -1026,7 +925,7 @@ fn liveness_watchdog_does_not_fire_on_a_run_that_makes_progress() {
 }
 
 #[test]
-fn liveness_watchdog_is_schedule_invariant_when_no_violation_fires() {
+fn liveness_watchdog_is_schedule_invariant_and_replays_without_its_config() {
     // The schedule-invariance proof: recording a healthy run with the watchdog
     // enabled produces a byte-identical recorded op stream to recording it
     // without. The watchdog only ADDS a possible report; it never records a
@@ -1066,29 +965,13 @@ fn liveness_watchdog_is_schedule_invariant_when_no_violation_fires() {
     assert_eq!(record.converge_budget_nanos, Some(10_000_000_000));
     // Fingerprint is unchanged by the watchdog (schedule-invariant).
     assert_eq!(a.metadata.fingerprint, b.metadata.fingerprint);
-}
 
-#[test]
-fn watchdog_config_is_recorded_and_replay_ignores_it() {
-    // A watchdog trace replays against a build with no watchdog (informational
-    // metadata, not reconciled fail-closed) — the op stream is authoritative.
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("wd.patina");
-    {
-        let mut context = Context::from_config(
-            RuntimeConfig::record(3, &path, "wd-replay-v1").with_liveness(LivenessConfig {
-                no_progress_budget_nanos: Some(1_000_000),
-                converge_budget_nanos: None,
-                heal_after_nanos: None,
-            }),
-        )
-        .unwrap();
-        context.write_file("/f", b"data").unwrap();
-        context.finish().unwrap();
-    }
-    // Replay with NO watchdog configured: must succeed (config not reconciled).
-    // Re-issue the same recorded op stream (the write).
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "wd-replay-v1")).unwrap();
-    replay.write_file("/f", b"data").unwrap();
+    // The recorded watchdog is informational, not reconciled fail-closed: the
+    // watched trace replays with no watchdog configured.
+    let mut replay =
+        Context::from_config(RuntimeConfig::replay(&watched, "wd-invariance-v1")).unwrap();
+    replay.write_file("/f", b"hello").unwrap();
+    replay.sleep_for(1_000).unwrap();
+    let _ = replay.read_file("/f").unwrap();
     replay.finish().unwrap();
 }

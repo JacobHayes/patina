@@ -4,6 +4,17 @@
 mod tests {
     use super::super::*;
 
+    /// The planted-liveness-bug guest (`testbeds/liveness-campaign`), built once
+    /// per run.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn liveness_guest() -> PathBuf {
+        super::super::run_facts::shared_guest("liveness-guest", |directory| {
+            let guest = directory.join("liveness-guest");
+            build_liveness_guest(&guest);
+            guest
+        })
+    }
+
     fn sometimes_gate_wat(label: &str, satisfied: bool) -> Vec<u8> {
         let bit = if satisfied { 1 } else { 0 };
         let wat = format!(
@@ -113,55 +124,53 @@ mod tests {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    // End-to-end coverage for `cargo patina campaign` + the liveness watchdog: build
-    // the buggify-driven planted-bug guest (`testbeds/liveness-campaign`), sweep it,
-    // and prove the campaign catches the planted liveness violation, deduplicates the
-    // signature across the generations that fire it, and records a working reproduce
-    // command. Native (single-threaded guest), so it does not touch the known
-    // main-thread TLS-teardown race. That the same sweep re-derives byte-identical
-    // outcomes, stores and state is `campaign_extend_equals_fresh_campaign`, which
-    // reruns this guest under these flags as a split campaign.
+    // End-to-end coverage for `cargo patina campaign` + the liveness watchdog over
+    // the buggify-driven planted-bug guest, under `--buggify --swarm`: the campaign
+    // catches the planted liveness violation, deduplicates the signature across the
+    // generations that fire it, verifies it and records a working reproduce
+    // command. Swarm drops buggify on some generations, which must run rather than
+    // abort on the fingerprint coherence guard (FAIL_CLOSED_ABORT). Native
+    // (single-threaded guest), so it does not touch the known main-thread
+    // TLS-teardown race.
     #[test]
-    fn campaign_catches_planted_liveness_bug_dedups_and_reproduces() {
+    fn campaign_catches_planted_liveness_bug_under_swarm_dedups_and_reproduces() {
         let workspace = native_workspace();
         let directory = tempdir().unwrap();
-        let guest = directory.path().join("liveness-guest");
-
-        // Build the planted-bug guest once; the campaign sweeps this same binary.
-        build_liveness_guest(&guest);
+        let guest = liveness_guest();
 
         let out = directory.path().join("camp");
-        let campaign_args = |out: &Path| {
-            vec![
-                "campaign".to_string(),
-                guest.to_str().unwrap().to_string(),
-                "--gens".to_string(),
-                "12".to_string(),
-                // Restore the full per-generation stream: this test asserts on the
-                // per-generation OK/LIVENESS lines and their determinism, which the
-                // summary-first default (novel/failing + periodic heartbeat) elides.
-                "--progress-every".to_string(),
-                "1".to_string(),
-                "--buggify".to_string(),
-                "--liveness-watchdog".to_string(),
-                "600000000000".to_string(),
-                "--out-dir".to_string(),
-                out.to_str().unwrap().to_string(),
-            ]
-        };
-        let owned1 = campaign_args(&out);
         let ran = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             workspace,
-            &owned1.iter().map(String::as_str).collect::<Vec<_>>(),
+            &[
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "12",
+                // The full per-generation stream: the assertions read the
+                // per-generation OK/LIVENESS lines, which the summary-first
+                // default (novel/failing + periodic heartbeat) elides.
+                "--progress-every",
+                "1",
+                "--buggify",
+                "--swarm",
+                "--liveness-watchdog",
+                "600000000000",
+                "--out-dir",
+                out.to_str().unwrap(),
+            ],
         );
-        let stdout = String::from_utf8_lossy(&ran.stdout);
+        let stdout = String::from_utf8_lossy(&ran.stdout).to_string();
         // A campaign with failures exits nonzero.
         assert_eq!(
             ran.status.code(),
             Some(1),
             "campaign should report failures (exit 1)\nstdout:\n{stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&ran.stderr)
+        );
+        assert!(
+            !stdout.contains("FAIL_CLOSED_ABORT"),
+            "a swarm+buggify campaign must not abort on configuration incoherence\n{stdout}"
         );
         // A genuine mix: the planted bug fires on some generations and not others.
         let liveness_gens = stdout.matches("class=LIVENESS").count();
@@ -230,6 +239,51 @@ mod tests {
             "reproduce command did not re-trigger the liveness violation: {reproduce}\nstderr:\n{}",
             String::from_utf8_lossy(&reproduced.stderr)
         );
+
+        // Non-vacuous: the sweep really did drop buggify on some of its generations
+        // and keep it on others, so the coherence path was exercised both ways. The
+        // swarm draw is a function of the run seed alone, so re-running the
+        // campaign's own generation seeds reports the same decision each
+        // generation made.
+        let (mut dropped, mut kept) = (false, false);
+        for line in stdout.lines() {
+            if dropped && kept {
+                break;
+            }
+            let Some(seed) = line.strip_prefix("PATINA_CAMPAIGN_GEN ").and_then(|rest| {
+                rest.split_whitespace()
+                    .find_map(|f| f.strip_prefix("seed="))
+            }) else {
+                continue;
+            };
+            let ran = invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                workspace,
+                &[
+                    "run",
+                    guest.to_str().unwrap(),
+                    "--seed",
+                    seed,
+                    "--swarm",
+                    "--buggify=372",
+                    // `run` takes the optional-value form with `=`; the space form is
+                    // a usage error, which would silently make this check vacuous.
+                    "--liveness-watchdog=600000000000",
+                ],
+            );
+            assert!(
+                ran.status.code() != Some(2),
+                "seed {seed}: usage error re-running a campaign generation:\n{}",
+                String::from_utf8_lossy(&ran.stderr)
+            );
+            let stderr = String::from_utf8_lossy(&ran.stderr);
+            dropped |= stderr.contains("class=buggify|0");
+            kept |= stderr.contains("class=buggify|1");
+        }
+        assert!(
+            dropped && kept,
+            "the sweep must exercise both swarm outcomes, got dropped={dropped} kept={kept}"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -247,12 +301,17 @@ mod tests {
     //      — the ambiguity that sent the original bug report after the wrong cause;
     //   3. an unmasked swarm generation still carries `+buggify`, and genuine
     //      incoherence (declaring `+buggify` with no buggify at all) still refuses.
+    //
+    // And the other end of the draw: a run that enabled NO class has nothing to
+    // select from, so `--swarm` is an inert knob, and an inert knob must not read
+    // as coverage. The runtime reports `vacuous=1` and warns, and the campaign
+    // classifies the generation `VACUOUS_SWARM` and fails, while the armed runs
+    // above report `vacuous=0`, so the detector is not always-on.
     #[test]
-    fn swarm_deselection_stays_coherent_with_fingerprint_and_metadata() {
+    fn swarm_deselection_stays_coherent_and_an_empty_draw_is_vacuous() {
         let workspace = native_workspace();
         let directory = tempdir().unwrap();
-        let guest = directory.path().join("swarm-guest");
-        build_liveness_guest(&guest);
+        let guest = liveness_guest();
 
         // Find one generation that drops buggify and one that keeps it by reading
         // each run's own PATINA_SWARM_REPORT rather than re-deriving the mask here. A
@@ -419,132 +478,14 @@ mod tests {
             "the coherence guard must still refuse genuine incoherence:\nstderr:\n{}",
             String::from_utf8_lossy(&incoherent.stderr)
         );
-    }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    // A `--buggify --swarm` campaign is the shape that made item 9 look like a broken
-    // flag: the campaign emits both flags on every generation, so each generation
-    // whose seed dropped buggify aborted on the coherence guard. Before the fix an
-    // eight generation sweep of the planted-bug fixture reported FAIL_CLOSED_ABORT on
-    // six of them; it must now report only the planted liveness bug.
-    #[test]
-    fn campaign_with_swarm_and_buggify_has_no_coherence_aborts() {
-        let workspace = native_workspace();
-        let directory = tempdir().unwrap();
-        let guest = directory.path().join("swarm-campaign-guest");
-        build_liveness_guest(&guest);
-
-        let out = directory.path().join("camp");
-        let ran = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "campaign",
-                guest.to_str().unwrap(),
-                "--gens",
-                "12",
-                "--buggify",
-                "--swarm",
-                "--liveness-watchdog",
-                "600000000000",
-                "--progress-every",
-                "1",
-                "--out-dir",
-                out.to_str().unwrap(),
-            ],
-        );
-        let stdout = String::from_utf8_lossy(&ran.stdout).to_string();
+        // A live draw is not vacuous and does not warn.
         assert!(
-            !stdout.contains("FAIL_CLOSED_ABORT"),
-            "a swarm+buggify campaign must not abort on configuration incoherence\n{stdout}"
+            kept_stderr.contains("PATINA_SWARM_REPORT candidates=1")
+                && kept_stderr.contains("vacuous=0")
+                && !kept_stderr.contains("swarm fault-class selection inert"),
+            "an armed class must make the swarm draw non-vacuous\nstderr:\n{kept_stderr}"
         );
-        // The sweep still does its job: it finds the planted liveness bug and has
-        // clean generations too, so "no aborts" is not "nothing ran".
-        assert!(
-            stdout.contains("class=LIVENESS") && stdout.contains("class=OK"),
-            "the sweep must still find the planted bug and have clean generations\n{stdout}"
-        );
-
-        // Non-vacuous: the sweep really did drop buggify on some of its generations
-        // and keep it on others, so the coherence path was exercised both ways. The
-        // swarm draw is a function of the run seed alone, so replaying the campaign's
-        // own generation seeds reports the same decision each generation made.
-        let mut dropped = 0usize;
-        let mut kept = 0usize;
-        for line in stdout.lines() {
-            let Some(seed) = line.strip_prefix("PATINA_CAMPAIGN_GEN ").and_then(|rest| {
-                rest.split_whitespace()
-                    .find_map(|f| f.strip_prefix("seed="))
-            }) else {
-                continue;
-            };
-            let ran = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                workspace,
-                &[
-                    "run",
-                    guest.to_str().unwrap(),
-                    "--seed",
-                    seed,
-                    "--swarm",
-                    "--buggify=372",
-                    // `run` takes the optional-value form with `=`; the space form is
-                    // a usage error, which would silently make this check vacuous.
-                    "--liveness-watchdog=600000000000",
-                ],
-            );
-            assert!(
-                ran.status.code() != Some(2),
-                "seed {seed}: usage error re-running a campaign generation:\n{}",
-                String::from_utf8_lossy(&ran.stderr)
-            );
-            let stderr = String::from_utf8_lossy(&ran.stderr);
-            if stderr.contains("class=buggify|0") {
-                dropped += 1;
-            } else if stderr.contains("class=buggify|1") {
-                kept += 1;
-            }
-        }
-        assert!(
-            dropped > 0 && kept > 0,
-            "the sweep must exercise both swarm outcomes, got dropped={dropped} kept={kept}"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    // `--swarm` selects a seed-derived SUBSET of the fault classes a run enabled, so
-    // a run that enabled none has nothing to select from: the draw keeps and drops
-    // nothing, and the generation explores exactly what it would have explored
-    // without `--swarm`. That is an inert knob, and an inert knob must not read as
-    // coverage. This is the planted zero-candidate fixture for the detector: the
-    // runtime reports `vacuous=1` and warns, and the campaign classifies the
-    // generation `VACUOUS_SWARM` and fails — while the same guest with one class
-    // armed is a clean, non-vacuous swarm run, so the detector is not always-on.
-    #[test]
-    fn swarm_with_zero_candidate_classes_is_reported_and_classified_vacuous() {
-        let workspace = native_workspace();
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("swarm_zero.rs");
-        fs::write(
-            &source,
-            r#"fn main() {
-    println!("SWARM_ZERO_OK");
-}
-"#,
-        )
-        .unwrap();
-        let guest = directory.path().join("swarm-zero");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                guest.to_str().unwrap(),
-            ],
-        );
-
-        // (1) The run itself reports the inert draw and warns.
         let inert = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             workspace,
@@ -564,33 +505,8 @@ mod tests {
             "an inert --swarm must warn\nstderr:\n{stderr}"
         );
 
-        // Non-vacuity control: one armed class gives the draw something to choose
-        // among, and the same knob on the same guest then reports `vacuous=0`.
-        let armed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "run",
-                guest.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--swarm",
-                "--buggify=372",
-            ],
-        );
-        let armed_stderr = String::from_utf8_lossy(&armed.stderr).to_string();
-        assert!(
-            armed_stderr.contains("PATINA_SWARM_REPORT candidates=1")
-                && armed_stderr.contains("vacuous=0"),
-            "an armed class must make the swarm draw non-vacuous\nstderr:\n{armed_stderr}"
-        );
-        assert!(
-            !armed_stderr.contains("swarm fault-class selection inert"),
-            "a live swarm draw must not warn\nstderr:\n{armed_stderr}"
-        );
-
-        // (2) The campaign classifies such a generation and FAILS: a campaign that
-        // asked for fault-subset exploration and got none is not a covered clean run.
+        // A campaign that asked for fault-subset exploration and got none is not
+        // a covered clean run.
         let out = directory.path().join("swarm-zero-campaign");
         let ran = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),

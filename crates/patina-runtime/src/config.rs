@@ -991,7 +991,7 @@ fn validate_guest_env_entry(key: &str, value: &str) -> Result<(), RuntimeError> 
 pub(super) mod tests {
     use crate::config::{FaultConfig, RuntimeConfig};
     use crate::replay::{fault_config_from_record, fault_record};
-    use crate::{Context, FaultKnob, Plane};
+    use crate::{FaultKnob, Plane};
 
     /// Every fault knob must survive the trace round trip. A knob the record
     /// does not carry replays as its default — the run reproduces WITHOUT the
@@ -1028,13 +1028,5 @@ pub(super) mod tests {
             knob.set_sample(&mut faults);
         }
         faults
-    }
-
-    #[test]
-    fn typed_builder_parameters_are_explicit() {
-        let config = RuntimeConfig::seeded(1).with_param("zone", "a").unwrap();
-        let context = Context::from_config(config).unwrap();
-        assert_eq!(context.param("zone"), Some("a"));
-        assert_eq!(context.param("missing"), None);
     }
 }

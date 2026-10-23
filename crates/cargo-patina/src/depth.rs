@@ -642,13 +642,6 @@ mod tests {
     }
 
     #[test]
-    fn selftest_detectors_all_fire() {
-        for (name, ok, detail) in campaign_detector_selftest() {
-            assert!(ok, "{name} failed: {detail}");
-        }
-    }
-
-    #[test]
     fn fold_accumulates_kinds_fuel_high_water_and_sums() {
         let mut store = store();
         store
@@ -671,61 +664,36 @@ mod tests {
         assert_eq!(meta.generations_with_depth, 2);
         assert_eq!(meta.last_new_depth_gen, Some(1));
         assert!(!meta.is_vacuous());
-    }
-
-    #[test]
-    fn a_higher_fuel_generation_counts_as_novel_without_new_kinds() {
-        let mut store = store();
-        store
-            .fold_generation(0, Some(&synthetic_depth(100, &[("fd_write", 1)])), true)
+        // A higher-fuel generation is novel even without a new kind.
+        let higher = store
+            .fold_generation(2, Some(&synthetic_depth(140, &[("fd_write", 1)])), true)
             .unwrap();
-        let outcome = store
-            .fold_generation(1, Some(&synthetic_depth(140, &[("fd_write", 1)])), true)
-            .unwrap();
-        assert_eq!(outcome.new_hostcall_kinds, 0);
-        assert!(outcome.raised_fuel_high_water);
-        assert_eq!(store.meta().last_new_depth_gen, Some(1));
-    }
-
-    #[test]
-    fn meta_round_trips_through_canonical_json() {
-        let mut store = store();
-        store
-            .fold_generation(
-                0,
-                Some(&synthetic_depth(100, &[("fd_write", 2), ("proc_exit", 1)])),
-                true,
-            )
-            .unwrap();
-        store.fold_generation(1, None, false).unwrap();
+        assert_eq!(higher.new_hostcall_kinds, 0);
+        assert!(higher.raised_fuel_high_water);
+        assert_eq!(store.meta().last_new_depth_gen, Some(2));
+        // A generation without depth folds too, and the meta round-trips
+        // through its canonical JSON.
+        store.fold_generation(3, None, false).unwrap();
         let json = store.meta().to_json();
         let parsed = CampaignDepthMeta::from_json(&json).expect("canonical meta round-trips");
         assert_eq!(&parsed, store.meta());
     }
 
     #[test]
-    fn corrupt_meta_is_refused_rather_than_partially_resumed() {
-        let mut json = {
-            let mut store = store();
-            store
-                .fold_generation(0, Some(&synthetic_depth(10, &[("fd_write", 1)])), true)
-                .unwrap();
-            store.meta().to_json()
-        };
-        json["generations_with_depth"] = Value::from(9u64);
-        let error = CampaignDepthMeta::from_json(&json).unwrap_err();
-        assert!(error.contains("exceeds generations_applied"), "{error}");
-    }
-
-    #[test]
-    fn non_sequential_generations_are_refused() {
+    fn corrupt_meta_and_fold_gaps_are_refused() {
         let mut store = store();
         store
             .fold_generation(0, Some(&synthetic_depth(10, &[("fd_write", 1)])), true)
             .unwrap();
-        let error = store
-            .fold_generation(2, Some(&synthetic_depth(10, &[("fd_write", 1)])), true)
-            .unwrap_err();
-        assert!(error.0.contains("fold gap"), "{error}");
+        assert!(
+            store
+                .fold_generation(2, Some(&synthetic_depth(10, &[("fd_write", 1)])), true)
+                .is_err(),
+            "a non-sequential generation must be refused"
+        );
+        let mut json = store.meta().to_json();
+        json["generations_with_depth"] = Value::from(9u64);
+        let error = CampaignDepthMeta::from_json(&json).unwrap_err();
+        assert!(error.contains("exceeds generations_applied"), "{error}");
     }
 }

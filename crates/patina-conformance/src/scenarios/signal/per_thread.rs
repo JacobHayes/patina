@@ -13,6 +13,7 @@
 //! the thread whose turn it is records events.
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::signals as support;
@@ -204,6 +205,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "signal/per_thread",
     run,
+    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_getpid,
         Syscall::N_gettid,

@@ -88,7 +88,7 @@ description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail 
 run = "testbeds/audit-corpus/run.sh"
 
 [tasks.conformance]
-description = "Syscall conformance: every scenario natively (the live host oracle) and under patina through every vehicle, record/replay, strace leak run"
+description = "Syscall conformance: every scenario natively (the live host oracle) and under patina through the libc and syscall doors (raw only where the trap is the subject), record/replay on one leg per scenario, strace leak run on every leg"
 run = "cargo test -p cargo-patina --test native_conformance --locked"
 
 [tasks."conformance:coverage"]

@@ -2,28 +2,33 @@
 
 use super::*;
 
-/// Exercises exactly ONE interposed entry point per run, selected by `argv[1]`,
-/// and performs no other boundary operation.
+/// The replay probe. `argv[1]` selects one of three behaviours.
 ///
-/// The "no other boundary operation" part is the whole point: any effect that
-/// reaches `ensure_runtime` aborts on a stored init error by itself, so the
-/// replay legs below would pass without proving anything about the entry point
-/// under test. Results are checked in-process and a wrong one calls `abort`,
-/// which needs no boundary — so the recording legs' success is what proves each
-/// arm actually ran.
-///
-/// The symbols are the shim's own C ABI (and, for the lock arm, the public
-/// symbol the shim strong-defines); all are defined inside the linked binary, so
-/// the audit sees no unsupported import.
+/// * A bootstrap-window entry point ([`BOOTSTRAP_WINDOW_ENTRY_POINTS`]):
+///   exercises exactly that interposed entry point and performs no other
+///   boundary operation. Any effect that reaches `ensure_runtime` aborts on a
+///   stored init error by itself, so a replay leg would pass without proving
+///   anything about the entry point under test. Results are checked in-process
+///   and a wrong one calls `abort`, which needs no boundary, so a recording's
+///   success proves the arm ran. The symbols are the shim's own C ABI (and, for
+///   the lock arm, the public symbol the shim strong-defines); all are defined
+///   inside the linked binary, so the audit sees no unsupported import.
+/// * `abort`: a guest that aborts itself.
+/// * Anything else: the guest's boundary op-stream depends on its arguments.
+///   It echoes `argv[0]` and its arguments, and writes and reads back a file
+///   named by `argv[1]` (default "default"), so a replay run with the wrong
+///   arguments diverges mid-run. A thread gives the trace scheduling decisions,
+///   and [`IDENTITY_PROBE_TAG`], kept in the image by `#[used]`, is a byte the
+///   guest never reads: flipping it changes the executable and nothing the
+///   guest does, so only the build identity tells the two apart.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const BOOTSTRAP_WINDOW_PROBE_SOURCE: &str = r#"
+const PROBE_SOURCE: &str = r#"
 unsafe extern "C" {
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> i32;
     fn patina_cpu_time_nanos(nanos: *mut u64) -> i32;
     fn patina_read_link(path: *const u8, buf: *mut u8, len: usize) -> isize;
     fn patina_sleep_until(clock: u32, deadline_nanos: u64) -> i32;
 }
-
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -32,7 +37,24 @@ unsafe extern "C" {
     fn os_unfair_lock_unlock(lock: *mut u32);
 }
 
+#[used]
+static TAG: [u8; 22] = *b"PATINA-IDENTITY-PROBE0";
+
 const MONOTONIC: u32 = 1;
+
+fn argv_and_identity() {
+    let argv: Vec<String> = std::env::args().collect();
+    println!("ARGV0={}", argv.first().map(String::as_str).unwrap_or(""));
+    let guest: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+    println!("ARGS={guest:?}");
+    let name = guest.first().copied().unwrap_or("default");
+    let path = format!("/{name}");
+    std::fs::write(&path, name.as_bytes()).unwrap();
+    let readback = std::fs::read_to_string(&path).unwrap();
+    println!("READBACK={readback}");
+    let worker = std::thread::spawn(|| 20u64);
+    println!("IDENTITY_PROBE {}", worker.join().unwrap() + 1);
+}
 
 fn main() {
     let entry = std::env::args().nth(1).unwrap_or_default();
@@ -80,8 +102,7 @@ fn main() {
             }
         }
         // Not a bootstrap-window path: captured stdio accepts bytes with no
-        // context installed, and `patina_shutdown` then drops the buffer, so a
-        // guest whose only effect is a print exited 0 with its output lost.
+        // context installed, and `patina_shutdown` then drops the buffer.
         "stdout" => {
             println!("BOOTSTRAP_WINDOW_PROBE stdout");
         }
@@ -92,7 +113,6 @@ fn main() {
                 std::process::abort();
             }
         }
-
         #[cfg(target_os = "macos")]
         "unfair-lock" => {
             let mut lock = 0u32;
@@ -104,19 +124,23 @@ fn main() {
                 }
             }
         }
-        _ => std::process::abort(),
+        "abort" => {
+            eprintln!("guest-about-to-abort");
+            std::process::abort();
+        }
+        _ => argv_and_identity(),
     }
 }
 "#;
 
 /// Every entry point known to answer WITHOUT reaching `ensure_runtime`, as an
-/// argument to [`BOOTSTRAP_WINDOW_PROBE_SOURCE`]. The first five and the macOS
-/// lock arm are the shim-bootstrap window; `stdout` is the captured-stdio path,
-/// which answers for the same reason (no context needed) outside the window.
+/// argument to [`PROBE_SOURCE`]. The first five and the macOS lock arm are the
+/// shim-bootstrap window; `stdout` is the captured-stdio path, which answers for
+/// the same reason (no context needed) outside the window.
 ///
 /// The window entries pair with the shim's own `bootstrap_window_lints` source
 /// lint, which pins the *source* call sites of the window predicate to the same
-/// list — so a new bootstrap-window path cannot be added without both the lint
+/// list, so a new bootstrap-window path cannot be added without both the lint
 /// and a leg here.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
@@ -129,30 +153,6 @@ const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
     #[cfg(target_os = "macos")]
     "unfair-lock",
 ];
-
-// A guest whose deterministic boundary op-stream DEPENDS on its arguments: it
-// opens and reads back a file whose name is `argv[1]` (default "default"), so a
-// replay that runs it with the wrong arguments diverges with a trace operation
-// mismatch mid-run — exactly the confusing incident that recording guest argv
-// fixes. It also echoes `argv[0]` so the supervisor-normalized value is pinned.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const ARGV_ECHO_SOURCE: &str = r#"
-fn main() {
-    let argv: Vec<String> = std::env::args().collect();
-    println!("ARGV0={}", argv.first().map(String::as_str).unwrap_or(""));
-    let guest: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
-    println!("ARGS={guest:?}");
-    // The open path is argv-derived, so the recorded FsOpen operation carries the
-    // argument. Replaying with a different argv opens a different path and the
-    // strict replay fails closed with an operation mismatch instead of silently
-    // running the wrong scenario.
-    let name = guest.first().copied().unwrap_or("default");
-    let path = format!("/{name}");
-    std::fs::write(&path, name.as_bytes()).unwrap();
-    let readback = std::fs::read_to_string(&path).unwrap();
-    println!("READBACK={readback}");
-}
-"#;
 
 // Rewrite `source` into `dest` with the additive `metadata.guest_argv` field
 // removed, synthesizing a trace as a pre-argv-capture recorder would have
@@ -172,22 +172,7 @@ fn strip_guest_argv(source: &Path, dest: &Path) {
     fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
-/// A guest carrying a byte its behaviour never reads: [`IDENTITY_PROBE_TAG`],
-/// kept in the image by `#[used]`. Flipping it changes the executable and
-/// nothing the guest does, so only the build identity can tell the two apart.
-/// The thread gives the trace scheduling decisions to replay.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const IDENTITY_PROBE_SOURCE: &str = r#"
-#[used]
-static TAG: [u8; 22] = *b"PATINA-IDENTITY-PROBE0";
-
-fn main() {
-    let worker = std::thread::spawn(|| 20u64);
-    println!("IDENTITY_PROBE {}", worker.join().unwrap() + 1);
-}
-"#;
-
-/// The inert tag in [`IDENTITY_PROBE_SOURCE`], found in the built executable.
+/// The inert tag in [`PROBE_SOURCE`], found in the built executable.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const IDENTITY_PROBE_TAG: &[u8] = b"PATINA-IDENTITY-PROBE0";
 

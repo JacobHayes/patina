@@ -2,8 +2,8 @@
  * The character and positioning calls a C++ runtime makes on the standard
  * streams (libstdc++'s stdio_sync_filebuf: putc, getc, ungetc, fread,
  * fileno, fseeko64, ftello64), observed on a pipe and on a regular file:
- * `native_abi` runs this source natively (unlinked) and under the shim and
- * requires the same report. After each call the report records its answer
+ * `stdio_entry_probe.c`'s `chars` case, which `native_abi` runs natively
+ * (unlinked) and under the shim, requiring the same report. After each call the report records its answer
  * and the bytes that reached the pipe (FIONREAD), so a flush a call makes is
  * visible. The report goes to the original stdout descriptor at the end.
  */
@@ -32,7 +32,7 @@ static long pending(int fd) {
 
 static void arrived(void) { note("  piped", pending(reader)); }
 
-int main(void) {
+int stdio_chars(void) {
     int original = dup(1);
     int ends[2];
     if (original < 0 || pipe2(ends, O_NONBLOCK) != 0 || dup2(ends[1], 1) != 1) return 1;

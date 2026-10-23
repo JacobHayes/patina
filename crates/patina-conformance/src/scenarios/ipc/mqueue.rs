@@ -312,7 +312,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mq_getsetattr,
         Syscall::N_fallocate,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::PosixMqueue],
     ..DEFAULTS
 };

@@ -16,7 +16,7 @@
 //! * pselect6 takes its mask with the kernel's sigset size — another size is
 //!   `EINVAL` — and refuses a timespec whose nanoseconds reach a second.
 //!
-//! Natively the `select` row is reached by the syscall and raw vehicles: glibc
+//! Natively the `select` row is reached by the syscall vehicle: glibc
 //! (≥ 2.35) implements `select(3)` over `pselect6`, normalizing the timeval
 //! itself, so the libc vehicle's native answer is pselect6's; under patina it
 //! exercises the shim's `select` symbol, the interesting door.

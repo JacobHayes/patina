@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_dump_lists_every_interface_then_done() {
+    fn a_link_dump_lists_every_interface_and_bad_requests_are_errors() {
         let answers = answer(
             &request(RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP, 1, &[0; 16]),
             7,
@@ -578,10 +578,8 @@ mod tests {
                 .all(|(kind, flags, _)| *kind == RTM_NEWLINK && flags & NLM_F_MULTI != 0)
         );
         assert_eq!(all.last().unwrap().0, NLMSG_DONE);
-    }
 
-    #[test]
-    fn a_missing_link_and_a_type_past_the_family_are_errors() {
+        // A missing link and a type past the family are errors.
         let mut body = [0u8; 16];
         body[4..8].copy_from_slice(&0x7fff_fff0i32.to_ne_bytes());
         let answers = answer(&request(RTM_GETLINK, NLM_F_REQUEST, 3, &body), 7);

@@ -30,7 +30,7 @@ fn campaign_fold_is_watermark_idempotent() {
 }
 
 #[test]
-fn campaign_load_validates_resume_watermark() {
+fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     let temp = tempfile::tempdir().unwrap();
     let dir = temp.path().join("coverage");
     let artifact = CoverageArtifact {
@@ -70,50 +70,71 @@ fn campaign_load_validates_resume_watermark() {
     );
 
     let meta_path = dir.join("meta.json");
-    let mut meta: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
-    meta["generations_applied"] = 3.into();
-    fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
-    let ahead =
-        CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
-            .unwrap_err();
+    let rewrite_meta = |edit: &dyn Fn(&mut Value)| {
+        let mut meta: Value =
+            serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+        edit(&mut meta);
+        fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    };
+    rewrite_meta(&|meta| meta["generations_applied"] = 3.into());
+    let ahead = CampaignCoverageStore::load(
+        dir.clone(),
+        artifact.clone(),
+        "patina-native+yieldpoints".into(),
+        200,
+        1,
+    )
+    .unwrap_err();
     assert!(
         ahead
             .0
             .contains("at most one checkpoint-tear generation ahead"),
         "unexpected error: {ahead}"
     );
-}
 
-#[test]
-fn campaign_meta_rejects_schema_and_edges_total_mismatch() {
-    let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
-    let meta = CampaignCoverageMeta::new(
-        CoverageArtifact {
-            path: "guest".into(),
-            sha256: "abc".into(),
-            family: "native".into(),
-        },
-        "patina-native+yieldpoints".into(),
-        &covmap,
-        200,
-    )
-    .to_json();
-
-    let mut bad_schema = meta.clone();
-    bad_schema["schema"] = "patina.coverage.campaign/v999".into();
+    rewrite_meta(&|meta| {
+        meta["generations_applied"] = 1.into();
+        meta["fingerprint"] = "other".into();
+    });
+    let error =
+        CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
+            .unwrap_err();
     assert!(
-        CampaignCoverageMeta::from_json(&bad_schema)
-            .unwrap_err()
-            .contains("unsupported schema")
+        error.0.contains("fingerprint mismatch"),
+        "unexpected error: {}",
+        error.0
     );
+    // An unknown schema or a covmap of a different size is refused.
+    {
+        let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
+        let meta = CampaignCoverageMeta::new(
+            CoverageArtifact {
+                path: "guest".into(),
+                sha256: "abc".into(),
+                family: "native".into(),
+            },
+            "patina-native+yieldpoints".into(),
+            &covmap,
+            200,
+        )
+        .to_json();
 
-    let mut bad_edges = meta;
-    bad_edges["edges_total"] = 2.into();
-    let error = CampaignCoverageMeta::from_json(&bad_edges).unwrap_err();
-    assert!(
-        error.contains("expected edges_total=2"),
-        "unexpected error: {error}"
-    );
+        let mut bad_schema = meta.clone();
+        bad_schema["schema"] = "patina.coverage.campaign/v999".into();
+        assert!(
+            CampaignCoverageMeta::from_json(&bad_schema)
+                .unwrap_err()
+                .contains("unsupported schema")
+        );
+
+        let mut bad_edges = meta;
+        bad_edges["edges_total"] = 2.into();
+        let error = CampaignCoverageMeta::from_json(&bad_edges).unwrap_err();
+        assert!(
+            error.contains("expected edges_total=2"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -150,40 +171,4 @@ fn plateau_rule_is_exact_and_zero_disables() {
     disabled.fold_covmap(1, &no_new).unwrap();
     disabled.fold_covmap(2, &no_new).unwrap();
     assert!(!disabled.meta().unwrap().plateaued);
-}
-
-#[test]
-fn campaign_meta_rejects_fingerprint_mismatch() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = temp.path().join("coverage");
-    let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
-    let artifact = CoverageArtifact {
-        path: "guest".into(),
-        sha256: "abc".into(),
-        family: "native".into(),
-    };
-    let mut store = CampaignCoverageStore::fresh(
-        dir.clone(),
-        artifact.clone(),
-        "patina-native+yieldpoints".into(),
-        200,
-    );
-    store.fold_covmap(0, &covmap).unwrap();
-    store.write_checkpoint().unwrap();
-    let mut meta: Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("meta.json")).unwrap()).unwrap();
-    meta["fingerprint"] = "other".into();
-    fs::write(
-        dir.join("meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
-    )
-    .unwrap();
-    let error =
-        CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
-            .unwrap_err();
-    assert!(
-        error.0.contains("coverage state fingerprint mismatch"),
-        "unexpected error: {}",
-        error.0
-    );
 }

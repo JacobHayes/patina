@@ -67,7 +67,7 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/membarrier",
     run,
     covers: &[Syscall::N_membarrier],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::Membarrier],
     kernel_floor: Some(KernelFloor {
         release: "4.16",

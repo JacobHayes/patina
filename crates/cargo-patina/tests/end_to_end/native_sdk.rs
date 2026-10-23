@@ -2,57 +2,75 @@
 
 use super::*;
 
-// A guest whose buggify sites all activate and always fire under
-// `--buggify=1000 --buggify-activation-permille 1000`, so the outcome is
-// deterministic without hunting for a firing seed.
+/// The SDK guest's source. Its buggify sites all activate and always fire under
+/// `--buggify=1000 --buggify-activation-permille 1000`, so the outcome is
+/// deterministic without hunting for a firing seed. Every declared SDK site
+/// macro sits behind a branch no run takes: invisible to lazy registration,
+/// visible through the linked table. The `no-setup` argument skips
+/// `setup_complete`, a declared-but-never-called harness bug under
+/// `--buggify-after-setup`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const BUGGIFY_SDK_MAIN: &str = r#"
-fn main() {
-    patina_dst::lifecycle::setup_complete();
+fn sdk_main() -> String {
+    let registry = patina_dst::SDK_SITE_MACROS
+        .iter()
+        .map(|site| format!("let _ = patina_dst::{};\n", site.fixture))
+        .collect::<String>();
+    format!(
+        r#"fn main() {{
+    if std::env::args().nth(1).as_deref() != Some("no-setup") {{
+        patina_dst::lifecycle::setup_complete();
+    }}
+    if std::hint::black_box(false) {{
+{registry}    }}
     let mut fired = 0u32;
     let knob = patina_dst::buggify_knob!("batch", 10_i64, 1, 100);
-    for i in 0..8 {
+    for i in 0..8 {{
         patina_dst::reachable!("loop-body");
-        if patina_dst::buggify!("early-return") {
+        if patina_dst::buggify!("early-return") {{
             fired += 1;
-        }
+        }}
         patina_dst::sometimes!(i == 3, "index-is-three");
-    }
+    }}
     patina_dst::always!(fired <= 8, "fired-in-bounds");
-    println!("RESULT knob={knob} fired={fired} rng={}", patina_dst::rng());
+    println!("RESULT knob={{knob}} fired={{fired}} rng={{}}", patina_dst::rng());
+}}
+"#
+    )
 }
-"#;
 
-// Every literal SDK site macro is behind an argv branch the campaign never
-// takes: invisible to lazy registration, visible through the linked table.
+/// The Cargo target directory the SDK guest builds into, shared with the
+/// fixture that checks a build never picks up another package's binary.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const BUGGIFY_NEVER_REACHABLE_MAIN: &str = r#"
-fn main() {
-    patina_dst::lifecycle::setup_complete();
-    if std::env::args().any(|arg| arg == "--take-never-branch") {
-        let _ = patina_dst::buggify!("never-called-buggify");
-        let _ = patina_dst::buggify_with_prob!("never-called-probability", 1.0);
-        let _ = patina_dst::buggify_delay!("never-called-delay");
-        let _ = patina_dst::buggify_knob!("never-called-knob", 3, 1, 5);
-        patina_dst::always!(true, "never-called-always");
-        patina_dst::sometimes!(true, "never-called-sometimes");
-        patina_dst::reachable!("never-called-reachable");
-    }
-    println!("guest-finished");
+fn shared_sdk_target() -> PathBuf {
+    common::guest_target_dir("sdk-shared-target")
 }
-"#;
 
-// A guest that never calls setup_complete; under --buggify-after-setup this is a
-// declared-but-never-called harness bug that must fail loudly.
+/// The SDK guest's package directory and binary, built once per run.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const BUGGIFY_NO_SETUP_MAIN: &str = r#"
-fn main() {
-    for _ in 0..5 {
-        let _ = patina_dst::buggify!("gated");
-    }
-    println!("guest-finished");
+fn sdk_guest() -> (PathBuf, PathBuf) {
+    let binary = super::run_facts::shared_guest("native-sdk-guest", |directory| {
+        let package = directory.join("pkg");
+        write_sdk_fixture(&package, &sdk_main());
+        let manifest = package.join("Cargo.toml");
+        let mut contents = fs::read_to_string(&manifest).unwrap();
+        contents.push_str("\n[workspace]\n");
+        fs::write(&manifest, contents).unwrap();
+        let binary = directory.join("sdk-guest");
+        invoke_in_with_env(
+            native_workspace(),
+            &[
+                "build",
+                package.to_str().unwrap(),
+                "--output",
+                binary.to_str().unwrap(),
+            ],
+            &[("CARGO_TARGET_DIR", shared_sdk_target().to_str().unwrap())],
+        );
+        binary
+    });
+    let package = binary.parent().unwrap().join("pkg");
+    (package, binary)
 }
-"#;
 
 #[cfg(test)]
 #[path = "native_sdk/tests.rs"]

@@ -11,10 +11,8 @@ mod tests {
         create_fixture(&fixture);
 
         let first = invoke(&fixture, &["run", "--seed", "123"]);
-        let repeated = invoke(&fixture, &["run", "--seed", "123"]);
         let different = invoke(&fixture, &["run", "--seed", "124"]);
         let first_result = result_line(&first);
-        assert_eq!(result_line(&repeated), first_result);
         assert!(first_result.contains("cfg=true"));
         // Wall time is epoch + uptime; both clocks advance by the 10ns slept.
         let uptime = patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS + 10;

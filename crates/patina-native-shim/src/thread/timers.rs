@@ -1375,7 +1375,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forwarding_counts_the_periods_up_to_the_first_after_now() {
+    fn forwarding_counts_the_periods_up_to_the_first_after_now_and_timevals_validate() {
         let mut expires = 1_000;
         // Exactly at the expiry: one period.
         assert_eq!(forward(&mut expires, 1_000, 1_000), 1);
@@ -1386,10 +1386,8 @@ mod tests {
         assert_eq!(expires, 21_000_000);
         // Before the expiry, nothing moves.
         assert_eq!(forward(&mut expires, 20_000_000, 1_000_000), 0);
-    }
 
-    #[test]
-    fn a_timeval_is_valid_below_one_second_of_microseconds() {
+        // A timeval is valid below one second of microseconds.
         assert_eq!(timeval_nanos([1, 5]), Some(NANOS + 5_000));
         assert_eq!(timeval_nanos([0, 1_000_000]), None);
         assert_eq!(timeval_nanos([0, -1]), None);

@@ -194,12 +194,40 @@ impl Guest {
         assert_success(self.command("audit", &[]))
     }
 
-    /// Require a successful seeded run with the supplied configuration.
+    /// Require a successful, deterministic seeded run with the supplied
+    /// configuration, and return its output. Every run a test requires to
+    /// succeed is checked here, so no test repeats the check: a plain seeded
+    /// run and a recorded run of the same seed must print the same stdout and
+    /// guest stderr (the seed alone decides the run, recording included), and
+    /// a flag-free replay of the recording must print them again.
     pub fn assert_run_success(&self, seed: u64, flags: &[&str]) -> Output {
+        self.assert_recorded(seed, flags).0
+    }
+
+    /// [`assert_run_success`](Self::assert_run_success), returning the
+    /// recorded run's output and the path of its trace.
+    pub fn assert_recorded(&self, seed: u64, flags: &[&str]) -> (Output, PathBuf) {
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let seed = seed.to_string();
-        let mut args = vec!["--seed", &seed];
-        args.extend_from_slice(flags);
-        assert_success(self.command("run", &args))
+        let trace = self.dir.path().join(format!("run-{run}.patina"));
+        let mut seeded = vec!["--seed", &seed];
+        seeded.extend_from_slice(flags);
+        let plain = assert_success(self.command("run", &seeded));
+        // Patina's own flags go before a `--` that starts the guest's.
+        let split = flags
+            .iter()
+            .position(|flag| *flag == "--")
+            .unwrap_or(flags.len());
+        let mut record = vec!["--seed", &seed];
+        record.extend_from_slice(&flags[..split]);
+        record.extend(["--record", trace.to_str().unwrap()]);
+        record.extend_from_slice(&flags[split..]);
+        let recorded = assert_success(self.command("run", &record));
+        assert_same_guest_output(&plain, &recorded, "seeded and recorded runs");
+        let replay = assert_success(self.command("replay", &[trace.to_str().unwrap()]));
+        assert_same_guest_output(&recorded, &replay, "recorded run and its replay");
+        (recorded, trace)
     }
 
     /// Require a failed seeded run and every named diagnostic.
@@ -210,87 +238,19 @@ impl Guest {
         )
     }
 
-    /// Require byte-identical stdout across at least two runs of one seed.
-    pub fn assert_seed_repeatability(&self, seed: u64, count: usize, flags: &[&str]) -> Vec<u8> {
-        assert!(count >= 2, "a determinism check needs two runs");
-        let first = self.assert_run_success(seed, flags).stdout;
-        for _ in 1..count {
-            assert_eq!(
-                first,
-                self.assert_run_success(seed, flags).stdout,
-                "same-seed stdout"
-            );
-        }
-        first
-    }
-
-    /// Require at least two distinct outputs among the supplied seeds.
+    /// Require at least two distinct outputs among the supplied seeds, each
+    /// from one plain seeded run.
     pub fn assert_seed_variation(&self, seeds: &[u64], flags: &[&str]) {
         let outputs: BTreeSet<_> = seeds
             .iter()
-            .map(|seed| self.assert_run_success(*seed, flags).stdout)
+            .map(|seed| {
+                let seed = seed.to_string();
+                let mut args = vec!["--seed", &seed];
+                args.extend_from_slice(flags);
+                assert_success(self.command("run", &args)).stdout
+            })
             .collect();
         assert!(outputs.len() >= 2, "output did not vary across {seeds:?}");
-    }
-
-    /// Require repeatability plus full stdout/trace identity.
-    pub fn assert_seeded_record_replay_identity(&self, seed: u64, flags: &[&str]) -> Vec<u8> {
-        let baseline = self.assert_seed_repeatability(seed, 2, flags);
-        self.assert_record_replay_identity(seed, flags, &baseline);
-        baseline
-    }
-
-    /// Compare two records and flag-free replay with a checked run; return the trace path.
-    pub fn assert_record_replay_identity(
-        &self,
-        seed: u64,
-        flags: &[&str],
-        baseline: &[u8],
-    ) -> PathBuf {
-        let trace = self.dir.path().join("run.patina");
-        let repeat = self.dir.path().join("repeat.patina");
-        for path in [&trace, &repeat] {
-            let mut args = flags.to_vec();
-            args.extend([
-                "--record",
-                path.to_str().unwrap(),
-                "--fingerprint",
-                "native-boundary-v1",
-            ]);
-            assert_eq!(
-                baseline,
-                self.assert_run_success(seed, &args).stdout,
-                "seeded vs record stdout"
-            );
-        }
-        assert_eq!(
-            std::fs::read(&trace).unwrap(),
-            std::fs::read(&repeat).unwrap(),
-            "record trace identity"
-        );
-        let replay = assert_success(self.command(
-            "replay",
-            &[
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "native-boundary-v1",
-            ],
-        ));
-        assert_eq!(baseline, replay.stdout, "record/replay stdout identity");
-        trace
-    }
-
-    /// Require that a replay of `trace` under another fingerprint is refused.
-    /// The check reads only the trace and the flag, whatever the guest does,
-    /// so one guest's trace proves it.
-    pub fn assert_fingerprint_refused(&self, trace: &Path) {
-        assert_refused(
-            self.command(
-                "replay",
-                &[trace.to_str().unwrap(), "--fingerprint", "different"],
-            ),
-            &["fingerprint"],
-        );
     }
 
     /// Require that no undefined symbol contains any of the given names.
@@ -364,6 +324,33 @@ impl Guest {
             "internal fatal must not finalize an invalid trace"
         );
     }
+}
+
+/// Require the same stdout and the same guest stderr. Patina's own stderr
+/// lines (`patina` and `PATINA_` prefixed) say which mode ran, so they are
+/// left out of the comparison.
+fn assert_same_guest_output(left: &Output, right: &Output, what: &str) {
+    assert!(
+        left.stdout == right.stdout,
+        "{what}: stdout differs:\n{}\n---\n{}",
+        String::from_utf8_lossy(&left.stdout),
+        String::from_utf8_lossy(&right.stdout)
+    );
+    let guest_stderr = |output: &Output| -> Vec<u8> {
+        output
+            .stderr
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| !line.starts_with(b"patina") && !line.starts_with(b"PATINA_"))
+            .flatten()
+            .copied()
+            .collect()
+    };
+    assert!(
+        guest_stderr(left) == guest_stderr(right),
+        "{what}: guest stderr differs:\n{}\n---\n{}",
+        String::from_utf8_lossy(&left.stderr),
+        String::from_utf8_lossy(&right.stderr)
+    );
 }
 
 /// Mutually exclusive linkage contracts for a direct C guest.

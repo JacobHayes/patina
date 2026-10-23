@@ -118,17 +118,16 @@ fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() 
             .unwrap()
             .join("relative/patina-native-shim")
     );
-}
-
-#[test]
-fn shim_target_dir_takes_precedence_over_cargo_target_dir() {
-    let shim = || Some(OsString::from("/shim-target"));
-    let cargo = || Some(OsString::from("/cargo-target"));
-    assert_eq!(shim_target_base(shim(), cargo()), shim());
-    assert_eq!(shim_target_base(shim(), None), shim());
-    assert_eq!(shim_target_base(None, cargo()), cargo());
-    assert_eq!(shim_target_base(Some(OsString::new()), cargo()), cargo());
-    assert_eq!(shim_target_base(None, None), None);
+    // PATINA_SHIM_TARGET_DIR takes precedence over CARGO_TARGET_DIR; an empty one is unset.
+    {
+        let shim = || Some(OsString::from("/shim-target"));
+        let cargo = || Some(OsString::from("/cargo-target"));
+        assert_eq!(shim_target_base(shim(), cargo()), shim());
+        assert_eq!(shim_target_base(shim(), None), shim());
+        assert_eq!(shim_target_base(None, cargo()), cargo());
+        assert_eq!(shim_target_base(Some(OsString::new()), cargo()), cargo());
+        assert_eq!(shim_target_base(None, None), None);
+    }
 }
 
 #[test]

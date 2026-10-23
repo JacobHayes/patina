@@ -29,21 +29,21 @@ fn add(keys: &mut Keys, ring: i32, description: &[u8], data: &[u8]) -> Result<i3
     }
 }
 
-/// SEARCH's unsupported destination form stops after valid arguments.
-/// Class pairing: argument-order checks below and the live key oracle.
+/// SEARCH judges its arguments (type and description pointers, then an
+/// unregistered type) before its unsupported destination form stops by name.
+/// Class pairing: the live key oracle's SEARCH argument refusals.
 #[test]
-fn search_with_destination_stops_by_name() {
-    assert!(matches!(
-        keyctl_at(credential(), MAIN, &[10, KEY_SPEC_SESSION_KEYRING as u64, c"user".as_ptr() as u64, c"missing".as_ptr() as u64, KEY_SPEC_PROCESS_KEYRING as u64, 0], 0),
-        Err(Stop::End(Unmodeled::Path(reason))) if reason.contains("KEYCTL_SEARCH")
-    ));
-}
-
-/// Class pairing: the live oracle's SEARCH argument refusals.
-#[test]
-fn search_destination_checks_arguments_before_stopping() {
+fn search_checks_arguments_before_its_destination_stops_by_name() {
     let kind = c"user".as_ptr() as u64;
     let description = c"missing".as_ptr() as u64;
+    let search = |ring: i32, kind, destination: i32| {
+        keyctl_at(
+            credential(),
+            MAIN,
+            &[10, ring as u64, kind, description, destination as u64, 0],
+            0,
+        )
+    };
     for (kind, description, expected) in [
         (0, description, errno::EFAULT),
         (kind, 0, errno::EFAULT),
@@ -57,25 +57,17 @@ fn search_destination_checks_arguments_before_stopping() {
             "expected errno {expected} before the destination stop"
         );
     }
-}
-
-#[test]
-fn search_unknown_type_is_enokey() {
     assert!(matches!(
-        keyctl_at(
-            credential(),
-            MAIN,
-            &[
-                10,
-                KEY_SPEC_SESSION_KEYRING as u64,
-                c"unregistered-type".as_ptr() as u64,
-                c"missing".as_ptr() as u64,
-                0,
-                0
-            ],
+        search(
+            KEY_SPEC_SESSION_KEYRING,
+            c"unregistered-type".as_ptr() as u64,
             0
         ),
         Err(Stop::Refuse(errno::ENOKEY))
+    ));
+    assert!(matches!(
+        search(KEY_SPEC_SESSION_KEYRING, kind, KEY_SPEC_PROCESS_KEYRING),
+        Err(Stop::End(Unmodeled::Path(reason))) if reason.contains("KEYCTL_SEARCH")
     ));
 }
 
@@ -208,8 +200,6 @@ fn session_is_shared_without_lifecycle_bookkeeping() {
         .0,
         FIRST_SERIAL
     );
-    assert_eq!(Keys::new().next_serial, FIRST_SERIAL + 1);
-    assert_eq!(Keys::new().keys.len(), 1);
 }
 
 /// Class pairing: quota accounting and graph ownership, plus the live oracle.
@@ -267,22 +257,6 @@ fn invalidation_collects_every_link_and_reclaims_quota_immediately() {
 }
 
 #[test]
-fn displacement_preserves_other_links() {
-    let mut keys = Keys::new();
-    let ring = FIRST_SERIAL;
-    let persistent = keys.persistent(credential(), ring, 0).unwrap() as i32;
-    let first = add(&mut keys, ring, b"d", b"v").unwrap();
-    keys.link(first, persistent).unwrap();
-    keys.keys.get_mut(&first).unwrap().revoked_at = Some(0);
-    let second = add(&mut keys, ring, b"d", b"w").unwrap();
-    assert_ne!(first, second);
-    assert!(keys.keys.contains_key(&first));
-    keys.link(second, persistent).unwrap();
-    assert!(!keys.keys.contains_key(&first));
-    assert_eq!(keys.search(credential(), ring, b"d", true).unwrap(), second);
-}
-
-#[test]
 fn unsupported_key_service_surface_still_stops_by_name() {
     for op in [
         1, 5, 7, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 23, 24, 25, 26, 27, 28, 29, 30, 32,
@@ -305,41 +279,34 @@ fn unsupported_key_service_surface_still_stops_by_name() {
     }
 }
 
-/// A revoked key's description is free again: a new key displaces it
-/// at once, and its serial names nothing.
+/// A revoked key's description is free again: a new key displaces it at
+/// once, and the revoked key lives on until its other links go, then its
+/// serial names nothing.
 #[test]
 fn a_new_key_displaces_a_revoked_one() {
     let (mut keys, ring) = with_process_keyring();
+    let persistent = keys.persistent(credential(), FIRST_SERIAL, 0).unwrap() as i32;
     let first = add(&mut keys, ring, b"d", b"v").unwrap();
+    keys.link(first, persistent).unwrap();
     keys.keys.get_mut(&first).unwrap().revoked_at = Some(0);
     let second = add(&mut keys, ring, b"d", b"w").unwrap();
     assert_ne!(first, second);
+    assert!(keys.keys.contains_key(&first));
+    assert_eq!(keys.keys[&ring].payload, Payload::Keyring(vec![second]));
+    keys.link(second, persistent).unwrap();
+    assert!(!keys.keys.contains_key(&first));
     assert!(matches!(
         keys.lookup(credential(), MAIN, first, false, None),
         Err(Stop::Refuse(errno::ENOKEY))
     ));
-    assert_eq!(keys.keys[&ring].payload, Payload::Keyring(vec![second]));
-}
-
-/// Past `kernel.keys.gc_delay` a revoked key would be collected: the
-/// model ends there, not before.
-#[test]
-fn the_collector_is_where_the_model_ends() {
-    let (mut keys, ring) = with_process_keyring();
-    let serial = add(&mut keys, ring, b"d", b"v").unwrap();
-    keys.keys.get_mut(&serial).unwrap().revoked_at = Some(10);
-    assert!(keys.collect(10 + KERNEL_CONFIG.keys_gc_delay - 1).is_ok());
-    assert!(matches!(
-        keys.collect(10 + KERNEL_CONFIG.keys_gc_delay),
-        Err(Stop::End(_))
-    ));
+    assert_eq!(keys.search(credential(), ring, b"d", true).unwrap(), second);
 }
 
 /// A keyring its last thread left is the collector's, and so are its
 /// keys: naming one ends the model, and so does a charge only their
 /// going would let fit; one that fits either way is answered.
 #[test]
-fn a_keyring_its_last_thread_left_is_the_collectors() {
+fn the_collector_is_where_the_model_ends() {
     const WORKER: c_int = MAIN + 1;
     let (mut keys, ring) = with_process_keyring();
     keys.spawned(MAIN, WORKER);
@@ -356,4 +323,15 @@ fn a_keyring_its_last_thread_left_is_the_collectors() {
     assert!(keys.charge(true, 1).is_ok());
     let freed_bytes = KERNEL_CONFIG.keys_maxbytes as usize - b"_pid\0".len();
     assert!(matches!(keys.charge(true, freed_bytes), Err(Stop::End(_))));
+
+    // Past `kernel.keys.gc_delay` a revoked key would be collected: the
+    // model ends there, not before.
+    let (mut keys, ring) = with_process_keyring();
+    let serial = add(&mut keys, ring, b"d", b"v").unwrap();
+    keys.keys.get_mut(&serial).unwrap().revoked_at = Some(10);
+    assert!(keys.collect(10 + KERNEL_CONFIG.keys_gc_delay - 1).is_ok());
+    assert!(matches!(
+        keys.collect(10 + KERNEL_CONFIG.keys_gc_delay),
+        Err(Stop::End(_))
+    ));
 }

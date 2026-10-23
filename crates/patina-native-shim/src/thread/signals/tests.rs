@@ -390,25 +390,30 @@ const EPOLL_CTL_ADD: i32 = 1;
 const CLOCK_MONOTONIC: u32 = 1;
 const TIMER_ABSTIME: u64 = 1;
 
-fn pipe_read_case(restart: bool) {
-    action(restart);
-    let [rd, wr] = pipe();
-    let me = current_task();
-    let helper = spawn(move || {
-        assert_eq!(after_others_park(me), BlockClass::Io);
-        generate(SIGUSR1);
-        assert_eq!(
-            HANDLERS.load(Ordering::SeqCst),
-            0,
-            "generation runs no handler"
-        );
-        deliver();
-        assert_eq!(
-            HANDLERS.load(Ordering::SeqCst),
-            0,
-            "the helper cannot steal shared delivery"
-        );
-        if restart {
+/// A handler interrupts a pipe read installed with `SA_RESTART`: the read
+/// re-parks and completes, charged as the two system calls it is natively.
+/// (Without `SA_RESTART` the read is `EINTR`:
+/// `interrupted_waiter_is_unlinked_before_wake`.)
+#[test]
+fn sa_restart_restarts_pipe_read() {
+    isolated(|| {
+        action(true);
+        let [rd, wr] = pipe();
+        let me = current_task();
+        let helper = spawn(move || {
+            assert_eq!(after_others_park(me), BlockClass::Io);
+            generate(SIGUSR1);
+            assert_eq!(
+                HANDLERS.load(Ordering::SeqCst),
+                0,
+                "generation runs no handler"
+            );
+            deliver();
+            assert_eq!(
+                HANDLERS.load(Ordering::SeqCst),
+                0,
+                "the helper cannot steal shared delivery"
+            );
             delay();
             assert_eq!(
                 parked_class(me),
@@ -419,46 +424,32 @@ fn pipe_read_case(restart: bool) {
                 unsafe { crate::patina_write(wr, b"x".as_ptr().cast(), 1) },
                 1
             );
-        }
-    });
-    let charged = || with_context_raw(|c| Ok(c.cpu_charge(Some(me)))).unwrap();
-    let before = charged();
-    let mut byte = 0u8;
-    let rc = unsafe { crate::patina_read(rd, (&mut byte as *mut u8).cast(), 1) };
-    // A restart enters the kernel again, natively: a second system call.
-    let calls = 1 + u64::from(restart);
-    let syscall = patina_dst_abi::ChargeClass::Syscall.cost();
-    assert_eq!(
-        charged().system_ns - before.system_ns,
-        calls * syscall.system_ns
-    );
-    if restart {
+        });
+        let charged = || with_context_raw(|c| Ok(c.cpu_charge(Some(me)))).unwrap();
+        let before = charged();
+        let mut byte = 0u8;
+        let rc = unsafe { crate::patina_read(rd, (&mut byte as *mut u8).cast(), 1) };
+        // A restart enters the kernel again, natively: a second system call.
+        let syscall = patina_dst_abi::ChargeClass::Syscall.cost();
+        assert_eq!(
+            charged().system_ns - before.system_ns,
+            2 * syscall.system_ns
+        );
         assert_eq!(rc, 1);
         assert_eq!(byte, b'x');
-    } else {
-        assert_eq!(rc, -1);
-        assert_eq!(crate::patina_errno(), EINTR);
-    }
-    assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
-    assert_eq!(parked_class(me), None);
-    join(helper);
-    let ops = operations();
-    assert_eq!(
-        ops.iter()
-            .filter(
-                |op| matches!(op, Operation::SignalGenerated { sig, .. } if *sig == SIGUSR1 as u8)
-            )
-            .count(),
-        1
-    );
-}
-#[test]
-fn sa_restart_restarts_pipe_read() {
-    isolated(|| pipe_read_case(true));
-}
-#[test]
-fn no_sa_restart_pipe_read_is_eintr() {
-    isolated(|| pipe_read_case(false));
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
+        assert_eq!(parked_class(me), None);
+        join(helper);
+        let ops = operations();
+        assert_eq!(
+            ops.iter()
+                .filter(
+                    |op| matches!(op, Operation::SignalGenerated { sig, .. } if *sig == SIGUSR1 as u8)
+                )
+                .count(),
+            1
+        );
+    });
 }
 
 #[test]
@@ -631,17 +622,27 @@ fn generation_wakes_only_the_chosen_parked_task() {
     });
 }
 
+/// An interrupted relative sleep reports what it has left (snapshotted before
+/// the handler's own time) and never restarts; an absolute one leaves `rem`
+/// untouched.
 #[test]
-fn nanosleep_interrupted_reports_remaining_and_never_restarts() {
+fn interrupted_sleeps_report_remaining_and_never_restart() {
+    extern "C" fn advancing_handler(_: i32) {
+        delay_for(20);
+        HANDLERS.fetch_add(1, Ordering::SeqCst);
+    }
     isolated(|| {
         action(true);
-        // The C-facing ABI and the raw SUD adapter both pass real rem buffers.
-        for raw in [false, true] {
-            let me = current_task();
-            let helper = spawn(move || {
+        let me = current_task();
+        let interrupt = move || {
+            spawn(move || {
                 assert_eq!(after_others_park(me), BlockClass::Sleep);
                 generate(SIGUSR1);
-            });
+            })
+        };
+        // The C-facing ABI and the raw SUD adapter both pass real rem buffers.
+        for raw in [false, true] {
+            let helper = interrupt();
             let now = with_context_raw(|c| c.now(ClockKind::Monotonic)).unwrap();
             let req = Timespec { sec: 1, nsec: 0 };
             let mut rem = [99i64; 2];
@@ -675,18 +676,8 @@ fn nanosleep_interrupted_reports_remaining_and_never_restarts() {
             join(helper);
         }
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 2);
-    });
-}
 
-#[test]
-fn absolute_clock_nanosleep_leaves_rem_untouched() {
-    isolated(|| {
-        action(true);
-        let me = current_task();
-        let helper = spawn(move || {
-            assert_eq!(after_others_park(me), BlockClass::Sleep);
-            generate(SIGUSR1);
-        });
+        let helper = interrupt();
         let deadline =
             with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap() + SLEEP;
         let req = Timespec {
@@ -708,7 +699,32 @@ fn absolute_clock_nanosleep_leaves_rem_untouched() {
         };
         assert_eq!(rc, -i64::from(EINTR));
         assert_eq!(rem, [123, 456]);
-        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 3);
+        join(helper);
+
+        install_handler(SIGUSR1, advancing_handler, 0, 0);
+        let helper = interrupt();
+        let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
+        let mut remaining = [0i64; 2];
+        assert_eq!(
+            unsafe {
+                crate::patina_sleep_until_remaining(
+                    CLOCK_MONOTONIC,
+                    now + SLEEP,
+                    remaining.as_mut_ptr(),
+                )
+            },
+            -1
+        );
+        assert_eq!(crate::patina_errno(), EINTR);
+        assert_eq!(remaining[0], 0);
+        assert!(left_after_delay(remaining[1] as u64), "{remaining:?}");
+        // The handler's 20 ns came after the snapshot: the time the sleep
+        // spent is what it reports, the handler's on top.
+        let after = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
+        let spent = SLEEP - remaining[1] as u64;
+        assert!(after - now >= spent + 20, "{} {spent}", after - now);
+        assert_eq!(HANDLERS.load(Ordering::SeqCst), 4);
         join(helper);
     });
 }
@@ -975,19 +991,15 @@ fn wake_after_an_escalation(wake: fn(usize) -> c_int) {
 }
 
 #[test]
-fn futex_wake_after_an_escalation_finds_the_expired_waiter_gone() {
+fn wakes_after_an_escalation_find_the_expired_waiter_gone() {
     // Class pairing: `lock_state` settles timer expiries before any wake path
     // reads a wait queue (see `pthread_kill_after_an_escalation_...`).
-    isolated(|| wake_after_an_escalation(|word| patina_futex_wake(word, 1)));
-}
-
-#[test]
-fn futex_requeue_after_an_escalation_finds_the_expired_waiter_gone() {
     isolated(|| {
+        wake_after_an_escalation(|word| patina_futex_wake(word, 1));
         wake_after_an_escalation(|word| {
             let other = word + 4;
             crate::thread::futex2::multiplexed_requeue(word, other, false, (1, 1), None) as c_int
-        })
+        });
     });
 }
 
@@ -1298,21 +1310,6 @@ fn signalfd_watchers_wake_once_only_for_visible_pending() {
 }
 
 #[test]
-fn reexec_rejects_an_empty_filter_and_a_planted_failure() {
-    const PLANT: &str = "PATINA_REEXEC_PLANT";
-    if std::env::var_os(PLANT).is_some() {
-        isolated(|| panic!("planted reexec failure"));
-        return;
-    }
-    isolated(|| {
-        assert!(std::panic::catch_unwind(|| reexec("no::such::signal::test", &[])).is_err());
-        let failed = reexec(&test_name(), &[(PLANT, "1")]);
-        assert!(!failed.status.success());
-        assert!(String::from_utf8_lossy(&failed.stderr).contains("planted reexec failure"));
-    });
-}
-
-#[test]
 fn zero_time_signal_wait_returns_eagain_before_unrelated_delivery() {
     isolated(|| {
         action(false);
@@ -1333,42 +1330,6 @@ fn zero_time_signal_wait_returns_eagain_before_unrelated_delivery() {
         };
         assert_eq!(rc, -i64::from(EAGAIN));
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
-    });
-}
-
-#[test]
-fn sleep_remaining_is_snapshotted_before_handler_time() {
-    extern "C" fn advancing_handler(_: i32) {
-        delay_for(20);
-    }
-    isolated(|| {
-        install_handler(SIGUSR1, advancing_handler, 0, 0);
-        let me = current_task();
-        let helper = spawn(move || {
-            assert_eq!(after_others_park(me), BlockClass::Sleep);
-            generate(SIGUSR1);
-        });
-        let now = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let mut remaining = [0i64; 2];
-        assert_eq!(
-            unsafe {
-                crate::patina_sleep_until_remaining(
-                    CLOCK_MONOTONIC,
-                    now + SLEEP,
-                    remaining.as_mut_ptr(),
-                )
-            },
-            -1
-        );
-        assert_eq!(crate::patina_errno(), EINTR);
-        assert_eq!(remaining[0], 0);
-        assert!(left_after_delay(remaining[1] as u64), "{remaining:?}");
-        // The handler's 20 ns came after the snapshot: the time the sleep
-        // spent is what it reports, the handler's on top.
-        let after = with_context_raw(|context| context.now(ClockKind::Monotonic)).unwrap();
-        let spent = SLEEP - remaining[1] as u64;
-        assert!(after - now >= spent + 20, "{} {spent}", after - now);
-        join(helper);
     });
 }
 

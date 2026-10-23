@@ -2,22 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::*;
-
-    // A harness fixture cheap enough to sweep: one interposed `std::fs` round trip,
-    // no faults, so every generation is OK once the harness deferral is forwarded.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const HARNESS_CAMPAIGN_SRC: &str = r#"
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    patina_dst_harness::run(|| {
-        std::fs::create_dir_all("/state")?;
-        std::fs::write("/state/v", b"hello")?;
-        println!("HARNESS_OUT read={}", std::fs::read_to_string("/state/v")?);
-        Ok::<(), std::io::Error>(())
-    })?;
-    Ok(())
-}
-"#;
+    use super::super::run_facts::{outcome_guest, shared_sdk_guest};
+    use super::super::*;
 
     // Gate: a `patina-dst-harness` binary is sweepable. Without `--harness` the
     // supervisor installs the runtime itself and the guest's own install fails closed
@@ -26,10 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[test]
     fn campaign_forwards_harness_deferral_to_every_generation() {
         let directory = tempdir().unwrap();
-        let fixture = directory.path().join("camp-harness");
-        write_harness_fixture(&fixture, "harness-campaign", HARNESS_CAMPAIGN_SRC);
-        let guest = directory.path().join("harness-campaign-bin");
-        build_harness_bin(&fixture, &guest);
+        let guest = super::super::sdk_harness::harness_guest();
 
         // RED: no `--harness`. Every generation fails closed, identically.
         let refused = campaign_run(&directory.path().join("red"), &guest, &[]);
@@ -61,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(campaign_json_stdout(&swept)["classes"]["OK"], 2);
 
         // And it is campaign SHAPE: recorded in the out-dir spec, so a continuation
-        // re-derives it without re-supplying (and refuses an attempt to change it).
+        // re-derives it without re-supplying.
         let extended = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             native_workspace(),
@@ -83,195 +67,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);
     }
 
-    // A guest whose captured streams are well past a pipe buffer (64 KiB on Linux,
-    // at most that on macOS). Under `run --format json` they travel INSIDE the
-    // envelope, so the child's stdout is one ~200 KiB line.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const WIDE_OUTPUT_SOURCE: &str = r#"
-fn main() {
-    let line = "w".repeat(1023);
-    for _ in 0..200 {
-        eprintln!("{line}");
-    }
-    println!("WIDE_OUT done");
-}
-"#;
-
-    // Gate: a generation whose output exceeds the pipe buffer is drained, not wedged.
-    // The campaign's timeout loop polls the child without reading its pipes; before
-    // the reader threads, a child this wide blocked on its envelope write, never
-    // exited, and was killed at the deadline as INFRA — so a guest with hundreds of
-    // SDK sites (one `PATINA_SDK_REPORT` line past 64 KiB) could not be swept at
-    // all. RED: no OK generation, the run fails, and the deadline is what ends it;
-    // GREEN: every generation is OK, well inside the deadline.
+    // One native guest, several outcomes, each landing in the class its attribution
+    // earns:
+    //
+    // * Output wider than the pipe buffer is drained, not wedged: the guest's
+    //   streams travel INSIDE its `--format json` envelope, so the child's stdout is
+    //   one ~200 KiB line, and the campaign's timeout loop polls the child without
+    //   reading its pipes. Before the reader threads such a child blocked on its
+    //   envelope write and was killed at the deadline as INFRA, so a guest with
+    //   hundreds of SDK sites could not be swept at all.
+    // * The outcome-channel arc's §4.4 split: the SAME SIGABRT lands in two classes
+    //   depending on one envelope field. A guest that aborts itself is
+    //   `GUEST_ABORT`, a finding attributed to the system under test, while a patina
+    //   fail-closed refusal (a duplicate buggify label, which the shim aborts on
+    //   with its marker before the guest runs past it) stays `FAIL_CLOSED_ABORT`.
+    //   Both halves are asserted so neither can quietly absorb the other.
+    // * A level-1 guest (no verdict ABI, no patina-visible failure at all) is
+    //   classified from rules its own campaign spec declares, with zero guest
+    //   changes; without the rules the same guest is OK, so it is the spec that
+    //   classifies, never the string, and a malformed rule is a loud spec error.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn campaign_drains_generation_output_wider_than_the_pipe_buffer() {
+    fn campaign_classifies_each_guest_outcome_by_its_attribution() {
         let directory = tempdir().unwrap();
-        let source = directory.path().join("wide.rs");
-        fs::write(&source, WIDE_OUTPUT_SOURCE).unwrap();
-        let guest = directory.path().join("wide");
-        invoke(
-            native_workspace(),
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                guest.to_str().unwrap(),
-            ],
+        let guest = outcome_guest();
+        let classes = |name: &str, guest: &Path, extra: &[&str]| {
+            let output = campaign_run(&directory.path().join(name), guest, extra);
+            (
+                output.status.success(),
+                campaign_json_stdout(&output)["classes"].clone(),
+            )
+        };
+
+        let (success, wide) = classes("wide", &guest, &["--timeout-secs", "20", "--", "wide"]);
+        assert!(
+            success && wide["OK"] == 2,
+            "a generation wider than the pipe buffer must be drained, not killed at the deadline: {wide}"
         );
-        let swept = campaign_run(
-            &directory.path().join("out"),
-            &guest,
-            &["--timeout-secs", "20"],
+
+        let (_, aborted) = classes("abort", &guest, &["--", "abort"]);
+        assert_eq!(
+            aborted["GUEST_ABORT"], 2,
+            "an unattributed abort is the guest's own doing: {aborted}"
+        );
+        assert_eq!(
+            aborted["FAIL_CLOSED_ABORT"],
+            serde_json::Value::Null,
+            "a guest abort must not be blamed on patina: {aborted}"
+        );
+
+        let refusing = shared_sdk_guest("buggify-dup", BUGGIFY_DUP_MAIN);
+        let output = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &["run", refusing.to_str().unwrap(), "--seed", "1"],
+        );
+        assert!(!output.status.success(), "duplicate label must abort");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("PATINA_BUGGIFY_DUPLICATE_LABEL label=same-label"),
+            "expected duplicate-label marker: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            swept.status.success(),
-            "a generation wider than the pipe buffer must be drained, not killed at the deadline:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&swept.stdout),
-            String::from_utf8_lossy(&swept.stderr)
+            !String::from_utf8_lossy(&output.stdout).contains("unreachable"),
+            "guest ran past the duplicate label"
         );
-        let envelope = campaign_json_stdout(&swept);
+        let (_, refused) = classes("refusal", &refusing, &[]);
         assert_eq!(
-            envelope["classes"]["OK"], 2,
-            "both generations must run to completion: {}",
-            envelope["classes"]
-        );
-    }
-
-    // A guest that aborts itself, with nothing patina would call a refusal.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const GUEST_ABORT_SOURCE: &str = r#"
-fn main() {
-    eprintln!("GUEST: invariant failed, aborting");
-    std::process::abort();
-}
-"#;
-
-    // The outcome-channel arc's §4.4 split, end to end: the SAME SIGABRT lands in two
-    // different campaign classes depending on one envelope field. A guest that aborts
-    // itself is `GUEST_ABORT` — a finding attributed to the system under test — while
-    // a patina fail-closed refusal (a duplicate buggify label, which the shim aborts
-    // on) still classifies `FAIL_CLOSED_ABORT`. Before the envelope carried a
-    // `refusal` record, EVERY exit-134 generation was blamed on patina and buried in
-    // the fail-closed bucket; both halves are asserted here so neither can quietly
-    // absorb the other.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn campaign_splits_a_guest_abort_from_a_patina_refusal() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-
-        // (a) the guest's own abort.
-        let source = directory.path().join("guest_abort.rs");
-        fs::write(&source, GUEST_ABORT_SOURCE).unwrap();
-        let aborting = directory.path().join("guest-abort");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                aborting.to_str().unwrap(),
-            ],
-        );
-        let swept = campaign_run(&directory.path().join("guest"), &aborting, &[]);
-        let envelope = campaign_json_stdout(&swept);
-        assert_eq!(
-            envelope["classes"]["GUEST_ABORT"], 2,
-            "an unattributed abort is the guest's own doing: {}",
-            envelope["classes"]
+            refused["FAIL_CLOSED_ABORT"], 2,
+            "an abort patina attributed to itself stays fail-closed: {refused}"
         );
         assert_eq!(
-            envelope["classes"]["FAIL_CLOSED_ABORT"],
+            refused["GUEST_ABORT"],
             serde_json::Value::Null,
-            "a guest abort must not be blamed on patina: {}",
-            envelope["classes"]
+            "a patina refusal must not be filed as a guest finding: {refused}"
         );
 
-        // (b) patina's own refusal, on the same exit code.
-        let pkg = directory.path().join("dup");
-        write_sdk_fixture(&pkg, BUGGIFY_DUP_MAIN);
-        let refusing = directory.path().join("dup-label");
-        invoke(
-            workspace,
-            &[
-                "build",
-                pkg.to_str().unwrap(),
-                "--output",
-                refusing.to_str().unwrap(),
-            ],
-        );
-        let refused = campaign_run(&directory.path().join("refusal"), &refusing, &[]);
-        let envelope = campaign_json_stdout(&refused);
-        assert_eq!(
-            envelope["classes"]["FAIL_CLOSED_ABORT"], 2,
-            "an abort patina attributed to itself stays fail-closed: {}",
-            envelope["classes"]
-        );
-        assert_eq!(
-            envelope["classes"]["GUEST_ABORT"],
-            serde_json::Value::Null,
-            "a patina refusal must not be filed as a guest finding: {}",
-            envelope["classes"]
-        );
-    }
-
-    // A level-1 guest — no verdict ABI, no patina-visible failure at all — is
-    // classified from rules its own campaign spec declares, with zero guest changes.
-    // The RED half is in the same test: the identical guest with no declared rules
-    // classifies OK, so it is the spec that classifies, never the string.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn campaign_classifies_a_level_one_guest_from_spec_declared_patterns() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("level_one.rs");
-        fs::write(
-            &source,
-            "fn main() { println!(\"GUEST: checksum mismatch on page 7\"); }\n",
-        )
-        .unwrap();
-        let guest = directory.path().join("level-one");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                guest.to_str().unwrap(),
-            ],
-        );
-
-        // RED: exit 0, nothing structured — patina sees a clean run.
-        let bare = campaign_run(&directory.path().join("bare"), &guest, &[]);
-        assert_eq!(campaign_json_stdout(&bare)["classes"]["OK"], 2);
-
-        // GREEN: the guest's own dialect, declared in its spec.
+        let (_, bare) = classes("bare", &guest, &["--", "level-one"]);
+        assert_eq!(bare["OK"], 2, "{bare}");
         let spec = directory.path().join("spec.json");
         fs::write(
             &spec,
             r#"{"classify": {"patterns": {"VIOLATION": ["checksum mismatch"]}}}"#,
         )
         .unwrap();
-        let declared = campaign_run(
-            &directory.path().join("declared"),
-            &guest,
-            &["--spec", spec.to_str().unwrap()],
-        );
-        let envelope = campaign_json_stdout(&declared);
+        let spec_arg = spec.to_str().unwrap();
+        let (_, declared) = classes("declared", &guest, &["--spec", spec_arg, "--", "level-one"]);
         assert_eq!(
-            envelope["classes"]["VIOLATION"], 2,
-            "declared patterns must classify a level-1 guest: {}",
-            envelope["classes"]
+            declared["VIOLATION"], 2,
+            "declared patterns must classify a level-1 guest: {declared}"
         );
-
-        // A malformed rule is a loud spec error, never a silently inert rule.
         fs::write(&spec, r#"{"classify": {"patterns": {"NOPE": ["x"]}}}"#).unwrap();
         let bad = campaign_run(
             &directory.path().join("bad"),
             &guest,
-            &["--spec", spec.to_str().unwrap()],
+            &["--spec", spec_arg, "--", "level-one"],
         );
         assert!(!bad.status.success(), "an unknown class must be refused");
         assert!(
@@ -283,13 +174,38 @@ fn main() {
         );
     }
 
-    // A WASI campaign carrying the native invocation surface is refused BY NAME
-    // where the artifact family is finally known, not silently swept without it —
-    // the same shape as the `--dns-entry` family refusal.
+    // A campaign asked for a mode its artifact cannot serve is refused by name, never
+    // swept in a different mode than the operator asked for. A plain native binary
+    // (no yield points) has no edge coverage and is not WASI, so `--guided` has no
+    // novelty signal; a WASI campaign carrying the native invocation surface is
+    // refused where the artifact family is finally known, the same shape as the
+    // `--dns-entry` family refusal.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn campaign_refuses_the_native_invocation_surface_for_a_wasi_artifact() {
+    fn campaign_refuses_a_mode_its_artifact_cannot_serve() {
         let directory = tempdir().unwrap();
+        let refused = campaign_run(
+            &directory.path().join("guided"),
+            &outcome_guest(),
+            &["--guided"],
+        );
+        assert_ne!(
+            refused.status.code(),
+            Some(0),
+            "--guided without a novelty signal must not succeed quietly"
+        );
+        // Under `--format json` the refusal travels in the envelope.
+        let refusal = format!(
+            "{}{}",
+            String::from_utf8_lossy(&refused.stdout),
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(
+            refusal.contains("--guided needs a novelty signal")
+                && refusal.contains("--yield-points"),
+            "the refusal must name the cause and the fix:\n{refusal}"
+        );
+
         let module = directory.path().join("app.wasm");
         fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
         for (flag, value) in [

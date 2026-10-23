@@ -22,7 +22,6 @@
 use super::tls::{ARCH_SET_FS, arch_prctl};
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::probe::{Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -64,7 +63,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/tls_cpu",
     run,
-    vehicles: Vehicle::ALL,
     covers: &[Syscall::N_arch_prctl],
     symbols: &["arch_prctl"],
     needs: &[Need::FourLevelPaging, Need::NoCpuidFaulting],

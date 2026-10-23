@@ -29,7 +29,7 @@
 //! The ptrace-mode check kcmp makes on both pids passes for the caller's
 //! own process; init, root's, fails it (`EPERM`, before the type).
 //! No other process is named. glibc wraps no kcmp, so the scenario
-//! runs through the kernel vehicles.
+//! runs through the `syscall` vehicle.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::{Id, Norm};
@@ -343,7 +343,7 @@ fn threads(p: &Probe, pid: i32) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/kcmp",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[Syscall::N_kcmp],
     needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS

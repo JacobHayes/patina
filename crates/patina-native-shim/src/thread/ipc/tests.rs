@@ -7,7 +7,7 @@ fn perm() -> Perm {
 }
 
 #[test]
-fn ids_advance_cyclically_and_a_removed_id_stays_invalid() {
+fn ids_advance_cyclically_within_the_window_and_a_removed_id_stays_invalid() {
     let mut space: Space<()> = Space::new(3);
     let first = space.add(perm(), ()).unwrap();
     let second = space.add(perm(), ()).unwrap();
@@ -20,10 +20,8 @@ fn ids_advance_cyclically_and_a_removed_id_stays_invalid() {
     assert_eq!(space.add(perm(), ()), Err(ENOSPC));
     assert_eq!(space.get(first).err(), Some(EINVAL));
     assert!(space.get(IPCMNI).is_ok());
-}
 
-#[test]
-fn ids_cycle_within_the_window_in_use_sets() {
+    // With few objects in use the index cycles within a small window.
     let mut space: Space<()> = Space::new(SEMMNI);
     for expected in 0..IPC_MIN_CYCLE {
         let id = space.add(perm(), ()).unwrap();

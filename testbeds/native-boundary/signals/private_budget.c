@@ -14,7 +14,8 @@
  * the second level, so the page just above it is a guard: sigaltstack, which
  * copies its argument in as the kernel does, answers EFAULT for it there, and
  * reads it (sentinel bytes, an invalid mode: EINVAL) once the handlers returned
- * (`PRIVATE_GUARD inside=... after=...`). Run it recording. */
+ * (`PRIVATE_GUARD inside=... after=...`). Run it recording, as
+ * `shim_fault.c`'s `budget` case. */
 #define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
@@ -86,7 +87,7 @@ static void outer(int sig) {
     outer_ran++;
 }
 
-int main(void) {
+int private_budget(void) {
     uintptr_t out[3];
     assert(patina_planted_private_stack(out) == 0);
     uintptr_t base = out[0], size = out[1], level = out[2];

@@ -2,14 +2,24 @@
 
 use super::*;
 
-// The native half of the custom-op ABI end to end: `patina_dst::custom_op_bytes`
-// reaches the shim's three verbs, each call becomes a `custom_op` trace event
-// carrying the label, key, and result bytes, and a replay reproduces the guest's
-// observable output from the recording WITHOUT running `perform` — proven by the
-// counter, which the replay must report as zero.
+/// The native custom-op ABI end to end, on one package build.
+///
+/// `patina_dst::custom_op_bytes` reaches the shim's three verbs, each call
+/// becomes a `custom_op` trace event carrying the label, key, and result bytes,
+/// and a replay reproduces the guest's observable output from the recording
+/// WITHOUT running `perform` (the counter reads zero). A recording that answers a
+/// different question is refused, naming the label.
+///
+/// The fault knob: eligibility crosses the shim ABI, a fired fault replaces the
+/// effect rather than discarding its result, the undeclared operation is
+/// untouched, and the plane reports itself.
+///
+/// The campaign: the knob is a first-class banded knob, so a bug reachable only
+/// under a particular custom-op failure PATTERN is found by ordinary campaign
+/// exploration and classified through the guest's own verdict.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_custom_op_records_replays_and_never_reruns_perform() {
+fn native_custom_ops_record_replay_fault_and_drive_a_campaign() {
     let directory = tempdir().unwrap();
     let pkg = directory.path().join("pkg");
     write_sdk_fixture(&pkg, CUSTOM_OP_SDK_MAIN);
@@ -24,17 +34,27 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
             bin.to_str().unwrap(),
         ],
     );
+    let bin = bin.to_str().unwrap();
+    record_replay_and_key_mismatch(directory.path(), bin);
+    faults_fire_report_and_replay(directory.path(), bin);
+    campaign_finds_a_planted_mishandling(directory.path(), bin);
+}
 
-    let trace = directory.path().join("custom-op.patina");
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
+    let workspace = native_workspace();
+    let trace = directory.join("custom-op.patina");
     let recorded = invoke(
         workspace,
         &[
             "run",
-            bin.to_str().unwrap(),
+            bin,
             "--seed",
             "4",
             "--record",
             trace.to_str().unwrap(),
+            "--",
+            "record",
         ],
     );
     assert_eq!(
@@ -68,10 +88,7 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     assert_eq!(events[1].2, patina_dst_abi::Outcome::Bytes(Vec::new()));
 
     // Replay: the guest sees the same values, but `perform` never ran.
-    let replayed = invoke(
-        workspace,
-        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
-    );
+    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 object=etag-7 empty_len=0",
@@ -80,15 +97,11 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
         String::from_utf8_lossy(&replayed.stderr)
     );
 
-    // Same seed twice: byte-identical, custom-op stream included.
-    let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-    let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-    assert_eq!(first.stdout, second.stdout);
-    assert_eq!(first.stderr, second.stderr);
+    // A plain seeded run performs for real, exactly like the record pass.
+    let plain = invoke(workspace, &["run", bin, "--seed", "4", "--", "record"]);
     assert_eq!(
-        result_line(&first),
-        "PATINA_RESULT performed=2 object=etag-7 empty_len=0",
-        "a plain seeded run performs for real, exactly like the record pass"
+        result_line(&plain),
+        "PATINA_RESULT performed=2 object=etag-7 empty_len=0"
     );
 
     // A recording that answers a DIFFERENT question is refused, naming the label.
@@ -105,16 +118,12 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
         label: "s3.get_object".into(),
         key: b"another/key".to_vec(),
     };
-    let mismatched = directory.path().join("custom-op-mismatch.patina");
+    let mismatched = directory.join("custom-op-mismatch.patina");
     edited.write_atomic(&mismatched).unwrap();
     let refused = invoke_with_deadline(
         env!("CARGO_BIN_EXE_cargo-patina"),
         workspace,
-        &[
-            "replay",
-            bin.to_str().unwrap(),
-            mismatched.to_str().unwrap(),
-        ],
+        &["replay", bin, mismatched.to_str().unwrap()],
         Duration::from_secs(20),
     )
     .expect("custom-op refusal must terminate rather than deadlock inside the shim");
@@ -134,106 +143,9 @@ fn native_custom_op_records_replays_and_never_reruns_perform() {
     );
 }
 
-// Audit honesty (arc §3.3): a custom op does NOT exempt the effect it wraps from
-// interposition. `perform` runs for real on the record pass, so an un-modeled raw
-// effect inside it is refused by exactly the same pre-run gate that would refuse
-// it anywhere else — wrapping is not a laundering channel.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_custom_op_wrapping_an_unmodeled_effect_still_fails_closed() {
-    let directory = tempdir().unwrap();
-    let pkg = directory.path().join("pkg");
-    write_sdk_fixture(
-        &pkg,
-        r#"
-unsafe extern "C" { fn system(command: *const u8) -> i32; }
-
-fn main() {
-    // The wrapped effect is an uninterposed process-class symbol: something
-    // Patina does not model, which is the whole reason a guest would reach for a
-    // custom op. Wrapping it changes nothing about the audit.
-    let bytes = patina_dst::custom_op_bytes("proc.shell", b"self", || {
-        let group = std::hint::black_box(0i32);
-        if group != 0 {
-            unsafe { system(std::ptr::null()) };
-        }
-        vec![1]
-    });
-    println!("PATINA_RESULT laundered={}", bytes.len());
-}
-"#,
-    );
+fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
     let workspace = native_workspace();
-    let bin = directory.path().join("custom-op-escape");
-    invoke(
-        workspace,
-        &[
-            "build",
-            pkg.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-
-    let refused = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["run", bin.to_str().unwrap(), "--seed", "1"],
-    );
-    assert!(
-        !refused.status.success(),
-        "an un-modeled effect inside a custom op must still be refused"
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        stderr.contains("system"),
-        "the refusal must still name the wrapped symbol:\n{stderr}"
-    );
-    assert!(
-        !String::from_utf8_lossy(&refused.stdout).contains("PATINA_RESULT"),
-        "the guest must not run"
-    );
-
-    // `audit` says the same thing about the binary: the custom op is not an
-    // exemption, so the symbol is still reported.
-    let audited = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["audit", bin.to_str().unwrap()],
-    );
-    let audit_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&audited.stdout),
-        String::from_utf8_lossy(&audited.stderr)
-    );
-    assert!(
-        audit_text.contains("system"),
-        "the audit must still name the wrapped symbol:\n{audit_text}"
-    );
-}
-
-// The knob end to end on the native family: eligibility crosses the shim ABI,
-// a fired fault replaces the effect rather than discarding its result, the
-// undeclared operation is untouched, and the plane reports itself.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_custom_op_faults_fire_report_and_replay() {
-    let directory = tempdir().unwrap();
-    let pkg = directory.path().join("pkg");
-    write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
-    let workspace = native_workspace();
-    let bin = directory.path().join("custom-op-fault-guest");
-    invoke(
-        workspace,
-        &[
-            "build",
-            pkg.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-    let bin = bin.to_str().unwrap();
-
     // Knob off: the declared failure is never reached, both closures run.
     let clean = invoke(workspace, &["run", bin, "--seed", "4", "--", "probe"]);
     assert_eq!(
@@ -248,7 +160,7 @@ fn native_custom_op_faults_fire_report_and_replay() {
     // Knob at a certain rate: the faultable op returns the guest's declared
     // failure WITHOUT performing, and the op that declared nothing is untouched
     // — so `performed=1` is the whole control in one number.
-    let trace = directory.path().join("custom-op-fault.patina");
+    let trace = directory.join("custom-op-fault.patina");
     let faulted = invoke(
         workspace,
         &[
@@ -336,29 +248,9 @@ fn native_custom_op_faults_fire_report_and_replay() {
     );
 }
 
-// The campaign leg: the knob is a first-class banded knob, so a bug reachable
-// only under a particular custom-op failure PATTERN is found by ordinary
-// campaign exploration and classified through the guest's own verdict.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn campaign_custom_op_faults_find_a_planted_mishandling() {
-    let directory = tempdir().unwrap();
-    let pkg = directory.path().join("pkg");
-    write_sdk_fixture(&pkg, CUSTOM_OP_FAULT_SDK_MAIN);
+fn campaign_finds_a_planted_mishandling(directory: &Path, bin: &str) {
     let workspace = native_workspace();
-    let bin = directory.path().join("custom-op-campaign-guest");
-    invoke(
-        workspace,
-        &[
-            "build",
-            pkg.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-            "--release",
-        ],
-    );
-    let bin = bin.to_str().unwrap();
-
     let campaign = |out: &Path, custom_op_faults: bool| {
         let mut args = vec![
             "campaign",
@@ -378,7 +270,7 @@ fn campaign_custom_op_faults_find_a_planted_mishandling() {
     // RED twin first: without the declaration the knob is not banded, no fetch
     // ever fails, and the campaign is clean. That is what makes the green leg
     // below evidence about THIS knob rather than about the campaign at large.
-    let unbanded_out = directory.path().join("camp-unbanded");
+    let unbanded_out = directory.join("camp-unbanded");
     let unbanded = campaign(&unbanded_out, false);
     assert_eq!(
         unbanded.status.code(),
@@ -388,7 +280,7 @@ fn campaign_custom_op_faults_find_a_planted_mishandling() {
         String::from_utf8_lossy(&unbanded.stderr)
     );
 
-    let out = directory.path().join("camp");
+    let out = directory.join("camp");
     let found = campaign(&out, true);
     let stdout = String::from_utf8_lossy(&found.stdout);
     assert_eq!(

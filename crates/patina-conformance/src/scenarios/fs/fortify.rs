@@ -20,18 +20,15 @@
 //! * `__readlink_chk`/`__readlinkat_chk` read a symlink's target (`EINVAL`
 //!   for a file).
 //!
-//! What sets them apart from the plain calls is the abort, asserted in a
-//! forked child each (stderr on /dev/null, no core): a `*_chk` asked for more
-//! than the buffer the compiler knew fails `__chk_fail` ("buffer overflow
-//! detected") and an `__open*_2` given `O_CREAT` or `O_TMPFILE`, which need a
-//! mode it cannot pass, fails `__fortify_fail` ("invalid open call"), both
-//! with SIGABRT before any syscall.
+//! The overflow path (`__chk_fail`, `__fortify_fail`: SIGABRT before any
+//! syscall) is not exercised: observing it needs a forked child, which patina
+//! refuses by design; the shim's own fortify aborts are cargo-patina's
+//! native_signals `raw::guest_ended_runs_finalize_their_traces`.
 //!
 //! libc only: glibc's symbols, imported (the shim defines them; the `libc`
 //! crate declares none of them).
 
-use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
-use crate::compare::{Ending, Failure};
+use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, Probe, neg};
 use crate::vehicle::{Vehicle, fold_errno};
@@ -106,50 +103,6 @@ fn opened(p: &Probe, op: &str, path: &str, flags: i32, mode: Option<u32>, r: i64
     };
     builder.norm("ret", Norm::Relative("fd")).emit();
     r as i32
-}
-
-/// Run `call` in a forked child (stderr on /dev/null, no core file) and
-/// record how the child ended: whether a signal ended it, and which. A
-/// fortify check fails by `abort`; a call that returns exits 99.
-fn aborts(p: &Probe, case: &str, call: impl FnOnce()) -> bool {
-    let status = p
-        .fork_child(
-            // SAFETY: fork in this single-threaded probe; the child only
-            // makes the call and exits.
-            || fold_errno(unsafe { fork() } as i64),
-            || {
-                // SAFETY: plain calls on the child's own descriptors and
-                // limits.
-                unsafe {
-                    let null = open(c"/dev/null".as_ptr(), O_WRONLY);
-                    dup2(null, 2);
-                    let none = rlimit {
-                        rlim_cur: 0,
-                        rlim_max: 0,
-                    };
-                    setrlimit(RLIMIT_CORE, &none);
-                }
-                call();
-                99
-            },
-        )
-        .wait();
-    let signaled = WIFSIGNALED(status);
-    p.rec
-        .event("wait_status", 0)
-        .arg("case", case)
-        .field("signaled", signaled)
-        .field("termsig", if signaled { WTERMSIG(status) } else { 0 })
-        .field(
-            "exit",
-            if WIFEXITED(status) {
-                WEXITSTATUS(status)
-            } else {
-                -1
-            },
-        )
-        .emit();
-    signaled && WTERMSIG(status) == SIGABRT
 }
 
 /// An event for a read: the bytes it answered.
@@ -359,76 +312,6 @@ pub fn run(p: &Probe) {
         readlink("__readlinkat_chk", "l", r, &target) == 1 && target[0] == b'f',
     );
 
-    // ---- the aborts ---------------------------------------------------------
-    // Each call is asked for one byte more than the buffer it names; the
-    // storage behind it is larger still, so a call that does not abort
-    // stays within memory the child owns.
-    let over = BUFLEN + 1;
-    let mut room = [0u8; 2 * BUFLEN];
-    let room = room.as_mut_ptr();
-    // SAFETY (each call below): glibc's definitions with live arguments; the
-    // over-long length is within `room`.
-    p.check(
-        "__read_chk past its buffer aborts",
-        aborts(p, "__read_chk", || unsafe {
-            read_chk(reader, room.cast(), over, BUFLEN);
-        }),
-    );
-    p.check(
-        "__pread_chk past its buffer aborts",
-        aborts(p, "__pread_chk", || unsafe {
-            pread_chk(second, room.cast(), over, 0, BUFLEN);
-        }),
-    );
-    p.check(
-        "__pread64_chk past its buffer aborts",
-        aborts(p, "__pread64_chk", || unsafe {
-            pread64_chk(second, room.cast(), over, 0, BUFLEN);
-        }),
-    );
-    p.check(
-        "__readlink_chk past its buffer aborts",
-        aborts(p, "__readlink_chk", || unsafe {
-            readlink_chk(c_link.as_ptr(), room.cast(), over, BUFLEN);
-        }),
-    );
-    p.check(
-        "__readlinkat_chk past its buffer aborts",
-        aborts(p, "__readlinkat_chk", || unsafe {
-            readlinkat_chk(dir, c_l.as_ptr(), room.cast(), over, BUFLEN);
-        }),
-    );
-    let c_new = cstr(&format!("{root}/n"));
-    p.check(
-        "__open_2 with O_CREAT, which needs a mode, aborts",
-        aborts(p, "__open_2 O_CREAT", || unsafe {
-            open_2(c_new.as_ptr(), O_CREAT | O_WRONLY);
-        }),
-    );
-    p.check(
-        "__open64_2 too",
-        aborts(p, "__open64_2 O_CREAT", || unsafe {
-            open64_2(c_new.as_ptr(), O_CREAT | O_WRONLY);
-        }),
-    );
-    let c_dot = cstr(".");
-    p.check(
-        "__openat_2 with O_TMPFILE, which needs a mode, aborts",
-        aborts(p, "__openat_2 O_TMPFILE", || unsafe {
-            openat_2(dir, c_dot.as_ptr(), O_TMPFILE | O_RDWR);
-        }),
-    );
-    p.check(
-        "__openat64_2 too",
-        aborts(p, "__openat64_2 O_TMPFILE", || unsafe {
-            openat64_2(dir, c_dot.as_ptr(), O_TMPFILE | O_RDWR);
-        }),
-    );
-    p.check(
-        "none of them created a file",
-        p.newfstatat(AT_FDCWD, &format!("{root}/n"), 0).0 == neg(ENOENT),
-    );
-
     for fd in [fd, reader, second, third, fourth, dir, rd, wr] {
         p.close(fd);
     }
@@ -468,17 +351,6 @@ pub const SCENARIO: Scenario = Scenario {
         "pipe2",
         "close",
         "fstatat",
-        "fork",
     ],
-    gaps: &[Gap {
-        status: Status::ByDesign,
-        vehicles: &[Vehicle::Libc],
-        what: "fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); each abort leg forks its child, so the scenario stops at the first and the abort legs run natively only (the shim's own fortify aborts are asserted by cargo-patina's native_signals `fortify_failures_are_guest_aborts`)",
-        failure: Failure::Stops {
-            events: 48,
-            ending: Ending::Signal(SIGABRT),
-            diagnostic: "patina: process spawn reached under patina: fork; the process class is a deterministic-runtime non-goal; failing closed",
-        },
-    }],
     ..DEFAULTS
 };

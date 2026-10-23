@@ -9,7 +9,9 @@
  * It ends with glibc's internal lock spellings and `fclose(stdout)`, whose
  * flush reaches the pipe. argv[1] `getchar` reads stdin instead, `freopen`
  * reopens stdout and `foreign` writes to a stream fmemopen made: each a named
- * stop under the shim.
+ * stop under the shim. `modes` and `chars` run the buffering-mode and
+ * character/positioning reports linked in from `stdio_modes_probe.c` and
+ * `stdio_chars_probe.c`.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -49,7 +51,12 @@ static void read_back(const char *what, int value) {
     errno = 0;
 }
 
+int stdio_modes(void);
+int stdio_chars(void);
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "modes") == 0) return stdio_modes();
+    if (argc > 1 && strcmp(argv[1], "chars") == 0) return stdio_chars();
     if (argc > 1 && strcmp(argv[1], "getchar") == 0) {
         printf("getchar=%d\n", getchar());
         return 0;

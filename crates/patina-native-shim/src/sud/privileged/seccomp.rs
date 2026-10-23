@@ -150,10 +150,10 @@ mod tests {
     use crate::identity::credential;
 
     /// With `no_new_privs` the privilege check passes for any credential,
-    /// and a filter that clears every earlier check ends the model by name;
-    /// the checks before it still refuse.
+    /// and a filter that clears every earlier check ends the model by name
+    /// (the checks before it still refuse), as strict mode does.
     #[test]
-    fn no_new_privs_reaches_the_install() {
+    fn installs_end_the_model_by_name() {
         static ONE_INSTRUCTION: Fprog = [1, 0];
         let program = ONE_INSTRUCTION.as_ptr() as u64;
         let filter = |flags: u64, args: u64| {
@@ -166,12 +166,9 @@ mod tests {
         assert!(matches!(filter(0, program), Err(Unmodeled::Path(_))));
         assert_eq!(filter(1 << 31, program), refuse(errno::EINVAL));
         assert_eq!(filter(0, 0), refuse(errno::EFAULT));
-    }
 
-    /// Entering strict mode is where the model ends, from either door;
-    /// prctl's ignores its filter argument.
-    #[test]
-    fn strict_mode_ends_by_name() {
+        // Entering strict mode is where the model ends, from either door;
+        // prctl's ignores its filter argument.
         let strict = do_seccomp(credential(), SECCOMP_SET_MODE_STRICT, 0, 0, false);
         assert!(matches!(strict, Err(Unmodeled::Path(_))));
         let prctl = prctl_set_seccomp(credential(), &[SECCOMP_MODE_STRICT, 1, 0, 0, 0, 0]);

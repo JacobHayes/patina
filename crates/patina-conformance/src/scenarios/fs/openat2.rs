@@ -265,7 +265,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // glibc has no wrapper for openat2: the libc spelling would be
     // `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_openat2,
         Syscall::N_openat,

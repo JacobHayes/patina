@@ -48,22 +48,31 @@ mod tests {
         );
     }
 
-    // `localtime_r` (the `time`/`chrono` crates' local-offset path) is interposed as
-    // a PURE UTC conversion: fixed timezone, tm_gmtoff=0, tm_zone="UTC". A guest that
-    // breaks down a fixed time_t sees the exact civil fields with no dependence on
-    // the host timezone, and two same-seed runs are byte-identical. Before the change
-    // `localtime_r` was an uninterposed `time`-class import and the run was refused
-    // before `main`.
+    // The libc surface the common crates reach, each call answered from the
+    // deterministic model rather than refused or passed to the host:
+    //
+    // * `getrusage(RUSAGE_SELF)` reports virtual CPU time: the modeled startup's
+    //   user time (half of `STARTUP_CPU_NANOS`), then what the guest's calls
+    //   charge. A sleep advances the clock but is not charged; a busy-wait on the
+    //   clock is charged every read. It runs first, so nothing else has charged
+    //   yet. `struct rusage` begins with ru_utime (`time_t` seconds, then
+    //   microseconds, 8 bytes each on both platforms).
+    // * `localtime_r` (the `time`/`chrono` local-offset path) is a pure UTC
+    //   conversion: fixed timezone, tm_gmtoff=0, tm_zone="UTC".
+    // * `kill` in the single-process world is an existence probe (self alive,
+    //   any other pid ESRCH) and `if_nametoindex` reports no such interface.
+    // * `sleep` (mimalloc's yield fallback) returns 0 promptly on the virtual clock.
+    // * libc `FILE*` stdio (`fputs`/`fprintf`/`fwrite` to the `stdout`/`stderr`
+    //   sentinels; mimalloc and aws-lc error output) lands on the captured streams.
+    // * `pthread_once` (aws-lc's lazy init) runs its routine exactly once, keyed
+    //   on the control block's address.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_localtime_r_is_pure_utc_and_deterministic() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("localtime.rs");
-        fs::write(
-            &source,
-            r#"use std::ffi::CStr;
-use std::os::raw::{c_char, c_int, c_long};
+    const LIBC_SURFACE_SOURCE: &str = r#"
+use std::ffi::{CStr, CString};
+use std::io::Error;
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 #[repr(C)]
 struct Tm {
@@ -80,63 +89,156 @@ struct Tm {
     tm_zone: *const c_char,
 }
 
+// 16 bytes with 8-byte alignment covers both pthread_once_t layouts (glibc's
+// bare int and Darwin's signature-word struct). The shim keys on the address and
+// ignores the contents, so zeroed storage is valid under the interposed once.
+#[repr(C, align(8))]
+struct Once([u8; 16]);
+
 unsafe extern "C" {
+    fn getrusage(who: c_int, usage: *mut u8) -> c_int;
+    fn sleep(seconds: u32) -> u32;
     fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    fn kill(pid: c_int, sig: c_int) -> c_int;
+    fn if_nametoindex(name: *const c_char) -> c_uint;
+    fn fputs(string: *const c_char, stream: *mut c_void) -> c_int;
+    fn fprintf(stream: *mut c_void, format: *const c_char, ...) -> c_int;
+    fn fwrite(pointer: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
+    fn pthread_once(once_control: *mut Once, init_routine: extern "C" fn()) -> c_int;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    static __stdoutp: *mut c_void;
+    static __stderrp: *mut c_void;
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    static stdout: *mut c_void;
+    static stderr: *mut c_void;
+}
+
+#[cfg(target_os = "macos")]
+fn streams() -> (*mut c_void, *mut c_void) {
+    unsafe { (__stdoutp, __stderrp) }
+}
+
+#[cfg(target_os = "linux")]
+fn streams() -> (*mut c_void, *mut c_void) {
+    unsafe { (stdout, stderr) }
+}
+
+// ru_utime in microseconds: the first two 8-byte words of `struct rusage`.
+fn utime_us() -> i64 {
+    // rusage contains native words; byte storage alone promises no alignment.
+    #[repr(C, align(8))]
+    struct Buffer([u8; 256]);
+    let mut aligned = Buffer([0; 256]);
+    let buf = &mut aligned.0;
+    let rc = unsafe { getrusage(0, buf.as_mut_ptr()) };
+    assert_eq!(rc, 0, "getrusage failed");
+    let seconds = i64::from_ne_bytes(buf[0..8].try_into().unwrap());
+    let micros = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
+    seconds * 1_000_000 + micros
+}
+
+static COUNT: AtomicU32 = AtomicU32::new(0);
+extern "C" fn init() {
+    COUNT.fetch_add(1, Ordering::SeqCst);
 }
 
 fn main() {
+    let before = utime_us();
+    let _ = unsafe { sleep(5) };
+    let slept = utime_us();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(2) {}
+    let spun = utime_us();
+    println!("RU before={before} slept={slept} spun_2ms={}", spun - slept >= 2_000);
+
     // 2001-09-09 01:46:40 UTC — a Sunday, day-of-year 251.
     let t: i64 = 1_000_000_000;
     let mut tm: Tm = unsafe { std::mem::zeroed() };
-    let returned = unsafe { localtime_r(&t, &mut tm) };
-    assert!(!returned.is_null(), "localtime_r returned null");
+    assert!(!unsafe { localtime_r(&t, &mut tm) }.is_null(), "localtime_r returned null");
     let zone = unsafe { CStr::from_ptr(tm.tm_zone) }.to_str().unwrap();
     println!(
         "LT y={} mon={} mday={} h={} m={} s={} wday={} yday={} isdst={} gmtoff={} zone={}",
         tm.tm_year, tm.tm_mon, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_wday,
         tm.tm_yday, tm.tm_isdst, tm.tm_gmtoff, zone
     );
+
+    let self_alive = unsafe { kill(std::process::id() as c_int, 0) };
+    let other = unsafe { kill(4242, 0) };
+    let other_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
+    let idx = unsafe { if_nametoindex(c"patina-nope0".as_ptr()) };
+    let idx_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
+    // ESRCH = 3 on both; an unknown interface is ENODEV (19) on Linux
+    // (glibc's SIOCGIFINDEX) and ENXIO (6) on macOS.
+    let no_such_interface = if cfg!(target_os = "linux") { 19 } else { 6 };
+    println!(
+        "KILL self_alive={self_alive} other={other} other_esrch={} idx={idx} idx_unknown={}",
+        other_errno == 3,
+        idx_errno == no_such_interface
+    );
+
+    // A one-hour sleep completes instantly under the virtual clock, returning 0
+    // (no seconds remaining). sleep(0) is mimalloc's actual yield-fallback call.
+    let remaining = unsafe { sleep(3600) };
+    let zero = unsafe { sleep(0) };
+    println!("SLEEP remaining={remaining} zero={zero} done");
+
+    let (out, err) = streams();
+    let line = CString::new("FPUTS_OUT line\n").unwrap();
+    unsafe { fputs(line.as_ptr(), out) };
+    let fmt = CString::new("FPRINTF n=%d\n").unwrap();
+    unsafe { fprintf(out, fmt.as_ptr(), 42) };
+    let e = CString::new("FWRITE_ERR line\n").unwrap();
+    unsafe { fwrite(e.as_ptr() as *const c_void, 1, e.as_bytes().len(), err) };
+
+    static mut ONCE: Once = Once([0u8; 16]);
+    let control = &raw mut ONCE;
+    let a = unsafe { pthread_once(control, init) };
+    let b = unsafe { pthread_once(control, init) };
+    println!("ONCE a={a} b={b} count={}", COUNT.load(Ordering::SeqCst));
 }
-"#,
-        )
-        .unwrap();
-        let bin = directory.path().join("localtime-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
+"#;
 
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let out = String::from_utf8_lossy(&ran.stdout);
-        assert!(
-            out.contains(
-                "LT y=101 mon=8 mday=9 h=1 m=46 s=40 wday=0 yday=251 isdst=0 gmtoff=0 zone=UTC"
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_libc_surface_answers_from_the_model() {
+        let guest = native_build::source_guest("libc_surface", LIBC_SURFACE_SOURCE);
+        let output = guest.assert_run_success(1, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for expected in [
+            format!(
+                "RU before={startup} slept={startup} spun_2ms=true",
+                startup = patina_dst_abi::STARTUP_CPU_CHARGE.user_ns / 1000
             ),
-            "localtime_r did not produce the exact UTC fields:\nstdout:\n{out}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stderr)
-        );
-
-        let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert_eq!(
-            ran.stdout, again.stdout,
-            "localtime_r run is not seed-stable"
+            "LT y=101 mon=8 mday=9 h=1 m=46 s=40 wday=0 yday=251 isdst=0 gmtoff=0 zone=UTC"
+                .to_owned(),
+            "KILL self_alive=0 other=-1 other_esrch=true idx=0 idx_unknown=true".to_owned(),
+            "SLEEP remaining=0 zero=0 done".to_owned(),
+            "FPUTS_OUT line".to_owned(),
+            "FPRINTF n=42".to_owned(),
+            "ONCE a=0 b=0 count=1".to_owned(),
+        ] {
+            assert!(
+                stdout.lines().any(|line| line == expected),
+                "missing {expected:?}:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        }
+        assert!(
+            stderr.contains("FWRITE_ERR line"),
+            "stderr-sentinel write did not reach captured stderr:\n{stderr}"
         );
     }
 
     // Build a single-file native source, run it twice at the same seed, assert the
-    // two runs are byte-identical, and hand back the stdout. Used by the
-    // dormant-surface conversion tests below (native-trust-root, host-inventory,
-    // local-timezone, kill/if_nametoindex): each source calls the converted C
-    // symbols directly (the extern-"C" fixture form the localtime_r test uses) and
-    // prints its result. Before the conversion each of those calls hit a shim
-    // deny-trap that aborts before printing, so `invoke_in`'s success assertion
-    // fails; after it, the printed result is deterministic.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // two runs are byte-identical, and hand back the stdout. Each macOS surface
+    // test below calls the modeled C symbols directly and prints its result.
+    #[cfg(target_os = "macos")]
     fn native_source_prints_deterministically(source_name: &str, source: &str) -> String {
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
@@ -662,171 +764,6 @@ fn main() {
         );
     }
 
-    // Cross-platform members: `kill` in the single-process world is an existence
-    // probe (self alive; any pid no process has ESRCH) and `if_nametoindex` reports no
-    // such interface (0 + ENXIO). Before the conversion both were deny-traps that
-    // aborted the run.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn kill_and_if_nametoindex_are_deterministic_errors() {
-        let out = native_source_prints_deterministically(
-            "killiface.rs",
-            r#"use std::io::Error;
-use std::os::raw::{c_char, c_int, c_uint};
-
-unsafe extern "C" {
-    fn kill(pid: c_int, sig: c_int) -> c_int;
-    fn if_nametoindex(name: *const c_char) -> c_uint;
-}
-
-fn main() {
-    let self_alive = unsafe { kill(std::process::id() as c_int, 0) };
-    let other = unsafe { kill(4242, 0) };
-    let other_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
-    let idx = unsafe { if_nametoindex(b"patina-nope0\0".as_ptr() as *const c_char) };
-    let idx_errno = Error::last_os_error().raw_os_error().unwrap_or(0);
-    // ESRCH = 3 on both; an unknown interface is ENODEV (19) on Linux
-    // (glibc's SIOCGIFINDEX) and ENXIO (6) on macOS.
-    let no_such_interface = if cfg!(target_os = "linux") { 19 } else { 6 };
-    println!(
-        "self_alive={self_alive} other={other} other_esrch={} idx={idx} idx_unknown={}",
-        other_errno == 3,
-        idx_errno == no_such_interface
-    );
-}
-"#,
-        );
-        assert!(
-            out.contains("self_alive=0 other=-1 other_esrch=true idx=0 idx_unknown=true"),
-            "kill/if_nametoindex did not resolve to the deterministic error shape:\n{out}"
-        );
-    }
-
-    // `sleep` (mimalloc's yield fallback) is interposed onto the virtual clock: it
-    // returns 0 promptly under virtual time and the run completes rather than
-    // blocking a real host thread. Before the change `sleep` was an uninterposed
-    // `time`-class import and the run was refused before `main`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_sleep_uses_virtual_clock_and_returns_promptly() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("sleep.rs");
-        fs::write(
-            &source,
-            r#"unsafe extern "C" {
-    fn sleep(seconds: u32) -> u32;
-}
-
-fn main() {
-    // A one-hour sleep completes instantly under the virtual clock, returning 0
-    // (no seconds remaining). sleep(0) is mimalloc's actual yield-fallback call.
-    let remaining = unsafe { sleep(3600) };
-    let zero = unsafe { sleep(0) };
-    println!("SLEEP remaining={remaining} zero={zero} done");
-}
-"#,
-        )
-        .unwrap();
-        let bin = directory.path().join("sleep-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert!(
-            String::from_utf8_lossy(&ran.stdout).contains("SLEEP remaining=0 zero=0 done"),
-            "sleep did not return promptly under virtual time:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stdout),
-            String::from_utf8_lossy(&ran.stderr)
-        );
-    }
-
-    // `getrusage(RUSAGE_SELF)` reports the virtual CPU time, never the host's
-    // accounting: its user time is the modeled startup's (half of
-    // `STARTUP_CPU_NANOS`), then what the guest's calls charge. A sleep
-    // advances the clock but is not charged; a busy-wait on the clock is
-    // charged every read and every escalation. Under the earlier model (CPU time = elapsed monotonic time) the sleep
-    // moved ru_utime by five seconds — the RED this pins. `struct rusage` begins with
-    // ru_utime (`time_t` seconds, then microseconds, 8 bytes each on both platforms).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_getrusage_reports_virtual_cpu_time() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("rusage.rs");
-        fs::write(
-            &source,
-            r#"use std::os::raw::c_int;
-use std::time::{Duration, Instant};
-
-unsafe extern "C" {
-    fn getrusage(who: c_int, usage: *mut u8) -> c_int;
-    fn sleep(seconds: u32) -> u32;
-}
-
-const RUSAGE_SELF: c_int = 0;
-
-// ru_utime in microseconds: the first two 8-byte words of `struct rusage`.
-fn utime_us() -> i64 {
-    // rusage contains native words; byte storage alone promises no alignment.
-    #[repr(C, align(8))]
-    struct Buffer([u8; 256]);
-    let mut aligned = Buffer([0; 256]);
-    let buf = &mut aligned.0;
-    let rc = unsafe { getrusage(RUSAGE_SELF, buf.as_mut_ptr()) };
-    assert_eq!(rc, 0, "getrusage failed");
-    let seconds = i64::from_ne_bytes(buf[0..8].try_into().unwrap());
-    let micros = i64::from_ne_bytes(buf[8..16].try_into().unwrap());
-    seconds * 1_000_000 + micros
-}
-
-fn main() {
-    let before = utime_us();
-    let _ = unsafe { sleep(5) };
-    let slept = utime_us();
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_millis(200) {}
-    let spun = utime_us();
-    println!(
-        "RU before={before} slept={slept} spun_200ms={}",
-        spun - slept >= 200_000
-    );
-}
-"#,
-        )
-        .unwrap();
-        let bin = directory.path().join("rusage-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let out = String::from_utf8_lossy(&ran.stdout);
-        assert!(
-            out.contains(&format!(
-                "RU before={startup} slept={startup} spun_200ms=true",
-                startup = patina_dst_abi::STARTUP_CPU_CHARGE.user_ns / 1000
-            )),
-            "getrusage did not report the virtual CPU time:\nstdout:\n{out}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stderr)
-        );
-
-        let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert_eq!(ran.stdout, again.stdout, "getrusage run is not seed-stable");
-    }
-
     // task_info(MACH_TASK_BASIC_INFO) reports the same virtual user time as getrusage
     // (`time_abi::cpu_time`): the startup's, unmoved by a sleep, advanced by a
     // busy-wait on the clock, byte-identically across same-seed runs. macOS only (task_info is Mach).
@@ -907,160 +844,6 @@ fn main() {
 
         let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
         assert_eq!(ran.stdout, again.stdout, "task_info run is not seed-stable");
-    }
-
-    // libc `FILE*` stdio (`fputs`/`fprintf`/`fwrite` to the `stdout`/`stderr`
-    // sentinels — mimalloc + aws-lc error output) routes to the deterministic
-    // captured stdio: stdout writes land on the run's captured stdout, stderr writes
-    // on captured stderr, byte-identically across runs. Before the change these were
-    // uninterposed `unknown-import` symbols (`fputs`/`fprintf`/`fwrite` and the
-    // `__stdoutp`/`__stderrp`/`stdout`/`stderr` data symbols) and the run was refused.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_libc_file_stdio_routes_to_captured_streams() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("stdio.rs");
-        fs::write(
-            &source,
-            r#"use std::ffi::CString;
-use std::os::raw::{c_char, c_int, c_void};
-
-unsafe extern "C" {
-    fn fputs(string: *const c_char, stream: *mut c_void) -> c_int;
-    fn fprintf(stream: *mut c_void, format: *const c_char, ...) -> c_int;
-    fn fwrite(pointer: *const c_void, size: usize, count: usize, stream: *mut c_void) -> usize;
-}
-
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    static __stdoutp: *mut c_void;
-    static __stderrp: *mut c_void;
-}
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    static stdout: *mut c_void;
-    static stderr: *mut c_void;
-}
-
-
-#[cfg(target_os = "macos")]
-fn streams() -> (*mut c_void, *mut c_void) {
-    unsafe { (__stdoutp, __stderrp) }
-}
-
-#[cfg(target_os = "linux")]
-fn streams() -> (*mut c_void, *mut c_void) {
-    unsafe { (stdout, stderr) }
-}
-
-fn main() {
-    let (out, err) = streams();
-    let line = CString::new("FPUTS_OUT line\n").unwrap();
-    unsafe { fputs(line.as_ptr(), out) };
-    let fmt = CString::new("FPRINTF n=%d\n").unwrap();
-    unsafe { fprintf(out, fmt.as_ptr(), 42) };
-    let e = CString::new("FWRITE_ERR line\n").unwrap();
-    unsafe { fwrite(e.as_ptr() as *const c_void, 1, e.as_bytes().len(), err) };
-    println!("STDIO_DONE");
-}
-"#,
-        )
-        .unwrap();
-        let bin = directory.path().join("stdio-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let out = String::from_utf8_lossy(&ran.stdout);
-        let err = String::from_utf8_lossy(&ran.stderr);
-        assert!(
-            out.contains("FPUTS_OUT line")
-                && out.contains("FPRINTF n=42")
-                && out.contains("STDIO_DONE"),
-            "stdout-sentinel writes did not reach captured stdout:\nstdout:\n{out}\nstderr:\n{err}"
-        );
-        assert!(
-            err.contains("FWRITE_ERR line"),
-            "stderr-sentinel write did not reach captured stderr:\nstdout:\n{out}\nstderr:\n{err}"
-        );
-        let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert_eq!(
-            ran.stdout, again.stdout,
-            "stdio run is not seed-stable (stdout)"
-        );
-        assert_eq!(
-            ran.stderr, again.stderr,
-            "stdio run is not seed-stable (stderr)"
-        );
-    }
-
-    // `pthread_once` (aws-lc's lazy init) runs the init routine exactly once through
-    // the shim-side registry keyed on the control-block address, guarded by the
-    // deterministic scheduler's mutex/condvar. Two calls on the same control block
-    // run the init exactly once. Before the change `pthread_once` was an uninterposed
-    // `unknown-import` and the run was refused before `main`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_pthread_once_runs_init_exactly_once() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("once.rs");
-        fs::write(
-            &source,
-            r#"use std::os::raw::c_int;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-// 16 bytes with 8-byte alignment covers both pthread_once_t layouts (glibc's
-// bare int and Darwin's signature-word struct). The shim keys on the address and
-// ignores the contents, so zeroed storage is valid under the interposed once.
-#[repr(C, align(8))]
-struct Once([u8; 16]);
-
-unsafe extern "C" {
-    fn pthread_once(once_control: *mut Once, init_routine: extern "C" fn()) -> c_int;
-}
-
-static COUNT: AtomicU32 = AtomicU32::new(0);
-extern "C" fn init() {
-    COUNT.fetch_add(1, Ordering::SeqCst);
-}
-
-fn main() {
-    static mut ONCE: Once = Once([0u8; 16]);
-    let control = &raw mut ONCE;
-    let a = unsafe { pthread_once(control, init) };
-    let b = unsafe { pthread_once(control, init) };
-    println!("ONCE a={a} b={b} count={}", COUNT.load(Ordering::SeqCst));
-}
-"#,
-        )
-        .unwrap();
-        let bin = directory.path().join("once-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert!(
-            String::from_utf8_lossy(&ran.stdout).contains("ONCE a=0 b=0 count=1"),
-            "pthread_once did not run the init exactly once:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stdout),
-            String::from_utf8_lossy(&ran.stderr)
-        );
     }
 
     // macOS `sysctlbyname`/`sysctl` (mimalloc, sysinfo, aws-lc) serve a small set of

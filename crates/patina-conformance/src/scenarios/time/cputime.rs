@@ -25,10 +25,14 @@
 //! Under patina the first reading is the virtual kernel's modeled startup
 //! cost (`patina_dst_abi::STARTUP_CPU_NANOS`), and the spin advances CPU time
 //! through the runtime's advance-on-spin rescue.
+//!
+//! The spin is thousands of recorded clock reads, so the scenario runs through
+//! the libc door alone; time/fault holds both rows through `syscall(2)`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
 use crate::signals::spin_until;
+use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -106,6 +110,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/cputime",
     run,
+    vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_times, Syscall::N_getrusage],
     symbols: &["syscall", "getrusage", "sysconf", "clock_gettime"],
     ..DEFAULTS

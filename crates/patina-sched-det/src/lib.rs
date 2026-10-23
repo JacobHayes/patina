@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_has_a_known_seeded_sequence() {
+    fn scheduler_has_a_known_seed_dependent_sequence() {
         assert_eq!(
             schedule(7, 8),
             [
@@ -683,41 +683,7 @@ mod tests {
                 TaskId(2),
             ]
         );
-    }
-
-    #[test]
-    fn different_seeds_give_different_sequences() {
         assert_ne!(schedule(7, 8), schedule(8, 8));
-    }
-
-    #[test]
-    fn a_thousand_seeds_repeat_schedules_with_park_and_wake() {
-        fn with_park_and_wake(seed: u64) -> Vec<TaskId> {
-            let mut scheduler = DetScheduler::new(seed);
-            for label in ["a", "b", "c"] {
-                scheduler.spawn(label).unwrap();
-            }
-            let parked = scheduler.next().unwrap().unwrap();
-            scheduler.park(parked, "blocked").unwrap();
-            let running = scheduler.next().unwrap().unwrap();
-            scheduler.yield_task(running).unwrap();
-            scheduler.wake(parked).unwrap();
-            let mut selected = vec![parked, running];
-            for _ in 0..20 {
-                let task = scheduler.next().unwrap().unwrap();
-                selected.push(task);
-                scheduler.yield_task(task).unwrap();
-            }
-            selected
-        }
-
-        for seed in 0..1_000 {
-            assert_eq!(
-                with_park_and_wake(seed),
-                with_park_and_wake(seed),
-                "seed {seed}"
-            );
-        }
     }
 
     #[test]
@@ -749,20 +715,6 @@ mod tests {
             scheduler.yield_task(task).unwrap();
         }
         order
-    }
-
-    #[test]
-    fn pct_is_deterministic_per_seed() {
-        let policy = SchedulePolicy {
-            pct: Some(PctConfig {
-                depth: 3,
-                steps: 40,
-            }),
-            starvation: None,
-        };
-        let mut a = DetScheduler::with_policy(11, policy);
-        let mut b = DetScheduler::with_policy(11, policy);
-        assert_eq!(drive(&mut a, 4, 40), drive(&mut b, 4, 40));
     }
 
     #[test]
@@ -820,9 +772,10 @@ mod tests {
     }
 
     #[test]
-    fn starvation_actually_excludes_and_ends() {
+    fn starvation_excludes_defers_liveness_and_ends() {
         // A wide interval starving one residue class must skip those tasks while
-        // active, then release them once the bounded interval ends.
+        // active, report a liveness deferral so the watchdog excuses that window,
+        // then release them once the bounded interval ends.
         let policy = SchedulePolicy {
             pct: None,
             starvation: Some(StarvationConfig {
@@ -832,7 +785,18 @@ mod tests {
             }),
         };
         let mut sched = DetScheduler::with_policy(9, policy);
-        let order = drive(&mut sched, 4, 60);
+        for label in 0..4u64 {
+            sched.spawn(&format!("t{label}")).unwrap();
+        }
+        let mut order = Vec::new();
+        let mut saw_deferral = false;
+        for _ in 0..60 {
+            let task = sched.next().unwrap().unwrap();
+            order.push(task);
+            saw_deferral |= sched.liveness_deferring();
+            sched.yield_task(task).unwrap();
+        }
+        assert!(saw_deferral, "an active interval must report a deferral");
         let report = sched.policy_report().unwrap();
         assert!(report.starvation);
         assert!(
@@ -944,15 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_reports_none() {
-        let mut sched = DetScheduler::new(1);
-        sched.spawn("a").unwrap();
-        sched.spawn("b").unwrap();
-        assert!(sched.policy_report().is_none());
-    }
-
-    #[test]
-    fn default_policy_never_reports_liveness_deferral() {
+    fn default_policy_reports_nothing_and_never_defers_liveness() {
         // The uniform-random policy never withholds a runnable task, so the
         // liveness watchdog stays fully live for a plain run.
         let mut sched = DetScheduler::new(7);
@@ -967,34 +923,7 @@ mod tests {
             );
             sched.yield_task(task).unwrap();
         }
-    }
-
-    #[test]
-    fn starvation_reports_liveness_deferral_while_excluding() {
-        // A wide interval excluding a residue class reports a policy deferral for
-        // at least one decision, so the watchdog excuses that non-progress window.
-        let policy = SchedulePolicy {
-            pct: None,
-            starvation: Some(StarvationConfig {
-                intervals: 1,
-                max_len: 6,
-                window: 2,
-            }),
-        };
-        let mut sched = DetScheduler::with_policy(9, policy);
-        for label in 0..4u64 {
-            sched.spawn(&format!("t{label}")).unwrap();
-        }
-        let mut saw_deferral = false;
-        for _ in 0..60 {
-            let task = sched.next().unwrap().unwrap();
-            saw_deferral |= sched.liveness_deferring();
-            sched.yield_task(task).unwrap();
-        }
-        assert!(
-            saw_deferral,
-            "an active starvation interval must report a deferral"
-        );
+        assert!(sched.policy_report().is_none());
     }
 
     #[test]

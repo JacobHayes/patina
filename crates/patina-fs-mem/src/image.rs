@@ -499,63 +499,6 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn encode_decode_round_trips_and_is_order_independent() {
-        let image = sample();
-        let decoded = FsImage::decode(&image.encode()).unwrap();
-        assert_eq!(image, decoded);
-
-        // A differently-ordered construction yields byte-identical output.
-        let reordered = FsImage::new({
-            let mut entries = image.entries().to_vec();
-            entries.reverse();
-            entries
-        });
-        assert_eq!(image.encode(), reordered.encode());
-    }
-
-    #[test]
-    fn into_memfs_rebuilds_files_dirs_and_inert_symlinks() {
-        let mut fs = sample().into_memfs().unwrap();
-
-        let fd = fs
-            .open(FsClock::EPOCH, "/README", OpenFlags::read_only())
-            .unwrap();
-        assert_eq!(fs.read(FsClock::EPOCH, fd, 64).unwrap(), b"top level");
-
-        let root: Vec<_> = fs
-            .read_directory(FsClock::EPOCH, "/")
-            .unwrap()
-            .into_iter()
-            .map(|entry| (entry.name, entry.kind))
-            .collect();
-        // Symlink is listed as a symlink (inert, not followed), matching how an
-        // ordinary directory walk skips it.
-        assert!(root.contains(&("link_to_readme".to_string(), FsEntryKind::Symlink)));
-        assert!(root.contains(&("README".to_string(), FsEntryKind::File)));
-        // Empty directory survives.
-        assert_eq!(
-            fs.read_link(FsClock::EPOCH, "/link_to_readme").unwrap(),
-            "README"
-        );
-        let empty = fs.read_directory(FsClock::EPOCH, "/data/empty").unwrap();
-        assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn decode_rejects_corruption() {
-        assert_eq!(
-            FsImage::decode(b"NOTMAGIC____").unwrap_err(),
-            FsImageError::BadMagic
-        );
-        let mut truncated = sample().encode();
-        truncated.truncate(truncated.len() - 3);
-        assert!(matches!(
-            FsImage::decode(&truncated),
-            Err(FsImageError::Truncated | FsImageError::Malformed(_))
-        ));
-    }
-
     /// Hand-encode a raw stream with the given entries so the decoder sees input
     /// the trusted `FsImage::new` sorter would never produce. Directories and
     /// files carry `mode`; every entry is at the epoch.
@@ -582,6 +525,23 @@ mod tests {
 
     #[test]
     fn decode_fails_closed_on_adversarial_images() {
+        assert_eq!(
+            FsImage::decode(b"NOTMAGIC____").unwrap_err(),
+            FsImageError::BadMagic
+        );
+        let mut truncated = sample().encode();
+        truncated.truncate(truncated.len() - 3);
+        assert!(matches!(
+            FsImage::decode(&truncated),
+            Err(FsImageError::Truncated | FsImageError::Malformed(_))
+        ));
+        // Mode bits beyond the permission bits.
+        let entry = [(KIND_FILE, "/a", &b"x"[..])];
+        assert!(FsImage::decode(&hand_encode_with_mode(&entry, 0o7777)).is_ok());
+        assert!(matches!(
+            FsImage::decode(&hand_encode_with_mode(&entry, 0o100644)),
+            Err(FsImageError::Malformed(_))
+        ));
         // Unsorted.
         assert_eq!(
             FsImage::decode(&hand_encode(&[
@@ -621,10 +581,11 @@ mod tests {
         ));
     }
 
+    /// The same entry set discovered in two host readdir orders yields
+    /// byte-identical images that decode to what was encoded and enumerate
+    /// sorted in the guest.
     #[test]
-    fn readdir_order_is_sorted_and_host_order_independent() {
-        // Same entry set discovered in two different (host readdir) orders must
-        // yield byte-identical images and identically sorted guest enumeration.
+    fn images_round_trip_independent_of_host_order_and_list_sorted() {
         let forward = vec![
             FsImageEntry::file("/src/a.rs", "fn a"),
             FsImageEntry::file("/src/b.rs", "fn b"),
@@ -638,11 +599,10 @@ mod tests {
         let image_a = FsImage::new(forward);
         let image_b = FsImage::new(shuffled);
         assert_eq!(image_a.encode(), image_b.encode());
+        let decoded = FsImage::decode(&image_a.encode()).unwrap();
+        assert_eq!(decoded, image_a);
 
-        let mut fs = FsImage::decode(&image_a.encode())
-            .unwrap()
-            .into_memfs()
-            .unwrap();
+        let mut fs = decoded.into_memfs().unwrap();
         let names: Vec<_> = fs
             .read_directory(FsClock::EPOCH, "/src")
             .unwrap()
@@ -652,22 +612,14 @@ mod tests {
         assert_eq!(names, vec!["a.rs", "b.rs", "c.rs"]);
     }
 
-    #[test]
-    fn decode_refuses_mode_bits_beyond_the_permission_bits() {
-        let entry = [(KIND_FILE, "/a", &b"x"[..])];
-        assert!(FsImage::decode(&hand_encode_with_mode(&entry, 0o7777)).is_ok());
-        assert!(matches!(
-            FsImage::decode(&hand_encode_with_mode(&entry, 0o100644)),
-            Err(FsImageError::Malformed(_))
-        ));
-    }
-
     const SECOND: i128 = 1_000_000_000;
 
-    /// Captured metadata survives the round trip and the rebuild: each entry
-    /// reads back its own bits and mtime (its other times derived from it), a
-    /// directory keeps its mtime although children were added after it, and a
-    /// directory without search permission still has its children seeded.
+    /// Captured entries survive the round trip and the rebuild: a file reads
+    /// its contents, a symlink is listed inert with its target, an empty
+    /// directory survives, each entry reads back its own bits and mtime (its
+    /// other times derived from it), a directory keeps its mtime although
+    /// children were added after it, and a directory without search
+    /// permission still has its children seeded.
     #[test]
     fn into_memfs_gives_each_entry_its_captured_mode_and_mtime() {
         let (dir_time, file_time, link_time) = (
@@ -692,6 +644,7 @@ mod tests {
                 target: "run.sh".into(),
                 mtime_nanos: link_time,
             },
+            FsImageEntry::directory("/empty"),
             FsImageEntry::Directory {
                 path: "/locked".into(),
                 mode: 0o000,
@@ -724,6 +677,23 @@ mod tests {
             assert_eq!(metadata.btime_nanos, mtime, "{path}");
         }
         assert_eq!(fs.metadata("/dir/link").unwrap().kind, FsEntryKind::Symlink);
+        assert_eq!(fs.read_link(FsClock::EPOCH, "/dir/link").unwrap(), "run.sh");
+        let fd = fs
+            .open(FsClock::EPOCH, "/dir/run.sh", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 64).unwrap(), b"#!/bin/sh");
+        let listed: Vec<_> = fs
+            .read_directory(FsClock::EPOCH, "/dir")
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.name, entry.kind))
+            .collect();
+        assert!(listed.contains(&("link".to_string(), FsEntryKind::Symlink)));
+        assert!(
+            fs.read_directory(FsClock::EPOCH, "/empty")
+                .unwrap()
+                .is_empty()
+        );
         // Behind a directory without search permission: read without the
         // guards a guest's lookup runs.
         let secret = fs.leaf("/locked/secret").unwrap();

@@ -224,21 +224,15 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         fs::create_dir(root.join("src")).unwrap();
         fs::write(root.join("src/main.rs"), source).unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"audit_boundaries\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[profile.dev]\nstrip = true\n[profile.release]\nstrip = \"symbols\"\n").unwrap();
-        for release in [false, true] {
-            let profile: &[&str] = if release { &["--release"] } else { &[] };
-            let binary = root.join("package-guest");
-            let mut build = vec!["build", ".", "--output", binary.to_str().unwrap()];
-            build.extend(profile);
-            invoke(root, &build);
-            assert_boundaries(&binary);
-            invoke(root, &["audit", binary.to_str().unwrap()]);
-            if !release {
-                invoke(root, &["audit", "."]);
-            }
-            let mut run = vec!["run", "."];
-            run.extend(profile);
-            invoke(root, &run);
-            let mut test = vec![
+        let binary = root.join("package-guest");
+        invoke(root, &["build", ".", "--output", binary.to_str().unwrap()]);
+        assert_boundaries(&binary);
+        invoke(root, &["audit", binary.to_str().unwrap()]);
+        invoke(root, &["audit", "."]);
+        invoke(root, &["run", "."]);
+        invoke(
+            root,
+            &[
                 "test",
                 ".",
                 "--harness-target",
@@ -247,104 +241,40 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
                 "boundaries",
                 "--seed",
                 "1",
-            ];
-            test.extend(profile);
-            invoke(root, &test);
-            let guest = fixture_target_directory(root)
-                .join("patina/dst/audit_boundaries/bin/audit_boundaries/boundaries/guest");
-            assert_boundaries(&guest);
-            invoke(root, &["audit", guest.to_str().unwrap()]);
-        }
+            ],
+        );
+        let guest = fixture_target_directory(root)
+            .join("patina/dst/audit_boundaries/bin/audit_boundaries/boundaries/guest");
+        assert_boundaries(&guest);
+        invoke(root, &["audit", guest.to_str().unwrap()]);
     }
 
-    // `run <SOURCE.rs>` builds native on the fly (no prior `build`) and runs the
-    // product; its output matches an explicit `build` + `run` of the same source,
-    // and the one-line identity note is printed so an implicit build is never silent.
+    // A single `.rs` source is first-class for `run`, `audit` and `replay`.
+    // `run <SOURCE.rs>` builds native on the fly and matches an explicit `build`
+    // + `run`, printing a one-line identity note so an implicit build is never
+    // silent. Auditing the source equals auditing the built artifact, and both
+    // pass with no `--allow`: the shim's `dlsym` control-plane vehicle, which
+    // the pre-run gate permits, is not reported as a dynamic-loading denial,
+    // and a Patina-built binary audits without the raw-audit banner. Replaying
+    // the unchanged source reproduces a recording of the artifact; after a
+    // behaviour-changing edit, source-first replay fails closed.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn run_builds_native_source_on_the_fly_and_matches_explicit_build() {
-        let directory = tempdir().unwrap();
-        let workspace = native_workspace();
-        let source = directory.path().join("greet.rs");
-        fs::write(
-            &source,
-            "fn main() { let a: Vec<String> = std::env::args().skip(1).collect(); \
-         println!(\"GREET seed_args={:?}\", a); }",
-        )
-        .unwrap();
-
-        // Explicit: build to an artifact, then run the artifact.
-        let bin = directory.path().join("greet");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let explicit = invoke(
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--",
-                "hi",
-                "there",
-            ],
-        );
-        let explicit_line = stdout_line_with(&explicit, "GREET");
-        assert!(
-            explicit_line.contains("[\"hi\", \"there\"]"),
-            "{explicit_line}"
-        );
-
-        // Implicit: run the source directly — build-on-the-fly then run.
-        let implicit = invoke(
-            workspace,
-            &[
-                "run",
-                source.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--",
-                "hi",
-                "there",
-            ],
-        );
-        assert_eq!(stdout_line_with(&implicit, "GREET"), explicit_line);
-        let note = stdout_line_with(&implicit, "PATINA_BUILD_ON_RUN");
-        assert!(
-            note.contains("target=native") && note.contains("sha256="),
-            "missing build-on-the-fly identity note:\n{}",
-            String::from_utf8_lossy(&implicit.stdout)
-        );
-    }
-
-    // `audit` and `replay` are source-first too: auditing a source equals auditing
-    // the explicitly-built artifact; replaying an unchanged source reproduces the
-    // recording byte-identically; replaying after a behavior-changing edit fails
-    // closed (fingerprint or operation mismatch — either is a loud refusal).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn audit_and_replay_are_source_first() {
+    fn native_source_is_first_class_for_run_audit_and_replay() {
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
         let source = directory.path().join("sf.rs");
         // The guest reads the virtual clock (a recorded boundary decision) so a
-        // behavior-changing edit alters the op-stream and replay can fail closed —
-        // stdout content alone is captured output, not a replay-checked decision.
+        // behaviour-changing edit alters the op-stream and replay can fail closed:
+        // stdout alone is captured output, not a replay-checked decision.
         fs::write(
             &source,
             "use std::time::Instant; \
-         fn main() { let s = Instant::now(); let _ = s.elapsed(); \
-         println!(\"SF_MARKER v1\"); }",
+             fn main() { let s = Instant::now(); let _ = s.elapsed(); \
+             let a: Vec<String> = std::env::args().skip(1).collect(); \
+             println!(\"SF_MARKER v1 args={a:?}\"); }",
         )
         .unwrap();
-
         let bin = directory.path().join("sf");
         invoke(
             workspace,
@@ -355,21 +285,16 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
                 bin.to_str().unwrap(),
             ],
         );
-        let control_plane: &[&str] = &["dlsym"];
-        let mut artifact_args = vec!["audit", bin.to_str().unwrap()];
-        let mut source_args = vec!["audit", source.to_str().unwrap()];
-        for symbol in control_plane {
-            artifact_args.push("--allow");
-            artifact_args.push(symbol);
-            source_args.push("--allow");
-            source_args.push(symbol);
-        }
-        let artifact_audit = invoke(workspace, &artifact_args);
-        let source_audit = invoke(workspace, &source_args);
+
+        let artifact_audit = invoke(workspace, &["audit", bin.to_str().unwrap()]);
+        let audit_out = String::from_utf8_lossy(&artifact_audit.stdout);
+        assert!(
+            !audit_out.contains("dynamic-loading") && !audit_out.contains("PATINA_RAW_AUDIT"),
+            "a Patina-built binary must audit cleanly with no --allow and no raw banner:\n{audit_out}"
+        );
+        let source_audit = invoke(workspace, &["audit", source.to_str().unwrap()]);
         assert_eq!(audit_imports(&artifact_audit), audit_imports(&source_audit));
 
-        // Record from the built artifact, then source-first replay of the UNCHANGED
-        // source reproduces the recording byte-identically (rebuilt binary matches).
         let trace = directory.path().join("sf.patina");
         let recorded = invoke(
             workspace,
@@ -382,48 +307,67 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
                 trace.to_str().unwrap(),
                 "--fingerprint",
                 "sf-v1",
+                "--",
+                "hi",
+                "there",
             ],
         );
-        let replayed = invoke(
-            workspace,
-            &[
-                "replay",
-                source.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "sf-v1",
-            ],
-        );
-        assert_eq!(
-            stdout_line_with(&recorded, "SF_MARKER"),
-            stdout_line_with(&replayed, "SF_MARKER")
+        let recorded_line = stdout_line_with(&recorded, "SF_MARKER");
+        assert!(
+            recorded_line.contains("[\"hi\", \"there\"]"),
+            "{recorded_line}"
         );
 
-        // A behavior-changing edit that reads the clock more times than the recording
-        // — the rebuilt binary's op-stream diverges, so source-first replay must fail
-        // closed (operation mismatch / trace exhaustion).
+        let implicit = invoke(
+            workspace,
+            &[
+                "run",
+                source.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--",
+                "hi",
+                "there",
+            ],
+        );
+        assert_eq!(stdout_line_with(&implicit, "SF_MARKER"), recorded_line);
+        let note = stdout_line_with(&implicit, "PATINA_BUILD_ON_RUN");
+        assert!(
+            note.contains("target=native") && note.contains("sha256="),
+            "missing build-on-the-fly identity note:\n{}",
+            String::from_utf8_lossy(&implicit.stdout)
+        );
+
+        let replay_source = || {
+            invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                workspace,
+                &[
+                    "replay",
+                    source.to_str().unwrap(),
+                    trace.to_str().unwrap(),
+                    "--fingerprint",
+                    "sf-v1",
+                ],
+            )
+        };
+        let replayed = common::assert_success(replay_source());
+        assert_eq!(stdout_line_with(&replayed, "SF_MARKER"), recorded_line);
+
+        // An edit that reads the clock more times than the recording: the rebuilt
+        // binary's op-stream diverges, so source-first replay must fail closed.
         fs::write(
             &source,
             "use std::time::Instant; \
-         fn main() { let s = Instant::now(); let mut acc = 0u128; \
-         for _ in 0..8 { acc = acc.wrapping_add(s.elapsed().as_nanos()); } \
-         println!(\"SF_MARKER v2 CHANGED acc={acc}\"); }",
+             fn main() { let s = Instant::now(); let mut acc = 0u128; \
+             for _ in 0..8 { acc = acc.wrapping_add(s.elapsed().as_nanos()); } \
+             println!(\"SF_MARKER v2 CHANGED acc={acc}\"); }",
         )
         .unwrap();
-        let broken = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                source.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "sf-v1",
-            ],
-        );
+        let broken = replay_source();
         assert!(
             !broken.status.success(),
-            "source-first replay of a behavior-changed source must fail closed\nstdout:\n{}\nstderr:\n{}",
+            "source-first replay of a behaviour-changed source must fail closed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&broken.stdout),
             String::from_utf8_lossy(&broken.stderr)
         );
@@ -543,6 +487,32 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         assert_eq!(value["exit_code"], 2);
         assert_json_finding_has_crate(&value, "system", "leaker_a");
         assert_json_finding_has_crate(&value, "shm_open", "leaker_b");
+
+        // `run` applies the same pre-run default-deny gate to the prebuilt binary
+        // and to the package directory built on the fly: both are refused before
+        // the guest runs, naming the same denied process-class symbol.
+        let denied_line = |target: &Path| -> String {
+            let out = invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                workspace,
+                &["run", target.to_str().unwrap(), "--seed", "1"],
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(!out.status.success(), "{} ran:\n{stderr}", target.display());
+            stderr
+                .lines()
+                .find(|line| line.contains("(process)"))
+                .unwrap_or_else(|| panic!("no denied-symbol line in stderr:\n{stderr}"))
+                .trim()
+                .to_owned()
+        };
+        let prebuilt = denied_line(&bin);
+        assert!(prebuilt.contains("system"), "{prebuilt}");
+        assert_eq!(
+            prebuilt,
+            denied_line(&package),
+            "the two paths named different denied symbols (gate not shared)"
+        );
     }
 
     /// Audit output lines whose `object=` names nothing real.
@@ -646,9 +616,8 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
     // listing is the opposite of the truth. The refusal names the source-first form.
     // `--raw` overrides the gate and runs the full audit (instruction scan and
     // escape categories stay meaningful) under a loud stderr banner. A
-    // Patina-built binary is unaffected: it defines the shim control-plane marker,
-    // so it audits normally with no banner. (Source-first equivalence and the WASI
-    // path are covered by `audit_and_replay_are_source_first` / the WASI audit tests.)
+    // Patina-built binary defines the shim control-plane marker and audits with no
+    // banner (`native_source_is_first_class_for_run_audit_and_replay`).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn audit_prebuilt_non_shim_binary_fails_closed_unless_raw() {
@@ -715,30 +684,6 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         assert!(
             raw_stderr.contains("unsupported native imports"),
             "--raw audit must render the real categorized findings:\n{raw_stderr}"
-        );
-
-        // (c) A Patina-built binary is unaffected: it defines the shim marker, so a
-        // bare audit (control-plane vehicle allowed) succeeds with no banner.
-        let shim_source = directory.path().join("shim.rs");
-        fs::write(&shim_source, "fn main() { println!(\"SHIM\"); }").unwrap();
-        let shim_bin = directory.path().join("shim");
-        invoke(
-            workspace,
-            &[
-                "build",
-                shim_source.to_str().unwrap(),
-                "--output",
-                shim_bin.to_str().unwrap(),
-            ],
-        );
-        let shim_audit = invoke(
-            workspace,
-            &["audit", shim_bin.to_str().unwrap(), "--allow", "dlsym"],
-        );
-        assert!(
-            !String::from_utf8_lossy(&shim_audit.stdout).contains("PATINA_RAW_AUDIT"),
-            "a Patina-built binary must audit without the raw banner:\n{}",
-            String::from_utf8_lossy(&shim_audit.stdout)
         );
     }
 

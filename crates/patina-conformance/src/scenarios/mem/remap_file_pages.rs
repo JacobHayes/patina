@@ -65,7 +65,7 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/remap_file_pages",
     run,
     covers: &[Syscall::N_remap_file_pages],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     kernel_floor: Some(KernelFloor {
         release: "4.0",
         why: "remap_file_pages is an emulation over a fresh mmap since Linux 4.0",

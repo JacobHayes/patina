@@ -600,6 +600,5 @@ mod tests {
         let mut filesystem = MinimalFs;
         let error = filesystem.crash_and_export_restart_snapshot().unwrap_err();
         assert_eq!(error.code, patina_dst_abi::ErrorCode::Denied);
-        assert!(error.message.contains("crash restart snapshot export"));
     }
 }

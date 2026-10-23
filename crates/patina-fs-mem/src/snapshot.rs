@@ -1031,30 +1031,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_exhausted_inode_allocator_and_valid_decode_can_allocate() {
+    fn decode_rejects_noncanonical_ordering_duplicates_and_inconsistent_inodes() {
         let root = ("/", 1, 0, 0);
         assert_eq!(
             FsSnapshot::decode(&hand_encode(u64::MAX, &[root], &[], &[])).unwrap_err(),
             FsSnapshotError::Malformed("next inode allocator state is exhausted")
         );
-
-        let mut imported = FsSnapshot::decode(&hand_encode(2, &[root], &[], &[]))
-            .unwrap()
-            .into_memfs();
-        let fd = imported
-            .open(
-                FsClock::EPOCH,
-                "/allocated",
-                OpenFlags::create_truncate_write(),
-            )
-            .unwrap();
-        imported.close(fd).unwrap();
-        assert_eq!(imported.metadata("/allocated").unwrap().ino, 2);
-    }
-
-    #[test]
-    fn decode_rejects_noncanonical_ordering_duplicates_and_inconsistent_inodes() {
-        let root = ("/", 1, 0, 0);
         let a = ("/a", 2, 0, 0);
         let b = ("/b", 3, 0, 0);
         let inode = (4, 1, 0, 0, b"x" as &[u8]);

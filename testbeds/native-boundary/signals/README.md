@@ -55,9 +55,10 @@ and come back, to return out of order, to nest by `siglongjmp` into an outer
 handler, and a dead thread's destructor to make one (past what the shim
 tracks, 70 suspended or left handlers stop by name),
 printing what they print natively, through the raw trap and (`-libc`, every
-arch) glibc's `syscall(2)`. `private_budget.c` (over a `planted-faults` shim)
-measures each recording level of the shim's private signal stack against its
-budget, and checks the guard above a running handler's level.
+arch) glibc's `syscall(2)`. `private_budget.c` (linked into `shim_fault.c`
+as its `budget` case, over a `planted-faults` shim) measures each recording
+level of the shim's private signal stack against its budget, and checks the
+guard above a running handler's level.
 `../small_stack_probe.rs` (in `native_containment`) records and replays raw
 syscalls made on a 2 KiB stack and requires nothing written below it.
 
@@ -65,8 +66,8 @@ syscalls made on a 2 KiB stack and requires nothing written below it.
 in a shim built with the `planted-faults` feature) under a guest handler for
 the signal: a SIGSEGV, a SIGBUS and a SIGILL, which `native_containment` requires to be
 named stops that take the default action, never the handler, on every Linux
-arch. `shim_reentry.c` arms a reentry planted the same way
-(`patina_planted_reentry`), then calls `syscall(2)`, which holds the thread
+arch. Its two-argument cases arm a reentry planted the same way
+(`patina_planted_reentry`), then call `syscall(2)`, which holds the thread
 (`held`), or `prctl(2)`, which does not (`unheld`): that call's dispatch
 reaches the shim's own boundary, through `syscall(2)`, the door std's
 futex-based locks and once-cells lower to (`door`, every Linux arch), and as a

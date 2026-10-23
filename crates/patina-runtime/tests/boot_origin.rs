@@ -4,7 +4,7 @@
 use patina_dst_abi::ClockKind;
 use patina_dst_runtime::{
     BuggifyConfig, Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS,
-    LivenessConfig, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
+    LivenessConfig, LivenessKind, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
 };
 use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
@@ -220,7 +220,13 @@ fn convergence_window_is_run_relative_but_diagnostics_are_absolute() {
                 break error;
             }
         };
-        assert!(matches!(error, RuntimeError::Liveness { .. }));
+        assert!(matches!(
+            error,
+            RuntimeError::Liveness {
+                kind: LivenessKind::HealThenConverge,
+                ..
+            }
+        ));
         let facts = ctx.run_facts();
         let finding = &facts["runtime_findings"][0];
         assert_eq!(

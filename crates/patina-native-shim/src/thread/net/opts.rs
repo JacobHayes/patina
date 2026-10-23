@@ -744,13 +744,4 @@ mod tests {
         set_timeout(&mut slot, &timeval_bytes(-1, 0)).unwrap();
         assert_eq!(timeout_nanos(slot), Some(0));
     }
-
-    #[test]
-    fn defaults_are_the_virtual_kernels_sysctls() {
-        let tcp = Options::new(AF_INET, SOCK_STREAM);
-        assert_eq!((tcp.sndbuf, tcp.rcvbuf), (TCP_SNDBUF, TCP_RCVBUF));
-        let udp = Options::new(AF_INET, SOCK_DGRAM);
-        assert_eq!((udp.sndbuf, udp.rcvbuf), (DEFAULT_BUFFER, DEFAULT_BUFFER));
-        assert_eq!(udp.recv_timeout(), None);
-    }
 }

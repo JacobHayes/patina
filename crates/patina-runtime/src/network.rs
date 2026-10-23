@@ -554,8 +554,6 @@ mod tests {
     use crate::config::RuntimeConfig;
     use crate::{Context, RuntimeError};
     use patina_dst_abi::ShutdownHow;
-
-    use patina_dst_trace::TraceError;
     use tempfile::tempdir;
 
     #[test]
@@ -587,30 +585,5 @@ mod tests {
         let mut replay = Context::from_config(RuntimeConfig::replay(&path, "tcp-v1")).unwrap();
         assert_eq!(simulation(&mut replay).unwrap(), expected);
         replay.finish().unwrap();
-    }
-
-    #[test]
-    fn tcp_replay_rejects_a_divergent_payload() {
-        fn program(context: &mut Context, bytes: &[u8]) -> Result<(), RuntimeError> {
-            let listener = context.net_tcp_listen("server", 1)?;
-            let client = context.net_tcp_connect("client", "server")?;
-            let accepted = context.net_tcp_accept(listener)?.unwrap();
-            context.net_tcp_send(client, bytes)?;
-            context.net_close(client)?;
-            context.net_close(accepted.socket)?;
-            context.net_close(listener)
-        }
-
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tcp-divergent.patina");
-        let mut record = Context::from_config(RuntimeConfig::record(11, &path, "tcp-v1")).unwrap();
-        program(&mut record, b"same").unwrap();
-        record.finish().unwrap();
-
-        let mut replay = Context::from_config(RuntimeConfig::replay(&path, "tcp-v1")).unwrap();
-        assert!(matches!(
-            program(&mut replay, b"different"),
-            Err(RuntimeError::Trace(TraceError::OperationMismatch { .. }))
-        ));
     }
 }

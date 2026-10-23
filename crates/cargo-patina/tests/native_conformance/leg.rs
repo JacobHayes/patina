@@ -60,6 +60,21 @@ pub(super) struct Leg<'a> {
     /// The host implements rows the scenario asserts absent: the native run
     /// answers them with the declared ENOSYS (`--declared-absent`).
     pub(super) declared_absent: bool,
+    /// Whether this leg replays its recorded trace (see [`replaying`]).
+    pub(super) replay: bool,
+}
+
+/// The one vehicle of `scenario` whose recorded trace is replayed: the first
+/// whose run completes. Every door reaches the same model operations, which
+/// are what a replay re-runs, so a second vehicle's replay repeats the first.
+/// Each door is still run under strace: an escape can live in a door's own
+/// adapter.
+pub(super) fn replaying(scenario: &Scenario) -> Option<Vehicle> {
+    scenario.vehicles.iter().copied().find(|&vehicle| {
+        !scenario
+            .gaps_for(vehicle)
+            .any(|gap| gap.failure.ends_early())
+    })
 }
 
 impl Leg<'_> {
@@ -321,20 +336,22 @@ impl Leg<'_> {
             }
             return Ok(());
         }
-        let replayed = self
-            .replay(&trace)
-            .map_err(|error| vec![format!("replay: {error}")])?;
-        if replayed.events != recorded.events || replayed.termination != recorded.termination {
-            return Err(with_stderr(
-                vec![format!(
-                    "replay: the replayed stream differs from the recorded one ({} vs {} events; {} vs {})",
-                    replayed.events.len(),
-                    recorded.events.len(),
-                    replayed.termination,
-                    recorded.termination
-                )],
-                &recorded,
-            ));
+        if self.replay {
+            let replayed = self
+                .replay(&trace)
+                .map_err(|error| vec![format!("replay: {error}")])?;
+            if replayed.events != recorded.events || replayed.termination != recorded.termination {
+                return Err(with_stderr(
+                    vec![format!(
+                        "replay: the replayed stream differs from the recorded one ({} vs {} events; {} vs {})",
+                        replayed.events.len(),
+                        recorded.events.len(),
+                        replayed.termination,
+                        recorded.termination
+                    )],
+                    &recorded,
+                ));
+            }
         }
         if let Some(facts) = &self.scenario.trace {
             let ops = self.trace_ops(&trace).map_err(|error| vec![error])?;
@@ -342,7 +359,6 @@ impl Leg<'_> {
                 .check(&ops)
                 .map_err(|unmet| prefixed("recorded trace: ", unmet))?;
         }
-
         self.check_leak(&recorded)
     }
 

@@ -244,7 +244,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splitmix64_has_a_fixed_byte_stream() {
+    fn splitmix64_has_a_fixed_seed_dependent_byte_stream() {
         let mut entropy = SeededEntropy::new(0);
         let mut bytes = [0; 16];
         entropy.fill(&mut bytes).unwrap();
@@ -255,6 +255,9 @@ mod tests {
                 0x78, 0x6e,
             ]
         );
+        let mut other = [0; 16];
+        SeededEntropy::new(1).fill(&mut other).unwrap();
+        assert_ne!(bytes, other);
     }
 
     #[test]
@@ -273,17 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn different_seeds_change_the_stream() {
-        let mut left = SeededEntropy::new(1);
-        let mut right = SeededEntropy::new(2);
-        let mut left_bytes = [0; 8];
-        let mut right_bytes = [0; 8];
-        left.fill(&mut left_bytes).unwrap();
-        right.fill(&mut right_bytes).unwrap();
-        assert_ne!(left_bytes, right_bytes);
-    }
-
-    #[test]
     fn domain_seed_separates_root_seed_streams() {
         let entropy_seed = domain_seed(7, fault_domain::ENTROPY);
         let net_seed = domain_seed(7, fault_domain::NET_FAULT);
@@ -294,10 +286,7 @@ mod tests {
         assert_eq!(entropy_seed, domain_seed(7, fault_domain::ENTROPY));
         assert_ne!(entropy_seed, domain_seed(8, fault_domain::ENTROPY));
 
-        // RED-before-GREEN for the historical aliasing class: before Wave A,
-        // runtime entropy and SimNet net faults both used `SplitMix64::new(root)`.
-        // These first words would therefore have been equal; domain labels make
-        // the streams independent while keeping each stream deterministic.
+        // A labelled stream never aliases the bare root-seeded stream.
         let old_root_first = SplitMix64::new(7).next_u64();
         let entropy_first = SplitMix64::new(entropy_seed).next_u64();
         let net_first = SplitMix64::new(net_seed).next_u64();

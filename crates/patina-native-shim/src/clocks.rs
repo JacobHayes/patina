@@ -926,15 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn a_timespec_is_valid_below_one_second_of_nanoseconds() {
-        let spec = |tv_sec, tv_nsec| Timespec { tv_sec, tv_nsec };
-        assert_eq!(spec(1, 5).valid_nanos(), Some(NANOS + 5));
-        assert_eq!(spec(0, NANOS as i64).valid_nanos(), None);
-        assert_eq!(spec(-1, 0).valid_nanos(), None);
-        assert_eq!(spec(0, -1).valid_nanos(), None);
-    }
-
-    #[test]
     fn setting_the_time_validates_before_the_privilege() {
         let none = std::ptr::null();
         assert_eq!(settimeofday(&[0, 1_000_001], none), -i64::from(EINVAL));

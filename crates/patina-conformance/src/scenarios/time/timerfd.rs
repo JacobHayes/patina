@@ -208,7 +208,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // Every row's libc spelling is glibc's syscall(2): a libc leg would
     // repeat the syscall one.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_timerfd_create,
         Syscall::N_timerfd_settime,

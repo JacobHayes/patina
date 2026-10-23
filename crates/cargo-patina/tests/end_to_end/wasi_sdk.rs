@@ -36,27 +36,31 @@ mod tests {
 
     // Buggify reaches a wasip1 guest through the `patina_sdk` import module: an active
     // site fires, the exit code reflects the decision, and the runtime emits a
-    // parseable `PATINA_SDK_REPORT` to stderr — the same report the campaign layer
-    // consumes for native runs.
+    // parseable `PATINA_SDK_REPORT` to stderr, the same report the campaign layer
+    // consumes for native runs. The firing profile is seed-driven rather than fixed.
+    // A buggify run records its configuration into the trace metadata; a flag-free
+    // `replay` restores it and reproduces the run (exit code and the full report),
+    // and re-passing `--buggify` on replay is refused: the trace is authoritative.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn wasi_buggify_fires_and_reports_on_wasip1() {
+    fn wasi_buggify_fires_reports_varies_by_seed_and_replays_flag_free() {
         let directory = tempdir().unwrap();
         let module = directory.path().join("buggify.wasm");
         fs::write(&module, wat::parse_str(WASI_BUGGIFY_MODULE).unwrap()).unwrap();
+        let module = module.to_str().unwrap();
+        let run = |args: &[&str]| {
+            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), args)
+        };
 
-        let fired = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &[
-                "run",
-                module.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--buggify=1000",
-                "--buggify-activation-permille",
-                "1000",
-            ],
-        );
+        let fired = run(&[
+            "run",
+            module,
+            "--seed",
+            "1",
+            "--buggify=1000",
+            "--buggify-activation-permille",
+            "1000",
+        ]);
         assert_eq!(
             fired.status.code(),
             Some(1),
@@ -71,61 +75,85 @@ mod tests {
                 && report.contains("|@wat:site-a"),
             "unexpected PATINA_SDK_REPORT on wasip1:\n{report}"
         );
+
+        // A moderate firing probability, so the single site's decision (exit 0/1)
+        // depends on the seed rather than always firing.
+        let codes: Vec<Option<i32>> = (1..=8)
+            .map(|seed| {
+                run(&[
+                    "run",
+                    module,
+                    "--seed",
+                    &seed.to_string(),
+                    "--buggify=500",
+                    "--buggify-activation-permille",
+                    "1000",
+                ])
+                .status
+                .code()
+            })
+            .collect();
+        assert!(
+            codes.contains(&Some(1)) && codes.contains(&Some(0)),
+            "buggify firing did not vary across seeds: {codes:?}"
+        );
+
+        let trace = directory.path().join("buggify.patina");
+        let trace = trace.to_str().unwrap();
+        let recorded = run(&[
+            "run",
+            module,
+            "--seed",
+            "9",
+            "--buggify=500",
+            "--buggify-activation-permille",
+            "800",
+            "--record",
+            trace,
+        ]);
+        assert!(
+            recorded.status.code().is_some(),
+            "record run did not exit cleanly:\nstderr:\n{}",
+            String::from_utf8_lossy(&recorded.stderr)
+        );
+        let recorded_report = sdk_report_line(&recorded);
+        assert!(
+            recorded_report.contains("enabled=1"),
+            "record run emitted no buggify report:\n{recorded_report}"
+        );
+        let replayed = run(&["replay", module, trace]);
+        assert_eq!(
+            replayed.status.code(),
+            recorded.status.code(),
+            "buggify replay diverged on exit code\nstderr:\n{}",
+            String::from_utf8_lossy(&replayed.stderr)
+        );
+        assert_eq!(
+            sdk_report_line(&replayed),
+            recorded_report,
+            "buggify replay diverged on the SDK report"
+        );
+        let refused = run(&["replay", module, trace, "--buggify"]);
+        assert!(
+            !refused.status.success()
+                && String::from_utf8_lossy(&refused.stderr).contains("the trace is authoritative"),
+            "replay should refuse a re-supplied --buggify:\nstderr:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
     }
 
-    // An `always!` invariant violation on wasip1 reports a `violation` verdict and
-    // terminates the run with a nonzero exit — the WASI mirror of the native shim's
-    // abort. The verdict line is the announcement; there is no legacy marker.
+    // Site registration is fail-closed on wasip1 exactly as on native. Reusing a
+    // label at a different call site aborts the second registration with
+    // `PATINA_BUGGIFY_DUPLICATE_LABEL`. `--buggify-after-setup` declares that the
+    // guest calls `setup_complete()`, so a guest that registers a site but never
+    // does is a harness bug: the run finalizes (reproducible) then fails loudly with
+    // `PATINA_BUGGIFY_SETUP_NEVER_CALLED`, mirroring the native shim's shutdown gate.
     #[test]
-    fn wasi_always_violation_traps_with_a_violation_verdict() {
+    fn wasi_buggify_duplicate_labels_and_a_never_reached_setup_gate_fail_loudly() {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("always.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(
-                r#"(module
-                (import "patina_sdk" "always"
-                    (func $always (param i32 i32 i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
-                (data (i32.const 0) "must-hold")
-                (data (i32.const 16) "wat:inv")
-                (func (export "_start")
-                    (drop (call $always (i32.const 0)
-                        (i32.const 0) (i32.const 9) (i32.const 16) (i32.const 7)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let violated = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &["run", module.to_str().unwrap(), "--seed", "1"],
-        );
-        assert!(
-            !violated.status.success(),
-            "an always! violation must fail the run"
-        );
-        let stderr = String::from_utf8_lossy(&violated.stderr);
-        assert!(
-            stderr.contains("kind=violation") && stderr.contains("label=must-hold"),
-            "missing violation verdict:\nstderr:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("PATINA_ALWAYS_VIOLATION"),
-            "the legacy always-violation marker must no longer print:\nstderr:\n{stderr}"
-        );
-    }
-
-    // Reusing a label at a different call site is a fatal error on wasip1 exactly as
-    // on native: the second registration aborts with `PATINA_BUGGIFY_DUPLICATE_LABEL`.
-    #[test]
-    fn wasi_buggify_duplicate_label_aborts() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("dup.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(
+        for (name, wat, flags, marker) in [
+            (
+                "dup",
                 r#"(module
                 (import "patina_sdk" "buggify"
                     (func $buggify (param i32 i32 i32 i32 i32) (result i32)))
@@ -138,36 +166,11 @@ mod tests {
                         (i32.const 16) (i32.const 7) (i32.const -1)))
                     (drop (call $buggify (i32.const 0) (i32.const 3)
                         (i32.const 32) (i32.const 7) (i32.const -1)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let aborted = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &["run", module.to_str().unwrap(), "--seed", "1", "--buggify"],
-        );
-        assert!(!aborted.status.success(), "a duplicate label must fail");
-        assert!(
-            String::from_utf8_lossy(&aborted.stderr)
-                .contains("PATINA_BUGGIFY_DUPLICATE_LABEL label=dup"),
-            "missing DUPLICATE_LABEL marker:\nstderr:\n{}",
-            String::from_utf8_lossy(&aborted.stderr)
-        );
-    }
-
-    // `--buggify-after-setup` declares that the guest calls `setup_complete()`. A
-    // wasip1 guest that registers a site but never does is a harness bug: the run
-    // finalizes (reproducible) then fails loudly with
-    // `PATINA_BUGGIFY_SETUP_NEVER_CALLED`, mirroring the native shim's shutdown gate.
-    #[test]
-    fn wasi_buggify_after_setup_gate_fails_when_never_called() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("gated.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(
+                &["--buggify"][..],
+                "PATINA_BUGGIFY_DUPLICATE_LABEL label=dup",
+            ),
+            (
+                "gated",
                 r#"(module
                 (import "patina_sdk" "buggify"
                     (func $buggify (param i32 i32 i32 i32 i32) (result i32)))
@@ -177,143 +180,23 @@ mod tests {
                 (func (export "_start")
                     (drop (call $buggify (i32.const 0) (i32.const 5)
                         (i32.const 16) (i32.const 5) (i32.const -1)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let gated = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &[
-                "run",
-                module.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--buggify",
-                "--buggify-after-setup",
-            ],
-        );
-        assert!(
-            !gated.status.success(),
-            "a never-reached setup gate must fail the run"
-        );
-        assert!(
-            String::from_utf8_lossy(&gated.stderr).contains("PATINA_BUGGIFY_SETUP_NEVER_CALLED"),
-            "missing SETUP_NEVER_CALLED marker:\nstderr:\n{}",
-            String::from_utf8_lossy(&gated.stderr)
-        );
-    }
-
-    // A buggify wasip1 run records its configuration into the trace metadata; a
-    // flag-free `replay` restores it and reproduces the run byte-for-byte (exit code
-    // and the full `PATINA_SDK_REPORT`). Re-passing `--buggify` on replay is refused —
-    // the trace is authoritative.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn wasi_buggify_record_replay_is_byte_identical() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("buggify.wasm");
-        fs::write(&module, wat::parse_str(WASI_BUGGIFY_MODULE).unwrap()).unwrap();
-        let trace = directory.path().join("buggify.patina");
-
-        let recorded = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &[
-                "run",
-                module.to_str().unwrap(),
-                "--seed",
-                "9",
-                "--buggify=500",
-                "--buggify-activation-permille",
-                "800",
-                "--record",
-                trace.to_str().unwrap(),
-            ],
-        );
-        assert!(
-            recorded.status.code().is_some(),
-            "record run did not exit cleanly:\nstderr:\n{}",
-            String::from_utf8_lossy(&recorded.stderr)
-        );
-        let recorded_report = sdk_report_line(&recorded);
-        assert!(
-            recorded_report.contains("enabled=1"),
-            "record run emitted no buggify report:\n{recorded_report}"
-        );
-
-        // Flag-free replay reproduces exit code and the full SDK report.
-        let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &["replay", module.to_str().unwrap(), trace.to_str().unwrap()],
-        );
-        assert_eq!(
-            replayed.status.code(),
-            recorded.status.code(),
-            "buggify replay diverged on exit code\nstderr:\n{}",
-            String::from_utf8_lossy(&replayed.stderr)
-        );
-        assert_eq!(
-            sdk_report_line(&replayed),
-            recorded_report,
-            "buggify replay diverged on the SDK report"
-        );
-
-        // Re-passing a buggify knob on replay is rejected: the trace is authoritative.
-        let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &[
-                "replay",
-                module.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--buggify",
-            ],
-        );
-        assert!(
-            !refused.status.success()
-                && String::from_utf8_lossy(&refused.stderr).contains("the trace is authoritative"),
-            "replay should refuse a re-supplied --buggify:\nstderr:\n{}",
-            String::from_utf8_lossy(&refused.stderr)
-        );
-    }
-
-    // A distinct seed produces a distinct buggify firing profile on wasip1, so the
-    // report is genuinely seed-driven rather than fixed.
-    #[test]
-    fn wasi_buggify_varies_across_seeds() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("buggify.wasm");
-        fs::write(&module, wat::parse_str(WASI_BUGGIFY_MODULE).unwrap()).unwrap();
-
-        let run_seed = |seed: &str| {
-            // A moderate firing probability so the single site's decision depends on
-            // the seed rather than always firing.
-            invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                directory.path(),
-                &[
-                    "run",
-                    module.to_str().unwrap(),
-                    "--seed",
-                    seed,
-                    "--buggify=500",
-                    "--buggify-activation-permille",
-                    "1000",
-                ],
-            )
-        };
-        // Sweep several seeds; the firing decision (exit 0/1) must not be constant.
-        let codes: Vec<Option<i32>> = ["1", "2", "3", "4", "5", "6", "7", "8"]
-            .iter()
-            .map(|seed| run_seed(seed).status.code())
-            .collect();
-        assert!(
-            codes.contains(&Some(1)) && codes.contains(&Some(0)),
-            "buggify firing did not vary across seeds: {codes:?}"
-        );
+                &["--buggify", "--buggify-after-setup"][..],
+                "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
+            ),
+        ] {
+            let module = directory.path().join(format!("{name}.wasm"));
+            fs::write(&module, wat::parse_str(wat).unwrap()).unwrap();
+            let mut args = vec!["run", module.to_str().unwrap(), "--seed", "1"];
+            args.extend_from_slice(flags);
+            let output =
+                invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &args);
+            assert!(!output.status.success(), "{name}: the run must fail");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(marker),
+                "{name}: missing {marker}:\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     // Create a Cargo package whose `main` is instrumented with the SDK buggify

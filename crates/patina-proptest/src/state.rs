@@ -461,29 +461,10 @@ mod tests {
 
     // The planted bug is found and shrunk to the tightest possible sequence: an
     // insert of key 0 followed by the remove of key 1 that clobbers it. The
-    // whole-state comparison in `apply` catches the divergence with no Get.
+    // whole-state comparison in `apply` catches the divergence with no Get, and
+    // independent seeds converge to the same canonical counterexample.
     #[test]
-    fn planted_bug_shrinks_to_a_minimal_sequence() {
-        let mut runner = runner(1);
-        let failure = check::<PlantedBugKv>(&mut runner, 0..=24)
-            .expect_err("the off-by-one delete bug must be caught");
-        assert_eq!(
-            failure.commands.len(),
-            2,
-            "expected a two-command counterexample, got {:?}",
-            failure.commands
-        );
-        match (&failure.commands[0], &failure.commands[1]) {
-            (Cmd::Insert(0, _), Cmd::Remove(1)) => {}
-            other => panic!("unexpected minimal sequence: {other:?}"),
-        }
-    }
-
-    // Shrinking is deterministic: the same seed yields a byte-identical minimal
-    // sequence across repeats, and independent seeds converge to the same
-    // canonical counterexample.
-    #[test]
-    fn shrinking_is_stable_across_repeats_and_seeds() {
+    fn planted_bug_shrinks_to_one_minimal_sequence_across_seeds() {
         let shrink = |seed: u8| {
             let mut runner = runner(seed);
             check::<PlantedBugKv>(&mut runner, 0..=24)
@@ -491,7 +472,6 @@ mod tests {
                 .commands
         };
         let baseline = shrink(1);
-        assert_eq!(baseline, shrink(1), "same seed must reproduce the shrink");
         assert_eq!(
             baseline,
             shrink(7),

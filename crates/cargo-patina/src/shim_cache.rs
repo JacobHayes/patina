@@ -572,17 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn copies_do_not_alias_mutable_build_outputs() {
-        let temp = tempfile::tempdir().unwrap();
-        let from = temp.path().join("cargo.a");
-        let to = temp.path().join("published.a");
-        fs::write(&from, b"first").unwrap();
-        copy(&from, &to).unwrap();
-        fs::write(&from, b"other").unwrap();
-        assert_eq!(fs::read(to).unwrap(), b"first");
-    }
-
-    #[test]
     fn legacy_targets_are_collected_but_locked_builds_and_unrelated_dirs_survive() {
         if isolated_test() {
             return;

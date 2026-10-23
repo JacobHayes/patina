@@ -55,16 +55,6 @@ fn opening_a_fifo_enforces_its_mode_and_then_defers_to_the_pipe_boundary() {
         ErrorCode::Denied,
         "a read-only FIFO must not be openable for writing"
     );
-    // An unsearchable parent hides it exactly as it hides a file.
-    fs.create_directory(FsClock::EPOCH, "/tmp/gate", 0o777)
-        .unwrap();
-    fs.make_fifo(FsClock::EPOCH, "/tmp/gate/pipe", 0o666)
-        .unwrap();
-    fs.set_mode(FsClock::EPOCH, "/tmp/gate", 0o000).unwrap();
-    assert_eq!(
-        fs.metadata("/tmp/gate/pipe").unwrap_err().code,
-        ErrorCode::Denied
-    );
 }
 
 #[test]

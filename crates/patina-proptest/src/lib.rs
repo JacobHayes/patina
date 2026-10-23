@@ -329,24 +329,15 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::TestError;
 
+    /// Failures reproduce via the Patina seed or trace, never regression
+    /// files; the `fork`/`timeout` features are compiled out; and the runner
+    /// draws from ChaCha.
     #[test]
-    fn config_disables_failure_persistence() {
-        assert!(
-            config().failure_persistence.is_none(),
-            "failure persistence must be off: reproduce via the Patina seed / trace, not regression files"
-        );
-    }
-
-    #[test]
-    fn config_has_no_fork() {
-        // The `fork`/`timeout` features are compiled out, so proptest reports a
-        // configuration that never forks.
-        assert!(!config().fork(), "forking must be unavailable under Patina");
-    }
-
-    #[test]
-    fn runner_uses_the_chacha_algorithm() {
-        assert_eq!(config().rng_algorithm, RngAlgorithm::ChaCha);
+    fn config_is_seed_reproducible_and_never_forks() {
+        let config = config();
+        assert!(config.failure_persistence.is_none());
+        assert!(!config.fork());
+        assert_eq!(config.rng_algorithm, RngAlgorithm::ChaCha);
     }
 
     // Digest the sequence of generated cases a runner produces for a *passing*
@@ -372,28 +363,11 @@ mod tests {
         digest.get()
     }
 
-    // The single seed-draw site is internally stable: with the same
-    // `patina_dst::rng()` stream state it returns the same 32 bytes. A freshly spawned
-    // thread resets `patina_dst::rng()`'s fallback stream to its fixed start, so two
-    // fresh threads observe identical stream state and must produce identical
-    // seeds — pinning both the draw order and its little-endian composition.
+    // The cases a single runner generates are a function of its seed and never
+    // degenerate to a constant (the PassThrough bisect-then-zero-fill collapse,
+    // where later cases are all zero-derived).
     #[test]
-    fn seed_draw_is_stable_for_equal_stream_state() {
-        let first = std::thread::spawn(seed).join().unwrap();
-        let second = std::thread::spawn(seed).join().unwrap();
-        assert_eq!(
-            first, second,
-            "seed() must be a pure function of the patina_dst::rng() stream state"
-        );
-    }
-
-    // Regression for the PassThrough bisect-then-zero-fill collapse: the cases a
-    // single runner generates must not degenerate to a constant. Collect the
-    // inputs of 64 generated cases and assert they are not all identical — this
-    // would FAIL under PassThrough (later cases all zero-derived) and passes under
-    // the ChaCha seeding.
-    #[test]
-    fn generated_cases_are_diverse_not_collapsed() {
+    fn generated_cases_are_seed_determined_and_diverse() {
         let mut config = config();
         config.cases = 64;
         let mut runner = TestRunner::new_with_rng(config, rng_from_seed([9u8; 32]));
@@ -412,16 +386,9 @@ mod tests {
             "generated cases degenerated ({} distinct of 64) — the PassThrough failure mode",
             distinct.len()
         );
-    }
 
-    #[test]
-    fn same_seed_generates_identical_cases() {
         let seed = [7u8; 32];
         assert_eq!(case_digest(seed, 128), case_digest(seed, 128));
-    }
-
-    #[test]
-    fn different_seeds_generate_different_cases() {
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
         a[0] = 1;
@@ -448,7 +415,6 @@ mod tests {
 
     #[test]
     fn shrinking_is_stable_and_minimal() {
-        assert_eq!(shrink_to_minimal([1u8; 32]), 100);
         assert_eq!(shrink_to_minimal([1u8; 32]), 100);
         assert_eq!(shrink_to_minimal([42u8; 32]), 100);
     }

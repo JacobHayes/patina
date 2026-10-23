@@ -8,31 +8,23 @@
 // modes are the same shapes with the address left out, the deterministic
 // controls. Argument one picks the mode.
 //
-// * `leak-exit` / `det-exit`: fail with exit 3 after printing a token. A
-//   leaked token is six letters of the address, so two runs agree on it only by
-//   a vanishing chance, and the token is the failure's signature.
-// * `leak-number-exit`: the same failure with the token spelled in digits, so
-//   the leak survives only in the exact line: a signature collapses a digit
-//   run, and both runs share one signature.
-// * `leak-detail` / `det-detail`: report a violation through the verdict ABI
-//   whose detail carries the address. Kind and label agree across runs; only
-//   the detail differs.
+// * `det-exit`: fail with exit 3 after printing a fixed six-letter token, the
+//   failure's signature.
+// * `leak-number-exit`: the same failure with the token spelled as the
+//   address's digits, so the leak survives only in the exact line: a signature
+//   collapses a digit run, and both runs share one signature.
 // * `forge-marker` / `forge-native-run`: fail with exit 3 after printing the
 //   leaked address as a quoted field of a line shaped like patina's own
 //   `PATINA_INFRA` marker (a near-miss head, then the exact `native_run`
 //   head). The guest wrote it, so it is evidence like any other guest line.
-// * `leak-clock`: make a leaked number of `getpid()` calls, which patina
-//   charges as CPU time but does not record, read the monotonic clock, then
-//   abort. A replay charges differently and reads a different time.
-// * `det-segv`: die on SIGSEGV writing to address 1, a fault that happens the
-//   same way on every run: the deterministic control for a fault signal.
-// * `det-segv-unterminated`: the same fault, after writing a stderr line with
+// * `det-segv-unterminated`: die on SIGSEGV writing to address 1, a fault
+//   that happens the same way on every run, after writing a stderr line with
 //   no trailing newline, so patina's own line follows unfinished guest output.
 // * `forge-divergence`: report a fixed violation, then leave a custom
 //   operation open under a label that spells a replay divergence, and print
 //   the structured token too. Deterministic: every word of it is the guest's,
 //   and a guest cannot claim a divergence its own run did not have.
-// * `leak-clean` / `det-clean`: pass, after one thread yields a number of
+// * `leak-clean`: pass, after one thread yields a leaked number of
 //   times while a peer yields too. Two runnable threads make every yield a
 //   recorded scheduling decision, so a leaked count reaches the trace.
 // * `leak-schedule`: report a violation first, under a label drawn from
@@ -48,7 +40,6 @@ unsafe extern "C" {
         detail: *const u8,
         detail_len: usize,
     ) -> i32;
-    fn getpid() -> i32;
     fn patina_custom_op_begin(
         label: *const u8,
         label_len: usize,
@@ -105,10 +96,6 @@ fn yield_alongside_a_peer(count: usize) {
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     match mode.as_str() {
-        "leak-exit" => {
-            eprintln!("ADDRESS_LEAK failure token={}", token(address_bits()));
-            std::process::exit(3);
-        }
         "det-exit" => {
             eprintln!("ADDRESS_LEAK failure token={}", token(0));
             std::process::exit(3);
@@ -117,8 +104,6 @@ fn main() {
             eprintln!("ADDRESS_LEAK failure token={}", address_bits());
             std::process::exit(3);
         }
-        "leak-detail" => verdict(VIOLATION, "leak", &address_bits().to_string()),
-        "det-detail" => verdict(VIOLATION, "leak", "0"),
         "forge-divergence" => {
             verdict(VIOLATION, "forged", "");
             eprintln!("replay_divergence=unconsumed_events");
@@ -139,24 +124,12 @@ fn main() {
             );
             std::process::exit(3);
         }
-        "leak-clock" => {
-            for _ in 0..address_bits() % 997 + 1 {
-                std::hint::black_box(unsafe { getpid() });
-            }
-            let _ = std::hint::black_box(std::time::Instant::now());
-            std::process::abort();
-        }
-        "det-segv" => unsafe { std::ptr::write_volatile(1 as *mut u8, 0) },
         "det-segv-unterminated" => {
             eprint!("guest fatal");
             unsafe { std::ptr::write_volatile(1 as *mut u8, 0) }
         }
         "leak-clean" => {
             yield_alongside_a_peer(address_bits() % 997 + 1);
-            println!("ADDRESS_LEAK clean");
-        }
-        "det-clean" => {
-            yield_alongside_a_peer(500);
             println!("ADDRESS_LEAK clean");
         }
         "leak-schedule" => {

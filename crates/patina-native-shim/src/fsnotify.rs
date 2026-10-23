@@ -732,10 +732,7 @@ mod tests {
         // A stale holder lets go with nothing to settle.
         assert_eq!(dentries.release(Holder::Handle(gone.0)), None);
         assert!(dentries.stale.is_empty());
-    }
-
-    #[test]
-    fn a_canonical_path_splits_into_its_directory_and_name() {
+        // A canonical path splits into its directory and name.
         assert_eq!(split("/a"), Some(("/", "a")));
         assert_eq!(split("/a/b/c"), Some(("/a/b", "c")));
         assert_eq!(split("/"), None);

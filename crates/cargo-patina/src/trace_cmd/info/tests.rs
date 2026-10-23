@@ -5,7 +5,7 @@ use patina_dst_abi::{ClockKind, Operation, Outcome};
 use patina_dst_trace::{RunMetadata, TraceBundle, TraceEvent};
 
 #[test]
-fn info_counts_resolved_branch_and_vtime_from_raw_json() {
+fn info_counts_resolved_branch_and_monotonic_vtime() {
     let main = vec![TraceEvent::new(
         0,
         Operation::ClockNow {
@@ -46,38 +46,37 @@ fn info_counts_resolved_branch_and_vtime_from_raw_json() {
     assert_eq!(info["resolved_events"], 2);
     assert_eq!(info["vtime"]["min_nanos"], 5);
     assert_eq!(info["vtime"]["max_nanos"], 20);
-}
-
-#[test]
-fn info_vtime_span_ignores_realtime_clock_reads() {
-    let events = vec![
-        (
-            Operation::ClockNow {
-                clock: ClockKind::Monotonic,
-            },
-            Outcome::U64(1_000),
-        ),
-        (
-            Operation::ClockNow {
-                clock: ClockKind::Realtime,
-            },
-            Outcome::U64(patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS),
-        ),
-        (
-            Operation::ClockNow {
-                clock: ClockKind::Monotonic,
-            },
-            Outcome::U64(20_000_000),
-        ),
-    ];
-    let decisions = events
-        .into_iter()
-        .enumerate()
-        .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
-        .collect();
-    let bundle = TraceBundle::new(RunMetadata::new(9, "fp", 0, "patina"), decisions);
-    let raw = serde_json::to_value(&bundle).unwrap();
-    let info = info_value(Path::new("run.patina"), "main", &bundle, &raw).unwrap();
-    assert_eq!(info["vtime"]["min_nanos"], 1_000);
-    assert_eq!(info["vtime"]["max_nanos"], 20_000_000);
+    // The vtime span ignores realtime clock reads.
+    {
+        let events = vec![
+            (
+                Operation::ClockNow {
+                    clock: ClockKind::Monotonic,
+                },
+                Outcome::U64(1_000),
+            ),
+            (
+                Operation::ClockNow {
+                    clock: ClockKind::Realtime,
+                },
+                Outcome::U64(patina_dst_abi::DEFAULT_REALTIME_EPOCH_NANOS),
+            ),
+            (
+                Operation::ClockNow {
+                    clock: ClockKind::Monotonic,
+                },
+                Outcome::U64(20_000_000),
+            ),
+        ];
+        let decisions = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, (operation, outcome))| TraceEvent::new(i as u64, operation, outcome))
+            .collect();
+        let bundle = TraceBundle::new(RunMetadata::new(9, "fp", 0, "patina"), decisions);
+        let raw = serde_json::to_value(&bundle).unwrap();
+        let info = info_value(Path::new("run.patina"), "main", &bundle, &raw).unwrap();
+        assert_eq!(info["vtime"]["min_nanos"], 1_000);
+        assert_eq!(info["vtime"]["max_nanos"], 20_000_000);
+    }
 }

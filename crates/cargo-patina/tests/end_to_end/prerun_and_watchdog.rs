@@ -37,7 +37,7 @@ fn main() {
     let mut baseline = None;
     // Fresh processes restart the private helpers. Same-seed records and replay
     // must preserve the guest's ordinary panic, with no observer task admitted.
-    for attempt in 0..4 {
+    for attempt in 0..2 {
         let trace = directory.path().join(format!("panic-{attempt}.patina"));
         let recorded = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),

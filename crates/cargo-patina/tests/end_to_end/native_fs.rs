@@ -4,505 +4,82 @@
 mod tests {
     use super::super::*;
 
-    // Two threads communicating over `std::sync::mpsc` with `recv_timeout`: on macOS
-    // this drives std's Darwin thread `Parker` (`park`/`park_timeout` on a
-    // libdispatch semaphore), on Linux the futex Parker. The interposed dispatch
-    // semaphore routes the wait through the deterministic scheduler and virtual
-    // clock, so both the delivery/timeout interleaving and the timeout count are a
-    // function of the seed alone — byte-identical across repeated runs and exactly
-    // reproduced by record/replay — never of host wall-clock timing.
-    const RECV_TIMEOUT_SOURCE: &str = r#"
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
-
-fn main() {
-    let (tx, rx) = mpsc::channel::<u64>();
-    let producer = thread::spawn(move || {
-        for i in 0..5 {
-            thread::sleep(Duration::from_millis(10));
-            tx.send(i).unwrap();
-        }
-    });
-    let mut delivered = Vec::new();
-    let mut timeouts = 0u32;
-    loop {
-        match rx.recv_timeout(Duration::from_millis(7)) {
-            Ok(v) => delivered.push(v),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                timeouts += 1;
-                if delivered.len() == 5 {
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    producer.join().unwrap();
-    println!("delivered={:?} timeouts={}", delivered, timeouts);
-}
-"#;
-
-    // Part A: `recv_timeout` across two threads is byte-identical across >=3 runs at
-    // multiple seeds and exactly reproduced by record/replay. Before the fix the
-    // Parker blocked a real host thread on a libdispatch semaphore and read host
-    // time for its timeout, escaping the scheduler entirely.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_recv_timeout_is_deterministic_across_seeds_and_replay() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("recv_timeout.rs");
-        fs::write(&source, RECV_TIMEOUT_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("recv-timeout");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-
-        for seed in ["1", "5", "9"] {
-            let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
-            let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
-            assert!(
-                baseline.contains("delivered="),
-                "unexpected recv_timeout output at seed {seed}: {baseline}"
-            );
-            for _ in 0..2 {
-                let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
-                assert_eq!(
-                    baseline,
-                    String::from_utf8_lossy(&again.stdout),
-                    "recv_timeout output is not byte-identical across runs at seed {seed}"
-                );
-            }
-        }
-
-        let trace = directory.path().join("recv.patina");
-        let recorded = invoke(
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "9",
-                "--record",
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "recv-timeout",
-            ],
-        );
-        let replayed = invoke(
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "recv-timeout",
-            ],
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&recorded.stdout),
-            String::from_utf8_lossy(&replayed.stdout),
-            "record and strict replay diverged"
-        );
-    }
-
-    // Exercises the two std filesystem APIs that lower onto `linkat` and
-    // `fdopendir` -- both unsupported native imports before this shim wave, so a
-    // guest using either was refused by the pre-run audit up front.
+    // The deterministic filesystem's std and libc surface, one section per call
+    // family, run in one guest. With no argument every section runs; `mount`
+    // reads the corpus `--mount` supplies; `pwritev_view PATH` runs that section
+    // alone against a host path, for the native oracle.
     //
-    // Part (a) hard links (`std::fs::hard_link` -> `linkat(AT_FDCWD, .., 0)`): after
-    // linking, a write through one path is observed through the other, the
-    // same-inode/same-content contract of a hard link (a copy would not see the
-    // mutation). Part (b) recursive removal (`std::fs::remove_dir_all`, which on
-    // both macOS and Linux std opens each directory with `openat(.., O_DIRECTORY)`,
-    // reads it via `fdopendir`, and removes children with `unlinkat(dirfd, ..)`):
-    // a nested tree is built and removed, and its absence is asserted.
-    const HARD_LINK_AND_REMOVE_TREE_SOURCE: &str = r#"
-use std::fs;
+    // * Hard links and recursive removal (`linkat`, and the `openat`/`fdopendir`/
+    //   `unlinkat` walk `remove_dir_all` takes): a write through one name is seen
+    //   through the other, and the tree is gone.
+    // * `flock` keys on the inode: a second open's `LOCK_EX | LOCK_NB` reports
+    //   EWOULDBLOCK in libc `errno` (what std's `File::try_lock` reads), and
+    //   closing the first descriptor releases the lock.
+    // * POSIX record locks for the lone opener: process-scoped locks never
+    //   conflict with the process's own, so `F_SETLK`/`F_SETLKW` succeed and
+    //   `F_GETLK` reports `F_UNLCK`; a bogus type is EINVAL and a read lock on
+    //   write-only stdout EBADF. On Linux, open-file-description locks do contend
+    //   across descriptions, and release lets the second in. `struct flock` and
+    //   the command numbers differ between Linux and Darwin.
+    // * Positional vectored I/O: one `pwritev` of two frames lands at the offset
+    //   without moving the cursor, `preadv` reads across two buffers, a read past
+    //   the end is short, and stdout has no offset (`ESPIPE`).
+    // * `canonicalize` (`realpath` with and without a buffer) resolves a noisy
+    //   spelling of an existing directory to its canonical name.
+    // * Linux `statfs`/`fstatfs`: one constant ext4-like volume for any resolving
+    //   path or descriptor, ENOENT for a missing path, EBADF for a bad descriptor.
+    // * Linux `pwritev` whose second segment is a shared mapping of the file the
+    //   first segment wrote reads what that segment stored: Linux writes the
+    //   vector through one page cache.
+    const FS_SURFACE_SOURCE: &str = r#"
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
 
-fn main() {
-    // (a) hard link: mutate through one name, observe through the other.
+#[repr(C)]
+struct Iovec {
+    base: *const u8,
+    len: usize,
+}
+
+unsafe extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+    fn preadv(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn links_and_trees() {
     fs::write("/original.txt", b"one").unwrap();
     fs::hard_link("/original.txt", "/alias.txt").unwrap();
     fs::write("/original.txt", b"two-longer").unwrap();
     let via_alias = fs::read_to_string("/alias.txt").unwrap();
-
-    // (b) recursive removal of a nested tree via the openat/fdopendir/unlinkat path.
     fs::create_dir_all("/tree/sub/deep").unwrap();
     fs::write("/tree/top.txt", b"x").unwrap();
     fs::write("/tree/sub/mid.txt", b"y").unwrap();
     fs::write("/tree/sub/deep/leaf.txt", b"z").unwrap();
     fs::remove_dir_all("/tree").unwrap();
-
-    println!("via_alias={via_alias}");
-    println!("tree_exists={}", fs::metadata("/tree").is_ok());
-}
-"#;
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_hard_link_and_remove_dir_all_are_supported_and_deterministic() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("hard_link_tree.rs");
-        fs::write(&source, HARD_LINK_AND_REMOVE_TREE_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("hard-link-tree");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-
-        // Audit is clean: `invoke_in` already asserts exit 0, and neither `linkat`
-        // nor `fdopendir` may surface as an unsupported/unknown import or force an
-        // allowance -- the strong defs drop them off the import table entirely.
-        let audited = invoke(workspace, &["audit", bin.to_str().unwrap()]);
-        let audit_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&audited.stdout),
-            String::from_utf8_lossy(&audited.stderr)
-        );
-        for needle in [
-            "unsupported native imports",
-            "unknown-import",
-            "linkat",
-            "fdopendir",
-        ] {
-            assert!(
-                !audit_text.contains(needle),
-                "audit must be clean but mentioned {needle:?}:\n{audit_text}"
-            );
-        }
-
-        const EXPECTED: &str = "via_alias=two-longer\ntree_exists=false\n";
-
-        // Runs deterministically: byte-identical across repeated same-seed runs at
-        // several seeds. The hard link observes the mutation (same inode) and the
-        // tree is gone.
-        for seed in ["0", "3", "8"] {
-            let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
-            let baseline = String::from_utf8_lossy(&first.stdout).into_owned();
-            assert_eq!(
-                baseline, EXPECTED,
-                "unexpected hard-link/remove-tree output at seed {seed}: {baseline}"
-            );
-            for _ in 0..2 {
-                let again = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", seed]);
-                assert_eq!(
-                    baseline,
-                    String::from_utf8_lossy(&again.stdout),
-                    "output not byte-identical across runs at seed {seed}"
-                );
-            }
-        }
-
-        // A recorded run replays byte-identically under strict replay.
-        let trace = directory.path().join("hard-link.patina");
-        let recorded = invoke(
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "8",
-                "--record",
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "hard-link-tree",
-            ],
-        );
-        assert_eq!(String::from_utf8_lossy(&recorded.stdout), EXPECTED);
-        let replayed = invoke(
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "hard-link-tree",
-            ],
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&recorded.stdout),
-            String::from_utf8_lossy(&replayed.stdout),
-            "record and strict replay diverged"
-        );
-    }
-
-    // A guest that reads a file the supervisor mounted into the deterministic
-    // filesystem, and the mode and modification time it was captured with.
-    // Used to exercise `--mount` composing with `--record`/`replay`, which
-    // hands the child TWO inherited descriptors at once.
-    const MOUNT_READER_SOURCE: &str = r#"
-use std::fs;
-use std::os::unix::fs::MetadataExt;
-
-fn main() {
-    let contents = fs::read_to_string("/data.txt").expect("read mounted file");
-    let metadata = fs::metadata("/data.txt").expect("stat mounted file");
-    print!("{contents}mode={:o} mtime={}\n", metadata.mode() & 0o7777, metadata.mtime());
-}
-"#;
-
-    /// The mounted file's metadata as the reader prints it.
-    const MOUNTED_MODE_AND_MTIME: &str = "mode=640 mtime=1704067200\n";
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
-        // A label holding what the corpus component looks like: the hash is
-        // read where patina put it, not out of the label.
-        const LABEL: &str = "read-mount+fsimg:label";
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("read_mount.rs");
-        fs::write(&source, MOUNT_READER_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("read-mount");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-
-        let mount = directory.path().join("corpus");
-        fs::create_dir(&mount).unwrap();
-        let data = mount.join("data.txt");
-        fs::write(&data, "MOUNTED-CONTENT\n").unwrap();
-        let set_metadata = |mtime_secs: u64| {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&data, fs::Permissions::from_mode(0o640)).unwrap();
-            fs::File::options()
-                .write(true)
-                .open(&data)
-                .unwrap()
-                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs))
-                .unwrap();
-        };
-        set_metadata(1_704_067_200);
-
-        let trace = directory.path().join("mount.patina");
-        let recorded = invoke(
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "0",
-                "--mount",
-                mount.to_str().unwrap(),
-                "--record",
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                LABEL,
-            ],
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&recorded.stdout),
-            format!("MOUNTED-CONTENT\n{MOUNTED_MODE_AND_MTIME}"),
-            "record mode with --mount did not see the mounted file as captured"
-        );
-
-        // `replay` re-supplies the host corpus with --mount (a host input the trace
-        // cannot carry; only its hash is in the fingerprint). The seed and everything
-        // else come from the trace, so the run reproduces byte-identically.
-        let replayed = invoke(
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--mount",
-                mount.to_str().unwrap(),
-                "--fingerprint",
-                LABEL,
-            ],
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&replayed.stdout),
-            format!("MOUNTED-CONTENT\n{MOUNTED_MODE_AND_MTIME}"),
-            "strict replay with --mount diverged from the recorded run"
-        );
-
-        // The same contents restamped, as a fresh checkout leaves them: the
-        // guest can see the mtime, so the supervisor refuses this corpus too,
-        // before the guest runs, naming the half that moved.
-        set_metadata(1_704_153_600);
-        let restamped = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--mount",
-                mount.to_str().unwrap(),
-                "--fingerprint",
-                LABEL,
-                "--format",
-                "json",
-            ],
-        );
-        let restamped_stdout = String::from_utf8_lossy(&restamped.stdout);
-        let envelope: serde_json::Value = serde_json::from_str(restamped_stdout.trim())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "envelope was not one JSON object: {error}\n{restamped_stdout}\nstderr:\n{}",
-                    String::from_utf8_lossy(&restamped.stderr)
-                )
-            });
-        assert!(!restamped.status.success(), "{envelope:#}");
-        assert_eq!(
-            envelope["refusal"]["class"], "fingerprint_mismatch",
-            "{envelope:#}"
-        );
-        assert_eq!(
-            envelope["refusal"]["mismatch"], "mount_metadata",
-            "{envelope:#}"
-        );
-        assert!(envelope["guest_exit"].is_null(), "{envelope:#}");
-        set_metadata(1_704_067_200);
-
-        // A DIFFERENT corpus at replay hashes to a different image, so the hash
-        // folded into the fingerprint no longer matches and replay must fail closed —
-        // and say WHY (the specific fingerprint mismatch), not abort mutely with the
-        // generic "no runtime installed" line.
-        let other_mount = directory.path().join("corpus-other");
-        fs::create_dir(&other_mount).unwrap();
-        fs::write(other_mount.join("data.txt"), "DIFFERENT-CONTENT\n").unwrap();
-        let cross = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--mount",
-                other_mount.to_str().unwrap(),
-                "--fingerprint",
-                LABEL,
-            ],
-        );
-        let cross_stderr = String::from_utf8_lossy(&cross.stderr);
-        assert!(
-            !cross.status.success(),
-            "replay against a different --mount corpus must fail closed:\nstderr:\n{cross_stderr}"
-        );
-        // The refusal carries the corpus image hash (`+fsimg:<hash>`): it is the
-        // recorded corpus's hash that no longer matches the substituted one, so
-        // the fail-closed reason points squarely at the corpus, not a generic error.
-        assert!(
-            cross_stderr.contains("+fsimg:"),
-            "the fingerprint mismatch must name the corpus image hash (+fsimg:):\nstderr:\n{cross_stderr}"
-        );
-    }
-
-    // A guest that opens the SAME file twice and takes an advisory `flock` on each
-    // descriptor. The interposed `flock` keys on the deterministic-fs inode, so the
-    // second `LOCK_EX | LOCK_NB` must report EWOULDBLOCK (-1) — the contention a
-    // single-opener database's open surfaces as an "already open" error — rather than
-    // both succeeding as a naive always-0 stub would — and it must report it in
-    // libc `errno` (EWOULDBLOCK: 11 on Linux, 35 on Darwin), which is what std's
-    // `File::try_lock` reads to say `WouldBlock`; the shim keeps its own thread-local
-    // errno, so a C entry that forwards a `patina_*` result without `fail_int` leaves
-    // libc errno STALE (the class: every `-1`-returning interposer must translate —
-    // `flock` itself did not until this pinned it; the same `fail_int` guards the
-    // `fcntl` OFD arm that shares the lock table). Closing the first descriptor
-    // releases the lock, so a third opener then acquires it, proving
-    // release-on-close.
-    const FLOCK_CONTENTION_SOURCE: &str = r#"
-use std::fs::{File, OpenOptions};
-use std::os::unix::io::AsRawFd;
-
-unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
-}
-const LOCK_EX: i32 = 2;
-const LOCK_NB: i32 = 4;
-
-fn try_lock(file: &File) -> i32 {
-    unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) }
+    println!("TREE via_alias={via_alias} tree_exists={}", fs::metadata("/tree").is_ok());
 }
 
-fn main() {
-    let first = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("/lock.db")
-        .unwrap();
+fn flock_contention() {
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let try_lock = |file: &File| unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    let first = OpenOptions::new().read(true).write(true).create(true).open("/lock.db").unwrap();
     let first_lock = try_lock(&first);
     let second = File::open("/lock.db").unwrap();
     let second_lock = try_lock(&second);
-    let second_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let second_errno = errno();
     drop(first);
     let third = File::open("/lock.db").unwrap();
     let third_lock = try_lock(&third);
     println!("FLOCK first={first_lock} second={second_lock}/{second_errno} third={third_lock}");
 }
-"#;
-
-    // The per-inode advisory-lock table: a second open of the same path contends the
-    // first's `LOCK_EX`, and closing the first releases it. A single-opener path
-    // still acquires cleanly; this is the can-fail half.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_flock_contends_on_a_second_open_and_releases_on_close() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("flock.rs");
-        fs::write(&source, FLOCK_CONTENTION_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("flock");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        let ewouldblock = if cfg!(target_os = "macos") { 35 } else { 11 };
-        assert!(
-            stdout.contains(&format!("FLOCK first=0 second=-1/{ewouldblock} third=0")),
-            "per-inode flock must contend the second open (EWOULDBLOCK in libc errno) and release on close:\nstdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&run.stderr),
-        );
-    }
-
-    // The lone opener's POSIX record locks. A run is ONE process and process-scoped
-    // record locks never conflict with locks their own process holds (POSIX merges
-    // them; any close releases them all), so `F_SETLK`/`F_SETLKW` on an open regular
-    // fd succeed and `F_GETLK` reports the range `F_UNLCK` — exactly what the lone
-    // opener sees on the host (the open-time whole-file lock a storage engine takes
-    // through rustix `fcntl_lock`). Left unmodeled, the lock was `ENOSYS` and the
-    // engine aborted at unlock. The modeled answer is not a blanket 0: a bogus lock
-    // type is `EINVAL` and captured stdio is `EBADF`. `struct flock` and the command
-    // numbers differ between Linux and Darwin, so the guest carries both ABIs.
-    const FCNTL_RECORD_LOCK_SOURCE: &str = r#"
-use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
-
-unsafe extern "C" {
-    fn fcntl(fd: i32, command: i32, ...) -> i32;
-}
-
 
 #[cfg(target_os = "linux")]
 mod abi {
@@ -545,35 +122,22 @@ mod abi {
         Flock { l_start: 0, l_len: 0, l_pid: 0, l_type, l_whence: 0 }
     }
 }
-use abi::*;
 
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
-fn main() {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("/locked.db")
-        .unwrap();
+fn record_locks() {
+    use abi::*;
+    let file = OpenOptions::new().read(true).write(true).create(true).open("/locked.db").unwrap();
     let fd = file.as_raw_fd();
-    let mut lock = whole(F_WRLCK);
-    let setlk = unsafe { fcntl(fd, F_SETLK, &mut lock as *mut Flock) };
+    let lock = |fd: i32, command: i32, mut flock: Flock| unsafe { fcntl(fd, command, &mut flock as *mut Flock) };
+    let setlk = lock(fd, F_SETLK, whole(F_WRLCK));
     let mut probe = whole(F_WRLCK);
     let getlk = unsafe { fcntl(fd, F_GETLK, &mut probe as *mut Flock) };
-    let mut again = whole(F_RDLCK);
-    let setlkw = unsafe { fcntl(fd, F_SETLKW, &mut again as *mut Flock) };
-    let mut unlock = whole(F_UNLCK);
-    let unlck = unsafe { fcntl(fd, F_SETLK, &mut unlock as *mut Flock) };
-    let mut bogus = whole(7);
-    let bad_type = unsafe { fcntl(fd, F_SETLK, &mut bogus as *mut Flock) };
+    let setlkw = lock(fd, F_SETLKW, whole(F_RDLCK));
+    let unlck = lock(fd, F_SETLK, whole(F_UNLCK));
+    let bad_type = lock(fd, F_SETLK, whole(7));
     let bad_type_errno = errno();
     // A READ lock on the write-only standard output is EBADF: fcntl_setlk
     // checks the lock type against the description's access mode.
-    let mut stdio = whole(F_RDLCK);
-    let on_stdio = unsafe { fcntl(1, F_SETLK, &mut stdio as *mut Flock) };
+    let on_stdio = lock(1, F_SETLK, whole(F_RDLCK));
     let stdio_errno = errno();
     println!(
         "FCNTL_LOCK setlk={setlk} getlk={getlk} getlk_type={} setlkw={setlkw} unlck={unlck} bad_type={bad_type}/{bad_type_errno} stdio={on_stdio}/{stdio_errno}",
@@ -583,108 +147,26 @@ fn main() {
     {
         const F_OFD_GETLK: i32 = 36;
         const F_OFD_SETLK: i32 = 37;
-        // Open-file-description locks DO contend inside one process: a second
-        // open's whole-file F_OFD_SETLK meets the first's and reports EAGAIN;
-        // a byte-range lock through the holder joins its own lock, and
-        // F_OFD_GETLK through it finds no other owner's; the first
-        // description's release lets the second acquire. (errno is printed
-        // after each call and a success leaves it alone, so it still reads
-        // the EAGAIN.) The second opener is read-write: a write lock needs a
-        // writable description (fcntl_setlk's access-mode check answers EBADF
-        // otherwise).
-        let mut first = whole(F_WRLCK);
-        let ofd_first = unsafe { fcntl(fd, F_OFD_SETLK, &mut first as *mut Flock) };
-        let second = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/locked.db")
-            .unwrap();
-        let mut contend = whole(F_WRLCK);
-        let ofd_second =
-            unsafe { fcntl(second.as_raw_fd(), F_OFD_SETLK, &mut contend as *mut Flock) };
-        let ofd_second_errno = errno();
-        let mut range = Flock { l_len: 16, ..whole(F_WRLCK) };
-        let ofd_range = unsafe { fcntl(fd, F_OFD_SETLK, &mut range as *mut Flock) };
-        let ofd_range_errno = errno();
-        let mut get = whole(F_WRLCK);
-        let ofd_getlk = unsafe { fcntl(fd, F_OFD_GETLK, &mut get as *mut Flock) };
-        let ofd_getlk_errno = errno();
-        let mut release = whole(F_UNLCK);
-        let ofd_release = unsafe { fcntl(fd, F_OFD_SETLK, &mut release as *mut Flock) };
-        let mut retry = whole(F_WRLCK);
-        let ofd_retry =
-            unsafe { fcntl(second.as_raw_fd(), F_OFD_SETLK, &mut retry as *mut Flock) };
+        // errno is printed after each call and a success leaves it alone, so it
+        // still reads the second opener's EAGAIN.
+        let first = lock(fd, F_OFD_SETLK, whole(F_WRLCK));
+        let second = OpenOptions::new().read(true).write(true).open("/locked.db").unwrap();
+        let contend = lock(second.as_raw_fd(), F_OFD_SETLK, whole(F_WRLCK));
+        let contend_errno = errno();
+        let range = lock(fd, F_OFD_SETLK, Flock { l_len: 16, ..whole(F_WRLCK) });
+        let range_errno = errno();
+        let getlk = lock(fd, F_OFD_GETLK, whole(F_WRLCK));
+        let getlk_errno = errno();
+        let release = lock(fd, F_OFD_SETLK, whole(F_UNLCK));
+        let retry = lock(second.as_raw_fd(), F_OFD_SETLK, whole(F_WRLCK));
         println!(
-            "FCNTL_OFD first={ofd_first} second={ofd_second}/{ofd_second_errno} range={ofd_range}/{ofd_range_errno} getlk={ofd_getlk}/{ofd_getlk_errno} release={ofd_release} retry={ofd_retry}"
+            "FCNTL_OFD first={first} second={contend}/{contend_errno} range={range}/{range_errno} getlk={getlk}/{getlk_errno} release={release} retry={retry}"
         );
     }
 }
-"#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_fcntl_record_locks_are_modeled_for_the_lone_opener() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("fcntl_lock.rs");
-        fs::write(&source, FCNTL_RECORD_LOCK_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("fcntl-lock");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(
-            stdout.contains(
-                "FCNTL_LOCK setlk=0 getlk=0 getlk_type=2 setlkw=0 unlck=0 bad_type=-1/22 stdio=-1/9"
-            ),
-            "the lone opener's record locks must be taken, reported unlocked, and released — and bad input refused:\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        );
-        if cfg!(target_os = "linux") {
-            assert!(
-                stdout.contains(
-                    "FCNTL_OFD first=0 second=-1/11 range=0/11 getlk=0/11 release=0 retry=0"
-                ),
-                "an OFD lock must contend across descriptions, the holder's byte-range lock and F_OFD_GETLK must succeed, and release must let the second opener in:\nstdout:\n{stdout}\nstderr:\n{stderr}"
-            );
-        }
-    }
-
-    // Positional vectored I/O: ONE `pwritev` of two frames lands at the given offset
-    // without moving the cursor (a database backend batches a transaction's WAL
-    // frames this way), `preadv` reads them back across two buffers, a read past
-    // the end is short, and stdout has no offset (`ESPIPE`). Before these were
-    // interposed, `pwritev` was the gate's planted *uninterposed* filesystem
-    // representative — a guest reaching it was refused pre-run.
-    const POSITIONAL_VECTORED_IO_SOURCE: &str = r#"
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
-
-#[repr(C)]
-struct Iovec {
-    base: *const u8,
-    len: usize,
-}
-
-unsafe extern "C" {
-    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
-    fn preadv(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
-}
-
-fn main() {
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("/wal")
-        .unwrap();
+fn positional_vectored() {
+    let mut file = OpenOptions::new().read(true).write(true).create(true).open("/wal").unwrap();
     file.write_all(b"0123456789").unwrap();
     file.seek(SeekFrom::Start(7)).unwrap();
     let fd = file.as_raw_fd();
@@ -708,74 +190,69 @@ fn main() {
     let tail_bufs = [Iovec { base: tail.as_mut_ptr().cast_const(), len: 8 }];
     let short = unsafe { preadv(fd, tail_bufs.as_ptr(), 1, 8) };
     let espipe = unsafe { pwritev(1, frames.as_ptr(), 2, 0) };
-    let espipe_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let espipe_errno = errno();
     println!(
         "PVEC wrote={wrote} cursor={cursor} read={read} a={} b={} file={whole} short={short} stdout={espipe}/{espipe_errno}",
         String::from_utf8_lossy(&a),
         String::from_utf8_lossy(&b)
     );
 }
-"#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_positional_vectored_io_round_trips_through_the_deterministic_fs() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("pvec.rs");
-        fs::write(&source, POSITIONAL_VECTORED_IO_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("pvec");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        assert!(
-            stdout.contains(
-                "PVEC wrote=4 cursor=7 read=7 a=1AB b=CD67 file=01ABCD6789 short=2 stdout=-1/29"
-            ),
-            "pwritev/preadv must be positional, cursor-independent, short at EOF, and ESPIPE on stdout:\nstdout:\n{stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+fn canonical() {
+    fs::create_dir_all("/tmp/patina-root/fragments").unwrap();
+    let direct = fs::canonicalize("/tmp/patina-root/fragments").unwrap();
+    let noisy = fs::canonicalize("/tmp/patina-root/../patina-root/./fragments//").unwrap();
+    println!("CANONICAL direct={} noisy={}", direct.display(), noisy.display());
+}
+
+#[cfg(target_os = "linux")]
+fn volume() {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Statfs {
+        f_type: i64,
+        f_bsize: i64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_fsid: [i32; 2],
+        f_namelen: i64,
+        f_frsize: i64,
+        f_flags: i64,
+        f_spare: [i64; 4],
     }
-
-    // A `pwritev` whose second segment is a shared mapping of the file the
-    // first segment just wrote reads what that segment stored: Linux writes the
-    // vector through one page cache, so file and mapping both end `BB`.
-    #[cfg(target_os = "linux")]
-    const PWRITEV_FROM_OWN_MAPPING_SOURCE: &str = r#"
-use std::io::Write;
-use std::os::unix::io::AsRawFd;
-
-#[repr(C)]
-struct Iovec {
-    base: *const u8,
-    len: usize,
+    unsafe extern "C" {
+        fn statfs(path: *const u8, buf: *mut Statfs) -> i32;
+        fn fstatfs(fd: i32, buf: *mut Statfs) -> i32;
+    }
+    fs::create_dir_all("/db").unwrap();
+    fs::write("/db/wal", b"frame").unwrap();
+    let mut by_path = Statfs::default();
+    let path_rc = unsafe { statfs(b"/db/wal\0".as_ptr(), &mut by_path) };
+    let mut missing = Statfs::default();
+    let missing_rc = unsafe { statfs(b"/db/nope\0".as_ptr(), &mut missing) };
+    let missing_errno = errno();
+    let file = File::open("/db/wal").unwrap();
+    let mut by_fd = Statfs::default();
+    let fd_rc = unsafe { fstatfs(file.as_raw_fd(), &mut by_fd) };
+    let mut closed = Statfs::default();
+    let bad_rc = unsafe { fstatfs(4242, &mut closed) };
+    println!(
+        "STATFS path={path_rc} type={:#x} bsize={} namelen={} missing={missing_rc}/{missing_errno} fd={fd_rc} fd_type={:#x} bad={bad_rc}",
+        by_path.f_type, by_path.f_bsize, by_path.f_namelen, by_fd.f_type
+    );
 }
 
-unsafe extern "C" {
-    fn pwritev(fd: i32, iov: *const Iovec, iovcnt: i32, offset: i64) -> isize;
-    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
-}
-
-const PROT_READ_WRITE: i32 = 3;
-const MAP_SHARED: i32 = 1;
-
-fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| "/mapped".into());
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .unwrap();
+#[cfg(target_os = "linux")]
+fn pwritev_view(path: &str) {
+    unsafe extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    }
+    const PROT_READ_WRITE: i32 = 3;
+    const MAP_SHARED: i32 = 1;
+    let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path).unwrap();
     file.write_all(b"AA").unwrap();
     let view = unsafe { mmap(std::ptr::null_mut(), 2, PROT_READ_WRITE, MAP_SHARED, file.as_raw_fd(), 0) };
     assert_ne!(view as isize, -1);
@@ -787,63 +264,209 @@ fn main() {
     let mapped = unsafe { std::slice::from_raw_parts(view, 2) };
     println!(
         "PWRITEV_VIEW wrote={wrote} file={} view={}",
-        String::from_utf8_lossy(&std::fs::read(&path).unwrap()),
+        String::from_utf8_lossy(&fs::read(path).unwrap()),
         String::from_utf8_lossy(mapped)
     );
 }
+
+fn mount() {
+    use std::os::unix::fs::MetadataExt;
+    let contents = fs::read_to_string("/data.txt").expect("read mounted file");
+    let metadata = fs::metadata("/data.txt").expect("stat mounted file");
+    print!("{contents}mode={:o} mtime={}\n", metadata.mode() & 0o7777, metadata.mtime());
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("mount") => mount(),
+        #[cfg(target_os = "linux")]
+        Some("pwritev_view") => pwritev_view(&args[1]),
+        Some(other) => panic!("unknown mode {other}"),
+        None => {
+            links_and_trees();
+            flock_contention();
+            record_locks();
+            positional_vectored();
+            canonical();
+            #[cfg(target_os = "linux")]
+            {
+                volume();
+                pwritev_view("/mapped");
+            }
+        }
+    }
+}
 "#;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_pwritev_segment_from_a_mapping_of_its_file_reads_the_earlier_segment() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("pwritev_view.rs");
-        fs::write(&source, PWRITEV_FROM_OWN_MAPPING_SOURCE).unwrap();
-        let native = directory.path().join("native-file");
-        let oracle = native_run_of(&source, &[native.to_str().unwrap()]);
+    fn native_fs_surface_answers_from_the_deterministic_filesystem() {
+        let guest = native_build::source_guest("fs_surface", FS_SURFACE_SOURCE);
+        // `linkat` and `fdopendir` are shim-defined, so they leave the import
+        // table and the audit passes without an allowance.
+        guest.assert_audit_clean();
+        guest.assert_no_imports(&["linkat", "fdopendir"]);
+        let output = guest.assert_run_success(1, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let ewouldblock = if cfg!(target_os = "macos") { 35 } else { 11 };
+        let mut expected = vec![
+            "TREE via_alias=two-longer tree_exists=false".to_owned(),
+            format!("FLOCK first=0 second=-1/{ewouldblock} third=0"),
+            "FCNTL_LOCK setlk=0 getlk=0 getlk_type=2 setlkw=0 unlck=0 bad_type=-1/22 stdio=-1/9"
+                .to_owned(),
+            "PVEC wrote=4 cursor=7 read=7 a=1AB b=CD67 file=01ABCD6789 short=2 stdout=-1/29"
+                .to_owned(),
+            "CANONICAL direct=/tmp/patina-root/fragments noisy=/tmp/patina-root/fragments"
+                .to_owned(),
+        ];
+        if cfg!(target_os = "linux") {
+            expected.push(
+                "FCNTL_OFD first=0 second=-1/11 range=0/11 getlk=0/11 release=0 retry=0".to_owned(),
+            );
+            expected.push(
+                "STATFS path=0 type=0xef53 bsize=4096 namelen=255 missing=-1/2 fd=0 fd_type=0xef53 bad=-1"
+                    .to_owned(),
+            );
+            let native = guest.dir.path().join("native-file");
+            expected.push(native_run_of(
+                FS_SURFACE_SOURCE,
+                guest.dir.path(),
+                &["pwritev_view", native.to_str().unwrap()],
+            ));
+        }
+        for line in expected {
+            assert!(
+                stdout.lines().any(|printed| printed == line),
+                "missing {line:?}:\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        mount_composes_with_record_and_replay(&guest);
+    }
+
+    /// `--mount` composes with `--record`/`replay`, which hands the child two
+    /// inherited descriptors at once, and a replay against a corpus that moved is
+    /// refused before the guest runs, naming what moved.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn mount_composes_with_record_and_replay(guest: &common::native::Guest) {
+        // A label holding what the corpus component looks like: the hash is
+        // read where patina put it, not out of the label.
+        const LABEL: &str = "read-mount+fsimg:label";
+        let directory = guest.dir.path();
+        let bin = guest.binary.to_str().unwrap();
         let workspace = native_workspace();
-        let bin = directory.path().join("pwritev-view");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let bin = bin.to_str().unwrap();
-        let trace = directory.path().join("pwritev-view.patina");
+        let mount = directory.join("corpus");
+        fs::create_dir(&mount).unwrap();
+        let data = mount.join("data.txt");
+        fs::write(&data, "MOUNTED-CONTENT\n").unwrap();
+        let set_metadata = |mtime_secs: u64| {
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o640)).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&data)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime_secs))
+                .unwrap();
+        };
+        set_metadata(1_704_067_200);
+        let expected = "MOUNTED-CONTENT\nmode=640 mtime=1704067200\n";
+
+        let trace = directory.join("mount.patina");
+        let mount_arg = mount.to_str().unwrap();
         let recorded = invoke(
             workspace,
             &[
                 "run",
                 bin,
                 "--seed",
-                "1",
+                "0",
+                "--mount",
+                mount_arg,
                 "--record",
                 trace.to_str().unwrap(),
+                "--fingerprint",
+                LABEL,
+                "--",
+                "mount",
             ],
         );
-        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
-        for (what, output) in [("run", &recorded), ("replay", &replayed)] {
-            let line = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .find(|line| line.starts_with("PWRITEV_VIEW "))
-                .map(str::to_owned);
-            assert_eq!(line.as_deref(), Some(oracle.as_str()), "{what} vs native");
-        }
+        assert_eq!(String::from_utf8_lossy(&recorded.stdout), expected);
+
+        // `replay` re-supplies the host corpus with --mount (a host input the trace
+        // cannot carry; only its hash is in the fingerprint).
+        let replay = |mount: &str, extra: &[&str]| {
+            let mut args = vec![
+                "replay",
+                bin,
+                trace.to_str().unwrap(),
+                "--mount",
+                mount,
+                "--fingerprint",
+                LABEL,
+            ];
+            args.extend_from_slice(extra);
+            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+        };
+        let replayed = replay(mount_arg, &[]);
+        assert!(
+            replayed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&replayed.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&replayed.stdout), expected);
+
+        // The same contents restamped, as a fresh checkout leaves them: the guest
+        // can see the mtime, so the supervisor refuses this corpus too, before the
+        // guest runs, naming the half that moved.
+        set_metadata(1_704_153_600);
+        let restamped = replay(mount_arg, &["--format", "json"]);
+        let envelope: serde_json::Value = serde_json::from_str(
+            String::from_utf8_lossy(&restamped.stdout).trim(),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "envelope was not one JSON object: {error}\nstderr:\n{}",
+                String::from_utf8_lossy(&restamped.stderr)
+            )
+        });
+        assert!(!restamped.status.success(), "{envelope:#}");
+        assert_eq!(
+            envelope["refusal"]["class"], "fingerprint_mismatch",
+            "{envelope:#}"
+        );
+        assert_eq!(
+            envelope["refusal"]["mismatch"], "mount_metadata",
+            "{envelope:#}"
+        );
+        assert!(envelope["guest_exit"].is_null(), "{envelope:#}");
+
+        // A different corpus hashes to a different image, so replay fails closed
+        // naming the corpus image hash, not a generic error.
+        let other_mount = directory.join("corpus-other");
+        fs::create_dir(&other_mount).unwrap();
+        fs::write(other_mount.join("data.txt"), "DIFFERENT-CONTENT\n").unwrap();
+        let cross = replay(other_mount.to_str().unwrap(), &[]);
+        let cross_stderr = String::from_utf8_lossy(&cross.stderr);
+        assert!(!cross.status.success(), "{cross_stderr}");
+        assert!(
+            cross_stderr.contains("+fsimg:"),
+            "the fingerprint mismatch must name the corpus image hash (+fsimg:):\n{cross_stderr}"
+        );
     }
 
-    /// The `PWRITEV_VIEW` line a single-file guest prints run natively with
-    /// plain `rustc`, without Patina.
-    #[cfg(target_os = "linux")]
-    fn native_run_of(source: &Path, args: &[&str]) -> String {
-        let binary = source.with_extension("native");
+    /// The line a mode of `source` prints first when built with plain `rustc` and
+    /// run natively, without Patina.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn native_run_of(source: &str, directory: &Path, args: &[&str]) -> String {
+        let source_path = directory.join("native.rs");
+        fs::write(&source_path, source).unwrap();
+        let binary = directory.join("native");
         let built = Command::new("rustc")
             .args(["--edition", "2024", "-o"])
             .arg(&binary)
-            .arg(source)
+            .arg(&source_path)
             .output()
             .unwrap();
         assert!(
@@ -859,146 +482,9 @@ fn main() {
         );
         String::from_utf8_lossy(&output.stdout)
             .lines()
-            .find(|line| line.starts_with("PWRITEV_VIEW "))
-            .expect("native guest printed its line")
+            .next()
+            .expect("the native guest printed its line")
             .to_owned()
-    }
-
-    // `statfs`/`fstatfs` (Linux): the virtual filesystem answers as ONE constant
-    // ext4-like volume for any path or descriptor that resolves, ENOENT for a
-    // missing path, EBADF for a bad descriptor. A storage engine probes this on
-    // every open to decide whether the path's filesystem supports its multi-process
-    // coordination; left unmodeled, the call reached the HOST with a virtual path
-    // and the engine refused to open at all.
-    #[cfg(target_os = "linux")]
-    const STATFS_SOURCE: &str = r#"
-use std::os::unix::io::AsRawFd;
-
-#[repr(C)]
-#[derive(Default)]
-struct Statfs {
-    f_type: i64,
-    f_bsize: i64,
-    f_blocks: u64,
-    f_bfree: u64,
-    f_bavail: u64,
-    f_files: u64,
-    f_ffree: u64,
-    f_fsid: [i32; 2],
-    f_namelen: i64,
-    f_frsize: i64,
-    f_flags: i64,
-    f_spare: [i64; 4],
-}
-
-unsafe extern "C" {
-    fn statfs(path: *const u8, buf: *mut Statfs) -> i32;
-    fn fstatfs(fd: i32, buf: *mut Statfs) -> i32;
-}
-
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
-fn main() {
-    std::fs::create_dir_all("/db").unwrap();
-    std::fs::write("/db/wal", b"frame").unwrap();
-    let mut by_path = Statfs::default();
-    let path_rc = unsafe { statfs(b"/db/wal\0".as_ptr(), &mut by_path) };
-    let mut missing = Statfs::default();
-    let missing_rc = unsafe { statfs(b"/db/nope\0".as_ptr(), &mut missing) };
-    let missing_errno = errno();
-    let file = std::fs::File::open("/db/wal").unwrap();
-    let mut by_fd = Statfs::default();
-    let fd_rc = unsafe { fstatfs(file.as_raw_fd(), &mut by_fd) };
-    let mut closed = Statfs::default();
-    let bad_rc = unsafe { fstatfs(4242, &mut closed) };
-    println!(
-        "STATFS path={path_rc} type={:#x} bsize={} namelen={} missing={missing_rc}/{missing_errno} fd={fd_rc} fd_type={:#x} bad={bad_rc}",
-        by_path.f_type, by_path.f_bsize, by_path.f_namelen, by_fd.f_type
-    );
-}
-"#;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn native_statfs_answers_as_one_virtual_volume() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("statfs.rs");
-        fs::write(&source, STATFS_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("statfs");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let run = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        assert!(
-        stdout.contains(
-            "STATFS path=0 type=0xef53 bsize=4096 namelen=255 missing=-1/2 fd=0 fd_type=0xef53 bad=-1"
-        ),
-        "statfs/fstatfs must answer as one virtual ext4-like volume, ENOENT a missing path, and EBADF a bad fd:\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    }
-
-    // `std::fs::canonicalize` on macOS reaches `realpath(path, NULL)` (the
-    // allocating convention) and on Linux `realpath(path, buf)`; both must resolve
-    // an existing guest path to the same canonical absolute spelling driven purely
-    // by the deterministic filesystem. The guest canonicalizes the path two ways --
-    // its exact spelling and a `..`/`.`/`//`-laden spelling of the same directory --
-    // so the assertion catches both the destination==NULL ENOSYS regression and a
-    // verbatim (non-canonicalizing) result.
-    const CANONICALIZE_SOURCE: &str = r#"
-use std::fs;
-
-fn main() {
-    fs::create_dir_all("/tmp/patina-root/fragments").unwrap();
-    let direct = fs::canonicalize("/tmp/patina-root/fragments").unwrap();
-    let noisy = fs::canonicalize("/tmp/patina-root/../patina-root/./fragments//").unwrap();
-    println!("direct={}", direct.display());
-    println!("noisy={}", noisy.display());
-}
-"#;
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_canonicalize_resolves_an_existing_guest_path_deterministically() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("canonicalize.rs");
-        fs::write(&source, CANONICALIZE_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("canonicalize");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        let first_stdout = String::from_utf8_lossy(&first.stdout);
-        assert!(
-            first_stdout.contains("direct=/tmp/patina-root/fragments")
-                && first_stdout.contains("noisy=/tmp/patina-root/fragments"),
-            "canonicalize must resolve both spellings to the same canonical guest path:\nstdout:\n{first_stdout}\nstderr:\n{}",
-            String::from_utf8_lossy(&first.stderr),
-        );
-        let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert_eq!(
-            first.stdout,
-            second.stdout,
-            "a same-seed canonicalize run must be byte-identical:\nstderr:\n{}",
-            String::from_utf8_lossy(&second.stderr),
-        );
     }
 
     // A guest/static constructor can run before Patina's startup constructor. If it

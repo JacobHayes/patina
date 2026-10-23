@@ -22,7 +22,6 @@
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::observe::{Id, Norm};
 use crate::probe::{NO_SUCH_PID, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
@@ -324,7 +323,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/vm_rw",
     run,
-    vehicles: Vehicle::ALL,
     covers: &[Syscall::N_process_vm_readv, Syscall::N_process_vm_writev],
     symbols: &["process_vm_readv", "process_vm_writev"],
     ..DEFAULTS

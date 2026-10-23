@@ -156,7 +156,7 @@ mod tests {
     // Class-level detector for every cache/campaign/trace lock caller: distinct
     // handles must contend, and closing the holder must release ownership.
     #[test]
-    fn exclusive_contention_and_release() {
+    fn exclusive_and_shared_contention_and_release() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("exclusive");
         let owner = File::create(&path).unwrap();
@@ -183,6 +183,14 @@ mod tests {
         );
         drop(contender);
         lock_shared(&reader, false).unwrap();
+        // Shared holders coexist and keep an exclusive contender out.
+        let second = File::open(&path).unwrap();
+        lock_shared(&second, false).unwrap();
+        let writer = OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(
+            lock_exclusive(&writer, false).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
@@ -203,30 +211,6 @@ mod tests {
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::PermissionDenied
-        );
-    }
-
-    #[test]
-    fn shared_holders_coexist_and_exclusive_holders_contend() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("shared");
-        let first = File::create(&path).unwrap();
-        let second = OpenOptions::new().write(true).open(&path).unwrap();
-        lock_shared(&first, true).unwrap();
-        lock_shared(&second, false).unwrap();
-        let contender = OpenOptions::new().write(true).open(&path).unwrap();
-        assert_eq!(
-            lock_exclusive(&contender, false).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
-        );
-
-        let path = temp.path().join("exclusive");
-        let writer = File::create(&path).unwrap();
-        lock_exclusive(&writer, false).unwrap();
-        let reader = OpenOptions::new().write(true).open(&path).unwrap();
-        assert_eq!(
-            lock_shared(&reader, false).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
         );
     }
 }

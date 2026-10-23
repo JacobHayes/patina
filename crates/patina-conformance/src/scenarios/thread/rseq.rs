@@ -21,7 +21,7 @@
 //! thread glibc's area would be registered, handing the kernel thread-local
 //! memory to write CPU ids into.
 //!
-//! glibc wraps no rseq, so the scenario runs through the kernel vehicles,
+//! glibc wraps no rseq, so the scenario runs through the `syscall` vehicle,
 //! and it finds the area through glibc's documented ABI words, linked
 //! (patina's `dlsym` answers NULL for them). Every call is refused: glibc's
 //! registration is never changed.
@@ -221,7 +221,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/rseq",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[Syscall::N_rseq],
     needs: &[Need::RseqRegistered],
     ..DEFAULTS

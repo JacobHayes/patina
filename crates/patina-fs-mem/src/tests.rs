@@ -4,10 +4,6 @@ use crate::MemFs;
 use patina_dst_abi::{ErrorCode, FsClock, FsEntryKind, OpenFlags, SeekWhence, XattrTarget};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
-/// RED before node-identity resolution: `*at` resolution replayed the name a
-/// descriptor was opened under, so a renamed directory detached its
-/// descriptor and a symlink planted at the vacated name captured every later
-/// resolution through it.
 /// A plain `O_WRONLY`: write access with no creation, truncation, or append.
 pub(super) fn write_only() -> OpenFlags {
     OpenFlags {
@@ -23,14 +19,7 @@ pub(super) fn write_only() -> OpenFlags {
 }
 
 #[test]
-fn new_seeds_root_and_tmp_directories() {
-    let mut fs = MemFs::new();
-    assert_eq!(fs.metadata("/").unwrap().kind, FsEntryKind::Directory);
-    assert_eq!(fs.metadata("/tmp").unwrap().kind, FsEntryKind::Directory);
-}
-
-#[test]
-fn directories_metadata_seek_append_and_remove_are_deterministic() {
+fn files_are_written_read_seeked_appended_truncated_and_removed() {
     let mut fs = MemFs::new();
     fs.create_directory(FsClock::EPOCH, "/state", 0o777)
         .unwrap();
@@ -51,31 +40,45 @@ fn directories_metadata_seek_append_and_remove_are_deterministic() {
             },
         )
         .unwrap();
-    fs.write(FsClock::EPOCH, fd, b"patina").unwrap();
+    assert_eq!(fs.write(FsClock::EPOCH, fd, b"patina").unwrap(), 6);
     assert_eq!(fs.seek(fd, -3, SeekWhence::End).unwrap(), 3);
     assert_eq!(fs.read(FsClock::EPOCH, fd, 3).unwrap(), b"ina");
     assert_eq!(fs.fd_metadata(fd).unwrap().len, 6);
     fs.close(fd).unwrap();
+
+    // A path with empty and `.` components names the same file; a short
+    // read stops at the end and a read there is empty.
+    let read_fd = fs
+        .open(FsClock::EPOCH, "/state//./value", OpenFlags::read_only())
+        .unwrap();
+    assert_eq!(fs.read(FsClock::EPOCH, read_fd, 3).unwrap(), b"pat");
+    assert_eq!(fs.read(FsClock::EPOCH, read_fd, 99).unwrap(), b"ina");
+    assert!(fs.read(FsClock::EPOCH, read_fd, 1).unwrap().is_empty());
+    fs.close(read_fd).unwrap();
 
     let append = fs
         .open(
             FsClock::EPOCH,
             "/state/value",
             OpenFlags {
-                read: false,
-                write: true,
-                create: false,
-                truncate: false,
                 append: true,
-                exclusive: false,
-                path_only: false,
-                mode: patina_dst_abi::CREATE_MODE_UNUSED,
+                ..write_only()
             },
         )
         .unwrap();
     fs.write(FsClock::EPOCH, append, b"!").unwrap();
     fs.close(append).unwrap();
     assert_eq!(fs.contents("/state/value").unwrap(), b"patina!");
+
+    let truncate_fd = fs
+        .open(
+            FsClock::EPOCH,
+            "/state/value",
+            OpenFlags::create_truncate_write(),
+        )
+        .unwrap();
+    fs.close(truncate_fd).unwrap();
+    assert!(fs.contents("/state/value").unwrap().is_empty());
     fs.remove_file(FsClock::EPOCH, "/state/value").unwrap();
     assert_eq!(
         fs.metadata("/state/value").unwrap_err().code,

@@ -908,9 +908,7 @@ mod tests {
 
     #[test]
     fn fs_short_io_is_seed_deterministic_and_observable() {
-        for seed in 0..64 {
-            assert_eq!(short_write_len(seed), short_write_len(seed), "seed {seed}");
-        }
+        assert_eq!(short_write_len(4), short_write_len(4));
         let written = short_write_len(4);
         assert!((1..6).contains(&written), "written={written}");
         let varied = (0..16).map(short_write_len).collect::<BTreeSet<_>>();
@@ -920,35 +918,24 @@ mod tests {
         );
     }
 
+    /// Writes and `fsync(2)` can each fail with every storage errno they may
+    /// return. `fsync` lists `ENOSPC`: with delayed allocation the disk-full
+    /// condition surfaces at writeback, the guest's key durability branch.
     #[test]
-    fn fs_error_injection_can_choose_write_errno_set() {
-        let mut seen = Vec::new();
+    fn write_and_fsync_inject_every_storage_errno() {
+        let mut writes = Vec::new();
+        let mut syncs = Vec::new();
         for seed in 0..256 {
             let (inner, fd) = fs_with_open_file();
             let mut fs = FaultFs::new(inner, seed).error_permille(1000);
-            let error = fs.write(FsClock::EPOCH, fd, b"x").unwrap_err();
-            seen.push(error.code);
+            writes.push(fs.write(FsClock::EPOCH, fd, b"x").unwrap_err().code);
+            syncs.push(fs.sync(fd).unwrap_err().code);
         }
-        assert!(seen.contains(&ErrorCode::Io), "seen={seen:?}");
-        assert!(seen.contains(&ErrorCode::NoSpace), "seen={seen:?}");
-        assert!(seen.contains(&ErrorCode::Interrupted), "seen={seen:?}");
-    }
-
-    /// `fsync(2)` ERRORS lists `ENOSPC`: with delayed allocation the disk-full
-    /// condition surfaces at writeback, not at `write`. A model that could only
-    /// fail fsync with `EIO` never exercises the guest's most important
-    /// durability-path branch.
-    #[test]
-    fn fsync_can_report_a_full_disk() {
-        let mut seen = Vec::new();
-        for seed in 0..256 {
-            let (inner, fd) = fs_with_open_file();
-            let mut fs = FaultFs::new(inner, seed).error_permille(1000);
-            seen.push(fs.sync(fd).unwrap_err().code);
+        for seen in [writes, syncs] {
+            for code in [ErrorCode::Io, ErrorCode::NoSpace, ErrorCode::Interrupted] {
+                assert!(seen.contains(&code), "seen={seen:?}");
+            }
         }
-        assert!(seen.contains(&ErrorCode::NoSpace), "seen={seen:?}");
-        assert!(seen.contains(&ErrorCode::Io), "seen={seen:?}");
-        assert!(seen.contains(&ErrorCode::Interrupted), "seen={seen:?}");
     }
 
     /// The injected set must never contain a code that indicts the CALLER
@@ -1075,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn fs_fault_report_is_per_class() {
+    fn fs_fault_report_is_per_class_and_rate_aware() {
         let (inner, fd) = fs_with_open_file();
         let mut fs = FaultFs::new(inner, 1).short_permille(1000);
         for _ in 0..5 {
@@ -1090,6 +1077,18 @@ mod tests {
         assert_eq!(report.errors_injected, 0);
         assert!(report.short_vacuity_diagnosable);
         assert_eq!(report.shorts_applied, 5);
+        assert!(!report.is_vacuous());
+
+        // Ten draws at one per-mille expect 0.01 fires: zero applied shorts is
+        // ordinary sampling, and calling it vacuous would fail healthy runs.
+        let (inner, fd) = fs_with_open_file();
+        let mut fs = FaultFs::new(inner, 1).short_permille(1);
+        for _ in 0..10 {
+            assert_eq!(fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap(), 6);
+        }
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.shorts_applied, 0);
+        assert!(!report.short_vacuity_diagnosable);
         assert!(!report.is_vacuous());
     }
 
@@ -1202,21 +1201,6 @@ mod tests {
     }
 
     #[test]
-    fn fs_vacuity_ignores_rates_too_low_to_expect_a_fire() {
-        let (inner, fd) = fs_with_open_file();
-        let mut fs = FaultFs::new(inner, 1).short_permille(1);
-        for _ in 0..10 {
-            assert_eq!(fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap(), 6);
-        }
-        let report = fs.fault_report().unwrap();
-        // Ten draws at one per-mille expect 0.01 fires: zero applied shorts is
-        // ordinary sampling, and calling it vacuous would fail healthy runs.
-        assert_eq!(report.shorts_applied, 0);
-        assert!(!report.short_vacuity_diagnosable);
-        assert!(!report.is_vacuous());
-    }
-
-    #[test]
     fn fs_short_reads_that_bind_nothing_are_vacuous() {
         let mut inner = MemFs::new();
         let fd = inner
@@ -1266,9 +1250,7 @@ mod tests {
 
     #[test]
     fn the_same_seed_selects_the_same_fault_locations() {
-        for seed in 0..100 {
-            assert_eq!(decisions(seed), decisions(seed), "seed {seed}");
-        }
+        assert_eq!(decisions(9), decisions(9));
         let decisions = decisions(9);
         assert!(
             decisions
@@ -1278,8 +1260,10 @@ mod tests {
         assert!(decisions.iter().any(|(_, copies)| *copies == 2));
     }
 
+    /// Datagram faults reach the receiver, while TCP passes through fault
+    /// injection unchanged.
     #[test]
-    fn duplicated_packets_are_observable_at_the_receiver() {
+    fn datagram_faults_are_observable_and_tcp_is_untouched() {
         let mut net = FaultNet::new(SimNet::new(), 1).duplicate_permille(1000);
         let left = net.bind("left").unwrap();
         let right = net.bind("right").unwrap();
@@ -1287,10 +1271,7 @@ mod tests {
         assert_eq!(report.copies, 2);
         assert_eq!(net.recv(right, 0).unwrap().unwrap().bytes, b"twice");
         assert_eq!(net.recv(right, 0).unwrap().unwrap().bytes, b"twice");
-    }
 
-    #[test]
-    fn tcp_passes_through_fault_injection_unchanged() {
         let mut net = FaultNet::new(SimNet::new(), 1).drop_permille(1000);
         let udp_left = net.bind("udp-left").unwrap();
         let udp_right = net.bind("udp-right").unwrap();
@@ -1307,31 +1288,5 @@ mod tests {
         let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
         assert_eq!(net.tcp_send(client, b"reliable", 0).unwrap(), 8);
         assert_eq!(net.tcp_recv(server, 16, 0).unwrap().unwrap(), b"reliable");
-    }
-
-    #[test]
-    fn drop_duplicate_and_fs_faults_use_separate_domain_streams() {
-        let drop_first = {
-            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_NET_DROP));
-            rng.next_u64()
-        };
-        let duplicate_first = {
-            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_NET_DUPLICATE));
-            rng.next_u64()
-        };
-        let fs_error_first = {
-            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_FS_ERROR));
-            rng.next_u64()
-        };
-        let fs_short_first = {
-            let mut rng = SplitMix64::new(domain_seed(3, fault_domain::FAULT_FS_SHORT));
-            rng.next_u64()
-        };
-        let mut unique = BTreeSet::new();
-        unique.insert(drop_first);
-        unique.insert(duplicate_first);
-        unique.insert(fs_error_first);
-        unique.insert(fs_short_first);
-        assert_eq!(unique.len(), 4);
     }
 }

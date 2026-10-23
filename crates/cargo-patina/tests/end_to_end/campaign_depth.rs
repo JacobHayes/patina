@@ -5,12 +5,13 @@ mod tests {
     use super::super::*;
 
     // The depth store follows the shared aux-store resume contract: k generations
-    // then `--extend` must reproduce the fresh campaign's persisted bytes exactly.
-    // The hostcall sums are saturating ADDS, so a missing watermark skip would
-    // double-count them and this comparison would fail — the WASI mirror of the
-    // native coverage store's idempotency proof.
+    // then `--extend`, and a resume after a torn checkpoint, must reproduce the
+    // fresh campaign's persisted bytes exactly. The hostcall sums are saturating
+    // ADDS, so a missing watermark skip would double-count them and these
+    // comparisons would fail: the WASI mirror of the native coverage store's
+    // idempotency proof.
     #[test]
-    fn campaign_extend_reproduces_aux_store_bytes_for_wasi_depth() {
+    fn campaign_extend_and_torn_resume_reproduce_aux_store_bytes_for_wasi_depth() {
         let directory = tempdir().unwrap();
         let module = directory.path().join("depth.wasm");
         fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
@@ -117,84 +118,31 @@ mod tests {
             fs::read_to_string(split_out.join("depth").join("meta.json")).unwrap(),
             "4-then-extend must reproduce the depth store bytes"
         );
-        println!(
-            "WASI_DEPTH_STORE_BYTE_EQUALITY bytes={} fuel_max={} kinds={}",
-            fresh_meta_bytes.len(),
-            meta["fuel_max"],
-            meta["hostcall_kinds"]
-        );
 
-        // The envelope reports the same accumulation, under its own `depth` object
-        // (never folded into `coverage`, which stays honestly unavailable here).
-        let json_out = directory.path().join("json");
-        let mut json_args = campaign_args(&json_out, 3);
-        json_args.extend(["--format".to_string(), "json".to_string()]);
-        let json = run(json_args);
-        assert!(
-            json.status.success(),
-            "JSON WASI depth campaign failed:\nstderr:\n{}",
-            String::from_utf8_lossy(&json.stderr)
-        );
-        let envelope = campaign_json_stdout(&json);
-        assert_eq!(envelope["depth"]["state"], "available");
-        assert_eq!(envelope["depth"]["generations_with_depth"], 3);
-        assert_eq!(envelope["coverage"]["edge"]["state"], "unavailable");
-        assert_eq!(envelope["coverage"]["edge"]["reason"], "not-native");
-        assert!(envelope["artifacts"]["depth_dir"].is_string());
-    }
-
-    // The checkpoint-tear leg of the aux-store contract, deterministically staged:
-    // the depth store is written BEFORE `campaign-state.json`, so a crash between the
-    // two leaves the store one generation ahead of the cursor and resume re-runs that
-    // generation. Rewinding the cursor by one reproduces exactly that state without
-    // racing a process. The re-run's fold must be skipped by the watermark: the
-    // hostcall sums are saturating adds, so folding it twice would inflate them and
-    // break the byte comparison below (RED-proven by disabling the skip).
-    #[test]
-    fn campaign_resume_after_a_depth_checkpoint_tear_does_not_double_fold() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("depth.wasm");
-        fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
-        let out = directory.path().join("camp");
-        let run = |owned: Vec<String>| {
-            let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
-        };
-
-        let fresh = run(vec![
-            "campaign".to_string(),
-            module.to_str().unwrap().to_string(),
-            "--gens".to_string(),
-            "6".to_string(),
-            "--out-dir".to_string(),
-            out.to_str().unwrap().to_string(),
-        ]);
-        assert!(
-            fresh.status.success(),
-            "fresh depth campaign failed:\nstderr:\n{}",
-            String::from_utf8_lossy(&fresh.stderr)
-        );
-        let untorn_meta = fs::read_to_string(out.join("depth").join("meta.json")).unwrap();
-        let torn_hostcalls = campaign_depth_meta(&out)["hostcalls"].clone();
-
-        // Stage the tear: the cursor claims five generations, the depth store already
-        // reflects six.
-        let state_path = out.join("campaign-state.json");
+        // The checkpoint tear, deterministically staged: the depth store is
+        // written BEFORE `campaign-state.json`, so a crash between the two
+        // leaves the store one generation ahead of the cursor and resume
+        // re-runs that generation. Rewinding the fresh campaign's cursor by one
+        // reproduces exactly that state without racing a process. The re-run's
+        // fold must be skipped by the watermark, or the saturating hostcall sums
+        // would inflate and the store bytes would change.
+        let state_path = fresh_out.join("campaign-state.json");
         let mut state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-        state["generations_done"] = serde_json::Value::from(5u64);
-        // The class histogram is validated against the cursor, so it rewinds too —
-        // this is a checkpoint tear, not a corrupt out-dir.
+        state["generations_done"] = serde_json::Value::from(gens - 1);
+        // The class histogram is validated against the cursor, so it rewinds
+        // too: this is a checkpoint tear, not a corrupt out-dir.
         let classes = state["classes"].as_object_mut().unwrap();
         let ok = classes.get_mut("OK").expect("a clean campaign records OK");
         *ok = serde_json::Value::from(ok.as_u64().unwrap() - 1);
         fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
-
         let resumed = run(vec![
             "campaign".to_string(),
             "--resume".to_string(),
             "--out-dir".to_string(),
-            out.to_str().unwrap().to_string(),
+            fresh_out.to_str().unwrap().to_string(),
+            "--format".to_string(),
+            "json".to_string(),
         ]);
         assert!(
             resumed.status.success(),
@@ -203,14 +151,19 @@ mod tests {
             String::from_utf8_lossy(&resumed.stderr)
         );
         assert_eq!(
-            untorn_meta,
-            fs::read_to_string(out.join("depth").join("meta.json")).unwrap(),
+            fresh_meta_bytes,
+            fs::read_to_string(fresh_out.join("depth").join("meta.json")).unwrap(),
             "re-running the torn generation must contribute nothing to the depth store"
         );
-        assert_eq!(
-            torn_hostcalls,
-            campaign_depth_meta(&out)["hostcalls"],
-            "hostcall sums must not be double-counted across a resume"
-        );
+
+        // The envelope reports the same accumulation, under its own `depth`
+        // object (never folded into `coverage`, which stays honestly
+        // unavailable here).
+        let envelope = campaign_json_stdout(&resumed);
+        assert_eq!(envelope["depth"]["state"], "available");
+        assert_eq!(envelope["depth"]["generations_with_depth"], gens);
+        assert_eq!(envelope["coverage"]["edge"]["state"], "unavailable");
+        assert_eq!(envelope["coverage"]["edge"]["reason"], "not-native");
+        assert!(envelope["artifacts"]["depth_dir"].is_string());
     }
 }

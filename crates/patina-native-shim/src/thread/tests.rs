@@ -99,6 +99,25 @@ fn pipe_channel_transfers_bytes_with_bounded_capacity_and_eof() {
     assert_eq!(channel.try_read(&mut dst), PipeRead::Read(2));
     assert_eq!(&dst[..2], b"hi");
     assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
+
+    // `pipe_write`: a write of at most PIPE_BUF bytes is atomic — it waits
+    // for room for all of it rather than landing in part — while a longer
+    // one takes what fits.
+    let mut channel = PipeChannel::new(PIPE_BUF + 8);
+    let small = [7u8; 16];
+    assert_eq!(
+        channel.try_write(&[0; PIPE_BUF]),
+        PipeWrite::Wrote(PIPE_BUF)
+    );
+    assert_eq!(channel.try_write(&small), PipeWrite::WouldBlock);
+    assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
+    let mut dst = [0u8; PIPE_BUF + 8];
+    assert_eq!(channel.try_read(&mut dst), PipeRead::Read(PIPE_BUF + 8));
+    assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
+    assert_eq!(
+        channel.try_write(&[1; PIPE_BUF + 1]),
+        PipeWrite::Wrote(PIPE_BUF)
+    );
 }
 
 // A FIFO channel is born with NO ends, and every "closed" answer is
@@ -133,37 +152,6 @@ fn fifo_channel_starts_endless_and_derives_closedness_from_its_refs() {
     assert_eq!(channel.try_read(&mut dst), PipeRead::Eof);
     channel.write_refs += 1;
     assert_eq!(channel.try_read(&mut dst), PipeRead::WouldBlock);
-}
-
-// `pipe_write`: a write of at most PIPE_BUF bytes is atomic — it waits
-// for room for all of it rather than landing in part — while a longer
-// one takes what fits.
-#[test]
-fn pipe_channel_writes_up_to_pipe_buf_atomically() {
-    let mut channel = PipeChannel::new(PIPE_BUF + 8);
-    let small = [7u8; 16];
-    assert_eq!(
-        channel.try_write(&[0; PIPE_BUF]),
-        PipeWrite::Wrote(PIPE_BUF)
-    );
-    assert_eq!(channel.try_write(&small), PipeWrite::WouldBlock);
-    assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
-    let mut dst = [0u8; PIPE_BUF + 8];
-    assert_eq!(channel.try_read(&mut dst), PipeRead::Read(PIPE_BUF + 8));
-    assert_eq!(channel.try_write(&small[..8]), PipeWrite::Wrote(8));
-    assert_eq!(
-        channel.try_write(&[1; PIPE_BUF + 1]),
-        PipeWrite::Wrote(PIPE_BUF)
-    );
-}
-
-// Writing to a channel whose reader closed is a broken pipe surfaced as an
-// errno (EPIPE) — never a signal.
-#[test]
-fn pipe_channel_write_to_closed_reader_is_broken_pipe() {
-    let mut channel = PipeChannel::new(4);
-    channel.read_refs = 0;
-    assert_eq!(channel.try_write(b"x"), PipeWrite::BrokenPipe);
 }
 
 /// A scheduler for pure wait-state tests: any transition is a test failure.

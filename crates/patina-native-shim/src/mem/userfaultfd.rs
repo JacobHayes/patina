@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn the_handshake_answers_once() {
+    fn the_handshake_answers_once_and_refuses_in_the_kernels_order() {
         let handle = created();
         assert_eq!(read(handle, true, MESSAGE), Err(EINVAL));
         assert_eq!(poll(handle, true), 0x8);
@@ -330,10 +330,9 @@ mod tests {
         // An unknown request after the handshake is EINVAL too.
         assert_eq!(ioctl(handle, 0x541B, 0), Err(EINVAL));
         released(handle);
-    }
 
-    #[test]
-    fn the_handshake_refuses_in_the_kernels_order() {
+        // A refused handshake refuses in the kernel's order, and initializes
+        // nothing.
         let handle = created();
         let mut api = Api {
             api: 0xab,

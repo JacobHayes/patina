@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 pub mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod process_group;
+pub mod process_group;
 
 use object::read::archive::ArchiveFile;
 use object::{Object, ObjectSymbol};
@@ -36,6 +36,50 @@ pub fn guest_target_dir(name: &str) -> PathBuf {
         .expect("profile has a target base")
         .join("native-guests")
         .join(name)
+}
+
+/// The paths `build` produces, built once per nextest run: the first test
+/// process of a run to ask builds them, under a lock, and every later one in
+/// the run reads their paths back. For artifacts whose inputs do not change
+/// during a run. Outside nextest every call builds.
+///
+/// Another run may rebuild the paths while this one still uses them, so
+/// `build` must put each artifact in place atomically (Cargo's outputs, and
+/// anything written beside its path and renamed over it), and the stamp is
+/// removed before a rebuild and written after it: a rebuild that dies midway
+/// leaves no stamp for any run to accept.
+pub fn once_per_run(name: &str, build: impl FnOnce() -> Vec<PathBuf>) -> Vec<PathBuf> {
+    let Some(run) = std::env::var("NEXTEST_RUN_ID").ok() else {
+        return build();
+    };
+    let dir = guest_target_dir("once-per-run");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = std::fs::File::create(dir.join(format!("{name}.lock"))).unwrap();
+    lock.lock().unwrap();
+    let stamp = dir.join(format!("{name}.stamp"));
+    if let Ok(text) = std::fs::read_to_string(&stamp)
+        && let Some((built_in, paths)) = text.split_once('\n')
+        && built_in == run
+    {
+        let paths: Vec<PathBuf> = paths.lines().map(PathBuf::from).collect();
+        if paths.iter().all(|path| path.exists()) {
+            return paths;
+        }
+    }
+    match std::fs::remove_file(&stamp) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => panic!("{error}"),
+        _ => {}
+    }
+    let paths = build();
+    let mut text = format!("{run}\n");
+    for path in &paths {
+        text.push_str(path.to_str().expect("a UTF-8 artifact path"));
+        text.push('\n');
+    }
+    let partial = dir.join(format!("{name}.stamp.partial"));
+    std::fs::write(&partial, text).unwrap();
+    std::fs::rename(&partial, &stamp).unwrap();
+    paths
 }
 
 /// Return the repository root containing the acceptance guests.

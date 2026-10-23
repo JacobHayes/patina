@@ -440,32 +440,21 @@ mod tests {
         unsafe { import(vector.as_ptr(), count) }.map(|segments| segments.len())
     }
 
+    /// `import_iovec`: a zero count reads nothing; a negative count, one past
+    /// `UIO_MAXIOV`, or a segment length negative as `ssize_t` is `EINVAL`; a
+    /// null vector with a count is `EFAULT`.
     #[test]
-    fn a_count_of_zero_touches_nothing() {
-        // SAFETY: a zero count never reads the vector.
-        assert_eq!(unsafe { import(std::ptr::null(), 0) }.unwrap().len(), 0);
-    }
-
-    #[test]
-    fn up_to_uio_maxiov_segments_import_and_one_more_is_einval() {
+    fn a_vector_imports_as_import_iovec_judges_it() {
+        // SAFETY: a zero count never reads the vector, and a null vector is
+        // refused before it is read.
+        unsafe {
+            assert_eq!(import(std::ptr::null(), 0).unwrap().len(), 0);
+            assert_eq!(import(std::ptr::null(), 1).err(), Some(EFAULT));
+        }
         let vector = segments(&[0; UIO_MAXIOV + 1]);
         assert_eq!(imported(&vector, UIO_MAXIOV as i64), Ok(UIO_MAXIOV));
         assert_eq!(imported(&vector, UIO_MAXIOV as i64 + 1), Err(EINVAL));
-    }
-
-    #[test]
-    fn a_negative_count_is_einval() {
         assert_eq!(imported(&segments(&[1]), -1), Err(EINVAL));
-    }
-
-    #[test]
-    fn a_null_vector_with_a_count_is_efault() {
-        // SAFETY: a null vector is refused before it is read.
-        assert_eq!(unsafe { import(std::ptr::null(), 1) }.err(), Some(EFAULT));
-    }
-
-    #[test]
-    fn a_segment_length_negative_as_ssize_t_is_einval() {
         assert_eq!(imported(&segments(&[1, usize::MAX]), 2), Err(EINVAL));
         assert_eq!(imported(&segments(&[1, isize::MAX as usize]), 2), Ok(2));
     }

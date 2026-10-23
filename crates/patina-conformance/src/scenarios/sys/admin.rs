@@ -24,7 +24,7 @@
 //! swapped, rebooted, loaded or unloaded: a missing accounting file
 //! (`ENOENT`), an unknown swap flag or a NULL swap path (`EINVAL`,
 //! `EFAULT`), an unknown reboot command (the libc vehicle's `reboot(howto)`
-//! passes the magic numbers itself; the kernel vehicles pass none:
+//! passes the magic numbers itself; the `syscall` vehicle passes none:
 //! `EINVAL`), unknown `kexec` flags (`EINVAL`; `kexec_load` with no segments
 //! and valid flags would unload the loaded image), an empty module image
 //! (`ENOEXEC`), an unknown module flag (`EINVAL`), a NULL module name and

@@ -61,79 +61,7 @@ fn resolved_branch_lifecycle_state_is_validated() {
 }
 
 #[test]
-fn lifecycle_models_crash_restart_with_global_order() {
-    let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let bundle = TraceBundle {
-        format_version: TRACE_FORMAT_VERSION,
-        metadata: RunMetadata::new(7, "fingerprint+crash-restart", 0, "patina"),
-        timelines: vec![Timeline {
-            id: MAIN_TIMELINE.into(),
-            parent: None,
-            from_sequence: None,
-            branch_seed: None,
-            lifecycle: vec![
-                LifecycleEvent {
-                    order: 0,
-                    kind: LifecycleEventKind::Start { incarnation: 0 },
-                },
-                LifecycleEvent {
-                    order: 2,
-                    kind: LifecycleEventKind::Crash {
-                        incarnation: 0,
-                        snapshot_digest: digest.into(),
-                    },
-                },
-                LifecycleEvent {
-                    order: 3,
-                    kind: LifecycleEventKind::Restart {
-                        from_incarnation: 0,
-                        to_incarnation: 1,
-                        snapshot_digest: digest.into(),
-                    },
-                },
-                LifecycleEvent {
-                    order: 4,
-                    kind: LifecycleEventKind::Start { incarnation: 1 },
-                },
-                LifecycleEvent {
-                    order: 6,
-                    kind: LifecycleEventKind::End { incarnation: 1 },
-                },
-            ],
-            decisions: vec![
-                TraceEvent {
-                    sequence: 0,
-                    order: 1,
-                    incarnation: 0,
-                    operation: Operation::FsWrite {
-                        fd: Fd(3),
-                        bytes: b"trigger".to_vec(),
-                    },
-                    outcome: Outcome::Usize(7),
-                },
-                TraceEvent {
-                    sequence: 1,
-                    order: 5,
-                    incarnation: 1,
-                    operation: operation(),
-                    outcome: Outcome::U64(11),
-                },
-            ],
-        }],
-    };
-    bundle.validate().unwrap();
-    let bytes = bundle.to_bytes().unwrap();
-    let reloaded = TraceBundle::from_slice(&bytes).unwrap();
-    assert_eq!(reloaded, bundle);
-    assert_eq!(
-        reloaded.to_bytes().unwrap(),
-        bytes,
-        "v5 lifecycle encoding is canonical"
-    );
-}
-
-#[test]
-fn lifecycle_ordering_and_incarnation_mismatches_are_refused() {
+fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     let mut bundle = TraceBundle::new(
         RunMetadata::new(1, "fingerprint", 0, "patina"),
         vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
@@ -157,10 +85,7 @@ fn lifecycle_ordering_and_incarnation_mismatches_are_refused() {
             .contains("declares incarnation 1, expected 0"),
         "incarnation/lifecycle mismatch must be named: {error}"
     );
-}
 
-#[test]
-fn lifecycle_missing_crash_digest_mismatch_and_unended_states_are_refused() {
     let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let other = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let mut bundle = crash_restart_bundle(digest);

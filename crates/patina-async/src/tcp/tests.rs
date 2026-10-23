@@ -7,7 +7,6 @@ use patina_dst_net_sim::SimNet;
 use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig};
 use patina_dst_wrapper_latency::LatencyNet;
 use std::cell::RefCell;
-use std::fs;
 use std::rc::Rc;
 
 async fn tcp_echo_scenario(order: Rc<RefCell<Vec<&'static str>>>) -> Result<Vec<u8>, RuntimeError> {
@@ -147,31 +146,21 @@ fn run_recorded_echo(config: RuntimeConfig) -> Result<Vec<u8>, RuntimeError> {
     }
 }
 
+/// A recorded echo replays to the same payload, and a guest that sends a
+/// different payload under replay is refused as a trace divergence.
 #[test]
-fn record_replay_byte_identity_for_echo() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = dir.path().join("first.patina");
-    let second = dir.path().join("second.patina");
-    assert_eq!(
-        run_recorded_echo(RuntimeConfig::record(12, &first, "async-echo-v1")).unwrap(),
-        b"hello"
-    );
-    assert_eq!(
-        run_recorded_echo(RuntimeConfig::record(12, &second, "async-echo-v1")).unwrap(),
-        b"hello"
-    );
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
-    assert_eq!(
-        run_recorded_echo(RuntimeConfig::replay(&first, "async-echo-v1")).unwrap(),
-        b"hello"
-    );
-}
-
-#[test]
-fn replay_rejects_divergent_echo_payload() {
+fn echo_replays_and_a_divergent_payload_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let trace = dir.path().join("trace.patina");
-    run_recorded_echo(RuntimeConfig::record(13, &trace, "async-echo-v1")).unwrap();
+    assert_eq!(
+        run_recorded_echo(RuntimeConfig::record(12, &trace, "async-echo-v1")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(
+        run_recorded_echo(RuntimeConfig::replay(&trace, "async-echo-v1")).unwrap(),
+        b"hello"
+    );
+
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::replay(&trace, "async-echo-v1"))
         .with_default_drivers()
         .with_network(SimNet::new())

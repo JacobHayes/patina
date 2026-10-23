@@ -59,7 +59,8 @@ fn measures_representative_instruction_lengths() {
 
 /// `(bytes, length, classification)`, lengths and mnemonics as objdump
 /// decodes them. Besides the 64-bit syscall and the counter/entropy
-/// reads, the i386 syscall entries (`int 0x80`, `sysenter`) are direct
+/// reads (including `rdtscp` in group 7 and `rdseed` beside `rdrand`), and
+/// the informational `host-identity` reads (`cpuid`, `rdpkru`/`wrpkru`), the i386 syscall entries (`int 0x80`, `sysenter`) are direct
 /// syscalls, and the far transfers that load CS (`lcall`/`ljmp` through
 /// memory, `lret`, `iret`) are `far-transfer`. Their neighbours are not
 /// findings: other `int` vectors, the privileged `sysexit`/`sysret`, the
@@ -87,128 +88,41 @@ fn flags_real_forbidden_opcodes_at_a_boundary() {
         (&[0xca, 0x08, 0x00], 3, Some((far, "lret"))), // lret $8
         (&[0xcf], 1, Some((far, "iret"))),
         (&[0x48, 0xcf], 2, Some((far, "iret"))), // iretq
-        (&[0x48, 0x0f, 0xc7, 0x08], 4, None),    // cmpxchg8b (group 9 reg 1)
-        (&[0xcd, 0x03], 2, None),                // int $3
-        (&[0xcd, 0x81], 2, None),                // int $0x81
-        (&[0xcc], 1, None),                      // int3
-        (&[0x0f, 0x35], 2, None),                // sysexit (privileged)
-        (&[0x0f, 0x07], 2, None),                // sysret (privileged)
-        (&[0xff, 0x10], 2, None),                // call *(%rax)
-        (&[0xff, 0x20], 2, None),                // jmp *(%rax)
-        (&[0xff, 0xd0], 2, None),                // call *%rax
-        (&[0xff, 0xe0], 2, None),                // jmp *%rax
-        (&[0xff, 0x30], 2, None),                // push (%rax)
-        (&[0xc2, 0x08, 0x00], 3, None),          // ret $8
+        (
+            &[0x0f, 0x01, 0xf9],
+            3,
+            Some(("cpu-nondeterminism", "rdtscp")),
+        ),
+        (
+            &[0x0f, 0xc7, 0xf8],
+            3,
+            Some(("cpu-nondeterminism", "rdseed")),
+        ),
+        (&[0x0f, 0xa2], 2, Some(("host-identity", "cpuid"))),
+        (&[0x0f, 0x01, 0xee], 3, Some(("host-identity", "rdpkru"))),
+        (&[0x0f, 0x01, 0xef], 3, Some(("host-identity", "wrpkru"))),
+        (&[0x48, 0x0f, 0xc7, 0x08], 4, None), // cmpxchg8b (group 9 reg 1)
+        (&[0x0f, 0x01, 0xf8], 3, None),       // swapgs (group 7 reg 7 rm 0)
+        (&[0x0f, 0x01, 0x00], 3, None),       // sgdt [rax] (group 7 memory)
+        (&[0x0f, 0x01, 0xd0], 3, None),       // xgetbv
+        (&[0x0f, 0xc8], 2, None),             // bswap eax (cpuid's length row)
+        (&[0x0f, 0x09], 2, None),             // wbinvd
+        (&[0x0f, 0x0b], 2, None),             // ud2
+        (&[0xcd, 0x03], 2, None),             // int $3
+        (&[0xcd, 0x81], 2, None),             // int $0x81
+        (&[0xcc], 1, None),                   // int3
+        (&[0x0f, 0x35], 2, None),             // sysexit (privileged)
+        (&[0x0f, 0x07], 2, None),             // sysret (privileged)
+        (&[0xff, 0x10], 2, None),             // call *(%rax)
+        (&[0xff, 0x20], 2, None),             // jmp *(%rax)
+        (&[0xff, 0xd0], 2, None),             // call *%rax
+        (&[0xff, 0xe0], 2, None),             // jmp *%rax
+        (&[0xff, 0x30], 2, None),             // push (%rax)
+        (&[0xc2, 0x08, 0x00], 3, None),       // ret $8
     ];
     for (bytes, len, expected) in cases {
         assert_eq!(decode_full(bytes), (*len, *expected), "{bytes:02x?}");
     }
-}
-
-/// The two counter/entropy reads the opcode table did not classify.
-/// `rdtscp` (`0f 01 f9`) was measured as an ordinary group-7 instruction
-/// and scanned straight past — a guest reading the timestamp counter
-/// through it audited CLEAN, which is the false-negative direction this
-/// containment gate must never take. `rdseed` (`0f c7 /7`) was the same
-/// blind spot one ModRM.reg over from `rdrand`. RED: drop either arm from
-/// the decoder and this test fails with `None`.
-#[test]
-fn classifies_rdtscp_and_rdseed() {
-    // rdtscp: mod=3, reg=7, rm=1. Length is unchanged at 3 bytes.
-    assert_eq!(
-        decode_full(&[0x0f, 0x01, 0xf9]).1,
-        Some(("cpu-nondeterminism", "rdtscp"))
-    );
-    assert_eq!(decode(&[0x0f, 0x01, 0xf9]).0, 3);
-    // rdseed eax: `0f c7 /7`, ModRM f8.
-    assert_eq!(
-        decode_full(&[0x0f, 0xc7, 0xf8]).1,
-        Some(("cpu-nondeterminism", "rdseed"))
-    );
-    // Neighbours in the same groups stay unforbidden: `swapgs`
-    // (`0f 01 f8`, reg 7 / rm 0) and the memory forms of group 7
-    // (`sgdt [rax]`, reg 0) are not counter reads.
-    assert_eq!(decode(&[0x0f, 0x01, 0xf8]).1, None);
-    assert_eq!(decode(&[0x0f, 0x01, 0x00]).1, None);
-    // And the mnemonic rides onto the finding, since the audit's
-    // manageability split reads it rather than the shared category.
-    let mut escapes = Vec::new();
-    scan_test(
-        &[0x0f, 0x31, 0x0f, 0x01, 0xf9, 0x0f, 0xc7, 0xf8],
-        &mut escapes,
-    );
-    let found: Vec<_> = escapes
-        .iter()
-        .map(|escape| (escape.category, escape.mnemonic))
-        .collect();
-    assert_eq!(
-        found,
-        vec![
-            ("cpu-nondeterminism", Some("rdtsc")),
-            ("cpu-nondeterminism", Some("rdtscp")),
-            ("cpu-nondeterminism", Some("rdseed")),
-        ]
-    );
-}
-
-/// `cpuid` (`0f a2`) is decoded and classified `host-identity` — the
-/// informational class, not a refusal. It sat in the "no ModRM, no
-/// immediate" length row with no category, so a guest branching on host
-/// CPU feature bits (libc ifunc resolvers, std feature detection, a
-/// fast-clock crate choosing its TSC path) was measured correctly and
-/// reported NOTHING: the fastant probe found 11 cpuid sites by objdump in
-/// a binary whose 2 rdtsc sites the audit did report. RED: drop the `0xA2`
-/// arm and the category is `None` again.
-/// `rdpkru`/`wrpkru` (`0f 01 ee`/`ef`, group 7's `mod=3, reg=5,
-/// rm=6/7`) are host-identity: visible, not refused. RED: without
-/// the group-7 arm they classify as nothing.
-#[test]
-fn classifies_protection_key_access_as_host_identity() {
-    for (bytes, mnemonic) in [
-        ([0x0f, 0x01, 0xee], "rdpkru"),
-        ([0x0f, 0x01, 0xef], "wrpkru"),
-    ] {
-        assert_eq!(decode_full(&bytes).1, Some(("host-identity", mnemonic)));
-        assert_eq!(decode(&bytes).0, 3);
-    }
-    // The group's other register forms keep their classes.
-    assert_eq!(decode(&[0x0f, 0x01, 0xf9]).1, Some("cpu-nondeterminism"));
-    assert_eq!(decode(&[0x0f, 0x01, 0xd0]).1, None, "xgetbv");
-}
-
-#[test]
-fn classifies_cpuid_as_host_identity() {
-    assert_eq!(
-        decode_full(&[0x0f, 0xa2]).1,
-        Some(("host-identity", "cpuid"))
-    );
-    // Classification only: the length was already right and stays 2.
-    assert_eq!(decode(&[0x0f, 0xa2]).0, 2);
-    // Neighbours in the same length row are untouched: `bswap eax`
-    // (`0f c8`), `cpuid`'s table row-mates `wbinvd` (`0f 09`) and `ud2`
-    // (`0f 0b`) classify as nothing.
-    for bytes in [&[0x0f, 0xc8][..], &[0x0f, 0x09][..], &[0x0f, 0x0b][..]] {
-        assert_eq!(decode(bytes).1, None, "{bytes:02x?} is not host-identity");
-    }
-    // And the counter/entropy neighbours keep their own category.
-    assert_eq!(decode(&[0x0f, 0x31]).1, Some("cpu-nondeterminism"));
-    assert_eq!(decode(&[0x0f, 0xc7, 0xf0]).1, Some("cpu-nondeterminism"));
-    // A scan of mixed text attributes each site to its own class, in
-    // order: cpuid, rdtsc, cpuid.
-    let mut escapes = Vec::new();
-    scan_test(&[0x0f, 0xa2, 0x0f, 0x31, 0x0f, 0xa2], &mut escapes);
-    let found: Vec<_> = escapes
-        .iter()
-        .map(|escape| (escape.symbol.as_str(), escape.category, escape.mnemonic))
-        .collect();
-    assert_eq!(
-        found,
-        vec![
-            ("instruction@.text+0x0", "host-identity", Some("cpuid")),
-            ("instruction@.text+0x2", "cpu-nondeterminism", Some("rdtsc")),
-            ("instruction@.text+0x4", "host-identity", Some("cpuid")),
-        ]
-    );
 }
 
 #[test]
@@ -247,7 +161,7 @@ fn fails_closed_on_undecodable_bytes() {
 }
 
 #[test]
-fn measures_vex_avx_instruction_lengths() {
+fn measures_vex_and_three_byte_map_lengths() {
     // VEX (AVX/AVX2) is the encoding the corpus check surfaced; default
     // codegen emits it, so it must be length-decoded rather than declined.
     let cases: &[(&[u8], usize)] = &[
@@ -259,11 +173,17 @@ fn measures_vex_avx_instruction_lengths() {
         (&[0xc5, 0xf9, 0xc5, 0xc1, 0x05], 5), // vpextrw eax,xmm1,imm8
         (&[0xc4, 0xe2, 0x7d, 0x00, 0xc1], 5), // 3-byte VEX, 0f38 map, no imm
         (&[0xc4, 0xe3, 0x7d, 0x46, 0xc1, 0x20], 6), // vperm2i128 (0f3a map, imm8)
+        // The legacy 0f 38 / 0f 3a maps, as the `sha2` x86 backend carries them.
+        (&[0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08], 7), // palignr (0f 3a 0f, imm8)
+        (&[0x66, 0x44, 0x0f, 0x3a, 0x0e, 0xe0, 0xf0], 7), // pblendw (0f 3a 0e, imm8)
+        (&[0x66, 0x0f, 0x3a, 0x22, 0xe1, 0x00], 6),       // pinsrd  (0f 3a 22, imm8)
+        (&[0x66, 0x0f, 0x38, 0x00, 0xfd], 5),             // pshufb  (0f 38 00, no imm)
+        (&[0x41, 0x0f, 0x38, 0xcb, 0xdd], 5),             // sha256rnds2 (0f 38 cb)
     ];
     for (bytes, expected) in cases {
         let (len, cat) = decode(bytes);
         assert_eq!(len, *expected, "length for {bytes:02x?}");
-        assert_eq!(cat, None, "VEX opcodes are never forbidden: {bytes:02x?}");
+        assert_eq!(cat, None, "{bytes:02x?} is never forbidden");
     }
 }
 
@@ -417,48 +337,6 @@ fn evex_rejects_unsupported_maps_and_invalid_prefix_fields() {
     assert!(matches!(decode_one(&bytes), Step::Undecodable));
 }
 
-#[test]
-fn decodes_legacy_three_byte_maps() {
-    // The exact bytes the `sha2` x86 backend carries (used by guests for
-    // an applied-sequence digest). Before the 0f 38/0f 3a
-    // maps were length-decoded these all failed closed, refusing the binary
-    // at the first `palignr` (`.text+0x42929`). Lengths are objdump-verified.
-    let cases: &[(&[u8], usize)] = &[
-        (&[0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08], 7), // palignr (0f 3a 0f, imm8)
-        (&[0x66, 0x44, 0x0f, 0x3a, 0x0e, 0xe0, 0xf0], 7), // pblendw (0f 3a 0e, imm8)
-        (&[0x66, 0x0f, 0x3a, 0x22, 0xe1, 0x00], 6),       // pinsrd  (0f 3a 22, imm8)
-        (&[0x66, 0x0f, 0x38, 0x00, 0xfd], 5),             // pshufb  (0f 38 00, no imm)
-        (&[0x41, 0x0f, 0x38, 0xcb, 0xdd], 5),             // sha256rnds2 (0f 38 cb)
-        (&[0x41, 0x0f, 0x38, 0xcc, 0xfe], 5),             // sha256msg1  (0f 38 cc)
-        (&[0x41, 0x0f, 0x38, 0xcd, 0xf0], 5),             // sha256msg2  (0f 38 cd)
-    ];
-    for (bytes, expected) in cases {
-        let (len, cat) = decode(bytes);
-        assert_eq!(len, *expected, "length for {bytes:02x?}");
-        assert_eq!(
-            cat, None,
-            "three-byte-map opcodes are never forbidden: {bytes:02x?}"
-        );
-    }
-}
-
-#[test]
-fn forbidden_opcode_after_three_byte_map_is_still_caught() {
-    // Decoding the 0f 38/0f 3a maps must not blunt the forbidden scan: a
-    // `syscall` at the real boundary immediately after a `palignr` (the
-    // encoding that used to halt the walk) must still be flagged, and the
-    // walk must land on it at exactly the right offset (7 = palignr's len).
-    let mut escapes = Vec::new();
-    let text = [
-        0x66, 0x45, 0x0f, 0x3a, 0x0f, 0xec, 0x08, // palignr (7 bytes)
-        0x0f, 0x05, // syscall at offset 7
-    ];
-    scan_test(&text, &mut escapes);
-    assert_eq!(escapes.len(), 1, "{escapes:?}");
-    assert_eq!(escapes[0].category, "direct-syscall");
-    assert_eq!(escapes[0].symbol, "instruction@.text+0x7");
-}
-
 /// Every x86-64 way to move the FS base without a syscall is a
 /// thread-pointer finding: `wrfsbase` (32- and 64-bit, any REX.B), and the
 /// FS selector loads `mov fs`, `pop fs` and `lfs`. The reads and the GS
@@ -524,27 +402,6 @@ fn corpus_evex_map(bytes: &[u8]) -> Option<u8> {
         .strip_prefix(&[0x62])?
         .first()
         .map(|p0| p0 & 0x0f)
-}
-
-#[test]
-fn corpus_evex_counter_handles_prefixes_but_not_operand_bytes() {
-    let instruction = [0x62, 0xf1, 0x74, 0x48, 0x58, 0xc2];
-    for prefixes in [
-        &[][..],
-        &[0x67],
-        &[0x64],
-        &[0x64, 0x67],
-        &[0x2e, 0x67],
-        &[0x64; 9],
-    ] {
-        let bytes = [prefixes, &instruction].concat();
-        assert_eq!(corpus_evex_map(&bytes), Some(1), "{bytes:02x?}");
-    }
-    // A mov immediate containing an EVEX-looking prefix is not EVEX.
-    assert_eq!(corpus_evex_map(&[0xb8, 0x62, 0xf1, 0x74, 0x48]), None);
-    for bytes in [&[][..], &[0x67], &[0x67, 0x62]] {
-        assert_eq!(corpus_evex_map(bytes), None);
-    }
 }
 
 /// Checked-in bytes and boundaries assembled from Patina's own EVEX

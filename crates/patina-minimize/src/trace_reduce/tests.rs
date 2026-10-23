@@ -1,7 +1,7 @@
 //! Timeline deletion, branch preservation, and fixed-point tests.
 
 use super::*;
-use crate::tests::{clock_event, run_scripted, shapes, test_timeline};
+use crate::tests::{clock_event, test_timeline};
 use patina_dst_abi::{ClockKind, Operation, Outcome};
 use patina_dst_trace::{RunMetadata, TraceEvent};
 use std::convert::Infallible;
@@ -39,6 +39,17 @@ fn delta_debugging_preserves_only_the_failure_inducing_decision() {
         minimized.timelines[0].decisions[0].outcome,
         Outcome::U64(999)
     );
+    // Tree minimization of a single timeline reaches the same result.
+    let tree = minimize_branch_tree(&bundle, &mut |candidate: &TraceBundle| {
+        Ok::<_, Infallible>(
+            candidate.timelines[0]
+                .decisions
+                .iter()
+                .any(|event| event.outcome == Outcome::U64(999)),
+        )
+    })
+    .unwrap();
+    assert_eq!(tree, minimized);
 }
 
 #[test]
@@ -88,7 +99,7 @@ fn minimizes_a_leaf_branch_without_changing_its_inherited_prefix() {
 }
 
 #[test]
-fn refuses_to_minimize_a_timeline_with_children() {
+fn refuses_a_timeline_with_children_or_an_original_that_does_not_fail() {
     let mut bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), Vec::new());
     bundle
         .timelines
@@ -101,70 +112,12 @@ fn refuses_to_minimize_a_timeline_with_children() {
     })
     .unwrap_err();
     assert!(matches!(error, MinimizeError::TimelineHasChildren(_)));
-}
 
-#[test]
-fn refuses_to_minimize_when_the_original_does_not_fail() {
     let bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), Vec::new());
     let result = minimize_main(&bundle, &mut |_candidate: &TraceBundle| {
         Ok::<_, Infallible>(false)
     });
     assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
-}
-
-/// One resumed single-event sweep with no repetition: what the search would
-/// do if the fixed-point iteration over sweeps were dropped. Used to show
-/// that the iteration is load-bearing rather than defensive.
-fn one_resumed_sweep(start_values: &[u64], predicate: impl Fn(&[u64]) -> bool) -> Vec<u64> {
-    let mut current = start_values.to_vec();
-    let mut index = 0usize;
-    while index < current.len() {
-        let mut candidate = current.clone();
-        candidate.remove(index);
-        if predicate(&candidate) {
-            current = candidate;
-        } else {
-            index += 1;
-        }
-    }
-    current
-}
-
-#[test]
-fn sweeps_iterate_to_a_fixed_point_rather_than_stopping_after_one_pass() {
-    // Deleting a decision here requires every later decision to be gone
-    // already, so one forward sweep can only ever remove the last one.
-    let start = vec![999, 1, 2, 3, 4, 5];
-    let predicate = |values: &[u64]| {
-        let Some((first, tail)) = values.split_first() else {
-            return false;
-        };
-        *first == 999 && tail.iter().copied().eq(1..=tail.len() as u64)
-    };
-    assert_eq!(
-        one_resumed_sweep(&start, predicate),
-        vec![999, 1, 2, 3, 4],
-        "a single sweep stops one deletion in"
-    );
-    let (result, _) = run_scripted(&start, predicate);
-    assert_eq!(
-        result,
-        vec![999],
-        "the iterated search reaches the fixed point"
-    );
-}
-
-#[test]
-fn the_search_asks_the_same_questions_in_the_same_order_on_a_repeat_run() {
-    for (name, start, predicate) in shapes() {
-        let (first_result, first_asked) = run_scripted(&start, predicate);
-        let (second_result, second_asked) = run_scripted(&start, predicate);
-        assert_eq!(first_result, second_result, "{name}: same result");
-        assert_eq!(
-            first_asked, second_asked,
-            "{name}: same candidate sequence, including which cache hits were re-verified"
-        );
-    }
 }
 
 #[test]
@@ -236,24 +189,6 @@ fn tree_minimization_preserves_a_non_leaf_protected_prefix_and_shrinks_its_suffi
     );
 }
 
-#[test]
-fn tree_minimization_matches_leaf_minimization_for_a_single_timeline() {
-    let mut decisions: Vec<TraceEvent> = (0..8).map(|s| clock_event(s, s)).collect();
-    decisions[5].outcome = Outcome::U64(999);
-    let bundle = TraceBundle::new(RunMetadata::new(1, "fixture", 0, "patina"), decisions);
-    let mut oracle = |candidate: &TraceBundle| {
-        Ok::<_, Infallible>(
-            candidate.timelines[0]
-                .decisions
-                .iter()
-                .any(|event| event.outcome == Outcome::U64(999)),
-        )
-    };
-    let tree = minimize_branch_tree(&bundle, &mut oracle).unwrap();
-    assert_eq!(tree.timelines[0].decisions.len(), 1);
-    assert_eq!(tree.timelines[0].decisions[0].outcome, Outcome::U64(999));
-}
-
 fn branched_bundle() -> TraceBundle {
     // main -> keeper (carries the 999 marker) and main -> disposable, plus
     // disposable -> grandchild so pruning must drop a whole subtree.
@@ -286,7 +221,7 @@ fn branched_bundle() -> TraceBundle {
 }
 
 #[test]
-fn prune_branches_drops_a_whole_orphan_subtree_the_oracle_does_not_need() {
+fn prune_branches_drops_exactly_the_subtrees_the_failure_does_not_need() {
     let bundle = branched_bundle();
     // The failure lives only in `keeper`; the `disposable` subtree is dead
     // weight and should be removed together with its `grandchild`.
@@ -302,11 +237,7 @@ fn prune_branches_drops_a_whole_orphan_subtree_the_oracle_does_not_need() {
     let ids: Vec<&str> = pruned.timelines.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, vec!["main", "keeper"]);
     pruned.validate().unwrap();
-}
 
-#[test]
-fn prune_branches_keeps_a_subtree_the_failure_still_needs() {
-    let bundle = branched_bundle();
     // The failure now depends on `grandchild`, so neither it nor its parent
     // `disposable` may be dropped; `keeper` still goes.
     let pruned = prune_branches(&bundle, &mut |candidate: &TraceBundle| {

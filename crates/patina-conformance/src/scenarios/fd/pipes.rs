@@ -247,8 +247,8 @@ pub fn run(p: &Probe) {
 
     // A duplicated read end keeps the pipe's reading side alive until the
     // LAST alias closes, not until the original descriptor closes (native ABI
-    // pin: native_abi::pipe_aliases_keep_channels_alive, also run on arm64 and
-    // macOS; fd/table holds the writing side).
+    // pin: native_abi::pipes_and_socketpairs_wake_alias_and_refuse_to_block,
+    // also run on arm64 and macOS; fd/table holds the writing side).
     let (rc, ends) = p.pipe2(O_NONBLOCK);
     p.require("reader alias lifetime pipe", rc == 0);
     let [rd, wr] = ends;

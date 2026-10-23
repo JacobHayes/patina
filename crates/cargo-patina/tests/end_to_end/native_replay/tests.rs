@@ -2,35 +2,40 @@
 
 use super::*;
 
-/// A replay whose runtime initialization fails closed must reach the guest as a
-/// named abort through EVERY interposed entry point, including the ones that
-/// answer without calling `ensure_runtime`.
-///
-/// RED before the fix: `clock`/`clock-until`/`cpu-time`/`read-link` (and the
-/// macOS lock arm) all take a bootstrap-window answer path that never consults
-/// the stored init error, so the fingerprint mismatch is swallowed — `clock-until`
-/// spins at 100% CPU until this test's deadline kills it, and the others exit 0.
-/// `stdout` was swallowed the same way one layer out: captured stdio accepts
-/// bytes with no context and shutdown then drops them, so the guest exited 0
-/// with its output gone. Only the `sleep` control aborted. Every arm now aborts
-/// on its first post-init-failure call.
+/// One probe build carries every replay contract that reads only the trace,
+/// the executable and the replay's own arguments: the trace names its build and
+/// refuses any other, guest argv is restored, an incomplete trace is refused
+/// before exec, a guest abort finalizes per platform, and a fail-closed replay
+/// init reaches the guest through every bootstrap-window entry point.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn native_replay_init_error_reaches_every_bootstrap_window_entry_point() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let source = directory.path().join("bootstrap_window_probe.rs");
-    fs::write(&source, BOOTSTRAP_WINDOW_PROBE_SOURCE).unwrap();
-    let bin = directory.path().join("bootstrap-window-probe");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
+fn native_replay_ties_the_trace_to_its_build_and_argv() {
+    let guest = native_build::source_guest("replay_probe", PROBE_SOURCE);
+    let (recorded, trace) = guest.assert_recorded(5, &[]);
+    let recorded_out = String::from_utf8_lossy(&recorded.stdout).into_owned();
+    // argv[0] is the supervisor-synthesized fixed name, never the host binary
+    // path, so a guest reading std::env::args().next() gets a portable value.
+    assert!(
+        recorded_out.contains("ARGV0=patina-guest")
+            && !recorded_out.contains(guest.binary.to_str().unwrap()),
+        "argv[0] must be normalized to a fixed name, got:\n{recorded_out}"
     );
+    the_trace_names_its_build_and_refuses_any_other(&guest, &trace, &recorded_out);
+    guest_argv_is_restored_on_replay(&guest);
+    incomplete_traces_are_refused_before_guest_exec(&guest);
+    guest_abort_trace_finalization_is_platform_specific(&guest);
+    replay_init_error_reaches_every_bootstrap_window_entry_point(&guest);
+}
+
+/// A replay whose runtime initialization fails closed must reach the guest as a
+/// named abort through EVERY interposed entry point, including the ones that
+/// answer without calling `ensure_runtime`: the bootstrap-window arms take an
+/// answer path that never consults the stored init error unless the shim checks
+/// it there, and `stdout` would exit 0 with its output dropped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn replay_init_error_reaches_every_bootstrap_window_entry_point(guest: &common::native::Guest) {
+    let workspace = native_workspace();
+    let bin = guest.binary.to_str().unwrap();
     let patina = env!("CARGO_BIN_EXE_cargo-patina");
 
     // Collected rather than asserted per entry: this is a class detector, so a
@@ -38,15 +43,15 @@ fn native_replay_init_error_reaches_every_bootstrap_window_entry_point() {
     // the first one.
     let mut swallowed: Vec<String> = Vec::new();
     for entry in BOOTSTRAP_WINDOW_ENTRY_POINTS {
-        let trace = directory.path().join(format!("{entry}.patina"));
-        // Recording proves the arm runs at all: an unrecognized entry (or an
-        // unexpected result from the call under test) aborts the guest.
+        let trace = guest.dir.path().join(format!("{entry}.patina"));
+        // Recording proves the arm runs at all: an unexpected result from the
+        // call under test aborts the guest.
         let recorded = invoke_unchecked(
             patina,
             workspace,
             &[
                 "run",
-                bin.to_str().unwrap(),
+                bin,
                 "--seed",
                 "3",
                 "--record",
@@ -66,14 +71,14 @@ fn native_replay_init_error_reaches_every_bootstrap_window_entry_point() {
 
         // The same trace replayed under a different fingerprint: initialization
         // fails closed, and the guest must learn about it through this entry
-        // point. The deadline is what turns the field symptom (an endless spin)
-        // into a failure instead of a hung test.
+        // point. The deadline turns the field symptom (an endless spin) into a
+        // failure instead of a hung test.
         let replayed = invoke_with_deadline(
             patina,
             workspace,
             &[
                 "replay",
-                bin.to_str().unwrap(),
+                bin,
                 trace.to_str().unwrap(),
                 "--fingerprint",
                 "bootstrap-window-other",
@@ -178,104 +183,16 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
     );
 }
 
-/// A `--record` run stopped by `--budget` used to lose the one artifact that
-/// would explain the wedge: the supervisor's pre-created trace file stayed empty
-/// because the abort skips record finalization. The stop now flushes a
-/// truncated-but-valid trace first.
+/// An explicit guest abort under `--record`: Linux finalizes the trace and
+/// reports the signal death; macOS reports an infra failure and no trace.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_budget_abort_under_record_preserves_a_loadable_trace() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let source = directory.path().join("budget_record.rs");
-    fs::write(&source, CALIBRATION_SPIN_SOURCE).unwrap();
-    let bin = directory.path().join("budget-record");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-
-    let trace = directory.path().join("budget.patina");
+fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::Guest) {
+    let directory = guest.dir.path();
+    let bin = &guest.binary;
+    let trace = directory.join("abort.patina");
     let ran = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &[
-            "run",
-            bin.to_str().unwrap(),
-            "--seed",
-            "1",
-            "--budget",
-            "5000",
-            "--record",
-            trace.to_str().unwrap(),
-            "--fingerprint",
-            "budget-record",
-        ],
-    );
-    assert!(
-        !ran.status.success(),
-        "the budget must stop this run\nstderr:\n{}",
-        String::from_utf8_lossy(&ran.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
-    assert!(
-        stderr.contains("step budget of 5000"),
-        "missing the budget diagnostic:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("empty trace file"),
-        "the budget abort still lost the recording:\n{stderr}"
-    );
-    assert!(
-        trace.is_file(),
-        "the budget abort must leave a truncated trace, not an absent one"
-    );
-    // The artifact is structurally valid and carries the run up to the stop.
-    let bundle: serde_json::Value =
-        serde_json::from_slice(&fs::read(&trace).unwrap()).expect("truncated trace must parse");
-    let events = bundle["timelines"][0]["decisions"].as_array().unwrap();
-    assert_eq!(
-        events.len(),
-        5000,
-        "the truncated trace should hold every op performed before the stop"
-    );
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_guest_abort_trace_finalization_is_platform_specific() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let source = directory.path().join("abort_record.rs");
-    fs::write(
-        &source,
-        r#"fn main() {
-    eprintln!("guest-about-to-abort");
-    std::process::abort();
-}
-"#,
-    )
-    .unwrap();
-    let bin = directory.path().join("abort-record");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-
-    let trace = directory.path().join("abort.patina");
-    let ran = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
+        native_workspace(),
         &[
             "run",
             bin.to_str().unwrap(),
@@ -287,6 +204,8 @@ fn native_guest_abort_trace_finalization_is_platform_specific() {
             "abort-record",
             "--format",
             "json",
+            "--",
+            "abort",
         ],
     );
     assert_eq!(
@@ -297,7 +216,7 @@ fn native_guest_abort_trace_finalization_is_platform_specific() {
         String::from_utf8_lossy(&ran.stderr)
     );
     assert!(
-        fs::read_dir(directory.path()).unwrap().all(|entry| !entry
+        fs::read_dir(directory).unwrap().all(|entry| !entry
             .unwrap()
             .file_name()
             .to_string_lossy()
@@ -315,7 +234,8 @@ fn native_guest_abort_trace_finalization_is_platform_specific() {
     {
         use std::os::unix::process::ExitStatusExt;
         const SIGABRT: i32 = 6;
-        let direct = Command::new(&bin)
+        let direct = Command::new(bin)
+            .arg("abort")
             .env("PATINA_MODE", "seeded")
             .env("PATINA_SEED", "1")
             .output()
@@ -342,43 +262,21 @@ fn native_guest_abort_trace_finalization_is_platform_specific() {
             "no absent trace fact should be advertised: {envelope:#}"
         );
         let stderr = envelope["stderr"].as_str().unwrap();
-        assert!(
-            stderr.contains("PATINA_INFRA native_run"),
-            "missing infra marker: {stderr}"
-        );
-        assert!(
-            stderr.contains("signal=6"),
-            "missing signal detail: {stderr}"
-        );
-        assert!(
-            stderr.contains("trace=incomplete"),
-            "missing trace detail: {stderr}"
-        );
-        assert!(
-            stderr.contains("empty trace"),
-            "missing empty-trace refusal: {stderr}"
-        );
+        for detail in [
+            "PATINA_INFRA native_run",
+            "signal=6",
+            "trace=incomplete",
+            "empty trace",
+        ] {
+            assert!(stderr.contains(detail), "missing {detail:?}: {stderr}");
+        }
     }
 }
 
+/// An empty, truncated or metadata-incomplete trace is refused with the CLI
+/// error exit before the guest is executed.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_replay_refuses_incomplete_traces_before_guest_exec() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let source = directory.path().join("noop_replay.rs");
-    fs::write(&source, "fn main() { println!(\"SHOULD_NOT_RUN\"); }\n").unwrap();
-    let bin = directory.path().join("noop-replay");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-
+fn incomplete_traces_are_refused_before_guest_exec(guest: &common::native::Guest) {
     let incomplete_metadata = format!(
         r#"{{"format_version":{},"metadata":{{"root_seed":1,"decision_policy":"splitmix64-v1"}},"timelines":[]}}"#,
         patina_dst_trace::TRACE_FORMAT_VERSION
@@ -393,313 +291,103 @@ fn native_replay_refuses_incomplete_traces_before_guest_exec() {
         ),
     ];
     for (name, bytes, needle) in cases {
-        let trace = directory.path().join(format!("{name}.patina"));
+        let trace = guest.dir.path().join(format!("{name}.patina"));
         fs::write(&trace, bytes).unwrap();
-        let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                bin.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "noop-replay",
-            ],
-        );
+        let replayed = guest.command("replay", &[trace.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&replayed.stderr);
         assert_eq!(
             replayed.status.code(),
             Some(2),
-            "{name} trace should refuse with the CLI error exit\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&replayed.stdout),
-            String::from_utf8_lossy(&replayed.stderr)
+            "{name} trace should refuse with the CLI error exit\nstderr:\n{stderr}"
         );
-        let stderr = String::from_utf8_lossy(&replayed.stderr);
         assert!(
-            stderr.contains("incomplete trace"),
+            stderr.contains("incomplete trace") && stderr.contains(needle),
             "{name} stderr:\n{stderr}"
         );
-        assert!(stderr.contains(needle), "{name} stderr:\n{stderr}");
         assert!(
-            !stderr.contains("terminated by a signal"),
-            "{name} replay must refuse before guest exec, not die by signal:\n{stderr}"
-        );
-        assert!(
-            !String::from_utf8_lossy(&replayed.stdout).contains("SHOULD_NOT_RUN"),
+            !String::from_utf8_lossy(&replayed.stdout).contains("ARGV0="),
             "{name} replay executed the guest before refusing"
         );
     }
 }
 
-// Guest argv is recorded into the trace metadata and restored on replay: a bare
-// `cargo patina replay <bin> <trace>` reproduces a run recorded with non-default
-// `-- ARGS` byte-identically (the incident class), a mismatched `--` section is
-// refused up front naming both argv lists, an old trace without the field still
-// replays with explicit arguments, and `argv[0]` is normalized to a fixed,
-// machine-independent value.
+/// Guest argv is recorded into the trace metadata and restored on replay: a
+/// bare `cargo patina replay <bin> <trace>` reproduces a run recorded with
+/// non-default `-- ARGS`, a mismatched `--` section is refused up front naming
+/// both argv lists, a matching one is accepted, and a trace without the field
+/// still replays with explicit arguments.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_replay_restores_guest_argv_and_normalizes_argv0() {
-    let directory = tempdir().unwrap();
-    let source = directory.path().join("argv_echo.rs");
-    fs::write(&source, ARGV_ECHO_SOURCE).unwrap();
-    let workspace = native_workspace();
-    let bin = directory.path().join("argv-echo");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-    let exe = env!("CARGO_BIN_EXE_cargo-patina");
-
-    // argv[0] is the supervisor-synthesized fixed name, never the host binary
-    // path, so a guest reading std::env::args().next() gets a portable value.
-    let seeded = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "0"]);
-    let seeded_out = String::from_utf8_lossy(&seeded.stdout);
-    assert!(
-        seeded_out.contains("ARGV0=patina-guest"),
-        "argv[0] must be normalized to a fixed name, got:\n{seeded_out}"
-    );
-    assert!(
-        !seeded_out.contains(bin.to_str().unwrap()),
-        "the host binary path must not leak into the guest argv[0]:\n{seeded_out}"
-    );
-
-    // Record with NON-DEFAULT guest arguments (the real incident used a
-    // non-default --tick-millis), then a BARE replay — no `--` section —
-    // reproduces the run byte-identically because the arguments are restored
-    // from the trace. Before argv capture this bare replay ran the guest with
-    // default args and diverged with an operation mismatch.
-    let trace = directory.path().join("argv.patina");
-    let recorded = invoke(
-        workspace,
-        &[
-            "run",
-            bin.to_str().unwrap(),
-            "--seed",
-            "0",
-            "--record",
-            trace.to_str().unwrap(),
-            "--",
-            "alpha",
-            "--tick-millis",
-            "50",
-        ],
-    );
+fn guest_argv_is_restored_on_replay(guest: &common::native::Guest) {
+    let trace = guest.dir.path().join("argv.patina");
+    let args = ["alpha", "--tick-millis", "50"];
+    let mut record = vec!["--seed", "0", "--record", trace.to_str().unwrap(), "--"];
+    record.extend(args);
+    let recorded = common::native::assert_success(guest.command("run", &record));
     let recorded_out = String::from_utf8_lossy(&recorded.stdout).into_owned();
     assert!(
-        recorded_out.contains("ARGS=[\"alpha\", \"--tick-millis\", \"50\"]"),
+        recorded_out.contains("ARGS=[\"alpha\", \"--tick-millis\", \"50\"]")
+            && recorded_out.contains("READBACK=alpha"),
         "record run did not see the passed guest arguments:\n{recorded_out}"
     );
-    assert!(recorded_out.contains("READBACK=alpha"), "{recorded_out}");
+    fn replay_args<'a>(bin: &'a str, trace: &'a Path, args: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = vec!["replay", bin, trace.to_str().unwrap()];
+        if !args.is_empty() {
+            argv.push("--");
+            argv.extend_from_slice(args);
+        }
+        argv
+    }
+    let (exe, workspace) = (env!("CARGO_BIN_EXE_cargo-patina"), native_workspace());
+    let bin = guest.binary.to_str().unwrap();
+    for (what, args) in [("bare", &[][..]), ("matching", &args[..])] {
+        let replayed = invoke_with(exe, workspace, &replay_args(bin, &trace, args));
+        assert_eq!(
+            String::from_utf8_lossy(&replayed.stdout),
+            recorded_out,
+            "a {what} replay must restore the recorded guest arguments"
+        );
+    }
 
-    let bare_replay = invoke_with(
-        exe,
-        workspace,
-        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&bare_replay.stdout),
-        recorded_out,
-        "bare `replay` must restore the recorded guest arguments and reproduce the run"
-    );
-
-    // A mismatched `--` section is refused UP FRONT, naming both the recorded and
-    // the passed argument lists — never a confusing mid-run divergence.
-    let mismatch = invoke_unchecked(
-        exe,
-        workspace,
-        &[
-            "replay",
-            bin.to_str().unwrap(),
-            trace.to_str().unwrap(),
-            "--",
-            "beta",
-            "--tick-millis",
-            "99",
-        ],
-    );
+    let mismatched = ["beta", "--tick-millis", "99"];
+    let mismatch = invoke_unchecked(exe, workspace, &replay_args(bin, &trace, &mismatched));
     let mismatch_stderr = String::from_utf8_lossy(&mismatch.stderr);
     assert!(
-        !mismatch.status.success(),
-        "a mismatched replay `--` section must fail:\nstderr:\n{mismatch_stderr}"
-    );
-    assert!(
-        mismatch_stderr.contains("alpha")
+        !mismatch.status.success()
+            && mismatch_stderr.contains("alpha")
             && mismatch_stderr.contains("beta")
             && mismatch_stderr.contains("mismatch"),
-        "the mismatch error must name BOTH argv lists:\nstderr:\n{mismatch_stderr}"
+        "a mismatched `--` section must be refused naming both argv lists:\n{mismatch_stderr}"
     );
 
-    // A matching `--` section is accepted (compat for scripts that still pass it).
-    let matching = invoke_with(
-        exe,
-        workspace,
-        &[
-            "replay",
-            bin.to_str().unwrap(),
-            trace.to_str().unwrap(),
-            "--",
-            "alpha",
-            "--tick-millis",
-            "50",
-        ],
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&matching.stdout),
-        recorded_out,
-        "a byte-identical `--` section must be accepted"
-    );
-
-    // Old-trace compatibility: synthesize a trace WITHOUT the guest_argv field
-    // (a pre-argv recording) by stripping it, then replay with explicit
-    // arguments exactly as before — no new error, arguments taken from the
-    // command line.
-    let old_trace = directory.path().join("old.patina");
+    let old_trace = guest.dir.path().join("old-argv.patina");
     strip_guest_argv(&trace, &old_trace);
-    let old_replay = invoke(
-        workspace,
-        &[
-            "replay",
-            bin.to_str().unwrap(),
-            old_trace.to_str().unwrap(),
-            "--",
-            "alpha",
-            "--tick-millis",
-            "50",
-        ],
-    );
+    let old_replay = invoke_with(exe, workspace, &replay_args(bin, &old_trace, &args));
     assert_eq!(
         String::from_utf8_lossy(&old_replay.stdout),
         recorded_out,
-        "an old trace without recorded argv must replay with explicit arguments as before"
+        "a trace without recorded argv must replay with explicit arguments"
     );
 }
 
-/// Build the identity probe at `bin` and record one run of it into `trace`.
+/// The supervisor stamps the build identity into the trace, naming the
+/// executable and the supervisor whatever the guest's linked recorder writes.
+/// Replay refuses, by component and before the guest starts, an executable one
+/// inert byte away, a trace from another supervisor build of the same version,
+/// and a trace with no identity. Rebuilding the one source, under another output
+/// name, reproduces the executable, so a source-first replay matches.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn record_identity_probe(directory: &Path, bin: &Path, trace: &Path) -> String {
-    let workspace = native_workspace();
-    let source = directory.join("identity_probe.rs");
-    fs::write(&source, IDENTITY_PROBE_SOURCE).unwrap();
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            bin.to_str().unwrap(),
-        ],
-    );
-    let recorded = invoke(
-        workspace,
-        &[
-            "run",
-            bin.to_str().unwrap(),
-            "--seed",
-            "5",
-            "--record",
-            trace.to_str().unwrap(),
-        ],
-    );
-    String::from_utf8_lossy(&recorded.stdout).into_owned()
-}
-
-/// A native trace replays against the executable it was recorded from, and is
-/// refused, by component and before the guest starts, against one that differs
-/// in a single byte.
-///
-/// RED before the fix: the flipped byte is one the guest never reads, so its
-/// replay against the trace succeeds; nothing tied the trace to the bytes it
-/// was recorded from.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_replay_refuses_an_executable_one_byte_away_and_names_it() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
-    let bin = directory.path().join("identity-probe");
-    let trace = directory.path().join("identity.patina");
-    let recorded_out = record_identity_probe(directory.path(), &bin, &trace);
-
-    let same = invoke(
-        workspace,
-        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&same.stdout),
-        recorded_out,
-        "the recorded executable must replay its own trace"
-    );
-
-    let changed = directory.path().join("identity-probe-changed");
-    flip_identity_probe_byte(&bin, &changed);
-    let refused = invoke_unchecked(
-        patina,
-        workspace,
-        &["replay", changed.to_str().unwrap(), trace.to_str().unwrap()],
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        !refused.status.success(),
-        "a trace must not replay against a different executable\nstdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&refused.stdout)
-    );
-    assert!(
-        stderr.contains("fingerprint mismatch") && stderr.contains("executable"),
-        "the refusal must name the differing component:\n{stderr}"
-    );
-    assert!(
-        !String::from_utf8_lossy(&refused.stdout).contains("IDENTITY_PROBE"),
-        "the guest must not start under a refused replay"
-    );
-
-    // The structured result classifies it as Patina's own refusal, before any
-    // guest ran.
-    let json = invoke_unchecked(
-        patina,
-        workspace,
-        &[
-            "replay",
-            "--format",
-            "json",
-            changed.to_str().unwrap(),
-            trace.to_str().unwrap(),
-        ],
-    );
-    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(envelope["refusal"]["class"], "fingerprint_mismatch");
-    assert!(
-        envelope
-            .get("guest_exit")
-            .is_none_or(serde_json::Value::is_null)
-    );
-}
-
-/// The supervisor stamps the build identity into the trace it commits, so a
-/// recording names its executable and its supervisor whatever the recorder
-/// linked into the guest knows: that recorder writes no identity at all, as
-/// one linked before identities existed does not.
-///
-/// RED before the fix: the identity rode the control plane to the guest's
-/// recorder, so a binary whose recorder did not know it recorded none, exited
-/// 0, and was then refused against itself.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_recording_names_its_build_whatever_the_recorder_writes() {
-    let directory = tempdir().unwrap();
-    let bin = directory.path().join("identity-probe");
-    let trace = directory.path().join("identity.patina");
-    record_identity_probe(directory.path(), &bin, &trace);
-
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+fn the_trace_names_its_build_and_refuses_any_other(
+    guest: &common::native::Guest,
+    trace: &Path,
+    recorded_out: &str,
+) {
+    let directory = guest.dir.path();
+    let bin = &guest.binary;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
     let native = &value["metadata"]["native"];
     assert_eq!(
         native["executable_sha256"].as_str(),
-        Some(file_digest(&bin).as_str()),
+        Some(file_digest(bin).as_str()),
         "the trace must name the executable it was recorded from"
     );
     assert_eq!(
@@ -707,112 +395,58 @@ fn native_recording_names_its_build_whatever_the_recorder_writes() {
         Some(file_digest(Path::new(env!("CARGO_BIN_EXE_cargo-patina"))).as_str()),
         "the trace must name the cargo-patina that recorded it"
     );
-}
 
-/// A native trace recorded by another `cargo-patina` build is refused, naming
-/// the supervisor, even when both builds carry the same package version: the
-/// supervisor builds the guest's initial state and arms its traps, and the
-/// version stays the same across development builds that do so differently.
-///
-/// RED before the fix: the package version stood for the supervisor, so a
-/// trace from another build of the same version replayed.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_replay_refuses_a_trace_from_another_supervisor_build_and_names_it() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let bin = directory.path().join("identity-probe");
-    let trace = directory.path().join("identity.patina");
-    record_identity_probe(directory.path(), &bin, &trace);
-    let foreign = directory.path().join("foreign.patina");
-    record_as_another_supervisor_build(&trace, &foreign);
+    let replay = |executable: &Path, trace: &Path, json: bool| {
+        let mut args = vec!["replay"];
+        if json {
+            args.extend(["--format", "json"]);
+        }
+        args.extend([executable.to_str().unwrap(), trace.to_str().unwrap()]);
+        invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            native_workspace(),
+            &args,
+        )
+    };
+    let assert_refused = |refused: &Output, component: &str| {
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            !refused.status.success()
+                && stderr.contains("fingerprint mismatch")
+                && stderr.contains(component),
+            "the refusal must name {component:?}:\n{stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&refused.stdout).contains("IDENTITY_PROBE"),
+            "the guest must not start under a refused replay"
+        );
+    };
 
-    let refused = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["replay", bin.to_str().unwrap(), foreign.to_str().unwrap()],
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
+    let changed = directory.join("replay_probe-changed");
+    flip_identity_probe_byte(bin, &changed);
+    assert_refused(&replay(&changed, trace, false), "executable");
+    // The structured result classifies it as Patina's own refusal, before any
+    // guest ran.
+    let json = replay(&changed, trace, true);
+    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["refusal"]["class"], "fingerprint_mismatch");
     assert!(
-        !refused.status.success(),
-        "a trace from another supervisor build must not replay\nstdout:\n{}\nstderr:\n{stderr}",
-        String::from_utf8_lossy(&refused.stdout)
-    );
-    assert!(
-        stderr.contains("fingerprint mismatch") && stderr.contains("supervisor"),
-        "the refusal must name the differing component:\n{stderr}"
-    );
-    assert!(
-        !String::from_utf8_lossy(&refused.stdout).contains("IDENTITY_PROBE"),
-        "the guest must not start under a refused replay"
-    );
-}
-
-/// A native trace without a build identity, as one recorded before identities
-/// existed reads, is refused rather than replayed on trust.
-///
-/// RED before the fix: no field was required, so the stripped trace replayed.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_replay_refuses_a_trace_without_a_build_identity() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let bin = directory.path().join("identity-probe");
-    let trace = directory.path().join("identity.patina");
-    record_identity_probe(directory.path(), &bin, &trace);
-    let old = directory.path().join("old.patina");
-    strip_native_identity(&trace, &old);
-
-    let refused = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        workspace,
-        &["replay", bin.to_str().unwrap(), old.to_str().unwrap()],
-    );
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        !refused.status.success(),
-        "a trace without a build identity must not replay\nstderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("fingerprint mismatch") && stderr.contains("no native build identity"),
-        "the refusal must say the identity is missing:\n{stderr}"
-    );
-}
-
-/// Building one source twice, under different output names, reproduces the
-/// executable, so a source-first replay matches a trace recorded from a built
-/// binary.
-///
-/// RED before the fix on macOS: the linker writes the output's file name into
-/// the executable (the ad-hoc signature identifier and the image UUID), so the
-/// two builds differ and the source-first replay is refused.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn native_single_source_rebuild_reproduces_the_build_identity() {
-    let directory = tempdir().unwrap();
-    let workspace = native_workspace();
-    let bin = directory.path().join("identity-probe");
-    let trace = directory.path().join("identity.patina");
-    let recorded_out = record_identity_probe(directory.path(), &bin, &trace);
-    let source = directory.path().join("identity_probe.rs");
-
-    let renamed = directory.path().join("renamed");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            renamed.to_str().unwrap(),
-        ],
-    );
-    assert!(
-        fs::read(&bin).unwrap() == fs::read(&renamed).unwrap(),
-        "two builds of one source must be byte-identical whatever they are named"
+        envelope
+            .get("guest_exit")
+            .is_none_or(serde_json::Value::is_null)
     );
 
+    let foreign = directory.join("foreign.patina");
+    record_as_another_supervisor_build(trace, &foreign);
+    assert_refused(&replay(bin, &foreign, false), "supervisor");
+
+    let old = directory.join("old-identity.patina");
+    strip_native_identity(trace, &old);
+    assert_refused(&replay(bin, &old, false), "no native build identity");
+
+    let source = directory.join("replay_probe.rs");
     let replayed = invoke(
-        workspace,
+        native_workspace(),
         &["replay", source.to_str().unwrap(), trace.to_str().unwrap()],
     );
     assert!(

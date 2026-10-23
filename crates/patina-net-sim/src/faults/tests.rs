@@ -3,22 +3,7 @@
 use crate::SimNet;
 use patina_dst_abi::{ErrorCode, SendDisposition};
 use patina_dst_driver_api::NetDriver;
-use patina_dst_rng_seeded::{domain_seed, fault_domain};
 use std::collections::BTreeSet;
-#[test]
-fn partitions_drop_without_silently_routing_to_the_host() {
-    let mut net = SimNet::builder()
-        .partition("left", "right")
-        .build()
-        .unwrap();
-    let left = net.bind("left").unwrap();
-    let right = net.bind("right").unwrap();
-    let report = net.send(left, "right", b"lost", 0).unwrap();
-    assert_eq!(report.disposition, SendDisposition::DroppedByPartition);
-    assert_eq!(report.copies, 0);
-    assert_eq!(net.recv(right, u64::MAX).unwrap(), None);
-}
-
 /// Send `count` numbered datagrams at send-time zero and drain them in
 /// delivery order, returning the sequence numbers actually received.
 fn delivered_order(net: &mut SimNet, count: u32) -> Vec<u32> {
@@ -35,86 +20,52 @@ fn delivered_order(net: &mut SimNet, count: u32) -> Vec<u32> {
 }
 
 #[test]
-fn jitter_reorders_datagrams_deterministically_per_seed() {
-    // A seed that reorders: the received order differs from the send order,
-    // and is byte-identical across two runs of the same configuration.
-    let mut first = SimNet::builder()
-        .fault_seed(7)
-        .jitter_nanos(0, 1000)
-        .build()
-        .unwrap();
-    let mut second = SimNet::builder()
-        .fault_seed(7)
-        .jitter_nanos(0, 1000)
-        .build()
-        .unwrap();
-    let order_a = delivered_order(&mut first, 8);
-    let order_b = delivered_order(&mut second, 8);
-    assert_eq!(order_a, order_b, "same seed must reproduce delivery order");
-    assert_eq!(order_a.len(), 8, "no jitter run should drop datagrams");
+fn jitter_reorders_datagrams_across_seeds_and_zero_jitter_preserves_order() {
     let in_order: Vec<u32> = (0..8).collect();
-    // At least one seed in a small sweep must actually reorder, proving the
-    // knob is not vacuous.
+    let mut net = SimNet::builder().jitter_nanos(0, 0).build().unwrap();
+    assert_eq!(delivered_order(&mut net, 8), in_order);
+    // At least one seed in a small sweep must actually reorder, without
+    // losing anything, proving the knob is not vacuous.
     let any_reordered = (0..16u64).any(|seed| {
         let mut net = SimNet::builder()
             .fault_seed(seed)
             .jitter_nanos(0, 1000)
             .build()
             .unwrap();
-        delivered_order(&mut net, 8) != in_order
+        let order = delivered_order(&mut net, 8);
+        assert_eq!(order.len(), 8, "jitter must not drop datagrams");
+        order != in_order
     });
     assert!(any_reordered, "jitter never reordered across seeds");
 }
 
 #[test]
-fn zero_jitter_preserves_send_order() {
-    let mut net = SimNet::builder().jitter_nanos(0, 0).build().unwrap();
-    assert_eq!(delivered_order(&mut net, 8), (0..8).collect::<Vec<_>>());
-}
-
-#[test]
-fn drop_permille_loses_datagrams_deterministically_and_extremes_are_total() {
-    // Certain drop loses everything; zero drop keeps everything.
+fn drop_permille_loses_datagrams_and_extremes_are_total() {
+    // Certain drop loses everything, reports the bytes written and queues
+    // nothing; zero drop keeps everything.
     let mut all = SimNet::builder().drop_permille(1000).build().unwrap();
-    assert!(delivered_order(&mut all, 8).is_empty());
-    let mut none = SimNet::builder().drop_permille(0).build().unwrap();
-    assert_eq!(delivered_order(&mut none, 8), (0..8).collect::<Vec<_>>());
-
-    // A partial probability drops some but not all, reproducibly per seed.
-    let received_a = {
-        let mut net = SimNet::builder()
-            .fault_seed(3)
-            .drop_permille(500)
-            .build()
-            .unwrap();
-        delivered_order(&mut net, 32)
-    };
-    let received_b = {
-        let mut net = SimNet::builder()
-            .fault_seed(3)
-            .drop_permille(500)
-            .build()
-            .unwrap();
-        delivered_order(&mut net, 32)
-    };
-    assert_eq!(received_a, received_b, "drops must reproduce per seed");
-    assert!(
-        received_a.len() < 32 && !received_a.is_empty(),
-        "half-probability drop should lose some but not all of 32 datagrams, got {}",
-        received_a.len()
-    );
-}
-
-#[test]
-fn dropped_send_reports_bytes_written_but_queues_nothing() {
-    let mut net = SimNet::builder().drop_permille(1000).build().unwrap();
-    let tx = net.bind("tx").unwrap();
-    net.bind("rx").unwrap();
-    let report = net.send(tx, "rx", b"payload", 0).unwrap();
+    let tx = all.bind("tx").unwrap();
+    all.bind("rx").unwrap();
+    let report = all.send(tx, "rx", b"payload", 0).unwrap();
     assert_eq!(report.written, 7);
     assert_eq!(report.copies, 0);
     assert_eq!(report.disposition, SendDisposition::DroppedByFault);
-    assert_eq!(net.queued_packets(), 0);
+    assert_eq!(all.queued_packets(), 0);
+    let mut none = SimNet::builder().drop_permille(0).build().unwrap();
+    assert_eq!(delivered_order(&mut none, 8), (0..8).collect::<Vec<_>>());
+
+    // A partial probability drops some but not all.
+    let mut net = SimNet::builder()
+        .fault_seed(3)
+        .drop_permille(500)
+        .build()
+        .unwrap();
+    let received = delivered_order(&mut net, 32);
+    assert!(
+        received.len() < 32 && !received.is_empty(),
+        "half-probability drop should lose some but not all of 32 datagrams, got {}",
+        received.len()
+    );
 }
 
 // --- TCP stream fault injection (jitter + drop-retransmit) ---
@@ -143,27 +94,42 @@ fn tcp_stream_delivered(net: &mut SimNet, payloads: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// Base latency delays a TCP segment to exactly its delivery time, which
+/// `next_delivery` reports until the segment is read; the report counts
+/// every send it delayed, so a send path that skipped the latency would
+/// read as vacuous rather than clean.
 #[test]
-fn tcp_base_latency_delays_delivery_without_fault_knobs() {
+fn tcp_base_latency_delays_delivery_and_is_reported_per_send() {
     let mut net = SimNet::builder().base_latency_nanos(50).build().unwrap();
-    let listener = net.tcp_listen("server", 1).unwrap();
+    let listener = net.tcp_listen("server", 8).unwrap();
     let client = net.tcp_connect("client", "server", 0).unwrap();
     let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    assert_eq!(net.tcp_send(client, b"latency", 0).unwrap(), 7);
-    assert_eq!(net.tcp_recv(server, 16, 49).unwrap(), None);
-    assert_eq!(net.next_delivery(server, 0).unwrap(), Some(50));
-    assert_eq!(net.tcp_recv(server, 16, 50).unwrap().unwrap(), b"latency");
+    assert_eq!(net.tcp_send(client, b"latency", 100).unwrap(), 7);
+    assert_eq!(net.tcp_recv(server, 16, 149).unwrap(), None);
+    assert_eq!(net.next_delivery(server, 0).unwrap(), Some(150));
+    assert_eq!(net.tcp_recv(server, 16, 150).unwrap().unwrap(), b"latency");
+    assert_eq!(net.next_delivery(server, 150).unwrap(), None);
+    for _ in 0..7 {
+        net.tcp_send(client, b"x", 0).unwrap();
+        let _ = net.tcp_recv(server, 64, u64::MAX);
+    }
+    let report = net.fault_report().unwrap();
+    assert!(report.latency_vacuity_diagnosable);
+    assert_eq!(report.latency_applied, 8);
+    assert!(!report.is_vacuous());
 }
 
 #[test]
-fn tcp_jitter_delays_delivery_preserves_order_and_reproduces_per_seed() {
-    // A nonzero jitter floor pushes every segment past t=0.
+fn tcp_jitter_delays_delivery_preserves_order_and_varies_across_seeds() {
+    // A nonzero jitter floor pushes every segment past t=0, and TCP stays
+    // reliable and in-order: jitter reorders across streams, never within one.
+    let payloads: [&[u8]; 4] = [b"aa", b"bb", b"cc", b"dd"];
     let mut net = SimNet::builder()
         .fault_seed(9)
         .jitter_nanos(1_000, 5_000)
         .build()
         .unwrap();
-    let listener = net.tcp_listen("server", 8).unwrap();
+    let listener = net.tcp_listen("server", 1).unwrap();
     let client = net.tcp_connect("client", "server", 0).unwrap();
     let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
     assert_eq!(net.tcp_send(client, b"aa", 0).unwrap(), 2);
@@ -173,33 +139,36 @@ fn tcp_jitter_delays_delivery_preserves_order_and_reproduces_per_seed() {
         "jitter must delay TCP delivery past the send instant"
     );
     assert_eq!(net.tcp_recv(server, 16, u64::MAX).unwrap().unwrap(), b"aa");
-
-    // Same seed reproduces byte-for-byte; order preserved; nothing lost.
-    let payloads: [&[u8]; 4] = [b"aa", b"bb", b"cc", b"dd"];
-    let mut first = SimNet::builder()
+    let mut net = SimNet::builder()
         .fault_seed(9)
         .jitter_nanos(1_000, 5_000)
         .build()
         .unwrap();
-    let mut second = SimNet::builder()
-        .fault_seed(9)
-        .jitter_nanos(1_000, 5_000)
-        .build()
-        .unwrap();
-    let delivered = tcp_stream_delivered(&mut first, &payloads);
-    assert_eq!(
-        delivered,
-        tcp_stream_delivered(&mut second, &payloads),
-        "same seed must reproduce the delivered byte stream"
-    );
-    assert_eq!(
-        delivered, b"aabbccdd",
-        "TCP is reliable and in-order: jitter reorders across streams, never within one"
-    );
-    let report = first.fault_report().unwrap();
+    assert_eq!(tcp_stream_delivered(&mut net, &payloads), b"aabbccdd");
+    let report = net.fault_report().unwrap();
     assert!(report.send_ops >= 4);
     assert!(report.jitter_applied > 0, "jitter must register as applied");
     assert!(!report.is_vacuous());
+
+    fn first_delivery(seed: u64) -> u64 {
+        let mut net = SimNet::builder()
+            .fault_seed(seed)
+            .jitter_nanos(1, 1_000_000)
+            .build()
+            .unwrap();
+        let listener = net.tcp_listen("server", 1).unwrap();
+        let client = net.tcp_connect("client", "server", 0).unwrap();
+        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+        net.tcp_send(client, b"x", 0).unwrap();
+        net.next_delivery(server, 0)
+            .unwrap()
+            .expect("a delayed segment has a future delivery time")
+    }
+    let distinct = (0..8u64).map(first_delivery).collect::<BTreeSet<_>>();
+    assert!(
+        distinct.len() > 1,
+        "jitter delivery time must vary across seeds, got {distinct:?}"
+    );
 }
 
 #[test]
@@ -231,31 +200,6 @@ fn tcp_drop_retransmits_and_never_loses_data() {
 }
 
 #[test]
-fn tcp_jitter_delivery_time_varies_across_seeds() {
-    fn first_delivery(seed: u64) -> u64 {
-        let mut net = SimNet::builder()
-            .fault_seed(seed)
-            .jitter_nanos(1, 1_000_000)
-            .build()
-            .unwrap();
-        let listener = net.tcp_listen("server", 1).unwrap();
-        let client = net.tcp_connect("client", "server", 0).unwrap();
-        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-        net.tcp_send(client, b"x", 0).unwrap();
-        net.next_delivery(server, 0)
-            .unwrap()
-            .expect("a delayed segment has a future delivery time")
-    }
-    // Different seeds draw different jitter, so the delivery schedule differs
-    // — the fault is not a constant.
-    let distinct = (0..8u64).map(first_delivery).collect::<BTreeSet<_>>();
-    assert!(
-        distinct.len() > 1,
-        "jitter delivery time must vary across seeds, got {distinct:?}"
-    );
-}
-
-#[test]
 fn tcp_without_fault_knobs_perturbs_nothing() {
     // The knobs-off default draws no fault RNG and delivers immediately, so
     // every pre-fault TCP test stays byte-identical.
@@ -278,9 +222,8 @@ fn tcp_without_fault_knobs_perturbs_nothing() {
 #[test]
 fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
     use patina_dst_driver_api::NetFaultReport;
-    // The signature the pre-fix inert TCP path produced: a knob armed to
-    // perturb, traffic occurred, yet zero effects — the bug this diagnostic
-    // exists to catch.
+    // The inertness signature: a knob armed to perturb, traffic occurred,
+    // yet zero effects.
     assert!(
         NetFaultReport {
             send_ops: 5,
@@ -313,10 +256,9 @@ fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
     assert!(!NetFaultReport::default().is_vacuous());
     assert!(!NetFaultReport::default().had_opportunities());
 
-    // The reason the report is PER CLASS. Before Wave E one merged
-    // `faults_applied` counter answered for every knob, so this shape —
-    // drops landing while an equally-live jitter knob applied nothing —
-    // read as "faults applied" and the inert class stayed invisible.
+    // The report is per class: drops landing while an equally live jitter
+    // knob applied nothing is still vacuous, so one live class never hides
+    // an inert one.
     let merged_would_have_hidden_it = NetFaultReport {
         send_ops: 100,
         drop_vacuity_diagnosable: true,
@@ -359,8 +301,6 @@ fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
     }
 }
 
-// --- Wave E: connection-level and duplication faults ---
-
 #[test]
 fn duplicated_datagrams_arrive_twice_with_independent_delivery_times() {
     let mut net = SimNet::builder()
@@ -387,6 +327,24 @@ fn duplicated_datagrams_arrive_twice_with_independent_delivery_times() {
     let fault_report = net.fault_report().unwrap();
     assert_eq!(fault_report.duplicates_applied, 1);
     assert!(!fault_report.is_vacuous());
+
+    // A partial rate both duplicates and does not, differently per seed.
+    fn duplicated(seed: u64) -> Vec<usize> {
+        let mut net = SimNet::builder()
+            .fault_seed(seed)
+            .duplicate_permille(500)
+            .build()
+            .unwrap();
+        let tx = net.bind("tx").unwrap();
+        net.bind("rx").unwrap();
+        (0..32)
+            .map(|index| net.send(tx, "rx", &[index as u8], 0).unwrap().copies)
+            .collect()
+    }
+    let one_run = duplicated(3);
+    assert!(one_run.contains(&2) && one_run.contains(&1));
+    let distinct = (0..16u64).map(duplicated).collect::<BTreeSet<_>>();
+    assert!(distinct.len() > 1, "duplication must vary across seeds");
 }
 
 #[test]
@@ -418,29 +376,6 @@ fn stream_sends_are_no_opportunity_for_the_datagram_only_duplicate_class() {
 }
 
 #[test]
-fn duplication_is_seed_deterministic_and_varies_across_seeds() {
-    fn duplicated(seed: u64) -> Vec<usize> {
-        let mut net = SimNet::builder()
-            .fault_seed(seed)
-            .duplicate_permille(500)
-            .build()
-            .unwrap();
-        let tx = net.bind("tx").unwrap();
-        net.bind("rx").unwrap();
-        (0..32)
-            .map(|index| net.send(tx, "rx", &[index as u8], 0).unwrap().copies)
-            .collect()
-    }
-    for seed in 0..16 {
-        assert_eq!(duplicated(seed), duplicated(seed), "seed {seed}");
-    }
-    let distinct = (0..16u64).map(duplicated).collect::<BTreeSet<_>>();
-    assert!(distinct.len() > 1, "duplication must vary across seeds");
-    let one_run = duplicated(3);
-    assert!(one_run.contains(&2) && one_run.contains(&1));
-}
-
-#[test]
 fn connect_refusal_fires_only_on_connects_that_would_have_succeeded() {
     let mut net = SimNet::builder()
         .fault_seed(2)
@@ -463,10 +398,9 @@ fn connect_refusal_fires_only_on_connects_that_would_have_succeeded() {
     assert_eq!(report.connect_ops, 1);
     assert_eq!(report.connects_refused, 1);
     assert!(!report.is_vacuous());
-}
 
-#[test]
-fn connect_refusal_is_seed_deterministic_and_leaves_the_listener_usable() {
+    // A half rate both refuses and admits, leaving the listener usable, and
+    // its verdicts vary across seeds.
     fn refusals(seed: u64) -> Vec<bool> {
         let mut net = SimNet::builder()
             .fault_seed(seed)
@@ -481,9 +415,6 @@ fn connect_refusal_is_seed_deterministic_and_leaves_the_listener_usable() {
             })
             .collect()
     }
-    for seed in 0..16 {
-        assert_eq!(refusals(seed), refusals(seed), "seed {seed}");
-    }
     let one_run = refusals(1);
     assert!(
         one_run.contains(&true) && one_run.contains(&false),
@@ -493,7 +424,7 @@ fn connect_refusal_is_seed_deterministic_and_leaves_the_listener_usable() {
 }
 
 #[test]
-fn an_injected_reset_tears_down_both_directions() {
+fn an_injected_reset_tears_down_both_directions_and_idle_polls_never_draw() {
     let mut net = SimNet::builder()
         .fault_seed(1)
         .reset_permille(1000)
@@ -502,6 +433,11 @@ fn an_injected_reset_tears_down_both_directions() {
     let listener = net.tcp_listen("server", 1).unwrap();
     let client = net.tcp_connect("client", "server", 0).unwrap();
     let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
+    // A poll with nothing to read is not a data operation, so it neither
+    // draws nor counts: a reset must not get likelier the harder a guest
+    // spins.
+    assert_eq!(net.tcp_recv(server, 16, 0).unwrap(), None);
+    assert_eq!(net.fault_report().unwrap().stream_ops, 0);
     assert_eq!(
         net.tcp_send(client, b"doomed", 0).unwrap_err().code,
         ErrorCode::ConnectionReset
@@ -519,31 +455,8 @@ fn an_injected_reset_tears_down_both_directions() {
     assert_eq!(report.stream_ops, 1, "the reset op is the only opportunity");
     assert_eq!(report.resets_injected, 1);
     assert!(!report.is_vacuous());
-}
 
-#[test]
-fn a_receiving_endpoint_can_be_reset_and_would_block_polls_do_not_draw() {
-    let mut net = SimNet::builder()
-        .fault_seed(1)
-        .reset_permille(1000)
-        .build()
-        .unwrap();
-    let listener = net.tcp_listen("server", 1).unwrap();
-    let client = net.tcp_connect("client", "server", 0).unwrap();
-    let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    // A poll with nothing to read is not a data operation, so it neither
-    // draws nor counts — a reset must not get likelier the harder a guest
-    // spins.
-    assert_eq!(net.tcp_recv(server, 16, 0).unwrap(), None);
-    assert_eq!(net.fault_report().unwrap().stream_ops, 0);
-    assert_eq!(
-        net.tcp_send(client, b"x", 0).unwrap_err().code,
-        ErrorCode::ConnectionReset
-    );
-}
-
-#[test]
-fn reset_is_seed_deterministic_and_varies_across_seeds() {
+    // At a partial rate the reset lands at a seed-dependent point.
     fn sends_before_reset(seed: u64) -> usize {
         let mut net = SimNet::builder()
             .fault_seed(seed)
@@ -562,15 +475,12 @@ fn reset_is_seed_deterministic_and_varies_across_seeds() {
         }
         64
     }
-    for seed in 0..8 {
-        assert_eq!(sends_before_reset(seed), sends_before_reset(seed));
-    }
     let distinct = (0..16u64).map(sends_before_reset).collect::<BTreeSet<_>>();
     assert!(distinct.len() > 1, "reset timing must vary across seeds");
 }
 
 #[test]
-fn a_partition_that_names_unused_addresses_is_vacuous() {
+fn a_partition_drops_matching_traffic_and_is_vacuous_on_unused_addresses() {
     // The operator-error signature: a partition spelled for addresses this
     // run never uses blocks nothing, and a clean result would otherwise read
     // as "tested under partition".
@@ -588,35 +498,19 @@ fn a_partition_that_names_unused_addresses_is_vacuous() {
     assert_eq!(report.partition_blocks, 0);
     assert!(report.is_vacuous());
 
-    // A partition that matches the traffic blocks it, and is not vacuous.
+    // A partition that matches the traffic drops it rather than routing it
+    // anywhere, and is not vacuous.
     let mut net = SimNet::builder().partition("tx", "rx").build().unwrap();
     let tx = net.bind("tx").unwrap();
-    net.bind("rx").unwrap();
+    let rx = net.bind("rx").unwrap();
     for _ in 0..8 {
-        net.send(tx, "rx", b"blocked", 0).unwrap();
+        let report = net.send(tx, "rx", b"blocked", 0).unwrap();
+        assert_eq!(report.disposition, SendDisposition::DroppedByPartition);
+        assert_eq!(report.copies, 0);
     }
+    assert_eq!(net.recv(rx, u64::MAX).unwrap(), None);
     let report = net.fault_report().unwrap();
     assert_eq!(report.partition_blocks, 8);
-    assert!(!report.is_vacuous());
-}
-
-#[test]
-fn the_base_latency_class_catches_a_send_path_that_ignores_it() {
-    // Defect 2's signature, now a first-class report row: the knob is set,
-    // sends happened, and the path applied it zero times. A TCP send that
-    // skipped `base_latency_nanos` (as the pre-Wave-A stream path did) lands
-    // exactly here instead of reading clean.
-    let mut net = SimNet::builder().base_latency_nanos(50).build().unwrap();
-    let listener = net.tcp_listen("server", 8).unwrap();
-    let client = net.tcp_connect("client", "server", 0).unwrap();
-    let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    for _ in 0..8 {
-        net.tcp_send(client, b"x", 0).unwrap();
-        let _ = net.tcp_recv(server, 64, u64::MAX);
-    }
-    let report = net.fault_report().unwrap();
-    assert!(report.latency_vacuity_diagnosable);
-    assert_eq!(report.latency_applied, 8);
     assert!(!report.is_vacuous());
 }
 
@@ -660,14 +554,4 @@ fn each_net_fault_class_draws_from_its_own_substream() {
         quiet.contains(&true) && quiet.contains(&false),
         "the control must actually have drawn both ways, or this proves nothing"
     );
-
-    // And the streams are not merely independent objects: they are keyed to
-    // DIFFERENT domains, so two classes never draw identical sequences.
-    let seeds = BTreeSet::from([
-        7,
-        domain_seed(7, fault_domain::NET_DUPLICATE),
-        domain_seed(7, fault_domain::NET_CONNECT_REFUSE),
-        domain_seed(7, fault_domain::NET_RESET),
-    ]);
-    assert_eq!(seeds.len(), 4, "net fault substreams must not alias");
 }

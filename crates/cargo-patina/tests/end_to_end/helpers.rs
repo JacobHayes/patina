@@ -211,12 +211,6 @@ pub(super) fn stdout_line_with(output: &Output, needle: &str) -> String {
         .to_string()
 }
 
-// `linkat` (hard links) and `fdopendir` (the openat-traversal `remove_dir_all`
-// uses) are strong-def'd by the shim: the audit is clean (no unsupported-import
-// note, no allowances), the guest runs deterministically, same-seed double runs
-// are byte-identical, and a recorded run replays byte-identically. Before this
-// wave the audit refused the binary outright ("unsupported native imports:
-// _fdopendir _linkat"), which is the RED evidence this test's fix clears.
 /// The calibration busy-wait, in the pure-`Instant` shape that needs no x86
 /// counter — the loop `fastant`'s pre-`main` constructor runs to measure the
 /// timestamp counter against the OS clock, minus the `rdtsc`. Before
@@ -245,9 +239,6 @@ fn main() {
 }
 "#;
 
-// A single-process loopback TCP echo: a listener thread reads a fixed 16-byte
-// payload and answers with its checksum; main streams the payload as eight
-// 2-byte segments and prints a deterministic result line. Exercises the SimNet
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) const FS_FAULT_SOURCE: &str = r#"
 use std::env;

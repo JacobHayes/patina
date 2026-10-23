@@ -689,16 +689,13 @@ pub(crate) fn recvmmsg(
 mod tests {
     use super::*;
 
-    /// The socket level an inet socket takes: its marks need a capability a
-    /// datagram's sender lacks; a stream answers every error `EINVAL`.
+    /// A control buffer of `optmem_max` bytes does not fit; the socket level
+    /// an inet socket takes: its marks need a capability a datagram's sender
+    /// lacks, and a stream answers every error `EINVAL`.
     #[test]
-    fn a_control_buffer_of_optmem_max_bytes_does_not_fit() {
+    fn control_messages_answer_as_sock_cmsg_send() {
         assert!(control_fits(OPTMEM_MAX - 1));
         assert!(!control_fits(OPTMEM_MAX));
-    }
-
-    #[test]
-    fn inet_socket_control_answers_as_sock_cmsg_send() {
         assert_eq!(inet_socket_control(true, SCM_RIGHTS), Err(EINVAL));
         #[cfg(target_os = "linux")]
         {

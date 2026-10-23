@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_control_takes_the_kernels_sizes_and_ranges() {
+    fn ipv6_control_takes_the_kernels_sizes_ranges_and_rfc_2292_numbers() {
         let ip = defaults();
         let tclass = |value: i32| {
             send_control(
@@ -407,11 +407,8 @@ mod tests {
             send_control(&ip, true, false, &[(SOL_IPV6, IPV6_PKTINFO, bad_index)]),
             Err(ENODEV)
         );
-    }
 
-    #[test]
-    fn ipv6_control_takes_the_rfc_2292_numbers_ip6_datagram_send_ctl_does() {
-        let ip = defaults();
+        // The RFC 2292 numbers, as `ip6_datagram_send_ctl` takes them.
         let send =
             |kind: i32, data: Vec<u8>| send_control(&ip, true, false, &[(SOL_IPV6, kind, data)]);
         let loopback = |extra: usize| {

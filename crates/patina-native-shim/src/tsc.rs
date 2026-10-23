@@ -227,7 +227,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_exactly_the_two_counter_reads() {
+    fn classifies_exactly_the_two_counter_reads_and_nothing_else() {
         assert_eq!(classify(&[0x0f, 0x31]), Some((PATINA_TSC_RDTSC, 2)));
         assert_eq!(classify(&[0x0f, 0x01, 0xf9]), Some((PATINA_TSC_RDTSCP, 3)));
         // Trailing bytes are ignored: the window is whatever text follows.
@@ -235,10 +235,7 @@ mod tests {
             classify(&[0x0f, 0x31, 0x48, 0x89, 0xc1]),
             Some((PATINA_TSC_RDTSC, 2))
         );
-    }
 
-    #[test]
-    fn refuses_everything_else_so_real_faults_are_not_swallowed() {
         // The neighbours that share a prefix with the counter reads: `swapgs`
         // (0f 01 f8) and the group-7 memory forms, `rdpmc` (0f 33), `cpuid`
         // (0f a2), `syscall` (0f 05) — plus an ordinary load and a truncated

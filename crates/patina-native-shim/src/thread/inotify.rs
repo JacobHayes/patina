@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_event_equal_to_the_last_queued_merges() {
+    fn only_an_event_equal_to_the_last_queued_merges_and_a_full_queue_overflows_once() {
         let mut instance = Instance::default();
         assert!(instance.enqueue(event(1, IN_MODIFY, Some("f"))));
         assert!(!instance.enqueue(event(1, IN_MODIFY, Some("f"))));
@@ -702,10 +702,8 @@ mod tests {
         assert!(instance.enqueue(event(1, IN_IGNORED, None)));
         assert_eq!(instance.queue.len(), 5);
         assert_eq!(instance.arrivals, 5);
-    }
 
-    #[test]
-    fn a_full_queue_takes_one_overflow_event() {
+        // A full queue takes one overflow event.
         let mut instance = Instance::default();
         for index in 0..MAX_QUEUED_EVENTS {
             assert!(instance.enqueue(event(1, IN_CREATE, Some(&index.to_string()))));
@@ -735,10 +733,9 @@ mod tests {
         assert_eq!(instance.allocate_wd(), i32::MAX);
         instance.watches.insert(i32::MAX, watch);
         assert_eq!(instance.allocate_wd(), 1);
-    }
 
-    #[test]
-    fn past_the_user_watch_limit_a_new_watch_is_enospc_and_still_takes_a_descriptor() {
+        // Past the user watch limit a new watch is `ENOSPC`, and still takes
+        // a descriptor.
         let mut instance = Instance {
             cursor: 1,
             ..Instance::default()

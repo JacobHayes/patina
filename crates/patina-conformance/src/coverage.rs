@@ -72,38 +72,26 @@ mod tests {
         },
     ];
 
-    fn planted() -> Uncovered {
-        uncovered_in(&[&COVERS_OPENAT], EXCLUDES_READV)
-    }
-
+    /// Only an entry neither covered nor excluded is reported, as a syscall
+    /// row and as a symbol alike.
     #[test]
-    fn a_covered_entry_is_not_reported() {
-        let report = planted();
-        assert!(
-            !report
-                .syscalls
-                .iter()
-                .any(|row| row.id == Syscall::N_openat)
-        );
-        assert!(!report.symbols.iter().any(|row| row.name == "openat"));
-    }
-
-    #[test]
-    fn an_excluded_entry_is_not_reported() {
-        let report = planted();
-        assert!(!report.syscalls.iter().any(|row| row.id == Syscall::N_readv));
-        assert!(!report.symbols.iter().any(|row| row.name == "readv"));
-    }
-
-    #[test]
-    fn an_entry_neither_covered_nor_excluded_is_reported() {
-        let report = planted();
-        assert!(
-            report
-                .syscalls
-                .iter()
-                .any(|row| row.id == Syscall::N_writev)
-        );
-        assert!(report.symbols.iter().any(|row| row.name == "writev"));
+    fn only_entries_neither_covered_nor_excluded_are_reported() {
+        let report = uncovered_in(&[&COVERS_OPENAT], EXCLUDES_READV);
+        for (row, name, reported) in [
+            (Syscall::N_openat, "openat", false),
+            (Syscall::N_readv, "readv", false),
+            (Syscall::N_writev, "writev", true),
+        ] {
+            assert_eq!(
+                report.syscalls.iter().any(|entry| entry.id == row),
+                reported,
+                "{name} row"
+            );
+            assert_eq!(
+                report.symbols.iter().any(|entry| entry.name == name),
+                reported,
+                "{name} symbol"
+            );
+        }
     }
 }

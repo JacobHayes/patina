@@ -81,9 +81,6 @@ mod tests {
             clock.now(ClockKind::Realtime).unwrap(),
             DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS
         );
-        // 2026-07-22T23:00:09Z, Patina's first commit.
-        assert_eq!(DEFAULT_REALTIME_EPOCH_NANOS / 1_000_000_000, 1_784_761_209);
-        assert_eq!(DEFAULT_REALTIME_EPOCH_NANOS % 1_000_000_000, 0);
         // A realtime deadline on the default epoch converts back to monotonic.
         clock
             .sleep_until(
@@ -98,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn sleeping_advances_both_clock_domains() {
+    fn sleeping_advances_both_domains_monotonically_and_overflow_fails() {
         let mut clock = VirtualClock::new(1_000);
         let start = clock.now(ClockKind::Monotonic).unwrap();
         clock
@@ -106,17 +103,13 @@ mod tests {
             .unwrap();
         assert_eq!(clock.now(ClockKind::Monotonic).unwrap() - start, 250);
         assert_eq!(clock.now(ClockKind::Realtime).unwrap(), start + 1_250);
-    }
 
-    #[test]
-    fn sleeping_until_the_past_does_not_move_backwards() {
+        // A deadline in the past never moves the clock backwards.
         let mut clock = VirtualClock::at(100, 1_000);
         clock.sleep_until(ClockKind::Realtime, 1_050).unwrap();
         assert_eq!(clock.now(ClockKind::Monotonic).unwrap(), 100);
-    }
 
-    #[test]
-    fn realtime_overflow_fails_explicitly() {
+        // Realtime overflow fails explicitly.
         let mut clock = VirtualClock::at(1, u64::MAX);
         let error = clock.now(ClockKind::Realtime).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidInput);

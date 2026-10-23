@@ -126,12 +126,12 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pkey_free,
         Syscall::N_pkey_mprotect,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::ProtectionKeys],
     #[cfg(target_arch = "x86_64")]
     gaps: &[Gap {
         status: Status::ByDesign,
-        vehicles: Vehicle::KERNEL,
+        vehicles: &[Vehicle::Syscall],
         what: "the virtual CPU has no protection keys, on any host: keys are CPU state a guest reads and writes without a syscall (rdpkru/wrpkru), so no host's keys could answer the same everywhere; the rows answer as 6.8 does without OSPKE (patina-native-shim src/sud/mem.rs): the first pkey_alloc EINVAL, later ones ENOSPC, and every key but -1 EINVAL, so no page is ever write-disabled by a key and the store that would fault with SEGV_PKUERR lands",
         failure: Failure::Differs(&[
             Difference::field(1, "pkey_alloc", "ret", Observed::Int(-1)),

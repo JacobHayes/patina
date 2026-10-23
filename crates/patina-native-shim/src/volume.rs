@@ -811,18 +811,20 @@ pub(crate) unsafe fn ustat(dev: u32, out: *mut KernelUstat) -> crate::abi::SysRe
 mod tests {
     use super::*;
 
+    /// Every filesystem's description is valid, names `NAME_MAX`, and sits
+    /// on its own device and fsid; the volume's counts are consistent.
     #[test]
-    fn every_description_is_valid_and_names_name_max() {
-        for filesystem in Filesystem::ALL {
+    fn every_description_is_valid_and_distinct() {
+        for (index, filesystem) in Filesystem::ALL.iter().enumerate() {
             let description = filesystem.describe();
             assert_ne!(description.f_flags & ST_VALID, 0, "{filesystem:?}");
             assert_eq!(description.f_namelen, NAME_MAX, "{filesystem:?}");
             assert_ne!(description.f_type, 0, "{filesystem:?}");
+            for other in &Filesystem::ALL[index + 1..] {
+                assert_ne!(filesystem.device(), other.device());
+                assert_ne!(filesystem.fsid(), other.fsid());
+            }
         }
-    }
-
-    #[test]
-    fn the_volume_describes_a_consistent_filesystem() {
         let volume = Filesystem::Volume.describe();
         assert!(volume.f_bfree <= volume.f_blocks && volume.f_bavail <= volume.f_bfree);
         assert!(volume.f_ffree <= volume.f_files);
@@ -887,6 +889,14 @@ mod tests {
             }
             assert_eq!(mount.magic(), mount.filesystem.describe().f_type as u64);
         }
+        // The entropy device is on devtmpfs (a mount crossing to
+        // `openat2(RESOLVE_NO_XDEV)`), not `ENOENT`.
+        let mut out = KernelStatfs::default();
+        // SAFETY: a valid path and a writable buffer.
+        let answer = unsafe { patina_statfs(c"/dev/urandom".as_ptr(), &mut out) };
+        assert_eq!(answer, 0);
+        assert_eq!(out, Filesystem::Devtmpfs.describe());
+        assert_eq!(out.f_type, TMPFS_MAGIC);
     }
 
     /// Each filesystem's mount, as `statx` names it: the namespace's own
@@ -923,27 +933,5 @@ mod tests {
             (STATX_BTIME | STATX_MNT_ID, u64::from(ROOT_MOUNT.id))
         );
         assert_eq!(statx_extra(PATINA_FS_PIPEFS, STATX_BTIME).0, STATX_MNT_ID);
-    }
-
-    #[test]
-    fn the_filesystems_are_on_distinct_devices() {
-        for (index, filesystem) in Filesystem::ALL.iter().enumerate() {
-            for other in &Filesystem::ALL[index + 1..] {
-                assert_ne!(filesystem.device(), other.device());
-                assert_ne!(filesystem.fsid(), other.fsid());
-            }
-        }
-    }
-
-    /// RED before: `statfs("/dev/urandom")` was `ENOENT`, though the path
-    /// opens and is a mount crossing to `openat2(RESOLVE_NO_XDEV)`.
-    #[test]
-    fn the_entropy_device_is_on_devtmpfs() {
-        let mut out = KernelStatfs::default();
-        // SAFETY: a valid path and a writable buffer.
-        let answer = unsafe { patina_statfs(c"/dev/urandom".as_ptr(), &mut out) };
-        assert_eq!(answer, 0);
-        assert_eq!(out, Filesystem::Devtmpfs.describe());
-        assert_eq!(out.f_type, TMPFS_MAGIC);
     }
 }

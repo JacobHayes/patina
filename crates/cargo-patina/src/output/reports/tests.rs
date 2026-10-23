@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn classify_detects_violation_markers() {
+fn classify_separates_violation_liveness_infra_and_failure() {
     assert_eq!(classify(0, "", ""), "ok");
     assert_eq!(classify(3, "GUEST_VIOLATION two-leaders", ""), "violation");
     assert_eq!(
@@ -11,10 +11,6 @@ fn classify_detects_violation_markers() {
         "violation"
     );
     assert_eq!(classify(1, "panic somewhere", ""), "failure");
-}
-
-#[test]
-fn classify_detects_infra_markers() {
     assert_eq!(
         classify(
             134,
@@ -27,10 +23,6 @@ fn classify_detects_infra_markers() {
         classify(2, "", "incomplete trace run.patina: empty trace file"),
         "infra"
     );
-}
-
-#[test]
-fn classify_detects_liveness_violations_distinctly() {
     assert_eq!(
         classify(
             1,

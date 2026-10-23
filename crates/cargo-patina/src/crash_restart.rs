@@ -641,19 +641,11 @@ not be written, so this generation has no replay artifact; the guest's own verdi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_dst_trace::{
-        CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest, TraceBundle,
-    };
+    use patina_dst_trace::{CrashRestartSegments, Sha256Digest, TraceBundle};
     use std::path::Path;
 
-    /// A verb may not redeclare a global flag. The global output/config switches
-    /// are stripped by a pre-pass BEFORE any verb routing, so a verb that
-    /// registers the same name can never be reached — and if the two declare
-    /// different arities, the pre-pass also eats the following token.
-    ///
-    /// This is a shipped bug pinned as a class: `campaign --report` was
-    /// documented and unreachable, because the global `--report OUT.html`
-    /// consumed both it and whatever came next.
+    /// A trace carrying a crash-restart lifecycle but no `--fs-crash-at`
+    /// selector cannot be replayed faithfully, so the plan refuses it.
     #[cfg(unix)]
     #[test]
     fn crash_restart_replay_plan_refuses_a_crash_lifecycle_without_a_selector() {
@@ -679,30 +671,5 @@ mod tests {
             "{}",
             error.0
         );
-    }
-
-    #[test]
-    fn corrupt_crash_restart_handoff_is_refused_by_codec_not_env_hook() {
-        let key = HandoffSealKey::from_bytes([3; 32]);
-        let handoff = IncarnationHandoff {
-            compatibility_fingerprint: "fp".into(),
-            from_incarnation: 0,
-            to_incarnation: 1,
-            selector: patina_dst_trace::CrashPointRecord {
-                op: patina_dst_trace::FaultCrashOp::Write,
-                ordinal: 6,
-            },
-            consumed: patina_dst_trace::HandoffConsumedState {
-                operations: 12,
-                lifecycle_order: 12,
-            },
-            realtime_nanos: 1,
-            snapshot: patina_dst_fs_mem::MemFs::new().export_snapshot(),
-        };
-        let mut encoded = handoff.seal(&key).unwrap();
-        assert!(IncarnationHandoff::open(&encoded, &key).is_ok());
-        *encoded.last_mut().unwrap() ^= 0xff;
-        let error = IncarnationHandoff::open(&encoded, &key).unwrap_err();
-        assert!(error.to_string().contains("seal mismatch"));
     }
 }

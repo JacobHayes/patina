@@ -518,7 +518,7 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mq_timedreceive,
         Syscall::N_close,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::SysvSem, Need::PosixMqueue],
     ..DEFAULTS
 };

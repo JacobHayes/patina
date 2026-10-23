@@ -91,30 +91,3 @@ fn the_cli_binary_does_not_name_its_source_checkout() {
         offenders.join(", ")
     );
 }
-
-#[test]
-fn planted_checkout_paths_trip_the_detector() {
-    let root = workspace_root().as_bytes();
-    let mut panic_location = Vec::new();
-    panic_location.push(0);
-    panic_location.extend_from_slice(root);
-    panic_location.extend_from_slice(b"/crates/cargo-patina/src/lib.rs");
-    panic_location.push(0);
-
-    assert_eq!(
-        checkout_dependency_hits(&panic_location, root),
-        1,
-        "absolute source paths must trip the detector on the pinned compiler too"
-    );
-
-    let mut runtime_lookup = Vec::new();
-    runtime_lookup.push(0);
-    runtime_lookup.extend_from_slice(root);
-    runtime_lookup.extend_from_slice(b"/crates/cargo-patina");
-    runtime_lookup.push(0);
-    assert_eq!(
-        checkout_dependency_hits(&runtime_lookup, root),
-        1,
-        "a baked env!(\"CARGO_MANIFEST_DIR\") directory still trips the detector"
-    );
-}

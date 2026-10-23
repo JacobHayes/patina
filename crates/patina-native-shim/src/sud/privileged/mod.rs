@@ -364,15 +364,6 @@ mod tests {
         ]
     }
 
-    /// swapon's flags come first, for every credential.
-    #[test]
-    fn swapon_checks_its_flags_before_the_capability() {
-        let unknown_flag = [0, 1 << 30, 0, 0, 0, 0];
-        for held in [0, Capability::ALL] {
-            assert_eq!(swapon(&holding(held), &unknown_flag), refuse(errno::EINVAL));
-        }
-    }
-
     /// Raising the I/O privilege level or turning ports on needs
     /// `CAP_SYS_RAWIO`.
     #[cfg(target_arch = "x86_64")]
@@ -652,10 +643,15 @@ mod tests {
         ]
     }
 
-    /// `PTRACE_O_SUSPEND_SECCOMP` needs `CAP_SYS_ADMIN`; past it, seizing
-    /// the caller's own thread group is still refused, for every credential.
+    /// Argument checks the kernel makes before the capability hold for
+    /// every credential: swapon's flags, and past `PTRACE_O_SUSPEND_SECCOMP`
+    /// (which needs `CAP_SYS_ADMIN`) seizing the caller's own thread group.
     #[test]
-    fn a_granted_option_still_meets_the_thread_group_check() {
+    fn argument_checks_before_the_capability_hold_for_every_credential() {
+        let unknown_flag = [0, 1 << 30, 0, 0, 0, 0];
+        for held in [0, Capability::ALL] {
+            assert_eq!(swapon(&holding(held), &unknown_flag), refuse(errno::EINVAL));
+        }
         const PTRACE_SEIZE: u64 = 0x4206;
         const SUSPEND_SECCOMP: u64 = 1 << 21;
         let own = crate::patina_pid() as u64;

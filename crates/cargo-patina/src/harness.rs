@@ -1031,6 +1031,25 @@ mod tests {
         for selector in ["example:app", "lib:missing", "lib:"] {
             assert!(select_native_harness_target(&metadata, selector, Some("first")).is_err());
         }
+
+        // Staging is keyed by the resolved kind and name, so a bare name and
+        // its explicit kind stage together and distinct targets apart.
+        let metadata = serde_json::json!({"packages": [{"name": "pkg", "targets": [
+            {"name": "app", "kind": ["lib"]},
+            {"name": "lib_app", "kind": ["test"]}
+        ]}]});
+        let directory = |selector| {
+            select_native_harness_target(&metadata, selector, None)
+                .unwrap()
+                .staging_directory(Path::new("target"), "pkg", "tests::case")
+        };
+        assert_eq!(directory("app"), directory("lib:app"));
+        assert_eq!(directory("lib_app"), directory("test:lib_app"));
+        assert_ne!(directory("lib:app"), directory("lib_app"));
+        assert_eq!(
+            directory("app"),
+            Path::new("target/patina/dst/pkg/lib/app/tests__case")
+        );
     }
 
     #[test]
@@ -1090,26 +1109,6 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("supervisor")),
             "the test run must stop, naming the supervisor; got {stopped:?}"
-        );
-    }
-
-    #[test]
-    fn native_harness_staging_uses_resolved_kind_and_name() {
-        let metadata = serde_json::json!({"packages": [{"name": "pkg", "targets": [
-            {"name": "app", "kind": ["lib"]},
-            {"name": "lib_app", "kind": ["test"]}
-        ]}]});
-        let directory = |selector| {
-            select_native_harness_target(&metadata, selector, None)
-                .unwrap()
-                .staging_directory(Path::new("target"), "pkg", "tests::case")
-        };
-        assert_eq!(directory("app"), directory("lib:app"));
-        assert_eq!(directory("lib_app"), directory("test:lib_app"));
-        assert_ne!(directory("lib:app"), directory("lib_app"));
-        assert_eq!(
-            directory("app"),
-            Path::new("target/patina/dst/pkg/lib/app/tests__case")
         );
     }
 

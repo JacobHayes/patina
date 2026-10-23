@@ -404,14 +404,11 @@ mod tests {
             pad_initial_stack(command, ENVP_SLOT_PREFIX, 100).unwrap();
         }
         assert_eq!(initial_stack(&seeded), initial_stack(&recorded));
-    }
-
-    #[test]
-    fn a_control_plane_past_the_reservation_is_refused() {
-        let mut command = launch(
+        // A control plane past the reservation cannot be padded and is refused.
+        let mut oversized = launch(
             "/guest",
             &[("PATINA_PARAMS_JSON", &"x".repeat(RESERVED_BYTES))],
         );
-        assert!(pad_initial_stack(&mut command, ENVP_SLOT_PREFIX, 0).is_err());
+        assert!(pad_initial_stack(&mut oversized, ENVP_SLOT_PREFIX, 0).is_err());
     }
 }

@@ -105,7 +105,8 @@ pub struct CampaignSpec {
     ///   for the other, so it keeps its full log sweep and a dampened campaign
     ///   still explores where a hold lands — the same call
     ///   `--net-tcp-buffer-bytes` got from the fault dial, for a sharper reason.
-    ///   Pinned by `the_starve_scale_leaves_the_placement_window_alone`.
+    ///   Pinned by the `campaign --selftest` detector
+    ///   `each-starvation-axis-scales-in-its-own-direction`.
     pub starve_scale_permille: u64,
     /// The fault planes whose knobs are randomized per generation: none (the
     /// default), every plane (bare `--faults`), or the subset `--faults=PLANE,...`
@@ -635,130 +636,54 @@ mod tests {
     use super::super::state::{spec_from_state_json, spec_to_json};
     use super::*;
 
-    /// Starvation rides the recorded spec (so `--resume` sweeps the same policy)
-    /// and is default-omitted from the JSON, so an out-dir written before the key
+    /// Every opt-in part of a spec rides the recorded spec, so `--resume` and
+    /// `--extend` continue the campaign the fresh run started, and is
+    /// default-omitted from the JSON, so an out-dir written before its key
     /// existed still passes the canonical-form check.
     #[test]
-    fn starvation_round_trips_through_the_recorded_spec() {
-        let mut spec = CampaignSpec::default();
-        spec.apply_json(&serde_json::json!({"starve": true}))
+    fn opt_in_spec_fields_round_trip_and_are_omitted_by_default() {
+        let mut classified = CampaignSpec::default();
+        classified
+            .apply_json(&serde_json::json!({
+                "classify": {"patterns": {"VIOLATION": ["CORRUPTION"]}}
+            }))
             .unwrap();
-        assert!(spec.starve);
-        let json = spec_to_json(&spec);
-        assert_eq!(json["starve"], serde_json::json!(true));
-        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
-        assert!(
-            spec_to_json(&CampaignSpec::default())
-                .get("starve")
-                .is_none()
-        );
-        // The exploration policy is part of the coverage store's compatibility
-        // fingerprint, so a starvation campaign never pools coverage with a
-        // non-starvation one.
-        assert_ne!(
-            campaign_coverage_fingerprint(&spec, crate::GuestInstrumentation::YieldPoints),
-            campaign_coverage_fingerprint(
-                &CampaignSpec::default(),
-                crate::GuestInstrumentation::YieldPoints
-            )
-        );
-    }
-
-    /// Declared rules ride the recorded spec, so a `--resume` reclassifies with
-    /// the same rules the fresh campaign used.
-    #[test]
-    fn declared_rules_round_trip_through_the_recorded_spec() {
-        let mut spec = CampaignSpec::default();
-        spec.apply_json(&serde_json::json!({
-            "classify": {"patterns": {"VIOLATION": ["CORRUPTION"]}}
-        }))
-        .unwrap();
-        let json = spec_to_json(&spec);
-        assert_eq!(
-            json["classify"],
-            serde_json::json!({"patterns": {"VIOLATION": ["CORRUPTION"]}})
-        );
-        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
-        // Default-omit: a spec with no declared rules records no key at all.
-        assert!(
-            spec_to_json(&CampaignSpec::default())
-                .get("classify")
-                .is_none()
-        );
-    }
-
-    /// The verification opt-out rides the recorded spec, so a continuation
-    /// classifies the way the fresh campaign did; the default records nothing.
-    #[test]
-    fn the_verification_opt_out_round_trips_through_the_recorded_spec() {
-        let spec = CampaignSpec {
-            verify: false,
-            ..CampaignSpec::default()
-        };
-        let json = spec_to_json(&spec);
-        assert_eq!(json["verify"], serde_json::json!(false));
-        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
-        assert!(CampaignSpec::default().verify);
-        assert!(
-            spec_to_json(&CampaignSpec::default())
-                .get("verify")
-                .is_none()
-        );
-    }
-
-    /// No rule over one run's output can say that run would not reproduce.
-    #[test]
-    fn a_declared_rule_cannot_assign_the_cross_run_class() {
-        let class = CampaignClass::ALL
-            .iter()
-            .find(|class| class.is_cross_run())
-            .unwrap();
-        let rules = serde_json::json!({"patterns": {class.as_str(): ["token"]}});
-        assert!(json_classify_rules(&rules).is_err());
-    }
-
-    #[test]
-    fn a_dns_host_table_round_trips_through_the_recorded_spec() {
-        let spec = CampaignSpec {
-            faults: FaultPlanes::ALL,
-            dns_entries: vec!["db.internal=10.0.0.5".into(), "cache=10.0.0.6".into()],
-            ..CampaignSpec::default()
-        };
-        let json = spec_to_json(&spec);
-        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
-        // A DNS-free spec records no key at all, so an out-dir written before the
-        // key existed still resumes.
-        let bare = CampaignSpec::default();
-        assert!(
-            spec_to_json(&bare).get("dns_entries").is_none(),
-            "a table-free spec must not record the key"
-        );
-        // A spec file bypasses the CLI value grammar, so it is validated here.
-        let mut malformed = CampaignSpec::default();
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"dns_entries": ["db.internal=nope"]}"#).unwrap();
-        let error = malformed.apply_json(&json).unwrap_err();
-        assert!(
-            error.to_string().contains("dotted-quad"),
-            "expected a loud grammar error, got {error}"
-        );
-    }
-
-    #[test]
-    fn the_native_invocation_surface_round_trips_through_the_recorded_spec() {
-        let spec = CampaignSpec {
-            harness: true,
-            allow_symbols: vec!["dlsym".into()],
-            allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
-            address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
-            ..CampaignSpec::default()
-        };
-        let json = spec_to_json(&spec);
-        assert_eq!(spec_from_state_json(&json).unwrap(), spec);
-        // A campaign that forwards none of it records no key at all, so an out-dir
-        // written before the keys existed still resumes.
+        let specs = [
+            CampaignSpec {
+                starve: true,
+                ..CampaignSpec::default()
+            },
+            classified,
+            CampaignSpec {
+                verify: false,
+                ..CampaignSpec::default()
+            },
+            CampaignSpec {
+                faults: FaultPlanes::ALL,
+                dns_entries: vec!["db.internal=10.0.0.5".into(), "cache=10.0.0.6".into()],
+                ..CampaignSpec::default()
+            },
+            CampaignSpec {
+                faults: FaultPlanes::from_names(["net", "sleep"]).unwrap(),
+                ..CampaignSpec::default()
+            },
+            CampaignSpec {
+                harness: true,
+                allow_symbols: vec!["dlsym".into()],
+                allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
+                address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
+                ..CampaignSpec::default()
+            },
+        ];
+        for spec in specs {
+            assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+        }
         let bare = spec_to_json(&CampaignSpec::default());
         for key in [
+            "starve",
+            "classify",
+            "verify",
+            "dns_entries",
             "harness",
             "allow_symbols",
             "allow_unsupported_symbols",
@@ -766,55 +691,49 @@ mod tests {
         ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
         }
-        // A spec file bypasses the CLI value grammar, so it is validated here.
-        for (source, expected) in [
-            (r#"{"allow_symbols": [""]}"#, "must not be empty"),
-            (
-                r#"{"allow_unsupported_symbols": ""}"#,
-                "requires `all` or a comma-separated symbol list",
-            ),
-        ] {
-            let json: serde_json::Value = serde_json::from_str(source).unwrap();
-            let error = CampaignSpec::default().apply_json(&json).unwrap_err();
-            assert!(
-                error.to_string().contains(expected),
-                "expected a loud grammar error for {source}, got {error}"
-            );
-        }
-    }
-
-    /// A subset records its plane names, so `--extend`/`--resume` keep drawing
-    /// only those planes, while every plane still records as the `true` an
-    /// out-dir written before subsets existed holds.
-    #[test]
-    fn a_fault_plane_subset_round_trips_through_the_recorded_spec() {
-        for faults in [
-            FaultPlanes::NONE,
-            FaultPlanes::ALL,
-            FaultPlanes::from_names(["net", "sleep"]).unwrap(),
-        ] {
-            let spec = CampaignSpec {
-                faults,
-                ..CampaignSpec::default()
-            };
-            assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
-        }
-        let mut legacy = spec_to_json(&CampaignSpec::default());
+        // Every plane still records as the `true` an out-dir written before
+        // subsets existed holds.
+        let mut legacy = bare.clone();
         legacy["faults"] = serde_json::json!(true);
         assert_eq!(
             spec_from_state_json(&legacy).unwrap().faults,
             FaultPlanes::ALL
         );
+        // The exploration policy is part of the coverage store's compatibility
+        // fingerprint, so a starvation campaign never pools coverage with a
+        // non-starvation one.
+        let starving = CampaignSpec {
+            starve: true,
+            ..CampaignSpec::default()
+        };
+        assert_ne!(
+            campaign_coverage_fingerprint(&starving, crate::GuestInstrumentation::YieldPoints),
+            campaign_coverage_fingerprint(
+                &CampaignSpec::default(),
+                crate::GuestInstrumentation::YieldPoints
+            )
+        );
     }
 
+    /// A spec file bypasses the CLI value grammar, so `apply_json` holds it to
+    /// the same grammar and refuses unknown keys, while known keys apply.
     #[test]
-    fn spec_rejects_unknown_keys() {
+    fn a_spec_file_is_grammar_validated() {
+        for source in [
+            r#"{"bogus": 1}"#,
+            r#"{"dns_entries": ["db.internal=nope"]}"#,
+            r#"{"allow_symbols": [""]}"#,
+            r#"{"allow_unsupported_symbols": ""}"#,
+        ] {
+            let json: serde_json::Value = serde_json::from_str(source).unwrap();
+            assert!(
+                CampaignSpec::default().apply_json(&json).is_err(),
+                "{source} must be refused"
+            );
+        }
         let mut spec = CampaignSpec::default();
-        let json: serde_json::Value = serde_json::from_str(r#"{"bogus": 1}"#).unwrap();
-        assert!(spec.apply_json(&json).is_err());
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"generations": 12, "buggify": true}"#).unwrap();
-        spec.apply_json(&json).unwrap();
+        spec.apply_json(&serde_json::json!({"generations": 12, "buggify": true}))
+            .unwrap();
         assert_eq!(spec.generations, 12);
         assert!(spec.buggify);
     }

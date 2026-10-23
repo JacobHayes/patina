@@ -359,52 +359,31 @@ mod tests {
 
     /// Every affinity view agrees with the machine's CPU count: the mask names
     /// exactly its CPUs, in whole longs, a buffer too small for them is
-    /// `EINVAL`, and a mask naming only CPUs past them is `EINVAL`.
+    /// `EINVAL`, and a mask naming only CPUs past them is `EINVAL`. Pinned to
+    /// another CPU, the thread runs there, and its own CPU and affinity answer
+    /// while the runtime's lock is held (as they must for an allocator the
+    /// runtime allocates through); a mask naming that CPU and CPUs past the
+    /// machine's keeps just that CPU; the full mask restores the CPU it
+    /// started on.
     #[test]
-    fn the_affinity_mask_names_every_virtual_cpu() {
+    fn the_affinity_mask_names_every_virtual_cpu_and_pins_the_thread() {
         crate::thread::signals::tests::isolated(|| {
             let cpus = crate::cpus::count();
-            let (r, mask) = affinity(128);
+            let (r, full) = affinity(128);
             assert_eq!(r, Ok(cpumask_bytes(cpus) as i64));
-            assert_eq!(count_of(&mask), cpus);
-            assert!((0..cpus).all(|cpu| mask[cpu as usize / 8] & (1 << (cpu % 8)) != 0));
+            assert_eq!(count_of(&full), cpus);
+            assert!((0..cpus).all(|cpu| full[cpu as usize / 8] & (1 << (cpu % 8)) != 0));
             let short = (cpus as usize).div_ceil(8) - 1;
             assert_eq!(affinity(short).0, Err(Errno::new(EINVAL)));
             assert_eq!(set_affinity(&named(&[cpus], 128)), Err(Errno::new(EINVAL)));
             assert_eq!(set_affinity(&named(&[], 128)), Err(Errno::new(EINVAL)));
-            assert_eq!(affinity(128).1, mask, "a refused mask changes nothing");
-        });
-    }
+            assert_eq!(affinity(128).1, full, "a refused mask changes nothing");
 
-    /// Pinned to another CPU, the thread runs there; a mask naming that CPU
-    /// and CPUs past the machine's keeps just that CPU; the full mask
-    /// restores the CPU it started on.
-    #[test]
-    fn a_pinned_thread_runs_on_its_cpu() {
-        crate::thread::signals::tests::isolated(|| {
-            let cpus = crate::cpus::count();
             assert!(cpus > 1, "the default machine has more than one CPU");
-            let (_, full) = affinity(128);
             let start = cpu();
             assert!(start < cpus);
             let other = (start + 1) % cpus;
             assert_eq!(set_affinity(&named(&[other, cpus], 128)), Ok(0));
-            assert_eq!(affinity(128).1, named(&[other], 128));
-            assert_eq!(cpu(), other);
-            assert_eq!(set_affinity(&full), Ok(0));
-            assert_eq!(cpu(), start);
-        });
-    }
-
-    /// A thread's own CPU and affinity answer while the runtime's lock is
-    /// held, as they must for an allocator the runtime allocates through;
-    /// pinned, they are the pinned CPU's.
-    #[test]
-    fn a_threads_own_cpu_reads_take_no_lock() {
-        crate::thread::signals::tests::isolated(|| {
-            let cpus = crate::cpus::count();
-            let other = 1 % cpus;
-            assert_eq!(set_affinity(&named(&[other], 128)), Ok(0));
             let mut mask = vec![0u8; 128];
             let held = lock_state();
             let current = current_cpu();
@@ -415,12 +394,14 @@ mod tests {
             assert_eq!((current, raw), (other, other));
             assert_eq!(r, Ok(cpumask_bytes(cpus) as i64));
             assert_eq!(mask, named(&[other], 128));
+            assert_eq!(set_affinity(&full), Ok(0));
+            assert_eq!(cpu(), start);
         });
     }
 
     /// Threads start round robin over the CPUs in creation order, main on
-    /// CPU 0; a mask moves a thread to the first CPU it allows after its own,
-    /// wrapping round.
+    /// CPU 0; a mask, which keeps only the machine's CPUs, moves a thread to
+    /// the first CPU it allows after its own, wrapping round.
     #[test]
     fn threads_start_round_robin_and_a_mask_moves_them_forward() {
         let cpus = 3;
@@ -431,10 +412,7 @@ mod tests {
         assert_eq!(on(2, only(&[2])), 2);
         assert_eq!(on(3, only(&[0, 1])), 0);
         assert_eq!(on(2, only(&[0, 2])), 2);
-    }
-
-    #[test]
-    fn a_mask_keeps_only_the_machines_cpus() {
+        // A mask keeps only the machine's CPUs.
         for cpus in [1, 63, 64, 65, patina_dst_abi::MAX_CPUS] {
             let first = CpuMask::first(cpus);
             assert_eq!(count_of(&first.bytes(128)), cpus);

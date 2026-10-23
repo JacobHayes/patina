@@ -2,7 +2,7 @@
 use patina_dst_syscalls::{ENTRIES, Os, generated::SOURCES};
 
 #[test]
-fn provenance_contains_only_the_compiled_target_sources() {
+fn metadata_is_the_compiled_targets_and_each_identity_has_its_own_number() {
     assert!(!SOURCES.is_empty());
     for source in SOURCES {
         assert_eq!(source.0, Os::host().name());
@@ -14,10 +14,7 @@ fn provenance_contains_only_the_compiled_target_sources() {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert!(!source.3.contains("x86"));
     }
-}
 
-#[test]
-fn every_native_identity_has_its_own_total_number() {
     assert!(!ENTRIES.is_empty());
     for entry in ENTRIES {
         assert_eq!(entry.id.number(), entry.nr);

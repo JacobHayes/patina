@@ -39,14 +39,12 @@ fn entropy_once(
 }
 
 #[test]
-fn entropy_bytes_resolves_without_a_knob_and_reports_nothing() {
+fn the_entropy_failure_knob_fires_and_is_reported() {
+    // Control: without the knob the request resolves and nothing reports.
     let (bytes, report) = entropy_once(RuntimeConfig::seeded(1), 16);
     assert_eq!(bytes.unwrap().len(), 16);
     assert!(report.is_none(), "no entropy knob was live, so no report");
-}
 
-#[test]
-fn the_entropy_failure_knob_fires_and_is_reported() {
     // MUST fail: a certain failure rate turns an eligible request into EAGAIN,
     // and the report proves it was applied.
     let (failed, report) = entropy_once(

@@ -3,7 +3,6 @@
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{AT_FDCWD, Probe, neg};
-use crate::vehicle::Vehicle;
 use libc::{EINVAL, O_CREAT, O_EXCL, O_WRONLY};
 use patina_dst_syscalls::Syscall;
 
@@ -46,7 +45,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "fs/readlink_width",
     run,
-    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_readlinkat,
         #[cfg(target_arch = "x86_64")]

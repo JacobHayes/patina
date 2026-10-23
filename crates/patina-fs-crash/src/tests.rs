@@ -3,7 +3,7 @@
 use crate::CrashFs;
 use patina_dst_abi::{ErrorCode, Fd, FsClock, OpenFlags};
 use patina_dst_driver_api::FsDriver;
-use patina_dst_fs_mem::{FsSnapshot, MemFs};
+use patina_dst_fs_mem::MemFs;
 
 pub(super) fn write_only() -> OpenFlags {
     OpenFlags {
@@ -33,52 +33,25 @@ pub(super) fn write(fs: &mut CrashFs, path: &str, bytes: &[u8]) -> Fd {
     fd
 }
 
+/// The snapshot a crash exports is the recovered image: synced bytes kept,
+/// unsynced ones reverted, and hard links still one node.
 #[test]
-fn crash_and_snapshot_exports_recovered_image_without_handles() {
-    let mut fs = CrashFs::default();
-    let fd = fs
-        .open(FsClock::EPOCH, "/state", OpenFlags::create_truncate_write())
-        .unwrap();
-    fs.write(FsClock::EPOCH, fd, b"stable").unwrap();
-    fs.sync(fd).unwrap();
-    fs.sync_directory("/").unwrap();
-    fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
-
-    let snapshot = fs.crash_and_snapshot().unwrap();
-    let encoded = snapshot.encode().unwrap();
-    assert_eq!(
-        FsSnapshot::decode(&encoded).unwrap().encode().unwrap(),
-        encoded
-    );
-    let mut imported = snapshot.into_memfs();
-    assert_eq!(imported.contents("/state").unwrap(), b"stable");
-    assert_eq!(
-        imported.read(FsClock::EPOCH, fd, 1).unwrap_err().code,
-        ErrorCode::InvalidHandle
-    );
-    assert_eq!(
-        imported
-            .open(FsClock::EPOCH, "/state", OpenFlags::read_only())
-            .unwrap(),
-        Fd(3)
-    );
-}
-
-#[test]
-fn crash_and_snapshot_preserves_hard_link_inode_identity() {
+fn crash_and_snapshot_exports_the_recovered_image() {
     let mut base = MemFs::new().with_file("/a", b"stable").unwrap();
     base.link(FsClock::EPOCH, "/a", "/b").unwrap();
     let mut fs = CrashFs::new(base);
-    let fd = fs.open(FsClock::EPOCH, "/a", write_only()).unwrap();
-    fs.write(FsClock::EPOCH, fd, b"volatile").unwrap();
+    let fd = write(&mut fs, "/state", b"stable");
+    fs.sync(fd).unwrap();
+    fs.sync_directory("/").unwrap();
+    fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
+    let linked = fs.open(FsClock::EPOCH, "/a", write_only()).unwrap();
+    fs.write(FsClock::EPOCH, linked, b"volatile").unwrap();
 
-    let snapshot = fs.crash_and_snapshot().unwrap();
-    let mut imported = snapshot.into_memfs();
+    let mut imported = fs.crash_and_snapshot().unwrap().into_memfs();
+    assert_eq!(imported.contents("/state").unwrap(), b"stable");
     let a = imported.metadata("/a").unwrap();
     let b = imported.metadata("/b").unwrap();
-    assert_eq!(a.ino, b.ino);
-    assert_eq!(a.nlink, 2);
-    assert_eq!(b.nlink, 2);
+    assert_eq!((a.ino, a.nlink), (b.ino, 2));
     assert_eq!(imported.contents("/a").unwrap(), b"stable");
     assert_eq!(imported.contents("/b").unwrap(), b"stable");
 }

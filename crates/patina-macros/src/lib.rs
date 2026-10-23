@@ -349,27 +349,18 @@ mod tests {
     use super::{flag_name, literal_to_cli_value, rust_string_literal};
 
     #[test]
-    fn flag_names_are_mechanical() {
+    fn flag_names_and_expansion_strings_are_mechanical() {
         assert_eq!(flag_name("fs_crash_at"), "--fs-crash-at");
         assert_eq!(flag_name("yield_points"), "--yield-points");
+        assert_eq!(rust_string_literal("a\\b\n\"c\""), "\"a\\\\b\\n\\\"c\\\"\"");
     }
 
     #[test]
-    fn literals_cover_integer_and_string_values() {
+    fn literals_convert_to_cli_values_and_refuse_unsupported_escapes() {
         assert_eq!(literal_to_cli_value("200").unwrap(), "200");
         assert_eq!(literal_to_cli_value("1_000u64").unwrap(), "1000");
         assert_eq!(literal_to_cli_value("\"write:3\"").unwrap(), "write:3");
         assert_eq!(literal_to_cli_value("r#\"net:drop\"#").unwrap(), "net:drop");
-    }
-
-    #[test]
-    fn string_literals_fail_on_unsupported_escapes() {
-        let error = literal_to_cli_value("\"\\x41\"").unwrap_err();
-        assert!(error.contains("unsupported escape"));
-    }
-
-    #[test]
-    fn rust_string_literals_escape_for_expansion() {
-        assert_eq!(rust_string_literal("a\\b\n\"c\""), "\"a\\\\b\\n\\\"c\\\"\"");
+        assert!(literal_to_cli_value("\"\\x41\"").is_err());
     }
 }

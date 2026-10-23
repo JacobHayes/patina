@@ -48,7 +48,7 @@ fn bindings_match_the_registry_rows() {
 }
 
 #[test]
-fn arg_fd_reads_int_fds_the_way_the_kernel_does() {
+fn int_arguments_narrow_the_way_the_kernel_reads_them() {
     // The kernel reads fd/dirfd as a 32-bit `int` (low register bits). A
     // caller may sign-extend a negative fd (hand asm) OR zero-extend it
     // (rustix's linux_raw `raw_fd` does `fd as c_uint as usize`): both leave
@@ -62,14 +62,10 @@ fn arg_fd_reads_int_fds_the_way_the_kernel_does() {
     assert_eq!(arg_fd(0), 0);
     assert_eq!(arg_fd(5), 5);
     assert_eq!(arg_fd(0x4000_0005), 0x4000_0005);
-}
 
-#[test]
-fn prctl_option_narrows_to_unsigned_int_like_the_kernel() {
-    // The kernel reads `option = (unsigned int) arg`, so only the low 32 bits
-    // decide the route. rustix passes a clean 32-bit PR_GET_AUXV; hand asm may
-    // sign-/zero-extend. RED: comparing the full 64-bit register would make a
-    // sign-extended PR_GET_AUXV (or a high-bit-dirty PR_SET_NAME) miscompare —
+    // Likewise `prctl` reads `option = (unsigned int) arg`, so only the low 32
+    // bits decide the route. RED: comparing the full 64-bit register would make
+    // a sign-extended PR_GET_AUXV (or a high-bit-dirty PR_SET_NAME) miscompare —
     // either wrongly denying the auxv route or wrongly accepting an escape.
     assert_eq!(prctl_option(0x4155_5856), PR_GET_AUXV); // exact
     assert_eq!(prctl_option(0xFFFF_FFFF_4155_5856), PR_GET_AUXV); // dirty high bits ignored
@@ -121,30 +117,6 @@ fn pr_get_auxv_copy_mirrors_the_kernel_semantics() {
         pr_get_auxv_copy(&saved, std::ptr::null_mut(), 8, 0, 0),
         -EFAULT
     );
-}
-
-#[test]
-fn creat_synthesizes_create_write_truncate_flags() {
-    // The legacy `creat(path, mode)` alias routes to openat with a SYNTHESIZED
-    // flag word `O_CREAT | O_WRONLY | O_TRUNC` (creat has no flags argument).
-    // That must decode to a writable, creating, truncating open — never a
-    // read-only one (which would drop the file's contents differently and
-    // fail to create). RED: synthesizing the wrong flags (e.g. O_RDONLY=0)
-    // would decode to PATINA_O_READ with no create/truncate bit.
-    let flags = openat_patina_flags(O_CREAT | O_WRONLY | O_TRUNC);
-    assert_eq!(
-        flags,
-        PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE,
-        "creat must be write+create+truncate"
-    );
-    // And it must NOT be classified read-only (that gates the directory-fd
-    // fallback path in sys_openat).
-    let read_only = flags & (PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE) == 0;
-    assert!(!read_only, "creat is never a read-only open");
-
-    // A bare `open(path, O_RDONLY)` (the read alias) decodes read-only — this
-    // pins the contrast the alias relies on.
-    assert_eq!(openat_patina_flags(0), PATINA_O_READ);
 }
 
 #[test]
@@ -263,30 +235,7 @@ fn flag_words_the_kernel_refuses_or_ignores() {
 }
 
 #[test]
-fn open_flags_decode_with_this_architectures_values() {
-    // The flag words a guest's libc hands the kernel, in the libc crate's
-    // per-target spelling: x86_64 and arm64 disagree on O_DIRECTORY,
-    // O_NOFOLLOW and O_DIRECT, so this oracle is independent of the
-    // dispatcher's own constants. RED with x86_64's values on arm64: the
-    // directory open is refused as unsupported, and pipe2 reads O_DIRECT as
-    // O_DIRECTORY.
-    let bits = |flags: libc::c_int| flags as u64;
-    let directory = bits(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    assert_eq!(directory & !OPENAT_SUPPORTED_FLAGS, 0);
-    assert_eq!(
-        openat_patina_flags(directory),
-        PATINA_O_READ | PATINA_O_DIRECTORY | PATINA_O_NOFOLLOW | PATINA_O_CLOEXEC
-    );
-    assert_ne!(bits(libc::O_DIRECT) & !OPENAT_SUPPORTED_FLAGS, 0);
-    // pipe2 refuses packet mode as unmodeled and any other bit as invalid,
-    // both before it creates anything.
-    let fds: u64 = 0x1000;
-    assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECT)), -ENOSYS);
-    assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECTORY)), -EINVAL);
-}
-
-#[test]
-fn openat_flag_decode_ignores_largefile_directory_cloexec_bits() {
+fn open_flags_decode_with_this_architectures_values_and_ignore_noise_bits() {
     // rustix ORs O_LARGEFILE into every open, and a directory open
     // adds O_DIRECTORY|O_CLOEXEC. The legacy `open`/`creat` aliases and the
     // direct `openat` share ONE decode (`openat_patina_flags`), so they are
@@ -300,11 +249,20 @@ fn openat_flag_decode_ignores_largefile_directory_cloexec_bits() {
         openat_patina_flags(O_RDWR | O_CLOEXEC),
         PATINA_O_READ | PATINA_O_WRITE | PATINA_O_CLOEXEC
     );
-    // The round-5 flag word.
-    assert_eq!(
-        openat_patina_flags(O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE),
-        PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
-    );
+    // The legacy `creat(path, mode)` alias synthesizes `O_CREAT | O_WRONLY |
+    // O_TRUNC` (it has no flags argument): a writable, creating, truncating
+    // open, as rustix's flag word with `O_LARGEFILE` is; a bare `O_RDONLY`
+    // is read-only.
+    for creat in [
+        O_CREAT | O_WRONLY | O_TRUNC,
+        O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE,
+    ] {
+        assert_eq!(
+            openat_patina_flags(creat),
+            PATINA_O_WRITE | PATINA_O_CREATE | PATINA_O_TRUNCATE
+        );
+    }
+    assert_eq!(openat_patina_flags(0), PATINA_O_READ);
     // A directory open decodes read-only plus the directory requirement;
     // the ONE open entry decides the descriptor's kind from the entry's,
     // so the bit travels rather than routing here.
@@ -331,4 +289,24 @@ fn openat_flag_decode_ignores_largefile_directory_cloexec_bits() {
             openat_patina_flags(base | noise)
         );
     }
+
+    // The flag words a guest's libc hands the kernel, in the libc crate's
+    // per-target spelling: x86_64 and arm64 disagree on O_DIRECTORY,
+    // O_NOFOLLOW and O_DIRECT, so this oracle is independent of the
+    // dispatcher's own constants. RED with x86_64's values on arm64: the
+    // directory open is refused as unsupported, and pipe2 reads O_DIRECT as
+    // O_DIRECTORY.
+    let bits = |flags: libc::c_int| flags as u64;
+    let directory = bits(libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    assert_eq!(directory & !OPENAT_SUPPORTED_FLAGS, 0);
+    assert_eq!(
+        openat_patina_flags(directory),
+        PATINA_O_READ | PATINA_O_DIRECTORY | PATINA_O_NOFOLLOW | PATINA_O_CLOEXEC
+    );
+    assert_ne!(bits(libc::O_DIRECT) & !OPENAT_SUPPORTED_FLAGS, 0);
+    // pipe2 refuses packet mode as unmodeled and any other bit as invalid,
+    // both before it creates anything.
+    let fds: u64 = 0x1000;
+    assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECT)), -ENOSYS);
+    assert_eq!(sys_pipe2(fds, bits(libc::O_DIRECTORY)), -EINVAL);
 }

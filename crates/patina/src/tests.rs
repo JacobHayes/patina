@@ -15,4 +15,5 @@ fn macros_are_inert_outside_patina() {
     reachable!("outside-reachable");
     super::lifecycle::setup_complete();
     super::lifecycle::event!("outside-event");
+    super::verdict(super::VerdictKind::Violation, "outside-verdict", "{}");
 }

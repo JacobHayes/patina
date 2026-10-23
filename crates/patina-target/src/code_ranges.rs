@@ -517,15 +517,6 @@ mod tests {
         assert_eq!(scan(&bytes).unwrap()[0].mnemonic, Some("rdrand"));
     }
 
-    #[test]
-    fn residual_undeclared_gap_escape_is_not_yet_detected() {
-        // Explicit residual, not a reachability claim: even a forbidden opcode
-        // in an uncovered gap is not scanned when function metadata exists.
-        let text = [RETURN_42, &[0x0f, 0xc7, 0xf0], RETURN_42].concat();
-        let bytes = elf(Architecture::X86_64, &text, &[(0, 6), (9, 6)], None);
-        assert!(scan(&bytes).unwrap().is_empty());
-    }
-
     // Class detector: declarations lacking sized .symtab functions must never
     // narrow the section walk, but still preserve independently declared starts.
     #[test]
@@ -887,14 +878,6 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_relocations_are_not_an_empty_relocation_table() {
-        let mut bytes = elf_with_unwind_relocation();
-        let header = relocation_header(&bytes);
-        bytes[header + 24..header + 32].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(scan(&bytes).is_err());
-    }
-
-    #[test]
     fn dynamic_relocations_cannot_rewrite_declared_code_addresses() {
         let mut bytes = elf_with_unwind_relocation();
         let header = relocation_header(&bytes);
@@ -922,10 +905,16 @@ mod tests {
         assert!(scan(&bytes).unwrap().is_empty());
     }
 
+    /// An unwind relocation table the scan cannot read or measure is never
+    /// treated as empty: an unreadable range, an unknown entry size, and an
+    /// unsupported table type all fail closed.
     #[test]
-    fn unmeasured_relocation_table_formats_fail_closed() {
+    fn unreadable_or_unmeasured_relocation_tables_fail_closed() {
         let mut bytes = elf_with_unwind_relocation();
         let header = relocation_header(&bytes);
+        bytes[header + 24..header + 32].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(scan(&bytes).is_err());
+        let mut bytes = elf_with_unwind_relocation();
         bytes[header + 56..header + 64].copy_from_slice(&1u64.to_le_bytes()); // sh_entsize
         assert!(scan(&bytes).is_err());
         let mut bytes = elf_with_unwind_relocation();

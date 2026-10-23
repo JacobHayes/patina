@@ -910,7 +910,7 @@ mod tests {
     const GUEST: i32 = ROOT_PID as i32;
 
     #[test]
-    fn set_ids_succeed_only_for_the_ids_held() {
+    fn ids_set_only_to_those_held_and_groups_answer_their_count() {
         let own = IDENTITY_UID;
         assert_eq!(set(Id::User, own), 0);
         assert_eq!(set(Id::User, own + 1), errno(EPERM));
@@ -919,10 +919,8 @@ mod tests {
         assert_eq!(set_many(Id::User, &[own, UNCHANGED, own]), 0);
         assert_eq!(set_many(Id::User, &[own, own + 1, own]), errno(EPERM));
         assert_eq!(set_fs(Id::Group), i64::from(IDENTITY_GID));
-    }
 
-    #[test]
-    fn getgroups_answers_the_count_and_refuses_a_short_buffer() {
+        // getgroups answers the count and refuses a short buffer.
         let mut list = [0u32; 4];
         // SAFETY: local buffers.
         unsafe {
@@ -934,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_versions_negotiate_as_the_kernel_does() {
+    fn capabilities_negotiate_and_set_as_the_kernel_does() {
         let mut header = CapHeader { version: 0, pid: 0 };
         let mut data = [CapData::default(); 2];
         // SAFETY: local buffers.
@@ -969,14 +967,11 @@ mod tests {
             };
             assert_eq!(capset(credential(), &mut header, data.as_ptr()), 0);
         }
-    }
 
-    /// `cap_capset` for credentials other than the guest's: `CAP_SETPCAP`
-    /// lets the inheritable set take a capability outside the permitted set
-    /// (but never outside the bounding set), and the permitted set never
-    /// grows.
-    #[test]
-    fn capset_follows_cap_capset_for_any_credential() {
+        // `cap_capset` for credentials other than the guest's: `CAP_SETPCAP`
+        // lets the inheritable set take a capability outside the permitted
+        // set (but never outside the bounding set), and the permitted set
+        // never grows.
         let chown = Capability::Chown.bit();
         let setpcap = Capability::Setpcap.bit();
         let holding = |held: u64, bounding: u64| Credential {
@@ -1068,18 +1063,6 @@ mod tests {
             Process::INIT
         ));
         assert!(ptrace_may_access(root, Process::INIT));
-    }
-
-    #[test]
-    fn the_table_holds_init_and_the_root_process() {
-        let root = Process::current();
-        assert_eq!((root.pid(), root.parent()), (GUEST, INIT));
-        assert_eq!((Process::INIT.pid(), Process::INIT.parent()), (INIT, 0));
-        assert_eq!(lookup(INIT), Some((Process::INIT, true)));
-        assert_eq!(root.credential(), &CREDENTIAL);
-        assert_eq!(Process::INIT.credential(), &ROOT_CREDENTIAL);
-        assert_eq!(crate::patina_pid(), GUEST);
-        assert_eq!(crate::patina_ppid(), INIT);
     }
 
     /// The one test that moves the guest's group and session: the tree's

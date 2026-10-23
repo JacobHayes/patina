@@ -326,7 +326,7 @@ symbol_rows! {
     // Darwin's _DARWIN_C_SOURCE headers give this implementation the extended
     // ABI name (including malloc-on-NULL). The legacy plain import is NOT an
     // alias we define or allow. Class pairing: the compiled-object registry gate
-    // and native_abi::realpath_buffer_conventions_agree.
+    // and native_abi::posix_descriptors_paths_and_environment_are_virtualized.
     s(
         "realpath$DARWIN_EXTSN",
         Platform::Darwin,

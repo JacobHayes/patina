@@ -215,7 +215,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/robust_list",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[Syscall::N_set_robust_list, Syscall::N_get_robust_list],
     ..DEFAULTS
 };

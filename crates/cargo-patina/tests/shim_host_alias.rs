@@ -18,13 +18,14 @@
 //!
 //! Red→green: on the pre-doctrine shim (which named `semaphore_wait`,
 //! `read$NOCANCEL`, ... directly) this fails; once those route through the alias
-//! table it passes with `dlsym` as the only escape-surface residue. The
-//! `planted_leak_is_caught` test keeps the scan non-vacuous.
+//! table it passes with `dlsym` as the only escape-surface residue. The scan
+//! must see the shim's own undefined externals, so it cannot pass vacuously;
+//! the classifier's planted vehicle names are `patina-target`'s unit test
+//! (`shim_host_alias_violation_flags_planted_vehicle_names`).
 
 mod common;
 
 use std::collections::BTreeSet;
-use std::process::Command;
 
 use object::{Object, ObjectSymbol};
 use patina_dst_target::{shim_control_plane_symbols, shim_host_alias_violation};
@@ -69,6 +70,10 @@ fn shim_objects_name_no_undeclared_host_escape() {
     let archive = shim_archive();
     let bytes = std::fs::read(&archive).expect("read shim staticlib");
     let undefined = shim_undefined_externals(&bytes);
+    assert!(
+        !undefined.is_empty(),
+        "the shim's own objects name no undefined externals: the scan is vacuous"
+    );
     let allow = shim_control_plane_symbols();
     let violations = violations(&undefined, &allow);
     assert!(
@@ -82,56 +87,5 @@ genuinely a sanctioned vehicle, declare them in shim_control_plane_symbols):\n{}
             .map(|(symbol, category)| format!("  {symbol} ({category})"))
             .collect::<Vec<_>>()
             .join("\n")
-    );
-}
-
-/// Non-vacuity guard: a fixture object that deliberately names `open` and
-/// `semaphore_wait` as undefined externals must be flagged by the exact same
-/// extraction-and-classification pipeline, so the scan can never silently pass.
-#[test]
-fn planted_leak_is_caught() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("planted_leak.c");
-    let obj = dir.path().join("planted_leak.o");
-    // References real host escape symbols so they appear as undefined externals.
-    std::fs::write(
-        &src,
-        r#"extern long semaphore_wait(unsigned int);
-extern int open(const char *, int, ...);
-long __patina_planted_leak(const char *p) {
-    return semaphore_wait(0) + open(p, 0);
-}
-"#,
-    )
-    .unwrap();
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    let status = Command::new(&cc)
-        .arg("-c")
-        .arg(&src)
-        .arg("-o")
-        .arg(&obj)
-        .status()
-        .expect("cc compiles the planted-leak fixture");
-    assert!(status.success(), "planted-leak fixture failed to compile");
-
-    let bytes = std::fs::read(&obj).unwrap();
-    let object = object::File::parse(&*bytes).expect("parse planted-leak object");
-    let undefined: BTreeSet<String> = object
-        .symbols()
-        .filter(|symbol| symbol.is_undefined())
-        .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
-        .collect();
-
-    // Empty allow set: even the sanctioned residue is not exempt for a planted
-    // leak, and the two planted names must both be classified escapes.
-    let flagged = violations(&undefined, &BTreeSet::new());
-    let categories: BTreeSet<&str> = flagged.iter().map(|(_, c)| *c).collect();
-    assert!(
-        categories.contains("unmanaged-sync"),
-        "planted semaphore_wait leak was not flagged as unmanaged-sync; flagged={flagged:?}"
-    );
-    assert!(
-        categories.contains("filesystem"),
-        "planted open leak was not flagged as filesystem; flagged={flagged:?}"
     );
 }

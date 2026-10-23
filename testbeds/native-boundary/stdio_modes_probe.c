@@ -1,6 +1,7 @@
 /*
- * glibc's buffering modes, observed on a pipe: `native_abi` runs this source
- * natively (unlinked) and under the shim and requires the same report. stdout
+ * glibc's buffering modes, observed on a pipe: `stdio_entry_probe.c`'s `modes`
+ * case, which `native_abi` runs natively (unlinked) and under the shim,
+ * requiring the same report. stdout
  * is redirected onto a non-blocking pipe; after each call the report records
  * the call's answer and the bytes that reached the pipe (FIONREAD), so every
  * flush a mode makes (or does not make) is visible. The report goes to the
@@ -42,7 +43,7 @@ static void drain(void) {
     }
 }
 
-int main(void) {
+int stdio_modes(void) {
     static char message[300];
     static char caller[16];
     memset(message, 'x', sizeof message);

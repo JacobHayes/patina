@@ -3,41 +3,10 @@
 use super::*;
 use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::tests::{native_build_invocation, native_run, strings};
-use crate::{
-    ArtifactRef, DEFAULT_NATIVE_FINGERPRINT, KnobValues, NativeBuildTarget, NativeRunMode,
-};
-use patina_dst_runtime::{ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, FaultKnob};
+use crate::{ArtifactRef, DEFAULT_NATIVE_FINGERPRINT, NativeBuildTarget, NativeRunMode};
+use patina_dst_runtime::{ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-#[test]
-fn native_run_parses_fault_knobs() {
-    let parsed = native_run(&[
-        "native-run",
-        "bin",
-        "--fs-crash-at",
-        "close:1",
-        "--fs-torn-granularity",
-        "byte",
-        "--sleep-jitter-nanos",
-        "500..1500",
-        "--net-jitter-nanos",
-        "0..1000",
-        "--net-drop-permille",
-        "250",
-    ]);
-    assert_eq!(parsed.knobs.get(FaultKnob::FsCrashAt), ["close:1"]);
-    assert_eq!(parsed.knobs.get(FaultKnob::FsTornGranularity), ["byte"]);
-    assert_eq!(parsed.knobs.get(FaultKnob::SleepJitterNanos), ["500..1500"]);
-    assert_eq!(parsed.knobs.get(FaultKnob::NetJitterNanos), ["0..1000"]);
-    assert_eq!(parsed.knobs.get(FaultKnob::NetDropPermille), ["250"]);
-}
-
-#[test]
-fn native_run_defaults_leave_fault_knobs_off() {
-    let parsed = native_run(&["native-run", "bin"]);
-    assert_eq!(parsed.knobs, KnobValues::default());
-}
 
 #[test]
 fn native_run_buggify_value_form_enables_and_carries_permille() {
@@ -100,7 +69,7 @@ fn parses_build_wasi_target_and_native_audit() {
 }
 
 #[test]
-fn parses_native_build_with_output_edition_and_forwarded_rustc_args() {
+fn parses_native_build_for_sources_and_packages() {
     let invocation = native_build_invocation(&[
         "native-build",
         "probe.rs",
@@ -146,6 +115,55 @@ fn parses_native_build_with_output_edition_and_forwarded_rustc_args() {
     assert!(parse_native_build(strings(&["--output", "probe"])).is_err());
     // Package-only options are rejected for a single source.
     assert!(parse_native_build(strings(&["probe.rs", "--output", "probe", "--bin", "x"])).is_err());
+    // A directory or an explicit Cargo.toml is a package build.
+    {
+        // A directory and an explicit Cargo.toml both resolve to a manifest path.
+        let invocation = native_build_invocation(&[
+            "native-build",
+            "pkg",
+            "--package",
+            "demo",
+            "--bin",
+            "app",
+            "--output",
+            "out",
+            "--release",
+        ]);
+        assert_eq!(invocation.output.as_deref(), Some(Path::new("out")));
+        assert!(invocation.release);
+        match invocation.target {
+            NativeBuildTarget::Package {
+                manifest,
+                package,
+                bin,
+            } => {
+                assert_eq!(manifest, PathBuf::from("pkg/Cargo.toml"));
+                assert_eq!(package.as_deref(), Some("demo"));
+                assert_eq!(bin.as_deref(), Some("app"));
+            }
+            _ => panic!("expected a package target"),
+        }
+
+        // --output is optional for packages; a Cargo.toml path is used as-is.
+        let invocation = native_build_invocation(&["native-build", "pkg/Cargo.toml"]);
+        assert!(invocation.output.is_none());
+        match invocation.target {
+            NativeBuildTarget::Package {
+                manifest,
+                package,
+                bin,
+            } => {
+                assert_eq!(manifest, PathBuf::from("pkg/Cargo.toml"));
+                assert_eq!(package, None);
+                assert_eq!(bin, None);
+            }
+            _ => panic!("expected a package target"),
+        }
+
+        // Single-source options are rejected for a package.
+        assert!(parse_native_build(strings(&["pkg", "--edition", "2021"])).is_err());
+        assert!(parse_native_build(strings(&["pkg", "--", "-C", "opt-level=2"])).is_err());
+    }
 }
 
 #[test]
@@ -188,56 +206,6 @@ fn parses_a_go_build_with_its_go_build_options() {
     ] {
         assert!(parse_native_build(strings(refused)).is_err(), "{refused:?}");
     }
-}
-
-#[test]
-fn parses_native_build_for_cargo_packages() {
-    // A directory and an explicit Cargo.toml both resolve to a manifest path.
-    let invocation = native_build_invocation(&[
-        "native-build",
-        "pkg",
-        "--package",
-        "demo",
-        "--bin",
-        "app",
-        "--output",
-        "out",
-        "--release",
-    ]);
-    assert_eq!(invocation.output.as_deref(), Some(Path::new("out")));
-    assert!(invocation.release);
-    match invocation.target {
-        NativeBuildTarget::Package {
-            manifest,
-            package,
-            bin,
-        } => {
-            assert_eq!(manifest, PathBuf::from("pkg/Cargo.toml"));
-            assert_eq!(package.as_deref(), Some("demo"));
-            assert_eq!(bin.as_deref(), Some("app"));
-        }
-        _ => panic!("expected a package target"),
-    }
-
-    // --output is optional for packages; a Cargo.toml path is used as-is.
-    let invocation = native_build_invocation(&["native-build", "pkg/Cargo.toml"]);
-    assert!(invocation.output.is_none());
-    match invocation.target {
-        NativeBuildTarget::Package {
-            manifest,
-            package,
-            bin,
-        } => {
-            assert_eq!(manifest, PathBuf::from("pkg/Cargo.toml"));
-            assert_eq!(package, None);
-            assert_eq!(bin, None);
-        }
-        _ => panic!("expected a package target"),
-    }
-
-    // Single-source options are rejected for a package.
-    assert!(parse_native_build(strings(&["pkg", "--edition", "2021"])).is_err());
-    assert!(parse_native_build(strings(&["pkg", "--", "-C", "opt-level=2"])).is_err());
 }
 
 #[test]

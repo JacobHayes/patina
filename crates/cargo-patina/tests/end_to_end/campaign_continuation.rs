@@ -2,12 +2,6 @@
 
 use super::*;
 
-fn campaign_json_without_invocations(value: &serde_json::Value) -> serde_json::Value {
-    let mut value = value.clone();
-    value.as_object_mut().unwrap().remove("invocations");
-    value
-}
-
 fn campaign_coverage_file_hashes(out_dir: &Path) -> BTreeMap<String, String> {
     let coverage_dir = out_dir.join("coverage");
     assert!(

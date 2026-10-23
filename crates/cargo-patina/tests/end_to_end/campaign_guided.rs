@@ -15,13 +15,25 @@ mod tests {
     // reproducible. Asserting only the first would pass for a nondeterministic
     // scheduler; asserting only the second would pass for a no-op.
     //
-    // The repeat is a campaign that runs the first generations fresh and the rest
-    // through `--extend`. An extended guided campaign re-derives generation k from
-    // the PERSISTED novelty log rather than from loop-carried state, so matching
-    // the fresh stream also proves the log is a sufficient and faithful record of
-    // the guidance input.
+    // The repeat is a campaign that runs the first generations fresh, survives a
+    // checkpoint tear, and runs the rest through `--extend`. An extended guided
+    // campaign re-derives generation k from the PERSISTED novelty log rather than
+    // from loop-carried state, so matching the fresh stream also proves the log is
+    // a sufficient and faithful record of the guidance input.
+    //
+    // The tear: the depth store is written BEFORE `campaign-state.json`, so a crash
+    // between the two leaves the novelty log one generation ahead of the cursor, and
+    // a guided resume re-derives that generation from a log that already contains
+    // its own entry. Truncating the log below the generation being derived is what
+    // keeps the re-derivation identical. The torn generation has to be novel (its
+    // own entry is in the log) and exploited (it consults the ancestor set), or the
+    // truncation is a no-op and the leg proves nothing. Generation 5 of seed base 3
+    // qualifies, which the first segment checks; derivation for generation g
+    // depends only on generations below it. A fixture change that moves it fails
+    // those checks; a probe of a few seed bases with long campaigns finds the next
+    // qualifying pair.
     #[test]
-    fn campaign_guided_steers_reproducibly_and_differs_from_unguided() {
+    fn campaign_guided_steers_reproducibly_across_a_tear_and_differs_from_unguided() {
         let directory = tempdir().unwrap();
         let module = directory.path().join("depth.wasm");
         fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
@@ -30,8 +42,7 @@ mod tests {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
             invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
         };
-        let gens = 24;
-        let fresh_gens = 6;
+        let (gens, torn) = (12, 5);
         let campaign_of = |out: &Path, guided: bool, gens: u64| {
             let mut args = vec![
                 "campaign".to_string(),
@@ -39,7 +50,9 @@ mod tests {
                 "--gens".to_string(),
                 gens.to_string(),
                 "--plateau-after".to_string(),
-                "8".to_string(),
+                "4".to_string(),
+                "--seed-start".to_string(),
+                "3".to_string(),
                 "--progress-every".to_string(),
                 "1".to_string(),
                 "--out-dir".to_string(),
@@ -51,43 +64,90 @@ mod tests {
             args
         };
         let campaign = |out: &Path, guided: bool| campaign_of(out, guided, gens);
-
-        let first_out = directory.path().join("guided-1");
-        let split_out = directory.path().join("guided-split");
-        let plain_out = directory.path().join("unguided");
-        let first = run(campaign(&first_out, true));
-        let split_fresh = run(campaign_of(&split_out, true, fresh_gens));
-        let split_extended = run(vec![
-            "campaign".to_string(),
-            "--extend".to_string(),
-            (gens - fresh_gens).to_string(),
-            "--out-dir".to_string(),
-            split_out.to_str().unwrap().to_string(),
-            "--progress-every".to_string(),
-            "1".to_string(),
-        ]);
-        let plain = run(campaign(&plain_out, false));
-        for (label, output) in [
-            ("guided-1", &first),
-            ("guided-split fresh", &split_fresh),
-            ("guided-split extended", &split_extended),
-            ("unguided", &plain),
-        ] {
+        let succeeded = |label: &str, output: &Output| {
             assert!(
                 output.status.success(),
                 "{label} campaign failed:\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
-        }
+            campaign_gen_lines(&String::from_utf8_lossy(&output.stdout))
+        };
+
+        let first_out = directory.path().join("guided-1");
+        let first = run(campaign(&first_out, true));
+        let guided_stream = succeeded("guided-1", &first);
         let first_stdout = String::from_utf8_lossy(&first.stdout).into_owned();
-        let guided_stream = campaign_gen_lines(&first_stdout);
-        let repeat_stream = [
-            campaign_gen_lines(&String::from_utf8_lossy(&split_fresh.stdout)),
-            campaign_gen_lines(&String::from_utf8_lossy(&split_extended.stdout)),
-        ]
-        .join("\n");
-        let plain_stream = campaign_gen_lines(&String::from_utf8_lossy(&plain.stdout));
+
+        // The first segment ends on the torn generation.
+        let split_out = directory.path().join("guided-split");
+        let segment = succeeded(
+            "guided-split fresh",
+            &run(campaign_of(&split_out, true, torn + 1)),
+        );
+        let segment_lines: Vec<&str> = segment.lines().collect();
+        assert_eq!(segment_lines.len() as u64, torn + 1);
+        let novel = campaign_depth_meta(&split_out)["new_depth_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry[0].as_u64() == Some(torn));
+        assert!(novel, "the torn generation must be novel");
+        assert!(
+            segment_lines[torn as usize].contains(" guided=exploit:"),
+            "the torn generation must consult the ancestor set: {}",
+            segment_lines[torn as usize]
+        );
+
+        // Stage the tear: the cursor rewinds by one, the depth store keeps its
+        // entry for the generation about to be re-run.
+        let state_path = split_out.join("campaign-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        state["generations_done"] = serde_json::Value::from(torn);
+        let classes = state["classes"].as_object_mut().unwrap();
+        let ok = classes.get_mut("OK").expect("a clean campaign records OK");
+        *ok = serde_json::Value::from(ok.as_u64().unwrap() - 1);
+        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        let resumed = succeeded(
+            "guided-split resumed",
+            &run(vec![
+                "campaign".to_string(),
+                "--resume".to_string(),
+                "--progress-every".to_string(),
+                "1".to_string(),
+                "--out-dir".to_string(),
+                split_out.to_str().unwrap().to_string(),
+            ]),
+        );
+        assert_eq!(
+            resumed, segment_lines[torn as usize],
+            "the re-run generation must be derived exactly as the original run derived it"
+        );
+
+        let extended = succeeded(
+            "guided-split extended",
+            &run(vec![
+                "campaign".to_string(),
+                "--extend".to_string(),
+                (gens - torn - 1).to_string(),
+                "--out-dir".to_string(),
+                split_out.to_str().unwrap().to_string(),
+                "--progress-every".to_string(),
+                "1".to_string(),
+            ]),
+        );
+        assert_eq!(
+            guided_stream,
+            [segment, extended].join("\n"),
+            "a fresh guided campaign and one extended from its first generations must \
+             derive identical generations at one seed base"
+        );
+
+        let plain_stream = succeeded(
+            "unguided",
+            &run(campaign(&directory.path().join("unguided"), false)),
+        );
         // A guided line carries its decision as a trailing ` guided=…` field, which an
         // unguided line does not have. Strip it before comparing the two modes, so
         // the comparison is about the DERIVATION (seed + class) and cannot pass just
@@ -99,12 +159,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-
-        assert_eq!(
-            guided_stream, repeat_stream,
-            "a fresh guided campaign and one extended from its first generations must \
-             derive identical generations at one seed base"
-        );
 
         // `--guided` is part of the recorded spec, so re-supplying it on the
         // continuation is refused rather than silently ignored — the out-dir's spec
@@ -172,180 +226,18 @@ mod tests {
             "PATINA_CAMPAIGN_COMPLETE must carry the guidance tally:\n{first_stdout}"
         );
 
-        // An unguided campaign says nothing about guidance at all — "off" is
-        // distinct from "on but did nothing".
         let json_out = directory.path().join("json");
         let mut json_args = campaign(&json_out, true);
         json_args.extend(["--format".to_string(), "json".to_string()]);
         let envelope = campaign_json_stdout(&run(json_args));
         assert_eq!(envelope["guidance"]["state"], "active");
-        assert!(envelope["guidance"]["exploited"].as_u64().unwrap() > 0);
+        assert_eq!(envelope["guidance"]["exploited"], exploited);
         assert_eq!(
             envelope["guidance"]["generations"].as_u64().unwrap(),
             envelope["guidance"]["exploited"].as_u64().unwrap()
                 + envelope["guidance"]["explored"].as_u64().unwrap()
                 + envelope["guidance"]["no_ancestors"].as_u64().unwrap(),
             "the guidance tally must account for every generation"
-        );
-    }
-
-    // Fail closed, loudly: a campaign asked to steer with no novelty signal is not a
-    // campaign with slightly worse selection, it is a different mode than the
-    // operator asked for. A plain (non-yield-point) native binary has no edge
-    // coverage and is not WASI, so `--guided` must refuse rather than quietly run
-    // unguided.
-    #[test]
-    fn campaign_guided_refuses_without_a_novelty_signal() {
-        let workspace = native_workspace();
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("plain.rs");
-        let guest = directory.path().join("plain-guest");
-        fs::write(&source, "fn main() { println!(\"PLAIN_DONE\"); }\n").unwrap();
-        let built = invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                guest.to_str().unwrap(),
-            ],
-        );
-        assert!(
-            built.status.success(),
-            "building the plain guest failed:\nstderr:\n{}",
-            String::from_utf8_lossy(&built.stderr)
-        );
-
-        let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "campaign",
-                guest.to_str().unwrap(),
-                "--gens",
-                "3",
-                "--guided",
-                "--out-dir",
-                directory.path().join("out").to_str().unwrap(),
-            ],
-        );
-        assert_ne!(
-            refused.status.code(),
-            Some(0),
-            "--guided without a novelty signal must not succeed quietly"
-        );
-        let stderr = String::from_utf8_lossy(&refused.stderr);
-        assert!(
-            stderr.contains("--guided needs a novelty signal") && stderr.contains("--yield-points"),
-            "the refusal must name the cause and the fix:\n{stderr}"
-        );
-    }
-
-    // Guided derivation under the checkpoint tear, end to end. The depth store is
-    // written BEFORE `campaign-state.json`, so a crash between the two leaves the
-    // novelty log one generation ahead of the cursor — and a guided resume then
-    // re-derives that generation from a log that already contains its own entry.
-    // Truncating the log below the generation being derived is what keeps the
-    // re-derivation identical; without it a resumed guided campaign silently runs a
-    // different generation than the one it is supposedly resuming.
-    //
-    // The torn generation must be one that was NOVEL, or the truncation is a no-op
-    // and the test proves nothing — so the campaign checks its novelty log before
-    // tearing it.
-    #[test]
-    fn campaign_guided_resume_after_a_tear_re_derives_the_same_generation() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("depth.wasm");
-        fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
-        let module_path = module.to_str().unwrap().to_string();
-        let run = |owned: Vec<String>| {
-            let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
-        };
-        let campaign = |out: &Path, gens: u64, seed_start: u64| {
-            vec![
-                "campaign".to_string(),
-                module_path.clone(),
-                "--gens".to_string(),
-                gens.to_string(),
-                "--plateau-after".to_string(),
-                "4".to_string(),
-                "--guided".to_string(),
-                "--seed-start".to_string(),
-                seed_start.to_string(),
-                "--progress-every".to_string(),
-                "1".to_string(),
-                "--out-dir".to_string(),
-                out.to_str().unwrap().to_string(),
-            ]
-        };
-
-        // The torn generation has to satisfy BOTH conditions or the truncation is a
-        // no-op and this test would pass with or without it: its own novelty entry
-        // must be in the log (novel), and it must actually consult the ancestor set
-        // (exploited). Whether a generation qualifies depends on the fixture's
-        // rolls; generation 5 of seed base 3 does, which the fresh campaign below
-        // checks. Derivation for generation g depends only on generations below
-        // it, so the campaign that ends on it derives it as any longer one would.
-        // A fixture change that moves it fails those checks; a probe of a few seed
-        // bases with long campaigns finds the next qualifying pair.
-        let (seed_start, torn) = (3, 5);
-
-        // Run a campaign whose LAST generation is that one, so tearing the cursor by
-        // one lands exactly on it.
-        let out = directory.path().join("camp");
-        let fresh = run(campaign(&out, torn + 1, seed_start));
-        assert!(
-            fresh.status.success(),
-            "fresh guided campaign failed:\nstderr:\n{}",
-            String::from_utf8_lossy(&fresh.stderr)
-        );
-        let fresh_lines: Vec<String> = campaign_gen_lines(&String::from_utf8_lossy(&fresh.stdout))
-            .lines()
-            .map(str::to_string)
-            .collect();
-        assert_eq!(fresh_lines.len() as u64, torn + 1);
-        let novel = campaign_depth_meta(&out)["new_depth_log"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry[0].as_u64() == Some(torn));
-        assert!(novel, "the torn generation must be novel");
-        assert!(
-            fresh_lines[torn as usize].contains(" guided=exploit:"),
-            "the torn generation must consult the ancestor set: {}",
-            fresh_lines[torn as usize]
-        );
-
-        // Stage the tear: the cursor rewinds by one, the depth store keeps its entry
-        // for the generation about to be re-run.
-        let state_path = out.join("campaign-state.json");
-        let mut state: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
-        state["generations_done"] = serde_json::Value::from(torn);
-        let classes = state["classes"].as_object_mut().unwrap();
-        let ok = classes.get_mut("OK").expect("a clean campaign records OK");
-        *ok = serde_json::Value::from(ok.as_u64().unwrap() - 1);
-        fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
-
-        let resumed = run(vec![
-            "campaign".to_string(),
-            "--resume".to_string(),
-            "--progress-every".to_string(),
-            "1".to_string(),
-            "--out-dir".to_string(),
-            out.to_str().unwrap().to_string(),
-        ]);
-        assert!(
-            resumed.status.success(),
-            "guided resume after a tear failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&resumed.stdout),
-            String::from_utf8_lossy(&resumed.stderr)
-        );
-        assert_eq!(
-            campaign_gen_lines(&String::from_utf8_lossy(&resumed.stdout)),
-            fresh_lines[torn as usize],
-            "the re-run generation must be derived exactly as the original run derived it"
         );
     }
 

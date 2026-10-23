@@ -134,7 +134,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // The shim does not define name_to_handle_at, so its libc spelling would
     // be `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_name_to_handle_at,
         Syscall::N_openat,

@@ -1021,7 +1021,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_reset_on_fork_child_drops_a_raised_priority() {
+    fn a_child_inherits_attributes_but_never_an_io_context() {
         let mut runtime = SchedRuntime::default();
         let parent = TaskId(1);
         runtime.set(
@@ -1044,13 +1044,10 @@ mod tests {
         );
         runtime.spawn(TaskId(3), parent);
         assert_eq!(runtime.get(tid_of(TaskId(3))), runtime.get(tid_of(parent)));
-    }
 
-    /// A thread gets an I/O context of its own from its first I/O
-    /// priority and keeps it; a thread it creates gets another only while
-    /// that priority is valid.
-    #[test]
-    fn io_contexts_come_from_io_priorities_and_are_never_shared() {
+        // A thread gets an I/O context of its own from its first I/O
+        // priority and keeps it; a thread it creates gets another only while
+        // that priority is valid.
         let mut runtime = SchedRuntime::default();
         let parent = TaskId(1);
         let context = |runtime: &SchedRuntime, task| runtime.get(tid_of(task)).io_context;
@@ -1099,12 +1096,33 @@ mod tests {
     }
 
     #[test]
-    fn priority_bounds_are_the_kernels() {
+    fn priority_bounds_and_deadline_parameters_are_the_kernels() {
         assert_eq!(priority_bound(SCHED_FIFO as i32, true), Ok(99));
         assert_eq!(priority_bound(SCHED_RR as i32, false), Ok(1));
         assert_eq!(priority_bound(SCHED_IDLE as i32, true), Ok(0));
         assert_eq!(priority_bound(4, true), Err(Errno::new(EINVAL)));
         assert_eq!(priority_bound(-1, false), Err(Errno::new(EINVAL)));
+
+        // Deadline parameters are checked as the kernel checks them.
+        let valid = Request {
+            runtime: 1_000_000,
+            deadline: 2_000_000,
+            period: 4_000_000,
+            ..Request::default()
+        };
+        assert!(deadline_params_valid(&valid));
+        assert!(!deadline_params_valid(&Request {
+            runtime: 3_000_000,
+            ..valid
+        }));
+        assert!(!deadline_params_valid(&Request {
+            deadline: 0,
+            ..valid
+        }));
+        assert!(!deadline_params_valid(&Request {
+            period: 1 << 63,
+            ..valid
+        }));
     }
 
     #[test]
@@ -1134,28 +1152,5 @@ mod tests {
         };
         assert_eq!(read_ioprio(set, true), best_effort(2));
         assert_eq!(read_ioprio(set, false), best_effort(2));
-    }
-
-    #[test]
-    fn deadline_parameters_are_checked_as_the_kernel_checks_them() {
-        let valid = Request {
-            runtime: 1_000_000,
-            deadline: 2_000_000,
-            period: 4_000_000,
-            ..Request::default()
-        };
-        assert!(deadline_params_valid(&valid));
-        assert!(!deadline_params_valid(&Request {
-            runtime: 3_000_000,
-            ..valid
-        }));
-        assert!(!deadline_params_valid(&Request {
-            deadline: 0,
-            ..valid
-        }));
-        assert!(!deadline_params_valid(&Request {
-            period: 1 << 63,
-            ..valid
-        }));
     }
 }

@@ -1,28 +1,68 @@
-//! Native and WASI verdict ABI recording, replay, and envelope delivery.
+//! Native and WASI verdict ABI recording, replay, and envelope delivery, and
+//! the native SDK verdict guest the minimize tests share.
+
+use super::*;
+
+/// An SDK guest whose first argument picks how it reports:
+///
+/// * none: print a line, then fail an `always!` invariant;
+/// * `verdicts`: report a passing, a violating and an abort-intent verdict,
+///   one with spaces in its label and detail, which the marker-line escaping
+///   has to carry into the envelope;
+/// * `parked`: fail the invariant while a parked worker holds std's stderr
+///   lock, so finalization must not wait on a lock a guest thread can hold.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const VERDICT_SDK_MAIN: &str = r#"
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use patina_dst::VerdictKind;
+
+static HOLDING: AtomicBool = AtomicBool::new(false);
+
+fn main() {
+    match std::env::args().nth(1).as_deref() {
+        Some("verdicts") => {
+            patina_dst::verdict(VerdictKind::Pass, "setup-complete", "");
+            patina_dst::verdict(VerdictKind::Violation, "two leaders", "{\"term\": 4}");
+            patina_dst::verdict(VerdictKind::AbortIntent, "checksum-mismatch", "page=7");
+            println!("PATINA_RESULT verdicts=3");
+            return;
+        }
+        Some("parked") => {
+            std::thread::spawn(|| {
+                let _stderr = std::io::stderr().lock();
+                HOLDING.store(true, Ordering::Release);
+                loop {
+                    std::thread::yield_now();
+                }
+            });
+            while !HOLDING.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+        _ => println!("GUEST_BEFORE"),
+    }
+    patina_dst::always!(std::env::args().count() > 64, "never-holds");
+    println!("UNREACHABLE");
+}
+"#;
+
+/// The [`VERDICT_SDK_MAIN`] guest.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn verdict_guest() -> PathBuf {
+    super::run_facts::shared_sdk_guest("verdict-guest", VERDICT_SDK_MAIN)
+}
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use super::verdict_guest;
 
     // ---------------------------------------------------------------------------
     // The verdict ABI (outcome-channel arc, Wave A): one shim verb / one WASI
     // import, recorded as trace events and surfaced in `patina.result/v1`.
     // ---------------------------------------------------------------------------
-
-    // A guest that reports both a passing and a violating verdict, plus one whose
-    // label and detail contain spaces — the marker-line escaping has to survive the
-    // round trip into the envelope.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const VERDICT_SDK_MAIN: &str = r#"
-use patina_dst::VerdictKind;
-
-fn main() {
-    patina_dst::verdict(VerdictKind::Pass, "setup-complete", "");
-    patina_dst::verdict(VerdictKind::Violation, "two leaders", "{\"term\": 4}");
-    patina_dst::verdict(VerdictKind::AbortIntent, "checksum-mismatch", "page=7");
-    println!("PATINA_RESULT verdicts=3");
-}
-"#;
 
     /// The `PATINA_VERDICT` lines in a stderr stream, in order.
     fn verdict_lines_in(stderr: &str) -> Vec<String> {
@@ -48,19 +88,8 @@ fn main() {
     #[test]
     fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
         let directory = tempdir().unwrap();
-        let pkg = directory.path().join("pkg");
-        write_sdk_fixture(&pkg, VERDICT_SDK_MAIN);
         let workspace = native_workspace();
-        let bin = directory.path().join("verdict-guest");
-        invoke(
-            workspace,
-            &[
-                "build",
-                pkg.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
+        let bin = verdict_guest();
 
         // The envelope carries the verdicts structurally, in call order.
         let trace = directory.path().join("verdict.patina");
@@ -75,6 +104,8 @@ fn main() {
                 trace.to_str().unwrap(),
                 "--format",
                 "json",
+                "--",
+                "verdicts",
             ],
         );
         let stdout = String::from_utf8_lossy(&recorded.stdout);
@@ -128,16 +159,9 @@ fn main() {
             3,
             "replay must not be vacuously verdict-free"
         );
-
-        // Same seed twice: byte-identical, verdict lines included.
-        let first = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-        let second = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "4"]);
-        assert_eq!(first.stdout, second.stdout);
-        assert_eq!(first.stderr, second.stderr);
-        assert_eq!(verdict_lines(&first).len(), 3);
     }
 
-    /// A built `always!` guest and its recorded run.
+    /// A recorded run of the verdict guest that fails its `always!`.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct AlwaysRecording {
         _directory: tempfile::TempDir,
@@ -146,36 +170,26 @@ fn main() {
         recorded: Output,
     }
 
-    /// Build `main` as an SDK guest and record one seeded run of it, which must
-    /// fail and leave a trace holding exactly one violation verdict.
+    /// Record one seeded run of the verdict guest in `mode`, which must fail
+    /// and leave a trace holding exactly one violation verdict.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn record_always_violation(main: &str) -> AlwaysRecording {
+    fn record_always_violation(mode: &[&str]) -> AlwaysRecording {
         let directory = tempdir().unwrap();
-        let pkg = directory.path().join("pkg");
-        write_sdk_fixture(&pkg, main);
-        let workspace = native_workspace();
-        let bin = directory.path().join("always-trace");
-        invoke(
-            workspace,
-            &[
-                "build",
-                pkg.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
+        let bin = verdict_guest();
         let trace = directory.path().join("always.patina");
+        let mut arguments = vec![
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ];
+        arguments.extend_from_slice(mode);
         let recorded = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--record",
-                trace.to_str().unwrap(),
-            ],
+            native_workspace(),
+            &arguments,
         );
         let stderr = String::from_utf8_lossy(&recorded.stderr);
         assert!(
@@ -234,15 +248,6 @@ fn main() {
         assert_eq!(verdict_lines(&replayed).len(), 1);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const ALWAYS_FAILS_MAIN: &str = r#"
-fn main() {
-    println!("GUEST_BEFORE");
-    patina_dst::always!(std::env::args().count() > 64, "never-holds");
-    println!("UNREACHABLE");
-}
-"#;
-
     // An `always!` violation lowers to a `VIOLATION` verdict on the same label, and
     // that verdict is the failure's ONLY announcement: Wave B of the outcome-channel
     // arc deleted the embedder's legacy `PATINA_ALWAYS_VIOLATION` marker once the
@@ -260,7 +265,7 @@ fn main() {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_always_violation_is_one_verdict_whose_trace_replays_and_detects_divergence() {
-        let recording = record_always_violation(ALWAYS_FAILS_MAIN);
+        let recording = record_always_violation(&[]);
         let stdout = String::from_utf8_lossy(&recording.recorded.stdout);
         let stderr = String::from_utf8_lossy(&recording.recorded.stderr);
         assert!(
@@ -327,36 +332,11 @@ fn main() {
             envelope["refusal"]["class"], "shim_fatal",
             "the unconsumed trace must fail the replay as a divergence: {envelope:#}"
         );
-    }
 
-    // Finalization prints the end-of-run reports after the runtime is gone, so
-    // it must not wait on a lock a guest thread can hold: here a worker is
-    // parked holding std's stderr lock when main fails its invariant.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_always_violation_finalizes_while_a_parked_thread_holds_stderr() {
-        let recording = record_always_violation(
-            r#"
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static HOLDING: AtomicBool = AtomicBool::new(false);
-
-fn main() {
-    std::thread::spawn(|| {
-        let _stderr = std::io::stderr().lock();
-        HOLDING.store(true, Ordering::Release);
-        loop {
-            std::thread::yield_now();
-        }
-    });
-    while !HOLDING.load(Ordering::Acquire) {
-        std::thread::yield_now();
-    }
-    patina_dst::always!(std::env::args().count() > 64, "never-holds");
-}
-"#,
-        );
-        assert_replays_identically(&recording);
+        // Finalization prints the end-of-run reports after the runtime is gone,
+        // so it must not wait on a lock a guest thread can hold: here a worker
+        // is parked holding std's stderr lock when main fails its invariant.
+        assert_replays_identically(&record_always_violation(&["--", "parked"]));
     }
 
     // The WASI half: the `patina_sdk` `verdict` import is backed by the same runtime

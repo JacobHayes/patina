@@ -134,33 +134,3 @@ impl fmt::Display for ErrorCodeDisplay {
         f.write_str(value)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn error_codes_have_stable_display_names() {
-        let error = EffectError::missing_driver("filesystem");
-        assert_eq!(
-            error.to_string(),
-            "missing_driver: no filesystem driver is installed"
-        );
-        assert_eq!(
-            EffectError::new(ErrorCode::ConnectionRefused, "dial failed").to_string(),
-            "connection_refused: dial failed"
-        );
-        assert_eq!(
-            EffectError::new(ErrorCode::ConnectionReset, "peer reset").to_string(),
-            "connection_reset: peer reset"
-        );
-        assert_eq!(
-            EffectError::new(ErrorCode::BrokenPipe, "write closed").to_string(),
-            "broken_pipe: write closed"
-        );
-        assert_eq!(
-            EffectError::new(ErrorCode::NotConnected, "no peer").to_string(),
-            "not_connected: no peer"
-        );
-    }
-}

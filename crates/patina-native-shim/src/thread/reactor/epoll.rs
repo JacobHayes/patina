@@ -697,8 +697,7 @@ mod tests {
     };
 
     /// The Rust struct is written straight into the guest's buffer, so
-    /// its layout must be the kernel ABI (also pinned from the C side
-    /// by `_Static_assert`s against the platform `struct epoll_event`).
+    /// its layout must be the kernel ABI.
     #[test]
     fn epoll_event_layout_matches_kernel_abi() {
         assert_eq!(std::mem::offset_of!(EpollEvent, events), 0);

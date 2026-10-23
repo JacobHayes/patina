@@ -130,18 +130,14 @@ mod tests {
             .collect()
     }
 
+    /// A `--faults=sleep,net` campaign draws and fires only those planes (the
+    /// every-plane control shows fs faults do reach this guest), the out-dir
+    /// records the subset, a continuation keeps it and refuses a new one, and
+    /// an unknown plane is a usage error naming the valid planes.
     #[test]
-    fn a_net_only_campaign_never_draws_or_fires_an_fs_fault() {
+    fn a_plane_subset_never_draws_another_plane_and_a_continuation_keeps_it() {
         let fixture = fixture();
-        let generations = 4;
-
-        // The control: over every plane, fs faults reach this guest.
-        let every = fresh(
-            &fixture,
-            &fixture.cwd.join("every"),
-            &generations.to_string(),
-            "--faults",
-        );
+        let every = fresh(&fixture, &fixture.cwd.join("every"), "4", "--faults");
         assert!(
             runs(&every)
                 .iter()
@@ -151,40 +147,12 @@ mod tests {
             every["notable_runs"]
         );
 
-        let net = fresh(
-            &fixture,
-            &fixture.cwd.join("net"),
-            &generations.to_string(),
-            "--faults=net",
-        );
-        assert_eq!(net["spec"]["faults"], serde_json::json!(["net"]));
-        assert_eq!(
-            runs(&net).len(),
-            generations,
-            "every generation is recorded"
-        );
-        for run in runs(&net) {
-            assert!(!drew(run, "--fs-"), "an fs knob was drawn: {run:#}");
-            assert!(drew(run, "--net-"), "no net knob was drawn: {run:#}");
-            assert_ne!(run["class"], "VIOLATION", "an fs fault fired: {run:#}");
-        }
-        let classes = net["classes"].as_object().unwrap();
-        assert!(
-            classes.keys().all(|class| !class.starts_with("VACUOUS_")),
-            "a plane counted as vacuous: {classes:?}"
-        );
-    }
-
-    #[test]
-    fn a_continuation_keeps_the_recorded_fault_planes_and_refuses_new_ones() {
-        let fixture = fixture();
         let out = fixture.cwd.join("camp");
         let recorded = fresh(&fixture, &out, "2", "--faults=sleep,net");
         assert_eq!(
             recorded["spec"]["faults"],
             serde_json::json!(["net", "sleep"])
         );
-
         assert_ran(&campaign(
             &fixture.cwd,
             &["--extend", "2", "--out-dir", out.to_str().unwrap()],
@@ -195,7 +163,13 @@ mod tests {
         for run in runs(&extended) {
             assert!(!drew(run, "--fs-"), "an fs knob was drawn: {run:#}");
             assert!(drew(run, "--net-") && drew(run, "--sleep-"), "{run:#}");
+            assert_ne!(run["class"], "VIOLATION", "an fs fault fired: {run:#}");
         }
+        let classes = extended["classes"].as_object().unwrap();
+        assert!(
+            classes.keys().all(|class| !class.starts_with("VACUOUS_")),
+            "a plane counted as vacuous: {classes:?}"
+        );
 
         for continuation in [
             vec!["--extend", "1", "--faults=fs"],
@@ -216,21 +190,17 @@ mod tests {
             extended,
             "a refused continuation changed the out-dir"
         );
-    }
 
-    #[test]
-    fn an_unknown_fault_plane_is_a_usage_error_naming_the_valid_planes() {
-        let fixture = fixture();
         let planes = registry_planes(&fixture.cwd);
         assert!(!planes.is_empty());
-        let out = fixture.cwd.join("camp");
+        let unknown_out = fixture.cwd.join("unknown");
         let refused = campaign(
             &fixture.cwd,
             &[
                 fixture.module.to_str().unwrap(),
                 "--faults=net,disk",
                 "--out-dir",
-                out.to_str().unwrap(),
+                unknown_out.to_str().unwrap(),
             ],
         );
         let stderr = String::from_utf8_lossy(&refused.stderr);
@@ -243,6 +213,6 @@ mod tests {
                 "{plane} unnamed:\n{stderr}"
             );
         }
-        assert!(!out.exists(), "a refused campaign wrote an out-dir");
+        assert!(!unknown_out.exists(), "a refused campaign wrote an out-dir");
     }
 }

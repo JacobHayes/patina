@@ -399,6 +399,11 @@ mod tests {
             parse_in6(&six[..24], EAFNOSUPPORT),
             Ok((Ipv6Addr::LOCALHOST, 1, V6Extra::default()))
         );
+        // The wire label round-trips both families.
+        for text in ["127.0.0.1:80", "[::1]:443"] {
+            assert_eq!(Endpoint::from_wire(text).unwrap().wire(), text);
+        }
+        assert_eq!(Endpoint::from_wire("label"), None);
     }
 
     #[test]
@@ -424,13 +429,5 @@ mod tests {
             encode_un(&UnixName::Abstract(b"ab".to_vec())).len(),
             SUN_PATH + 3
         );
-    }
-
-    #[test]
-    fn a_wire_address_round_trips_both_families() {
-        for text in ["127.0.0.1:80", "[::1]:443"] {
-            assert_eq!(Endpoint::from_wire(text).unwrap().wire(), text);
-        }
-        assert_eq!(Endpoint::from_wire("label"), None);
     }
 }

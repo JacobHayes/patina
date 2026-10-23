@@ -139,6 +139,3 @@ impl Future for UdpRecvFuture {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

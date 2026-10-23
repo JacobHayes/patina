@@ -4,41 +4,38 @@
 mod tests {
     use super::super::*;
 
+    /// Run defaults come from flags, then `PATINA_*`, then the project config,
+    /// each provenanced in the envelope and all ignored under `--no-config`. A
+    /// config value that matches an explicit one leaves the trace's bytes alone,
+    /// a replay refuses config defaults (the trace is authoritative), and a bad
+    /// config is a loud error naming its line that blocks neither help nor
+    /// `--no-config`.
     #[test]
-    fn config_precedence_and_no_config_are_provenanced() {
+    fn run_config_defaults_are_provenanced_loud_and_stay_out_of_traces_and_replays() {
         let directory = tempdir().unwrap();
         let module = directory.path().join("noop.wasm");
         write_noop_wasm(&module);
-        fs::create_dir_all(directory.path().join(".patina")).unwrap();
-        fs::write(
-            directory.path().join(".patina/config.toml"),
-            "[defaults.run]\nseed = 3\n",
-        )
-        .unwrap();
+        let config = directory.path().join(".patina/config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "[defaults.run]\nseed = 3\n").unwrap();
         let patina = env!("CARGO_BIN_EXE_cargo-patina");
         let module = module.to_str().unwrap();
+        let run = |args: &[&str], env: &[(&str, &str)]| {
+            invoke_unchecked_clean_env(patina, directory.path(), args, env)
+        };
 
-        let from_config = json_output(&invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &["run", module, "--format", "json"],
-            &[],
-        ));
+        let from_config = json_output(&run(&["run", module, "--format", "json"], &[]));
         assert_eq!(from_config["seed"], 3, "{from_config:#}");
         assert_eq!(from_config["config"]["applied"][0]["source"], "config");
 
-        let from_env = json_output(&invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
+        let from_env = json_output(&run(
             &["run", module, "--format", "json"],
             &[("PATINA_SEED", "4")],
         ));
         assert_eq!(from_env["seed"], 4, "{from_env:#}");
         assert_eq!(from_env["config"]["applied"][0]["source"], "env");
 
-        let from_flag = json_output(&invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
+        let from_flag = json_output(&run(
             &["run", module, "--seed", "5", "--format", "json"],
             &[("PATINA_SEED", "4")],
         ));
@@ -48,144 +45,69 @@ mod tests {
             "explicit flag should leave lower-priority defaults unapplied: {from_flag:#}"
         );
 
-        let no_config = json_output(&invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
+        let no_config = json_output(&run(
             &["run", "--no-config", module, "--format", "json"],
             &[],
         ));
         assert_eq!(no_config["seed"], 0, "{no_config:#}");
         assert!(no_config.get("config").is_none(), "{no_config:#}");
-    }
 
-    #[test]
-    fn config_effective_values_do_not_change_trace_bytes() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        write_noop_wasm(&module);
-        fs::create_dir_all(directory.path().join(".patina")).unwrap();
-        fs::write(
-            directory.path().join(".patina/config.toml"),
-            "[defaults.run]\nseed = 9\n",
-        )
-        .unwrap();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
-        let module = module.to_str().unwrap();
         let config_trace = directory.path().join("config.patina");
         let explicit_trace = directory.path().join("explicit.patina");
-
-        let config_record = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &["run", module, "--record", config_trace.to_str().unwrap()],
-            &[],
-        );
-        assert!(
-            config_record.status.success(),
-            "config record failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&config_record.stdout),
-            String::from_utf8_lossy(&config_record.stderr)
-        );
-        let explicit_record = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &[
-                "run",
-                "--no-config",
-                module,
-                "--seed",
-                "9",
-                "--record",
-                explicit_trace.to_str().unwrap(),
-            ],
-            &[],
-        );
-        assert!(
-            explicit_record.status.success(),
-            "explicit record failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&explicit_record.stdout),
-            String::from_utf8_lossy(&explicit_record.stderr)
-        );
+        for recorded in [
+            run(
+                &["run", module, "--record", config_trace.to_str().unwrap()],
+                &[],
+            ),
+            run(
+                &[
+                    "run",
+                    "--no-config",
+                    module,
+                    "--seed",
+                    "3",
+                    "--record",
+                    explicit_trace.to_str().unwrap(),
+                ],
+                &[],
+            ),
+        ] {
+            assert!(
+                recorded.status.success(),
+                "record failed:\nstderr:\n{}",
+                String::from_utf8_lossy(&recorded.stderr)
+            );
+        }
         assert_eq!(
-            fs::read(config_trace).unwrap(),
-            fs::read(explicit_trace).unwrap(),
+            fs::read(&config_trace).unwrap(),
+            fs::read(&explicit_trace).unwrap(),
             "config provenance must not enter traces when effective values match"
         );
-    }
 
-    #[test]
-    fn bad_config_is_loud_and_no_config_ignores_it() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        write_noop_wasm(&module);
-        fs::create_dir_all(directory.path().join(".patina")).unwrap();
-        fs::write(
-            directory.path().join(".patina/config.toml"),
-            "[defaults.run]\nseed = \"abc\"\n",
-        )
-        .unwrap();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
-        let module = module.to_str().unwrap();
+        fs::write(&config, "[defaults.replay]\ntimeline = \"other\"\n").unwrap();
+        let replayed = run(&["replay", module, config_trace.to_str().unwrap()], &[]);
+        assert!(!replayed.status.success());
+        let stderr = String::from_utf8_lossy(&replayed.stderr);
+        assert!(stderr.contains("trace-authoritative"), "{stderr}");
+        assert!(stderr.contains("config.toml:2:1"), "{stderr}");
 
-        let bad = invoke_unchecked_clean_env(patina, directory.path(), &["run", module], &[]);
+        fs::write(&config, "[defaults.run]\nseed = \"abc\"\n").unwrap();
+        let bad = run(&["run", module], &[]);
         assert!(!bad.status.success());
         let stderr = String::from_utf8_lossy(&bad.stderr);
         assert!(stderr.contains("seed"), "{stderr}");
         assert!(stderr.contains("config.toml:2:1"), "{stderr}");
-
-        let help = invoke_unchecked_clean_env(patina, directory.path(), &["run", "--help"], &[]);
+        let help = run(&["run", "--help"], &[]);
         assert!(
             help.status.success(),
             "help must not be blocked by a bad project config:\nstderr:\n{}",
             String::from_utf8_lossy(&help.stderr)
         );
-
-        let ignored = json_output(&invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
+        let ignored = json_output(&run(
             &["run", "--no-config", module, "--format", "json"],
             &[],
         ));
         assert_eq!(ignored["seed"], 0, "{ignored:#}");
-    }
-
-    #[test]
-    fn replay_config_defaults_are_refused() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        write_noop_wasm(&module);
-        let trace = directory.path().join("run.patina");
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
-        let recorded = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &[
-                "run",
-                "--no-config",
-                module.to_str().unwrap(),
-                "--record",
-                trace.to_str().unwrap(),
-            ],
-            &[],
-        );
-        assert!(recorded.status.success());
-        fs::create_dir_all(directory.path().join(".patina")).unwrap();
-        fs::write(
-            directory.path().join(".patina/config.toml"),
-            "[defaults.replay]\ntimeline = \"other\"\n",
-        )
-        .unwrap();
-
-        let replayed = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &["replay", module.to_str().unwrap(), trace.to_str().unwrap()],
-            &[],
-        );
-        assert!(!replayed.status.success());
-        let stderr = String::from_utf8_lossy(&replayed.stderr);
-        assert!(stderr.contains("trace-authoritative"), "{stderr}");
-        assert!(stderr.contains("config.toml:2:1"), "{stderr}");
     }
 
     // A campaign's child `run` processes are driven entirely by the derived flags, so

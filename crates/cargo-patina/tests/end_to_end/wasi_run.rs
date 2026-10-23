@@ -64,11 +64,15 @@ mod tests {
         assert_eq!(ro.status.code(), Some(69));
     }
 
-    // The WASI family's realtime epoch: the default, the `--realtime-epoch`
-    // override applied to the in-process clock, recorded into the trace, restored by
-    // a flag-free replay, and refused when re-supplied to `replay`.
+    // The trace is authoritative for a WASI run: the realtime epoch (the default,
+    // and the `--realtime-epoch` override applied to the in-process clock), the
+    // guest argv (the `--arg` values) and the fault configuration are recorded and
+    // restored by a flag-free replay. A re-supplied epoch is refused; a re-supplied
+    // `--arg` must match the recording or the replay is refused up front, naming
+    // both.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn wasi_realtime_epoch_defaults_overrides_and_replays_flag_free() {
+    fn wasi_replay_restores_the_recorded_epoch_argv_and_faults_flag_free() {
         let directory = tempdir().unwrap();
         let cwd = directory.path();
         // `_start` subtracts monotonic from realtime, then selects by epoch:
@@ -165,23 +169,13 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&refused.stderr)
         );
-    }
 
-    // A WASI record→`replay` round-trip: the `replay` verb restores the recorded
-    // guest argv (the `--arg` values) and fault configuration from the trace, so a
-    // replay is flag-free and byte-identical. A re-supplied `--arg` must match the
-    // recording or the replay is refused up front, naming both.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn wasi_replay_restores_guest_argv_and_faults_flag_free() {
-        let directory = tempdir().unwrap();
-        let cwd = directory.path();
         // `_start` reads the argument count and exits with it, so the process exit
         // code is a pure function of the guest argv — a compact, observable proxy for
         // "the argv reached the guest".
-        let module = directory.path().join("argc.wasm");
+        let argc_module = directory.path().join("argc.wasm");
         fs::write(
-            &module,
+            &argc_module,
             wat::parse_str(
                 r#"(module
                 (import "wasi_snapshot_preview1" "args_sizes_get"
@@ -196,15 +190,16 @@ mod tests {
         )
         .unwrap();
 
+        let argc = argc_module.to_str().unwrap();
         let trace = directory.path().join("argc.patina");
         // Record with two guest arguments and a fault knob that this guest never
         // triggers (no filesystem ops): both are captured into the trace metadata.
         let recorded = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            patina,
             cwd,
             &[
                 "run",
-                module.to_str().unwrap(),
+                argc,
                 "--seed",
                 "1",
                 "--record",
@@ -226,11 +221,7 @@ mod tests {
 
         // Flag-free replay: neither `--arg` nor `--fs-latency-nanos` is re-passed, yet the
         // run reproduces byte-identically because the trace is authoritative.
-        let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            cwd,
-            &["replay", module.to_str().unwrap(), trace.to_str().unwrap()],
-        );
+        let replayed = invoke_unchecked(patina, cwd, &["replay", argc, trace.to_str().unwrap()]);
         assert_eq!(
             replayed.status.code(),
             recorded_code,
@@ -240,11 +231,11 @@ mod tests {
 
         // A re-supplied `--arg` matching the recording is accepted.
         let matching = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            patina,
             cwd,
             &[
                 "replay",
-                module.to_str().unwrap(),
+                argc,
                 trace.to_str().unwrap(),
                 "--arg",
                 "alpha",
@@ -256,15 +247,9 @@ mod tests {
 
         // A conflicting `--arg` is refused up front, naming the conflict.
         let conflict = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            patina,
             cwd,
-            &[
-                "replay",
-                module.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--arg",
-                "gamma",
-            ],
+            &["replay", argc, trace.to_str().unwrap(), "--arg", "gamma"],
         );
         assert!(!conflict.status.success());
         let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);

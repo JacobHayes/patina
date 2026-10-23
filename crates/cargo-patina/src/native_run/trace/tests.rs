@@ -49,68 +49,6 @@ fn commit_stamps_the_build_identity_into_a_trace_the_recorder_left_without_one()
     assert!(!temp_path.exists());
 }
 
-/// A trace whose scratch file is GONE at commit — it was swept out from
-/// under the run, or its directory was — is the artifact channel failing,
-/// not the run failing. It is reported as its own kind so the campaign can
-/// file it as INFRA under one shared shape, while a trace that is present
-/// but empty (what a guest that died mid-record leaves) stays Broken and
-/// keeps failing the run.
-#[cfg(unix)]
-#[test]
-fn a_vanished_scratch_file_is_a_channel_failure_not_a_broken_trace() {
-    let directory = tempfile::tempdir().unwrap();
-
-    let final_path = directory.path().join("vanished.patina");
-    let sink = NativeTraceSink::create(&final_path).unwrap();
-    fs::remove_file(&sink.temp_path).unwrap();
-    let failure = sink.commit(&identity()).unwrap_err();
-    assert!(
-        matches!(failure, TraceCommitFailure::Unavailable(_)),
-        "a vanished scratch file is a channel failure; got {}",
-        failure.reason()
-    );
-
-    // RED twin: the file is there and simply holds no bundle. That is the
-    // run's own doing and must stay a failure.
-    let final_path = directory.path().join("empty.patina");
-    let sink = NativeTraceSink::create(&final_path).unwrap();
-    assert!(matches!(
-        sink.commit(&identity()).unwrap_err(),
-        TraceCommitFailure::Broken(_)
-    ));
-}
-
-/// A complete trace that cannot be stamped (the filesystem refuses the
-/// rewrite) is the trace channel failing, not the run: the guest already
-/// reached its verdict, so the failure is reported as patina's own.
-#[cfg(unix)]
-#[test]
-fn a_stamp_the_filesystem_refuses_is_a_channel_failure() {
-    use std::io::Write;
-
-    let directory = tempfile::tempdir().unwrap();
-    let final_path = directory.path().join("unstampable.patina");
-    let recorded = TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), Vec::new());
-    let mut sink = NativeTraceSink::create(&final_path).unwrap();
-    sink.file
-        .as_mut()
-        .unwrap()
-        .write_all(&recorded.to_bytes().unwrap())
-        .unwrap();
-    // A read-only descriptor of the same complete file: it loads, and every
-    // write to it fails.
-    sink.file = Some(fs::File::open(&sink.temp_path).unwrap());
-    let temp_path = sink.temp_path.clone();
-
-    let failure = sink.commit(&identity()).unwrap_err();
-    assert!(
-        matches!(failure, TraceCommitFailure::Unavailable(_)),
-        "a refused stamp is a channel failure; got {}",
-        failure.reason()
-    );
-    assert!(!temp_path.exists() && !final_path.exists());
-}
-
 /// The scratch sweep clears what a DEAD recorder left behind and nothing
 /// else. A file a recorder still holds belongs to a live run — two
 /// campaigns sharing an out-dir is how that happens — and deleting it
@@ -151,7 +89,7 @@ fn the_scratch_sweep_spares_a_live_recorders_file() {
 /// `replay` to trip over.
 #[cfg(unix)]
 #[test]
-fn an_abandoned_trace_is_reported_while_a_missing_one_fails() {
+fn commit_failures_are_classified_by_what_the_channel_saw() {
     use patina_dst_trace::abandoned_trace_marker;
     use std::io::Write;
 
@@ -194,4 +132,41 @@ fn an_abandoned_trace_is_reported_while_a_missing_one_fails() {
         failure.reason()
     );
     assert!(!temp_path.exists() && !final_path.exists());
+    // A vanished scratch file, or a complete trace the filesystem refuses to stamp, is the artifact
+    // channel failing, not the run.
+    {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+
+        let final_path = directory.path().join("vanished.patina");
+        let sink = NativeTraceSink::create(&final_path).unwrap();
+        fs::remove_file(&sink.temp_path).unwrap();
+        let failure = sink.commit(&identity()).unwrap_err();
+        assert!(
+            matches!(failure, TraceCommitFailure::Unavailable(_)),
+            "a vanished scratch file is a channel failure; got {}",
+            failure.reason()
+        );
+
+        let final_path = directory.path().join("unstampable.patina");
+        let recorded = TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), Vec::new());
+        let mut sink = NativeTraceSink::create(&final_path).unwrap();
+        sink.file
+            .as_mut()
+            .unwrap()
+            .write_all(&recorded.to_bytes().unwrap())
+            .unwrap();
+        // A read-only descriptor of the same complete file: it loads, and every
+        // write to it fails.
+        sink.file = Some(fs::File::open(&sink.temp_path).unwrap());
+        let temp_path = sink.temp_path.clone();
+        let failure = sink.commit(&identity()).unwrap_err();
+        assert!(
+            matches!(failure, TraceCommitFailure::Unavailable(_)),
+            "a refused stamp is a channel failure; got {}",
+            failure.reason()
+        );
+        assert!(!temp_path.exists() && !final_path.exists());
+    }
 }

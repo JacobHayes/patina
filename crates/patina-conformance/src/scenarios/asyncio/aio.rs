@@ -23,7 +23,7 @@
 //! * `io_destroy` ends the context; a second one is `EINVAL`.
 //!
 //! glibc wraps none of the rows (libaio is a separate library), so the
-//! scenario runs through the kernel vehicles. Every reap that expects an
+//! scenario runs through the `syscall` vehicle. Every reap that expects an
 //! event blocks until it arrives, so no answer depends on timing. The host
 //! must offer AIO (`Need::Aio`).
 
@@ -414,7 +414,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "asyncio/aio",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_io_setup,
         Syscall::N_io_destroy,
@@ -426,7 +426,7 @@ pub const SCENARIO: Scenario = Scenario {
     needs: &[Need::Aio],
     gaps: &[Gap {
         status: Status::ByDesign,
-        vehicles: Vehicle::KERNEL,
+        vehicles: &[Vehicle::Syscall],
         what: "the Linux AIO rows are SoftDeny(ENOSYS) in the registry: the virtual kernel is built without AIO (CONFIG_AIO=n), which libaio users detect at io_setup and fall back from, so every call answers ENOSYS where the host kernel has AIO",
         failure: Failure::Differs(&[
             Difference::field(0, "io_setup", "errno", Observed::Str("ENOSYS")),

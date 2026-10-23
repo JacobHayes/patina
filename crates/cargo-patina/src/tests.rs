@@ -99,7 +99,7 @@ mod registry {
     }
 
     #[test]
-    fn json_index_lists_every_verb_without_flag_groups() {
+    fn json_index_and_verb_scopes_split_the_registry() {
         let json = index_json();
         assert_eq!(json["schema"], help::HELP_SCHEMA);
         // The env protocol and global flags live in the index.
@@ -143,66 +143,65 @@ mod registry {
                 verb.name
             );
         }
-    }
-
-    #[test]
-    fn json_verb_scope_carries_only_that_verbs_detail() {
-        // Class-shaped: walk the registry. Each verb's scoped payload names that
-        // verb, carries its own flag_groups and global flags, and leaks neither
-        // the environment block nor any other verb's entry.
-        for verb in help::VERBS {
-            let json = verb_json(verb.name);
-            assert_eq!(json["schema"], help::HELP_SCHEMA, "{} schema", verb.name);
-            assert_eq!(json["verb"]["name"], verb.name, "verb name");
-            assert_eq!(json["verb"]["summary"], verb.summary, "verb summary");
-            assert!(
-                json["verb"]["flag_groups"].is_array(),
-                "{} carries flag_groups",
-                verb.name
-            );
-            assert_eq!(
-                json["verb"]["flag_groups"].as_array().unwrap().len(),
-                verb.groups.len(),
-                "{} flag_groups count matches the registry",
-                verb.name
-            );
-            assert!(
-                json["global_flags"]["flags"].is_array(),
-                "{} carries global flags",
-                verb.name
-            );
-            // Scoping: no top-level `verbs` map and no environment block.
-            assert!(
-                json.get("verbs").is_none(),
-                "{} scoped payload must not carry the verbs index",
-                verb.name
-            );
-            assert!(
-                json.get("environment").is_none(),
-                "{} scoped payload must not carry the environment block",
-                verb.name
-            );
-            // The verb's own flags are present; a DIFFERENT verb's unique flag is
-            // not. `run`'s `--mount` (re-supplying a host corpus) is unique to
-            // run/replay, so it never appears in, say, `build`'s payload.
-            // Deliberately NOT `--harness`: `campaign` forwards that one to its
-            // child runs and registers it too, so it would not be a probe of
-            // leakage.
-            let names = flag_names(&json["verb"]["flag_groups"]);
-            if verb.name != "run" && verb.name != "replay" {
+        // Each verb's scoped payload carries only that verb's detail.
+        {
+            // Class-shaped: walk the registry. Each verb's scoped payload names that
+            // verb, carries its own flag_groups and global flags, and leaks neither
+            // the environment block nor any other verb's entry.
+            for verb in help::VERBS {
+                let json = verb_json(verb.name);
+                assert_eq!(json["schema"], help::HELP_SCHEMA, "{} schema", verb.name);
+                assert_eq!(json["verb"]["name"], verb.name, "verb name");
+                assert_eq!(json["verb"]["summary"], verb.summary, "verb summary");
                 assert!(
-                    !names.contains("--mount"),
-                    "{}'s payload leaked run's unique --mount flag",
+                    json["verb"]["flag_groups"].is_array(),
+                    "{} carries flag_groups",
                     verb.name
                 );
+                assert_eq!(
+                    json["verb"]["flag_groups"].as_array().unwrap().len(),
+                    verb.groups.len(),
+                    "{} flag_groups count matches the registry",
+                    verb.name
+                );
+                assert!(
+                    json["global_flags"]["flags"].is_array(),
+                    "{} carries global flags",
+                    verb.name
+                );
+                // Scoping: no top-level `verbs` map and no environment block.
+                assert!(
+                    json.get("verbs").is_none(),
+                    "{} scoped payload must not carry the verbs index",
+                    verb.name
+                );
+                assert!(
+                    json.get("environment").is_none(),
+                    "{} scoped payload must not carry the environment block",
+                    verb.name
+                );
+                // The verb's own flags are present; a DIFFERENT verb's unique flag is
+                // not. `run`'s `--mount` (re-supplying a host corpus) is unique to
+                // run/replay, so it never appears in, say, `build`'s payload.
+                // Deliberately NOT `--harness`: `campaign` forwards that one to its
+                // child runs and registers it too, so it would not be a probe of
+                // leakage.
+                let names = flag_names(&json["verb"]["flag_groups"]);
+                if verb.name != "run" && verb.name != "replay" {
+                    assert!(
+                        !names.contains("--mount"),
+                        "{}'s payload leaked run's unique --mount flag",
+                        verb.name
+                    );
+                }
             }
+            // Positive: run's payload does contain its unique flag.
+            let run = verb_json("run");
+            assert!(
+                flag_names(&run["verb"]["flag_groups"]).contains("--mount"),
+                "run's payload should contain its own --mount flag"
+            );
         }
-        // Positive: run's payload does contain its unique flag.
-        let run = verb_json("run");
-        assert!(
-            flag_names(&run["verb"]["flag_groups"]).contains("--mount"),
-            "run's payload should contain its own --mount flag"
-        );
     }
 
     #[test]
@@ -738,32 +737,6 @@ mod registry {
         assert!(wasi.contains("WASI --fs-crash-at crash-restart is not implemented"));
     }
 
-    /// A Cargo-family replay refuses a semantic knob by name instead of handing
-    /// it to Cargo: the trace is authoritative, and silently forwarding
-    /// `--fs-crash-at` would surface as a confusing cargo error rather than the
-    /// reason the knob is not accepted.
-    #[test]
-    fn cargo_replay_refuses_semantic_knobs_rather_than_forwarding_them() {
-        for flag in ["--fs-crash-at", "--seed", "--buggify", "--sched-pct"] {
-            let argv = vec![
-                OsString::from(flag),
-                OsString::from("close"),
-                OsString::from("--example"),
-                OsString::from("demo"),
-            ];
-            let Err(error) =
-                parse_cargo_replay(PathBuf::from("."), PathBuf::from("t.patina"), argv)
-            else {
-                panic!("{flag} should be refused, not forwarded to Cargo");
-            };
-            let message = error.to_string();
-            assert!(
-                message.contains(flag) && message.contains("trace is authoritative"),
-                "{flag}: {message}"
-            );
-        }
-    }
-
     /// The Cargo family forwards every unrecognized token verbatim, in place,
     /// including one that is not valid UTF-8 — such a token can never be a
     /// Patina flag, and dropping or re-encoding it would corrupt a legitimate
@@ -889,6 +862,26 @@ mod registry {
                 );
             }
         }
+        // A Cargo-family replay refuses run controls by name instead of forwarding them to Cargo
+        // alongside its own arguments.
+        for flag in ["--fs-crash-at", "--seed", "--buggify", "--sched-pct"] {
+            let argv = vec![
+                OsString::from(flag),
+                OsString::from("close"),
+                OsString::from("--example"),
+                OsString::from("demo"),
+            ];
+            let Err(error) =
+                parse_cargo_replay(PathBuf::from("."), PathBuf::from("t.patina"), argv)
+            else {
+                panic!("{flag} should be refused, not forwarded to Cargo");
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains(flag) && message.contains("trace is authoritative"),
+                "{flag}: {message}"
+            );
+        }
     }
 
     #[test]
@@ -922,7 +915,7 @@ mod registry {
     }
 
     #[test]
-    fn realtime_epoch_reaches_every_run_family_and_replay_refuses_it() {
+    fn run_facts_reach_every_family_that_can_observe_them_and_replay_refuses_them() {
         const TEXT: &str = "2001-09-09T01:46:40Z";
         const NANOS: u64 = 1_000_000_000_000_000_000;
         let native = parse_native_run(strings(&["guest", "--realtime-epoch", TEXT])).unwrap();
@@ -950,6 +943,46 @@ mod registry {
             .expect("unix seconds are refused");
         assert!(error.to_string().contains("--realtime-epoch"), "{error}");
         assert_replay_refuses("--realtime-epoch", TEXT);
+        // The hostname reaches every family that can observe it; wasip1 has none, and the kernel's
+        // length and NUL rules apply.
+        {
+            const NAME: &str = "db-1.internal";
+            let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
+            assert_eq!(native.hostname.as_deref(), Some(NAME));
+            for command in ["run", "test"] {
+                let ParseResult::Run(cargo) =
+                    parse_cargo(command.into(), strings(&["--hostname", NAME])).unwrap()
+                else {
+                    panic!("the Cargo family parses to a Run invocation");
+                };
+                assert_eq!(cargo.hostname.as_deref(), Some(NAME), "{command}");
+            }
+            assert_eq!(
+                parse_native_run(strings(&["guest"])).unwrap().hostname,
+                None
+            );
+            // wasip1 has no hostname surface, so the WASI family refuses the flag.
+            let error = parse_wasi_run(strings(&["guest.wasm", "--hostname", NAME]))
+                .expect_err("WASI refuses --hostname");
+            assert!(error.to_string().contains("--hostname"), "{error}");
+            // The kernel's rules: 64 bytes fit, 65 do not, and a NUL never does.
+            let longest = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES);
+            let too_long = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES + 1);
+            assert_eq!(
+                parse_native_run(strings(&["guest", "--hostname", &longest]))
+                    .unwrap()
+                    .hostname
+                    .as_deref(),
+                Some(longest.as_str())
+            );
+            for refused in [too_long.as_str(), "a\0b"] {
+                let error = parse_native_run(strings(&["guest", "--hostname", refused]))
+                    .err()
+                    .expect("refused hostname");
+                assert!(error.to_string().contains("--hostname"), "{error}");
+            }
+            assert_replay_refuses("--hostname", NAME);
+        }
     }
 
     /// `replay` refuses a re-supplied run fact in every family, by name.
@@ -964,46 +997,6 @@ mod registry {
                 Ok(_) => panic!("{family:?} replay accepted a re-supplied {flag}"),
             }
         }
-    }
-
-    #[test]
-    fn hostname_reaches_every_family_that_can_observe_it_and_replay_refuses_it() {
-        const NAME: &str = "db-1.internal";
-        let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
-        assert_eq!(native.hostname.as_deref(), Some(NAME));
-        for command in ["run", "test"] {
-            let ParseResult::Run(cargo) =
-                parse_cargo(command.into(), strings(&["--hostname", NAME])).unwrap()
-            else {
-                panic!("the Cargo family parses to a Run invocation");
-            };
-            assert_eq!(cargo.hostname.as_deref(), Some(NAME), "{command}");
-        }
-        assert_eq!(
-            parse_native_run(strings(&["guest"])).unwrap().hostname,
-            None
-        );
-        // wasip1 has no hostname surface, so the WASI family refuses the flag.
-        let error = parse_wasi_run(strings(&["guest.wasm", "--hostname", NAME]))
-            .expect_err("WASI refuses --hostname");
-        assert!(error.to_string().contains("--hostname"), "{error}");
-        // The kernel's rules: 64 bytes fit, 65 do not, and a NUL never does.
-        let longest = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES);
-        let too_long = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES + 1);
-        assert_eq!(
-            parse_native_run(strings(&["guest", "--hostname", &longest]))
-                .unwrap()
-                .hostname
-                .as_deref(),
-            Some(longest.as_str())
-        );
-        for refused in [too_long.as_str(), "a\0b"] {
-            let error = parse_native_run(strings(&["guest", "--hostname", refused]))
-                .err()
-                .expect("refused hostname");
-            assert!(error.to_string().contains("--hostname"), "{error}");
-        }
-        assert_replay_refuses("--hostname", NAME);
     }
 
     #[test]

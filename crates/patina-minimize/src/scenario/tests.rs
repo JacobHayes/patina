@@ -4,7 +4,7 @@ use super::*;
 use std::convert::Infallible;
 
 #[test]
-fn reduce_params_drops_unneeded_keys_and_keeps_the_load_bearing_one() {
+fn reduce_params_drops_unneeded_keys_and_shrinks_the_load_bearing_values() {
     let scenario = Scenario::new(0)
         .with_param("a", "1")
         .with_param("b", "2")
@@ -15,10 +15,7 @@ fn reduce_params_drops_unneeded_keys_and_keeps_the_load_bearing_one() {
     .unwrap();
     assert_eq!(reduced.params.len(), 1);
     assert_eq!(reduced.params.get("b").map(String::as_str), Some("2"));
-}
 
-#[test]
-fn reduce_params_shrinks_a_numeric_value_toward_the_failure_boundary() {
     let scenario = Scenario::new(0).with_param("n", "100");
     let reduced = reduce_params(&scenario, &mut |candidate: &Scenario| {
         let value = candidate
@@ -31,10 +28,15 @@ fn reduce_params_shrinks_a_numeric_value_toward_the_failure_boundary() {
     let value: u64 = reduced.params["n"].parse().unwrap();
     assert!(value >= 10, "must still reproduce the failure");
     assert!(value < 100, "must have shrunk from the original");
+
+    let result = reduce_params(&scenario, &mut |_candidate: &Scenario| {
+        Ok::<_, Infallible>(false)
+    });
+    assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
 }
 
 #[test]
-fn reduce_seed_finds_the_smallest_reproducing_seed_within_budget() {
+fn reduce_seed_finds_the_smallest_reproducing_seed_within_its_budget() {
     let scenario = Scenario::new(9);
     let reduced = reduce_seed(
         &scenario,
@@ -43,10 +45,8 @@ fn reduce_seed_finds_the_smallest_reproducing_seed_within_budget() {
     )
     .unwrap();
     assert_eq!(reduced.seed, 3);
-}
 
-#[test]
-fn reduce_seed_keeps_the_original_when_the_budget_is_exhausted() {
+    // An exhausted budget keeps the original.
     let scenario = Scenario::new(100);
     let reduced = reduce_seed(
         &scenario,
@@ -73,13 +73,4 @@ fn reduce_scenario_canonicalizes_the_seed_and_the_parameters_together() {
     assert_eq!(reduced.seed, 2);
     assert_eq!(reduced.params.len(), 1);
     assert!(reduced.params.contains_key("keep"));
-}
-
-#[test]
-fn scenario_reducers_reject_an_input_that_does_not_fail() {
-    let scenario = Scenario::new(1).with_param("a", "1");
-    let result = reduce_params(&scenario, &mut |_candidate: &Scenario| {
-        Ok::<_, Infallible>(false)
-    });
-    assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
 }

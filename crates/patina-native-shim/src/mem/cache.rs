@@ -480,21 +480,19 @@ impl<P: Pages> Cache<P> {
 mod tests {
     use super::*;
 
-    fn cache(contents: &[u8]) -> Cache<Vec<u8>> {
+    fn cached(contents: &[u8]) -> Cache<Vec<u8>> {
         Cache::new(Vec::new(), contents)
     }
 
     #[test]
-    fn a_store_past_the_end_grows_the_file_over_a_zero_gap() {
-        let mut cache = cache(b"abc");
+    fn growing_fills_a_zero_gap_and_shrinking_discards() {
+        let mut cache = cached(b"abc");
         cache.store(10, b"xy");
         assert_eq!(cache.size(), 12);
         assert_eq!(cache.pages, b"abc\0\0\0\0\0\0\0xy");
-    }
 
-    #[test]
-    fn shrinking_discards_and_regrowing_reads_zero() {
-        let mut cache = cache(&[7; 3 * PAGE]);
+        // Shrinking discards, and regrowing reads zero.
+        let mut cache = cached(&[7; 3 * PAGE]);
         cache.resize(PAGE as u64 + 10);
         cache.resize(2 * PAGE as u64);
         assert!(cache.pages[..PAGE + 10].iter().all(|byte| *byte == 7));
@@ -502,8 +500,8 @@ mod tests {
     }
 
     #[test]
-    fn only_the_pages_a_view_changed_are_dirty_whole_and_clipped() {
-        let mut cache = cache(&[1; 2 * PAGE + 100]);
+    fn only_the_pages_a_view_changed_are_dirty_and_every_cache_write_keeps_the_shadow_clean() {
+        let mut cache = cached(&[1; 2 * PAGE + 100]);
         assert!(cache.dirty_pages().is_empty(), "no shadow, nothing tracked");
         cache.track(true);
         assert!(cache.dirty_pages().is_empty());
@@ -519,21 +517,17 @@ mod tests {
             cache.accept(*offset, bytes);
         }
         assert!(cache.dirty_pages().is_empty());
-    }
 
-    #[test]
-    fn a_mirrored_write_over_a_dirty_range_wins_and_leaves_it_clean() {
-        let mut cache = cache(&[1; PAGE]);
+        // A mirrored write over a dirty range wins and leaves it clean.
+        let mut cache = cached(&[1; PAGE]);
         cache.track(true);
         cache.pages[0] = 9;
         cache.store(0, &[3]);
         assert_eq!(cache.pages[0], 3);
         assert!(cache.dirty_pages().is_empty());
-    }
 
-    #[test]
-    fn zeroing_and_resizing_keep_the_shadow_in_step() {
-        let mut cache = cache(&[1; 2 * PAGE]);
+        // Zeroing and resizing keep the shadow in step.
+        let mut cache = cached(&[1; 2 * PAGE]);
         cache.track(true);
         cache.zero(10, 20);
         cache.zero(PAGE as u64, 3 * PAGE as u64);
@@ -542,11 +536,9 @@ mod tests {
         cache.resize(PAGE as u64 / 2);
         cache.resize(PAGE as u64);
         assert!(cache.dirty_pages().is_empty());
-    }
 
-    #[test]
-    fn a_reload_replaces_the_contents_and_cleans_the_shadow() {
-        let mut cache = cache(b"stored!");
+        // A reload replaces the contents and cleans the shadow.
+        let mut cache = cached(b"stored!");
         cache.track(true);
         cache.pages[0] = b'X';
         cache.reload(b"durable+");

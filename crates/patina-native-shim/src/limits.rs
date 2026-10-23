@@ -263,10 +263,8 @@ mod tests {
             assert_eq!(exchange(&mut limits, resource, None), Ok(raised));
         }
         assert_eq!(exchange(&mut limits, 16, None), Err(crate::EINVAL));
-    }
 
-    #[test]
-    fn a_soft_limit_above_the_hard_one_is_invalid_before_anything_else() {
+        // A soft limit above the hard one is invalid before anything else.
         let mut limits = INITIAL;
         assert_eq!(
             exchange(&mut limits, RLIMIT_CORE, Some(limit(2, 1))),

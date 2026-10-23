@@ -95,9 +95,11 @@ fn the_text_is_made_again_only_where_a_read_does_not_continue() {
 }
 
 /// A read of no bytes neither makes the text nor moves where the last read
-/// ended, so the next read makes the text as it would have without it.
+/// ended, so the next read makes the text as it would have without it; a
+/// read whose bytes cannot be delivered moves nothing, and the next read
+/// serves them from the same text.
 #[test]
-fn a_read_of_no_bytes_changes_nothing() {
+fn reads_that_serve_nothing_move_nothing() {
     let mut texts = Texts(0);
     let mut open = opened();
     assert_eq!(texts.read(&mut open, 0, None), "");
@@ -106,12 +108,7 @@ fn a_read_of_no_bytes_changes_nothing() {
     assert_eq!(texts.read(&mut open, 0, None), "");
     assert_eq!(open.read_pos, 4, "the empty read at 0 did not continue");
     assert_eq!(texts.read(&mut open, 6, None), "text 2");
-}
 
-/// A read whose bytes cannot be delivered moves nothing: the next read
-/// serves them from the same text.
-#[test]
-fn an_undelivered_read_moves_nothing() {
     let mut texts = Texts(0);
     let mut open = opened();
     let refused = texts.read_into(&mut open, 4, None, &mut |_| Err(crate::EFAULT));
@@ -142,18 +139,6 @@ fn a_read_takes_the_position_when_it_serves() {
         .unwrap();
     assert_eq!(served, b"e");
     assert_eq!(open.pos, 2);
-}
-
-/// `name_to_int`: decimal digits with no leading zero, within an `int`.
-#[test]
-fn process_names_are_canonical_decimal_pids() {
-    assert_eq!(pid_name("1"), Some(1));
-    assert_eq!(pid_name("0"), Some(0));
-    assert_eq!(pid_name(&i32::MAX.to_string()), Some(i32::MAX));
-    for name in ["", "01", "+1", "-1", "1a", " 1"] {
-        assert_eq!(pid_name(name), None, "{name:?}");
-    }
-    assert_eq!(pid_name(&(i64::from(i32::MAX) + 1).to_string()), None);
 }
 
 /// Every listed entry looks up to the node it was listed as, its path names
@@ -199,7 +184,15 @@ fn the_root_lists_what_its_lookups_find() {
     inodes.dedup();
     assert_eq!(inodes.len(), count, "distinct inodes");
     assert_eq!(lookup(Node::Root, "nosuch"), Err(ENOENT));
+    // Process names are `name_to_int`'s: decimal digits with no leading
+    // zero, within an `int`.
+    assert_eq!(pid_name("0"), Some(0));
+    assert_eq!(pid_name(&i32::MAX.to_string()), Some(i32::MAX));
+    for name in ["", "01", "+1", "-1", "1a", " 1"] {
+        assert_eq!(pid_name(name), None, "{name:?}");
+    }
     assert_eq!(lookup(Node::Root, "01"), Err(ENOENT));
+    assert_eq!(pid_name(&(i64::from(i32::MAX) + 1).to_string()), None);
     assert_eq!(lookup(Node::Machine(Machine::Uptime), "x"), Err(ENOTDIR));
 }
 
@@ -248,7 +241,7 @@ fn a_walk_follows_self_and_leaves_by_dot_dot() {
 
 /// A process's `task` directory lists its live threads by id, each a
 /// directory of that thread's files; `..` climbs back through them, and an
-/// id no live thread has is `ENOENT`.
+/// id no live thread has is `ENOENT` and lists nothing.
 #[test]
 fn a_process_lists_its_threads_under_task() {
     let at = |node| Ok(Walked::At(node));
@@ -295,6 +288,14 @@ fn a_process_lists_its_threads_under_task() {
         }
     }
     assert_eq!(lookup(tasks, &i32::MAX.to_string()), Err(ENOENT));
+    // A thread's directory lists only while the thread is there.
+    let gone = entries[2..]
+        .iter()
+        .filter_map(|entry| pid_name(&entry.name))
+        .max()
+        .unwrap()
+        + 1;
+    assert_eq!(listing(Node::Thread(me(), gone)), Err(ENOENT));
     let init = Node::Tasks(Process::INIT.pid());
     let init_tids: Vec<String> = listing(init).unwrap()[2..]
         .iter()
@@ -385,20 +386,6 @@ fn a_directory_links_the_directories_it_lists() {
         );
         directories.extend(listed);
     }
-}
-
-/// A thread's directory lists only while the thread is there.
-#[test]
-fn a_gone_threads_directory_lists_nothing() {
-    let tasks = listing(Node::Tasks(me())).unwrap();
-    let gone = tasks[2..]
-        .iter()
-        .filter_map(|entry| pid_name(&entry.name))
-        .max()
-        .unwrap()
-        + 1;
-    assert_eq!(listing(Node::Thread(me(), gone)), Err(ENOENT));
-    assert!(listing(Node::Thread(me(), me())).is_ok());
 }
 
 /// A task directory's walk resumes at the thread the last call could not

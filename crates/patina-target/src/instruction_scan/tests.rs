@@ -296,6 +296,7 @@ fn classifies_aarch64_system_register_accesses() {
     for rt in 0..32u32 {
         for (word, expected) in [
             (0xd51b_d040, (THREAD_POINTER_CATEGORY, "msr tpidr_el0")),
+            (0xd53b_e040, ("cpu-nondeterminism", "cntvct")),
             (0xd53b_e0c0, ("cpu-nondeterminism", "cntvctss")),
             (0xd53b_2400, ("cpu-nondeterminism", "rndr")),
             (0xd53b_2420, ("cpu-nondeterminism", "rndrrs")),
@@ -331,6 +332,10 @@ fn classifies_aarch64_system_register_accesses() {
             );
         }
     }
+    assert_eq!(
+        aarch64_instruction_category(0xd400_0001),
+        Some(("direct-syscall", "svc"))
+    );
 }
 
 // The scanner on bytes, end to end through the public gate. glibc 2.39's own

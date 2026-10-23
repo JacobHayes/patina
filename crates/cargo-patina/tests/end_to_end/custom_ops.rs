@@ -8,42 +8,19 @@ use super::*;
 // without ever running the wrapper again.
 // ---------------------------------------------------------------------------
 
-// A guest with two custom ops — one with a key and a nonempty result, one with
-// neither, so the empty cases ride the same path. `perform` bumps a process-local
-// counter instead of doing I/O, so the printed count is a direct, boundary-free
-// answer to "did the closure run?": on record it must be 2, on replay 0.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-const CUSTOM_OP_SDK_MAIN: &str = r#"
-use std::sync::atomic::{AtomicU32, Ordering};
-
-static PERFORMED: AtomicU32 = AtomicU32::new(0);
-
-fn main() {
-    let object = patina_dst::custom_op_bytes("s3.get_object", b"bucket/key", || {
-        PERFORMED.fetch_add(1, Ordering::SeqCst);
-        b"etag-7".to_vec()
-    });
-    let empty = patina_dst::custom_op_bytes("host.uptime", b"", || {
-        PERFORMED.fetch_add(1, Ordering::SeqCst);
-        Vec::new()
-    });
-    println!(
-        "PATINA_RESULT performed={} object={} empty_len={}",
-        PERFORMED.load(Ordering::SeqCst),
-        String::from_utf8_lossy(&object),
-        empty.len()
-    );
-}
-"#;
-
 // ---------------------------------------------------------------------------
 // Seeded custom-op faults (docs/arcs/custom-ops.md, Wave B): a guest declares
 // what failure means for an operation it wraps, and `--custom-op-fail-permille`
 // hands back that failure instead of running the effect.
 // ---------------------------------------------------------------------------
 
-// One guest, three modes, so the whole knob is proven against a single build.
+// One guest, four modes, so record/replay, the fault knob and the campaign are
+// proven against a single build. `PERFORMED` counts closure runs in-process
+// instead of doing I/O, so the printed count is a boundary-free answer to "did
+// the closure run?".
 //
+// `record` — two custom ops, one with a key and a nonempty result, one with
+//            neither, so the empty cases ride the same path.
 // `probe`  — one faultable op next to one that declares nothing, which is the
 //            control: eligibility is the guest's call, so the knob must pass
 //            the undeclared one by even at a certain rate.
@@ -54,7 +31,7 @@ fn main() {
 //            reachable only under a specific fault PATTERN (two in a row), so
 //            finding it is campaign work rather than a single run's.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-const CUSTOM_OP_FAULT_SDK_MAIN: &str = r#"
+const CUSTOM_OP_SDK_MAIN: &str = r#"
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static PERFORMED: AtomicU32 = AtomicU32::new(0);
@@ -79,6 +56,22 @@ fn fetch(index: u32) -> Result<String, String> {
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
+        Some("record") => {
+            let object = patina_dst::custom_op_bytes("s3.get_object", b"bucket/key", || {
+                PERFORMED.fetch_add(1, Ordering::SeqCst);
+                b"etag-7".to_vec()
+            });
+            let empty = patina_dst::custom_op_bytes("host.uptime", b"", || {
+                PERFORMED.fetch_add(1, Ordering::SeqCst);
+                Vec::new()
+            });
+            println!(
+                "PATINA_RESULT performed={} object={} empty_len={}",
+                PERFORMED.load(Ordering::SeqCst),
+                String::from_utf8_lossy(&object),
+                empty.len()
+            );
+        }
         Some("bare") => {
             println!("PATINA_RESULT mode=bare");
         }

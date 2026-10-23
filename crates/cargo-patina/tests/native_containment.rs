@@ -5,8 +5,14 @@ mod common;
 mod layout;
 use common::native::*;
 
+/// The raw audit refuses a stock program's escapes by class: a raw syscall
+/// or an unmanaged thread, an unknown import and a shared-memory import; the
+/// plain audit refuses a binary `cargo patina build` did not make. On Linux a
+/// raw syscall outside the shim is refused before it runs, without blaming a
+/// kernel that has syscall-user-dispatch, and on x86_64 a vsyscall
+/// materialization is refused.
 #[test]
-fn audit_rejects_unlinked_raw_syscall_or_thread_escape() {
+fn raw_audit_refuses_each_unlinked_escape_class() {
     let escape = assert_build_c_guest("escape_probe.c", CLink::Unlinked);
     assert_refused(
         escape.command("audit", &[]),
@@ -18,31 +24,37 @@ fn audit_rejects_unlinked_raw_syscall_or_thread_escape() {
         error.contains("direct-syscall") || error.contains("unmanaged-thread"),
         "{error}"
     );
-}
-
-#[test]
-fn audit_rejects_unknown_import() {
-    let unknown = assert_build_c_guest("unknown_import_probe.c", CLink::Unlinked);
-    assert_refused(unknown.command("audit", &["--raw"]), &["unknown-import"]);
-}
-
-#[test]
-fn audit_rejects_shared_memory_import() {
-    let ipc = assert_build_c_guest("shared_ipc_refusal_probe.c", CLink::Unlinked);
-    assert_refused(ipc.command("audit", &["--raw"]), &["shared-memory-ipc"]);
+    for (source, class) in [
+        ("unknown_import_probe.c", "unknown-import"),
+        ("shared_ipc_refusal_probe.c", "shared-memory-ipc"),
+    ] {
+        let g = assert_build_c_guest(source, CLink::Unlinked);
+        assert_refused(g.command("audit", &["--raw"]), &[class]);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let planted = assert_build_c_guest("planted_raw.c", CLink::Unlinked);
+        assert_refused(planted.command("audit", &["--raw"]), &["direct-syscall"]);
+        let output = assert_refused(planted.command("run", &[]), &["direct-syscall"]);
+        assert_eq!(output.status.code(), Some(2));
+        if kernel_supports(KernelFeature::Sud) {
+            let diagnostic = format!("{}{}", text(&output.stdout), text(&output.stderr));
+            assert!(
+                !diagnostic.contains("kernel lacks syscall-user-dispatch"),
+                "SUD-capable host was blamed for a non-shim binary:\n{diagnostic}"
+            );
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let g = assert_build_c_guest("vsyscall_probe.c", CLink::Unlinked);
+        assert_refused(g.command("audit", &["--raw"]), &["vsyscall"]);
+    }
 }
 
 /// glibc's aliases of names the shim interposes (`__mmap`, `__munmap`) are
 /// different linker symbols the shim does not define: the gate refuses them
 /// by name instead of letting libc's own text map past the mapping model.
-#[cfg(target_os = "linux")]
-#[test]
-fn prerun_refuses_aliases_of_interposed_names() {
-    let g = Guest::assert_build("interposer_alias_probe.rs");
-    let out = g.assert_run_refused(1, &["__mmap", "__munmap"]);
-    assert!(!text(&out.stdout).contains("INTERPOSER_ALIAS_RAN"));
-}
-
 /// A `.symver`-pinned `dlsym@GLIBC_…` reference reaches around the shim's
 /// `-Wl,--wrap=dlsym`, which rewrites only unversioned references. The probe's
 /// reference is weak, as the shim's own `dlsym` import is, so only its version
@@ -50,14 +62,12 @@ fn prerun_refuses_aliases_of_interposed_names() {
 /// name before it can resolve a host symbol through libc's own resolver.
 #[cfg(target_os = "linux")]
 #[test]
-fn prerun_refuses_versioned_dlsym_bypass() {
+fn prerun_refuses_interposer_aliases_and_a_versioned_dlsym_bypass() {
     let g = Guest::assert_build("versioned_dlsym_probe.rs");
-    let out = g.assert_run_refused(1, &["dlsym@GLIBC_", "versioned-bypass"]);
+    let diagnostics = ["__mmap", "__munmap", "dlsym@GLIBC_", "versioned-bypass"];
+    let out = g.assert_run_refused(1, &diagnostics);
     assert!(!text(&out.stdout).contains("VERSIONED_DLSYM_ESCAPED"));
-    assert_refused(
-        g.command("audit", &[]),
-        &["dlsym@GLIBC_", "versioned-bypass"],
-    );
+    assert_refused(g.command("audit", &[]), &diagnostics);
 }
 
 /// A versioned reference to a name the shim interposes is no bypass: whether
@@ -95,7 +105,11 @@ fn prerun_refuses_shm_open_and_hatch_warns() {
     let g = Guest::assert_build("gate_refusal_probe.rs");
     let out = g.assert_run_refused(1, &["shm_open", "shared-memory-ipc"]);
     assert!(!text(&out.stdout).contains("GATE_REFUSAL_RAN"));
-    let hatch = g.assert_run_success(1, &["--allow-unsupported-symbols", "all"]);
+    // A replay re-checks the gate, so the hatch run is a plain seeded one.
+    let hatch = assert_success(g.command(
+        "run",
+        &["--seed", "1", "--allow-unsupported-symbols", "all"],
+    ));
     assert_eq!(text(&hatch.stdout), "GATE_REFUSAL_RAN\n");
     assert!(text(&hatch.stderr).contains("WARNING"));
 }
@@ -164,79 +178,16 @@ fn original_envp_is_scrubbed() {
     );
 }
 
-// Class pairing: every startup environment reader must agree, and removing
-// entries must preserve the platform trailer, not just hide host getenv.
-fn check_supervised_initial_stack_environment(guest_entries: usize) {
-    // Match the product link's dead-section removal: otherwise the C link
-    // retains unused std archive sections and their unrelated host imports.
-    let flags = if cfg!(target_os = "linux") {
-        &["-Wl,--gc-sections"][..]
-    } else {
-        &["-Wl,-dead_strip"][..]
-    };
-    let g = assert_build_c_guest_with_flags("initial_stack_env.c", CLink::PosixShim, flags);
-    let expected: Vec<_> = (0..guest_entries)
-        .map(|i| format!("STACK_{i:04}=value={i}"))
-        .collect();
-    let run = |trace: Option<&std::path::Path>, replay: bool| {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
-        command
-            .env_clear()
-            .arg(if replay { "replay" } else { "run" })
-            .arg(&g.binary);
-        if replay {
-            command.arg(trace.unwrap());
-        } else {
-            command.args(["--seed", "9"]);
-            for entry in &expected {
-                command.arg("--env").arg(entry);
-            }
-            if let Some(trace) = trace {
-                command.arg("--record").arg(trace);
-            }
-        }
-        if trace.is_some() {
-            command.args(["--fingerprint", "initial-stack-env"]);
-        }
-        if !replay {
-            command.arg("--").args(&expected);
-        }
-        assert_success(
-            common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
-                .expect("initial-stack guest exceeded 60s"),
-        )
-    };
-    let first = run(None, false);
-    assert_eq!(first.stdout, run(None, false).stdout);
-    let trace = g.dir.path().join("stack.patina");
-    assert_eq!(first.stdout, run(Some(&trace), false).stdout);
-    assert_eq!(first.stdout, run(Some(&trace), true).stdout);
-}
-
-#[test]
-fn supervised_initial_stack_environment_empty_map() {
-    check_supervised_initial_stack_environment(0);
-}
-
-#[test]
-fn supervised_initial_stack_environment_single_entry() {
-    check_supervised_initial_stack_environment(1);
-}
-
-#[test]
-fn supervised_initial_stack_environment_many_entries() {
-    check_supervised_initial_stack_environment(128);
-}
-
 fn initial_stack_map(entries: usize) -> std::collections::BTreeMap<String, String> {
     (0..entries)
         .map(|i| (format!("STACK_{i:04}"), format!("value={i}")))
         .collect()
 }
 
-// Unlike the CLI tests above, this controls the guest's actual exec-time array
-// size. The three controls plus a reservation marker take four slots; padding
-// fills the remainder. The sentinel receives that original count via argv.
+// Unlike the supervised runs, this controls the guest's actual exec-time
+// array size. The three controls plus a reservation marker take four slots;
+// padding fills the remainder. The sentinel receives that original count via
+// argv.
 fn direct_initial_stack(
     guest: &Guest,
     capacity: usize,
@@ -272,146 +223,157 @@ fn direct_initial_stack(
     standalone_output(&guest.binary, &args, &env)
 }
 
-fn initial_stack_sentinel() -> (Guest, usize) {
-    let guest = assert_build_c_guest("initial_stack_env.c", CLink::PosixShim);
-    let measured = direct_initial_stack(&guest, 4, None, &initial_stack_map(0), true);
-    assert_eq!(measured.status.code(), Some(42), "{measured:?}");
-    let slots: usize = assert_unique_line_payload(&measured.stdout, "INITIAL_STACK_TRAILER slots=")
-        .parse()
-        .expect("positive trailer slot count");
-    assert!(slots > 0);
-    (guest, slots)
-}
-
-fn assert_initial_stack_sentinel(output: std::process::Output, trailer_slots: usize) {
-    assert_eq!(output.status.code(), Some(42), "{output:?}");
-    assert_eq!(
-        text(&output.stdout),
-        format!("INITIAL_STACK_TRAILER slots={trailer_slots}\n")
-    );
-}
-
+/// Every startup environment reader must agree (`initial_stack_env.c` walks
+/// from argv rather than trusting `environ`), and removing entries must keep
+/// the platform trailer, not just hide host getenv.
+///
+/// Supervised, an empty and a many-entry map reach the guest whole, in a
+/// recording and its flag-free replay. Direct reserved launches measure this
+/// binary's actual trailer and run with zero, one and many surplus slots. A
+/// map that exactly fills or exceeds the original array, one slot short, or
+/// an invalid marker refuses, each with a positive twin that changes only
+/// that input; plenty of space alone is not a reservation: an unmarked
+/// nonempty map refuses rather than publish inconsistent argv/envp/environ
+/// views, while an unmarked empty map runs.
 #[test]
-fn initial_stack_environment_zero_one_and_many_surplus_slots() {
-    let (guest, trailer_slots) = initial_stack_sentinel();
+fn the_initial_stack_environment_is_whole_or_refused() {
+    use std::os::unix::process::ExitStatusExt;
+    // Match the product link's dead-section removal: otherwise the C link
+    // retains unused std archive sections and their unrelated host imports.
+    let flags = if cfg!(target_os = "linux") {
+        &["-Wl,--gc-sections"][..]
+    } else {
+        &["-Wl,-dead_strip"][..]
+    };
+    let g = assert_build_c_guest_with_flags("initial_stack_env.c", CLink::PosixShim, flags);
+    for entries in [0, 128] {
+        let expected: Vec<_> = initial_stack_map(entries)
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let trace = g.dir.path().join(format!("stack-{entries}.patina"));
+        let run = |replay: bool| {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+            command
+                .env_clear()
+                .arg(if replay { "replay" } else { "run" })
+                .arg(&g.binary);
+            if replay {
+                command.arg(&trace);
+            } else {
+                command.args(["--seed", "9"]);
+                for entry in &expected {
+                    command.arg("--env").arg(entry);
+                }
+                command.arg("--record").arg(&trace);
+            }
+            command.args(["--fingerprint", "initial-stack-env"]);
+            if !replay {
+                command.arg("--").args(&expected);
+            }
+            assert_success(
+                common::output_with_deadline(&mut command, std::time::Duration::from_secs(60))
+                    .expect("initial-stack guest exceeded 60s"),
+            )
+        };
+        let recorded = run(false);
+        assert_eq!(
+            text(&recorded.stdout),
+            format!("INITIAL_STACK_ENV entries={entries}\n")
+        );
+        assert_eq!(recorded.stdout, run(true).stdout);
+    }
+
+    let sentinel = |output: std::process::Output| {
+        assert_eq!(output.status.code(), Some(42), "{output:?}");
+        let slots: usize =
+            assert_unique_line_payload(&output.stdout, "INITIAL_STACK_TRAILER slots=")
+                .parse()
+                .expect("positive trailer slot count");
+        slots
+    };
+    let refused = |output: std::process::Output| {
+        assert_eq!(output.status.signal(), Some(libc::SIGABRT), "{output:?}");
+    };
+    let trailer_slots = sentinel(direct_initial_stack(
+        &g,
+        4,
+        None,
+        &initial_stack_map(0),
+        true,
+    ));
+    assert!(trailer_slots > 0);
     for entries in [4, 128] {
         let map = initial_stack_map(entries);
         for surplus in [0, 1, patina_dst_runtime::NATIVE_INITIAL_STACK_TRAILER_SLOTS] {
             let capacity = entries + trailer_slots + surplus;
-            let out = assert_success(direct_initial_stack(
-                &guest,
-                capacity,
-                Some("1"),
-                &map,
-                false,
-            ));
+            let out = assert_success(direct_initial_stack(&g, capacity, Some("1"), &map, false));
             assert_eq!(
                 text(&out.stdout),
                 format!("INITIAL_STACK_ENV entries={entries}\n")
             );
         }
-    }
-}
-
-#[test]
-fn initial_stack_reservation_refuses_short_or_invalid_layouts() {
-    use std::os::unix::process::ExitStatusExt;
-    let (guest, trailer_slots) = initial_stack_sentinel();
-    for entries in [4, 128] {
-        let map = initial_stack_map(entries);
-        // Map exactly fills the original array, or exceeds it; neither leaves
-        // room for the trailer. Both have positive twins with the SAME map.
-        let too_small = direct_initial_stack(&guest, 4, Some("1"), &map, true);
-        assert_eq!(
-            too_small.status.signal(),
-            Some(libc::SIGABRT),
-            "{too_small:?}"
-        );
         let required = entries + trailer_slots;
-        let one_short = direct_initial_stack(&guest, required - 1, Some("1"), &map, true);
-        assert_eq!(
-            one_short.status.signal(),
-            Some(libc::SIGABRT),
-            "{one_short:?}"
-        );
+        refused(direct_initial_stack(&g, 4, Some("1"), &map, true));
+        refused(direct_initial_stack(
+            &g,
+            required - 1,
+            Some("1"),
+            &map,
+            true,
+        ));
         // Changing only the capacity by one slot crosses the refusal boundary.
-        assert_initial_stack_sentinel(
-            direct_initial_stack(&guest, required, Some("1"), &map, true),
-            trailer_slots,
+        assert_eq!(
+            sentinel(direct_initial_stack(&g, required, Some("1"), &map, true)),
+            trailer_slots
         );
-        let invalid = direct_initial_stack(&guest, required, Some("invalid"), &map, true);
-        assert_eq!(invalid.status.signal(), Some(libc::SIGABRT), "{invalid:?}");
+        refused(direct_initial_stack(
+            &g,
+            required,
+            Some("invalid"),
+            &map,
+            true,
+        ));
+        refused(direct_initial_stack(&g, required, None, &map, true));
     }
-}
-
-#[test]
-fn direct_initial_stack_nonempty_map_requires_reservation() {
-    use std::os::unix::process::ExitStatusExt;
-    let (guest, trailer_slots) = initial_stack_sentinel();
-    let map = initial_stack_map(4);
-    let capacity = map.len() + trailer_slots;
-    // Plenty of space alone is not a reservation: an unmarked nonempty map
-    // must refuse rather than publish inconsistent argv/envp/environ views.
-    let unreserved = direct_initial_stack(&guest, capacity, None, &map, true);
+    let empty = initial_stack_map(0);
     assert_eq!(
-        unreserved.status.signal(),
-        Some(libc::SIGABRT),
-        "{unreserved:?}"
-    );
-    assert_initial_stack_sentinel(
-        direct_initial_stack(&guest, capacity, Some("1"), &map, true),
-        trailer_slots,
-    );
-    assert_initial_stack_sentinel(
-        direct_initial_stack(&guest, capacity, None, &initial_stack_map(0), true),
-        trailer_slots,
+        sentinel(direct_initial_stack(&g, trailer_slots, None, &empty, true)),
+        trailer_slots
     );
 }
 
+/// The host's environment never reaches the guest: whatever canary the host
+/// holds, the guest's environment is empty and its own, in a recording and in
+/// a replay under another host canary.
 #[test]
 fn host_environment_canaries_never_enter_guest_or_replay() {
     let g = Guest::assert_build("env_probe.rs");
     g.assert_audit_clean();
     let trace = g.dir.path().join("env.patina");
+    let trace = trace.to_str().unwrap();
+    let bin = g.binary.to_str().unwrap();
     let run = |args: &[&str], envs: &[(&str, &str)]| {
         common::invoke_in_with_env(common::native_workspace(), args, envs).stdout
     };
-    let bin = g.binary.to_str().unwrap();
-    let first = run(
-        &["run", bin, "--seed", "3"],
-        &[("PATINA_ENV_CANARY_HOST", "one")],
+    let recorded = run(
+        &[
+            "run",
+            bin,
+            "--seed",
+            "3",
+            "--record",
+            trace,
+            "--fingerprint",
+            "env-v1",
+        ],
+        &[("PATINA_ENV_CANARY_HOST", "one"), ("CANARY_HOST", "one")],
     );
-    assert_eq!(text(&first), "NATIVE_ENV_RESULT vars=0\n");
+    assert_eq!(text(&recorded), "NATIVE_ENV_RESULT vars=0\n");
     assert_eq!(
-        first,
-        run(&["run", bin, "--seed", "3"], &[("CANARY_HOST", "two")])
-    );
-    assert_eq!(
-        first,
+        recorded,
         run(
-            &[
-                "run",
-                bin,
-                "--seed",
-                "3",
-                "--record",
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "env-v1"
-            ],
-            &[("CANARY_HOST", "one")]
-        )
-    );
-    assert_eq!(
-        first,
-        run(
-            &[
-                "replay",
-                bin,
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "env-v1"
-            ],
+            &["replay", bin, trace, "--fingerprint", "env-v1"],
             &[("CANARY_HOST", "two")]
         )
     );
@@ -421,7 +383,7 @@ fn host_environment_canaries_never_enter_guest_or_replay() {
 fn dlsym_routes_the_shim_definitions_and_no_host_name() {
     let g = Guest::assert_build("dlsym_probe.rs");
     g.assert_audit_clean();
-    let out = g.assert_seeded_record_replay_identity(1, &[]);
+    let out = g.assert_run_success(1, &[]).stdout;
     let fields = assert_fields(
         &out,
         "NATIVE_DLSYM_ENTROPY ",
@@ -444,10 +406,6 @@ fn dlsym_routes_the_shim_definitions_and_no_host_name() {
     g.assert_seed_variation(&[1, 2], &[]);
 }
 
-/// A fault in the shim's own code (planted in a shim entry) is the shim's on
-/// every Linux arch, for SIGSEGV, SIGBUS and SIGILL alike: a named stop that takes the
-/// signal's default action, never the guest's handler for it. The planted
-/// entry says so on stderr before it faults, so an earlier death cannot pass.
 /// The captured streams are written through to the host as the guest
 /// writes them: a host reader that went away is the host's, never the
 /// guest's, so the SIGPIPE it raises neither runs the guest's handler (which
@@ -473,11 +431,39 @@ fn a_host_reader_that_went_away_raises_no_guest_sigpipe() {
     assert!(text(&output.stderr).contains("SURVIVED"), "{output:?}");
 }
 
+/// `signals/shim_fault.c` over a shim built with `planted-faults`, with the
+/// private signal stack's budget report (`signals/private_budget.c`) linked
+/// in.
+#[cfg(target_os = "linux")]
+fn planted_guest() -> Guest {
+    let budget = guest_source("signals/private_budget.c");
+    assert_build_c_guest_with_flags(
+        "signals/shim_fault.c",
+        CLink::PosixShimPlanted,
+        &[budget.to_str().unwrap()],
+    )
+}
+
+/// A fault in the shim's own code (planted in a shim entry) is the shim's on
+/// every Linux arch, for SIGSEGV, SIGBUS and SIGILL alike: a named stop that
+/// takes the signal's default action, never the guest's handler for it.
+///
+/// Shim code that reaches the shim's own boundary from inside a dispatch
+/// (planted, in the dispatch of the guest's own call: `syscall(2)`, which
+/// holds the thread around it, or `prctl(2)`, which holds nothing) is a named
+/// stop before its call is serviced as the guest's: through the `syscall(2)`
+/// door std's futex-based locks and once-cells lower to, on every Linux arch,
+/// and as a raw syscall instruction, where the host has syscall-user-dispatch.
+/// Guest code a shim entry calls nests instead
+/// (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`).
+///
+/// Each plant says so on stderr before it acts, so an earlier death cannot
+/// pass; a serviced reentry writes a marker of its own.
 #[cfg(target_os = "linux")]
 #[test]
 fn shim_faults_are_named_stops_never_the_guests() {
     use std::os::unix::process::ExitStatusExt;
-    let g = assert_build_c_guest("signals/shim_fault.c", CLink::PosixShimPlanted);
+    let g = planted_guest();
     let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
     for (case, sig) in [("segv", 11), ("bus", 7), ("ill", 4)] {
         let output = standalone_output(&g.binary, &[case], &env);
@@ -487,24 +473,6 @@ fn shim_faults_are_named_stops_never_the_guests() {
             "{case}: {output:?}"
         );
     }
-}
-
-/// Shim code that reaches the shim's own boundary from inside a dispatch
-/// (planted, in the dispatch of the guest's own call: `syscall(2)`, which
-/// holds the thread around it, or `prctl(2)`, which holds nothing) is a named
-/// stop before its call is serviced as the guest's: through the `syscall(2)` door
-/// std's futex-based locks and once-cells lower to, on every Linux arch, and
-/// as a raw syscall instruction, where the host has syscall-user-dispatch.
-/// The plant says so on stderr before it reaches the boundary, so an earlier
-/// death cannot pass; its call, serviced, writes a marker of its own. Guest
-/// code a shim entry calls nests instead
-/// (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`).
-#[cfg(target_os = "linux")]
-#[test]
-fn shim_code_reaching_its_own_boundary_is_a_named_stop() {
-    use std::os::unix::process::ExitStatusExt;
-    let g = assert_build_c_guest("signals/shim_reentry.c", CLink::PosixShimPlanted);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
     let mut kinds = vec!["door"];
     if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
         kinds.push("trap");
@@ -532,51 +500,27 @@ mod linux {
     use super::*;
     use std::io::Write;
 
+    /// The audit names the SUD-managed raw syscall sites and the kernel
+    /// requirement. With syscall-user-dispatch the raw syscalls are served
+    /// from the virtual kernel (seeded entropy, virtual threads); without it
+    /// the run is refused before anything executes, and a replay's empty
+    /// trace is refused before the guest launches.
     #[test]
-    fn audit_reports_sud_marker_and_kernel_requirement() {
+    fn raw_syscalls_are_virtualized_or_refused_before_execution() {
         let g = Guest::assert_build("raw_syscall_probe.rs");
         let audit = g.assert_audit_clean();
         let audit = format!("{}{}", text(&audit.stdout), text(&audit.stderr));
         assert!(audit.contains("SUD-managed"), "{audit}");
         assert!(audit.contains("refused on kernels without it"), "{audit}");
-    }
-
-    #[test]
-    fn unmarked_raw_syscall_is_refused() {
-        let planted = assert_build_c_guest("planted_raw.c", CLink::Unlinked);
-        assert_refused(planted.command("audit", &["--raw"]), &["direct-syscall"]);
-    }
-
-    #[test]
-    fn non_shim_raw_syscall_refusal_does_not_blame_a_sud_capable_kernel() {
-        let planted = assert_build_c_guest("planted_raw.c", CLink::Unlinked);
-        let sud = kernel_supports(KernelFeature::Sud);
-        let output = assert_refused(planted.command("run", &[]), &["direct-syscall"]);
-        assert_eq!(output.status.code(), Some(2));
-        if sud {
-            let diagnostic = format!("{}{}", text(&output.stdout), text(&output.stderr));
-            assert!(
-                !diagnostic.contains("kernel lacks syscall-user-dispatch"),
-                "SUD-capable host was blamed for a non-shim binary:\n{diagnostic}"
-            );
-        }
-    }
-
-    #[test]
-    fn raw_syscalls_are_virtualized_or_refused_before_execution() {
-        let g = Guest::assert_build("raw_syscall_probe.rs");
         if kernel_supports(KernelFeature::Sud) {
-            let out = g.assert_seeded_record_replay_identity(5, &[]);
+            let out = g.assert_run_success(5, &[]).stdout;
             let fields = assert_fields(&out, "RAW_SUD_RESULT ", &["fs", "rand", "threads_virtual"]);
             assert_eq!(fields["fs"], "sud");
             assert_lower_hex(fields["rand"], 16);
             assert_eq!(fields["threads_virtual"], "true");
-            g.assert_seed_variation(&[1, 2, 3, 4], &[]);
+            g.assert_seed_variation(&[1, 2], &[]);
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
-            // The supervisor reads a trace's build identity before it
-            // launches the guest, so an empty trace is refused there,
-            // before anything runs.
             let trace = g.dir.path().join("invalid.patina");
             std::fs::write(&trace, []).unwrap();
             assert_refused(
@@ -599,7 +543,7 @@ mod linux {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
             return;
         }
-        let out = g.assert_seeded_record_replay_identity(1, &[]);
+        let out = g.assert_run_success(1, &[]).stdout;
         for who in ["main", "thread"] {
             let fields = assert_fields(
                 &out,
@@ -628,12 +572,10 @@ mod linux {
     /// glibc's `syscall(2)`, so there a level holds a delivery's frames.
     #[test]
     fn private_signal_stack_levels_fit_their_budget() {
-        use std::io::Write;
         if cfg!(target_arch = "x86_64") && !kernel_supports(KernelFeature::Sud) {
             return;
         }
-        let g = assert_build_c_guest("signals/private_budget.c", CLink::PosixShimPlanted);
-        let (output, _) = g.record_standalone(&[]);
+        let (output, _) = planted_guest().record_standalone(&["budget"]);
         assert!(output.status.success(), "{output:?}");
         let fields = assert_fields(&output.stdout, "PRIVATE_BUDGET ", &["level", "used"]);
         let level: usize = fields["level"].parse().unwrap();
@@ -679,30 +621,21 @@ mod linux {
         }
     }
 
+    /// What the kernel hands a process at exec is the virtual kernel's on
+    /// every kernel: AT_RANDOM is seeded, and where syscall-user-dispatch
+    /// traps raw syscalls the vDSO's auxv entry is scrubbed. A guest's SIGSYS
+    /// action is virtual too, through libc and, under SUD, the raw door; a
+    /// guest SIGSYS is a named stop.
     #[test]
-    fn sud_scrubs_vdso_auxv() {
-        if !kernel_supports(KernelFeature::Sud) {
-            writeln!(
-                std::io::stderr(),
-                "SKIPPED sud_scrubs_vdso_auxv: host lacks syscall-user-dispatch"
-            )
-            .unwrap();
-            return;
-        }
+    fn auxv_and_sigsys_are_virtual_on_every_kernel() {
         let g = Guest::assert_build("auxv_probe.rs");
-        assert_eq!(
-            text(&g.assert_run_success(1, &[]).stdout),
-            "AUXV_SYSINFO_EHDR=0\n"
-        );
-    }
-
-    #[test]
-    fn sigsys_registration_is_virtual_on_every_kernel() {
-        let g = Guest::assert_build("sigsys_probe.rs");
-        assert_eq!(
-            g.assert_seeded_record_replay_identity(1, &[]),
-            b"SIGSYS guest action roundtrip\n"
-        );
+        let out = g.assert_run_success(1, &[]).stdout;
+        assert_lower_hex(assert_unique_line_payload(&out, "AT_RANDOM="), 32);
+        assert_exact_line(&out, "SIGSYS guest action roundtrip");
+        if kernel_supports(KernelFeature::Sud) {
+            assert_exact_line(&out, "AUXV_SYSINFO_EHDR=0");
+        }
+        g.assert_seed_variation(&[1, 2], &[]);
         #[cfg(target_arch = "x86_64")]
         if let Some(c) = sud_c_guest("signals/signal_boundary.c") {
             for door in ["reserved-sys-libc", "reserved-sys-raw"] {
@@ -726,24 +659,16 @@ mod linux {
         }
     }
 
-    #[test]
-    fn at_random_is_seeded_on_every_kernel() {
-        let g = Guest::assert_build("at_random_probe.rs");
-        let out = g.assert_seeded_record_replay_identity(1, &[]);
-        assert_lower_hex(assert_unique_line_payload(&out, "AT_RANDOM="), 32);
-        g.assert_seed_variation(&[1, 2], &[]);
-    }
-
     #[cfg(target_arch = "x86_64")]
     mod x86_64 {
         use super::*;
 
-        #[test]
-        fn vsyscall_materialization_is_refused() {
-            let g = assert_build_c_guest("vsyscall_probe.c", CLink::Unlinked);
-            assert_refused(g.command("audit", &["--raw"]), &["vsyscall"]);
-        }
-
+        /// The counter reads answer from the virtual monotonic clock: each
+        /// step's reads lie between the monotonic readings around them
+        /// (calls cost virtual time, so no read equals another), a step's
+        /// reads lie at least the 5 ms sleep before the next's, and the trace
+        /// records them as monotonic clock reads. Seeded sleep jitter moves
+        /// the counter with the clock.
         #[test]
         fn tsc_reads_answer_from_virtual_clock() {
             let g = Guest::assert_build("tsc_probe.rs");
@@ -754,80 +679,63 @@ mod linux {
                 audit.lines().filter(|l| l.contains("instruction@")).count(),
                 2
             );
-            if kernel_supports(KernelFeature::Tsc) {
-                let ran = g.assert_run_success(7, &[]);
-                assert!(text(&ran.stderr).contains("timestamp-counter instruction site(s)"));
-                // The virtual monotonic clock: each step's counter reads lie
-                // between the monotonic readings around them (calls cost
-                // virtual time, so no read equals another), and a step's
-                // reads lie at least the 5 ms sleep before the next's.
-                let out = text(&ran.stdout);
-                let field = |line: &str, key: &str| -> u64 {
-                    let start = line.find(key).unwrap() + key.len();
-                    line[start..]
-                        .split_whitespace()
-                        .next()
-                        .unwrap()
-                        .parse()
-                        .unwrap()
-                };
-                let steps: Vec<[u64; 4]> = out
-                    .lines()
-                    .filter(|line| line.starts_with("TSC step="))
-                    .map(|line| {
-                        assert!(line.ends_with(" aux=0"), "{out}");
-                        ["before=", "rdtsc=", "rdtscp=", "after="].map(|key| field(line, key))
-                    })
-                    .collect();
-                assert_eq!(steps.len(), 3, "{out}");
-                for [before, plain, with_aux, after] in &steps {
-                    assert!(
-                        before <= plain && plain <= with_aux && with_aux <= after,
-                        "{out}"
-                    );
-                }
-                for pair in steps.windows(2) {
-                    assert!(pair[1][1] >= pair[0][2] + 5_000_000, "{out}");
-                }
-                let total = field(out.lines().last().unwrap(), "total_ticks=");
-                assert!(total >= 15_000_000, "{out}");
-                assert_eq!(ran.stdout, g.assert_run_success(7, &[]).stdout);
-                let trace = g.assert_record_replay_identity(7, &[], &ran.stdout);
-                let trace = std::fs::read_to_string(trace).unwrap();
-                let values: Vec<serde_json::Value> = trace
-                    .lines()
-                    .map(|l| serde_json::from_str(l).unwrap())
-                    .collect();
-                assert!(values.iter().any(|v| json_contains(v, "tsc", &true.into())));
-                assert!(
-                    values
-                        .iter()
-                        .any(|v| json_contains(v, "kind", &"clock_now".into())
-                            && json_contains(v, "clock", &"monotonic".into()))
-                );
-            } else {
+            if !kernel_supports(KernelFeature::Tsc) {
                 g.assert_run_refused(7, &["cpu-nondeterminism"]);
+                return;
             }
+            let (ran, trace) = g.assert_recorded(7, &[]);
+            assert!(text(&ran.stderr).contains("timestamp-counter instruction site(s)"));
+            let out = text(&ran.stdout);
+            let field = |line: &str, key: &str| -> u64 {
+                let start = line.find(key).unwrap() + key.len();
+                line[start..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            let steps: Vec<[u64; 4]> = out
+                .lines()
+                .filter(|line| line.starts_with("TSC step="))
+                .map(|line| {
+                    assert!(line.ends_with(" aux=0"), "{out}");
+                    ["before=", "rdtsc=", "rdtscp=", "after="].map(|key| field(line, key))
+                })
+                .collect();
+            assert_eq!(steps.len(), 3, "{out}");
+            for [before, plain, with_aux, after] in &steps {
+                assert!(
+                    before <= plain && plain <= with_aux && with_aux <= after,
+                    "{out}"
+                );
+            }
+            for pair in steps.windows(2) {
+                assert!(pair[1][1] >= pair[0][2] + 5_000_000, "{out}");
+            }
+            let total = field(out.lines().last().unwrap(), "total_ticks=");
+            assert!(total >= 15_000_000, "{out}");
+            let trace = std::fs::read_to_string(trace).unwrap();
+            let values: Vec<serde_json::Value> = trace
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            assert!(values.iter().any(|v| json_contains(v, "tsc", &true.into())));
+            assert!(
+                values
+                    .iter()
+                    .any(|v| json_contains(v, "kind", &"clock_now".into())
+                        && json_contains(v, "clock", &"monotonic".into()))
+            );
+            let flags = ["--sleep-jitter-nanos", "0..4000000"];
+            assert_ne!(g.assert_run_success(7, &flags).stdout, ran.stdout);
+            g.assert_seed_variation(&[1, 2], &flags);
         }
 
         #[test]
         fn rdrand_is_refused_on_every_kernel() {
             let rdrand = Guest::assert_build("rdrand_probe.rs");
             rdrand.assert_run_refused(1, &["untrappable anywhere", "cannot clear one"]);
-        }
-
-        #[test]
-        fn tsc_sleep_jitter_moves_counter() {
-            let g = Guest::assert_build("tsc_probe.rs");
-            if kernel_supports(KernelFeature::Tsc) {
-                let baseline = g.assert_run_success(1, &[]).stdout;
-                let flags = ["--sleep-jitter-nanos", "0..4000000"];
-                let jittered = g.assert_seed_repeatability(1, 2, &flags);
-                assert_ne!(jittered, baseline);
-                g.assert_seed_variation(&[1, 2], &flags);
-            } else {
-                g.assert_run_refused(1, &["cpu-nondeterminism"]);
-            }
         }
 
         #[test]
@@ -841,55 +749,35 @@ mod linux {
             }
         }
 
-        /// Class pairing: small native-capable alternate stacks must not need
-        /// room for a second kernel frame: the counter trap's are private.
+        /// Small native-capable alternate stacks need no room for a second
+        /// kernel frame: the counter trap's frame and the runtime are on the
+        /// private stack. A counter read on a minimal alternate stack (an
+        /// autodisarmed one too) leaves the guest's stack whole, and a counter
+        /// read inside a handler on such a stack takes none of it. The TSC
+        /// mechanism predates SUD: its stack setup does not depend on the SUD
+        /// probe having published the auxiliary vector.
         #[test]
         fn counter_reads_on_a_minimal_altstack_preserve_the_guest_stack() {
             use std::os::unix::process::ExitStatusExt;
             if !kernel_supports(KernelFeature::Tsc) {
                 return;
             }
-            let native = assert_build_c_guest("signals/counter_small.c", CLink::Unlinked);
+            let source = "signals/counter_small.c";
+            let native = assert_build_c_guest(source, CLink::Unlinked);
             assert_standalone_success(&native.binary, &["native-frame"], &[]);
-            let patina = assert_build_c_guest("signals/counter_small.c", CLink::PosixShim);
+            let patina = assert_build_c_guest(source, CLink::PosixShim);
             let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
-            for case in ["read-fault", "read-fault-autodisarm"] {
-                let output = standalone_output(&patina.binary, &[case], &env);
+            let without_sud = assert_build_c_guest(source, CLink::PosixShimWithoutSud);
+            for (g, case) in [
+                (&patina, "read-fault"),
+                (&patina, "read-fault-autodisarm"),
+                (&without_sud, "read-fault-nosud"),
+            ] {
+                let output = standalone_output(&g.binary, &[case], &env);
                 assert_eq!(output.status.signal(), Some(11), "{case}: {output:?}");
                 assert_eq!(output.stdout, b"COUNTERS ANSWERED\n");
                 assert!(output.stderr.is_empty(), "{case}: {output:?}");
             }
-        }
-
-        /// The TSC mechanism predates SUD; its stack setup must not depend
-        /// on the SUD probe having published the auxiliary vector.
-        #[test]
-        fn private_signal_stacks_are_available_without_sud() {
-            use std::os::unix::process::ExitStatusExt;
-            if !kernel_supports(KernelFeature::Tsc) {
-                return;
-            }
-            let g = assert_build_c_guest("signals/counter_small.c", CLink::PosixShimWithoutSud);
-            let output = standalone_output(
-                &g.binary,
-                &["read-fault-nosud"],
-                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
-            );
-            assert_eq!(output.status.signal(), Some(11), "{output:?}");
-            assert_eq!(output.stdout, b"COUNTERS ANSWERED\n");
-            assert!(output.stderr.is_empty(), "{output:?}");
-        }
-
-        /// A counter read inside a handler on a small alternate stack
-        /// (an autodisarmed one too) takes none of that stack: the trap's
-        /// frame and the runtime are on the private stack.
-        #[test]
-        fn counter_reads_inside_small_altstack_handlers_use_private_storage() {
-            if !kernel_supports(KernelFeature::Tsc) {
-                return;
-            }
-            let native = assert_build_c_guest("signals/counter_small.c", CLink::Unlinked);
-            let patina = assert_build_c_guest("signals/counter_small.c", CLink::PosixShim);
             for suffix in ["", "-autodisarm", "-check", "-autodisarm-check"] {
                 assert_standalone_success(
                     &native.binary,
@@ -899,7 +787,7 @@ mod linux {
                 let output = assert_standalone_success(
                     &patina.binary,
                     &[&format!("handler-counter{suffix}")],
-                    &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+                    &env,
                 );
                 assert_eq!(output.stdout, b"HANDLER COUNTERS ANSWERED\n");
             }
@@ -975,53 +863,6 @@ mod early_init {
     use std::process::Command;
     use std::time::Duration;
 
-    fn dso_guest(link: CLink) -> (tempfile::TempDir, Guest) {
-        let libs = tempfile::tempdir().unwrap();
-        let library = assert_build_c_library("dso_ctor_escape.c", libs.path());
-        let rpath = format!("-Wl,-rpath,{}", libs.path().display());
-        let flags = [library.to_str().unwrap(), rpath.as_str()];
-        let guest = assert_build_c_guest_with_flags("dso_ctor_probe.c", link, &flags);
-        (libs, guest)
-    }
-
-    // An inline syscall or counter read in a library constructor lies outside
-    // the main executable's text: a named stop, never a host effect.
-    #[test]
-    fn library_constructor_escapes_stop_by_name() {
-        let (_libs, g) = dso_guest(CLink::PosixShim);
-        if kernel_supports(KernelFeature::Sud) {
-            g.assert_internal_fatal(
-                &["syscall"],
-                &["SUD: trapped a syscall outside the main executable text"],
-            );
-        }
-        if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
-            g.assert_internal_fatal(
-                &["rdtsc"],
-                &["timestamp-counter read the trap does not answer"],
-            );
-        }
-    }
-
-    // Without syscall-user-dispatch nothing traps a library's inline syscall,
-    // and the pre-run scan reads only the executable: the documented residual
-    // (ESCAPE-CLASSES, residual 11). The host answers, where the virtual
-    // kernel's getppid would answer init's pid, 1.
-    #[test]
-    fn library_syscall_without_sud_is_the_documented_residual() {
-        let (_libs, g) = dso_guest(CLink::PosixShimWithoutSud);
-        let (out, _trace) = g.record_standalone(&["syscall"]);
-        let out = assert_success(out);
-        // The guest replaced the launching shell, so its host parent is this
-        // test process.
-        let expected = format!(
-            "DSO_CTOR_RESULT mode=syscall ran=1 value={} ",
-            std::process::id()
-        );
-        let line = text(&out.stdout);
-        assert!(line.starts_with(&expected), "{line}");
-    }
-
     /// A CPU other than the virtual CPU 0 this process may run on.
     fn allowed_cpu_other_than_zero() -> Option<usize> {
         // SAFETY: an all-zero cpu_set_t is empty; sched_getaffinity fills it.
@@ -1035,15 +876,33 @@ mod early_init {
         (1..libc::CPU_SETSIZE as usize).find(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) })
     }
 
-    // A library constructor already reads the virtual CPU from glibc's rseq
-    // area, even on a host CPU other than 0.
+    /// An inline syscall or counter read in a library constructor lies
+    /// outside the main executable's text: a named stop, never a host
+    /// effect. A library constructor already reads the virtual CPU from
+    /// glibc's rseq area, even on a host CPU other than 0.
     #[test]
-    fn library_constructor_reads_the_virtual_cpu() {
+    fn library_constructor_escapes_stop_by_name() {
+        let libs = tempfile::tempdir().unwrap();
+        let library = assert_build_c_library("dso_ctor_escape.c", libs.path());
+        let rpath = format!("-Wl,-rpath,{}", libs.path().display());
+        let flags = [library.to_str().unwrap(), rpath.as_str()];
+        let g = assert_build_c_guest_with_flags("dso_ctor_probe.c", CLink::PosixShim, &flags);
+        if kernel_supports(KernelFeature::Sud) {
+            g.assert_internal_fatal(
+                &["syscall"],
+                &["SUD: trapped a syscall outside the main executable text"],
+            );
+        }
+        if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
+            g.assert_internal_fatal(
+                &["rdtsc"],
+                &["timestamp-counter read the trap does not answer"],
+            );
+        }
         let Some(cpu) = allowed_cpu_other_than_zero() else {
-            eprintln!("library_constructor_reads_the_virtual_cpu: no allowed CPU but 0, not run");
+            eprintln!("library constructor rseq: no allowed CPU but 0, not run");
             return;
         };
-        let (_libs, g) = dso_guest(CLink::PosixShim);
         let mut command = Command::new("taskset");
         command
             .env_clear()
@@ -1058,24 +917,6 @@ mod early_init {
         assert_eq!(
             text(&out.stdout),
             "DSO_CTOR_RESULT mode=rseq ran=1 value=0 main_cpu=0\n"
-        );
-    }
-
-    // The C++ runtime's own constructor runs before the runtime is installed,
-    // through interposed calls; the program then runs on it.
-    #[test]
-    fn cxx_guest_runs_on_shared_libstdcxx() {
-        let g = assert_build_cxx_guest("cxx_iostream_probe.cc");
-        let out = assert_standalone_success(
-            &g.binary,
-            &[],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
-        );
-        assert_eq!(text(&out.stdout), "CXX_IOSTREAM_RESULT word=patina-42\n");
-        assert!(
-            text(&out.stderr).contains("CXX_IOSTREAM_STDERR ok"),
-            "{}",
-            text(&out.stderr)
         );
     }
 
@@ -1106,9 +947,12 @@ mod early_init {
         assert_refused(renamed.command("audit", &[]), &["early-init"]);
     }
 
-    // Stripping the symbol table leaves the marker the shim keeps beside its
-    // entry: the shim's entry is still attributed (also through a collecting
-    // link), and a guest's own entry is still refused.
+    /// Stripping the symbol table leaves the marker the shim keeps beside its
+    /// entry: the shim's entry is still attributed (also through a collecting
+    /// link), and a guest's own entry is still refused. The shim also proves
+    /// its entry's place at run time from its own loaded code, trusting
+    /// nothing the binary says: an entry beside it stops the run before that
+    /// entry runs.
     #[test]
     fn stripped_guests_keep_their_attribution() {
         let clean = assert_build_c_guest_with_flags(
@@ -1130,20 +974,7 @@ mod early_init {
             foreign.command("audit", &["--raw"]),
             &["preinit_array[1] (early-init)"],
         );
-    }
-
-    // The shim proves its entry's place at run time from its own loaded code,
-    // trusting nothing the binary says: an entry beside it stops the run
-    // before that entry runs.
-    #[test]
-    fn an_entry_beside_the_shims_stops_the_run() {
-        let entry = guest_source("preinit_entry_probe.c");
-        let g = assert_build_c_guest_with_flags(
-            "envp_probe.c",
-            CLink::PosixShim,
-            &[entry.to_str().unwrap()],
-        );
-        g.assert_internal_fatal(
+        foreign.assert_internal_fatal(
             &[],
             &["early-init: the executable's preinit array holds an entry beside the shim's"],
         );
@@ -1173,21 +1004,6 @@ mod early_init {
         std::fs::write(binary, bytes).unwrap();
     }
 
-    // A crafted image the audit cannot see through (its preinit array emptied,
-    // so the shim's entry never runs) still stops at the door, by name.
-    #[test]
-    fn a_shim_entry_the_loader_never_ran_stops_the_run() {
-        let g = assert_build_c_guest("envp_probe.c", CLink::PosixShim);
-        empty_the_preinit_array(&g.binary);
-        let audit = g.command("audit", &[]);
-        let report = format!("{}{}", text(&audit.stdout), text(&audit.stderr));
-        assert!(!report.contains("early-init"), "{report}");
-        g.assert_internal_fatal(
-            &[],
-            &["early-init: the loader ran the executable's preinit array without the shim's entry"],
-        );
-    }
-
     /// Remove a linked ELF's section-header table, which the loader never
     /// reads: the image still runs.
     fn drop_section_headers(binary: &std::path::Path) {
@@ -1197,11 +1013,23 @@ mod early_init {
         std::fs::write(binary, bytes).unwrap();
     }
 
-    // Without section headers the audit would see no imports and scan no
-    // code: refused before anything runs, the shim's guests and a stock
-    // program alike.
+    /// Crafted images the audit cannot see through still stop by name. With
+    /// its preinit array emptied the shim's entry never runs: the audit sees
+    /// no early-init entry, and the door stops the run. Without section
+    /// headers the audit would see no imports and scan no code: the run and
+    /// the audit refuse it before anything runs, the shim's guests and a stock
+    /// program alike.
     #[test]
-    fn an_elf_without_section_headers_is_refused() {
+    fn crafted_images_the_audit_cannot_see_through_stop_by_name() {
+        let g = assert_build_c_guest("envp_probe.c", CLink::PosixShim);
+        empty_the_preinit_array(&g.binary);
+        let audit = g.command("audit", &[]);
+        let report = format!("{}{}", text(&audit.stdout), text(&audit.stderr));
+        assert!(!report.contains("early-init"), "{report}");
+        g.assert_internal_fatal(
+            &[],
+            &["early-init: the loader ran the executable's preinit array without the shim's entry"],
+        );
         for link in [CLink::PosixShim, CLink::Unlinked] {
             let g = assert_build_c_guest("envp_probe.c", link);
             drop_section_headers(&g.binary);

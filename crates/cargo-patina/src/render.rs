@@ -609,6 +609,9 @@ mod tests {
         })
     }
 
+    /// A self-contained page that surfaces the event count, every metadata
+    /// field (including one this renderer has never heard of) and the failure
+    /// summary when the run failed.
     #[test]
     fn renders_wellformed_standalone_html() {
         let bundle = bundle_with(vec![
@@ -626,18 +629,37 @@ mod tests {
                 Outcome::U64(1_000_000),
             ),
         ]);
-        let html = render_bundle(&bundle);
+        let mut raw = serde_json::to_value(&bundle).unwrap();
+        raw["metadata"]["future_knob_from_another_wave"] = serde_json::json!("surfaced");
+        let html = render(&RenderInput {
+            bundle: &bundle,
+            raw: &raw,
+            trace_path: "run.patina",
+            artifact: "demo",
+            family: "native",
+            timeline: "main",
+            failure: Some(FailureSummary {
+                result_line: "GUEST_VIOLATION two-leaders term=4".into(),
+                classification: "violation".into(),
+                exit_code: 1,
+                facts: vec![("applied_hash".into(), "deadbeef".into())],
+                messages: vec!["PATINA_SCHEDULE_REPORT tasks_spawned=3".into()],
+            }),
+        });
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.trim_end().ends_with("</html>"));
         // Fully self-contained: no external references.
         assert!(!html.contains("http://") && !html.contains("https://"));
         assert!(!html.contains("<script"));
-        // Event count surfaces.
         assert!(html.contains("4 events"));
+        assert!(html.contains("future_knob_from_another_wave"));
+        assert!(html.contains("surfaced"));
+        assert!(html.contains("GUEST_VIOLATION"));
+        assert!(html.contains("applied_hash"));
     }
 
     #[test]
-    fn attributes_ops_to_scheduled_task_lanes() {
+    fn renders_task_lanes_and_notable_events() {
         let bundle = bundle_with(vec![
             (
                 Operation::TaskSpawn {
@@ -656,39 +678,38 @@ mod tests {
         assert!(html.contains("task 1"));
         assert!(html.contains("worker"));
         assert!(html.contains("completed"));
-    }
-
-    #[test]
-    fn surfaces_crash_error_and_drop_as_notable() {
-        use patina_dst_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
-        let bundle = bundle_with(vec![
-            (Operation::FsCrash, Outcome::Unit),
-            (
-                Operation::FsOpen {
-                    path: "/x".into(),
-                    flags: patina_dst_abi::OpenFlags::read_only(),
-                },
-                Outcome::Error(EffectError::new(ErrorCode::NotFound, "missing")),
-            ),
-            (
-                Operation::NetSend {
-                    socket: SocketId(1),
-                    to: "127.0.0.1:9".into(),
-                    bytes: vec![0; 8],
-                    now_nanos: 5,
-                },
-                Outcome::SendReport(SendReport {
-                    written: 0,
-                    copies: 0,
-                    delivery_nanos: vec![],
-                    disposition: SendDisposition::DroppedByFault,
-                }),
-            ),
-        ]);
-        let html = render_bundle(&bundle);
-        assert!(html.contains("filesystem crash injected"));
-        assert!(html.contains("error not_found: missing"));
-        assert!(html.contains("dropped"));
+        // Crashes, errors and drops surface as notable.
+        {
+            use patina_dst_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
+            let bundle = bundle_with(vec![
+                (Operation::FsCrash, Outcome::Unit),
+                (
+                    Operation::FsOpen {
+                        path: "/x".into(),
+                        flags: patina_dst_abi::OpenFlags::read_only(),
+                    },
+                    Outcome::Error(EffectError::new(ErrorCode::NotFound, "missing")),
+                ),
+                (
+                    Operation::NetSend {
+                        socket: SocketId(1),
+                        to: "127.0.0.1:9".into(),
+                        bytes: vec![0; 8],
+                        now_nanos: 5,
+                    },
+                    Outcome::SendReport(SendReport {
+                        written: 0,
+                        copies: 0,
+                        delivery_nanos: vec![],
+                        disposition: SendDisposition::DroppedByFault,
+                    }),
+                ),
+            ]);
+            let html = render_bundle(&bundle);
+            assert!(html.contains("filesystem crash injected"));
+            assert!(html.contains("error not_found: missing"));
+            assert!(html.contains("dropped"));
+        }
     }
 
     #[test]
@@ -719,49 +740,5 @@ mod tests {
                 "render should surface operation kind {kind}"
             );
         }
-    }
-
-    #[test]
-    fn renders_unknown_metadata_fields_generically() {
-        // Simulate a future/unknown metadata field by editing the raw JSON the
-        // metadata panel renders from.
-        let bundle = bundle_with(vec![(Operation::FsCrash, Outcome::Unit)]);
-        let mut raw = serde_json::to_value(&bundle).unwrap();
-        raw["metadata"]["future_knob_from_another_wave"] = serde_json::json!("surfaced");
-        let html = render(&RenderInput {
-            bundle: &bundle,
-            raw: &raw,
-            trace_path: "run.patina",
-            artifact: "demo",
-            family: "native",
-            timeline: "main",
-            failure: None,
-        });
-        assert!(html.contains("future_knob_from_another_wave"));
-        assert!(html.contains("surfaced"));
-    }
-
-    #[test]
-    fn includes_failure_summary_when_present() {
-        let bundle = bundle_with(vec![(Operation::FsCrash, Outcome::Unit)]);
-        let raw = serde_json::to_value(&bundle).unwrap();
-        let html = render(&RenderInput {
-            bundle: &bundle,
-            raw: &raw,
-            trace_path: "run.patina",
-            artifact: "demo",
-            family: "native",
-            timeline: "main",
-            failure: Some(FailureSummary {
-                result_line: "GUEST_VIOLATION two-leaders term=4".into(),
-                classification: "violation".into(),
-                exit_code: 1,
-                facts: vec![("applied_hash".into(), "deadbeef".into())],
-                messages: vec!["PATINA_SCHEDULE_REPORT tasks_spawned=3".into()],
-            }),
-        });
-        assert!(html.contains("Run failed"));
-        assert!(html.contains("GUEST_VIOLATION"));
-        assert!(html.contains("applied_hash"));
     }
 }

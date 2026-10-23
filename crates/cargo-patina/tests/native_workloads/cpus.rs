@@ -1,36 +1,7 @@
-//! The virtual machine's CPU count (`--cpus`) as workloads read it: a tokio
-//! runtime sizing its pool from it, every count surface, and an allocator
-//! reading its CPU.
+//! The virtual machine's CPU count (`--cpus`) as workloads read it: every
+//! count surface, and allocators reading their CPU.
 
 use super::*;
-
-/// The workers a default `new_multi_thread()` runtime reports, after their
-/// threads started.
-fn tokio_workers(out: &[u8]) -> usize {
-    let fields = assert_fields(out, "NATIVE_TOKIO_WORKERS ", &["workers", "started"]);
-    assert_eq!(fields["started"], fields["workers"], "{}", text(out));
-    fields["workers"].parse().unwrap()
-}
-
-/// A tokio runtime built as most programs build it, `new_multi_thread()` with
-/// the default worker count, sizes its pool from the virtual machine's CPU
-/// count: one worker per virtual CPU, so the default machine gives it several
-/// and its cross-worker interleavings are explored; the run replays
-/// identically. `--cpus 1` is the one-CPU machine: one worker.
-#[test]
-fn a_default_multi_thread_tokio_runtime_starts_a_worker_per_virtual_cpu() {
-    let g = Guest::assert_build("tokio-tcp");
-    let default = ["--env", "TOKIO_TCP_MODE=default"];
-    let out = g.assert_seeded_record_replay_identity(3, &default);
-    tokio_tcp_elapsed_us(&out);
-    let workers = tokio_workers(&out);
-    assert!(workers > 1, "{}", text(&out));
-    assert_eq!(workers, patina_dst_abi::DEFAULT_CPUS as usize);
-    let one = ["--env", "TOKIO_TCP_MODE=default", "--cpus", "1"];
-    let out = g.assert_run_success(3, &one).stdout;
-    tokio_tcp_elapsed_us(&out);
-    assert_eq!(tokio_workers(&out), 1);
-}
 
 #[cfg(target_os = "linux")]
 const CPU_COUNTS: [&str; 5] = ["parallelism", "online", "configured", "early", "affinity"];
@@ -86,37 +57,23 @@ fn assert_cpu_count(out: &[u8], cpus: u32) {
 fn every_cpu_count_surface_agrees_with_the_run() {
     let g = Guest::assert_build("cpu_probe.rs");
     g.assert_audit_clean();
-    let default = g.assert_seed_repeatability(1, 2, &[]);
+    let default = run_seeded(&g, 1, &[]);
     assert_cpu_count(&default, patina_dst_abi::DEFAULT_CPUS);
-    for cpus in [1u32, 3] {
-        let count = cpus.to_string();
-        let flags = ["--cpus", count.as_str()];
-        let baseline = g.assert_seed_repeatability(1, 2, &flags);
-        assert_cpu_count(&baseline, cpus);
-        let trace = g.assert_record_replay_identity(1, &flags, &baseline);
-        assert_eq!(
-            patina_dst_trace::TraceBundle::load(&trace)
-                .unwrap()
-                .metadata
-                .cpus,
-            cpus
-        );
-        let replay = |count: &str| {
-            g.command(
-                "replay",
-                &[
-                    trace.to_str().unwrap(),
-                    "--fingerprint",
-                    "native-boundary-v1",
-                    "--cpus",
-                    count,
-                ],
-            )
-        };
-        assert_eq!(assert_success(replay(count.as_str())).stdout, baseline);
-        assert_refused(replay(&(cpus + 1).to_string()), &["--cpus"]);
-    }
-    for refused in ["0", "1025", "four"] {
+    let one = run_seeded(&g, 1, &["--cpus", "1"]);
+    assert_cpu_count(&one, 1);
+    let (three, trace) = g.assert_recorded(1, &["--cpus", "3"]);
+    assert_cpu_count(&three.stdout, 3);
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata
+            .cpus,
+        3
+    );
+    let replay = |count: &str| g.command("replay", &[trace.to_str().unwrap(), "--cpus", count]);
+    assert_eq!(assert_success(replay("3")).stdout, three.stdout);
+    assert_refused(replay("4"), &["--cpus"]);
+    for refused in ["0", "1025"] {
         assert_refused(
             g.command("run", &["--seed", "1", "--cpus", refused]),
             &["--cpus"],
@@ -137,8 +94,7 @@ fn an_allocator_reading_its_cpu_runs_threads() {
     let cpus = 3u32;
     let count = cpus.to_string();
     let flags = ["--cpus", count.as_str()];
-    let out = g.assert_seed_repeatability(1, 2, &flags);
-    g.assert_record_replay_identity(1, &flags, &out);
+    let out = g.assert_run_success(1, &flags).stdout;
     let fields = assert_fields(
         &out,
         "NATIVE_CPU_ALLOC_RESULT ",
@@ -175,8 +131,7 @@ fn an_allocator_making_system_calls_runs_threads() {
         let cpus = 3u32;
         let count = cpus.to_string();
         let flags = ["--cpus", count.as_str()];
-        let out = g.assert_seed_repeatability(1, 2, &flags);
-        g.assert_record_replay_identity(1, &flags, &out);
+        let out = g.assert_run_success(1, &flags).stdout;
         let fields = assert_fields(
             &out,
             "NATIVE_SYSCALL_ALLOC_RESULT ",

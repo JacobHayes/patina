@@ -75,8 +75,12 @@ mod tests {
     (if (i32.ge_u (local.get $n) (i32.const 6)) (then (call $proc_exit (i32.const 71))))
     (call $print)))"#;
 
+    /// Each WASI fs fault knob is observable inside the guest and reported
+    /// non-vacuous: injected errors, short writes, and a fixed latency that shows
+    /// up as virtual elapsed time between two clock reads (and, without the knob,
+    /// does not: the guest then takes its explicit failure exit).
     #[test]
-    fn wasi_fs_latency_is_observable_in_the_guest_and_reported_non_vacuous() {
+    fn wasi_fs_faults_and_latency_are_observable_and_reported_non_vacuous() {
         let directory = tempdir().unwrap();
         let module = directory.path().join("latency.wasm");
         fs::write(&module, wat::parse_str(WASI_FS_LATENCY).unwrap()).unwrap();
@@ -123,11 +127,7 @@ mod tests {
             stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
             "fs fault report must prove the latency knob was non-vacuous:\n{stderr}"
         );
-    }
 
-    #[test]
-    fn wasi_fs_fault_errors_and_short_io_are_observable() {
-        let directory = tempdir().unwrap();
         let eio = directory.path().join("eio.wasm");
         let enospc = directory.path().join("enospc.wasm");
         let short = directory.path().join("short.wasm");
@@ -135,7 +135,6 @@ mod tests {
         fs::write(&enospc, wat::parse_str(WASI_FS_ENOSPC_WRITE).unwrap()).unwrap();
         fs::write(&short, wat::parse_str(WASI_FS_SHORT_WRITE).unwrap()).unwrap();
 
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
         for (module, seed, flag, value, marker) in [
             (
                 &eio,

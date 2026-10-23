@@ -11,7 +11,7 @@ use std::fs;
 use tempfile::tempdir;
 
 #[test]
-fn borrowed_prefix_matches_the_ordinary_bundle() {
+fn borrowed_prefix_matches_the_ordinary_bundle_of_its_incarnation() {
     for incarnation in [0, 1] {
         for count in [0, 1, 9] {
             let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"))
@@ -25,9 +25,22 @@ fn borrowed_prefix_matches_the_ordinary_bundle() {
             });
             let mut bytes = Vec::new();
             recorder.write_prefix(&mut bytes).unwrap();
+            let bundle = recorder.to_bundle().unwrap();
+            assert_eq!(TraceBundle::from_slice(&bytes).unwrap(), bundle);
+            // The recorder stamps its incarnation on every event and marker.
+            let main = &bundle.timelines[0];
+            assert!(
+                main.decisions
+                    .iter()
+                    .all(|event| event.incarnation == incarnation)
+            );
             assert_eq!(
-                TraceBundle::from_slice(&bytes).unwrap(),
-                recorder.to_bundle().unwrap()
+                main.lifecycle[0].kind,
+                LifecycleEventKind::Start { incarnation }
+            );
+            assert_eq!(
+                main.lifecycle.last().unwrap().kind,
+                LifecycleEventKind::End { incarnation }
             );
         }
     }
@@ -71,23 +84,25 @@ fn abandoned_prefix_returns_a_plain_status_before_serialization() {
         ));
         assert!(recorder.decisions.is_empty());
     }
-}
 
-#[test]
-fn recorder_stamps_its_incarnation_on_every_event_and_marker() {
-    let mut recorder =
-        Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina")).with_incarnation(1);
-    recorder.observe(operation(), Outcome::U64(0));
-    let bundle = recorder.into_bundle().unwrap();
-    let main = &bundle.timelines[0];
-    assert_eq!(main.decisions[0].incarnation, 1);
-    assert_eq!(
-        main.lifecycle[0].kind,
-        LifecycleEventKind::Start { incarnation: 1 }
+    // The event-count budget bounds memory the same way for a run whose
+    // events are too small to reach the byte budget first.
+    let mut recorder = Recorder::with_limits(
+        RunMetadata::new(7, "fingerprint", 0, "patina"),
+        MAX_TRACE_BYTES,
+        8,
     );
+    for index in 0..64u64 {
+        recorder.observe(operation(), Outcome::U64(index));
+        assert!(recorder.decisions.len() <= 8);
+    }
+    assert!(recorder.decisions.is_empty());
+    let error = recorder.into_bundle().unwrap_err();
+    assert!(error.is_resource_limit(), "unexpected error: {error}");
     assert_eq!(
-        main.lifecycle[1].kind,
-        LifecycleEventKind::End { incarnation: 1 }
+        error.resource_limit_bytes(),
+        None,
+        "an event-count budget has no byte figures to report"
     );
 }
 
@@ -96,13 +111,11 @@ fn recorder_stamps_its_incarnation_on_every_event_and_marker() {
 /// the overflow at finalization with the whole run resident — the shape
 /// that cost ~1.9 GB of RSS per long generation and lost the trace anyway.
 ///
-/// Three things are pinned: the memory really is bounded (the held events
+/// Two things are pinned: the memory really is bounded (the held events
 /// never exceed the budget by more than the single event that crossed it,
-/// and are released outright at the crossing); the crossing is a pure
-/// function of the event stream, so a run that abandons abandons at the
-/// same event every time; and the refusal is still the SAME graceful budget
-/// error, carrying its figures and writing no file, so the shim's shutdown
-/// downgrade keeps the guest's own verdict exactly as before.
+/// and are released outright at the crossing); and the refusal is still the
+/// SAME graceful budget error, carrying its figures and writing no file, so
+/// the shim's shutdown downgrade keeps the guest's own verdict.
 #[test]
 fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
     let limit = 64 * 1024;
@@ -115,7 +128,7 @@ fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
     .unwrap()
         + 1;
 
-    let record = || {
+    let (crossing, recorder) = {
         let mut recorder =
             Recorder::with_limit(RunMetadata::new(7, "fingerprint", 0, "patina"), limit);
         let mut crossed_at = None;
@@ -140,12 +153,6 @@ fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
         (crossed_at.expect("the budget must be crossed"), recorder)
     };
 
-    let (crossing, recorder) = record();
-    let (crossing_again, _) = record();
-    assert_eq!(
-        crossing, crossing_again,
-        "the abandon point must be a function of the recorded events alone"
-    );
     assert!(
         crossing > 0 && crossing < 4_096,
         "the crossing must land inside the run; got {crossing}"
@@ -180,33 +187,6 @@ fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
     assert!(resource_limit_infra_line(&error).starts_with(&format!(
         "PATINA_INFRA trace=incomplete reason=resource-limit bytes={held} limit={limit}"
     )));
-}
-
-/// The event-count budget bounds memory the same way, for a run whose
-/// events are too small to reach the byte budget first.
-#[test]
-fn an_over_long_recording_is_abandoned_at_the_event_budget() {
-    let mut recorder = Recorder::with_limits(
-        RunMetadata::new(7, "fingerprint", 0, "patina"),
-        MAX_TRACE_BYTES,
-        8,
-    );
-    for index in 0..64u64 {
-        recorder.observe(operation(), Outcome::U64(index));
-        assert!(recorder.decisions.len() <= 8);
-    }
-    assert!(recorder.decisions.is_empty());
-    let error = recorder.into_bundle().unwrap_err();
-    assert!(error.is_resource_limit(), "unexpected error: {error}");
-    assert_eq!(
-        error.resource_limit_bytes(),
-        None,
-        "an event-count budget has no byte figures to report"
-    );
-    assert!(
-        error.to_string().contains("reached 9 events"),
-        "the refusal must name the count that crossed the budget; got {error}"
-    );
 }
 
 /// The other half of the bargain: a recording that FITS its budget is

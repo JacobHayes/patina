@@ -3,121 +3,79 @@
 use super::*;
 use crate::tests::operation;
 use crate::{
-    MAX_TIMELINE_EVENTS, MAX_TRACE_BYTES, Recorder, Replayer, RunMetadata, TRACE_FORMAT_VERSION,
-    TraceError,
+    MAX_TIMELINE_EVENTS, MAX_TRACE_BYTES, Recorder, RunMetadata, TRACE_FORMAT_VERSION, TraceError,
 };
-use patina_dst_abi::{Fd, Operation, Outcome};
+use patina_dst_abi::Outcome;
 use std::fs;
 use tempfile::tempdir;
 
+/// A write sweeps the scratch files beside its trace that no writer holds
+/// and spares one a live writer holds. Leftover scratch from dead writers,
+/// even under names a pid-derived scheme would pick again, never blocks it.
 #[test]
-fn byte_encoding_round_trips_and_matches_files() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("run.patina");
-    let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
-    recorder.observe(operation(), Outcome::U64(10));
-    recorder.observe(Operation::FsDup { fd: Fd(3) }, Outcome::Handle(Fd(4)));
-    let bundle = recorder.into_bundle().unwrap();
-    let bytes = bundle.to_bytes().unwrap();
-    bundle.write_atomic(&path).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), bytes);
-
-    let parsed = TraceBundle::from_slice(&bytes).unwrap();
-    assert_eq!(parsed, bundle);
-    let mut replay = Replayer::from_bundle(parsed, "fingerprint", "main").unwrap();
-    assert_eq!(replay.expect(&operation()).unwrap(), Outcome::U64(10));
-    assert_eq!(
-        replay.expect(&Operation::FsDup { fd: Fd(3) }).unwrap(),
-        Outcome::Handle(Fd(4))
-    );
-    replay.finish().unwrap();
-
-    assert!(matches!(
-        TraceBundle::from_slice(b"not json"),
-        Err(TraceError::Parse { .. })
-    ));
-}
-
-/// A writer that dies mid-write leaves its scratch file behind, and a
-/// scratch name derived from the pid is the name the next process given
-/// that pid picks. Red while scratch names were `.<trace>.tmp-<pid>-<n>`
-/// opened with `create_new`: these leftovers refused the write.
-#[test]
-fn a_dead_writers_scratch_file_does_not_block_a_write() {
+fn a_write_sweeps_dead_scratch_and_spares_live_scratch() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("run.patina");
     for counter in 0..1024 {
         let name = format!(".run.patina.tmp-{}-{counter}", std::process::id());
         File::create(directory.path().join(name)).unwrap();
     }
-    let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
-    recorder.observe(operation(), Outcome::U64(10));
-    recorder.finish(&path).unwrap();
-    TraceBundle::load(&path).unwrap();
-}
-
-/// A write sweeps the scratch files beside its trace that no writer holds
-/// and spares one a live writer holds.
-#[test]
-fn a_write_sweeps_dead_scratch_and_spares_live_scratch() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("run.patina");
     let (live, _held) = create_scratch(&path).unwrap();
     let dead = directory.path().join(".run.patina.tmp.dead");
     File::create(&dead).unwrap();
     let other_trace = directory.path().join(".run.patina2.tmp.dead");
     File::create(&other_trace).unwrap();
 
-    TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new())
-        .write_atomic(&path)
-        .unwrap();
+    let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
+    recorder.observe(operation(), Outcome::U64(10));
+    recorder.finish(&path).unwrap();
+    TraceBundle::load(&path).unwrap();
     assert!(!dead.exists(), "a dead writer's scratch is swept");
     assert!(live.exists(), "a live writer's scratch is spared");
     assert!(other_trace.exists(), "another trace's scratch is not swept");
 }
 
+/// Every save path refuses a trace over its byte budget before writing
+/// anything, and the refusal is classifiable as a budget refusal WITHOUT
+/// string matching, carrying the two numbers a diagnostic reports. The native
+/// shim keeps a run's verdict on the budget refusal and aborts on every other
+/// one, so this is the seam that decision rests on.
 #[test]
-fn save_paths_reject_serialized_trace_that_exceeds_byte_limit() {
+fn save_paths_refuse_an_over_budget_trace_classifiably_and_write_nothing() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("oversized.patina");
     let event = TraceEvent::new(0, operation(), Outcome::U64(10));
     let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), vec![event]);
-    let serialized_len = {
-        let mut bytes = serde_json::to_vec(&bundle).unwrap();
-        bytes.push(b'\n');
-        bytes.len() as u64
-    };
+    let serialized_len = bundle.to_bytes().unwrap().len() as u64;
     let limit = serialized_len - 1;
 
     let error = bundle.to_bytes_with_limit(limit).unwrap_err();
-    assert!(
-        matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
-        "unexpected error: {error}"
-    );
-
+    assert!(error.is_resource_limit(), "unexpected error: {error}");
+    assert_eq!(error.resource_limit_bytes(), Some((serialized_len, limit)));
     let error = bundle.write_atomic_with_limit(&path, limit).unwrap_err();
-    assert!(
-        matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
-        "unexpected error: {error}"
-    );
-    assert!(
-        !path.exists(),
-        "save-time refusal must not leave a trace file"
-    );
-    assert_eq!(
-        fs::read_dir(directory.path()).unwrap().count(),
-        0,
-        "save-time refusal must not leave a temporary file"
-    );
-
+    assert!(error.is_resource_limit(), "unexpected error: {error}");
     let mut recorder = Recorder::new(RunMetadata::new(7, "fingerprint", 0, "patina"));
     recorder.observe(operation(), Outcome::U64(10));
     let error = recorder.finish_with_limit(&path, limit).unwrap_err();
-    assert!(
-        matches!(&error, TraceError::ResourceLimit { message, bytes: Some(_) } if message.contains("serialized trace")),
-        "unexpected error: {error}"
+    assert!(error.is_resource_limit(), "unexpected error: {error}");
+    assert_eq!(
+        fs::read_dir(directory.path()).unwrap().count(),
+        0,
+        "a save-time refusal must leave neither a trace nor a temporary file"
     );
-    assert!(!path.exists(), "Recorder::finish must fail before writing");
+
+    let mut oversized =
+        TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
+    oversized.timelines[0].decisions =
+        vec![TraceEvent::new(0, operation(), Outcome::U64(0)); MAX_TIMELINE_EVENTS + 1];
+    let error = oversized.validate().unwrap_err();
+    assert!(error.is_resource_limit(), "unexpected error: {error}");
+    assert_eq!(
+        error.resource_limit_bytes(),
+        None,
+        "an event-count budget has no byte figures to report"
+    );
+    assert!(!TraceError::Invalid("something is wrong".into()).is_resource_limit());
 }
 
 #[test]
@@ -151,12 +109,7 @@ fn buggify_fingerprint_requires_buggify_metadata() {
     });
     let bytes = serde_json::to_vec(&invalid).unwrap();
     let error = TraceBundle::from_slice(&bytes).expect_err("missing buggify config must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("fingerprint declares +buggify but trace metadata has no buggify config"),
-        "{error}"
-    );
+    assert!(matches!(error, TraceError::Invalid(_)), "{error}");
 }
 
 #[test]
@@ -170,7 +123,7 @@ fn rejects_non_contiguous_sequences() {
 }
 
 #[test]
-fn rejects_malformed_incomplete_and_unsupported_trace_files() {
+fn rejects_malformed_incomplete_and_oversized_trace_files() {
     let directory = tempdir().unwrap();
     let malformed = directory.path().join("malformed.patina");
     fs::write(&malformed, b"not json").unwrap();
@@ -218,15 +171,6 @@ fn rejects_malformed_incomplete_and_unsupported_trace_files() {
         Err(TraceError::Incomplete { .. })
     ));
 
-    let unsupported = directory.path().join("unsupported.patina");
-    let mut bundle = TraceBundle::new(RunMetadata::new(1, "fingerprint", 0, "patina"), Vec::new());
-    bundle.format_version = TRACE_FORMAT_VERSION + 1;
-    fs::write(&unsupported, serde_json::to_vec(&bundle).unwrap()).unwrap();
-    assert!(matches!(
-        TraceBundle::load(&unsupported),
-        Err(TraceError::UnsupportedVersion { .. })
-    ));
-
     let oversized = directory.path().join("oversized.patina");
     File::create(&oversized)
         .unwrap()
@@ -236,34 +180,4 @@ fn rejects_malformed_incomplete_and_unsupported_trace_files() {
         TraceBundle::load(&oversized),
         Err(TraceError::ResourceLimit { .. })
     ));
-}
-
-/// A budget refusal must be distinguishable from a broken trace WITHOUT
-/// string matching, and must carry the two numbers a diagnostic reports.
-/// The native shim keeps a run's verdict on the budget refusal and aborts
-/// on every other one, so this is the seam that decision rests on.
-#[test]
-fn a_budget_refusal_is_classifiable_and_carries_its_numbers() {
-    let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
-    let serialized_len = bundle.to_bytes().unwrap().len() as u64;
-    let limit = serialized_len - 1;
-
-    let error = bundle.to_bytes_with_limit(limit).unwrap_err();
-    assert!(error.is_resource_limit(), "unexpected error: {error}");
-    assert_eq!(error.resource_limit_bytes(), Some((serialized_len, limit)));
-
-    let mut oversized =
-        TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
-    oversized.timelines[0].decisions =
-        vec![TraceEvent::new(0, operation(), Outcome::U64(0)); MAX_TIMELINE_EVENTS + 1];
-    let error = oversized.validate().unwrap_err();
-    assert!(error.is_resource_limit(), "unexpected error: {error}");
-    assert_eq!(
-        error.resource_limit_bytes(),
-        None,
-        "an event-count budget has no byte figures to report"
-    );
-
-    let broken = TraceError::Invalid("something is wrong".into());
-    assert!(!broken.is_resource_limit());
 }

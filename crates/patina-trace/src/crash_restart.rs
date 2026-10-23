@@ -392,23 +392,40 @@ mod tests {
         assert_eq!(placement, vec![(0, 1, 0), (1, 2, 0), (2, 6, 1)]);
     }
 
+    /// Splitting a joined trace returns the segments it was joined from; a
+    /// trace without a crash has none, and a branched crash trace is refused.
     #[test]
     fn segments_of_a_joined_trace_are_the_segments_it_was_joined_from() {
         let original = segments();
         let joined = original.clone().join().unwrap();
         let reloaded = TraceBundle::from_slice(&joined.to_bytes().unwrap()).unwrap();
         assert_eq!(reloaded.crash_restart_segments().unwrap(), Some(original));
-    }
 
-    #[test]
-    fn a_trace_without_a_crash_has_no_segments() {
         let metadata = RunMetadata::new(7, "fingerprint", 0, "patina");
         let linear = segment(&metadata, 0, &[b"only"]);
         assert_eq!(linear.crash_restart_segments().unwrap(), None);
+
+        let mut branched = joined;
+        branched.timelines.push(Timeline {
+            id: "branch".into(),
+            parent: Some(MAIN_TIMELINE.into()),
+            from_sequence: Some(1),
+            branch_seed: Some(9),
+            lifecycle: Vec::new(),
+            decisions: Vec::new(),
+        });
+        let error = branched.crash_restart_segments().unwrap_err();
+        assert!(
+            error.to_string().contains("exactly one timeline"),
+            "{error}"
+        );
     }
 
+    /// Join refuses segments that are not two linear incarnations of one run:
+    /// different metadata, a segment that already crashed, or a segment of the
+    /// wrong incarnation.
     #[test]
-    fn join_refuses_incarnations_with_different_metadata() {
+    fn join_refuses_segments_that_are_not_one_runs_incarnations() {
         let mut parts = segments();
         parts.restarted.metadata.root_seed += 1;
         let error = parts.join().unwrap_err();
@@ -416,18 +433,12 @@ mod tests {
             error.to_string().contains("different run metadata"),
             "{error}"
         );
-    }
 
-    #[test]
-    fn join_refuses_a_segment_that_already_crashed() {
         let mut parts = segments();
         parts.restarted = segments().join().unwrap();
         let error = parts.join().unwrap_err();
         assert!(error.to_string().contains("one linear timeline"), "{error}");
-    }
 
-    #[test]
-    fn join_refuses_a_segment_of_the_wrong_incarnation() {
         let mut parts = segments();
         let metadata = parts.restarted.metadata.clone();
         parts.restarted = segment(&metadata, 0, &[b"after"]);
@@ -438,8 +449,10 @@ mod tests {
         );
     }
 
+    /// Join merges the buggify sites each incarnation reached and refuses a
+    /// knob the two incarnations realized differently.
     #[test]
-    fn join_merges_the_buggify_sites_each_incarnation_reached() {
+    fn join_merges_buggify_sites_and_refuses_a_divergent_knob() {
         let mut parts = segments();
         parts.crashed.metadata.buggify = Some(buggify(&["b", "c"], &[("b", 4)]));
         parts.restarted.metadata.buggify = Some(buggify(&["a", "b"], &[("a", 1), ("b", 4)]));
@@ -448,32 +461,11 @@ mod tests {
             joined.metadata.buggify,
             Some(buggify(&["a", "b", "c"], &[("a", 1), ("b", 4)]))
         );
-    }
 
-    #[test]
-    fn join_refuses_a_buggify_knob_realized_differently_per_incarnation() {
         let mut parts = segments();
         parts.crashed.metadata.buggify = Some(buggify(&[], &[("b", 4)]));
         parts.restarted.metadata.buggify = Some(buggify(&[], &[("b", 5)]));
         let error = parts.join().unwrap_err();
         assert!(error.to_string().contains("knob \"b\""), "{error}");
-    }
-
-    #[test]
-    fn segments_refuse_a_branched_crash_trace() {
-        let mut joined = segments().join().unwrap();
-        joined.timelines.push(Timeline {
-            id: "branch".into(),
-            parent: Some(MAIN_TIMELINE.into()),
-            from_sequence: Some(1),
-            branch_seed: Some(9),
-            lifecycle: Vec::new(),
-            decisions: Vec::new(),
-        });
-        let error = joined.crash_restart_segments().unwrap_err();
-        assert!(
-            error.to_string().contains("exactly one timeline"),
-            "{error}"
-        );
     }
 }

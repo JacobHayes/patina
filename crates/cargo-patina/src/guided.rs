@@ -441,13 +441,8 @@ fn detector_drought_broadens_exploration() -> (&'static str, bool, String) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn selftest_detectors_all_fire() {
-        for (name, ok, detail) in campaign_detector_selftest() {
-            assert!(ok, "{name} failed: {detail}");
-        }
-    }
-
+    /// A plan is a pure function of its inputs, and the novelty log is one of
+    /// them: a different log steers a different stream.
     #[test]
     fn a_plan_is_a_pure_function_of_its_inputs() {
         let entries = log(&[(0, 2), (5, 4), (11, 1)]);
@@ -460,10 +455,6 @@ mod tests {
                 "generation {generation} must derive identically"
             );
         }
-    }
-
-    #[test]
-    fn a_different_novelty_log_steers_differently() {
         let one = GuidancePlan::new(42, 50, &log(&[(0, 2)]));
         let other = GuidancePlan::new(42, 50, &log(&[(0, 2), (3, 9)]));
         assert!(
@@ -495,11 +486,8 @@ mod tests {
             heavy > light * 5,
             "the 99:1 weight must dominate: heavy={heavy} light={light}"
         );
-    }
-
-    #[test]
-    fn weights_below_one_are_lifted_so_every_novel_generation_stays_selectable() {
-        // Entry 0 is the excluded bootstrap; entry 1 carries the zero weight.
+        // A weight below one is lifted, so every novel generation stays
+        // selectable. Entry 0 is the excluded bootstrap; entry 1 weighs zero.
         let plan = GuidancePlan::new(1, 200, &log(&[(0, 7), (1, 0)]));
         let reached = (2..64).any(|g| {
             matches!(
@@ -534,20 +522,19 @@ mod tests {
         );
         assert_eq!(tally.exploited, 0);
         assert_eq!(tally.no_ancestors, 40);
-    }
-
-    #[test]
-    fn tally_reports_vacuity_only_when_nothing_was_steered() {
-        let mut tally = GuidanceTally::default();
-        assert!(!tally.is_vacuous(), "an empty tally is not vacuous");
-        tally.record(GuidanceDecision::NoAncestors);
-        tally.record(GuidanceDecision::Explore);
-        assert!(tally.is_vacuous(), "no exploit means the mode did nothing");
-        tally.record(GuidanceDecision::Exploit { ancestor: 0 });
-        assert!(!tally.is_vacuous());
-        assert_eq!(tally.generations, 3);
-        assert_eq!(tally.exploited, 1);
-        assert_eq!(tally.explored, 1);
-        assert_eq!(tally.no_ancestors, 1);
+        // A tally is vacuous only when something was decided and nothing was exploited.
+        {
+            let mut tally = GuidanceTally::default();
+            assert!(!tally.is_vacuous(), "an empty tally is not vacuous");
+            tally.record(GuidanceDecision::NoAncestors);
+            tally.record(GuidanceDecision::Explore);
+            assert!(tally.is_vacuous(), "no exploit means the mode did nothing");
+            tally.record(GuidanceDecision::Exploit { ancestor: 0 });
+            assert!(!tally.is_vacuous());
+            assert_eq!(tally.generations, 3);
+            assert_eq!(tally.exploited, 1);
+            assert_eq!(tally.explored, 1);
+            assert_eq!(tally.no_ancestors, 1);
+        }
     }
 }

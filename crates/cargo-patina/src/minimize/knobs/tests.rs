@@ -23,16 +23,8 @@ fn knobs_split_on_the_run_registry_arity_not_on_leading_dashes() {
             "--dns-entry workq-server=127.0.0.1",
         ]
     );
-}
-
-#[test]
-fn an_unregistered_recorded_flag_is_refused_rather_than_guessed() {
-    let error = split_knobs(&["--not-a-run-flag".to_string()]).unwrap_err();
-    assert!(
-        error.0.contains("is not a `run` flag"),
-        "unexpected error: {}",
-        error.0
-    );
+    // A recorded flag `run` does not register is refused rather than guessed.
+    assert!(split_knobs(&["--not-a-run-flag".to_string()]).is_err());
 }
 
 /// A knob candidate is held to the unreduced run's refusal class, never to the

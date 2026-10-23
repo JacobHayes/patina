@@ -60,7 +60,7 @@ impl Scenario {
 pub const DEFAULTS: Scenario = Scenario {
     name: "",
     run: |_| {},
-    vehicles: Vehicle::ALL,
+    vehicles: Vehicle::DOORS,
     covers: &[],
     asserts_absent: &[],
     symbols: &[],
@@ -445,7 +445,7 @@ pub const EXCLUSIONS: &[Exclusion] = &[
     },
     Exclusion {
         entry: Entry::Symbol("tkill"),
-        reason: "glibc exports no tkill (only tgkill, since 2.30), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare it themselves. The tkill row is covered through syscall(2) and the raw instruction by signal/basic",
+        reason: "glibc exports no tkill (only tgkill, since 2.30), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare it themselves. The tkill row is covered through syscall(2) by signal/basic",
     },
     Exclusion {
         entry: Entry::Symbol("res_init"),
@@ -947,64 +947,59 @@ mod tests {
         serde_json::json!({ "kind": kind, "operation": operation })
     }
 
-    const ONE_PROCESS_SIGUSR1: TraceFacts = TraceFacts {
-        generations: &[Generation {
-            signal: libc::SIGUSR1,
-            target: Target::Process,
-        }],
-        max_wakes_per_generation: Some(1),
-    };
-
+    /// Trace facts hold exactly when the trace generates the declared
+    /// signals, to the declared targets, waking no more than declared.
     #[test]
-    fn trace_facts_accept_the_declared_generations() {
-        let ops = [
-            op(
-                "signal_generated",
-                serde_json::json!({ "sig": 10, "target": "process" }),
-            ),
-            op("task_wake", serde_json::json!({})),
-        ];
-        assert_eq!(ONE_PROCESS_SIGUSR1.check(&ops), Ok(()));
-    }
-
-    #[test]
-    fn trace_facts_refuse_a_missing_generation() {
-        assert!(ONE_PROCESS_SIGUSR1.check(&[]).is_err());
-    }
-
-    #[test]
-    fn trace_facts_refuse_a_thread_directed_generation_for_a_process_one() {
-        let ops = [op(
-            "signal_generated",
-            serde_json::json!({ "sig": 10, "target": { "task": 1 } }),
-        )];
-        assert!(ONE_PROCESS_SIGUSR1.check(&ops).is_err());
-    }
-
-    #[test]
-    fn trace_facts_with_no_generations_refuse_a_generation() {
+    fn trace_facts_hold_only_for_the_declared_generations() {
+        const ONE_PROCESS_SIGUSR1: TraceFacts = TraceFacts {
+            generations: &[Generation::process(libc::SIGUSR1)],
+            max_wakes_per_generation: Some(1),
+        };
         const NONE: TraceFacts = TraceFacts {
             generations: &[],
             max_wakes_per_generation: None,
         };
-        let ops = [op(
-            "signal_generated",
-            serde_json::json!({ "sig": 10, "target": "process" }),
-        )];
-        assert_eq!(NONE.check(&[]), Ok(()));
-        assert!(NONE.check(&ops).is_err());
-    }
-
-    #[test]
-    fn trace_facts_refuse_a_wake_all() {
-        let ops = [
+        let to_process = || {
             op(
                 "signal_generated",
-                serde_json::json!({ "sig": 10, "target": "process" }),
+                serde_json::json!({ "sig": libc::SIGUSR1, "target": "process" }),
+            )
+        };
+        let to_thread = op(
+            "signal_generated",
+            serde_json::json!({ "sig": libc::SIGUSR1, "target": { "task": 1 } }),
+        );
+        let wake = || op("task_wake", serde_json::json!({}));
+        let cases = [
+            (
+                "the declared generation",
+                ONE_PROCESS_SIGUSR1,
+                vec![to_process(), wake()],
+                true,
             ),
-            op("task_wake", serde_json::json!({})),
-            op("task_wake", serde_json::json!({})),
+            ("a missing generation", ONE_PROCESS_SIGUSR1, vec![], false),
+            (
+                "a thread-directed generation",
+                ONE_PROCESS_SIGUSR1,
+                vec![to_thread],
+                false,
+            ),
+            (
+                "a wake-all",
+                ONE_PROCESS_SIGUSR1,
+                vec![to_process(), wake(), wake()],
+                false,
+            ),
+            ("no generation declared or made", NONE, vec![], true),
+            (
+                "a generation where none is declared",
+                NONE,
+                vec![to_process()],
+                false,
+            ),
         ];
-        assert!(ONE_PROCESS_SIGUSR1.check(&ops).is_err());
+        for (case, facts, ops, hold) in cases {
+            assert_eq!(facts.check(&ops).is_ok(), hold, "{case}");
+        }
     }
 }

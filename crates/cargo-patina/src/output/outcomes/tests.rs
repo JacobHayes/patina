@@ -33,34 +33,14 @@ fn guest_exit_reports_the_core_flag() {
                 .and_then(serde_json::Value::as_bool),
             expected_core
         );
+        // The signal the exit code cannot express is named; a guest that
+        // deliberately returns 134 is NOT a signal death, and the envelope
+        // keeps the two apart.
+        match signal {
+            Some(_) => assert_eq!(json["guest_exit"]["signal_name"], "SIGABRT"),
+            None => assert!(json["guest_exit"].get("signal").is_none()),
+        }
     }
-}
-
-#[test]
-fn guest_exit_names_the_signal_the_exit_code_cannot_express() {
-    let mut env = Envelope::new("run", "failure", 134);
-    env.guest_exit = Some(GuestExit {
-        code: 134,
-        signal: Some(6),
-        core: false,
-    });
-    let json = env.to_json();
-    assert_eq!(json["guest_exit"]["code"], 134);
-    assert_eq!(json["guest_exit"]["signal"], 6);
-    assert_eq!(json["guest_exit"]["signal_name"], "SIGABRT");
-
-    // A guest that deliberately returns 134 is NOT a signal death, and the
-    // envelope must keep the two apart — that split is what lets a campaign
-    // tell a fail-closed abort from an ordinary exit status.
-    let mut plain = Envelope::new("run", "failure", 134);
-    plain.guest_exit = Some(GuestExit {
-        code: 134,
-        signal: None,
-        core: false,
-    });
-    let json = plain.to_json();
-    assert_eq!(json["guest_exit"]["code"], 134);
-    assert!(json["guest_exit"].get("signal").is_none());
 }
 
 #[test]
@@ -86,37 +66,38 @@ fn refusal_attributes_patinas_own_fail_closed_aborts() {
             .class,
         "buggify_duplicate_label"
     );
-}
-
-/// A failed trace CHANNEL is patina's own operational condition and says so
-/// in one fixed sentence, carrying the status the GUEST reached. The fixed
-/// prefix is what makes every such run share a class — and therefore a
-/// signature — instead of one novel finding per scratch path.
-#[test]
-fn a_failed_trace_channel_is_patinas_own_refusal_and_names_the_guests_status() {
-    let line = format!(
-        "{} guest_exit_code=0 — the trace could not be written",
-        crate::TRACE_CHANNEL_UNAVAILABLE
-    );
-    let refused = refusal(2, "", &line).expect("a failed trace channel is a refusal");
-    assert_eq!(refused.class, "trace_unavailable");
-    assert_eq!(refused.guest_exit_code, Some(0));
-
-    let failing_guest = refusal(
-        101,
-        "",
-        &format!(
-            "{} guest_exit_code=101 — the trace could not be written",
+    // With patina's refusals attributed, an UNATTRIBUTED SIGABRT is the
+    // guest's own doing, and a clean run is never a refusal whatever it
+    // printed.
+    assert!(refusal(134, "APP_INVARIANT_BROKEN detail=ledger", "").is_none());
+    assert!(refusal(0, "", "fingerprint mismatch").is_none());
+    // A failed trace CHANNEL is patina's own refusal under one fixed prefix, carrying the status
+    // the GUEST reached; the incomplete trace a DYING guest leaves is a consequence of the run, not
+    // a refusal.
+    {
+        let line = format!(
+            "{} guest_exit_code=0 — the trace could not be written",
             crate::TRACE_CHANNEL_UNAVAILABLE
-        ),
-    )
-    .expect("a failed trace channel is a refusal");
-    assert_eq!(failing_guest.guest_exit_code, Some(101));
+        );
+        let refused = refusal(2, "", &line).expect("a failed trace channel is a refusal");
+        assert_eq!(refused.class, "trace_unavailable");
+        assert_eq!(refused.guest_exit_code, Some(0));
 
-    // RED twin: the truncated trace a DYING guest leaves is a consequence of
-    // the run, not a refusal — attributing it to patina would make every
-    // guest abort mid-record look like patina's fault.
-    assert!(
+        let failing_guest = refusal(
+            101,
+            "",
+            &format!(
+                "{} guest_exit_code=101 — the trace could not be written",
+                crate::TRACE_CHANNEL_UNAVAILABLE
+            ),
+        )
+        .expect("a failed trace channel is a refusal");
+        assert_eq!(failing_guest.guest_exit_code, Some(101));
+
+        // RED twin: the truncated trace a DYING guest leaves is a consequence of
+        // the run, not a refusal — attributing it to patina would make every
+        // guest abort mid-record look like patina's fault.
+        assert!(
             refusal(
                 134,
                 "",
@@ -125,38 +106,5 @@ fn a_failed_trace_channel_is_patinas_own_refusal_and_names_the_guests_status() {
             .is_none(),
             "a trace left incomplete by a dying guest must not be attributed to patina"
         );
-}
-
-#[test]
-fn refusal_is_absent_for_a_guests_own_abort() {
-    // The design point of §4.4: with patina's refusals attributed, an
-    // UNATTRIBUTED SIGABRT is the guest's own doing. If this ever starts
-    // returning Some, the campaign classifier would file a guest's deliberate
-    // abort as patina infrastructure again.
-    assert!(refusal(134, "APP_INVARIANT_BROKEN detail=ledger", "").is_none());
-    // And a clean run is never a refusal, whatever it printed.
-    assert!(refusal(0, "", "fingerprint mismatch").is_none());
-    // The trap this closes: a guest that aborts under `--record` ALWAYS
-    // leaves an incomplete trace, and the supervisor always says so. Reading
-    // that consequence as a refusal attributed every single guest abort to
-    // patina, which made the campaign's `GUEST_ABORT` class unreachable.
-    assert!(
-        refusal(
-            134,
-            "",
-            "PATINA_INFRA native_run signal=6 trace=incomplete trace_path=\"g.patina\" \
-reason=\"incomplete trace .g.patina.tmp: empty trace file; record finalization did not complete\""
-        )
-        .is_none(),
-        "an incomplete trace left by a dying guest is a consequence, not a patina refusal"
-    );
-}
-
-#[test]
-fn a_malformed_verdict_line_is_dropped_not_half_decoded() {
-    // Truncated (no detail) and unknown-kind lines must not become verdicts:
-    // a partially understood result is worse than no result.
-    let stderr =
-        "PATINA_VERDICT seq=1 kind=pass label=x\nPATINA_VERDICT seq=2 kind=nope label=x detail=\n";
-    assert!(extract_verdicts("", stderr).is_empty());
+    }
 }

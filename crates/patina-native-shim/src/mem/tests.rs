@@ -42,8 +42,10 @@ fn a_write_back_goes_through_the_first_opened_writer_wherever_it_is_mapped() {
     }
 }
 
+/// The mapping type, the flags each type accepts, then the description's
+/// access modes, all before the file kind.
 #[test]
-fn a_private_mapping_is_private_whatever_the_type_bits_share() {
+fn mapping_flags_and_access_modes_are_judged_as_do_mmap_does() {
     // MAP_SHARED_VALIDATE (3) contains MAP_PRIVATE's bit: testing the type
     // as flags made every private mapping read as shared-and-private.
     assert_eq!(judge(MAP_PRIVATE, RW, true, false, true, false), Ok(false));
@@ -61,10 +63,9 @@ fn a_private_mapping_is_private_whatever_the_type_bits_share() {
     );
     assert_eq!(judge(0, RW, true, true, true, false), Err(EINVAL));
     assert_eq!(judge(MAP_TYPE, RW, true, true, true, false), Err(EINVAL));
-}
 
-#[test]
-fn unknown_flags_are_ignored_by_map_shared_and_refused_by_validate() {
+    // Unknown flags are ignored by MAP_SHARED and refused by
+    // MAP_SHARED_VALIDATE.
     assert_eq!(
         judge(MAP_SHARED | UNKNOWN, PROT_READ, true, false, true, false),
         Ok(true)
@@ -92,10 +93,7 @@ fn unknown_flags_are_ignored_by_map_shared_and_refused_by_validate() {
         ),
         Err(EOPNOTSUPP)
     );
-}
 
-#[test]
-fn access_modes_are_judged_before_the_file_kind() {
     // Shared and writable needs a writable description; any mapping needs
     // a readable one; both before a non-file's ENODEV.
     assert_eq!(judge(MAP_SHARED, RW, true, false, true, false), Err(EACCES));

@@ -38,7 +38,6 @@
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
 use crate::probe::{AT_FDCWD, CLOSED_FD, NO_SUCH_PID, Probe, SIGSET_BYTES, neg};
-use crate::vehicle::Vehicle;
 use libc::*;
 use patina_dst_syscalls::Syscall;
 
@@ -326,7 +325,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "proc/pidfd",
     run,
-    vehicles: Vehicle::ALL,
     covers: &[
         Syscall::N_pidfd_open,
         Syscall::N_pidfd_getfd,

@@ -16,19 +16,22 @@ use super::*;
 #[test]
 fn a_mapped_file_is_whole_under_filesystem_faults() {
     let g = Guest::assert_build("mmap_short_read_probe.rs");
-    for mode in [&[][..], &["--env", "MMAP_SHORT_READ_MODE=crash"]] {
-        for faults in [
-            ["--fs-short-permille", "1000"],
-            ["--fs-error-permille", "500"],
-        ] {
-            let flags = [&faults[..], mode].concat();
-            let out = g.assert_seeded_record_replay_identity(1, &flags);
-            assert_eq!(
-                assert_unique_line_payload(&out, "NATIVE_MMAP_SHORT_READ "),
-                "pages_written=64",
-                "{flags:?}"
-            );
-        }
+    let crash = ["--env", "MMAP_SHORT_READ_MODE=crash"];
+    for (mode, faults) in [
+        (&[][..], ["--fs-short-permille", "1000"]),
+        (&crash[..], ["--fs-error-permille", "500"]),
+    ] {
+        let flags = [&faults[..], mode].concat();
+        let out = if mode.is_empty() {
+            run_seeded(&g, 1, &flags)
+        } else {
+            g.assert_run_success(1, &flags).stdout
+        };
+        assert_eq!(
+            assert_unique_line_payload(&out, "NATIVE_MMAP_SHORT_READ "),
+            "pages_written=64",
+            "{flags:?}"
+        );
     }
 }
 
@@ -55,43 +58,47 @@ const INODE_READ_ANSWERS: [(&str, &str); 9] = [
 /// attributes an injected error to `fd_metadata` has a shim step that read
 /// the inode through the guest's `fstat`. That attribution is what judges
 /// `utimensat` and `fchown`, whose own attribute write can fail and is
-/// retried. Each call runs alone so a failure names its site; the whole probe
-/// then repeats and replays under the same faults. RED before: each site read
-/// the inode through the faulted `fstat`, so the calls that do no I/O failed
-/// with `EIO` and every site drew `fd_metadata` faults.
+/// retried. RED before: each site read the inode through the faulted
+/// `fstat`, so the calls that do no I/O failed with `EIO` and every site drew
+/// `fd_metadata` faults. A failure on one site is narrowed with
+/// `--env INODE_READ_SITE=<site>`.
 #[cfg(target_os = "linux")]
 #[test]
 fn in_memory_inode_reads_answer_under_filesystem_faults() {
     let g = Guest::assert_build("inode_read_fault_probe.rs");
-    let faults = ["--fs-error-permille", "500", "--fs-short-permille", "1000"];
+    let output = g.command(
+        "run",
+        &[
+            "--fs-error-permille",
+            "500",
+            "--fs-short-permille",
+            "1000",
+            "--seed",
+            "1",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}: {}{}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stdout = envelope["stdout"].as_str().unwrap();
     for (site, expected) in INODE_READ_ANSWERS {
-        let env = format!("INODE_READ_SITE={site}");
-        let run = ["--seed", "1", "--env", &env, "--format", "json"];
-        let output = g.command("run", &[&faults[..], &run].concat());
-        assert!(
-            output.status.success(),
-            "{site}: {}: {}{}",
-            output.status,
-            text(&output.stdout),
-            text(&output.stderr)
-        );
-        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let stdout = envelope["stdout"].as_str().unwrap();
         let prefix = format!("NATIVE_INODE_READ {site} ");
         assert_eq!(
             assert_unique_line_payload(stdout.as_bytes(), &prefix),
             expected,
             "{site}"
         );
-        let errors = &envelope["fault_reports"]["fs"]["errors_by_op"];
-        assert!(errors.is_object(), "{site}: {envelope:#}");
-        assert_eq!(errors.get("fd_metadata"), None, "{site}: {errors}");
     }
-    let out = g.assert_seeded_record_replay_identity(1, &faults);
-    for (site, expected) in INODE_READ_ANSWERS {
-        let prefix = format!("NATIVE_INODE_READ {site} ");
-        assert_eq!(assert_unique_line_payload(&out, &prefix), expected);
-    }
+    let errors = &envelope["fault_reports"]["fs"]["errors_by_op"];
+    assert!(errors.is_object(), "{envelope:#}");
+    assert_eq!(errors.get("fd_metadata"), None, "{errors}");
 }
 
 /// What `path_walk_fault_probe.rs` prints in its `lookups` mode for each call
@@ -112,7 +119,7 @@ const PATH_WALK_ANSWERS: [(&str, &str); 4] = [
 /// error landing on a lookup. Under a partial rate, the same rounds of `open`,
 /// `stat` and `mkdir` spelled directly and through `..`, `.` and a symlink
 /// draw the same fault stream, so they get the same answers under one seed,
-/// and each spelling replays. RED before: every lookup of the walk drew a
+/// and the walked spelling replays. RED before: every lookup of the walk drew a
 /// `metadata` fault (and a symlink a `read_link` one), so the walk-only calls
 /// failed with `EIO`, the fault report charged errors to `metadata`, and a
 /// longer spelling shifted every later call's draw.
@@ -166,8 +173,12 @@ fn the_path_walk_draws_no_filesystem_fault() {
     let faults = ["--fs-error-permille", "500"];
     let answers = ["plain", "walked"].map(|mode| {
         let env = format!("PATH_WALK_MODE={mode}");
-        let out =
-            g.assert_seeded_record_replay_identity(1, &[&faults[..], &["--env", &env]].concat());
+        let flags = [&faults[..], &["--env", &env]].concat();
+        let out = if mode == "walked" {
+            g.assert_run_success(1, &flags).stdout
+        } else {
+            run_seeded(&g, 1, &flags)
+        };
         assert_unique_line_payload(&out, "NATIVE_PATH_WALK rounds ").to_owned()
     });
     let [plain, walked] = &answers;

@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_are_aligned_distinct_and_writable() {
+    fn blocks_are_aligned_distinct_writable_and_within_the_region() {
         let layouts = [
             (1, 1),
             (24, 8),
@@ -762,6 +762,14 @@ mod tests {
             // SAFETY: each block's own layout.
             unsafe { dealloc(block, size, align) };
         }
+        // A block larger than the region is null, zeroed or not.
+        let (base, end) = region();
+        let size = (end - base) * 2;
+        assert!(alloc(size, 8).is_null());
+        assert!(alloc_zeroed(size, 8).is_null());
+        // A guest heap block is not the arena's.
+        let block = Box::new(0u64);
+        assert!(!contains(&*block as *const u64 as *const u8));
     }
 
     #[test]
@@ -798,14 +806,6 @@ mod tests {
             assert_eq!(std::slice::from_raw_parts(shrunk, 5), b"01234");
             dealloc(shrunk, 5, 1);
         }
-    }
-
-    #[test]
-    fn a_block_larger_than_the_region_is_null_zeroed_or_not() {
-        let (base, end) = region();
-        let size = (end - base) * 2;
-        assert!(alloc(size, 8).is_null());
-        assert!(alloc_zeroed(size, 8).is_null());
     }
 
     #[test]
@@ -859,13 +859,8 @@ mod tests {
         // to grow up to it), rules it out.
         taken.see(base - size - 4096, base - size);
         assert_eq!(taken.choice(), (false, Some(base + 2 * size)));
-    }
-
-    #[test]
-    fn an_unreadable_mapping_list_places_no_region() {
-        let (size, top) = (1usize << 30, 1usize << 47);
-        let fresh = || Candidates::new(top / 4 * 3, size, top / 2, top - top / 8);
-        assert_eq!(choose(fresh(), |_| true, || true), Ok(top / 4 * 3));
+        // An unreadable mapping list places no region.
+        assert_eq!(choose(fresh(), |_| true, || true), Ok(base));
         assert!(choose(fresh(), |_| false, || true).is_err());
         assert!(choose(fresh(), |_| false, || false).is_err());
     }
@@ -881,11 +876,5 @@ mod tests {
         ));
         host(Syscall::N_munmap, [mapped, page, 0, 0, 0, 0]);
         assert!(seen);
-    }
-
-    #[test]
-    fn a_guest_heap_block_is_not_the_arenas() {
-        let block = Box::new(0u64);
-        assert!(!contains(&*block as *const u64 as *const u8));
     }
 }

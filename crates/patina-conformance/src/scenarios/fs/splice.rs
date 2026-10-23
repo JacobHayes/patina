@@ -190,7 +190,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // The shim defines none of splice, tee and vmsplice, so their libc
     // spelling would be `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_splice,
         Syscall::N_tee,

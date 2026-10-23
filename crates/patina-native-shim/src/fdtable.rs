@@ -777,21 +777,12 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_table_holds_the_three_standard_descriptors() {
-        let table = table();
-        assert_eq!(table.open_numbers(), vec![0, 1, 2]);
-        assert_eq!(table.kind(0), Some(FdKind::Stdin));
-        assert_eq!(table.kind(1), Some(FdKind::Stdout));
-        assert_eq!(table.kind(2), Some(FdKind::Stderr));
-        assert_eq!(table.resolve(1).unwrap().handle, 1);
-        assert_eq!(table.resolve(2).unwrap().handle, 2);
-        assert_eq!(table.kind(3), None);
-        assert_eq!(table.kind(-1), None);
-    }
-
-    #[test]
     fn allocation_is_lowest_free_with_holes_reused() {
         let mut table = table();
+        assert_eq!(table.open_numbers(), vec![0, 1, 2]);
+        assert_eq!(table.kind(0), Some(FdKind::Stdin));
+        assert_eq!(table.kind(2), Some(FdKind::Stderr));
+        assert_eq!(table.resolve(2).unwrap().handle, 2);
         let a = table.install(FdKind::File, 10, O_READ, false).unwrap();
         let b = table.install(FdKind::File, 11, O_READ, false).unwrap();
         let c = table.install(FdKind::File, 12, O_READ, false).unwrap();
@@ -899,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reserved_number_is_neither_free_nor_open_until_installed() {
+    fn a_reserved_number_is_held_and_counted_until_installed() {
         let mut table = table();
         let reserved = table.reserve(false).unwrap();
         assert_eq!(reserved, 3);
@@ -917,11 +908,10 @@ mod tests {
             table.install(FdKind::File, 11, O_READ, false),
             Ok(abandoned)
         );
-    }
 
-    #[test]
-    fn close_range_leaves_a_reserved_number_held_and_marks_it_close_on_exec() {
-        let mut table = table();
+        // close_range leaves a reserved number held, and marks it
+        // close-on-exec for its install.
+        let mut table = GuestFdTable::new(RLIMIT_NOFILE, O_READ, O_WRITE, O_WRITE);
         let reserved = table.reserve(false).unwrap();
         assert_eq!(
             table.close_range(0, u32::MAX, 0).map(|closed| closed.len()),
@@ -933,10 +923,8 @@ mod tests {
             .unwrap();
         table.install_reserved(reserved, FdKind::Pipe, 20, O_READ);
         assert_eq!(table.cloexec(reserved), Ok(true));
-    }
 
-    #[test]
-    fn a_reservation_counts_against_the_limit() {
+        // A reservation counts against the limit.
         let mut table = GuestFdTable::new(4, O_READ, O_WRITE, O_WRITE);
         let reserved = table.reserve(false).unwrap();
         assert_eq!(table.reserve(false), Err(EMFILE));
@@ -1006,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn a_retained_description_outlives_its_numbers() {
+    fn a_retained_description_outlives_its_numbers_and_ids_are_never_reused() {
         let mut table = table();
         let fd = table.install(FdKind::File, 10, O_READ, false).unwrap();
         let desc = table.resolve(fd).unwrap().desc;
@@ -1026,16 +1014,7 @@ mod tests {
         );
         assert_eq!(table.release(desc), Err(EBADF));
         assert_eq!(table.retain(desc), Err(EBADF));
-    }
-
-    #[test]
-    fn description_ids_are_never_reused() {
-        let mut table = table();
-        let a = table.install(FdKind::File, 10, O_READ, false).unwrap();
-        let first = table.resolve(a).unwrap().desc;
-        table.close(a).unwrap();
-        let b = table.install(FdKind::File, 10, O_READ, false).unwrap();
-        assert_eq!(a, b);
-        assert_ne!(table.resolve(b).unwrap().desc, first);
+        // Description ids are never reused, even for the same number.
+        assert_ne!(table.resolve(fd).unwrap().desc, desc);
     }
 }

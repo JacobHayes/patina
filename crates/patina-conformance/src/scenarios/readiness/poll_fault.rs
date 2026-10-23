@@ -5,8 +5,8 @@
 //! ends the whole run (and a crash loses the captured event stream).
 //!
 //! glibc's wrapper cannot pass these shapes through, so the scenario runs
-//! through the kernel vehicles only. The generic (arm64) table has no `poll`
-//! row: there both issue `ppoll`.
+//! through the `syscall` vehicle only. The generic (arm64) table has no
+//! `poll` row: there it issues `ppoll`.
 
 use crate::catalog::{DEFAULTS, Scenario};
 use crate::probe::{Probe, neg};
@@ -50,6 +50,6 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(not(target_arch = "x86_64"))]
         Syscall::N_ppoll,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     ..DEFAULTS
 };

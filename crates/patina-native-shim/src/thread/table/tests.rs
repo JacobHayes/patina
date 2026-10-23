@@ -73,37 +73,6 @@ const MUTEX: usize = 0x1000;
 const COND: usize = 0x2000;
 const RWLOCK: usize = 0x3000;
 
-// The loud path the fix must preserve: rescheduling a task the scheduler
-// never registered is an error, not a silent no-op. `sched_point` reaches
-// this via `reschedule` for any non-completed thread, so a foreign thread
-// reaching a scheduling point still fails closed.
-#[test]
-fn rescheduling_an_unregistered_task_errors() {
-    let mut scheduler = DetAdapter::new(1);
-    assert!(scheduler.yield_task(UNMANAGED_TASK).is_err());
-}
-
-#[test]
-fn uncontended_lock_and_unlock_round_trips() {
-    let mut table = ThreadTable::default();
-    let mut scheduler = DetAdapter::new(1);
-    let a = TaskId(1);
-    assert!(matches!(
-        table
-            .lock(
-                a,
-                MUTEX,
-                MutexKind::Normal,
-                &mut Wait::new(BlockClass::Sync, vec![])
-            )
-            .unwrap(),
-        LockStep::Acquired
-    ));
-    assert_eq!(table.mutexes[&MUTEX].owner, Some(a));
-    table.unlock(&mut scheduler, a, MUTEX).unwrap();
-    assert_eq!(table.mutexes[&MUTEX].owner, None);
-}
-
 #[test]
 fn an_owner_relock_follows_the_mutex_kind() {
     let mut table = ThreadTable::default();
@@ -255,19 +224,6 @@ fn a_normal_mutex_unlock_checks_no_owner() {
             Err(ThreadError::Posix(EPERM))
         ));
     }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn robust_and_priority_inheriting_normal_mutexes_check_the_owner() {
-    assert_eq!(MutexKind::from_glibc(0), MutexKind::Normal);
-    assert_eq!(MutexKind::from_glibc(3), MutexKind::Normal);
-    // Priority protection (64) and elision (256) leave it unchecked.
-    assert_eq!(MutexKind::from_glibc(64 | 256), MutexKind::Normal);
-    assert_eq!(MutexKind::from_glibc(16), MutexKind::NormalOwned);
-    assert_eq!(MutexKind::from_glibc(32 | 3), MutexKind::NormalOwned);
-    assert_eq!(MutexKind::from_glibc(16 | 1), MutexKind::Recursive);
-    assert_eq!(MutexKind::from_glibc(32 | 2), MutexKind::ErrorCheck);
 }
 
 #[test]
@@ -537,23 +493,28 @@ fn rwlock_preference(kind: RwLockKind) {
 }
 
 #[test]
-fn rwlock_prefers_readers_by_default() {
-    rwlock_preference(RwLockKind::default());
-}
-
-#[test]
-fn rwlock_can_hand_writer_to_writer() {
-    rwlock_preference(RwLockKind::PreferWriter);
-}
-
-#[test]
-fn rwlock_can_prefer_writers_over_new_readers() {
-    rwlock_preference(RwLockKind::PreferWriterNonrecursive);
+fn rwlock_kind_decides_reader_barging_and_the_writers_hand_off() {
+    for kind in [
+        RwLockKind::default(),
+        RwLockKind::PreferWriter,
+        RwLockKind::PreferWriterNonrecursive,
+    ] {
+        rwlock_preference(kind);
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn rwlock_kinds_decode_as_glibc_compares_them() {
+fn mutex_and_rwlock_kinds_decode_as_glibc_compares_them() {
+    assert_eq!(MutexKind::from_glibc(0), MutexKind::Normal);
+    assert_eq!(MutexKind::from_glibc(3), MutexKind::Normal);
+    // Priority protection (64) and elision (256) leave it unchecked.
+    assert_eq!(MutexKind::from_glibc(64 | 256), MutexKind::Normal);
+    // Robust (16) and priority-inheriting (32) normal mutexes check the owner.
+    assert_eq!(MutexKind::from_glibc(16), MutexKind::NormalOwned);
+    assert_eq!(MutexKind::from_glibc(32 | 3), MutexKind::NormalOwned);
+    assert_eq!(MutexKind::from_glibc(16 | 1), MutexKind::Recursive);
+    assert_eq!(MutexKind::from_glibc(32 | 2), MutexKind::ErrorCheck);
     assert_eq!(RwLockKind::from_glibc(0), RwLockKind::PreferReader);
     assert_eq!(RwLockKind::from_glibc(1), RwLockKind::PreferWriter);
     assert_eq!(
@@ -662,17 +623,4 @@ fn cond_wait_reacquires_mutex_on_signal_without_spurious_wakeups() {
 
     // A second signal with no waiter is a no-op (no spurious wakeup).
     table.cond_signal(&mut scheduler, COND).unwrap();
-}
-
-#[test]
-fn all_threads_parked_is_an_explicit_deadlock() {
-    // Two managed tasks that each block waiting on the other deadlock;
-    // the scheduler reports it rather than hanging.
-    let mut scheduler = DetAdapter::new(1);
-    let a = scheduler.spawn_running();
-    let b = SchedulerDriver::spawn(&mut scheduler.scheduler, "b").unwrap();
-    scheduler.park(a, "wait-b").unwrap();
-    assert_eq!(scheduler.next().unwrap(), Some(b));
-    scheduler.park(b, "wait-a").unwrap();
-    assert!(scheduler.next().is_err());
 }

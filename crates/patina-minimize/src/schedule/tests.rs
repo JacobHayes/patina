@@ -6,7 +6,7 @@ use patina_dst_trace::RunMetadata;
 use std::convert::Infallible;
 
 #[test]
-fn schedule_reduction_collapses_a_ping_pong_into_longer_runs() {
+fn schedule_reduction_collapses_a_ping_pong_into_longer_runs_at_a_fixed_point() {
     let bundle = TraceBundle::new(
         RunMetadata::new(1, "fixture", 0, "patina"),
         vec![
@@ -33,6 +33,13 @@ fn schedule_reduction_collapses_a_ping_pong_into_longer_runs() {
     // Positions and count never change; only scheduler outcomes are rewritten.
     assert_eq!(reduced.timelines[0].decisions.len(), 4);
     reduced.validate().unwrap();
+    // The reduction is a fixed point: a second pass changes nothing.
+    let twice = reduce_schedule(&reduced, &mut |candidate: &TraceBundle| {
+        let tasks = selected_tasks(&candidate.timelines[0]);
+        Ok::<_, Infallible>(tasks.contains(&1) && tasks.contains(&2))
+    })
+    .unwrap();
+    assert_eq!(twice, reduced);
 }
 
 #[test]
@@ -93,7 +100,7 @@ fn schedule_reduction_never_rewrites_a_protected_prefix() {
 }
 
 #[test]
-fn schedule_reduction_leaves_the_bundle_unchanged_when_every_rewrite_is_rejected() {
+fn schedule_reduction_keeps_the_original_when_no_rewrite_holds_and_refuses_a_passing_one() {
     let bundle = TraceBundle::new(
         RunMetadata::new(1, "fixture", 0, "patina"),
         vec![sched_event(0, 1), sched_event(1, 2), sched_event(2, 1)],
@@ -106,37 +113,7 @@ fn schedule_reduction_leaves_the_bundle_unchanged_when_every_rewrite_is_rejected
     })
     .unwrap();
     assert_eq!(reduced, bundle);
-}
 
-#[test]
-fn schedule_reduction_reaches_a_fixed_point() {
-    let bundle = TraceBundle::new(
-        RunMetadata::new(1, "fixture", 0, "patina"),
-        vec![
-            sched_event(0, 1),
-            sched_event(1, 2),
-            sched_event(2, 1),
-            sched_event(3, 2),
-        ],
-    );
-    let mut marker = |candidate: &TraceBundle| {
-        let tasks = selected_tasks(&candidate.timelines[0]);
-        Ok::<_, Infallible>(tasks.contains(&1) && tasks.contains(&2))
-    };
-    let once = reduce_schedule(&bundle, &mut marker).unwrap();
-    let twice = reduce_schedule(&once, &mut marker).unwrap();
-    assert_eq!(
-        once, twice,
-        "a second pass changes nothing at the fixed point"
-    );
-}
-
-#[test]
-fn schedule_reduction_rejects_an_input_that_does_not_fail() {
-    let bundle = TraceBundle::new(
-        RunMetadata::new(1, "fixture", 0, "patina"),
-        vec![sched_event(0, 1)],
-    );
     let result = reduce_schedule(&bundle, &mut |_c: &TraceBundle| Ok::<_, Infallible>(false));
     assert!(matches!(result, Err(MinimizeError::OriginalDoesNotFail)));
 }

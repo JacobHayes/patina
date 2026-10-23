@@ -672,7 +672,7 @@ mod tests {
     /// slot is gone: no stack pointer is proof, since the handler may be
     /// suspended in a coroutine on any stack.
     #[test]
-    fn a_record_is_left_only_when_its_slot_is_overwritten() {
+    fn a_record_is_left_only_when_its_slot_is_overwritten_and_levels_alternate() {
         let mut words = [0u64; 4];
         let slot = words.as_mut_ptr() as usize;
         // SAFETY: a word of `words`.
@@ -686,12 +686,10 @@ mod tests {
         // SAFETY: as above.
         unsafe { (slot as *mut u64).write(0x5eee) };
         assert!(left(&record));
-    }
 
-    /// The registration names the highest level no running handler owns,
-    /// so a handler left and reentered from one place alternates two levels.
-    #[test]
-    fn the_registration_is_the_highest_free_level() {
+        // The registration names the highest level no running handler owns,
+        // so a handler left and reentered from one place alternates two
+        // levels.
         assert_eq!(free_level([].into_iter()), 0);
         assert_eq!(free_level([0].into_iter()), 1);
         assert_eq!(free_level([1].into_iter()), 0);

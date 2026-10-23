@@ -962,32 +962,19 @@ mod tests {
         )
     }
 
+    /// An unknown key or a value outside the flag's grammar is refused,
+    /// naming the key and its position in the file.
     #[test]
-    fn config_rejects_unknown_group_key_with_position() {
-        let error = parse("[groups.durability]\npathz = [\"src/**\"]\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("pathz"), "{error}");
-        assert!(error.contains("config.toml:2:1"), "{error}");
-    }
-
-    #[test]
-    fn defaults_reject_unknown_flag_key_with_position() {
-        let error = parse("[defaults.run]\nseeed = 1\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("seeed"), "{error}");
-        assert!(error.contains("config.toml:2:1"), "{error}");
-    }
-
-    #[test]
-    fn defaults_reject_bad_value_grammar_with_position() {
-        let error = parse("[defaults.run]\nseed = \"abc\"\n")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("seed"), "{error}");
-        assert!(error.contains("u64"), "{error}");
-        assert!(error.contains("config.toml:2:1"), "{error}");
+    fn config_errors_name_the_key_and_its_position() {
+        for (text, key) in [
+            ("[groups.durability]\npathz = [\"src/**\"]\n", "pathz"),
+            ("[defaults.run]\nseeed = 1\n", "seeed"),
+            ("[defaults.run]\nseed = \"abc\"\n", "seed"),
+        ] {
+            let error = parse(text).unwrap_err().to_string();
+            assert!(error.contains(key), "{error}");
+            assert!(error.contains("config.toml:2:1"), "{error}");
+        }
     }
 
     #[test]

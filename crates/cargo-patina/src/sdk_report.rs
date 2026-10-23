@@ -625,49 +625,6 @@ fn parse_knob(value: &str) -> Result<Option<i64>, String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_wave2_site_rows_with_file_line_identity() {
-        let parsed = parse_report_line(
-            "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_registered=2 \
-             site=commit|fault|a1|e3|f2|r1|s0|v0|k-|@src/main.rs:9 \
-             site=batch|knob|a1|e0|f0|r1|s0|v0|k42|@src/main.rs:4",
-        )
-        .unwrap();
-        assert_eq!(parsed.enabled, Some(true));
-        assert_eq!(parsed.sites.len(), 2);
-        assert_eq!(parsed.sites[0].label, "commit");
-        assert_eq!(parsed.sites[0].site, "src/main.rs:9");
-        assert_eq!(parsed.sites[0].fires, 2);
-        assert_eq!(parsed.sites[1].knob, Some(42));
-    }
-
-    #[test]
-    fn declared_sites_round_trip_as_zero_registered_rows() {
-        let line = "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=2 \
-             declared_site=never|reachable|@src/main.rs:9 \
-             declared_site=maybe|sometimes|@src/main.rs:10 \
-             site=maybe|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:10";
-        let parsed = parse_report_line(line).unwrap();
-        assert_eq!(parsed.declared_sites.len(), 2);
-        assert_eq!(parsed.declared_sites[0].label, "never");
-        assert_eq!(parsed.sites.len(), 1);
-
-        let mut tally = CoverageTally::default();
-        tally.observe_generation(0, 7, line).unwrap();
-        let never = &tally.sites["never"];
-        assert_eq!(never.kind, "reachable");
-        assert_eq!(never.registered_gens, 0);
-        assert_eq!(never.reachable_runs, 0);
-        assert_eq!(never.first_registered_gen, None);
-        let maybe = &tally.sites["maybe"];
-        assert_eq!(maybe.registered_gens, 1);
-        assert_eq!(maybe.evals, 1);
-
-        let json = tally.to_json();
-        let loaded = CoverageTally::from_json(&json).unwrap();
-        assert_eq!(loaded, tally);
-    }
-
     /// Every ordered pair of awkward fragments, so each meets every other at
     /// both ends of a label.
     fn awkward_labels() -> Vec<String> {
@@ -752,17 +709,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(declared, expected);
         assert_eq!(evaluated, expected);
-        assert!(parsed.sites.iter().all(|site| site.knob == Some(-7)));
+        assert!(
+            parsed
+                .sites
+                .iter()
+                .all(|site| site.knob == Some(-7) && site.fires == 1 && site.evals == 3)
+        );
     }
 
     #[test]
-    fn malformed_label_escapes_fail_loudly() {
+    fn malformed_rows_fail_loudly() {
         let well_formed = "PATINA_SDK_REPORT encoding=escaped enabled=1 declared_site=ok|reachable|@src/main.rs:3";
         assert!(parse_report_line(well_formed).is_ok());
         for bad_label in ["dangling\\", "unknown\\q"] {
             let line = well_formed.replace("=ok|", &format!("={bad_label}|"));
             assert!(parse_report_line(&line).is_err(), "{line:?} must not parse");
         }
+        // A site row without its file:line identity is refused, both as a line
+        // and as a campaign observation.
+        let short_row =
+            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-";
+        assert!(parse_report_line(short_row).is_err());
+        assert!(
+            CoverageTally::default()
+                .observe_generation(0, 1, short_row)
+                .is_err()
+        );
     }
 
     #[test]
@@ -784,18 +756,6 @@ mod tests {
             assert!(parse_report_line(&late).is_err(), "{late:?}");
         }
         assert!(parse_report_line("PATINA_SDK_REPORT encoding=literal enabled=1").is_err());
-    }
-
-    #[test]
-    fn rejects_legacy_site_rows_without_file_line_identity() {
-        let error = parse_report_line(
-            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=commit|fault|a1|e3|f2|r1|s0|v0|k-",
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("expected 10 pipe-separated fields"),
-            "unexpected error: {error}"
-        );
     }
 
     #[test]
@@ -867,21 +827,31 @@ mod tests {
         assert_eq!(source.kind, "campaign");
         assert_eq!(source.generations_observed, 2);
         assert_eq!(source.sites["x"].first_satisfied_seed, Some(456));
-    }
+        // Declared sites that never registered round-trip as zero-registered rows.
+        {
+            let line = "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=2 \
+             declared_site=never|reachable|@src/main.rs:9 \
+             declared_site=maybe|sometimes|@src/main.rs:10 \
+             site=maybe|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:10";
+            let parsed = parse_report_line(line).unwrap();
+            assert_eq!(parsed.declared_sites.len(), 2);
+            assert_eq!(parsed.declared_sites[0].label, "never");
+            assert_eq!(parsed.sites.len(), 1);
 
-    #[test]
-    fn malformed_rows_fail_loudly() {
-        let mut tally = CoverageTally::default();
-        let error = tally
-            .observe_generation(
-                0,
-                1,
-                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
-            )
-            .unwrap_err();
-        assert!(
-            error.contains("expected 10 pipe-separated fields"),
-            "{error}"
-        );
+            let mut tally = CoverageTally::default();
+            tally.observe_generation(0, 7, line).unwrap();
+            let never = &tally.sites["never"];
+            assert_eq!(never.kind, "reachable");
+            assert_eq!(never.registered_gens, 0);
+            assert_eq!(never.reachable_runs, 0);
+            assert_eq!(never.first_registered_gen, None);
+            let maybe = &tally.sites["maybe"];
+            assert_eq!(maybe.registered_gens, 1);
+            assert_eq!(maybe.evals, 1);
+
+            let json = tally.to_json();
+            let loaded = CoverageTally::from_json(&json).unwrap();
+            assert_eq!(loaded, tally);
+        }
     }
 }

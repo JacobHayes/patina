@@ -180,9 +180,10 @@ pub(super) fn sys_getdents(fd: i64, dirp: u64, count: u64) -> i64 {
 mod tests {
     use super::*;
 
+    /// The legacy x86_64 rows that are not their modern twin's alias.
     #[test]
-    fn dup2_diverges_from_dup3_only_on_equal_fds() {
-        // The kernel-exact divergence: dup2(fd, fd) is a validating no-op that
+    fn legacy_rows_validate_as_the_kernel_does() {
+        // dup2's kernel-exact divergence: dup2(fd, fd) is a validating no-op that
         // returns fd, whereas dup3(fd, fd, 0) is -EINVAL. RED: routing legacy
         // `dup2` straight through the dup3 handler (or vice versa) would turn a
         // valid stdio dup2(1,1) into -EINVAL, breaking any raw dup2-based fd
@@ -202,10 +203,7 @@ mod tests {
         assert_eq!(sys_dup3(0, 901, 0o4000), -EINVAL);
         // A chosen number well above the table is EBADF.
         assert_eq!(sys_dup3(0, 1 << 20, 0), -EBADF);
-    }
 
-    #[test]
-    fn epoll_create_rejects_nonpositive_size_like_the_kernel() {
         // `epoll_create(size)` ignores `size` since 2.6.8 but still rejects
         // `size <= 0` with -EINVAL before creating. RED: dropping the guard would
         // let epoll_create(0) fall through to epoll_create1 and succeed, diverging
@@ -213,10 +211,8 @@ mod tests {
         // end-to-end by the epoll validate leg.)
         assert_eq!(sys_epoll_create(0), -EINVAL);
         assert_eq!(sys_epoll_create(0xFFFF_FFFF), -EINVAL); // reads as int -1
-    }
 
-    #[test]
-    fn poll_validates_buffers_and_descriptor_limit_before_waiting() {
+        // poll validates its buffer and the descriptor limit before waiting.
         assert_eq!(sys_poll(0, 1, -1), -EFAULT);
         assert_eq!(sys_poll(0, 1025, 0), -EINVAL);
     }

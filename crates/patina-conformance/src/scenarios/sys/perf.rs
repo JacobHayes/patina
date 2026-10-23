@@ -78,7 +78,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // glibc has no wrapper for the row: the libc spelling would be
     // `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[Syscall::N_perf_event_open],
     needs: &[Need::Unprivileged, Need::RestrictedPerf],
     ..DEFAULTS

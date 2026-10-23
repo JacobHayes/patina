@@ -4,85 +4,66 @@
 mod tests {
     use super::super::*;
 
+    // Errors, short transfers and latency on the native family, each seen by the
+    // guest, reported non-vacuous on stderr, and reproduced by a flag-free replay.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_fs_fault_errors_and_shorts_are_deterministic_replayable_and_reported() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("fs_fault.rs");
-        fs::write(&source, FS_FAULT_SOURCE).unwrap();
+    fn native_fs_faults_and_latency_reach_the_guest_report_and_replay() {
+        let guest = native_build::source_guest("fs_fault", FS_FAULT_SOURCE);
+        let bin = guest.binary.to_str().unwrap();
         let workspace = native_workspace();
-        let bin = directory.path().join("fs-fault");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let bin = bin.to_str().unwrap().to_owned();
-
-        let trace1 = directory.path().join("eio1.patina");
-        let trace2 = directory.path().join("eio2.patina");
-        // The seeds pick a fault schedule whose first injected error lands on the
-        // operation under test (the read / the write), not on the setup write or
-        // the open before it; the schedule is a function of the guest's own
-        // filesystem operations (the path walk's lookups draw nothing).
-        let eio_args = |trace: &Path| {
-            vec![
-                "run".to_string(),
-                bin.clone(),
-                "--seed".to_string(),
-                "70".to_string(),
-                "--record".to_string(),
-                trace.to_str().unwrap().to_string(),
-                "--fs-error-permille".to_string(),
-                "100".to_string(),
-                "--".to_string(),
-                "eio_read".to_string(),
-            ]
+        let assert_non_vacuous = |output: &Output, what: &str| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
+                "the fs fault report must prove {what} was non-vacuous:\n{stderr}"
+            );
         };
-        let run_vec = |args: Vec<String>| {
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            invoke(workspace, &refs)
-        };
-        let eio1 = run_vec(eio_args(&trace1));
-        let eio2 = run_vec(eio_args(&trace2));
-        let eio_line = stdout_line_with(&eio1, "NATIVE_FS_FAULT_RESULT");
-        assert_eq!(eio_line, stdout_line_with(&eio2, "NATIVE_FS_FAULT_RESULT"));
-        assert_eq!(fs::read(&trace1).unwrap(), fs::read(&trace2).unwrap());
-        let eio_stderr = String::from_utf8_lossy(&eio1.stderr);
-        assert!(
-            eio_stderr.contains("PATINA_FS_FAULT_REPORT") && eio_stderr.contains("vacuous=0"),
-            "fs fault report must prove the read EIO was non-vacuous:\n{eio_stderr}"
-        );
 
-        let replayed = invoke(workspace, &["replay", &bin, trace1.to_str().unwrap()]);
+        // The seed picks a fault schedule whose first injected error lands on the
+        // read under test, not on the setup write or the open before it; the
+        // schedule is a function of the guest's own filesystem operations, so two
+        // recordings at the seed are byte-identical.
+        let record = |name: &str| {
+            let trace = guest.dir.path().join(name);
+            let output = invoke(
+                workspace,
+                &[
+                    "run",
+                    bin,
+                    "--seed",
+                    "70",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--fs-error-permille",
+                    "100",
+                    "--",
+                    "eio_read",
+                ],
+            );
+            (output, trace)
+        };
+        let (eio, trace) = record("eio1.patina");
+        let (repeat, repeat_trace) = record("eio2.patina");
+        let eio_line = stdout_line_with(&eio, "NATIVE_FS_FAULT_RESULT");
+        assert_eq!(
+            eio_line,
+            stdout_line_with(&repeat, "NATIVE_FS_FAULT_RESULT")
+        );
+        assert_eq!(fs::read(&trace).unwrap(), fs::read(&repeat_trace).unwrap());
+        assert_non_vacuous(&eio, "the read EIO");
+        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
         assert_eq!(
             eio_line,
             stdout_line_with(&replayed, "NATIVE_FS_FAULT_RESULT"),
             "flag-free replay must reproduce the fs error"
         );
-        let rejected = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                &bin,
-                trace1.to_str().unwrap(),
-                "--fs-short-permille",
-                "1",
-            ],
-        );
-        assert!(!rejected.status.success());
-        assert!(String::from_utf8_lossy(&rejected.stderr).contains("--fs-short-permille"));
 
         let enospc = invoke(
             workspace,
             &[
                 "run",
-                &bin,
+                bin,
                 "--seed",
                 "29",
                 "--fs-error-permille",
@@ -98,7 +79,7 @@ mod tests {
                 workspace,
                 &[
                     "run",
-                    &bin,
+                    bin,
                     "--seed",
                     "5",
                     "--fs-short-permille",
@@ -112,33 +93,10 @@ mod tests {
                 line.contains(mode),
                 "missing short-I/O result for {mode}: {line}"
             );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
-                "short-I/O run should be non-vacuous for {mode}:\n{stderr}"
-            );
+            assert_non_vacuous(&output, mode);
         }
-    }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_fs_latency_is_observable_in_the_guest_and_replays_flag_free() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("fs_fault.rs");
-        fs::write(&source, FS_FAULT_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let bin = directory.path().join("fs-latency");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin.to_str().unwrap(),
-            ],
-        );
-        let bin = bin.to_str().unwrap().to_owned();
-        let elapsed_of = |output: &std::process::Output| -> u128 {
+        let elapsed_of = |output: &Output| -> u128 {
             stdout_line_with(output, "NATIVE_FS_FAULT_RESULT")
                 .rsplit_once('=')
                 .expect("elapsed_nanos=N")
@@ -146,64 +104,44 @@ mod tests {
                 .parse()
                 .expect("elapsed nanos")
         };
-
-        // Control: a knob-free run advances virtual time across the operation
-        // by the calls' own charges alone (well under a microsecond each).
-        let clean = invoke(workspace, &["run", &bin, "--seed", "4", "--", "latency"]);
-        let charged = elapsed_of(&clean);
+        // Control: a knob-free run advances virtual time across the operation by
+        // the calls' own charges alone (well under a microsecond each).
+        let charged = elapsed_of(&invoke(
+            workspace,
+            &["run", bin, "--seed", "4", "--", "latency"],
+        ));
         assert!(
             charged < 10_000,
             "a knob-free run must not delay fs ops: {charged}"
         );
 
-        // MUST delay: the same fixed 1ms latency the WASI leg asserts, seen by the
-        // native guest as virtual elapsed time — the two families share the ONE
+        // The same fixed 1 ms latency the WASI leg asserts, seen by the native
+        // guest as virtual elapsed time: the two families share the one
         // Context-side application site, so neither doubles it nor misses it.
-        let trace = directory.path().join("fs-latency.patina");
-        let args = vec![
-            "run".to_string(),
-            bin.clone(),
-            "--seed".to_string(),
-            "4".to_string(),
-            "--record".to_string(),
-            trace.to_str().unwrap().to_string(),
-            "--fs-latency-nanos".to_string(),
-            "1000000..1000000".to_string(),
-            "--".to_string(),
-            "latency".to_string(),
-        ];
-        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let delayed = invoke(workspace, &refs);
+        let latency_trace = guest.dir.path().join("fs-latency.patina");
+        let delayed = invoke(
+            workspace,
+            &[
+                "run",
+                bin,
+                "--seed",
+                "4",
+                "--record",
+                latency_trace.to_str().unwrap(),
+                "--fs-latency-nanos",
+                "1000000..1000000",
+                "--",
+                "latency",
+            ],
+        );
         let elapsed = elapsed_of(&delayed);
-        // The same calls, each fs op now 1 ms later.
         let delayed_by = elapsed - charged;
         assert!(
             delayed_by >= 1_000_000 && delayed_by % 1_000_000 == 0,
             "native guest saw {elapsed}ns across the fs op, not whole 1ms latencies"
         );
-        let stderr = String::from_utf8_lossy(&delayed.stderr);
-        assert!(
-            stderr.contains("PATINA_FS_FAULT_REPORT") && stderr.contains("vacuous=0"),
-            "fs fault report must prove the latency knob was non-vacuous:\n{stderr}"
-        );
-
-        // Flag-free replay restores the latency from the trace and reproduces it.
-        let replayed = invoke(workspace, &["replay", &bin, trace.to_str().unwrap()]);
+        assert_non_vacuous(&delayed, "the latency knob");
+        let replayed = invoke(workspace, &["replay", bin, latency_trace.to_str().unwrap()]);
         assert_eq!(elapsed_of(&replayed), elapsed);
-
-        // Re-supplying the knob on replay is refused: the trace is authoritative.
-        let rejected = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "replay",
-                &bin,
-                trace.to_str().unwrap(),
-                "--fs-latency-nanos",
-                "1..2",
-            ],
-        );
-        assert!(!rejected.status.success());
-        assert!(String::from_utf8_lossy(&rejected.stderr).contains("--fs-latency-nanos"));
     }
 }

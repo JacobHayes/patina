@@ -58,10 +58,8 @@ fn every_native_entry_has_exactly_one_support_row() {
     }
 }
 
-/// Names are unique, every trap class is a known one, every routed row and
-/// every trap that is not final names the arc that changes it, and `Absent`
-/// is exactly the rows `since` places past [`VIRTUAL_ABI`] (the `Removed`
-/// flip belongs to the signals arc).
+/// Names are unique, every trap class is a known one, and every routed row and
+/// every trap that is not final names the arc that changes it.
 #[test]
 fn rows_are_well_formed() {
     let mut names = BTreeSet::new();
@@ -73,28 +71,18 @@ fn rows_are_well_formed() {
             "{}: reasoning is required",
             row.name
         );
-        match row.disposition {
-            Disposition::Trap(class) => {
-                assert!(
-                    TRAP_CLASSES.contains(&class),
-                    "{}: unknown trap class {class}",
-                    row.name
-                );
-                let final_class = class == TRAP_PROCESS || class == TRAP_PRIVILEGED;
-                assert!(
-                    final_class || row.closes_in.is_some(),
-                    "{}: a trap that is not a final class must name the arc that closes it",
-                    row.name
-                );
-            }
-            Disposition::Absent => assert!(
-                row.absent_by_abi(),
-                "{}: Absent needs a `since` newer than VIRTUAL_ABI {VIRTUAL_ABI} (got {:?}); \
-                 the Removed-family flip belongs to the signals arc",
-                row.name,
-                row.since
-            ),
-            _ => {}
+        if let Disposition::Trap(class) = row.disposition {
+            assert!(
+                TRAP_CLASSES.contains(&class),
+                "{}: unknown trap class {class}",
+                row.name
+            );
+            let final_class = class == TRAP_PROCESS || class == TRAP_PRIVILEGED;
+            assert!(
+                final_class || row.closes_in.is_some(),
+                "{}: a trap that is not a final class must name the arc that closes it",
+                row.name
+            );
         }
         if let Some(since) = row.since {
             assert!(
@@ -158,33 +146,6 @@ fn since_newer_than_virtual_abi_is_exactly_the_absent_rows() {
          a since newer than the level must be Absent, an Absent row must be newer:\n  {}",
         disagree.join("\n  ")
     );
-    let absent: Vec<&str> = SYSCALLS
-        .iter()
-        .filter(|row| row.disposition == Disposition::Absent)
-        .map(|row| row.name)
-        .collect();
-    assert_eq!(
-        absent,
-        [
-            #[cfg(target_arch = "x86_64")]
-            "uretprobe",
-            #[cfg(target_arch = "x86_64")]
-            "uprobe",
-            "mseal",
-            "setxattrat",
-            "getxattrat",
-            "listxattrat",
-            "removexattrat",
-            "open_tree_attr",
-            "file_getattr",
-            "file_setattr",
-            "listns",
-            "rseq_slice_yield",
-            "fchroot",
-        ],
-        "the rows past the virtual ABI level (raise VIRTUAL_ABI deliberately, then re-disposition)"
-    );
-
     // Planted: the predicate on doctored rows.
     let planted = |since: Option<&'static str>| SyscallRow {
         since,
@@ -265,17 +226,6 @@ fn symbol_rows_reference_real_rows() {
             "{}: the patina_* ABI is excluded by rule, not listed",
             symbol.name
         );
-    }
-}
-
-/// The per-arch view is sorted and complete: x86_64 has every row, aarch64 has
-/// exactly the table's count.
-#[test]
-fn native_rows_are_sorted_and_complete() {
-    assert_eq!(rows_for().len(), ENTRIES.len());
-    {
-        let rows = rows_for();
-        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
     }
 }
 

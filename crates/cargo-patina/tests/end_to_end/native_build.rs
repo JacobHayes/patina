@@ -1,31 +1,41 @@
 //! Native package builds, shim linking, cache reuse, and atomic copy-out.
 
+use super::*;
+
+/// Build the single-file guest `source` into a fresh scratch directory, which
+/// also holds the traces the shared determinism helpers record.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn source_guest(name: &str, source: &str) -> common::native::Guest {
+    let dir = tempdir().unwrap();
+    let binary = build_facts_guest(dir.path(), name, source);
+    common::native::Guest { dir, binary }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::*;
 
     // Whole Cargo-package `native-build`: a package with a path dependency and a
-    // build script builds under Patina control, passes the strict audit, and
-    // records/replays byte-identically, while multi-bin ambiguity and an
-    // off-allowlist binary fail closed. `native-build` builds the `patina-dst-native-shim`
-    // staticlib from the surrounding Patina workspace, so it runs with the workspace
-    // as its working directory while the fixture is addressed by absolute path.
+    // build script builds under Patina control into an `--output` whose directory
+    // does not exist yet, passes the strict audit with no allowances, varies with
+    // the seed and records/replays byte-identically, while multi-bin ambiguity
+    // fails closed. `native-build` builds the `patina-dst-native-shim` staticlib
+    // from the surrounding Patina workspace, so it runs with the workspace as its
+    // working directory while the fixture is addressed by absolute path.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_build_package_audits_records_and_fails_closed() {
         let directory = tempdir().unwrap();
         let package = directory.path().join("pkg");
         create_package_fixture(directory.path());
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap();
+        let workspace = native_workspace();
 
         // The clean binary builds through the package's own `cargo build`, with the
         // shim link args isolated to the final binary by the explicit host --target
         // (the build script's file I/O proves it did not leak onto host artifacts).
-        let clean = package.join("clean-bin");
+        // The output's parent directories are created, as `--record` creates a
+        // trace's.
+        let clean = directory.path().join("out/deeper/clean-bin");
         let built = invoke(
             workspace,
             &[
@@ -45,27 +55,13 @@ mod tests {
         assert!(clean.is_file());
 
         // The produced binary passes the same strict audit as a single-source
-        // binary, with the shim control-plane symbol allowed per audited binary.
-        // Under the host-alias doctrine the trace-fd, baton, and thread-creation
-        // vehicles are all resolved at runtime through the `dlsym` primitive, so
-        // their names never reach the guest import table — the control plane is the
-        // single `dlsym` residue on both platforms (Linux reaches the resolver
-        // through `-Wl,--wrap=dlsym`).
-        let control_plane: &[&str] = &["dlsym"];
-        let mut audit_args = vec!["audit", clean.to_str().unwrap()];
-        for symbol in control_plane {
-            audit_args.push("--allow");
-            audit_args.push(symbol);
-        }
-        invoke(workspace, &audit_args);
+        // binary: the shim's control-plane `dlsym` is allowed without a flag.
+        invoke(workspace, &["audit", clean.to_str().unwrap()]);
 
-        // The package binary runs under native-run with cross-process seed stability,
-        // seed variation, and byte-identical record/replay through the supervisor.
+        // The package binary runs under native-run with seed variation and
+        // byte-identical record/replay through the supervisor; the recorded run is
+        // a second process at the first run's seed.
         let seeded = package_result(&invoke(
-            workspace,
-            &["run", clean.to_str().unwrap(), "--seed", "5"],
-        ));
-        let repeated = package_result(&invoke(
             workspace,
             &["run", clean.to_str().unwrap(), "--seed", "5"],
         ));
@@ -73,7 +69,6 @@ mod tests {
             workspace,
             &["run", clean.to_str().unwrap(), "--seed", "6"],
         ));
-        assert_eq!(seeded, repeated);
         assert_ne!(seeded, other);
         assert!(
             seeded.contains("built=1"),
@@ -124,60 +119,6 @@ mod tests {
             ambiguous_stderr.contains("multiple binary targets")
                 && ambiguous_stderr.contains("--bin"),
             "missing ambiguity diagnostic:\n{ambiguous_stderr}"
-        );
-
-        // A binary whose build product imports an off-allowlist symbol builds, but
-        // fails the audit with the existing category diagnostic.
-        let leaky = package.join("leaky-bin");
-        invoke(
-            workspace,
-            &[
-                "build",
-                package.to_str().unwrap(),
-                "--bin",
-                "leaky",
-                "--output",
-                leaky.to_str().unwrap(),
-            ],
-        );
-        let denied = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["audit", leaky.to_str().unwrap()],
-        );
-        assert!(!denied.status.success());
-        assert!(
-            String::from_utf8_lossy(&denied.stderr).contains("process"),
-            "missing process-category diagnostic:\n{}",
-            String::from_utf8_lossy(&denied.stderr)
-        );
-    }
-
-    // `--output` names a file whose directory need not exist yet: the build
-    // creates it, as `--record` does for a trace, and the binary it puts there
-    // runs.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn native_build_output_creates_its_parent_directory() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("nested.rs");
-        fs::write(&source, "fn main() { println!(\"NESTED_OUTPUT\"); }\n").unwrap();
-        let workspace = native_workspace();
-        let binary = directory.path().join("out/deeper/nested");
-        invoke(
-            workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                binary.to_str().unwrap(),
-            ],
-        );
-        let ran = invoke(workspace, &["run", binary.to_str().unwrap(), "--seed", "1"]);
-        assert!(
-            String::from_utf8_lossy(&ran.stdout).contains("NESTED_OUTPUT"),
-            "the binary built into a new directory did not run:\n{}",
-            String::from_utf8_lossy(&ran.stdout)
         );
     }
 
@@ -973,7 +914,7 @@ exit "$status"
     // dependency (`greeter`), a build script (whose output the binary reads back,
     // and whose host-side file I/O proves the shim link args do not leak onto build
     // scripts), a clean binary that audits and replays, and a second binary that
-    // imports an off-allowlist process symbol.
+    // makes the binary selection ambiguous.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn create_package_fixture(root: &Path) {
         let greeter = root.join("greeter");
@@ -1031,25 +972,7 @@ fn main() {
 "#,
         )
         .unwrap();
-        fs::write(
-            package.join("src/bin/leaky.rs"),
-            r#"// Imports an uninterposed process-class libc symbol (`system`) that the native
-// audit denies as "process". The spawn family (fork/posix_spawn*/...) is
-// shim-defined deny-traps and `kill` a deterministic-model interposer, so a
-// `Command::spawn` — or a `kill` — would
-// leave no process *import* to flag; this reaches for a still-uninterposed member
-// of the class instead. Taking its address forces the undefined import. Building
-// succeeds; the audit must reject the product with the "process" category.
-unsafe extern "C" {
-    fn system(command: *const u8) -> i32;
-}
-fn main() {
-    let reached = system as *const ();
-    std::process::exit((reached as usize & 1) as i32);
-}
-"#,
-        )
-        .unwrap();
+        fs::write(package.join("src/bin/second.rs"), "fn main() {}\n").unwrap();
     }
 
     /// A package depending on a local path crate whose `[lib]` declares

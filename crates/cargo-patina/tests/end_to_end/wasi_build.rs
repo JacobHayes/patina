@@ -4,39 +4,41 @@
 mod tests {
     use super::super::*;
 
+    // One package, built for wasip1 three ways. `build --target wasi` puts the
+    // module in Cargo's target directory, and `audit` and `run` both infer the WASI
+    // path from its `\0asm` magic. A WASI `--output` whose directory does not exist
+    // yet is created, as the native build does. `run <pkg> --target wasi` builds on
+    // the fly and runs the produced module, inferred by the shared resolution step.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn build_target_wasi_compiles_and_composes_with_audit_and_run() {
+    fn build_target_wasi_composes_with_audit_run_output_and_source_first_run() {
         if !wasm32_wasip1_installed() {
             eprintln!(
-                "skipping build_target_wasi_compiles_and_composes_with_audit_and_run: \
+                "skipping build_target_wasi_composes_with_audit_run_output_and_source_first_run: \
 wasm32-wasip1 target not installed"
             );
             return;
         }
         let directory = tempdir().unwrap();
         let package = directory.path().join("wasi-hello");
-        fs::create_dir_all(package.join("src")).unwrap();
-        fs::write(
-        package.join("Cargo.toml"),
-        "[package]\nname = \"wasi-hello\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-hello\"\npath = \"src/main.rs\"\n",
-    )
-    .unwrap();
-        fs::write(
-            package.join("src/main.rs"),
+        write_plain_package(
+            &package,
+            "wasi-hello",
             "fn main() { println!(\"WASI_HELLO\"); }\n",
-        )
-        .unwrap();
-
+        );
         let workspace = native_workspace();
-        let built = invoke(
+        let assert_hello = |ran: &Output, how: &str| {
+            assert!(
+                ran.status.success() && String::from_utf8_lossy(&ran.stdout).contains("WASI_HELLO"),
+                "{how}: unexpected wasi run output:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&ran.stdout),
+                String::from_utf8_lossy(&ran.stderr)
+            );
+        };
+
+        invoke(
             workspace,
             &["build", package.to_str().unwrap(), "--target", "wasi"],
-        );
-        assert!(
-            built.status.success(),
-            "build --target wasi failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&built.stdout),
-            String::from_utf8_lossy(&built.stderr)
         );
         let module = fixture_target_directory(&package).join("wasm32-wasip1/debug/wasi-hello.wasm");
         assert!(
@@ -44,39 +46,13 @@ wasm32-wasip1 target not installed"
             "missing wasm artifact at {}",
             module.display()
         );
-
-        // `audit` infers the WASI path from the `\0asm` magic and lists imports.
         invoke(workspace, &["audit", module.to_str().unwrap()]);
-        // `run` infers the WASI runner and executes `_start` deterministically.
-        let ran = invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
-        assert!(
-            String::from_utf8_lossy(&ran.stdout).contains("WASI_HELLO"),
-            "unexpected wasi run output:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stdout),
-            String::from_utf8_lossy(&ran.stderr)
+        assert_hello(
+            &invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]),
+            "the built module",
         );
-    }
 
-    // A WASI `--output` whose directory does not exist yet: the build creates
-    // it, as the native build does, and the module it puts there runs.
-    #[test]
-    fn build_target_wasi_output_creates_its_parent_directory() {
-        if !wasm32_wasip1_installed() {
-            eprintln!(
-                "skipping build_target_wasi_output_creates_its_parent_directory: \
-wasm32-wasip1 target not installed"
-            );
-            return;
-        }
-        let directory = tempdir().unwrap();
-        let package = directory.path().join("wasi-nested");
-        write_plain_package(
-            &package,
-            "wasi-nested",
-            "fn main() { println!(\"WASI_NESTED\"); }\n",
-        );
-        let workspace = native_workspace();
-        let module = directory.path().join("out/deeper/nested.wasm");
+        let nested = directory.path().join("out/deeper/nested.wasm");
         invoke(
             workspace,
             &[
@@ -85,43 +61,14 @@ wasm32-wasip1 target not installed"
                 "--target",
                 "wasi",
                 "--output",
-                module.to_str().unwrap(),
+                nested.to_str().unwrap(),
             ],
         );
-        let ran = invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
-        assert!(
-            String::from_utf8_lossy(&ran.stdout).contains("WASI_NESTED"),
-            "the module built into a new directory did not run:\n{}",
-            String::from_utf8_lossy(&ran.stdout)
+        assert_hello(
+            &invoke(workspace, &["run", nested.to_str().unwrap(), "--seed", "1"]),
+            "the module built into a new directory",
         );
-    }
 
-    // `run <pkg> --target wasi` builds the package for wasip1 on the fly and runs the
-    // produced module, inferred by the shared resolution step.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn run_source_package_target_wasi_on_the_fly() {
-        if !wasm32_wasip1_installed() {
-            eprintln!(
-                "skipping run_source_package_target_wasi_on_the_fly: wasm32-wasip1 not installed"
-            );
-            return;
-        }
-        let directory = tempdir().unwrap();
-        let package = directory.path().join("wasi-run-pkg");
-        fs::create_dir_all(package.join("src")).unwrap();
-        fs::write(
-        package.join("Cargo.toml"),
-        "[package]\nname = \"wasi-run-pkg\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"wasi-run-pkg\"\npath = \"src/main.rs\"\n",
-    )
-    .unwrap();
-        fs::write(
-            package.join("src/main.rs"),
-            "fn main() { println!(\"WASI_ON_THE_FLY\"); }\n",
-        )
-        .unwrap();
-
-        let workspace = native_workspace();
         let ran = invoke(
             workspace,
             &[
@@ -133,13 +80,7 @@ wasm32-wasip1 target not installed"
                 "1",
             ],
         );
-        assert!(
-            ran.status.success(),
-            "run --target wasi on the fly failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&ran.stdout),
-            String::from_utf8_lossy(&ran.stderr)
-        );
-        assert!(String::from_utf8_lossy(&ran.stdout).contains("WASI_ON_THE_FLY"));
+        assert_hello(&ran, "run --target wasi on the fly");
         let note = stdout_line_with(&ran, "PATINA_BUILD_ON_RUN");
         assert!(
             note.contains("target=wasi"),

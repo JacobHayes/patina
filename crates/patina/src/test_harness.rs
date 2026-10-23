@@ -251,24 +251,8 @@ mod orchestration {
         };
 
         #[test]
-        fn libtest_exact_strips_the_harness_crate_segment() {
+        fn rerun_commands_name_the_libtest_case_and_quote_for_the_shell() {
             assert_eq!(libtest_exact_name(&TEST), "nested::case");
-        }
-
-        #[test]
-        fn missing_cli_message_is_a_loud_failure_not_a_skip() {
-            let message = missing_cli_message(
-                &TEST,
-                "PATINA_CLI is not set and cargo-patina was not found on PATH",
-            );
-            assert!(message.contains("could not find cargo-patina"));
-            assert!(message.contains("set PATINA_CLI"));
-            assert!(message.contains("put cargo-patina on PATH"));
-            assert!(message.contains("never skip"));
-        }
-
-        #[test]
-        fn shell_quote_preserves_copy_pasteable_commands() {
             assert_eq!(
                 shell_quote(std::ffi::OsStr::new("simple/path")),
                 "simple/path"

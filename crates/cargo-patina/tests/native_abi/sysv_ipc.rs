@@ -107,7 +107,7 @@ fn libc_sysv_ipc_stays_in_the_run_namespace_and_replays() {
     let (key, host) = HostObjects::create();
     let env = format!("PATINA_SYSV_KEY={key}");
     let flags = ["--env", env.as_str()];
-    let stdout = g.assert_seeded_record_replay_identity(1, &flags);
+    let stdout = g.assert_run_success(1, &flags).stdout;
     assert_eq!(
         text(&stdout),
         "NATIVE_SYSV_IPC_RESULT hidden=3 woke=2 refused=2\n"

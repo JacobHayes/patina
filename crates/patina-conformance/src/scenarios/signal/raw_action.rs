@@ -12,6 +12,7 @@
 //! raised.
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::signals as support;
@@ -138,6 +139,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "signal/raw_action",
     run,
+    vehicles: Vehicle::ALL,
     covers: &[Syscall::N_getpid, Syscall::N_kill, Syscall::N_rt_sigaction],
     symbols: &["getpid", "kill", "sigaction", "syscall"],
     trace: Some(TraceFacts {

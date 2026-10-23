@@ -265,11 +265,7 @@ mod tests {
         expected.push("-Wl,--gc-sections");
         assert_eq!(split_quoted(extld), expected);
         assert_eq!(fields.len(), 2);
-    }
-
-    #[test]
-    fn a_quote_in_a_link_argument_is_refused() {
-        let error = go_ldflags(Path::new("/o/it's.o"), Path::new("/a/lib.a"), &[]);
-        assert!(error.is_err());
+        // A quote cannot be carried through the quoted field, so it is refused.
+        assert!(go_ldflags(Path::new("/o/it's.o"), Path::new("/a/lib.a"), &[]).is_err());
     }
 }

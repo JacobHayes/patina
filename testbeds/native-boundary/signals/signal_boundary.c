@@ -222,7 +222,6 @@ int main(int argc, char **argv) {
     }
     if (strncmp(argv[1], "fortify-", 8) == 0) fortify_failure(argv[1] + 8);
     if (strcmp(argv[1], "internal-c") == 0) fork();
-    if (strcmp(argv[1], "internal-rust") == 0) raw4(999999, 0, 0, 0, 0);
     if (strcmp(argv[1], "internal-guest-abort-handler") == 0) {
         /* An internal stop is the host's own abort: the guest's SIGABRT
          * handler (a runtime's, which makes raw syscalls) never runs. */

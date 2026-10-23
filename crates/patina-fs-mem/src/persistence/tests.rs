@@ -6,66 +6,6 @@ use patina_dst_abi::{ErrorCode, FsClock, FsEntryKind, FsNode, OpenFlags, XattrTa
 use patina_dst_driver_api::FsDriver;
 
 #[test]
-fn fifos_survive_a_restart_snapshot_with_their_mode_and_identity() {
-    let mut fs = MemFs::new();
-    fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666).unwrap();
-    fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o640).unwrap();
-    let before = fs.metadata("/tmp/pipe").unwrap();
-
-    let encoded = fs.export_snapshot().encode().unwrap();
-    let mut restored = MemFs::import_snapshot(&crate::FsSnapshot::decode(&encoded).unwrap());
-    let after = restored.metadata("/tmp/pipe").unwrap();
-    assert_eq!(after.kind, FsEntryKind::Fifo);
-    assert_eq!(after.mode, 0o640);
-    assert_eq!(after.ino, before.ino);
-    assert_eq!(restored.export_snapshot().encode().unwrap(), encoded);
-}
-
-/// A hard-linked FIFO is ONE node, and a restart snapshot has to say so:
-/// two names, one inode, link count 2 — otherwise the shim would key two
-/// pipe channels off what used to be one pipe.
-#[test]
-fn linked_fifos_survive_a_restart_snapshot_as_one_node() {
-    let mut fs = MemFs::new();
-    fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o600).unwrap();
-    fs.link(FsClock::EPOCH, "/tmp/pipe", "/tmp/alias").unwrap();
-    let before = fs.metadata("/tmp/pipe").unwrap();
-
-    let encoded = fs.export_snapshot().encode().unwrap();
-    let mut restored = MemFs::import_snapshot(&crate::FsSnapshot::decode(&encoded).unwrap());
-    let first = restored.metadata("/tmp/pipe").unwrap();
-    let second = restored.metadata("/tmp/alias").unwrap();
-    assert_eq!(first.ino, before.ino);
-    assert_eq!(second.ino, before.ino);
-    assert_eq!(first.nlink, 2);
-    assert_eq!(first.mode, 0o600);
-    assert_eq!(restored.export_snapshot().encode().unwrap(), encoded);
-}
-
-#[test]
-fn modes_survive_a_restart_snapshot() {
-    let mut fs = MemFs::new();
-    fs.create_directory(FsClock::EPOCH, "/state", 0o777)
-        .unwrap();
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/state/file",
-            OpenFlags::create_truncate_write(),
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    fs.set_mode(FsClock::EPOCH, "/state/file", 0o600).unwrap();
-    fs.set_mode(FsClock::EPOCH, "/state", 0o700).unwrap();
-
-    let encoded = fs.export_snapshot().encode().unwrap();
-    let mut restarted =
-        MemFs::import_snapshot(&FsSnapshot::decode(&encoded).expect("snapshot decodes"));
-    assert_eq!(restarted.metadata("/state/file").unwrap().mode, 0o600);
-    assert_eq!(restarted.metadata("/state").unwrap().mode, 0o700);
-}
-
-#[test]
 fn persistent_snapshot_drops_descriptions() {
     let mut fs = MemFs::new().with_file("/value", b"abc").unwrap();
     let first = fs
@@ -102,14 +42,31 @@ fn a_crash_model_restores_all_four_times_verbatim() {
     );
 }
 
+/// A restart snapshot carries every node kind with its mode, identity,
+/// links and attributes, and re-encodes to the same bytes. A hard-linked
+/// FIFO is one node with two names, or the shim would key two pipe
+/// channels off what used to be one pipe.
 #[test]
-fn nodes_links_and_attributes_survive_a_restart_snapshot() {
+fn nodes_modes_links_and_attributes_survive_a_restart_snapshot() {
     let mut fs = MemFs::new();
+    fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
+    let fd = fs
+        .open(
+            FsClock::EPOCH,
+            "/d/file",
+            OpenFlags::create_truncate_write(),
+        )
+        .unwrap();
+    fs.close(fd).unwrap();
+    fs.set_mode(FsClock::EPOCH, "/d/file", 0o600).unwrap();
+    fs.set_mode(FsClock::EPOCH, "/d", 0o700).unwrap();
+    fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o666).unwrap();
+    fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o640).unwrap();
+    fs.link(FsClock::EPOCH, "/tmp/pipe", "/tmp/alias").unwrap();
     fs.symlink(FsClock::EPOCH, "t", "/l").unwrap();
     fs.link(FsClock::EPOCH, "/l", "/l2").unwrap();
     fs.make_node(FsClock::EPOCH, "/s", FsNode::Socket, 0o600)
         .unwrap();
-    fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
     fs.set_xattr(
         FsClock::EPOCH,
         &XattrTarget::Path("/d".into()),
@@ -118,8 +75,20 @@ fn nodes_links_and_attributes_survive_a_restart_snapshot() {
         0,
     )
     .unwrap();
+    let pipe = fs.metadata("/tmp/pipe").unwrap();
+
     let encoded = fs.export_snapshot().encode().unwrap();
     let mut restored = FsSnapshot::decode(&encoded).unwrap().into_memfs();
+    assert_eq!(restored.metadata("/d/file").unwrap().mode, 0o600);
+    assert_eq!(restored.metadata("/d").unwrap().mode, 0o700);
+    for name in ["/tmp/pipe", "/tmp/alias"] {
+        let after = restored.metadata(name).unwrap();
+        assert_eq!(
+            (after.kind, after.mode, after.ino, after.nlink),
+            (FsEntryKind::Fifo, 0o640, pipe.ino, 2),
+            "{name}"
+        );
+    }
     assert_eq!(restored.metadata("/l2").unwrap().nlink, 2);
     assert_eq!(
         restored.metadata("/l").unwrap().ino,

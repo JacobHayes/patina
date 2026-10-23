@@ -120,8 +120,8 @@ Focused regression tests:
 
 - `cargo test -p patina-dst-runtime --lib swarm`
 - `cargo test -p patina-dst-trace swarm`
-- `cargo test -p cargo-patina --test end_to_end swarm_deselection_stays_coherent_with_fingerprint_and_metadata -- --nocapture`
-- `cargo test -p cargo-patina --test end_to_end campaign_with_swarm_and_buggify_has_no_coherence_aborts -- --nocapture`
+- `cargo test -p cargo-patina --test end_to_end swarm_deselection_stays_coherent_and_an_empty_draw_is_vacuous -- --nocapture`
+- `cargo test -p cargo-patina --test end_to_end campaign_catches_planted_liveness_bug_under_swarm_dedups_and_reproduces -- --nocapture`
 
 The landing gate for this runtime/trace-touching change is `mise run check`.
 

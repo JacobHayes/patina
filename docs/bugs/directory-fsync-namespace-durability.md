@@ -42,7 +42,7 @@ protocol from a missing-directory-fsync bug.
 Focused regression coverage:
 
 - `patina-dst-fs-mem::read_only_directory_open_supports_fstat_fsync_and_close_only`
-- `patina-dst-fs-crash::directory_fd_sync_commits_namespace_operations`
+- `patina-dst-fs-crash::a_new_entry_is_lost_without_a_parent_fsync_and_kept_with_one`
 - `patina-dst-wasi-host::directory_fd_sync_commits_namespace_durability`
 - `cargo-patina::native_directory_fsync_guards_namespace_durability_and_replays`
 

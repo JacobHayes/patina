@@ -9,7 +9,6 @@ use patina_dst_abi::{ClockKind, Operation, TaskId};
 use patina_dst_sched_det::{PctConfig, SchedulePolicy};
 use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
-use std::fs;
 
 use tempfile::tempdir;
 
@@ -97,15 +96,14 @@ fn run_worker(context: &mut Context, worker: TaskId, yields: u32) {
 }
 
 #[test]
-fn vacuous_worker_that_never_yields_is_flagged() {
+fn only_a_concurrent_worker_that_never_yields_is_flagged_vacuous() {
     // RED: a spawned worker that runs from first scheduled to completion with
-    // zero scheduling boundaries — like a lost-update race on an
-    // atomics-only RwLock fast path — must be reported as vacuous.
+    // zero scheduling boundaries (like a lost-update race on an atomics-only
+    // RwLock fast path) must be reported as vacuous.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let _main = context.task_spawn("main").unwrap();
     let worker = context.task_spawn("worker").unwrap();
     run_worker(&mut context, worker, 0);
-
     let diagnostics = context.schedule_diagnostics();
     assert!(diagnostics.had_concurrency());
     assert_eq!(diagnostics.vacuous, vec![worker]);
@@ -116,43 +114,23 @@ fn vacuous_worker_that_never_yields_is_flagged() {
         .expect("worker recorded");
     assert_eq!(stat.boundaries, 0);
     assert!(stat.vacuous);
-}
 
-#[test]
-fn worker_that_passes_a_boundary_is_not_flagged() {
     // GREEN: a worker that clears the scaffolding floor with real scheduling
-    // boundaries — like the `deadlock` mode's interposed mutex loop, which
-    // yields on every lock/unlock — is explorable and must NOT be flagged.
+    // boundaries is explorable and must NOT be flagged.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let _main = context.task_spawn("main").unwrap();
     let worker = context.task_spawn("worker").unwrap();
     run_worker(&mut context, worker, SCAFFOLDING_YIELD_FLOOR as u32 + 1);
-
     let diagnostics = context.schedule_diagnostics();
     assert!(diagnostics.had_concurrency());
-    assert!(
-        diagnostics.vacuous.is_empty(),
-        "worker cleared the scaffolding floor; must not be vacuous: {diagnostics:?}"
-    );
-    let stat = diagnostics
-        .tasks
-        .iter()
-        .find(|stat| stat.task == worker)
-        .expect("worker recorded");
-    assert!(stat.yields > SCAFFOLDING_YIELD_FLOOR);
-    assert!(!stat.vacuous);
-}
+    assert!(diagnostics.vacuous.is_empty(), "{diagnostics:?}");
 
-#[test]
-fn single_task_run_reports_no_concurrency() {
     // A run with only the initial task has no schedule to explore, so the
     // diagnostic stays silent.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let solo = context.task_spawn("main").unwrap();
-    let selected = context.scheduler_next().unwrap().unwrap();
-    assert_eq!(selected, solo);
+    assert_eq!(context.scheduler_next().unwrap(), Some(solo));
     context.task_complete(solo).unwrap();
-
     let diagnostics = context.schedule_diagnostics();
     assert!(!diagnostics.had_concurrency());
     assert!(diagnostics.vacuous.is_empty());
@@ -188,35 +166,6 @@ fn task_lifetime_and_completion_cause_are_annotated() {
     assert_eq!(main_stat.cause, TaskCompletionCause::LiveAtExit);
 }
 
-#[test]
-fn tcp_blocking_pattern_parks_and_wakes_deterministically() {
-    fn program(context: &mut Context) -> Result<(TaskId, TaskId, String), RuntimeError> {
-        let acceptor_task = context.task_spawn("acceptor")?;
-        let connector_task = context.task_spawn("connector")?;
-        let selected = context.scheduler_next()?.expect("a task is runnable");
-        let listener = context.net_tcp_listen("server", 1)?;
-        assert!(context.net_tcp_accept(listener)?.is_none());
-        context.task_park(selected, "tcp-accept")?;
-        let client = context.net_tcp_connect("client", "server")?;
-        context.task_wake(selected)?;
-        let accepted = context.net_tcp_accept(listener)?.unwrap();
-        context.net_close(client)?;
-        context.net_close(accepted.socket)?;
-        context.net_close(listener)?;
-        Ok((acceptor_task, connector_task, accepted.peer))
-    }
-
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("tcp-park.patina");
-    let mut record = Context::from_config(RuntimeConfig::record(12, &path, "tcp-v1")).unwrap();
-    let expected = program(&mut record).unwrap();
-    record.finish().unwrap();
-
-    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "tcp-v1")).unwrap();
-    assert_eq!(program(&mut replay).unwrap(), expected);
-    replay.finish().unwrap();
-}
-
 /// Drive the runtime the way the shim does: spawn two tasks, park each with
 /// a virtual-clock deadline, then let `scheduler_next` rescue the deadlock by
 /// advancing time and waking the earliest-due task. Returns the observed wake
@@ -244,34 +193,22 @@ fn timed_rescue(context: &mut Context) -> Result<Vec<(TaskId, u64)>, RuntimeErro
 }
 
 #[test]
-fn deadlock_rescue_advances_time_and_wakes_in_deadline_order() {
-    let mut context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
-    let wakes = timed_rescue(&mut context).unwrap();
+fn deadlock_rescue_advances_time_wakes_in_deadline_order_and_replays() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("timer.patina");
+    let mut record = Context::from_config(RuntimeConfig::record(9, &path, "timer-v1")).unwrap();
+    let wakes = timed_rescue(&mut record).unwrap();
+    record.finish().unwrap();
     // The task parked at 100 wakes first at virtual time 100, then the task
-    // parked at 200 wakes at 200 — deadline order, not registration order.
+    // parked at 200 wakes at 200: deadline order, not registration order.
     assert_eq!(wakes.len(), 2);
     assert_eq!(wakes[0].1, 100);
     assert_eq!(wakes[1].1, 200);
     assert_ne!(wakes[0].0, wakes[1].0);
-    context.finish().unwrap();
-}
-
-#[test]
-fn deadlock_rescue_records_and_replays_byte_identically() {
-    let directory = tempdir().unwrap();
-    let first = directory.path().join("timer-a.patina");
-    let second = directory.path().join("timer-b.patina");
-    for path in [&first, &second] {
-        let mut record = Context::from_config(RuntimeConfig::record(9, path, "timer-v1")).unwrap();
-        timed_rescue(&mut record).unwrap();
-        record.finish().unwrap();
-    }
-    // Two independent record processes with the same seed are byte-identical.
-    assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
 
     // Replay consumes every recorded SleepUntil/TaskWake/SchedulerNext event.
-    let mut replay = Context::from_config(RuntimeConfig::replay(&first, "timer-v1")).unwrap();
-    timed_rescue(&mut replay).unwrap();
+    let mut replay = Context::from_config(RuntimeConfig::replay(&path, "timer-v1")).unwrap();
+    assert_eq!(timed_rescue(&mut replay).unwrap(), wakes);
     replay.finish().unwrap();
 }
 
@@ -387,30 +324,6 @@ fn early_signal_wake_deregisters_timed_sleep() {
 }
 
 #[test]
-fn a_timed_park_with_no_other_runnable_task_rescues_itself() {
-    // Single-task program: the sleeper is the only task, so the very next
-    // `scheduler_next` deadlocks, the rescue advances time, and it wakes.
-    let mut context = Context::from_config(RuntimeConfig::seeded(3)).unwrap();
-    let task = context.task_spawn("only").unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    context
-        .task_park_timed(
-            task,
-            "sleep",
-            ClockKind::Monotonic,
-            DEFAULT_BOOT_ORIGIN_NANOS + 4_096,
-        )
-        .unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    assert_eq!(
-        context.now(ClockKind::Monotonic).unwrap(),
-        DEFAULT_BOOT_ORIGIN_NANOS + 4_096
-    );
-    assert!(context.take_expired_timeouts().contains(&task));
-    context.task_complete(task).unwrap();
-}
-
-#[test]
 fn a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer() {
     // Class pairing: `expire_due_timers` runs at registration as well as at
     // every clock advance, so the registry never holds a reached deadline and
@@ -452,26 +365,6 @@ fn a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer() {
         .unwrap();
     assert!(context.take_expired_timeouts().is_empty());
     assert!(context.has_future_deadline(waiter));
-}
-
-#[test]
-fn a_timed_park_without_a_clock_fails_before_parking() {
-    // Registration expiry reads the clock, so the missing driver must refuse
-    // the park before any scheduler state changes, not after it.
-    let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_scheduler(patina_dst_sched_det::DetScheduler::new(1))
-        .build()
-        .unwrap();
-    let task = context.task_spawn("sleeper").unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    assert!(
-        context
-            .task_park_timed(task, "sleep", ClockKind::Monotonic, 1)
-            .is_err()
-    );
-    // Still runnable: the scheduler selects it again.
-    context.task_yield(task).unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
 }
 
 /// A virtual clock whose reads fail while `failing` is set.

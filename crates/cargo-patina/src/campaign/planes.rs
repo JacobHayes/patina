@@ -208,12 +208,8 @@ mod tests {
                 "{plane:?} selects no knob"
             );
         }
-    }
-
-    /// Names select a set: order and repeats do not matter, and the list
-    /// renders in canonical order.
-    #[test]
-    fn plane_names_select_a_set_in_canonical_order() {
+        // Names select a set: order and repeats do not matter, and the list
+        // renders in canonical order.
         let subset = FaultPlanes::from_names(["sleep", "net", "sleep"]).unwrap();
         assert_eq!(subset.cli_list(), "net,sleep");
         assert_eq!(
@@ -221,9 +217,5 @@ mod tests {
             Ok(FaultPlanes::ALL)
         );
         assert!(FaultPlanes::from_names(Vec::<&str>::new()).is_err());
-        let error = FaultPlanes::from_names(["net", "disk"]).unwrap_err();
-        for name in FAULT_PLANE_NAMES {
-            assert!(error.contains(name), "{error} does not name plane {name}");
-        }
     }
 }

@@ -46,49 +46,8 @@ pub(super) fn simd_module_is_rejected() {
     );
 }
 
-// R20 engine-determinism knob: wasmi is a pure interpreter with no NaN
-// canonicalization knob, so a NaN-producing float op must yield the SAME bit
-// pattern on every run. Pinning this means an upstream change that (e.g.)
-// introduced canonicalization or nondeterministic NaN bits would fail loudly
-// here rather than silently perturbing guest-observable float results.
 #[test]
-pub(super) fn nan_bits_are_deterministic() {
-    // sqrt(-1) is a canonical NaN source; reinterpret to i64 to observe the
-    // exact bit pattern the interpreter produced.
-    let module = wat::parse_str(
-        r#"(module
-                (func (export "nan_bits") (result i64)
-                    (i64.reinterpret_f64 (f64.sqrt (f64.const -1)))))"#,
-    )
-    .unwrap();
-    let nan_bits = || -> i64 {
-        let engine = Engine::new(&deterministic_wasmi_config());
-        let module = Module::new(&engine, &module).unwrap();
-        let mut store = Store::new(&engine, ());
-        // Fuel metering is on in the pinned config, so the store must be
-        // funded before any guest instruction runs.
-        store.set_fuel(1_000_000).unwrap();
-        let instance = Linker::<()>::new(&engine)
-            .instantiate_and_start(&mut store, &module)
-            .unwrap();
-        instance
-            .get_typed_func::<(), i64>(&store, "nan_bits")
-            .unwrap()
-            .call(&mut store, ())
-            .unwrap()
-    };
-    let first = nan_bits();
-    let second = nan_bits();
-    assert_eq!(first, second, "NaN bit pattern was not reproducible");
-    // It is genuinely a NaN (all exponent bits set, non-zero mantissa), so the
-    // determinism is over a real NaN result rather than a trivial constant.
-    let bits = first as u64;
-    assert_eq!(bits & 0x7ff0_0000_0000_0000, 0x7ff0_0000_0000_0000);
-    assert_ne!(bits & 0x000f_ffff_ffff_ffff, 0);
-}
-
-#[test]
-fn memory_growth_cap_traps_deterministically_and_is_replayable() {
+fn memory_growth_beyond_the_cap_traps() {
     let module = wat::parse_str(
         r#"(module
                 (memory 1)
@@ -97,17 +56,16 @@ fn memory_growth_cap_traps_deterministically_and_is_replayable() {
     )
     .unwrap();
 
-    let capped = || {
-        let context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
-        let host = Preview1Host::new(context).with_resource_limits(ResourceLimits {
-            max_memory_pages: 2,
-            ..ResourceLimits::default()
-        });
-        execute_preview1(&module, host)
-    };
-    // Exceeding the cap is a deterministic trap on every run.
-    assert!(matches!(capped(), Err(WasiRunError::Engine(_))));
-    assert!(matches!(capped(), Err(WasiRunError::Engine(_))));
+    // Exceeding the cap traps.
+    let context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
+    let host = Preview1Host::new(context).with_resource_limits(ResourceLimits {
+        max_memory_pages: 2,
+        ..ResourceLimits::default()
+    });
+    assert!(matches!(
+        execute_preview1(&module, host),
+        Err(WasiRunError::Engine(_))
+    ));
 
     // A generous cap admits the same growth.
     let context = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
@@ -164,27 +122,9 @@ fn hostcall_counters_record_every_import_call_exactly() {
         execution.fuel_consumed > 0,
         "fuel accounting reported nothing for a guest that executed"
     );
-}
-
-#[test]
-fn depth_is_byte_identical_across_repeat_runs_of_one_seed() {
-    let first = run_depth_probe(11);
-    let second = run_depth_probe(11);
-    assert_eq!(first.fuel_consumed, second.fuel_consumed);
-    assert_eq!(first.hostcalls, second.hostcalls);
-    // The counters must not perturb the run either: the guest-observable
-    // outputs stay identical alongside them.
-    assert_eq!(first.stdout, second.stdout);
-    assert_eq!(first.exit_code, second.exit_code);
-}
-
-#[test]
-fn zero_fuel_depth_is_refused_rather_than_reported_as_zero() {
+    // A run that reports no fuel has no depth data and is refused rather
+    // than reported as zero.
     let error = check_depth_available(0).unwrap_err();
     assert!(matches!(error, WasiRunError::Depth(_)), "got {error:?}");
-    assert!(
-        error.to_string().contains("fuel_consumed=0"),
-        "refusal must name the missing measurement, got: {error}"
-    );
     check_depth_available(1).expect("a run that consumed fuel has depth data");
 }

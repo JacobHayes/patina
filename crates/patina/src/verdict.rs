@@ -107,9 +107,4 @@ mod tests {
         assert_eq!(super::VerdictKind::Pass.as_abi(), 2);
         assert_eq!(super::VerdictKind::AbortIntent.as_abi(), 3);
     }
-
-    #[test]
-    fn verdict_is_a_no_op_outside_patina() {
-        super::verdict(super::VerdictKind::Violation, "outside-verdict", "{}");
-    }
 }

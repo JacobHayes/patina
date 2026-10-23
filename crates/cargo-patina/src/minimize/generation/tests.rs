@@ -29,15 +29,10 @@ fn a_cross_run_generation_is_refused_even_with_a_target() {
     assert!(generation_target(Some("GUEST_TORN"), 14, &repro).is_err());
 }
 
+/// Without a marker a generation targets its own failure verdicts; an
+/// explicit marker overrides them.
 #[test]
-fn an_explicit_marker_overrides_the_recorded_verdicts() {
-    let repro = repro_with("VIOLATION", vec![verdict("violation", "durability")]);
-    let target = generation_target(Some("GUEST_TORN"), 14, &repro).unwrap();
-    assert_eq!(target.render(), "marker[GUEST_TORN]");
-}
-
-#[test]
-fn a_generation_with_verdicts_targets_them_without_a_marker() {
+fn a_generation_targets_its_failure_verdicts_unless_a_marker_overrides_them() {
     let repro = repro_with(
         "VIOLATION",
         vec![
@@ -47,6 +42,8 @@ fn a_generation_with_verdicts_targets_them_without_a_marker() {
     );
     let target = generation_target(None, 14, &repro).unwrap();
     assert_eq!(target.render(), "verdicts[violation:durability]");
+    let target = generation_target(Some("GUEST_TORN"), 14, &repro).unwrap();
+    assert_eq!(target.render(), "marker[GUEST_TORN]");
 }
 
 #[test]

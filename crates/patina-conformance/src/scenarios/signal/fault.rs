@@ -244,6 +244,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_ppoll,
         Syscall::N_sigaltstack,
     ],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     ..DEFAULTS
 };

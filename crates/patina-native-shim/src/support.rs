@@ -308,11 +308,9 @@ mod spin_mutex_tests {
         assert_eq!(mutex.acquire().err(), Some(SelfDeadlock));
         drop(held);
         assert!(mutex.acquire().is_ok(), "released, it is free again");
-    }
 
-    #[test]
-    fn a_lock_another_thread_released_is_no_self_deadlock() {
-        let mutex = std::sync::Arc::new(SpinMutex::new(0u8));
+        // A lock another thread took and released is no self-deadlock.
+        let mutex = std::sync::Arc::new(mutex);
         let other = std::sync::Arc::clone(&mutex);
         std::thread::spawn(move || drop(other.acquire().expect("taken elsewhere")))
             .join()

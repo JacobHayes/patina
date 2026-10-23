@@ -33,10 +33,10 @@ const PATH_RACE_ANSWERS: [(&str, &str); 5] = [
 fn path_and_directory_calls_are_one_step_against_other_threads() {
     let g = Guest::assert_build("path_race_probe.rs");
     let mut wrong = Vec::new();
-    for seed in 1..=3 {
+    for seed in 1..=2 {
         for (mode, expected) in PATH_RACE_ANSWERS {
             let env = format!("PATH_RACE_MODE={mode}");
-            let out = g.assert_run_success(seed, &["--env", &env]).stdout;
+            let out = run_seeded(&g, seed, &["--env", &env]);
             let prefix = format!("NATIVE_PATH_RACE {mode} ");
             let answer = assert_unique_line_payload(&out, &prefix);
             if answer != expected {

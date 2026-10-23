@@ -8,8 +8,6 @@ use crate::static_sites::declare_wasm_static_sites;
 use crate::{Preview1Host, WasiRunError};
 use patina_dst_target::WasiAudit;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use wasmi::Linker;
 use wasmi::{Config as WasmiConfig, Engine, Error as WasmiError, Module, Store, TrapCode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,8 +53,7 @@ pub fn execute_preview1(
 ///   - NaN bit patterns: wasmi computes floats in software (`wasmi_core`), so
 ///     a NaN-producing op yields the same bits on every run and every host.
 ///     There is NO NaN-canonicalization knob to set (unlike a JIT engine,
-///     which needs one); the `nan_bits_are_deterministic` test pins that this
-///     stays true.
+///     which needs one).
 ///   - relaxed-SIMD: the ONE Wasm proposal whose results are implementation-
 ///     defined (relaxed FMA / swizzle / lane-select may legally differ across
 ///     engines) and therefore a determinism hole. It is reachable only under

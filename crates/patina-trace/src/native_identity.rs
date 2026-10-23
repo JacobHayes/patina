@@ -103,14 +103,17 @@ mod tests {
         }
     }
 
+    /// The executable and supervisor digests are compared and named; the
+    /// version, shim bundle and target are context and never compared.
     #[test]
-    fn an_identical_build_has_no_differences() {
+    fn identity_components_are_compared_and_named_and_context_is_not() {
         assert!(identity().differences(&identity()).is_empty());
-    }
-
-    #[test]
-    fn every_identity_component_is_compared_and_named() {
         let mut current = identity();
+        current.patina_version = "1.0.1".into();
+        current.shim_bundle_sha256 = Sha256Digest([4; 32]);
+        current.target = "aarch64-apple-darwin".into();
+        assert!(identity().differences(&current).is_empty());
+
         current.executable_sha256 = Sha256Digest([3; 32]);
         current.supervisor_sha256 = Sha256Digest([6; 32]);
         let differences = identity().differences(&current);
@@ -124,14 +127,5 @@ mod tests {
             differences[0].current,
             current.executable_sha256.to_string()
         );
-    }
-
-    #[test]
-    fn context_fields_are_never_compared() {
-        let mut current = identity();
-        current.patina_version = "1.0.1".into();
-        current.shim_bundle_sha256 = Sha256Digest([4; 32]);
-        current.target = "aarch64-apple-darwin".into();
-        assert!(identity().differences(&current).is_empty());
     }
 }

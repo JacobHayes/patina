@@ -81,7 +81,7 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &["fork", "syscall"],
     gaps: &[Gap {
         status: Status::ByDesign,
-        vehicles: Vehicle::ALL,
+        vehicles: Vehicle::DOORS,
         what: "fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only",
         failure: Failure::Stops {
             events: 0,

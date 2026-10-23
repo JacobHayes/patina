@@ -2,8 +2,10 @@
 
 use super::*;
 
+/// Absent, never zero: fields nothing produced are omitted, so a consumer
+/// never reads a fabricated empty object as "the plane reported nothing".
 #[test]
-fn envelope_serializes_stable_shape() {
+fn envelope_omits_fields_nothing_produced() {
     let mut env = Envelope::new("audit", "ok", 0);
     env.family = Some("native".into());
     env.findings = vec!["libc::open".into()];
@@ -12,9 +14,24 @@ fn envelope_serializes_stable_shape() {
     assert_eq!(json["verb"], "audit");
     assert_eq!(json["result"], "ok");
     assert_eq!(json["findings"][0], "libc::open");
-    // Absent fields are omitted.
-    assert!(json.get("trace").is_none());
-    assert!(json.get("seed").is_none());
+    for absent in [
+        "trace",
+        "seed",
+        "fault_reports",
+        "runtime_findings",
+        "crash_restart",
+        "refusal",
+        "guest_exit",
+        "verdicts",
+    ] {
+        assert!(json.get(absent).is_none(), "{absent} must be omitted");
+    }
+    // Nothing on the verdict channel, and a truncated or unknown-kind line
+    // is dropped rather than half decoded.
+    assert!(extract_verdicts("hello\n", "PATINA_SDK_REPORT enabled=0\n").is_empty());
+    let malformed =
+        "PATINA_VERDICT seq=1 kind=pass label=x\nPATINA_VERDICT seq=2 kind=nope label=x detail=\n";
+    assert!(extract_verdicts("", malformed).is_empty());
 }
 
 /// Every key a fully-populated run envelope emits, pinned. The list is the
@@ -134,19 +151,6 @@ fn envelope_keeps_every_field_and_adds_the_outcome_channel_ones() {
 }
 
 #[test]
-fn the_outcome_channel_fields_are_omitted_when_nothing_produced_them() {
-    // Absent, never zero: a run with no facts channel, no refusal, and no
-    // exit record must not fabricate empty objects a consumer would read as
-    // "the plane reported nothing".
-    let json = Envelope::new("run", "ok", 0).to_json();
-    assert!(json.get("fault_reports").is_none());
-    assert!(json.get("runtime_findings").is_none());
-    assert!(json.get("crash_restart").is_none());
-    assert!(json.get("refusal").is_none());
-    assert!(json.get("guest_exit").is_none());
-}
-
-#[test]
 fn envelope_carries_verdicts_in_report_order() {
     let stderr = format!(
         "noise\n{}\n{}\n",
@@ -164,11 +168,4 @@ fn envelope_carries_verdicts_in_report_order() {
     // Spaces survive the escape round trip in both label and detail.
     assert_eq!(json["verdicts"][1]["label"], "two leaders");
     assert_eq!(json["verdicts"][1]["detail"], "{\"term\": 4}");
-}
-
-#[test]
-fn envelope_omits_verdicts_when_the_run_reported_none() {
-    let env = Envelope::new("run", "ok", 0);
-    assert!(env.to_json().get("verdicts").is_none());
-    assert!(extract_verdicts("hello\n", "PATINA_SDK_REPORT enabled=0\n").is_empty());
 }

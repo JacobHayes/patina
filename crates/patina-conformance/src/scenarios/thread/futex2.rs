@@ -30,7 +30,7 @@
 //! waiter has left its call.
 //!
 //! glibc 2.39 wraps none of the rows, so the scenario runs through the
-//! kernel vehicles. Every word is the scenario's own.
+//! `syscall` vehicle. Every word is the scenario's own.
 
 use crate::catalog::{DEFAULTS, KernelFloor, Scenario};
 use crate::probe::{Probe, neg};
@@ -481,7 +481,7 @@ fn requeue_handshake(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "thread/futex2",
     run,
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_futex_wake,
         Syscall::N_futex_wait,

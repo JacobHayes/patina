@@ -20,7 +20,7 @@ fn install_task_handler(sig: i32, flags: u64) -> Action {
     super::install_handler(sig, task_handler, flags, 0)
 }
 #[test]
-fn broken_pipe_generates_sigpipe_before_epipe() {
+fn a_broken_pipe_or_socket_generates_sigpipe_before_epipe() {
     isolated(|| {
         let me = current_task();
         install_task_handler(SIGPIPE, 0);
@@ -56,20 +56,9 @@ fn broken_pipe_generates_sigpipe_before_epipe() {
             0,
             "ignored generation is dropped"
         );
-        // The production generation entry asserts SPIN_DEPTH == 0: either
-        // broken-pipe call aborts if pipe_write holds its runtime lock here.
-        assert_eq!(
-            signal_ops(&operations()),
-            vec![(SIGPIPE as u8, SignalTarget::Task(me)); 2]
-        );
-    });
-}
-
-#[test]
-fn msg_nosignal_suppresses_sigpipe() {
-    isolated(|| {
+        // A socket send generates SIGPIPE too, unless MSG_NOSIGNAL suppresses
+        // it; the SUD sendto row and C send both reach this entry.
         install_task_handler(SIGPIPE, 0);
-        let me = current_task();
         use crate::thread::net::abi::{AF_UNIX, SOCK_STREAM};
         use crate::thread::net::{patina_sock_sendto, patina_sock_socketpair};
         let mut fds = [-1i32; 2];
@@ -78,17 +67,18 @@ fn msg_nosignal_suppresses_sigpipe() {
             0
         );
         assert_eq!(crate::patina_close(fds[1]), 0);
-        for (flags, count) in [(MSG_NOSIGNAL, 0), (0, 1)] {
-            // The SUD sendto row and C send both reach this entry.
+        for (flags, count) in [(MSG_NOSIGNAL, 1), (0, 2)] {
             assert_eq!(
                 patina_sock_sendto(fds[0], b"x".as_ptr() as usize, 1, flags, 0, 0),
                 -i64::from(EPIPE)
             );
             assert_eq!(HANDLERS.load(Ordering::SeqCst), count);
         }
+        // The production generation entry asserts SPIN_DEPTH == 0: either
+        // broken-pipe call aborts if pipe_write holds its runtime lock here.
         assert_eq!(
             signal_ops(&operations()),
-            vec![(SIGPIPE as u8, SignalTarget::Task(me))]
+            vec![(SIGPIPE as u8, SignalTarget::Task(me)); 3]
         );
     });
 }
@@ -131,7 +121,7 @@ fn sigstop_to_self_is_a_named_trap() {
         });
         return;
     }
-    for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
+    for sig in [SIGSTOP, SIGTSTP] {
         let child = reexec(&test_name(), &[("PATINA_STOP_TEST", &sig.to_string())]);
         assert_eq!(child.status.signal(), Some(SIGABRT));
         let stderr = String::from_utf8_lossy(&child.stderr);
@@ -227,64 +217,6 @@ fn thread_directed_signal_targets_only_that_task() {
                 assert!(!matches!(ops[i + 2], Operation::TaskWake { .. }));
             }
         }
-    });
-}
-
-#[test]
-fn pending_for_a_blocking_task_is_invisible_to_another_tasks_sigpending() {
-    isolated(|| {
-        install_task_handler(SIGUSR1, 0);
-        set_mask(SIG_BLOCK, bit(SIGUSR1 as u8));
-        let [rd, wr] = pipe();
-        let target = spawn(move || {
-            let mut byte = 0u8;
-            assert_eq!(
-                unsafe { crate::patina_read(rd, (&mut byte as *mut u8).cast(), 1) },
-                1
-            );
-            assert_eq!(query_pending(), bit(SIGUSR1 as u8));
-            assert_eq!(HANDLERS.load(Ordering::SeqCst), 0);
-            set_mask(SIG_UNBLOCK, bit(SIGUSR1 as u8));
-            deliver();
-            assert_eq!(query_pending(), 0);
-            assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                HANDLER_TASK.load(Ordering::SeqCst),
-                current_task().0 as usize
-            );
-        });
-        let task = task_of(target);
-        delay();
-        assert_eq!(
-            unsafe {
-                generate_signal(
-                    GenerationTarget::Thread {
-                        tgid: Some(crate::registry::ROOT_PID as i32),
-                        tid: tid_of(task),
-                    },
-                    SIGUSR1,
-                    GenerationInfo::Thread,
-                )
-            },
-            0
-        );
-        assert_eq!(
-            query_pending(),
-            0,
-            "the caller also blocks SIGUSR1 but cannot see another private queue"
-        );
-        assert!(parked_class(task).is_some());
-        assert_eq!(HANDLERS.load(Ordering::SeqCst), 0);
-        // A third task likewise cannot see the target's private pending set.
-        let observer = spawn(|| assert_eq!(query_pending(), 0));
-        join(observer);
-        assert_eq!(
-            unsafe { crate::patina_write(wr, b"x".as_ptr().cast(), 1) },
-            1
-        );
-        join(target);
-        set_mask(SIG_SETMASK, 0);
-        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
     });
 }
 

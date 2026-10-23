@@ -1,5 +1,6 @@
-//! Live raw/libc parity and Patina-specific soft refusals. These are not host
-//! equivalence claims (identity and auxv deliberately differ).
+//! Raw syscall rows the conformance scenarios do not reach, and Patina-specific
+//! soft refusals. These are not host equivalence claims (identity and auxv
+//! deliberately differ).
 mod common;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -7,37 +8,26 @@ mod linux {
     use super::*;
     use common::native::*;
 
-    fn assert_raw_output(name: &str, expected: &str) {
+    /// One `raw` package binary, built; or, on a host without
+    /// syscall-user-dispatch, refused by name and `None`.
+    fn raw_guest(name: &str) -> Option<Guest> {
         let g = Guest::assert_build_with("raw", &["--bin", name]);
         if kernel_supports(KernelFeature::Sud) {
-            assert_eq!(
-                text(&g.assert_seed_repeatability(1, 2, &[])),
-                format!("{expected}\n")
-            );
+            Some(g)
         } else {
             g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+            None
         }
     }
 
-    #[test]
-    fn raw_process_identity_is_fixed() {
-        assert_raw_output(
-            "raw_procstate",
-            "RAW_PROCSTATE pid=2 uid=1000 uname_rc=0 sysname=Linux nodename=patina",
-        );
-    }
-
-    #[test]
-    fn raw_messages_gather_into_one_datagram() {
-        assert_raw_output("raw_msg", "RAW_MSG sendmsg=9 recvmsg=9 data=frag-ment");
-    }
-
-    #[test]
-    fn legacy_fs_aliases_share_virtual_state() {
-        assert_raw_output(
-            "raw_legacy_fs",
-            "LEGACY_ALIASES open+creat+unlink+getdents ok",
-        );
+    fn assert_raw_output(name: &str, expected: &str) {
+        if let Some(g) = raw_guest(name) {
+            assert_eq!(
+                text(&g.assert_run_success(1, &[]).stdout),
+                format!("{expected}\n"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -48,88 +38,39 @@ mod linux {
         );
     }
 
+    /// The raw process identity is the fixed virtual one; a socketpair
+    /// survives `dup2` over an eventfd; raw `ppoll` writes back a zero
+    /// remaining timeout after its virtual sleep; and `PR_GET_AUXV` answers
+    /// the scrubbed auxv, its `AT_RANDOM` bytes seeded.
     #[test]
-    fn creation_modes_are_enforced_on_later_open() {
-        assert_raw_output(
-            "raw_modes",
-            "RAW_MODES openat+open+creat+mkdirat+mkdir+umask+enforced ok",
-        );
-    }
-
-    #[test]
-    fn socketpair_survives_dup2_over_eventfd() {
-        assert_raw_output("raw_socketpair", "SOCKETPAIR_ROW pair+dup2eventfd ok");
-    }
-
-    #[test]
-    fn ppoll_timeout_writes_back_zero_after_virtual_sleep() {
-        assert_ppoll_output("timeout", "PPOLL_TIMEOUT elapsed_ms=5 remaining=0");
-    }
-
-    #[test]
-    fn ppoll_pipe_readiness_changes_only_after_write() {
-        assert_ppoll_output("readiness", "PPOLL_READINESS empty=0 ready=1 revents=1");
-    }
-
-    fn assert_ppoll_output(mode: &str, expected: &str) {
-        let g = Guest::assert_build_with("raw", &["--bin", "raw_ppoll"]);
-        if kernel_supports(KernelFeature::Sud) {
-            assert_eq!(
-                text(&g.assert_run_success(1, &["--", mode]).stdout),
-                format!("{expected}\n")
-            );
-        } else {
-            g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+    fn raw_rows_answer_the_virtual_process() {
+        for (name, expected) in [
+            (
+                "raw_procstate",
+                "RAW_PROCSTATE pid=2 uid=1000 uname_rc=0 sysname=Linux nodename=patina",
+            ),
+            ("raw_socketpair", "SOCKETPAIR_ROW pair+dup2eventfd ok"),
+            ("raw_ppoll", "PPOLL_TIMEOUT elapsed_ms=5 remaining=0"),
+        ] {
+            assert_raw_output(name, expected);
         }
-    }
-
-    #[test]
-    fn prctl_set_name_is_modeled() {
-        assert_raw_output("raw_prctl_modeled", "PR_SET_NAME_RET=0");
-    }
-
-    #[test]
-    fn fcntl_status_flags_match_libc() {
-        assert_raw_output("raw_fcntl_parity", "FCNTL_PARITY raw=32769 libc=32769");
-    }
-
-    #[test]
-    fn fcntl_record_locks_match_libc() {
-        assert_raw_output(
-            "raw_fcntl_lock",
-            "FCNTL_LOCK_PARITY raw_set=0 raw_get=0 raw_type=2 libc_set=0 libc_get=0 libc_type=2",
-        );
-    }
-
-    #[test]
-    fn prctl_returns_scrubbed_auxv() {
-        let g = Guest::assert_build_with("raw", &["--bin", "raw_prctl_auxv"]);
-        if kernel_supports(KernelFeature::Sud) {
-            let out = g.assert_seed_repeatability(1, 2, &[]);
+        if let Some(g) = raw_guest("raw_prctl_auxv") {
+            let out = g.assert_run_success(1, &[]).stdout;
             let fields = assert_fields(&out, "PR_GET_AUXV ", &["len", "random"]);
             let len: usize = fields["len"].parse().unwrap();
             assert!(len > 0 && len <= 4096 && len.is_multiple_of(16));
             assert_lower_hex(fields["random"], 32);
-        } else {
-            g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
         }
     }
 
-    /// The prctl doors patina refuses: an unknown option is `EINVAL`, and
-    /// entering seccomp strict mode, through prctl (whose filter argument
+    /// Entering seccomp strict mode, through prctl (whose filter argument
     /// strict mode ignores) or seccomp(2), stops the run by name before the
     /// host could enter it.
     #[test]
-    fn prctl_refusals_answer_or_stop_by_name() {
-        let g = Guest::assert_build_with("raw", &["--bin", "raw_prctl_refusal"]);
-        if !kernel_supports(KernelFeature::Sud) {
-            g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+    fn seccomp_strict_mode_stops_by_name() {
+        let Some(g) = raw_guest("raw_prctl_refusal") else {
             return;
-        }
-        assert_eq!(
-            text(&g.assert_run_success(1, &["--", "unsupported"]).stdout),
-            "PRCTL_REFUSED errno=22\n"
-        );
+        };
         for (door, row) in [("prctl-strict", "prctl"), ("seccomp-strict", "seccomp")] {
             g.assert_internal_fatal(&[door], &[&format!("{row}: entering strict mode")]);
         }

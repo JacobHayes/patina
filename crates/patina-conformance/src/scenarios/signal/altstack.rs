@@ -6,6 +6,7 @@
 //! `EPERM`.
 
 use crate::catalog::{DEFAULTS, Generation, Scenario, TraceFacts};
+use crate::vehicle::Vehicle;
 use patina_dst_syscalls::Syscall;
 
 use crate::probe::{Probe, neg};
@@ -153,6 +154,7 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "signal/altstack",
     run,
+    vehicles: Vehicle::ALL,
     covers: &[Syscall::N_sigaltstack, Syscall::N_kill, Syscall::N_getpid],
     symbols: &["sigaltstack", "kill", "getpid", "sigaction"],
     trace: Some(TraceFacts {

@@ -6,11 +6,11 @@ use std::os::unix::process::ExitStatusExt;
 
 /// Recording changes nothing a run observes: the legs judge only the
 /// recorded patina run, so a plain run of the same seed must match it event
-/// for event and in its ending. One filesystem, one network and one signal
-/// scenario, through their first vehicle.
+/// for event and in its ending. A network and a signal scenario, the two
+/// whose interleavings the scheduler decides, through their first vehicle.
 #[test]
 fn recording_changes_no_observation() {
-    for name in ["fs/rw", "net/tcp", "signal/basic"] {
+    for name in ["net/tcp", "signal/basic"] {
         let scenario = catalog::scenario(name).unwrap();
         let owned = tempfile::Builder::new()
             .prefix("patina-conformance-")
@@ -25,6 +25,7 @@ fn recording_changes_no_observation() {
             dir: &owned.path().join("run"),
             logs,
             declared_absent: false,
+            replay: false,
         };
         let plain = leg.patina(None).unwrap();
         let recorded = leg.patina(Some(&leg.logs.join("run.patina"))).unwrap();
@@ -114,6 +115,7 @@ fn a_killed_native_ipc_run_is_swept() {
             dir: &dir,
             logs,
             declared_absent: false,
+            replay: false,
         };
         let rerun = leg
             .native()

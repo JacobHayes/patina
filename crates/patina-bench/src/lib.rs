@@ -272,40 +272,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workload_boundary_op_count_scales_with_iterations() {
-        // The workload must issue a stable number of boundary operations per
-        // iteration so timing and trace-growth figures are comparable.
+    fn recording_is_linear_with_one_event_per_boundary_op() {
+        // A stable op count per iteration keeps timing and trace-growth figures
+        // comparable, and recording must not amplify.
         let (_, ops_one) = measure_seeded(1).unwrap();
         let (_, ops_ten) = measure_seeded(10).unwrap();
         assert!(ops_one > 0);
         assert_eq!(ops_ten, ops_one * 10);
-    }
+        let (_, _, events) = measure_record(10).unwrap();
+        assert_eq!(events, ops_ten);
 
-    #[test]
-    fn record_emits_exactly_one_event_per_boundary_op() {
-        // Recording must not amplify: growth stays linear in boundary ops.
-        let mut context = seeded_context(1).unwrap();
-        workload(&mut context, 5).unwrap();
-        let seeded_ops = context.steps();
-        context.finish().unwrap();
-
-        let (_, _, events) = measure_record(5).unwrap();
-        assert_eq!(events, seeded_ops);
-    }
-
-    #[test]
-    fn trace_growth_stays_within_budget() {
-        // Deterministic, machine-independent budget gate.
-        let report = qualify(200, 1).unwrap();
-        let bytes_per_event = report.bytes_per_event();
-        assert!(
-            bytes_per_event <= MAX_TRACE_BYTES_PER_EVENT,
-            "trace grew to {bytes_per_event:.1} bytes/event, budget is {MAX_TRACE_BYTES_PER_EVENT:.0}"
-        );
-    }
-
-    #[test]
-    fn trace_growth_is_linear_in_boundary_ops() {
         let (_, small, _) = measure_record(100).unwrap();
         let (_, large, _) = measure_record(200).unwrap();
         let ratio = large as f64 / small as f64;
@@ -315,11 +291,16 @@ mod tests {
         );
     }
 
+    /// Deterministic, machine-independent budget gate. Qualification also
+    /// replays the recording, so a replay mismatch fails here too.
     #[test]
-    fn replay_reproduces_the_recorded_workload() {
-        // Replay must complete without a mismatch, otherwise the timing figure
-        // would be meaningless.
-        assert!(measure_replay(50).is_ok());
+    fn trace_growth_stays_within_budget() {
+        let report = qualify(200, 1).unwrap();
+        let bytes_per_event = report.bytes_per_event();
+        assert!(
+            bytes_per_event <= MAX_TRACE_BYTES_PER_EVENT,
+            "trace grew to {bytes_per_event:.1} bytes/event, budget is {MAX_TRACE_BYTES_PER_EVENT:.0}"
+        );
     }
 
     // Timing guards are opt-in: they depend on the host and would flake as

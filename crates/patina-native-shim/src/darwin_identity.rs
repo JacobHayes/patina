@@ -98,10 +98,7 @@ mod tests {
         assert_eq!(machine, expected_machine);
         // The same node name yields the same bytes.
         assert!(describe("db-1.internal").fields == name.fields);
-    }
-
-    #[test]
-    fn an_oversized_node_name_keeps_its_nul() {
+        // An oversized node name keeps its NUL.
         let long = "n".repeat(UTS_LEN + 10);
         let name = describe(&long);
         assert_eq!(field(&name, 1), &long[..UTS_LEN - 1]);

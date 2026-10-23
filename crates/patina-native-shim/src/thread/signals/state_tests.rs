@@ -84,15 +84,23 @@ fn directed(task: TaskId, sig: i32) {
     );
 }
 
+/// Mask, pending queue and alternate stack are per task: a spawned thread
+/// inherits the mask but neither the private queue nor the alternate stack.
 #[test]
-fn signal_state_is_per_task() {
+fn signal_state_is_per_task_and_only_the_mask_is_inherited() {
     isolated(|| {
         action(false);
         let main = current_task();
         let mut main_bytes = vec![0u8; 64 * 1024];
         let main_stack = stack_for(&mut main_bytes);
         set_stack(&main_stack);
+        set_mask(SIG_BLOCK, bit(SIGUSR2));
+        directed(main, SIGUSR2);
         let worker = spawn(move || {
+            assert_eq!(read_mask(), bit(SIGUSR2));
+            assert_eq!(lock_state().signals.mask(current_task()), bit(SIGUSR2));
+            assert_eq!(query_pending(), 0);
+            assert_eq!(query_stack().flags, SS_DISABLE);
             let mut bytes = vec![0u8; 64 * 1024];
             let stack = stack_for(&mut bytes);
             set_stack(&stack);
@@ -100,65 +108,19 @@ fn signal_state_is_per_task() {
             directed(current_task(), SIGUSR1);
             assert_eq!(query_pending(), bit(SIGUSR1));
             let state = lock_state();
-            assert_eq!(state.signals.mask(main), 0);
-            assert_eq!(state.signals.tasks[&main].private.mask(), 0);
+            assert_eq!(state.signals.mask(main), bit(SIGUSR2));
+            assert_eq!(state.signals.tasks[&main].private.mask(), bit(SIGUSR2));
             assert_eq!(state.signals.shared.mask(), 0);
             drop(state);
             assert_eq!(query_stack(), stack);
             set_stack(&Stack::default());
         });
         join(worker);
-        assert_eq!(query_pending(), 0);
+        assert_eq!(query_pending(), bit(SIGUSR2));
         assert_eq!(query_stack(), main_stack);
         set_stack(&Stack::default());
-    });
-}
-
-/// `rt_sigaction` keeps only the flag bits 6.8 knows (`UAPI_SA_FLAGS`):
-/// the old action reports a probe bit (`SA_UNSUPPORTED`) cleared.
-#[test]
-fn an_action_keeps_only_the_flags_the_kernel_knows() {
-    isolated(|| {
-        const SA_UNSUPPORTED: u64 = 0x400;
-        let ignore = Action {
-            handler: SIG_IGN,
-            flags: SA_UNSUPPORTED | SA_RESTART,
-            ..Action::default()
-        };
-        assert_eq!(
-            unsafe { patina_signal_action(SIGUSR1, &ignore, std::ptr::null_mut(), SIGSET_BYTES) },
-            0
-        );
-        assert_eq!(query_action(SIGUSR1).flags, SA_RESTART);
-    });
-}
-
-#[test]
-fn mask_is_inherited_at_spawn() {
-    isolated(|| {
-        action(false);
-        set_mask(SIG_BLOCK, bit(SIGUSR1));
-        directed(current_task(), SIGUSR1);
-        let mut bytes = vec![0u8; 64 * 1024];
-        set_stack(&stack_for(&mut bytes));
-        let worker = spawn(|| {
-            assert_eq!(read_mask() & bit(SIGUSR1), bit(SIGUSR1));
-            assert_eq!(
-                lock_state().signals.mask(current_task()) & bit(SIGUSR1),
-                bit(SIGUSR1)
-            );
-            assert_eq!(query_pending(), 0);
-            assert_eq!(query_stack().flags, SS_DISABLE);
-            assert!(
-                lock_state().signals.tasks[&current_task()]
-                    .private
-                    .0
-                    .is_empty()
-            );
-        });
-        join(worker);
-        set_stack(&Stack::default());
-        set_mask(SIG_UNBLOCK, bit(SIGUSR1));
+        install_handler(SIGUSR2, handler, 0, 0);
+        set_mask(SIG_UNBLOCK, bit(SIGUSR2));
         deliver();
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
     });
@@ -418,6 +380,18 @@ fn raw_rt_sigaction_installs_and_reports_oldact() {
             0,
             "installing ignore flushes private and shared queues"
         );
+        // Only the flag bits 6.8 knows (`UAPI_SA_FLAGS`) are kept: the old
+        // action reports a probe bit (`SA_UNSUPPORTED`) cleared.
+        const SA_UNSUPPORTED: u64 = 0x400;
+        let probe = Action {
+            flags: ignore.flags | SA_UNSUPPORTED | SA_RESTART,
+            ..ignore
+        };
+        assert_eq!(
+            unsafe { patina_signal_action(SIGUSR1, &probe, std::ptr::null_mut(), SIGSET_BYTES) },
+            0
+        );
+        assert_eq!(query_action(SIGUSR1).flags, ignore.flags | SA_RESTART);
     });
 }
 
@@ -610,115 +584,74 @@ fn reserved_signals_are_stripped_from_every_host_mask() {
     });
 }
 
-/// Registration/query is process state, not permission to change containment.
-/// Both null queries and replacements must leave the actual host action intact.
-#[test]
-fn sigsys_action_is_virtual_and_never_changes_the_host() {
-    isolated(|| {
-        let host_action = || {
-            let mut action = Action::default();
-            assert_eq!(
-                host(
-                    SYS_RT_SIGACTION,
-                    [
-                        u64::from(SIGSYS),
-                        0,
-                        &mut action as *mut _ as u64,
-                        SIGSET_BYTES as u64,
-                        0,
-                        0
-                    ]
-                ),
+fn host_action(sig: u8) -> Action {
+    let mut action = Action::default();
+    assert_eq!(
+        host(
+            SYS_RT_SIGACTION,
+            [
+                u64::from(sig),
+                0,
+                &mut action as *mut _ as u64,
+                SIGSET_BYTES as u64,
+                0,
                 0
-            );
-            action
-        };
-        let before = host_action();
-        let mut previous = Action::default();
-        for handler in [handler as *const () as usize, SIG_IGN, SIG_DFL] {
-            let action = Action {
-                handler,
-                flags: SA_ONSTACK | SA_SIGINFO,
-                mask: bit(SIGUSR1),
-                restorer: 1234,
-            };
-            let mut old = Action::default();
-            assert_eq!(
-                unsafe { patina_signal_action(i32::from(SIGSYS), &action, &mut old, SIGSET_BYTES) },
-                0
-            );
-            assert_eq!(old, previous);
-            assert_eq!(
-                unsafe {
-                    patina_signal_action(
-                        i32::from(SIGSYS),
-                        std::ptr::null(),
-                        &mut old,
-                        SIGSET_BYTES,
-                    )
-                },
-                0
-            );
-            assert_eq!(old, action);
-            assert_eq!(host_action(), before);
-            previous = action;
-        }
-    });
+            ]
+        ),
+        0
+    );
+    action
 }
 
-/// Under the timestamp-counter trap a guest SIGSEGV action is virtual: the
-/// host keeps the trap's action as it is (its frames are private whatever
-/// stack the guest's handler asks for), and `sigaction` reports the guest's
-/// own action back.
+/// The guest's SIGSYS action, and under the timestamp-counter trap its
+/// SIGSEGV action, are virtual: registration and query are process state,
+/// never permission to change containment, so the host keeps the trap's
+/// action as it is (its frames are private whatever stack the guest's
+/// handler asks for) and `sigaction` reports the guest's own action back.
 #[test]
-fn trap_routed_sigsegv_action_stays_virtual() {
+fn trap_signal_actions_are_virtual_and_never_change_the_host() {
     isolated(|| {
         crate::PATINA_TSC_ARMED.store(1, Ordering::Relaxed);
-        let host_action = || {
-            let mut action = Action::default();
-            assert_eq!(
-                host(
-                    SYS_RT_SIGACTION,
-                    [
-                        u64::from(SIGSEGV),
-                        0,
-                        &mut action as *mut _ as u64,
-                        SIGSET_BYTES as u64,
-                        0,
-                        0
-                    ],
-                ),
-                0
-            );
-            action
-        };
-        let trap = host_action();
-        for flags in [SA_ONSTACK, 0] {
-            let guest = Action {
-                handler: handler as *const () as usize,
-                flags,
-                mask: bit(SIGUSR1),
-                ..Action::default()
-            };
-            let mut old = Action::default();
-            assert_eq!(
-                unsafe { patina_signal_action(i32::from(SIGSEGV), &guest, &mut old, SIGSET_BYTES) },
-                0
-            );
-            assert_eq!(host_action(), trap);
-            let mut reported = Action::default();
-            assert_eq!(
-                unsafe {
-                    patina_signal_action(
-                        i32::from(SIGSEGV),
-                        std::ptr::null(),
-                        &mut reported,
-                        SIGSET_BYTES,
-                    )
-                },
-                0
-            );
-            assert_eq!(reported, guest);
+        for sig in [SIGSYS, SIGSEGV] {
+            let before = host_action(sig);
+            for (handler, flags) in [
+                (handler as *const () as usize, SA_ONSTACK | SA_SIGINFO),
+                (handler as *const () as usize, 0),
+                (SIG_IGN, SA_ONSTACK),
+                (SIG_DFL, 0),
+            ] {
+                let action = Action {
+                    handler,
+                    flags,
+                    mask: bit(SIGUSR1),
+                    restorer: 0,
+                };
+                assert_eq!(
+                    unsafe {
+                        patina_signal_action(
+                            i32::from(sig),
+                            &action,
+                            std::ptr::null_mut(),
+                            SIGSET_BYTES,
+                        )
+                    },
+                    0
+                );
+                let mut reported = Action::default();
+                assert_eq!(
+                    unsafe {
+                        patina_signal_action(
+                            i32::from(sig),
+                            std::ptr::null(),
+                            &mut reported,
+                            SIGSET_BYTES,
+                        )
+                    },
+                    0
+                );
+                assert_eq!(reported, action);
+                assert_eq!(host_action(sig), before);
+            }
         }
     });
 }
@@ -863,8 +796,15 @@ fn action_mask_deferred_pending_remains_visible_and_consumable() {
     });
 }
 
+/// Before the runtime is installed, signal and poll queries answer without
+/// installing the scheduler, and a scheduling point (a lock or a write the
+/// host's or the harness's own startup makes before `patina_harness_install`)
+/// has no charged time to show and marks no boundary, so the harness can still
+/// install. Shim code holding the Context lock that reaches a door taking a
+/// scheduling point (a diagnostic under the lock initialising std's stderr
+/// mutex, on macOS) takes no second Context lock.
 #[test]
-fn startup_queries_do_not_install_the_scheduler() {
+fn startup_work_before_install_installs_nothing_and_marks_no_boundary() {
     let name = test_name();
     if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
         let output = reexec(&name, &[]);
@@ -907,51 +847,11 @@ fn startup_queries_do_not_install_the_scheduler() {
         } >= 0
     );
     assert!(fds.iter().all(|fd| fd.revents & POLLNVAL == 0));
-    assert!(crate::slot().lock().is_none());
-    assert!(!lock_state().active);
-    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
-}
-
-/// A scheduling point taken before the runtime is installed (a lock or a
-/// write the host's or the harness's own startup makes before
-/// `patina_harness_install`) has no charged time to show and marks no
-/// boundary, so the harness can still install.
-#[test]
-fn a_scheduling_point_before_install_marks_no_boundary() {
-    let name = test_name();
-    if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
-        let output = reexec(&name, &[]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
-    assert!(crate::slot().lock().is_none());
-    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
     assert_eq!(crate::thread::sched_point(), Ok(()));
     crate::charge::flush_now();
     assert!(crate::slot().lock().is_none());
+    assert!(!lock_state().active);
     assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
-}
-
-/// Shim code holding the Context lock reaches a door that takes a
-/// scheduling point (a diagnostic under the lock initialising std's stderr
-/// mutex, on macOS): the point shows nothing and takes no second Context
-/// lock.
-#[test]
-fn a_scheduling_point_under_the_context_lock_takes_it_no_second_time() {
-    let name = test_name();
-    if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
-        let output = reexec(&name, &[]);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
     let held = crate::slot().lock();
     assert_eq!(crate::thread::sched_point(), Ok(()));
     drop(held);

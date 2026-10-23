@@ -1,38 +1,53 @@
 //! Tests for timestamps, metadata assembly and permission checks.
 
 use crate::MemFs;
-use crate::tests::{read_write, times, write_only};
-use patina_dst_abi::{AtimePolicy, ErrorCode, FsAllocateMode, FsClock, FsEntryKind, OpenFlags};
+use crate::tests::{read_write, times};
+use patina_dst_abi::{AtimePolicy, ErrorCode, FsAllocateMode, FsClock, OpenFlags};
 use patina_dst_driver_api::FsDriver;
 
-/// RED before the mode model: every entry reported one fabricated constant,
-/// `set_mode` did not exist, and nothing was ever refused for permissions —
-/// so a guest could not tell a genuine `EACCES` from "missing".
+/// A creating call stores the mode it was handed, verbatim (no umask: the
+/// layer above already masked it), whatever the kind; opening an existing
+/// name never touches it, even with `O_CREAT` and a mode; `chmod` changes
+/// only the permission bits; and a symlink's mode is always `0o777`.
 #[test]
-fn modes_are_the_creation_modes_handed_down_and_chmod_changes_them() {
+fn modes_are_the_creating_calls_and_only_chmod_changes_them() {
     let mut fs = MemFs::new();
-    fs.create_directory(FsClock::EPOCH, "/perm", 0o755).unwrap();
+    fs.create_directory(FsClock::EPOCH, "/perm", 0o500).unwrap();
+    assert_eq!(fs.metadata("/perm").unwrap().mode, 0o500);
+    fs.set_mode(FsClock::EPOCH, "/perm", 0o755).unwrap();
+    let create = |fs: &mut MemFs, path: &str, mode: u32| {
+        let fd = fs
+            .open(
+                FsClock::EPOCH,
+                path,
+                OpenFlags {
+                    mode,
+                    ..OpenFlags::create_truncate_write()
+                },
+            )
+            .unwrap();
+        fs.close(fd).unwrap();
+    };
+    for (path, mode) in [("/perm/strict", 0o400), ("/perm/wide", 0o777)] {
+        create(&mut fs, path, mode);
+        assert_eq!(fs.metadata(path).unwrap().mode, mode, "{path}");
+    }
     let fd = fs
         .open(
             FsClock::EPOCH,
-            "/perm/file",
-            OpenFlags {
-                path_only: false,
-                mode: 0o644,
-                ..OpenFlags::create_truncate_write()
-            },
+            "/perm/plain",
+            OpenFlags::create_truncate_write(),
         )
         .unwrap();
     fs.close(fd).unwrap();
-    fs.symlink(FsClock::EPOCH, "/perm/file", "/perm/link")
-        .unwrap();
+    assert_eq!(fs.metadata("/perm/plain").unwrap().mode, 0o666);
 
-    assert_eq!(fs.metadata("/perm").unwrap().mode, 0o755);
-    assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
-    // The initial image's root and /tmp carry the conventional 0o755.
-    assert_eq!(fs.metadata("/").unwrap().mode, 0o755);
-    // Linux gives a symlink no mode of its own; it always reads 0o777 and
-    // cannot be changed.
+    // `O_CREAT` on a name that is already there is not a creation.
+    create(&mut fs, "/perm/wide", 0o640);
+    assert_eq!(fs.metadata("/perm/wide").unwrap().mode, 0o777);
+
+    fs.symlink(FsClock::EPOCH, "/perm/wide", "/perm/link")
+        .unwrap();
     assert_eq!(fs.metadata("/perm/link").unwrap().mode, 0o777);
     assert_eq!(
         fs.set_mode(FsClock::EPOCH, "/perm/link", 0o600)
@@ -41,172 +56,9 @@ fn modes_are_the_creation_modes_handed_down_and_chmod_changes_them() {
         ErrorCode::Denied
     );
 
-    fs.set_mode(FsClock::EPOCH, "/perm/file", 0o600).unwrap();
-    assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o600);
-    // Only the permission bits are stored; file-type bits are the kind's.
-    fs.set_mode(FsClock::EPOCH, "/perm/file", 0o100_644)
+    fs.set_mode(FsClock::EPOCH, "/perm/wide", 0o100_644)
         .unwrap();
-    assert_eq!(fs.metadata("/perm/file").unwrap().mode, 0o644);
-}
-
-/// RED before creating calls carried a mode: `open(path, O_CREAT, mode)`
-/// and `mkdir(path, mode)` dropped the argument and every new entry got a
-/// fixed default for its kind, so a file asked for at `0o400` came
-/// back writable and a directory asked for at `0o500` accepted new names.
-#[test]
-fn a_creating_call_gets_the_mode_it_asked_for_and_the_bits_are_enforced() {
-    let mut fs = MemFs::new();
-
-    // A creation mode is the caller's, verbatim.
-    let read_only_file = OpenFlags {
-        path_only: false,
-        mode: 0o400,
-        ..OpenFlags::create_truncate_write()
-    };
-    let fd = fs
-        .open(FsClock::EPOCH, "/tmp/strict", read_only_file)
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/strict").unwrap().mode, 0o400);
-
-    // And it is JUDGED on a later open: `r--` is readable, never writable.
-    let opened = fs
-        .open(FsClock::EPOCH, "/tmp/strict", OpenFlags::read_only())
-        .unwrap();
-    fs.close(opened).unwrap();
-    assert_eq!(
-        fs.open(FsClock::EPOCH, "/tmp/strict", write_only())
-            .unwrap_err()
-            .code,
-        ErrorCode::Denied
-    );
-
-    // No umask is applied here: the group/other triads arrive as the layer
-    // above (the process umask's owner) already masked them, so `0o666`
-    // handed down is `0o666` stored — the umask is the caller's business.
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/tmp/plain",
-            OpenFlags::create_truncate_write(),
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/plain").unwrap().mode, 0o666);
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/tmp/wide",
-            OpenFlags {
-                path_only: false,
-                mode: 0o777,
-                ..OpenFlags::create_truncate_write()
-            },
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/wide").unwrap().mode, 0o777);
-
-    // A directory's mode is the caller's too, and `0o500` refuses creation
-    // inside it while still resolving through and listing.
-    fs.create_directory(FsClock::EPOCH, "/tmp/locked", 0o500)
-        .unwrap();
-    assert_eq!(fs.metadata("/tmp/locked").unwrap().mode, 0o500);
-    assert_eq!(
-        fs.open(
-            FsClock::EPOCH,
-            "/tmp/locked/new",
-            OpenFlags::create_truncate_write()
-        )
-        .unwrap_err()
-        .code,
-        ErrorCode::Denied
-    );
-    assert!(
-        fs.read_directory(FsClock::EPOCH, "/tmp/locked")
-            .unwrap()
-            .is_empty()
-    );
-}
-
-/// An `open` of an EXISTING entry must never touch its mode, whatever third
-/// argument the caller passes — POSIX does not read one on that branch.
-#[test]
-fn opening_an_existing_file_leaves_its_mode_alone() {
-    let mut fs = MemFs::new();
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/tmp/kept",
-            OpenFlags {
-                path_only: false,
-                mode: 0o640,
-                ..OpenFlags::create_truncate_write()
-            },
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
-
-    // `O_CREAT` on a name that is already there is not a creation.
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/tmp/kept",
-            OpenFlags {
-                path_only: false,
-                mode: 0o777,
-                ..OpenFlags::create_truncate_write()
-            },
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
-
-    // Neither does an ordinary non-creating open.
-    let fd = fs
-        .open(FsClock::EPOCH, "/tmp/kept", OpenFlags::read_only())
-        .unwrap();
-    fs.close(fd).unwrap();
-    assert_eq!(fs.metadata("/tmp/kept").unwrap().mode, 0o640);
-}
-
-/// What `fstat` on a FIFO descriptor reads: the LIVE entry, by inode, so a
-/// `chmod` after the open is visible exactly as it is through a regular
-/// file's descriptor.
-#[test]
-fn inode_metadata_reads_the_live_entry() {
-    let mut fs = MemFs::new();
-    fs.make_fifo(FsClock::EPOCH, "/tmp/pipe", 0o644).unwrap();
-    let ino = fs.metadata("/tmp/pipe").unwrap().ino;
-    assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o644);
-
-    fs.set_mode(FsClock::EPOCH, "/tmp/pipe", 0o400).unwrap();
-    assert_eq!(fs.inode_metadata(ino).unwrap().mode, 0o400);
-
-    // A rename moves the name, never the node, so the inode still answers.
-    fs.rename(FsClock::EPOCH, "/tmp/pipe", "/tmp/moved")
-        .unwrap();
-    let after = fs.inode_metadata(ino).unwrap();
-    assert_eq!(after.ino, ino);
-    assert_eq!(after.mode, 0o400);
-
-    // A regular file's inode answers here too (the same node identity the
-    // link table uses), and an unknown inode is `NotFound`, never a guess.
-    let fd = fs
-        .open(
-            FsClock::EPOCH,
-            "/tmp/file",
-            OpenFlags::create_truncate_write(),
-        )
-        .unwrap();
-    fs.close(fd).unwrap();
-    let file_ino = fs.metadata("/tmp/file").unwrap().ino;
-    assert_eq!(fs.inode_metadata(file_ino).unwrap().kind, FsEntryKind::File);
-    assert_eq!(
-        fs.inode_metadata(u64::MAX).unwrap_err().code,
-        ErrorCode::NotFound
-    );
+    assert_eq!(fs.metadata("/perm/wide").unwrap().mode, 0o644);
 }
 
 #[test]
@@ -361,33 +213,6 @@ fn directory_modes_gate_search_listing_and_name_creation() {
 
     fs.set_mode(FsClock::EPOCH, "/gate", 0o755).unwrap();
     fs.remove_file(FsClock::EPOCH, "/gate/inner").unwrap();
-}
-
-#[test]
-fn explicit_timestamp_updates_are_reflected_in_metadata() {
-    let mut fs = MemFs::new().with_file("/value", b"x").unwrap();
-    let fd = fs
-        .open(FsClock::EPOCH, "/value", OpenFlags::read_only())
-        .unwrap();
-    fs.set_times(FsClock::EPOCH, fd, Some(10), Some(20))
-        .unwrap();
-    assert_eq!(fs.fd_metadata(fd).unwrap().atime_nanos, 10);
-    assert_eq!(fs.metadata("/value").unwrap().mtime_nanos, 20);
-    fs.close(fd).unwrap();
-    fs.create_directory(FsClock::EPOCH, "/state", 0o777)
-        .unwrap();
-    let state_ino = fs.metadata("/state").unwrap().ino;
-    fs.symlink(FsClock::EPOCH, "missing", "/state/link")
-        .unwrap();
-    let link_metadata = fs.metadata("/state/link").unwrap();
-    assert_ne!(state_ino, link_metadata.ino);
-    assert_eq!(link_metadata.nlink, 1);
-    fs.set_times_by_path(FsClock::EPOCH, "/state", Some(30), None)
-        .unwrap();
-    fs.set_times_by_path(FsClock::EPOCH, "/state/link", None, Some(40))
-        .unwrap();
-    assert_eq!(fs.metadata("/state").unwrap().atime_nanos, 30);
-    assert_eq!(fs.metadata("/state/link").unwrap().mtime_nanos, 40);
 }
 
 #[test]

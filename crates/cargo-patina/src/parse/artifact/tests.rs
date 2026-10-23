@@ -143,7 +143,7 @@ fn classifies_and_resolves_positional_arguments() {
 }
 
 #[test]
-fn source_first_package_selection_threads_into_the_build_spec() {
+fn source_first_package_selection_and_release_thread_into_the_build_spec() {
     // `--package`/`--bin` are extracted from the head (before any `--`) and the
     // rest is passed through; a `--package` in the guest section is untouched.
     let selection = take_package_bin(strings(&[
@@ -193,54 +193,52 @@ fn source_first_package_selection_threads_into_the_build_spec() {
     assert!(apply_package_selection(&mut prebuilt, None, None).is_ok());
     let mut source = ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs"))));
     assert!(apply_package_selection(&mut source, None, Some("x".into())).is_err());
-}
+    {
+        // `--release` is extracted from the head (before any `--`); the rest passes
+        // through, and a `--release` in the guest section stays untouched.
+        let (release, rest) =
+            take_release(strings(&["--release", "--seed", "1", "--", "--release"])).unwrap();
+        assert!(release);
+        assert_eq!(rest, strings(&["--seed", "1", "--", "--release"]));
 
-#[test]
-fn source_first_release_threads_into_the_build_spec() {
-    // `--release` is extracted from the head (before any `--`); the rest passes
-    // through, and a `--release` in the guest section stays untouched.
-    let (release, rest) =
-        take_release(strings(&["--release", "--seed", "1", "--", "--release"])).unwrap();
-    assert!(release);
-    assert_eq!(rest, strings(&["--seed", "1", "--", "--release"]));
+        // Absent, it defaults off; an inline value is rejected (valueless switch).
+        let (release, rest) = take_release(strings(&["--seed", "1"])).unwrap();
+        assert!(!release);
+        assert_eq!(rest, strings(&["--seed", "1"]));
+        assert!(take_release(strings(&["--release=yes"])).is_err());
 
-    // Absent, it defaults off; an inline value is rejected (valueless switch).
-    let (release, rest) = take_release(strings(&["--seed", "1"])).unwrap();
-    assert!(!release);
-    assert_eq!(rest, strings(&["--seed", "1"]));
-    assert!(take_release(strings(&["--release=yes"])).is_err());
+        // Applied to a native source/package build, it flips the release profile;
+        // a WASI package build spec flips too.
+        for mut artifact in [
+            ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs")))),
+            ArtifactRef::Build(Box::new(native_package_spec(
+                PathBuf::from("ws"),
+                PathBuf::from("ws/Cargo.toml"),
+            ))),
+            ArtifactRef::Build(Box::new(wasi_package_spec(
+                PathBuf::from("ws"),
+                PathBuf::from("ws/Cargo.toml"),
+            ))),
+        ] {
+            apply_release(&mut artifact, true).unwrap();
+            let released = match &artifact {
+                ArtifactRef::Build(spec) => match &spec.kind {
+                    BuildSpecKind::Native(inv) => inv.release,
+                    BuildSpecKind::Wasi(inv) => inv.release,
+                },
+                _ => panic!("expected a build spec"),
+            };
+            assert!(
+                released,
+                "release profile did not thread into the build spec"
+            );
+        }
 
-    // Applied to a native source/package build, it flips the release profile;
-    // a WASI package build spec flips too.
-    for mut artifact in [
-        ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs")))),
-        ArtifactRef::Build(Box::new(native_package_spec(
-            PathBuf::from("ws"),
-            PathBuf::from("ws/Cargo.toml"),
-        ))),
-        ArtifactRef::Build(Box::new(wasi_package_spec(
-            PathBuf::from("ws"),
-            PathBuf::from("ws/Cargo.toml"),
-        ))),
-    ] {
-        apply_release(&mut artifact, true).unwrap();
-        let released = match &artifact {
-            ArtifactRef::Build(spec) => match &spec.kind {
-                BuildSpecKind::Native(inv) => inv.release,
-                BuildSpecKind::Wasi(inv) => inv.release,
-            },
-            _ => panic!("expected a build spec"),
-        };
-        assert!(
-            released,
-            "release profile did not thread into the build spec"
-        );
+        // An already-built artifact carries no build profile, so `--release` on a
+        // prebuilt positional fails closed rather than being silently ignored; a
+        // false (absent) release is a no-op on any artifact.
+        let mut prebuilt = ArtifactRef::Prebuilt(PathBuf::from("bin"));
+        assert!(apply_release(&mut prebuilt, true).is_err());
+        assert!(apply_release(&mut prebuilt, false).is_ok());
     }
-
-    // An already-built artifact carries no build profile, so `--release` on a
-    // prebuilt positional fails closed rather than being silently ignored; a
-    // false (absent) release is a no-op on any artifact.
-    let mut prebuilt = ArtifactRef::Prebuilt(PathBuf::from("bin"));
-    assert!(apply_release(&mut prebuilt, true).is_err());
-    assert!(apply_release(&mut prebuilt, false).is_ok());
 }

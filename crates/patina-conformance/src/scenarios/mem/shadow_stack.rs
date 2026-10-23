@@ -73,13 +73,13 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/shadow_stack",
     run,
     covers: &[Syscall::N_map_shadow_stack],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     needs: &[Need::ShadowStack],
     #[cfg(target_arch = "x86_64")]
     gaps: &[
         Gap {
             status: Status::ByDesign,
-            vehicles: Vehicle::KERNEL,
+            vehicles: &[Vehicle::Syscall],
             what: "the virtual CPU has no user shadow stacks, on any host, so its answers do not depend on whether the host's CPU has them (this oracle's does, many do not); map_shadow_stack answers EOPNOTSUPP before any argument, as 6.8 does without USER_SHSTK (patina-native-shim src/sud/mem.rs)",
             failure: Failure::Differs(&[
                 Difference::field(0, "map_shadow_stack", "errno", Observed::Str("EOPNOTSUPP")),
@@ -95,7 +95,7 @@ pub const SCENARIO: Scenario = Scenario {
         },
         Gap {
             status: Status::ByDesign,
-            vehicles: Vehicle::KERNEL,
+            vehicles: &[Vehicle::Syscall],
             what: "with no shadow stack to map on the virtual CPU (the gap above), the scenario cannot go on to judge a mapping",
             failure: Failure::Stops {
                 events: 7,

@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn statmount_room_and_order() {
+    fn statmount_reads_its_request_and_fills_the_room_in_order() {
         let root = ROOT_MOUNT.unique;
         let mut buf = vec![0x55u8; 1024];
         // "/" alone needs 512 + "\0/\0": room for 515, not 514.
@@ -385,10 +385,8 @@ mod tests {
             statmount(credential(), &flag),
             Ok(-i64::from(errno::EINVAL))
         );
-    }
 
-    #[test]
-    fn a_request_is_read_as_copy_mnt_id_req_reads_it() {
+        // The request is read as `copy_mnt_id_req` reads it.
         let root = ROOT_MOUNT.unique;
         let mut buf = vec![0u8; 1024];
         let e = |code: u32| -i64::from(code);

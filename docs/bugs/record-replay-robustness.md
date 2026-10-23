@@ -53,7 +53,7 @@ Focused regression tests:
 - `cargo test -p patina-dst-trace`
 - `cargo test -p cargo-patina --lib`
 - `cargo test -p cargo-patina --test end_to_end native_record_abort_leaves_trace_absent_and_infra_classified -- --nocapture`
-- `cargo test -p cargo-patina --test end_to_end native_replay_refuses_incomplete_traces_before_guest_exec -- --nocapture`
+- `cargo test -p cargo-patina --test end_to_end native_replay_ties_the_trace_to_its_build_and_argv -- --nocapture`
 - `cargo test -p cargo-patina --test end_to_end campaign_timeout_does_not_save_incomplete_trace -- --nocapture`
 
 The landing gate for this trace/runtime/native-touching change is `mise run check`.

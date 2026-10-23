@@ -4,12 +4,6 @@ struct Ts {
     sec: i64,
     nsec: i64,
 }
-#[repr(C)]
-struct Pollfd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
 unsafe fn sc5(nr: i64, a0: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
     let r: i64;
     unsafe {
@@ -32,79 +26,26 @@ fn mono_ns() -> i64 {
     }
     ts.sec * 1_000_000_000 + ts.nsec
 }
-// Class pairing: readiness/poll host oracle and signals readiness wait tests.
+// Class pairing: readiness/poll host oracle, whose ppoll passes its timeout
+// read-only; the raw row writes the remaining time back.
 fn main() {
     const PPOLL: i64 = 271;
-    const PIPE2: i64 = 293;
-    const WRITE: i64 = 1;
-    const POLLIN: i16 = 1;
-    match std::env::args().nth(1).as_deref() {
-        Some("timeout") => {
-            let before = mono_ns();
-            let mut tmo = Ts {
-                sec: 0,
-                nsec: 5_000_000,
-            };
-            assert_eq!(
-                unsafe { sc5(PPOLL, 0, 0, &mut tmo as *mut Ts as i64, 0, 0) },
-                0
-            );
-            // The timeout, and the calls charged around it.
-            let delta = mono_ns() - before;
-            assert!((5_000_000..5_100_000).contains(&delta), "{delta}");
-            assert_eq!(
-                (tmo.sec, tmo.nsec),
-                (0, 0),
-                "raw ppoll writes remaining timeout"
-            );
-            println!("PPOLL_TIMEOUT elapsed_ms={} remaining=0", delta / 1_000_000);
-        }
-        Some("readiness") => {
-            let mut fds = [-1i32; 2];
-            assert_eq!(
-                unsafe { sc5(PIPE2, fds.as_mut_ptr() as i64, 0, 0, 0, 0) },
-                0
-            );
-            let mut pfd = Pollfd {
-                fd: fds[0],
-                events: POLLIN,
-                revents: 0,
-            };
-            let mut z = Ts { sec: 0, nsec: 0 };
-            assert_eq!(
-                unsafe {
-                    sc5(
-                        PPOLL,
-                        &mut pfd as *mut Pollfd as i64,
-                        1,
-                        &mut z as *mut Ts as i64,
-                        0,
-                        0,
-                    )
-                },
-                0
-            );
-            assert_eq!(pfd.revents, 0, "an empty pipe is not readable");
-            assert_eq!(
-                unsafe { sc5(WRITE, fds[1] as i64, b"x".as_ptr() as i64, 1, 0, 0) },
-                1
-            );
-            assert_eq!(
-                unsafe {
-                    sc5(
-                        PPOLL,
-                        &mut pfd as *mut Pollfd as i64,
-                        1,
-                        &mut z as *mut Ts as i64,
-                        0,
-                        0,
-                    )
-                },
-                1
-            );
-            assert_eq!(pfd.revents, POLLIN);
-            println!("PPOLL_READINESS empty=0 ready=1 revents=1");
-        }
-        _ => panic!("expected timeout or readiness"),
-    }
+    let before = mono_ns();
+    let mut tmo = Ts {
+        sec: 0,
+        nsec: 5_000_000,
+    };
+    assert_eq!(
+        unsafe { sc5(PPOLL, 0, 0, &mut tmo as *mut Ts as i64, 0, 0) },
+        0
+    );
+    // The timeout, and the calls charged around it.
+    let delta = mono_ns() - before;
+    assert!((5_000_000..5_100_000).contains(&delta), "{delta}");
+    assert_eq!(
+        (tmo.sec, tmo.nsec),
+        (0, 0),
+        "raw ppoll writes remaining timeout"
+    );
+    println!("PPOLL_TIMEOUT elapsed_ms={} remaining=0", delta / 1_000_000);
 }

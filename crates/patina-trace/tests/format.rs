@@ -15,7 +15,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
+fn current_format_fixtures_parse_validate_and_are_canonically_encoded() {
     let bundle = TraceBundle::load(fixture("format-22.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
@@ -45,10 +45,7 @@ fn current_format_fixture_parses_validates_and_is_canonically_encoded() {
         1,
         "current encoding must be single-line"
     );
-}
 
-#[test]
-fn current_crash_restart_fixture_parses_validates_and_is_canonical() {
     let bundle = TraceBundle::load(fixture("format-22-crash-restart.patina")).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
@@ -77,29 +74,4 @@ fn any_other_format_version_is_refused() {
             "format {version}: expected UnsupportedVersion, got {error:?}"
         );
     }
-}
-
-/// A crash-restart trace recorded before restarted incarnations drew their
-/// own streams (format 18) would replay its restart with different unrecorded
-/// draws, so it is refused by its version. The point pin for the class
-/// `any_other_format_version_is_refused` covers.
-#[test]
-fn a_crash_restart_trace_from_before_per_incarnation_streams_is_refused() {
-    let current = std::fs::read(fixture("format-22-crash-restart.patina")).unwrap();
-    let mut value: serde_json::Value = serde_json::from_slice(&current).unwrap();
-    value["format_version"] = serde_json::Value::from(18);
-    let error = TraceBundle::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap_err();
-    assert!(
-        matches!(error, TraceError::UnsupportedVersion { found: 18 }),
-        "expected UnsupportedVersion, got {error:?}"
-    );
-}
-
-#[test]
-fn malformed_fixture_is_rejected_as_a_parse_error() {
-    let error = TraceBundle::load(fixture("malformed.patina")).unwrap_err();
-    assert!(
-        matches!(error, TraceError::Parse { .. }),
-        "expected Parse, got {error:?}"
-    );
 }

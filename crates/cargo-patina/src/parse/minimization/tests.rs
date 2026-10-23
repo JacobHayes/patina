@@ -38,21 +38,21 @@ fn parses_trace_minimization_with_an_external_oracle() {
     assert!(!invocation.prune);
     assert_eq!(invocation.oracle, strings(&["./oracle", "--exact"]));
     assert!(parse(strings(&["minimize", "failure.patina"])).is_err());
-}
 
-#[test]
-fn parses_branch_pruning_and_rejects_timeline_combo() {
-    let invocation = trace_invocation(&[
+    // The trace may follow the options, like the other verbs.
+    let trailing = trace_invocation(&[
         "minimize",
-        "failure.patina",
         "--output",
-        "small.patina",
+        "out.patina",
         "--prune-branches",
+        "trace.patina",
         "--",
-        "./oracle",
+        "oracle",
     ]);
-    assert!(invocation.prune);
-    assert_eq!(invocation.timeline, None);
+    assert_eq!(trailing.trace, PathBuf::from("trace.patina"));
+    assert_eq!(trailing.output, PathBuf::from("out.patina"));
+    assert!(trailing.prune);
+    assert_eq!(trailing.timeline, None);
     // --prune-branches and --timeline are mutually exclusive.
     assert!(
         parse(strings(&[
@@ -106,28 +106,4 @@ fn parses_scenario_minimization_with_seed_and_params() {
         ]))
         .is_err()
     );
-}
-
-#[test]
-fn minimize_locates_the_trace_after_options() {
-    // `minimize --output out.patina trace.patina -- oracle`: the trace follows
-    // the option, like the other verbs (previously the option was mistaken for
-    // the trace path).
-    match parse(strings(&[
-        "minimize",
-        "--output",
-        "out.patina",
-        "trace.patina",
-        "--",
-        "oracle",
-    ]))
-    .unwrap()
-    {
-        ParseResult::Minimize(minimize::MinimizeInvocation::Trace(trace)) => {
-            assert_eq!(trace.trace, PathBuf::from("trace.patina"));
-            assert_eq!(trace.output, PathBuf::from("out.patina"));
-            assert_eq!(trace.oracle, strings(&["oracle"]));
-        }
-        _ => panic!("expected a trace minimization"),
-    }
 }

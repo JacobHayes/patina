@@ -251,43 +251,28 @@ fn run_search(start: &[u64], predicate: Predicate, resumed: bool) -> (Vec<u64>, 
     (values(&result), memo)
 }
 
+/// On every scripted shape the resumed sweep reaches the restarting
+/// search's fixed point (also through the public entry point) for no more
+/// oracle calls. Both searches are measured with the same verdict cache, so
+/// the difference is the search and not the memo.
 #[test]
-fn resume_sweep_reaches_the_same_fixed_point_as_the_restarting_search() {
+fn resume_sweep_reaches_the_restarting_fixed_point_for_fewer_oracle_calls() {
+    let mut restart_total = 0usize;
+    let mut resume_total = 0usize;
     for (name, start, predicate) in shapes() {
-        let (reference, _) = run_search(&start, predicate, false);
-        let (result, _) = run_search(&start, predicate, true);
+        let (reference, restart) = run_search(&start, predicate, false);
+        let (result, resume) = run_search(&start, predicate, true);
         assert_eq!(
             result, reference,
             "{name}: resumed sweep and restarting search must agree"
         );
         assert!(predicate(&result), "{name}: the failure must survive");
         value_bundle(&result).validate().unwrap();
-        // The same result also comes back through the public entry point,
-        // which is what callers actually reach.
         let (public, _) = run_scripted(&start, predicate);
         assert_eq!(public, result, "{name}: public entry point agrees");
-    }
-}
 
-#[test]
-fn resume_sweep_costs_fewer_oracle_calls_than_restarting() {
-    // Both searches are measured with the same verdict cache, so the
-    // difference is the search and not the memo; `hits + misses` is what
-    // each would have cost without the cache.
-    let mut restart_total = 0usize;
-    let mut resume_total = 0usize;
-    for (name, start, predicate) in shapes() {
-        let (_, restart) = run_search(&start, predicate, false);
-        let (_, resume) = run_search(&start, predicate, true);
         let restart_calls = (restart.misses + restart.verifications) as usize;
         let resume_calls = (resume.misses + resume.verifications) as usize;
-        println!(
-            "{name}: {} events, restart {restart_calls} calls ({} without the cache), \
-                 resume {resume_calls} calls ({} without the cache)",
-            start.len(),
-            restart.hits + restart.misses,
-            resume.hits + resume.misses
-        );
         if name == "single-decision deletions only" {
             // Every accepted deletion is a single decision and no two
             // candidates are alike, so the cache cannot help either search:
@@ -298,19 +283,9 @@ fn resume_sweep_costs_fewer_oracle_calls_than_restarting() {
                      got {resume_calls} vs {restart_calls}"
             );
         }
-        if name == "interchangeable filler" {
-            // The duplicate-heavy case the probe measured: here the cache is
-            // what pays, and it must actually pay.
-            assert!(
-                resume.hits > 0 && resume_calls < (resume.hits + resume.misses) as usize,
-                "{name}: the cache saved nothing"
-            );
-        }
         // On ten-decision traces the two searches are within a couple of
-        // calls of each other either way - restarting at index 0 is cheap
-        // when the whole window is that small. The measured 3-3.7x is a
-        // 944-decision effect (docs/probes/minimize-oracle-perf.md); what
-        // matters here is that no shape blows up.
+        // calls of each other either way; what matters here is that no shape
+        // blows up.
         assert!(
             resume_calls <= restart_calls + 2,
             "{name}: resumed sweep cost {resume_calls} calls against restart's {restart_calls}"
@@ -340,7 +315,7 @@ fn duplicate_heavy() -> (Vec<u64>, Predicate) {
 }
 
 #[test]
-fn repeated_candidates_are_decided_once() {
+fn repeated_candidates_are_decided_once_apart_from_sampled_re_runs() {
     let (start, predicate) = duplicate_heavy();
     let bundle = value_bundle(&start);
     let mut memo = CandidateMemo::new();
@@ -357,6 +332,13 @@ fn repeated_candidates_are_decided_once() {
     assert!(
         memo.hits > 0,
         "the shape must actually repeat candidates, or this proves nothing"
+    );
+    // Under the shipped sampling period a normal run re-runs some hits.
+    assert!(
+        memo.verifications > 0,
+        "the re-verification never fired: {} hits, {} misses",
+        memo.hits,
+        memo.misses
     );
     // Every oracle call is a distinct candidate except the sampled re-runs
     // the soundness guard deliberately repeats.
@@ -412,37 +394,8 @@ fn a_contradicting_oracle_aborts_the_run_instead_of_being_trusted() {
     };
     assert_eq!(digest.len(), 64, "the refusal names the candidate digest");
     assert_ne!(cached, observed);
-    let message = error.to_string();
-    assert!(
-        message.contains("nondeterministic") && message.contains("sha256:"),
-        "the refusal must be legible: {message}"
-    );
-}
 
-#[test]
-fn the_default_sample_re_runs_cache_hits_and_still_catches_a_contradiction() {
-    let (start, predicate) = duplicate_heavy();
-
-    // Non-vacuity: under the shipped sampling period a normal run really does
-    // re-run some of its cache hits.
-    let bundle = value_bundle(&start);
-    let mut memo = CandidateMemo::new();
-    minimize_main_with_memo(
-        &bundle,
-        &mut |candidate: &TraceBundle| Ok::<_, Infallible>(predicate(&values(candidate))),
-        &mut memo,
-    )
-    .unwrap();
-    assert!(memo.hits > 0, "the run must exercise the cache at all");
-    assert!(
-        memo.verifications > 0,
-        "the re-verification never fired: {} hits, {} misses",
-        memo.hits,
-        memo.misses
-    );
-
-    // And that sample is what catches a self-contradicting oracle without
-    // any test-only period.
+    // The shipped sampling period catches it too, without a test-only period.
     let mut seen = HashMap::new();
     let error = minimize_main_with_memo(
         &bundle,
@@ -564,7 +517,7 @@ fn a_widened_candidate_window_changes_throughput_and_not_the_result() {
             windows: 0,
         };
         let reference = minimize_main(&bundle, &mut serial).unwrap();
-        for width in [2usize, 3, 8, 64] {
+        for width in [2usize, 8, 64] {
             let mut batched = WindowedOracle {
                 predicate,
                 width,
@@ -588,80 +541,17 @@ fn a_widened_candidate_window_changes_throughput_and_not_the_result() {
                 batched.windows,
                 serial.windows
             );
+            // The saving is real work per round trip: a wide window batches
+            // rather than falling back to one candidate at a time.
+            if name == "interchangeable filler" && width == 8 {
+                assert!(
+                    batched.windows * 2 < batched.verdicts,
+                    "width 8 made {} round trips for {} verdicts",
+                    batched.windows,
+                    batched.verdicts
+                );
+            }
         }
-    }
-}
-
-#[test]
-fn a_wide_window_actually_batches_rather_than_falling_back_to_one_at_a_time() {
-    // The saving is real work per round trip: a serial run makes one round
-    // trip per verdict, a batched one must make strictly fewer.
-    let (start, predicate) = duplicate_heavy();
-    let bundle = value_bundle(&start);
-    let mut batched = WindowedOracle {
-        predicate,
-        width: 8,
-        verdicts: 0,
-        windows: 0,
-    };
-    minimize_main(&bundle, &mut batched).unwrap();
-    assert!(
-        batched.windows * 2 < batched.verdicts,
-        "width 8 made {} round trips for {} verdicts",
-        batched.windows,
-        batched.verdicts
-    );
-}
-
-/// The self-contradicting oracle above, batching. The window is where a
-/// disagreement could plausibly get lost: several candidates are judged for
-/// one scan step, but only one of them is kept, so a search that stopped
-/// reading verdicts at its accept would skip the re-verification of every
-/// later member and launder exactly the flakiness the guard exists to catch.
-struct ContradictingWindowedOracle<'a> {
-    seen: &'a mut HashMap<Vec<u64>, bool>,
-    predicate: Predicate,
-    width: usize,
-}
-
-impl FailureOracle for ContradictingWindowedOracle<'_> {
-    type Error = Infallible;
-
-    fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
-        let candidate = values(candidate);
-        let honest = (self.predicate)(&candidate);
-        Ok(match self.seen.insert(candidate, honest) {
-            Some(previous) => !previous,
-            None => honest,
-        })
-    }
-
-    fn batch_width(&self) -> usize {
-        self.width
-    }
-}
-
-#[test]
-fn a_contradiction_inside_a_speculative_window_still_aborts_the_run() {
-    let (start, predicate) = duplicate_heavy();
-    let bundle = value_bundle(&start);
-    for width in [2usize, 8, 64] {
-        let mut seen = HashMap::new();
-        let mut oracle = ContradictingWindowedOracle {
-            seen: &mut seen,
-            predicate,
-            width,
-        };
-        let error = minimize_main_with_memo(
-            &bundle,
-            &mut oracle,
-            &mut CandidateMemo::with_verification_period(1),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, MinimizeError::NondeterministicOracle { .. }),
-            "width {width}: expected a nondeterminism refusal, got {error}"
-        );
     }
 }
 

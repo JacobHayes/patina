@@ -272,7 +272,7 @@ mod tests {
     /// else is passed; the attribute's copy refuses in
     /// `copy_min_struct_from_user`'s order.
     #[test]
-    fn create_ruleset_answers_flags_and_copies_in_order() {
+    fn rulesets_answer_flags_and_copy_in_order() {
         let create = |attr: u64, size: u64, flags: u64| {
             landlock_create_ruleset(credential(), &[attr, size, flags, 0, 0, 0])
         };
@@ -290,12 +290,9 @@ mod tests {
             create(UNKNOWN_NET.as_ptr() as u64, 16, 0),
             refuse(errno::EINVAL)
         );
-    }
 
-    /// With `no_new_privs`, the flags and the descriptor are checked, and
-    /// no descriptor names a ruleset here.
-    #[test]
-    fn restrict_self_checks_flags_then_the_ruleset_with_no_new_privs() {
+        // restrict_self, with `no_new_privs`, checks the flags and then the
+        // descriptor, and no descriptor names a ruleset here.
         let restrict = |fd: i32, flags: u64| {
             restrict_self_as(credential(), &[fd as u64, flags, 0, 0, 0, 0], true)
         };

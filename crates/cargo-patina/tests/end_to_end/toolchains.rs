@@ -40,7 +40,6 @@ mod tests {
             "fn main() { println!(\"TOOLCHAIN_SPLIT_FIXTURE_OK\"); }\n",
         );
         let split_output = package.join("split-build");
-        let agreeing_output = package.join("agreeing-build");
 
         // Split: the shim half and the guest half resolve different compilers.
         let refused = invoke_unchecked_clean_env(
@@ -90,32 +89,6 @@ mod tests {
             !split_output.exists(),
             "the refusal produced a binary at {}; it must refuse BEFORE the link",
             split_output.display()
-        );
-
-        // Removing the false identity must allow this same guest to build.
-        let built = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            &package,
-            &[
-                "build",
-                package.to_str().unwrap(),
-                "--output",
-                agreeing_output.to_str().unwrap(),
-            ],
-            &[],
-        );
-        assert!(
-            built.status.success(),
-            "an agreeing toolchain was refused: the detector fires on a non-mismatch (exit {})\
-         \nstdout:\n{}\nstderr:\n{}",
-            built.status,
-            String::from_utf8_lossy(&built.stdout),
-            String::from_utf8_lossy(&built.stderr)
-        );
-        assert!(
-            agreeing_output.is_file(),
-            "the agreeing build produced no binary at {}",
-            agreeing_output.display()
         );
     }
 
@@ -314,14 +287,27 @@ mod tests {
         assert!(propagated_output.is_file());
         assert_no_bundle_toolchain_pin(&shim_sources);
 
-        // From here on, PATH is hostile: the aligned build must use the absolute
-        // RUSTC/CARGO values below for every compiler probe and Cargo child. If any
-        // later step falls back to PATH, this test fails instead of passing vacuously.
+        // From here on, PATH is hostile: the aligned build must use the RUSTC/CARGO
+        // values below for every compiler probe and Cargo child. If any later step
+        // falls back to PATH, this test fails instead of passing vacuously. The
+        // values are relative to the guest's directory, so they work only if they
+        // are anchored before the shim build changes directory.
         fs::write(
             &rustc_proxy,
             "#!/bin/sh\necho HOSTILE_PATH_RUSTC_USED \"$@\" >&2\nexit 99\n",
         )
         .unwrap();
+        let tools = package.join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        for (name, real) in [("rustc", &real_rustc), ("cargo", &real_cargo)] {
+            let wrapper = tools.join(name);
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", real.display()),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let aligned = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
             .current_dir(&package)
             .args([
@@ -332,13 +318,13 @@ mod tests {
             ])
             .env("PATH", &path)
             .env("RUSTUP_TOOLCHAIN", "1.96.1")
-            .env("RUSTC", &real_rustc)
-            .env("CARGO", &real_cargo)
+            .env("RUSTC", "./tools/rustc")
+            .env("CARGO", "./tools/cargo")
             .output()
             .unwrap();
         assert!(
             aligned.status.success(),
-            "absolute, matching RUSTC/CARGO were refused (exit {})\nstdout:\n{}\nstderr:\n{}",
+            "relative, matching RUSTC/CARGO were refused (exit {})\nstdout:\n{}\nstderr:\n{}",
             aligned.status,
             String::from_utf8_lossy(&aligned.stdout),
             String::from_utf8_lossy(&aligned.stderr)
@@ -444,108 +430,6 @@ mod tests {
             eprintln!("{name}: refused before link ({expected})");
         }
         assert_no_bundle_toolchain_pin(&shim_source_cache());
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_relative_rustc_path_is_anchored_for_the_shim_cargo_child() {
-        let directory = tempdir().unwrap();
-        let package = directory.path().join("relative-rustc-guest");
-        write_plain_package(
-            &package,
-            "patina-toolchain-relative-rustc-fixture",
-            "fn main() { println!(\"RELATIVE_RUSTC_FIXTURE_OK\"); }\n",
-        );
-
-        let real_rustc = active_toolchain_binary("rustc");
-        let real_cargo = active_toolchain_binary("cargo");
-        let tools = package.join("tools");
-        fs::create_dir_all(&tools).unwrap();
-        let relative_rustc = tools.join("rustc");
-        fs::write(
-            &relative_rustc,
-            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", real_rustc.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&relative_rustc, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let output_path = package.join("relative-rustc-build");
-        let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
-            .current_dir(&package)
-            .args([
-                "build",
-                package.to_str().unwrap(),
-                "--output",
-                output_path.to_str().unwrap(),
-            ])
-            .env("RUSTC", "./tools/rustc")
-            .env("CARGO", &real_cargo)
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "relative RUSTC was not anchored before the shim Cargo child changed cwd (exit {})\nstdout:\n{}\nstderr:\n{}",
-            built.status,
-            String::from_utf8_lossy(&built.stdout),
-            String::from_utf8_lossy(&built.stderr)
-        );
-        assert!(
-            output_path.is_file(),
-            "the relative-RUSTC build produced no binary at {}",
-            output_path.display()
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_relative_cargo_path_is_anchored_before_the_shim_build_changes_directory() {
-        let directory = tempdir().unwrap();
-        let package = directory.path().join("relative-cargo-guest");
-        write_plain_package(
-            &package,
-            "patina-toolchain-relative-cargo-fixture",
-            "fn main() { println!(\"RELATIVE_CARGO_FIXTURE_OK\"); }\n",
-        );
-
-        let real_rustc = active_toolchain_binary("rustc");
-        let real_cargo = active_toolchain_binary("cargo");
-        let tools = package.join("tools");
-        fs::create_dir_all(&tools).unwrap();
-        let relative_cargo = tools.join("cargo");
-        fs::write(
-            &relative_cargo,
-            format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", real_cargo.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&relative_cargo, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let output_path = package.join("relative-cargo-build");
-        let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
-            .current_dir(&package)
-            .args([
-                "build",
-                package.to_str().unwrap(),
-                "--output",
-                output_path.to_str().unwrap(),
-            ])
-            .env("RUSTC", &real_rustc)
-            .env("CARGO", "./tools/cargo")
-            .env_remove("RUSTUP_TOOLCHAIN")
-            .output()
-            .unwrap();
-        assert!(
-            built.status.success(),
-            "relative CARGO was not anchored before the shim build changed cwd (exit {})\nstdout:\n{}\nstderr:\n{}",
-            built.status,
-            String::from_utf8_lossy(&built.stdout),
-            String::from_utf8_lossy(&built.stderr)
-        );
-        assert!(
-            output_path.is_file(),
-            "the relative-CARGO build produced no binary at {}",
-            output_path.display()
-        );
     }
 
     /// Where the CLI unpacks its embedded shim source bundle and builds the shim:

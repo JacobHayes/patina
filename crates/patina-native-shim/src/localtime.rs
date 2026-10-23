@@ -577,9 +577,10 @@ mod tests {
     }
 
     /// The zones glibc cannot find a file for: the default file and the
-    /// empty name answer "UTC", a name without an offset keeps its name.
+    /// empty name answer "UTC", a name without an offset keeps its name; a
+    /// zone file that is there is refused.
     #[test]
-    fn a_missing_zone_file_falls_back_as_glibc_does() {
+    fn a_missing_zone_file_falls_back_as_glibc_does_and_a_present_one_is_refused() {
         let zone = |tz: Option<&[u8]>| Zone::choose(tz, None, none).unwrap().local(0).unwrap();
         for (tz, name) in [
             (None, "UTC"),
@@ -595,11 +596,8 @@ mod tests {
             assert_eq!(fields(&tm).2, name, "{tz:?}");
             assert_eq!((tm.gmtoff, tm.isdst, tm.hour), (0, 0, 0), "{tz:?}");
         }
-    }
 
-    /// A regular file where glibc would read one is refused, not guessed.
-    #[test]
-    fn a_zone_file_in_the_filesystem_is_refused() {
+        // A regular file where glibc would read one is refused, not guessed.
         let at = |wanted: &'static str| move |path: &str| path == wanted;
         assert_eq!(
             Zone::choose(None, None, at("/etc/localtime")).unwrap_err(),

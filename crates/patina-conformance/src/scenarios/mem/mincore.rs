@@ -82,6 +82,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/mincore",
     run,
     covers: &[Syscall::N_mincore],
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     ..DEFAULTS
 };

@@ -81,9 +81,10 @@ interposers keep shim-internal reentrancy from being the call that aborts.
 
 Evidence:
 
-- Class detector: `native_replay_init_error_reaches_every_bootstrap_window_entry_point`
-  (`crates/cargo-patina/tests/end_to_end/native_replay/tests.rs`) drives one guest per answering
-  entry point through a fingerprint-mismatched replay, under a deadline so the
+- Class detector: `native_replay_ties_the_trace_to_its_build_and_argv`
+  (`crates/cargo-patina/tests/end_to_end/native_replay/tests.rs`, its
+  `replay_init_error_reaches_every_bootstrap_window_entry_point` leg) drives the replay
+  probe through each answering entry point in a fingerprint-mismatched replay, under a deadline so the
   field symptom fails the test instead of hanging it. RED before the fix, naming
   all five swallowing entry points at once (`clock`, `cpu-time`, `read-link` and
   the macOS `unfair-lock` arm exited 0; `clock-until` was still spinning at the

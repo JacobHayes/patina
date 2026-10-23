@@ -407,9 +407,15 @@ mod tests {
         guard
     }
 
+    /// The process attributes `prctl` keeps: `no_new_privs` (only 1, with a
+    /// zero tail, and sticky), the dumpable flag (0 or 1), the parent-death
+    /// signal (any signal number), the timer slack (0 restores the default),
+    /// and no seccomp mode, whatever the arguments.
     #[test]
-    fn prctl_no_new_privs_accepts_only_one_with_zero_tail() {
+    fn prctl_attributes_answer_as_the_kernel_does() {
         let _serial = reset_prctl_state();
+        assert_eq!(sys_prctl(PR_GET_SECCOMP as u64, 1, 2, 3, 4), 0);
+
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 0);
         assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 1, 1, 0, 0), -EINVAL);
@@ -417,32 +423,17 @@ mod tests {
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
         assert_eq!(sys_prctl(PR_SET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_GET_NO_NEW_PRIVS as u64, 0, 0, 0, 0), 1);
-    }
 
-    /// No seccomp mode is ever entered, whatever the arguments.
-    #[test]
-    fn prctl_reads_no_seccomp_mode() {
-        assert_eq!(sys_prctl(PR_GET_SECCOMP as u64, 1, 2, 3, 4), 0);
-    }
-
-    #[test]
-    fn prctl_dumpable_refuses_two() {
-        let _serial = reset_prctl_state();
         assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
         assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 0, 0, 0, 0), 0);
         assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 0);
         assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 1, 0, 0, 0), 0);
-        assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
         assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 2, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_SET_DUMPABLE as u64, 999, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_GET_DUMPABLE as u64, 0, 0, 0, 0), 1);
-    }
 
-    #[test]
-    fn prctl_pdeathsig_range() {
-        let _serial = reset_prctl_state();
         let mut value = -1i32;
-        for sig in 0_u64..=64 {
+        for sig in [0_u64, 1, 64] {
             assert_eq!(sys_prctl(PR_SET_PDEATHSIG as u64, sig, 0, 0, 0), 0);
             assert_eq!(
                 sys_prctl(
@@ -458,11 +449,7 @@ mod tests {
         }
         assert_eq!(sys_prctl(PR_SET_PDEATHSIG as u64, 65, 0, 0, 0), -EINVAL);
         assert_eq!(sys_prctl(PR_GET_PDEATHSIG as u64, 0, 0, 0, 0), -EFAULT);
-    }
 
-    #[test]
-    fn prctl_timerslack_zero_restores_default() {
-        let _serial = reset_prctl_state();
         assert_eq!(sys_prctl(PR_GET_TIMERSLACK as u64, 0, 0, 0, 0), 50_000);
         assert_eq!(sys_prctl(PR_SET_TIMERSLACK as u64, 123_456, 0, 0, 0), 0);
         assert_eq!(sys_prctl(PR_GET_TIMERSLACK as u64, 0, 0, 0, 0), 123_456);

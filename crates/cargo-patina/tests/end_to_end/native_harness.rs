@@ -69,24 +69,12 @@ mod tests {
             "--format",
             "json",
         ];
-        let first = invoke_unchecked(patina, directory.path(), &passing_args);
+        let passed = invoke_unchecked(patina, directory.path(), &passing_args);
         assert!(
-            first.status.success(),
-            "first filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&first.stdout),
-            String::from_utf8_lossy(&first.stderr)
-        );
-        let second = invoke_unchecked(patina, directory.path(), &passing_args);
-        assert!(
-            second.status.success(),
-            "second filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&second.stdout),
-            String::from_utf8_lossy(&second.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&first.stdout),
-            String::from_utf8_lossy(&second.stdout),
-            "filtered harness JSON stdout should be byte-identical across repeats"
+            passed.status.success(),
+            "filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&passed.stdout),
+            String::from_utf8_lossy(&passed.stderr)
         );
 
         let pass_guest = fixture_target_directory(directory.path()).join(
@@ -200,7 +188,10 @@ fn import_is_linked() {
     }
 
     /// Same-name targets are Cargo's default for a package with lib.rs + main.rs.
-    /// Class pairing: the target-kind/package selection matrix in lib.rs.
+    /// A bare name is ambiguous, and each `kind:name` selector runs its own
+    /// target: every target carries a canary that fails only under Patina, so a
+    /// wrong target or an empty filter cannot look like success. Class pairing:
+    /// the target-kind/package selection matrix in lib.rs.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_harness_selects_same_named_library_binary_and_integration_test() {
@@ -213,37 +204,19 @@ fn import_is_linked() {
             "[package]\nname = \"same_name\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
-        // Native and simulated oracles are the same; no sleep or host input.
-        let case = r#"
-#[test]
-fn roundtrip() {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let thread = std::thread::spawn(move || tx.send(42).unwrap());
-    assert_eq!(rx.recv().unwrap(), 42);
-    thread.join().unwrap();
-}
-"#;
         for (kind, path, entry) in [
             ("lib", "src/lib.rs", ""),
             ("bin", "src/main.rs", "fn main() {}"),
             ("test", "tests/same_name.rs", ""),
         ] {
-            // Each harness also has a distinct failing selection canary under
-            // Patina. A wrong target or an empty filter must not look like success.
             fs::write(
-            root.join(path),
-            format!(
-                "{entry}\n{case}\n#[test]\n#[allow(unexpected_cfgs)]\nfn selected_{kind}() {{ assert!(!cfg!(patina)); }}\n"
-            ),
-        )
-        .unwrap();
-        }
-        let native = Command::new("cargo")
-            .args(["test", "--quiet"])
-            .current_dir(root)
-            .output()
+                root.join(path),
+                format!(
+                    "{entry}\n#[test]\n#[allow(unexpected_cfgs)]\nfn selected_{kind}() {{ assert!(!cfg!(patina)); }}\n"
+                ),
+            )
             .unwrap();
-        assert!(native.status.success(), "{native:?}");
+        }
         let patina = env!("CARGO_BIN_EXE_cargo-patina");
         let ambiguous = invoke_unchecked(
             patina,
@@ -254,7 +227,7 @@ fn roundtrip() {
                 "--harness-target",
                 "same_name",
                 "--exact",
-                "roundtrip",
+                "selected_lib",
                 "--seed",
                 "0",
             ],
@@ -262,21 +235,6 @@ fn roundtrip() {
         assert_eq!(ambiguous.status.code(), Some(2));
         for kind in ["lib", "bin", "test"] {
             let selector = format!("{kind}:same_name");
-            let run = invoke_unchecked(
-                patina,
-                root,
-                &[
-                    "test",
-                    ".",
-                    "--harness-target",
-                    &selector,
-                    "--exact",
-                    "roundtrip",
-                    "--seed",
-                    "0",
-                ],
-            );
-            assert!(run.status.success(), "{selector}: {run:?}");
             let canary = invoke_unchecked(
                 patina,
                 root,

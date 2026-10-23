@@ -275,7 +275,7 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     // glibc has no wrapper for these rows: the libc spelling would be
     // `syscall(2)` again.
-    vehicles: Vehicle::KERNEL,
+    vehicles: &[Vehicle::Syscall],
     covers: &[
         Syscall::N_landlock_create_ruleset,
         Syscall::N_landlock_add_rule,

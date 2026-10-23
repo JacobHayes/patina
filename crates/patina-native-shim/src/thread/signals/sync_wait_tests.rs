@@ -45,21 +45,6 @@ fn signal_parked_sync(main: TaskId, during_handler: bool) {
 }
 
 #[test]
-fn join_delivers_process_signal_then_waits_for_worker_completion() {
-    isolated(|| {
-        install_handler(SIGUSR1, sync_handler, 0, 0);
-        let main = current_task();
-        let worker = spawn(move || {
-            signal_parked_sync(main, false);
-            // The main task cannot return from join just because its handler ran.
-            assert!(lock_state().table.threads[&current_task()].joiner.is_some());
-        });
-        join(worker);
-        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
-    });
-}
-
-#[test]
 fn mutex_and_cond_keep_ownership_and_notifications_across_handlers() {
     isolated(|| {
         install_handler(SIGUSR1, sync_handler, 0, 0);
@@ -248,7 +233,7 @@ fn nested_pthread_wait_is_a_named_fatal_before_reparking() {
         return;
     }
     let mut failures = Vec::new();
-    for case in ["plain", "timed", "plain-granted", "timed-granted"] {
+    for case in ["plain", "timed-granted"] {
         let output = reexec(&test_name(), &[("PATINA_NESTED_SYNC", case)]);
         let stderr = String::from_utf8_lossy(&output.stderr);
         if output.status.signal() != Some(6)

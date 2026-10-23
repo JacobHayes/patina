@@ -18,8 +18,9 @@ patina values, or `Failure::Stops` with the exact point, ending and
 diagnostic): the test fails when patina fails differently, and when patina
 starts passing, until the gap is removed. The patina run judged is the
 recorded one (recording changes nothing it observes, which one test checks on
-a few scenarios); one that completes is also replayed and run directly under
-strace.
+a few scenarios); one that completes is also run directly under strace, and
+the scenario's first vehicle that completes is replayed (every door reaches the
+same model operations, which are what a replay re-runs).
 
 The system is pinned: the scenarios assert Ubuntu 24.04 — its GA kernel,
 Ubuntu's build of Linux 6.8 (`patina_dst_syscalls::VIRTUAL_ABI`, the kernel
@@ -79,7 +80,10 @@ only — loopback addresses, AF_UNIX paths in the run directory and abstract
 names derived from it, the kernel's rtnetlink — and compare host-allocated or
 host-configured values (ports, buffer sizes, MTUs, interfaces other than `lo`)
 by relation; IPv6 on `lo` and an unprivileged fanotify group are their needs. A scenario whose
-rows glibc has no wrapper for runs through `Vehicle::KERNEL` only, not
-`syscall(2)` twice. `Probe::resolve` reaches a symbol through `dlsym`, a
+rows glibc has no wrapper for runs through the `syscall` vehicle only, not
+`syscall(2)` twice. A scenario runs through `libc` and `syscall`
+(`Vehicle::DOORS`) unless the trapped instruction is its subject (signal
+delivery and restart around a trapped call, frames, a thread's own exit):
+`raw` reaches the very dispatcher `syscall(2)` does. `Probe::resolve` reaches a symbol through `dlsym`, a
 program's other way to it than linking; under patina that lookup answers only
 the names the shim defines (`src/posix/dlsym.rs` `patina_dlsym_route`).

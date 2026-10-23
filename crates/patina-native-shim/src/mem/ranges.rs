@@ -107,7 +107,7 @@ mod tests {
     use super::Ranges;
 
     #[test]
-    fn cutting_splits_a_range_and_answers_the_middle() {
+    fn cutting_splits_and_setting_replaces_what_it_covers() {
         let mut ranges = Ranges::new();
         ranges.set(0x1000, 0x5000, 'a');
         assert_eq!(ranges.cut(0x2000, 0x3000), vec![(0x2000, 0x3000, 'a')]);
@@ -120,10 +120,8 @@ mod tests {
         assert_eq!(ranges.at(0x5000), None);
         assert_eq!(ranges.containing(0x4000), Some((0x3000, 0x5000, 'a')));
         assert_eq!(ranges.total(), 0x3000);
-    }
 
-    #[test]
-    fn setting_over_ranges_replaces_what_it_covers() {
+        // Setting over ranges replaces what it covers.
         let mut ranges = Ranges::new();
         ranges.set(0x1000, 0x3000, 'a');
         ranges.set(0x4000, 0x6000, 'b');
