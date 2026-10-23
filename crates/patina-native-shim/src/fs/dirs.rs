@@ -51,12 +51,9 @@ pub(crate) unsafe fn read_dir_after_point(
         && resolved.kind == FdKind::ProcDir
     {
         let node = crate::procfs::node_of(resolved.handle);
-        let state = Box::new(ReadDirState {
-            entries: crate::procfs::listing(node),
-            position: 0,
-        });
+        let entries = crate::procfs::listing(node).map_err(crate::abi::failed)?;
         // SAFETY: `state_out` was checked and is required to be writable.
-        unsafe { state_out.write(Box::into_raw(state).cast()) };
+        unsafe { state_out.write(snapshot_of(entries)) };
         set_errno(0);
         return Ok(());
     }
@@ -77,6 +74,39 @@ pub(crate) unsafe fn read_dir_after_point(
         }
         Err(errno) => Err(crate::abi::failed(errno)),
     }
+}
+
+/// A snapshot holding `entries`, for [`read_dir_next`].
+fn snapshot_of(entries: Vec<FsDirectoryEntry>) -> *mut c_void {
+    Box::into_raw(Box::new(ReadDirState {
+        entries,
+        position: 0,
+    }))
+    .cast()
+}
+
+/// A `getdents` on procfs directory descriptor `raw_fd` at `position`: the
+/// directory's listing now, as a snapshot, and how many of its entries the
+/// call passes over ([`crate::procfs::resume`]; `unreturned` is the entry
+/// the last call could not return). procfs walks a directory at every call,
+/// never from a snapshot an earlier call took.
+///
+/// # Safety
+/// `state_out` must be writable.
+#[cfg(target_os = "linux")]
+pub(crate) unsafe fn read_proc_dir(
+    raw_fd: c_int,
+    position: u64,
+    unreturned: Option<&[u8]>,
+    state_out: *mut *mut c_void,
+) -> crate::abi::SysResult<u64> {
+    let resolved = resolve_fd(raw_fd).map_err(crate::abi::failed)?;
+    let node = crate::procfs::node_of(resolved.handle);
+    let entries = crate::procfs::listing(node).map_err(crate::abi::failed)?;
+    let skip = crate::procfs::resume(node, &entries, position, unreturned);
+    // SAFETY: the caller guarantees `state_out` is writable.
+    unsafe { state_out.write(snapshot_of(entries)) };
+    Ok(skip)
 }
 
 /// A getdents on directory descriptor `raw_fd` reached `iterate_dir`: the

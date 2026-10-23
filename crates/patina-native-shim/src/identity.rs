@@ -303,12 +303,15 @@ pub(crate) fn ptrace_may_access(caller: &Credential, target: Process) -> bool {
 
 /// `find_task_by_vpid`: the process a pid (or one of its thread ids) names,
 /// and whether it names the process's main thread (its thread-group leader).
+/// The caller's pid names its process for as long as the process lives,
+/// the leader's exit included (a zombie leader keeps its pid hashed until
+/// the last thread exits).
 pub(crate) fn lookup(pid: i32) -> Option<(Process, bool)> {
     if pid == INIT {
         return Some((Process::INIT, true));
     }
     let caller = Process::current();
-    crate::thread::live_tid(pid).then_some((caller, pid == caller.0))
+    (pid == caller.0 || crate::thread::live_tid(pid)).then_some((caller, pid == caller.0))
 }
 
 /// A process as procfs lists it: its pid, its parent's, its group and its

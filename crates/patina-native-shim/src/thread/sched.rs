@@ -257,9 +257,14 @@ impl SchedRuntime {
         self.set(tid, attrs);
     }
 
+    /// Task `task` exited. The thread-group leader's attributes stay: its
+    /// task is a zombie until the last thread exits, and what it set (its
+    /// name, its nice value) still answers for it.
     pub(super) fn finish(&mut self, task: TaskId) {
         let tid = tid_of(task);
-        self.tasks.remove(&tid);
+        if tid != crate::patina_pid() {
+            self.tasks.remove(&tid);
+        }
         if let Some(slot) = self.slots.remove(&tid) {
             self.free_slots.push(slot);
         }

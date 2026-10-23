@@ -48,6 +48,8 @@ fn opened() -> Open {
         text: None,
         read_pos: 0,
         pos: 0,
+        reading: 0,
+        released: false,
     }
 }
 
@@ -159,7 +161,7 @@ fn process_names_are_canonical_decimal_pids() {
 /// in `proc_match`'s order, then `self`, then the processes by pid.
 #[test]
 fn the_root_lists_what_its_lookups_find() {
-    let entries = listing(Node::Root);
+    let entries = listing(Node::Root).unwrap();
     let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(names[..2], [".", ".."]);
     let self_at = names.iter().position(|name| *name == "self").unwrap();
@@ -184,7 +186,7 @@ fn the_root_lists_what_its_lookups_find() {
         assert_eq!(node.ino(), entry.ino);
         inodes.push(entry.ino);
         if node.is_directory() {
-            for inner in &listing(node)[2..] {
+            for inner in &listing(node).unwrap()[2..] {
                 let file = lookup(node, &inner.name).unwrap();
                 assert_eq!(node_at(&file.path()), Some(file));
                 assert_eq!(file.ino(), inner.ino);
@@ -270,7 +272,7 @@ fn a_process_lists_its_threads_under_task() {
         ),
         at(Node::Process(me()))
     );
-    let entries = listing(tasks);
+    let entries = listing(tasks).unwrap();
     assert_eq!(entries[1].ino, Node::Process(me()).ino());
     let tids: Vec<i32> = entries[2..]
         .iter()
@@ -282,7 +284,7 @@ fn a_process_lists_its_threads_under_task() {
         let thread = lookup(tasks, &tid.to_string()).unwrap();
         assert_eq!(thread, Node::Thread(me(), tid));
         assert_eq!(node_at(&thread.path()), Some(thread));
-        let files: Vec<String> = listing(thread)[2..]
+        let files: Vec<String> = listing(thread).unwrap()[2..]
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
@@ -294,7 +296,7 @@ fn a_process_lists_its_threads_under_task() {
     }
     assert_eq!(lookup(tasks, &i32::MAX.to_string()), Err(ENOENT));
     let init = Node::Tasks(Process::INIT.pid());
-    let init_tids: Vec<String> = listing(init)[2..]
+    let init_tids: Vec<String> = listing(init).unwrap()[2..]
         .iter()
         .map(|entry| entry.name.clone())
         .collect();
@@ -327,7 +329,7 @@ fn net_leads_to_the_callers_socket_tables() {
         walked(Node::Root, &format!("{}/net", me()), false, false),
         at(net)
     );
-    let entries = listing(net);
+    let entries = listing(net).unwrap();
     assert_eq!(entries[1].ino, Node::Process(me()).ino());
     let names: Vec<&str> = entries[2..]
         .iter()
@@ -370,7 +372,7 @@ fn net_leads_to_the_callers_socket_tables() {
 fn a_directory_links_the_directories_it_lists() {
     let mut directories = vec![Node::Root];
     while let Some(dir) = directories.pop() {
-        let listed: Vec<Node> = listing(dir)[2..]
+        let listed: Vec<Node> = listing(dir).unwrap()[2..]
             .iter()
             .filter(|entry| entry.kind == FsEntryKind::Directory)
             .map(|entry| lookup(dir, &entry.name).unwrap())
@@ -383,4 +385,61 @@ fn a_directory_links_the_directories_it_lists() {
         );
         directories.extend(listed);
     }
+}
+
+/// A thread's directory lists only while the thread is there.
+#[test]
+fn a_gone_threads_directory_lists_nothing() {
+    let tasks = listing(Node::Tasks(me())).unwrap();
+    let gone = tasks[2..]
+        .iter()
+        .filter_map(|entry| pid_name(&entry.name))
+        .max()
+        .unwrap()
+        + 1;
+    assert_eq!(listing(Node::Thread(me(), gone)), Err(ENOENT));
+    assert!(listing(Node::Thread(me(), me())).is_ok());
+}
+
+/// A task directory's walk resumes at the thread the last call could not
+/// return while that thread is listed, and by position otherwise; every
+/// other directory resumes by position.
+#[test]
+fn a_task_walk_resumes_at_the_thread_it_could_not_return() {
+    let entry = |name: &str| FsDirectoryEntry {
+        name: name.to_owned(),
+        kind: FsEntryKind::Directory,
+        ino: 0,
+    };
+    let entries: Vec<FsDirectoryEntry> = [".", "..", "2", "5", "9"].map(entry).into();
+    let tasks = Node::Tasks(me());
+    assert_eq!(resume(tasks, &entries, 4, Some(b"5")), 3);
+    assert_eq!(resume(tasks, &entries, 4, Some(b"7")), 4);
+    assert_eq!(resume(tasks, &entries, 4, None), 4);
+    assert_eq!(resume(Node::Process(me()), &entries, 4, Some(b"5")), 4);
+}
+
+/// A description that goes while a read holds its open stays until the
+/// read lets it go; one with no read under way goes at once.
+#[test]
+fn an_open_outlives_its_description_while_a_read_holds_it() {
+    let insert = |reading: u32| {
+        let mut opens = OPENS.lock();
+        let handle = opens.0;
+        opens.0 += 1;
+        let mut open = opened();
+        open.reading = reading;
+        opens.1.insert(handle, open);
+        handle
+    };
+    let present = |handle: u64| OPENS.lock().1.contains_key(&handle);
+    let idle = insert(0);
+    released(idle);
+    assert!(!present(idle));
+    let held = insert(1);
+    let hold = Hold(held);
+    released(held);
+    assert!(present(held));
+    drop(hold);
+    assert!(!present(held));
 }

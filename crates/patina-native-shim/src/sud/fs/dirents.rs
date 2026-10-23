@@ -194,7 +194,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     // Linux directory iteration needs an opened directory (`fdget_pos`): a
     // number that names nothing, or an `O_PATH` one, is EBADF; anything else
     // (a file, a socket) is ENOTDIR.
-    let desc = match c_int::try_from(fd).map(crate::fdget) {
+    let (desc, proc_dir) = match c_int::try_from(fd).map(crate::fdget) {
         Err(_) | Ok(Err(_)) => return -EBADF,
         Ok(Ok(resolved))
             if matches!(
@@ -202,7 +202,10 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
                 crate::fdtable::FdKind::Dir | crate::fdtable::FdKind::ProcDir
             ) =>
         {
-            resolved.desc
+            (
+                resolved.desc,
+                resolved.kind == crate::fdtable::FdKind::ProcDir,
+            )
         }
         Ok(Ok(_)) => return -ENOTDIR,
     };
@@ -215,27 +218,49 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     let cap = count as u32 as usize;
     // The snapshot is taken by the FIRST getdents on the descriptor (and after
     // a seek), through the same `crate::fs::read_dir` model the interposed
-    // `opendir` uses — a second caller, never a second directory model.
+    // `opendir` uses — a second caller, never a second directory model. A
+    // procfs directory is walked afresh at every call instead
+    // (`crate::fs::read_proc_dir`), resuming at the position or at the entry
+    // the last call could not return.
     let Ok(fd) = c_int::try_from(fd) else {
         return -EBADF;
     };
     // The snapshot is read before the iteration lock is taken: the read is
     // the call's driver step, and no shim lock is held across a driver
     // step.
-    let needs_snapshot = DIR_ITERATIONS
-        .lock()
-        .get(&desc)
-        .is_none_or(|dir| dir.snapshot == 0);
+    let (needs_snapshot, position, unreturned) = match DIR_ITERATIONS.lock().get(&desc) {
+        Some(dir) => (
+            proc_dir || dir.snapshot == 0,
+            dir.position,
+            dir.pending
+                .as_ref()
+                .filter(|_| proc_dir)
+                .map(|record| record.name.clone()),
+        ),
+        None => (true, 0, None),
+    };
     let mut fresh: *mut c_void = std::ptr::null_mut();
+    let mut skip = position;
     if needs_snapshot {
         // The snapshot is read through the DESCRIPTOR: its `r` was charged at
         // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
         // descriptor (which opened nothing) cannot iterate at all.
-        // SAFETY: `fresh` is writable local storage.
-        let rc =
-            crate::abi::raw(unsafe { crate::fs::read_dir_after_point(fd, &mut fresh) }.map(|_| 0));
-        if rc != 0 {
-            return rc;
+        if proc_dir {
+            // SAFETY: `fresh` is writable local storage.
+            match unsafe {
+                crate::fs::read_proc_dir(fd, position, unreturned.as_deref(), &mut fresh)
+            } {
+                Ok(resume) => skip = resume,
+                Err(errno) => return -i64::from(errno.get()),
+            }
+        } else {
+            // SAFETY: `fresh` is writable local storage.
+            let rc = crate::abi::raw(
+                unsafe { crate::fs::read_dir_after_point(fd, &mut fresh) }.map(|_| 0),
+            );
+            if rc != 0 {
+                return rc;
+            }
         }
     }
     let mut map = DIR_ITERATIONS.lock();
@@ -244,6 +269,18 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         position: 0,
         pending: None,
     });
+    if proc_dir {
+        // The walk just made replaces the last call's, and holds the entry
+        // that call could not return. Another call on the description that
+        // moved the position meanwhile leaves it to resume by position.
+        // SAFETY: `snapshot` is null or the live `read_dir` box for this description.
+        unsafe { crate::fs::free_dir(dir.snapshot as *mut c_void) };
+        dir.snapshot = 0;
+        dir.pending = None;
+        if dir.position != position {
+            skip = dir.position;
+        }
+    }
     if dir.snapshot != 0 {
         // Another task's getdents on the descriptor took its snapshot while
         // this one read: the iteration goes on from that one.
@@ -256,7 +293,7 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
         let mut name = [0u8; 256];
         let mut kind: u32 = 0;
         let mut ino: u64 = 0;
-        for _ in 0..dir.position {
+        for _ in 0..skip {
             // SAFETY: `snapshot` is the live box; `name` is writable for its length.
             let rc = crate::abi::raw(
                 unsafe {

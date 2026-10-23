@@ -19,7 +19,10 @@
 //!   free memory at most the total; `/proc/vmstat`'s free pages too;
 //! * `/proc/self/task` lists the caller's thread, running by its `stat`; a
 //!   thread waiting in a `read` sleeps by its own, and its `status` names
-//!   the process (`Tgid`) and the thread (`Pid`);
+//!   the process (`Tgid`) and the thread (`Pid`); the directory is walked
+//!   at every `getdents64`, so it lists threads made and gone between two
+//!   calls as they are, and a gone thread's directory and `stat`, opened
+//!   while it lived, are `ENOENT` and `ESRCH`;
 //! * `/proc/self/stat` and `/proc/self/status` name the caller as its own
 //!   calls do: its pid, parent, group, session and ids, its name as
 //!   `PR_GET_NAME` reads it (and again after `PR_SET_NAME` renames it), the
@@ -27,8 +30,9 @@
 //!   answer gives and the `SCHED_OTHER` priority `20 + nice`, at least one
 //!   thread, CPU time between two `times` readings and a start no later
 //!   than now;
-//! * a file's text is a `seq_file`'s: a read continues in the text the last
-//!   one made, a read of no bytes makes none, an `EFAULT` read moves
+//! * a file's text is a `seq_file`'s: a read racing a close on another
+//!   thread reads or finds the descriptor closed, a read continues in the
+//!   text the last one made, a read of no bytes makes none, an `EFAULT` read moves
 //!   nothing, two threads' reads of one description read on from each
 //!   other, `SEEK_END` is `EINVAL`; epoll takes a machine file (its
 //!   `proc_reg_poll` answers every readiness) but no process file or
@@ -251,30 +255,40 @@ fn listing(p: &Probe, path: &str) -> Option<Vec<(String, u8)>> {
         return None;
     }
     let mut entries: Vec<(String, u8)> = Vec::new();
-    loop {
-        let mut buf = vec![0u8; 4096];
-        let n = p.call_unrecorded(
-            Syscall::N_getdents64,
-            [fd, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0, 0],
-        );
-        if n <= 0 {
-            break;
-        }
-        let mut at = 0;
-        while at < n as usize {
-            let reclen = u16::from_ne_bytes([buf[at + 16], buf[at + 17]]) as usize;
-            let kind = buf[at + 18];
-            let name = &buf[at + 19..at + reclen];
-            let end = name
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(name.len());
-            entries.push((String::from_utf8_lossy(&name[..end]).into_owned(), kind));
-            at += reclen;
-        }
+    while let Ok(more) = dents(p, fd, 4096)
+        && !more.is_empty()
+    {
+        entries.extend(more);
     }
     close(p, fd);
     Some(entries)
+}
+
+/// One `getdents64` of up to `len` bytes on `fd`: the entries it returned
+/// (none at the end), or its `-errno`.
+fn dents(p: &Probe, fd: i64, len: usize) -> Result<Vec<(String, u8)>, i64> {
+    let mut buf = vec![0u8; len];
+    let n = p.call_unrecorded(
+        Syscall::N_getdents64,
+        [fd, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0, 0],
+    );
+    if n < 0 {
+        return Err(n);
+    }
+    let mut entries = Vec::new();
+    let mut at = 0;
+    while at < n as usize {
+        let reclen = u16::from_ne_bytes([buf[at + 16], buf[at + 17]]) as usize;
+        let kind = buf[at + 18];
+        let name = &buf[at + 19..at + reclen];
+        let end = name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name.len());
+        entries.push((String::from_utf8_lossy(&name[..end]).into_owned(), kind));
+        at += reclen;
+    }
+    Ok(entries)
 }
 
 fn root(p: &Probe) {
@@ -869,6 +883,131 @@ fn threads(p: &Probe) {
     }
 }
 
+/// How many times [`lifecycle`] races a close against a read.
+const CLOSE_RACES: usize = 16;
+
+/// What procfs keeps as threads come and go, and as a descriptor goes
+/// while a read is under way on it: a read racing a close on another
+/// thread reads the file or finds the descriptor closed (`EBADF`), the
+/// read under way keeping the file; `/proc/self/task` is walked at every
+/// `getdents64`, so a thread made after its first call is listed by the
+/// next, and one that was there at the first call but has gone since is
+/// not; a gone thread's directory, opened while
+/// it lived, lists `ENOENT`, and its `stat`, opened then, reads `ESRCH`.
+fn lifecycle(p: &Probe) {
+    let mut answered = true;
+    for _ in 0..CLOSE_RACES {
+        let fd = open(p, "/proc/meminfo", O_RDONLY);
+        p.require("/proc/meminfo opens", fd >= 0);
+        let mut buf = [0u8; 128];
+        let n = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // SAFETY: closes the scenario's own descriptor.
+                unsafe { libc::close(fd as i32) };
+            });
+            p.call_unrecorded(
+                Syscall::N_read,
+                [fd, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0, 0],
+            )
+        });
+        answered &= n > 0 || n == neg(EBADF);
+    }
+    p.check(
+        "a read racing a close on another thread reads, or finds the descriptor closed",
+        answered,
+    );
+    let names = |entries: &[(String, u8)]| -> Vec<String> {
+        entries.iter().map(|(name, _)| name.clone()).collect()
+    };
+    let dots = |fd: i64| dents(p, fd, 48).map(|entries| names(&entries));
+    let tasks = open(p, "/proc/self/task", O_RDONLY | O_DIRECTORY);
+    let after = open(p, "/proc/self/task", O_RDONLY | O_DIRECTORY);
+    p.require("/proc/self/task opens", tasks >= 0 && after >= 0);
+    let first = dots(tasks);
+    let mut ends = [0i32; 2];
+    let r = p.call_unrecorded(
+        Syscall::N_pipe2,
+        [ends.as_mut_ptr() as i64, i64::from(O_CLOEXEC), 0, 0, 0, 0],
+    );
+    p.require("pipe2 answers", r == 0);
+    let tid = std::sync::atomic::AtomicI32::new(0);
+    let (made, first_after, worker, dead, dead_stat) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            tid.store(
+                crate::signals::gettid(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            let mut byte = 0u8;
+            // SAFETY: one writable byte.
+            unsafe { libc::read(ends[0], (&raw mut byte).cast(), 1) };
+        });
+        p.rec.quiet(|| {
+            crate::signals::wait_until(std::time::Duration::from_millis(1), || {
+                tid.load(std::sync::atomic::Ordering::SeqCst) != 0
+            })
+        });
+        let worker = tid.load(std::sync::atomic::Ordering::SeqCst);
+        let made = dents(p, tasks, 4096).map(|entries| names(&entries));
+        let first_after = dots(after);
+        let dead = open(
+            p,
+            &format!("/proc/self/task/{worker}"),
+            O_RDONLY | O_DIRECTORY,
+        );
+        let dead_stat = open(p, &format!("/proc/self/task/{worker}/stat"), O_RDONLY);
+        // SAFETY: one readable byte.
+        unsafe { libc::write(ends[1], b"x".as_ptr().cast(), 1) };
+        (made, first_after, worker, dead, dead_stat)
+    });
+    // The joined thread leaves procfs once the kernel has released it.
+    let path = format!("/proc/self/task/{worker}");
+    p.rec.quiet(|| {
+        crate::signals::wait_until(std::time::Duration::from_millis(1), || {
+            stat(p, &path).is_none()
+        })
+    });
+    let worker = worker.to_string();
+    let walked = |first: Result<Vec<String>, i64>| {
+        first.as_deref() == Ok(&[".".to_owned(), "..".to_owned()][..])
+    };
+    p.check(
+        "a task directory's next getdents64 lists a thread made after its first",
+        walked(first) && made.is_ok_and(|names| names.contains(&worker)),
+    );
+    let gone = dents(p, after, 4096).map(|entries| names(&entries));
+    p.check(
+        "and does not list a thread gone since",
+        walked(first_after)
+            && gone.is_ok_and(|names| !names.is_empty() && !names.contains(&worker)),
+    );
+    p.check(
+        "a gone thread's directory, opened while it lived, lists ENOENT",
+        dead >= 0 && dents(p, dead, 4096) == Err(neg(ENOENT)),
+    );
+    let mut buf = [0u8; 64];
+    p.check(
+        "and its stat, opened then, reads ESRCH",
+        dead_stat >= 0
+            && p.call_unrecorded(
+                Syscall::N_read,
+                [
+                    dead_stat,
+                    buf.as_mut_ptr() as i64,
+                    buf.len() as i64,
+                    0,
+                    0,
+                    0,
+                ],
+            ) == neg(ESRCH),
+    );
+    for fd in [tasks, after, dead, dead_stat]
+        .into_iter()
+        .chain(ends.map(i64::from))
+    {
+        close(p, fd);
+    }
+}
+
 fn behaviour(p: &Probe) {
     let fd = open(p, "/proc/uptime", O_RDONLY);
     p.require("/proc/uptime opens", fd >= 0);
@@ -1087,6 +1226,7 @@ pub fn run(p: &Probe) {
     descriptions(p);
     names(p);
     threads(p);
+    lifecycle(p);
     net(p);
     behaviour(p);
 }

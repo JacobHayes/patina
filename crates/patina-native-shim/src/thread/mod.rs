@@ -456,33 +456,41 @@ pub(crate) fn live_threads() -> usize {
 #[cfg(target_os = "linux")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Census {
-    /// The live threads.
+    /// The threads the process holds (`nr_threads`): the live ones and an
+    /// exited leader, a zombie while any other thread lives.
     pub(crate) live: usize,
-    /// How many of them sleep in a modeled wait; the rest are running or
-    /// runnable.
-    pub(crate) waiting: usize,
-    /// Whether the main thread is one of them.
-    pub(crate) main_waiting: bool,
     /// The highest thread id handed out so far (the pid before the first
     /// spawn): the pid namespace's last allocated id.
     pub(crate) last_tid: i32,
     /// The live threads at a positive nice value, whose user time the
     /// kernel accounts as niced.
     pub(crate) niced: Vec<TaskId>,
-    /// Every live thread, by id: the main thread alone before the thread
-    /// subsystem manages any.
+    /// Every thread the process holds, by id: the main thread alone before
+    /// the thread subsystem manages any.
     pub(crate) threads: Vec<CensusThread>,
 }
 
-/// A live thread as the [`Census`] counts it.
+/// A thread as the [`Census`] counts it.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CensusThread {
     pub(crate) tid: i32,
     /// Its task, `None` for the unmanaged main thread.
     pub(crate) task: Option<TaskId>,
-    /// Whether it sleeps in a modeled wait.
-    pub(crate) waiting: bool,
+    pub(crate) state: ThreadState,
+}
+
+/// What a [`CensusThread`] is doing.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadState {
+    /// Running or runnable.
+    Running,
+    /// Asleep in a modeled wait.
+    Waiting,
+    /// Exited: the thread-group leader once it has, while another thread
+    /// lives (`EXIT_ZOMBIE`, `delay_group_leader`).
+    Zombie,
 }
 
 /// The [`Census`] of the virtual process's threads now.
@@ -490,30 +498,35 @@ pub(crate) struct CensusThread {
 pub(crate) fn census() -> Census {
     let state = lock_state();
     let tasks: Vec<TaskId> = state.signals.task_ids().collect();
-    let waiting = tasks
-        .iter()
-        .filter(|task| state.signals.blocked.contains_key(task))
-        .count();
     let mut threads: Vec<CensusThread> = tasks
         .iter()
         .map(|task| CensusThread {
             tid: tid_of(*task),
             task: Some(*task),
-            waiting: state.signals.blocked.contains_key(task),
+            state: if state.signals.blocked.contains_key(task) {
+                ThreadState::Waiting
+            } else {
+                ThreadState::Running
+            },
         })
         .collect();
     if threads.is_empty() {
         threads.push(CensusThread {
             tid: crate::patina_pid(),
             task: None,
-            waiting: false,
+            state: ThreadState::Running,
+        });
+    } else if !state.signals.has_task(MAIN_TASK) {
+        // The managed main thread has exited while others live.
+        threads.push(CensusThread {
+            tid: crate::patina_pid(),
+            task: Some(MAIN_TASK),
+            state: ThreadState::Zombie,
         });
     }
     threads.sort_unstable_by_key(|thread| thread.tid);
     Census {
-        live: tasks.len().max(1),
-        waiting,
-        main_waiting: state.signals.blocked.contains_key(&MAIN_TASK),
+        live: threads.len(),
         last_tid: state.sched.last_tid().max(crate::patina_pid()),
         niced: tasks
             .into_iter()

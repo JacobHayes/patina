@@ -15,11 +15,11 @@
 //! its nice value is positive (the kernel files each tick under the value
 //! of the moment); a finished thread's counts as user time.
 
-use super::{Machine, Node, OfProcess, PF_RANDOMIZE};
+use super::{Machine, Node, OfProcess, PF_EXITED, PF_RANDOMIZE};
 use crate::clocks::{CpuOf, NANOS, USER_HZ, cpu_time_unrecorded};
 use crate::identity::{Listed, Process};
-use crate::thread::Census;
 use crate::thread::sched::Scheduling;
+use crate::thread::{Census, ThreadState};
 use crate::{ENOENT, ESRCH, with_context};
 use patina_dst_abi::{ClockKind, CpuCharge};
 use std::ffi::c_int;
@@ -98,10 +98,14 @@ impl Reading {
     }
 }
 
-/// The threads running or runnable: the guest's that do not wait (init
-/// sleeps).
+/// The threads running or runnable: the guest's that neither wait nor
+/// have exited (init sleeps).
 fn running(census: &Census) -> usize {
-    census.live - census.waiting
+    census
+        .threads
+        .iter()
+        .filter(|thread| thread.state == ThreadState::Running)
+        .count()
 }
 
 /// A file's text now.
@@ -174,6 +178,19 @@ pub(super) fn generate(node: Node) -> Result<Vec<u8>, c_int> {
     Ok(text.into_bytes())
 }
 
+/// Thread `tid`'s state by the census: running while it is the caller,
+/// otherwise as the census counts it.
+fn state_of(tid: i32, census: &Census) -> ThreadState {
+    if crate::thread::current_tid() == tid {
+        return ThreadState::Running;
+    }
+    census
+        .threads
+        .iter()
+        .find(|thread| thread.tid == tid)
+        .map_or(ThreadState::Running, |thread| thread.state)
+}
+
 /// A process as its procfs files describe it: its thread-group leader's
 /// state and scheduling, the group's CPU time and thread count.
 struct Task {
@@ -181,14 +198,15 @@ struct Task {
     /// The thread it describes (the leader's for a process's files).
     tid: i32,
     comm: Vec<u8>,
-    running: bool,
+    state: ThreadState,
     scheduling: Scheduling,
     threads: usize,
     charge: CpuCharge,
     /// When it started, on the boot clock, where the model keeps it (the
     /// process's start, its first thread's).
     start: Option<u64>,
-    /// Its umask, where the model holds one (the guest's).
+    /// Its umask, where the model holds one (the guest's, while the
+    /// thread it describes has not exited: an exited task has no `fs`).
     umask: Option<u32>,
 }
 
@@ -206,7 +224,7 @@ impl Task {
                 listed,
                 tid: pid,
                 comm: INIT_COMM.to_vec(),
-                running: false,
+                state: ThreadState::Waiting,
                 scheduling: Scheduling {
                     comm: [0; 16],
                     nice: 0,
@@ -227,18 +245,17 @@ impl Task {
             .copied()
             .take_while(|byte| *byte != 0)
             .collect();
+        let state = state_of(pid, census);
         Ok(Task {
             listed,
             tid: pid,
             comm,
-            // The leader runs while the caller is it, and otherwise unless it
-            // sleeps in a wait.
-            running: crate::thread::current_tid() == pid || !census.main_waiting,
+            state,
             scheduling,
             threads: census.live,
             charge: reading.guest,
             start: Some(reading.origin),
-            umask: Some(crate::paths::umask()),
+            umask: (state != ThreadState::Zombie).then(crate::paths::umask),
         })
     }
 
@@ -264,7 +281,8 @@ impl Task {
             .take_while(|byte| *byte != 0)
             .collect();
         task.tid = tid;
-        task.running = crate::thread::current_tid() == tid || !thread.waiting;
+        task.state = state_of(tid, census);
+        task.umask = (task.state != ThreadState::Zombie).then(crate::paths::umask);
         task.scheduling = scheduling;
         task.charge = match thread.task {
             Some(id) => crate::with_context_raw(|context| {
@@ -295,11 +313,18 @@ impl Task {
         text.extend_from_slice(
             format!(
                 ") {} {} {} {} 0 -1 {} 0 0 0 0 {} {} 0 0 {} {} {} 0{}\n",
-                if self.running { 'R' } else { 'S' },
+                match self.state {
+                    ThreadState::Running => 'R',
+                    ThreadState::Waiting => 'S',
+                    ThreadState::Zombie => 'Z',
+                },
                 listed.parent,
                 listed.pgid,
                 listed.sid,
-                PF_RANDOMIZE,
+                match self.state {
+                    ThreadState::Zombie => PF_RANDOMIZE | PF_EXITED,
+                    ThreadState::Running | ThreadState::Waiting => PF_RANDOMIZE,
+                },
                 ticks(self.charge.user_ns),
                 ticks(self.charge.system_ns),
                 self.scheduling.prio,
@@ -333,10 +358,10 @@ impl Task {
         if let Some(umask) = self.umask {
             let _ = writeln!(rest, "Umask:\t{umask:04o}");
         }
-        let state = if self.running {
-            "R (running)"
-        } else {
-            "S (sleeping)"
+        let state = match self.state {
+            ThreadState::Running => "R (running)",
+            ThreadState::Waiting => "S (sleeping)",
+            ThreadState::Zombie => "Z (zombie)",
         };
         let ids = |id: u32| format!("{id}\t{id}\t{id}\t{id}");
         let groups: Vec<String> = credential.groups.iter().map(u32::to_string).collect();

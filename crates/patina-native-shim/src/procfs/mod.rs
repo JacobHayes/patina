@@ -14,10 +14,13 @@
 //!   `loadavg` and `meminfo` ([`text`]);
 //! * `/proc/<pid>` (`0555`, the process's owner) with its `task` and `net`
 //!   directories and its `status` and `stat` (`0444`);
-//! * `/proc/<pid>/task` (`0555`, the process's owner), a directory per live
-//!   thread by id (the thread census's; init has its one), each holding the
-//!   thread's own `status` and `stat`: its name, its state (sleeping while
-//!   it waits in a modeled wait), its scheduling and its CPU time;
+//! * `/proc/<pid>/task` (`0555`, the process's owner), a directory per
+//!   thread by id (the thread census's: the live ones, and the leader as a
+//!   zombie once it has exited while another lives; init has its one), each
+//!   holding the thread's own `status` and `stat`: its name, its state
+//!   (sleeping while it waits in a modeled wait), its scheduling and its CPU
+//!   time. A thread's directory lists `ENOENT` once the thread has gone,
+//!   and its files read `ESRCH`;
 //! * `/proc/<pid>/net` (`0555`, the process's owner), the socket tables
 //!   (`0444`, root's): `tcp`, `udp`, `tcp6`, `udp6` and `unix` ([`net`]),
 //!   each its header with no rows; a read of one while the guest holds a
@@ -28,15 +31,19 @@
 //! fill (`starttime`), since the host maps the guest's memory and the model
 //! cannot say how much; a thread's stops before `starttime` but for the
 //! process's first thread, the model keeping no start for the others. Any
-//! other name in procfs is `ENOENT`, as a name no entry has; `thread-self`, a thread's directory by its id at the root, a
-//! thread's `ns`, the namespace files by any spelling but
-//! `/proc/self/ns/<entry>` (`crate::nsfs`) and an `O_PATH` open stop the
-//! run by name.
+//! other name in procfs is `ENOENT`, as a name no entry has; `thread-self`,
+//! a thread's directory by its id at the root, a thread's `ns`, the
+//! namespace files by any spelling but `/proc/self/ns/<entry>`
+//! (`crate::nsfs`) and an `O_PATH` open stop the run by name.
 //!
 //! The text is made as `seq_file` makes it: at the first read, and again
 //! whenever a read or a seek moves to a position other than where the last
 //! read ended (a seek to the start leaves it to the next read); a read takes
-//! the bytes from that position. The machine's files have
+//! the bytes from that position, and holds the open while it makes the text,
+//! so a close on another thread meanwhile lets the open go only after it.
+//! A directory is walked afresh at every `getdents` (a task directory
+//! resuming at a thread the last call could not return). The machine's
+//! files have
 //! `proc_iter_file_ops`' `poll` (always ready, so epoll takes them) and
 //! `splice_read` (`sendfile` and `splice` read them); the socket tables
 //! have the `poll` alone; a process's files and every directory have
@@ -160,6 +167,10 @@ const THREAD_INO_BASE: u64 = 1 << 40;
 /// The task flags `<pid>/stat` reports (`PF_RANDOMIZE`: each process was
 /// executed with address-space randomization, the default persona).
 pub(super) const PF_RANDOMIZE: u32 = 0x0040_0000;
+/// The flags an exited thread adds: `PF_EXITING` (`exit_signals`),
+/// `PF_POSTCOREDUMP` (`coredump_task_exit`) and `PF_NOFREEZE`
+/// (`do_task_dead`).
+pub(super) const PF_EXITED: u32 = 0x0000_0004 | 0x0000_0008 | 0x0000_8000;
 
 impl Node {
     /// The canonical path that names it.
@@ -527,10 +538,17 @@ pub(crate) fn link_target(node: Node) -> Option<String> {
     }
 }
 
-/// A directory's entries, `.` and `..` first (the root's `..` is itself, the
-/// root of its mount), as `proc_root_readdir`, `proc_pident_readdir`,
-/// `proc_task_readdir` (the threads by id) and `proc_readdir_de` list them.
-pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
+/// A directory's entries now, `.` and `..` first (the root's `..` is itself,
+/// the root of its mount), as `proc_root_readdir`, `proc_pident_readdir`,
+/// `proc_task_readdir` (the threads by id) and `proc_readdir_de` list them;
+/// `ENOENT` for a thread's directory once the thread has gone
+/// (`proc_pident_readdir` finds no task).
+pub(crate) fn listing(dir: Node) -> Result<Vec<FsDirectoryEntry>, c_int> {
+    if let Node::Thread(pid, tid) = dir
+        && !threads(pid).contains(&tid)
+    {
+        return Err(ENOENT);
+    }
     let entry = |name: &str, node: Node| FsDirectoryEntry {
         name: name.to_owned(),
         kind: node.kind(),
@@ -583,7 +601,30 @@ pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
         | Node::OfThread(..)
         | Node::NetFile(..) => {}
     }
-    entries
+    Ok(entries)
+}
+
+/// How many of `entries`, directory `dir`'s listing now, a `getdents` at
+/// `position` passes over before it returns any: `position` of them, but
+/// for a thread the last call could not return (`unreturned`), which
+/// `proc_task_readdir` resumes at while it lives (`first_tid`'s `f_version`
+/// hint), wherever the threads before it have gone.
+pub(crate) fn resume(
+    dir: Node,
+    entries: &[FsDirectoryEntry],
+    position: u64,
+    unreturned: Option<&[u8]>,
+) -> u64 {
+    if let (Node::Tasks(_), Some(name)) = (dir, unreturned)
+        && position > 2
+        && let Some(index) = entries
+            .iter()
+            .skip(2)
+            .position(|entry| entry.name.as_bytes() == name)
+    {
+        return index as u64 + 2;
+    }
+    position
 }
 
 /// An open procfs node: a file's text and positions, or a directory.
@@ -595,6 +636,12 @@ struct Open {
     read_pos: u64,
     /// The description's position (`f_pos`).
     pos: u64,
+    /// The reads under way that made text with the table's lock released:
+    /// each holds the open as the kernel's `fdget` holds the file.
+    reading: u32,
+    /// Whether the description's last reference went while a read was
+    /// under way: the last of them lets the open go.
+    released: bool,
 }
 
 /// The open procfs nodes, by description handle, and the next handle.
@@ -645,6 +692,8 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
                 text: None,
                 read_pos: 0,
                 pos: 0,
+                reading: 0,
+                released: false,
             },
         );
         handle
@@ -663,9 +712,41 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
     }
 }
 
-/// A procfs description's last reference went.
+/// A procfs description's last reference went: its open goes with it, or
+/// with the last read under way on it.
 pub(crate) fn released(handle: u64) {
-    OPENS.lock().1.remove(&handle);
+    let mut opens = OPENS.lock();
+    match opens.1.get_mut(&handle) {
+        Some(open) if open.reading > 0 => open.released = true,
+        _ => {
+            opens.1.remove(&handle);
+        }
+    }
+}
+
+/// A read's hold on an open while it makes text with the table's lock
+/// released ([`locked`]); dropped unspent (the making failed), it lets the
+/// open go if the description went meanwhile.
+struct Hold(u64);
+
+impl Hold {
+    /// Give the hold up under the table's lock the caller holds.
+    fn spend(self, open: &mut Open) {
+        open.reading -= 1;
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let mut opens = OPENS.lock();
+        if let Some(open) = opens.1.get_mut(&self.0) {
+            open.reading -= 1;
+            if open.released && open.reading == 0 {
+                opens.1.remove(&self.0);
+            }
+        }
+    }
 }
 
 /// The node a procfs description is open on.
@@ -725,19 +806,31 @@ pub(crate) fn set_position(handle: u64, position: u64) {
 /// lock (making it reads the clocks and the threads, and takes a scheduling
 /// point) before `step` runs again on the open as it is then. So a read or a
 /// seek judges and moves the position in one step, with nothing between, as
-/// `seq_file` does under its lock.
+/// `seq_file` does under its lock. The open is held while the text is made
+/// ([`Hold`]): a close on another thread meanwhile lets it go only once the
+/// step is done, as the kernel's file outlives its descriptor for a read
+/// under way.
 fn locked<T>(
     handle: u64,
     mut step: impl FnMut(&mut Open, &mut Option<Vec<u8>>) -> Result<Option<T>, c_int>,
 ) -> Result<T, c_int> {
     let mut fresh = None;
+    let mut hold: Option<Hold> = None;
     loop {
         let node = {
             let mut opens = OPENS.lock();
             let open = opens.1.get_mut(&handle).ok_or(EINVAL)?;
-            if let Some(done) = step(open, &mut fresh)? {
-                return Ok(done);
+            if let Some(hold) = hold.take() {
+                hold.spend(open);
             }
+            if let Some(answer) = step(open, &mut fresh).transpose() {
+                if open.released && open.reading == 0 {
+                    opens.1.remove(&handle);
+                }
+                return answer;
+            }
+            open.reading += 1;
+            hold = Some(Hold(handle));
             open.node
         };
         fresh = Some(text::generate(node)?);
