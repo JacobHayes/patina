@@ -663,7 +663,7 @@ fn versioned_bypass_admits_only_the_shim_vehicle() {
     );
     let file = object::File::parse(&*bytes).expect("parses");
     let mut refused: Vec<String> =
-        versioned_bypass_escapes(&file, &BTreeSet::new(), &std::collections::BTreeMap::new())
+        versioned_bypass_escapes(&file, &BTreeSet::new(), &|_| Vec::new())
             .into_iter()
             .map(|escape| {
                 assert_eq!(escape.category, VERSIONED_BYPASS_CATEGORY);
@@ -748,11 +748,10 @@ fn an_exact_versioned_allowance_clears_only_that_finding() {
     );
     let file = object::File::parse(&*bytes).expect("parses");
     let allow = BTreeSet::from(["dlsym@GLIBC_2.2.5".to_owned()]);
-    let refused: Vec<String> =
-        versioned_bypass_escapes(&file, &allow, &std::collections::BTreeMap::new())
-            .into_iter()
-            .map(|escape| escape.symbol)
-            .collect();
+    let refused: Vec<String> = versioned_bypass_escapes(&file, &allow, &|_| Vec::new())
+        .into_iter()
+        .map(|escape| escape.symbol)
+        .collect();
     assert_eq!(refused, vec!["mmap@GLIBC_2.2.5".to_owned()]);
 }
 

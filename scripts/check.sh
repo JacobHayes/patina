@@ -14,13 +14,15 @@ cd "$root"
 
 check_target_base="$root/target/check"
 export CARGO_TARGET_DIR="$check_target_base/serial"
+# Every guest a check builds (the workspace suite's and every testbed rung's)
+# shares the native shim builds of the serial target, whatever target dir the
+# guest itself builds in, so a check builds each shim profile once.
+export PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR"
 # The workspace suite's own cargo-patina (the test profile, which optimizes the
 # third-party crates and the guest scanner) drives every gate that needs a CLI,
-# so a check builds the CLI once. Every testbed rung's guests share the native
-# shim builds of the serial target, which the suite's own guests fill.
+# so a check builds the CLI once.
 patina_cli="$CARGO_TARGET_DIR/debug/cargo-patina"
-# Testbed rungs only: the workspace suite's tests place shims themselves.
-testbed_env=(env PATINA_CLI="$patina_cli" PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR")
+testbed_env=(env PATINA_CLI="$patina_cli")
 # One test process per Cargo build job by default: a test can start guest
 # builds of its own, so this keeps the suite inside the build cap the host
 # already sets. NEXTEST_TEST_THREADS (nextest's own variable) overrides it.
@@ -41,11 +43,11 @@ Usage: scripts/check.sh <full|fast>
        scripts/check.sh --selftest
 
   full  Full local pre-landing gate. Cheap checks, host and cross-cfg clippy,
-        docs and packaging run first, then one build of the workspace suite,
+        and docs run first, then one build of the workspace suite,
         whose cargo-patina drives the CLI gates. The workspace suite (nextest,
-        e2e and native acceptance included) then runs alone; the doctests,
-        WASI and cross-target smoke, and the native ecosystem, workq, pubsub
-        and macro-adopter testbeds follow it concurrently.
+        e2e and native acceptance included) then runs alongside the doctests,
+        crate packaging, WASI and cross-target smoke, and the native
+        ecosystem, workq, pubsub and macro-adopter testbeds.
   fast  Inner-loop gate; excludes cargo-patina end_to_end and the seven native
         execution targets and the landing-only docs/packaging/testbed rungs.
         Targeted native ABI feedback: mise run check:native-abi.
@@ -59,8 +61,8 @@ complete rung log and exact command are printed. The workspace suite runs
 under nextest (profile `local`) with NEXTEST_TEST_THREADS tests at a time,
 else one per CARGO_BUILD_JOBS job, else one per two CPUs. Serial work, the workspace suite and the doctests share one Cargo
 target dir; every other parallel rung gets its own under
-target/check/parallel/, plus the suite's cargo-patina (PATINA_CLI) and shim
-builds (PATINA_SHIM_TARGET_DIR).
+target/check/parallel/, plus the suite's cargo-patina (PATINA_CLI). Every
+guest shares the serial target's shim builds (PATINA_SHIM_TARGET_DIR).
 PATINA_CHECK_JOBS is intentionally not exposed: the full profile uses one
 reviewed concurrency group whose members have independent scratch/output paths.
 EOF
@@ -271,10 +273,6 @@ run_full() {
     run_rung "$target clippy" cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings || return $?
   done
   run_rung 'documentation' cargo doc --workspace --no-deps --locked || return $?
-  # Every workspace member packages cleanly (manifest metadata, readme paths,
-  # include/exclude). --no-verify skips the per-crate verify build; the release
-  # dry run (scripts/publish.sh) covers that and the license-text audit.
-  run_rung 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty || return $?
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
@@ -284,14 +282,16 @@ run_full() {
   run_rung 'CLI flag drift' env PATINA_CLI="$patina_cli" scripts/check-flag-drift.sh || return $?
   run_rung 'campaign classifier selftest' "$patina_cli" patina campaign --selftest || return $?
 
-  # The workspace suite (the native_conformance scenarios included) runs alone:
-  # its guests fill the shared native shim builds, so the testbeds that follow
-  # it, all at once, reuse them instead of building them alongside it. Measured
-  # fresh, that matches overlapping the two in wall time and uses less CPU. Each
+  # The workspace suite (the native_conformance scenarios included) and every
+  # remaining gate run at once. The suite holds a fixed number of test slots and
+  # leaves cores idle, and the testbeds are mostly one guest run after another,
+  # so overlapping them costs the suite little and saves the testbeds' wall
+  # time. Every guest shares the native shim builds (PATINA_SHIM_TARGET_DIR),
+  # so a shim the suite is building is waited for, never built twice. Each
   # testbed gets a Cargo target dir of its own through start_rung, plus each
   # script's own runtime scratch paths. The multiproc pending-gap battery runs
   # in CI.
-  run_rung 'workspace tests (includes e2e)' workspace_nextest --workspace || return $?
+  start_rung_in "$CARGO_TARGET_DIR" 'workspace tests (includes e2e)' workspace_nextest --workspace
   start_rung 'native ecosystem testbeds' "${testbed_env[@]}" scripts/check-native-testbeds.sh
   start_rung 'workq testbed' "${testbed_env[@]}" testbeds/workq/run-patina.sh
   start_rung 'macro adopter testbed' "${testbed_env[@]}" testbeds/patina-macro-adopter/run.sh
@@ -299,6 +299,10 @@ run_full() {
   start_rung 'cross-target smoke' "${testbed_env[@]}" scripts/smoke-cross-target.sh
   start_rung 'WASI validation' "${testbed_env[@]}" scripts/validate-wasi.sh
   start_rung_in "$CARGO_TARGET_DIR" 'doctests' cargo test --quiet --doc --workspace --locked
+  # Every workspace member packages cleanly (manifest metadata, readme paths,
+  # include/exclude). --no-verify skips the per-crate verify build; the release
+  # dry run (scripts/publish.sh) covers that and the license-text audit.
+  start_rung_in "$CARGO_TARGET_DIR" 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty
   wait_rungs || return $?
 }
 

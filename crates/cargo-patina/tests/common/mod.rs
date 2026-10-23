@@ -436,7 +436,10 @@ pub fn output_until(
                 stderr: stderr.join().unwrap(),
             };
         }
-        std::thread::sleep(Duration::from_millis(20));
+        // Most runs end within a few hundred milliseconds, and every poll
+        // interval is latency added to each one; a poll is a non-blocking
+        // wait and two flag reads.
+        std::thread::sleep(Duration::from_millis(2));
     }
     Deadlined::Finished(Output {
         status: child.wait().unwrap(),

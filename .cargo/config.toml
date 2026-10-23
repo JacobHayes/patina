@@ -1,0 +1,15 @@
+# Every process Cargo and nextest start in this workspace (the test suites, and
+# `cargo run -p cargo-patina`) builds the native shim in this workspace's own
+# target dir, unless the environment already names a shim base. The suites'
+# guest builds then share one shim build per profile, whatever CARGO_TARGET_DIR
+# each guest package builds in, and never contend with another checkout's shim
+# in the per-user cache. Tests that inspect a shim build of their own clear it.
+[env]
+PATINA_SHIM_TARGET_DIR = { value = "target", relative = true }
+
+# A guest that dies by a core-dumping signal (the suites kill hundreds on
+# purpose) is handed to the host's core handler. Ubuntu's apport then asks the
+# crashed process's session bus whether the session is closing, which holds the
+# dying process for about a second. An empty address skips that question; the
+# dump, the wait status and its core flag are unchanged.
+DBUS_SESSION_BUS_ADDRESS = { value = "", force = true }

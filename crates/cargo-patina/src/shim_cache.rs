@@ -10,7 +10,8 @@ use std::{
 
 pub(super) const KEEP_ARTIFACTS: usize = 4;
 pub(super) const KEEP_SOURCES: usize = 4;
-pub(super) const KEEP_BUILDS: usize = 2;
+/// Shim build work dirs kept warm: two toolchains, each in both profiles.
+pub(super) const KEEP_BUILDS: usize = 4;
 pub(super) const BUILD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const COMPLETE: &str = ".complete";
 const LEASE: &str = ".lease";
@@ -195,6 +196,113 @@ pub(super) fn copy_sources(from: &Path, to: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Incremental compilation state of some packages, moved out of a Cargo target
+/// dir while `cargo clean -p` removes their artifacts, and put back after.
+pub(super) struct IncrementalHistory {
+    kept: PathBuf,
+    moved: Vec<(PathBuf, PathBuf)>,
+}
+
+impl IncrementalHistory {
+    const KEPT: &str = ".incremental-kept";
+
+    /// Move each profile's incremental directories of `packages` (named by
+    /// crate, `<crate>-<hash>`) under `target`'s holding directory, after
+    /// clearing whatever an interrupted earlier switch left there.
+    pub(super) fn set_aside(target: &Path, packages: &[&str]) -> Result<Self, CliError> {
+        let kept = target.join(Self::KEPT);
+        if kept.exists() {
+            fs::remove_dir_all(&kept).map_err(|e| error(&kept, e))?;
+        }
+        let mut moved = Vec::new();
+        for profile in ["debug", "release"] {
+            let incremental = target.join(profile).join("incremental");
+            let Ok(entries) = fs::read_dir(&incremental) else {
+                continue;
+            };
+            for entry in entries {
+                let name = entry.map_err(|e| error(&incremental, e))?.file_name();
+                let text = name.to_string_lossy();
+                let owned = packages.iter().any(|package| {
+                    text.strip_prefix(&package.replace('-', "_"))
+                        .is_some_and(|rest| rest.starts_with('-'))
+                });
+                if !owned {
+                    continue;
+                }
+                let holding = kept.join(profile);
+                fs::create_dir_all(&holding).map_err(|e| error(&holding, e))?;
+                let (from, to) = (incremental.join(&name), holding.join(&name));
+                fs::rename(&from, &to).map_err(|e| error(&from, e))?;
+                moved.push((to, from));
+            }
+        }
+        Ok(Self { kept, moved })
+    }
+
+    /// Put the histories back. One that cannot return is dropped with a
+    /// warning: rustc then compiles that crate from scratch.
+    pub(super) fn restore(self) {
+        for (from, to) in &self.moved {
+            let returned = to
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::rename(from, to));
+            cleanup_warning(returned.map_err(|e| error(to, e)));
+        }
+        if self.kept.exists() {
+            cleanup_warning(fs::remove_dir_all(&self.kept).map_err(|e| error(&self.kept, e)));
+        }
+    }
+}
+
+/// Whether `name` is this cache's own bookkeeping (a lease or completion
+/// marker), which is never part of an entry's sources.
+pub(super) fn cache_metadata(name: &std::ffi::OsStr) -> bool {
+    name == LEASE || name == COMPLETE
+}
+
+/// Whether `a` and `b` hold the same bytes: one file each, or two directories
+/// with the same entries (cache metadata aside) holding the same bytes. A
+/// missing side is never the same.
+pub(super) fn same_tree(a: &Path, b: &Path) -> Result<bool, CliError> {
+    let (meta_a, meta_b) = match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(meta_a), Ok(meta_b)) => (meta_a, meta_b),
+        (Err(e), _) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        (_, Err(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        (Err(e), _) => return Err(error(a, e)),
+        (_, Err(e)) => return Err(error(b, e)),
+    };
+    if meta_a.is_dir() != meta_b.is_dir() {
+        return Ok(false);
+    }
+    if !meta_a.is_dir() {
+        return Ok(meta_a.len() == meta_b.len()
+            && fs::read(a).map_err(|e| error(a, e))? == fs::read(b).map_err(|e| error(b, e))?);
+    }
+    let names = |dir: &Path| -> Result<Vec<std::ffi::OsString>, CliError> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(dir).map_err(|e| error(dir, e))? {
+            let name = entry.map_err(|e| error(dir, e))?.file_name();
+            if !cache_metadata(&name) {
+                names.push(name);
+            }
+        }
+        names.sort();
+        Ok(names)
+    };
+    let entries = names(a)?;
+    if entries != names(b)? {
+        return Ok(false);
+    }
+    for name in entries {
+        if !same_tree(&a.join(&name), &b.join(&name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn bytes(dir: &Path) -> Result<u64, CliError> {
     let mut size = 0;
     if !dir.exists() {
@@ -325,17 +433,33 @@ pub(super) fn copy(from: &Path, to: &Path) -> Result<(), CliError> {
 /// Tests that assert immediate lock release run in their own single-test
 /// process. Unrelated libtest threads can fork while a descriptor is open; their
 /// pre-exec children legitimately retain it briefly, even with CLOEXEC.
+///
+/// The calling test is named by its libtest thread, so the re-run selects
+/// exactly that test, and a re-run that runs no test fails.
 #[cfg(test)]
-pub(super) fn isolated_test(name: &str) -> bool {
+pub(super) fn isolated_test() -> bool {
+    let current = std::thread::current();
+    let name = current.name().expect("libtest names each test's thread");
     if std::env::var("PATINA_SHIM_CACHE_TEST").as_deref() == Ok(name) {
         return false;
     }
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--test-threads=1", "--nocapture"])
         .env("PATINA_SHIM_CACHE_TEST", name)
-        .status()
+        .stderr(std::process::Stdio::inherit())
+        .output()
         .unwrap();
-    assert!(status.success(), "isolated test {name} failed: {status}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    print!("{stdout}");
+    assert!(
+        output.status.success(),
+        "isolated test {name} failed: {}",
+        output.status
+    );
+    assert!(
+        stdout.contains(" 1 passed;"),
+        "the isolated re-run of {name} ran no test"
+    );
     true
 }
 
@@ -345,9 +469,7 @@ mod tests {
 
     #[test]
     fn pruning_pins_readers_and_waiting_builders_then_reclaims_them() {
-        if isolated_test(
-            "shim_cache::tests::pruning_pins_readers_and_waiting_builders_then_reclaims_them",
-        ) {
+        if isolated_test() {
             return;
         }
         // Class detector: no path handoff without a lease, including waiters.
@@ -371,9 +493,7 @@ mod tests {
 
     #[test]
     fn interrupted_eviction_is_undiscoverable_and_failed_cleanup_is_retryable() {
-        if isolated_test(
-            "shim_cache::tests::interrupted_eviction_is_undiscoverable_and_failed_cleanup_is_retryable",
-        ) {
+        if isolated_test() {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
@@ -408,9 +528,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn consuming_subprocess_keeps_only_shared_lease_after_parent_handles_close() {
-        if isolated_test(
-            "shim_cache::tests::consuming_subprocess_keeps_only_shared_lease_after_parent_handles_close",
-        ) {
+        if isolated_test() {
             return;
         }
         use std::io::{BufRead, Write};
@@ -466,9 +584,7 @@ mod tests {
 
     #[test]
     fn legacy_targets_are_collected_but_locked_builds_and_unrelated_dirs_survive() {
-        if isolated_test(
-            "shim_cache::tests::legacy_targets_are_collected_but_locked_builds_and_unrelated_dirs_survive",
-        ) {
+        if isolated_test() {
             return;
         }
         let temp = tempfile::tempdir().unwrap();

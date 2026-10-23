@@ -19,3 +19,26 @@ success-output = "final"
 failure-output = "immediate-final"
 slow-timeout = { period = "60s" }
 final-status-level = "slow"
+
+# Each test is its own process, so the suite's wall time is its test-seconds
+# spread over the fixed slots plus whatever one long test adds after the rest
+# have finished. The longest tests start first, so the short ones fill in behind
+# them. The filters name tests by what they run (a large recorded payload, a
+# campaign, a minimize, a starvation run), not by measured times.
+[[profile.default.overrides]]
+filter = '''
+  (binary(end_to_end) & test(/native_fs_crash_that_cannot_be_exported|campaign_guided_steers|two_axis_stateful_shrink|minimize_generation_targets/))
+  | (binary(native_conformance) & test(=scenarios::tests::time_cputime))
+  | (binary(native_workloads) & test(/^compute_watchdog_stops_starvation/))
+  | (binary(native_containment) & test(=layout::the_arena_region_answers_the_guest_alike_in_every_run_of_a_seed))
+'''
+priority = 20
+
+[[profile.default.overrides]]
+filter = '''
+  (binary(end_to_end) & test(/^(campaign_continuation|minimize|custom_ops|native_harness|sdk_harness)::/))
+  | (binary(native_abi) & test(/^variadic::matrix::/))
+  | (binary(native_workloads) & test(/^(compute_watchdog|fs_faults::)/))
+  | (binary(native_containment) & test(/^layout::/))
+'''
+priority = 10

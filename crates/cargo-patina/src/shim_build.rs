@@ -7,6 +7,7 @@ use crate::native_build::{
 use crate::{CliError, hash_bytes, hash_os, hex, output, shim_cache};
 use patina_dst_trace::lock_exclusive;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -282,9 +283,11 @@ fn build_native_shim_at(
     shim_cache::prune_legacy(&base);
     let profile = if release { "release" } else { "debug" };
     let mut hasher = Sha256::new();
-    // One Cargo target already separates debug/release. Keep two toolchains
-    // warm, not merely two toolchain/profile combinations.
+    // Each profile builds in a work dir of its own, under its own lock: an
+    // optimized single-unit release build takes far longer than a debug one,
+    // and the debug shim every test guest links must not queue behind it.
     hash_bytes(&mut hasher, rustc.identity.verbose.as_bytes());
+    hash_bytes(&mut hasher, profile.as_bytes());
     let work = shim_cache::acquire(
         &base.join("builds"),
         &hex(&hasher.finalize()),
@@ -306,18 +309,49 @@ fn build_native_shim_at(
     // Size is a high-water mark, not a mid-build quota. A single build may be
     // larger; its next use resets scratch state without touching pinned links.
     shim_cache::trim_build_target(&work.dir);
+    // The closure packages whose sources this build replaces, or `None` for a
+    // whole reset. A switch from an intact previous bundle replaces only the
+    // packages whose bytes differ, so their unchanged dependencies keep their
+    // compiled artifacts; anything less certain resets every package.
+    let mut replaced: Option<Vec<&str>> = Some(Vec::new());
     if needs_switch {
+        let intact = match &previous {
+            Some(previous) => shim_cache::complete(&source_dir, previous)?,
+            None => false,
+        };
+        replaced = if intact {
+            changed_packages(&shim.dir, &source_dir)?
+        } else {
+            None
+        };
         // Invalidate BEFORE changing sources. A crash halfway through a switch
-        // must not let the previous bundle mistake this workspace for its own.
+        // must not let the previous bundle mistake this workspace for its own,
+        // and with no marker the retry resets every package.
         if previous.is_some() {
             fs::remove_file(&marker)
                 .map_err(|e| CliError(format!("invalidating shim bundle marker: {e}")))?;
         }
-        if source_dir.exists() {
-            fs::remove_dir_all(&source_dir)
-                .map_err(|e| CliError(format!("resetting shim build sources: {e}")))?;
+        match &replaced {
+            Some(packages) => {
+                shim_cache::clear_partial(&source_dir.join(shim_cache::COMPLETE))?;
+                shim_cache::copy(&shim.dir.join("Cargo.lock"), &source_dir.join("Cargo.lock"))?;
+                for package in packages {
+                    let dir = source_dir.join(package);
+                    if dir.exists() {
+                        fs::remove_dir_all(&dir)
+                            .map_err(|e| CliError(format!("resetting shim build sources: {e}")))?;
+                    }
+                    shim_cache::copy_sources(&shim.dir.join(package), &dir)?;
+                }
+            }
+            None => {
+                if source_dir.exists() {
+                    fs::remove_dir_all(&source_dir)
+                        .map_err(|e| CliError(format!("resetting shim build sources: {e}")))?;
+                }
+                shim_cache::copy_sources(&shim.dir, &source_dir)?;
+            }
         }
-        shim_cache::copy_sources(&shim.dir, &source_dir)?;
     }
     let command = || {
         let mut command = Command::new(&rustc.cargo_command);
@@ -327,28 +361,47 @@ fn build_native_shim_at(
             // Cargo >=1.91 can redirect intermediate state independently. Keep
             // it in our bounded scratch too; older Cargo ignores this variable.
             .env("CARGO_BUILD_BUILD_DIR", &target_dir)
-            // Private scratch state needs neither incremental history nor full
-            // type debug info. Level 1 retains backtraces and source locations.
-            .env("CARGO_INCREMENTAL", "0")
+            // A debug shim keeps incremental history: the single codegen unit
+            // the guest archive needs (`POSIX_RUST_FLAGS`) makes every shim
+            // edit regenerate all of the crate's code, and incremental reuse
+            // of the rest of the compilation more than halves the rebuild. A
+            // release shim, rebuilt rarely, keeps none. Neither needs full
+            // type debug info: level 1 retains backtraces and source locations.
+            .env("CARGO_INCREMENTAL", if release { "0" } else { "1" })
             .env("CARGO_PROFILE_DEV_DEBUG", "1");
         apply_rustc_env(&mut command, rustc);
         command
     };
     if needs_switch {
-        // Never trust Cargo's freshness of an older restored bundle. Clean only
-        // local closure packages: registry dependencies stay reusable. This also
-        // bounds obsolete local artifacts as source versions change.
-        let mut clean = command();
-        shim_cache::inherit(&mut clean, &work)?;
-        clean.arg("clean");
-        for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
-            clean.arg("-p").arg(package);
-        }
-        let status = clean
-            .status()
-            .map_err(|e| CliError(format!("cleaning shim packages: {e}")))?;
-        if !status.success() {
-            return Err(CliError("cleaning shim packages failed".into()));
+        // Never trust Cargo's freshness of replaced sources: a copy can keep
+        // timestamps older than the previous bundle's artifacts. Clean only the
+        // replaced local closure packages: registry dependencies and unchanged
+        // packages stay reusable. This also bounds obsolete local artifacts as
+        // source versions change.
+        let cleaned: Vec<&str> = match &replaced {
+            Some(packages) => packages.clone(),
+            None => shim_bundle::EMBEDDED_SHIM_SOURCES
+                .iter()
+                .map(|(package, _)| *package)
+                .collect(),
+        };
+        if !cleaned.is_empty() {
+            // The clean forces the rebuild; the packages' incremental histories
+            // survive it, since rustc verifies every reuse against the sources.
+            let kept = shim_cache::IncrementalHistory::set_aside(&target_dir, &cleaned)?;
+            let mut clean = command();
+            shim_cache::inherit(&mut clean, &work)?;
+            clean.arg("clean");
+            for package in &cleaned {
+                clean.arg("-p").arg(package);
+            }
+            let status = clean
+                .status()
+                .map_err(|e| CliError(format!("cleaning shim packages: {e}")))?;
+            if !status.success() {
+                return Err(CliError("cleaning shim packages failed".into()));
+            }
+            kept.restore();
         }
         // Write only after successful invalidation. A crash or failed build
         // leaves Cargo's own incomplete-build fingerprint to force a retry.
@@ -387,6 +440,43 @@ fn build_native_shim_at(
         &rustc.identity,
         &recipe,
     )
+}
+
+/// The closure packages whose sources differ between the bundle `bundle` and
+/// the private build copy `copy`, or `None` when anything else at the
+/// workspace root differs (its manifest, Cargo configuration), which only a
+/// whole reset handles. The lock is not compared: Cargo rewrites the copy's
+/// (a newer lock format), the switch restores the bundle's, and Cargo
+/// fingerprints the dependency versions it resolves.
+fn changed_packages<'a>(bundle: &Path, copy: &Path) -> Result<Option<Vec<&'a str>>, CliError> {
+    let package = |name: &std::ffi::OsStr| {
+        shim_bundle::EMBEDDED_SHIM_SOURCES
+            .iter()
+            .any(|(package, _)| name == std::ffi::OsStr::new(package))
+    };
+    let mut root = BTreeSet::new();
+    for dir in [bundle, copy] {
+        for entry in fs::read_dir(dir).map_err(|e| CliError(format!("{}: {e}", dir.display())))? {
+            let name = entry
+                .map_err(|e| CliError(format!("{}: {e}", dir.display())))?
+                .file_name();
+            if !package(&name) && name != "Cargo.lock" && !shim_cache::cache_metadata(&name) {
+                root.insert(name);
+            }
+        }
+    }
+    for name in root {
+        if !shim_cache::same_tree(&bundle.join(&name), &copy.join(&name))? {
+            return Ok(None);
+        }
+    }
+    let mut changed = Vec::new();
+    for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
+        if !shim_cache::same_tree(&bundle.join(package), &copy.join(package))? {
+            changed.push(*package);
+        }
+    }
+    Ok(Some(changed))
 }
 
 /// The archive digest also distinguishes ambient Cargo configuration changes.
@@ -986,498 +1076,4 @@ pub(super) fn stage_shim_object(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::native_build::GuestInstrumentation;
-    use std::ffi::{OsStr, OsString};
-    use std::fs::OpenOptions;
-    use std::path::{Path, PathBuf};
-    use std::process::Command;
-    use std::{env, fs};
-
-    use crate::shim_cache;
-
-    #[test]
-    fn a_shim_object_is_keyed_by_the_sdk_the_compiler_reads() {
-        let hash = |sdk: Option<&str>| {
-            shim_object_hash_in(
-                OsStr::new("cc"),
-                &PATINA_YIELD_OBJECT,
-                "x86_64-unknown-linux-gnu",
-                &[],
-                |name| {
-                    (name == "SDKROOT")
-                        .then_some(sdk)
-                        .flatten()
-                        .map(OsString::from)
-                },
-            )
-            .unwrap()
-        };
-        let unset = hash(None);
-        let older = hash(Some("/sdks/MacOSX26.sdk"));
-        let newer = hash(Some("/sdks/MacOSX27.sdk"));
-        assert_eq!(older, hash(Some("/sdks/MacOSX26.sdk")));
-        assert_ne!(older, newer);
-        assert_ne!(unset, older);
-        assert_ne!(unset, hash(Some("")));
-    }
-
-    #[test]
-    fn a_relative_rustc_probes_as_one_program_from_both_directories() {
-        let from = Path::new("/work/guest");
-        // A bare name is PATH-resolved, which does not vary by directory.
-        assert_eq!(
-            anchored_program(None, from, "rustc"),
-            OsString::from("rustc")
-        );
-        assert_eq!(
-            anchored_program(Some("rustc".into()), from, "rustc"),
-            OsString::from("rustc")
-        );
-        // An absolute path already names one program.
-        assert_eq!(
-            anchored_program(Some("/opt/rust/bin/rustc".into()), from, "rustc"),
-            OsString::from("/opt/rust/bin/rustc")
-        );
-        // A relative path with a directory component would otherwise resolve
-        // against each probe's own working directory — two different programs,
-        // reported as a toolchain split that does not exist.
-        assert_eq!(
-            anchored_program(Some("./tools/rustc".into()), from, "rustc"),
-            OsString::from("/work/guest/./tools/rustc")
-        );
-        assert_eq!(
-            anchored_program(Some("tools/rustc".into()), from, "rustc"),
-            OsString::from("/work/guest/tools/rustc")
-        );
-    }
-
-    #[test]
-    fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() {
-        let cache = tempfile::tempdir().unwrap();
-        let workspace = cache.path();
-        let archive = workspace.join("cargo.a");
-        fs::write(&archive, b"stable archive").unwrap();
-        let stable = RustcIdentity {
-            banner: "rustc 1.98.0 (stable)".into(),
-            verbose: "rustc 1.98.0 (stable)\ncommit-hash: stable".into(),
-        };
-        let other = RustcIdentity {
-            banner: "rustc 1.98.1 (other)".into(),
-            verbose: "rustc 1.98.1 (other)\ncommit-hash: other".into(),
-        };
-        let base = native_shim_cache_base(workspace, None).unwrap();
-        let stable_artifact =
-            publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
-        fs::write(&archive, b"other archive").unwrap();
-        let other_artifact =
-            publish_native_shim(&archive, &base, "bundle-a", &other, "debug").unwrap();
-        let changed = publish_native_shim(&archive, &base, "bundle-b", &stable, "debug").unwrap();
-        assert_ne!(stable_artifact.staticlib, other_artifact.staticlib);
-        assert_ne!(stable_artifact.staticlib, changed.staticlib);
-        let same_bytes_other_bundle =
-            publish_native_shim(&archive, &base, "bundle-a", &stable, "debug").unwrap();
-        assert_ne!(same_bytes_other_bundle.staticlib, changed.staticlib);
-        assert_eq!(
-            fs::read(&stable_artifact.staticlib).unwrap(),
-            b"stable archive"
-        );
-        assert_eq!(
-            fs::read(&other_artifact.staticlib).unwrap(),
-            b"other archive"
-        );
-        // Equal banners and bytes still cannot alias different complete identities.
-        let mut rebuilt_toolchain = stable.clone();
-        rebuilt_toolchain
-            .verbose
-            .push_str("\nLLVM version: different");
-        let rebuilt =
-            publish_native_shim(&archive, &base, "bundle-b", &rebuilt_toolchain, "debug").unwrap();
-        assert_ne!(rebuilt.staticlib, changed.staticlib);
-        let release = publish_native_shim(&archive, &base, "bundle-b", &stable, "release").unwrap();
-        assert_ne!(release.staticlib, changed.staticlib);
-
-        assert_eq!(
-            native_shim_cache_base(workspace, Some(OsStr::new("/custom-target"))).unwrap(),
-            PathBuf::from("/custom-target/patina-native-shim")
-        );
-        assert_eq!(
-            native_shim_cache_base(workspace, Some(OsStr::new("relative"))).unwrap(),
-            env::current_dir()
-                .unwrap()
-                .join("relative/patina-native-shim")
-        );
-    }
-
-    #[test]
-    fn shim_target_dir_takes_precedence_over_cargo_target_dir() {
-        let shim = || Some(OsString::from("/shim-target"));
-        let cargo = || Some(OsString::from("/cargo-target"));
-        assert_eq!(shim_target_base(shim(), cargo()), shim());
-        assert_eq!(shim_target_base(shim(), None), shim());
-        assert_eq!(shim_target_base(None, cargo()), cargo());
-        assert_eq!(shim_target_base(Some(OsString::new()), cargo()), cargo());
-        assert_eq!(shim_target_base(None, None), None);
-    }
-
-    #[test]
-    fn incomplete_shim_source_bundle_is_repaired() {
-        let cache = tempfile::tempdir().unwrap();
-        let bundles = cache.path().join("shim-src");
-        let key = shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256;
-        let partial = bundles.join(key);
-        fs::create_dir_all(&partial).unwrap();
-        fs::write(partial.join("Cargo.toml"), b"interrupted old extraction").unwrap();
-        let lease = shim_cache::acquire_initialized(&bundles, key, 1, || {
-            unpack_embedded_shim_sources(cache.path()).map(|_| ())
-        })
-        .unwrap();
-        assert!(shim_cache::complete(&lease.dir, key).unwrap());
-        for (package, files) in shim_bundle::EMBEDDED_SHIM_SOURCES {
-            for (path, bytes) in *files {
-                assert_eq!(
-                    fs::read(lease.dir.join(package).join(path)).unwrap(),
-                    *bytes
-                );
-            }
-        }
-    }
-
-    /// Build real archives with deliberately different link-time answers. This
-    /// is the class-level detector for restored-bundle Cargo freshness, mutable
-    /// output handoff, and cross-bundle concurrent builds (not just key strings).
-    #[test]
-    #[cfg(unix)]
-    fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
-        if shim_cache::isolated_test(
-            "tests::concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore",
-        ) {
-            return;
-        }
-        let cache = tempfile::tempdir().unwrap();
-        let make_bundle = |key: &'static str, answer: u32| {
-            let lease = shim_cache::acquire(&cache.path().join("shim-src"), key, 4).unwrap();
-            // Even an ambient/configured Cargo intermediate directory must not
-            // escape the leased, size-bounded scratch target.
-            fs::create_dir_all(lease.dir.join(".cargo")).unwrap();
-            fs::write(
-                lease.dir.join(".cargo/config.toml"),
-                format!(
-                    "[build]\nbuild-dir = {:?}\n",
-                    cache.path().join("escaped-build-dir")
-                ),
-            )
-            .unwrap();
-            let mut members = Vec::new();
-            let mut lock = String::from("version = 3\n");
-            for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
-                members.push(format!("{package:?}"));
-                let dir = lease.dir.join(package);
-                fs::create_dir_all(dir.join("src")).unwrap();
-                let is_shim = *package == "patina-dst-native-shim";
-                fs::write(dir.join("Cargo.toml"), format!(
-                    "[package]\nname = {package:?}\nversion = \"0.0.0\"\nedition = \"2021\"\n{}",
-                    if is_shim { "[lib]\ncrate-type = [\"staticlib\"]\n" } else { "" }
-                )).unwrap();
-                fs::write(dir.join("src/lib.rs"), if is_shim {
-                    format!("#[no_mangle] pub extern \"C\" fn shim_cache_sentinel() -> u32 {{ {answer} }}\n")
-                } else { String::new() }).unwrap();
-                lock.push_str(&format!(
-                    "\n[[package]]\nname = {package:?}\nversion = \"0.0.0\"\n"
-                ));
-            }
-            fs::write(
-                lease.dir.join("Cargo.toml"),
-                format!(
-                    "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
-                    members.join(",")
-                ),
-            )
-            .unwrap();
-            fs::write(lease.dir.join("Cargo.lock"), lock).unwrap();
-            ShimSources {
-                cache_root: cache.path().into(),
-                dir: lease.dir.clone(),
-                bundle_hash: key,
-                _lease: lease,
-            }
-        };
-        let a = make_bundle("a", 17);
-        let b = make_bundle("b", 29);
-        let mut rustc = check_native_toolchain_agreement(&a.dir).unwrap();
-        let quote = |path: &OsStr| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
-        // Reproduce clonefile-preserved timestamps on every platform. Without
-        // clean -p, Cargo sees the old dep-info as fresh despite different bytes.
-        let backdate = cache.path().join("cargo-backdate");
-        fs::write(&backdate, format!(
-            "#!/bin/sh\nset -eu\nfind . -type f -exec touch -t 200001010000 {{}} +\nexec {} \"$@\"\n",
-            quote(&rustc.cargo_command)
-        )).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&backdate, fs::Permissions::from_mode(0o755)).unwrap();
-        rustc.cargo_command = backdate.as_os_str().into();
-        let link = |built: &BuiltNativeShim, expected: u32| {
-            let dir = tempfile::tempdir().unwrap();
-            let source = dir.path().join("guest.c");
-            let guest = dir.path().join("guest");
-            fs::write(&source, format!("extern unsigned shim_cache_sentinel(void); int main(void) {{ return shim_cache_sentinel() != {expected}; }}")).unwrap();
-            let mut cc = Command::new("cc");
-            cc.arg(source).arg(&built.staticlib).arg("-o").arg(&guest);
-            if cfg!(target_os = "linux") {
-                cc.args(["-ldl", "-lpthread", "-lm"]);
-            }
-            assert!(cc.status().unwrap().success());
-            assert!(Command::new(guest).status().unwrap().success());
-        };
-        // Both archive handles survive while another bundle overwrites Cargo's
-        // same-named output. Rendezvous AFTER build, BEFORE either guest links.
-        let barrier = std::sync::Barrier::new(2);
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = [(&a, 17), (&b, 29)]
-                .into_iter()
-                .map(|(bundle, expected)| {
-                    let rustc = &rustc;
-                    let barrier = &barrier;
-                    scope.spawn(move || {
-                        barrier.wait();
-                        (
-                            build_native_shim_at(
-                                false,
-                                rustc,
-                                bundle,
-                                None,
-                                GuestInstrumentation::None,
-                            )
-                            .unwrap(),
-                            expected,
-                        )
-                    })
-                })
-                .collect();
-            let built: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-            for (artifact, expected) in built {
-                link(&artifact, expected);
-            }
-        });
-        // Force A -> B -> A even if the concurrent scheduling chose B -> A.
-        for (bundle, expected) in [(&a, 17), (&b, 29), (&a, 17)] {
-            let built =
-                build_native_shim_at(false, &rustc, bundle, None, GuestInstrumentation::None)
-                    .unwrap();
-            link(&built, expected);
-        }
-        assert!(!cache.path().join("escaped-build-dir").exists());
-
-        // A compiler-wrapper server can outlive the command that started it.
-        // It may pin shared state, but the next real build must acquire the
-        // exclusive build lock without waiting for that server to exit.
-        let fifo = cache.path().join("daemon-control");
-        assert!(
-            Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
-        struct ResumeDaemon(fs::File);
-        impl Drop for ResumeDaemon {
-            fn drop(&mut self) {
-                use std::io::Write;
-                let _ = self.0.write_all(b"finish\n");
-            }
-        }
-        let resume = ResumeDaemon(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&fifo)
-                .unwrap(),
-        );
-        let ready = cache.path().join("daemon-ready");
-        let claim = cache.path().join("daemon-started");
-        let wrapper = cache.path().join("cargo-daemon-wrapper");
-        fs::write(&wrapper, format!(
-            "#!/bin/sh\nset -eu\nif [ \"$1\" = build ] && mkdir {} 2>/dev/null; then\n  (exec 3< {}; : > {}; read reply <&3) </dev/null >/dev/null 2>&1 &\nfi\nexec {} \"$@\"\n",
-            quote(claim.as_os_str()), quote(fifo.as_os_str()), quote(ready.as_os_str()), quote(backdate.as_os_str())
-        )).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut daemon_rustc = rustc.clone();
-        daemon_rustc.cargo_command = wrapper.into();
-        let first =
-            build_native_shim_at(false, &daemon_rustc, &a, None, GuestInstrumentation::None)
-                .unwrap();
-        link(&first, 17);
-        for _ in 0..100 {
-            if ready.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            ready.exists(),
-            "wrapper's long-lived child never became ready"
-        );
-        std::thread::scope(|scope| {
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let next = scope.spawn(move || {
-                let built = build_native_shim_at(
-                    false,
-                    &daemon_rustc,
-                    &b,
-                    None,
-                    GuestInstrumentation::None,
-                );
-                tx.send(()).unwrap();
-                built
-            });
-            let unblocked = rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
-            drop(resume); // release the server even when detecting the regression
-            let built = next.join().unwrap().unwrap();
-            assert!(
-                unblocked,
-                "a wrapper daemon retained the exclusive build lock"
-            );
-            link(&built, 29);
-        });
-
-        let builds = native_shim_cache_base(cache.path(), None)
-            .unwrap()
-            .join("builds");
-        let work = fs::read_dir(builds)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.is_dir())
-            .unwrap();
-        let release =
-            build_native_shim_at(true, &rustc, &a, None, GuestInstrumentation::None).unwrap();
-        link(&release, 17);
-        let debug =
-            build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
-        link(&debug, 17);
-        assert!(
-            work.join("target/debug")
-                .join(NATIVE_SHIM_STATICLIB)
-                .exists()
-        );
-        assert!(
-            work.join("target/release")
-                .join(NATIVE_SHIM_STATICLIB)
-                .exists()
-        );
-        assert_ne!(release.staticlib, debug.staticlib);
-        let growth = work.join("target/oversized-scratch");
-        fs::File::create(&growth)
-            .unwrap()
-            .set_len(shim_cache::BUILD_BYTES + 1)
-            .unwrap();
-        // Model an old torn entry: the completion marker is missing but the
-        // bundle marker survived alongside a broken private copy. Retrying A must
-        // replace it, and oversized scratch must actually be removed.
-        fs::remove_file(work.join("source").join(shim_cache::COMPLETE)).unwrap();
-        // Keep the old bundle marker: it alone is not proof of source integrity.
-        fs::write(
-            work.join("source/patina-dst-native-shim/src/lib.rs"),
-            "compile_error!(\"incomplete source switch\");",
-        )
-        .unwrap();
-        let restored =
-            build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
-        link(&restored, 17);
-        assert!(!growth.exists());
-    }
-
-    #[test]
-    fn a_same_version_toolchain_split_still_names_the_difference() {
-        // Two compilers can print the same banner and still be different builds
-        // (a rebuilt nightly, a vendored rustc). The banner alone would then read
-        // as a contradiction — "these two identical toolchains disagree" — so the
-        // refusal falls back to the full `-vV` blocks.
-        let shim = RustcIdentity {
-            banner: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)".into(),
-            verbose: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)\ncommit-hash: aaaaaaaaa\nLLVM version: \
-                      20.1.0"
-                .into(),
-        };
-        let guest = RustcIdentity {
-            banner: shim.banner.clone(),
-            verbose: "rustc 1.90.0 (aaaaaaaaa 2026-01-01)\ncommit-hash: bbbbbbbbb\nLLVM version: \
-                      21.1.0"
-                .into(),
-        };
-        assert_ne!(shim, guest);
-        let message = toolchain_mismatch_message(
-            &shim,
-            Path::new("/patina"),
-            &guest,
-            Path::new("/work/guest"),
-        );
-        assert!(message.contains("refusing to build"), "{message}");
-        assert!(
-            message.contains("/patina") && message.contains("/work/guest"),
-            "{message}"
-        );
-        assert!(
-            message.contains("commit-hash: aaaaaaaaa")
-                && message.contains("commit-hash: bbbbbbbbb"),
-            "the same-banner case must show the full identities:\n{message}"
-        );
-        assert!(message.contains("No ambient fallback"), "{message}");
-        assert!(
-            message.contains("absolute, matching RUSTC and CARGO"),
-            "{message}"
-        );
-
-        // Differing banners are self-explanatory; no full dump.
-        let other = RustcIdentity {
-            banner: "rustc 1.98.1 (48a229cea 2026-09-01)".into(),
-            verbose: "rustc 1.98.1 (48a229cea 2026-09-01)\ncommit-hash: 48a229cea".into(),
-        };
-        let message =
-            toolchain_mismatch_message(&shim, Path::new("/patina"), &other, Path::new("/g"));
-        assert!(message.contains("rustc 1.98.1"), "{message}");
-        assert!(
-            !message.contains("commit-hash: 48a229cea"),
-            "differing banners need no full dump:\n{message}"
-        );
-    }
-
-    // A guest relinks when the shim changes because the staticlib it links is
-    // named by its bytes and Cargo fingerprints the `cargo rustc --` link
-    // arguments. Same bytes must publish to the same path (an unchanged rebuild
-    // stays a cache hit and stores nothing new); changed bytes, even at the same
-    // length, to a new one; and a published copy never changes afterwards.
-    #[test]
-    fn published_shim_staticlib_is_named_by_its_bytes() {
-        let directory = tempfile::tempdir().unwrap();
-        let staticlib = directory.path().join(NATIVE_SHIM_STATICLIB);
-        let identity = RustcIdentity {
-            banner: "test".into(),
-            verbose: "test complete identity".into(),
-        };
-        let publish = || {
-            publish_native_shim(&staticlib, directory.path(), "bundle", &identity, "debug").unwrap()
-        };
-        fs::write(&staticlib, b"shim bytes").unwrap();
-        let first = publish();
-        let abandoned = first._lease.dir.join("archive.partial");
-        fs::write(&abandoned, b"interrupted publication").unwrap();
-        assert_eq!(publish().staticlib, first.staticlib);
-        assert!(!abandoned.exists());
-
-        fs::write(&staticlib, b"shim bytez").unwrap();
-        let flipped = publish();
-        fs::write(&staticlib, b"rebuilt shim bytes").unwrap();
-        let rebuilt = publish();
-        assert_ne!(
-            first.staticlib, flipped.staticlib,
-            "a same-length edit must publish a new name"
-        );
-        assert_ne!(first.staticlib, rebuilt.staticlib);
-        assert_ne!(flipped.staticlib, rebuilt.staticlib);
-
-        assert_eq!(fs::read(&first.staticlib).unwrap(), b"shim bytes");
-        assert_eq!(fs::read(&flipped.staticlib).unwrap(), b"shim bytez");
-        assert_eq!(fs::read(&rebuilt.staticlib).unwrap(), b"rebuilt shim bytes");
-    }
-}
+mod tests;

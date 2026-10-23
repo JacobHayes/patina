@@ -14,6 +14,7 @@ use crate::shim::native_binary_is_shim_linked;
 use crate::{NativeEscape, TargetError, code_ranges};
 use object::read::elf::Sym as _;
 use object::{Object, ObjectSymbol};
+use std::cell::OnceCell;
 use std::collections::BTreeSet;
 
 /// The category of a versioned undefined ELF import that reached around a shim
@@ -46,8 +47,19 @@ impl NativeAudit {
         imports.dedup();
         let provenance = NativeProvenanceIndex::new(&file);
         let code_ranges = code_ranges::CodeRanges::new(&file)?;
-        let import_provenance = collect_import_provenance(&file, bytes, &provenance, &code_ranges);
-        let inert_weak = inert_weak_symbols(&file);
+        // Attribution and the undefined-weak rule each walk the whole binary
+        // (relocations, code cross-references, every symbol), and only a
+        // denied import consults them, so each is computed on first use: a
+        // clean binary, the common case before every run, never pays for them.
+        let import_provenance = OnceCell::new();
+        let provenance_of = |symbol: &str| {
+            import_provenance
+                .get_or_init(|| collect_import_provenance(&file, bytes, &provenance, &code_ranges))
+                .get(symbol)
+                .cloned()
+                .unwrap_or_else(|| vec![NativeProvenance::unknown()])
+        };
+        let inert_weak = OnceCell::new();
         let mut inert_weak_imports = Vec::new();
         let mut denied = Vec::new();
         for symbol in &imports {
@@ -57,7 +69,9 @@ impl NativeAudit {
                 continue;
             };
             if category == UNKNOWN_IMPORT_CATEGORY
-                && inert_weak.contains(normalize_native_symbol(symbol))
+                && inert_weak
+                    .get_or_init(|| inert_weak_symbols(&file))
+                    .contains(normalize_native_symbol(symbol))
             {
                 inert_weak_imports.push(symbol.clone());
                 continue;
@@ -65,10 +79,7 @@ impl NativeAudit {
             denied.push(NativeEscape::new(
                 symbol.clone(),
                 category,
-                import_provenance
-                    .get(symbol)
-                    .cloned()
-                    .unwrap_or_else(|| vec![NativeProvenance::unknown()]),
+                provenance_of(symbol),
             ));
         }
         // Host-identity reads and Go build markers are informational, so they
@@ -92,7 +103,7 @@ impl NativeAudit {
         // This only means anything for a shim-linked binary: without the shim,
         // the allowlist already governs an ordinary libc call, versioned or not.
         if native_binary_is_shim_linked(bytes).unwrap_or(false) {
-            denied.extend(versioned_bypass_escapes(&file, allow, &import_provenance));
+            denied.extend(versioned_bypass_escapes(&file, allow, &provenance_of));
         }
         if !denied.is_empty() {
             return Err(TargetError::UnsupportedNativeImports(denied));
@@ -198,7 +209,7 @@ fn dynamic_versions(file: &object::File<'_>) -> DynamicVersions {
 fn versioned_bypass_escapes(
     file: &object::File<'_>,
     allow: &BTreeSet<String>,
-    import_provenance: &std::collections::BTreeMap<String, Vec<NativeProvenance>>,
+    provenance_of: &dyn Fn(&str) -> Vec<NativeProvenance>,
 ) -> Vec<NativeEscape> {
     let dynamic = dynamic_versions(file);
     let mut escapes = Vec::new();
@@ -221,10 +232,7 @@ fn versioned_bypass_escapes(
         escapes.push(NativeEscape::new(
             versioned,
             VERSIONED_BYPASS_CATEGORY,
-            import_provenance
-                .get(&import.name)
-                .cloned()
-                .unwrap_or_else(|| vec![NativeProvenance::unknown()]),
+            provenance_of(&import.name),
         ));
     }
     escapes
