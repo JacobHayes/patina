@@ -22,6 +22,29 @@
 //! disposition, with the guest's flags, mask and restorer, and runs the
 //! guest's virtual action from its frame ([`patina_fault_route`]).
 //!
+//! **The shim's own system calls.** The SIGSYS trap and the held libc doors
+//! (`syscall(2)`, the doors forwarded to the syscall model) take the thread
+//! the same way. One that finds it already the shim's took nothing, and who
+//! held it decides. Under a shim entry it is guest code that entry called
+//! (its C allocator, during `pthread_create` say), and its call nests in the
+//! entry's. Beneath a system call's dispatch, however it was entered (a
+//! trap's, a held door's, or an entry's such as `prctl` that holds nothing),
+//! or under a trap handler's or a door's own hold, only the shim's own code
+//! and what it calls run, so it is the shim reaching its own boundary: a raw system call its code, or
+//! guest code that code called, executed, or a call of its own door, which
+//! std makes wherever it lowers to one (its futex-based locks, once-cells and
+//! thread parking wait and wake through `syscall(2)`). Serviced, it would be
+//! the guest's call, made over half-done shim state, so it is a named stop
+//! before any dispatch ([`patina_trap_nested_syscall`],
+//! [`patina_door_nested_call`]). Who made the call is not told apart by its
+//! address: the shim is a static archive linked into the guest's executable,
+//! its std shared with a Rust guest's and its cold code grouped with the
+//! guest's, so no address range is the shim's alone. Under a shim entry
+//! outside any dispatch, so, the shim's own such call nests as its guest
+//! code's does: `clippy.toml`
+//! refuses the std locks that would make one, and a once-cell's first
+//! initialisation raced by another thread is what is left.
+//!
 //! **Blocking SIGSEGV.** The host can never block SIGSEGV (a counter read
 //! must trap wherever it runs), so whether the guest has it blocked is kept
 //! here, per thread ([`SegvBlock`]). Visible mask changes set it; a handler, a
@@ -285,18 +308,79 @@ pub extern "C" fn patina_planted_fault(kind: i32) -> u8 {
     unsafe { std::ptr::read_volatile(address as *const u8) }
 }
 
+/// The reentry [`patina_planted_reentry`] armed: its `kind`, or -1.
+#[cfg(feature = "planted-faults")]
+static PLANTED_REENTRY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+#[unsafe(no_mangle)]
+/// Plant shim code reaching the shim's own boundary, for the containment
+/// tests: the next system call dispatched (the caller's own `syscall(2)`,
+/// which holds the thread, or `prctl`, which does not) makes one of its own
+/// from inside its dispatch. It writes a marker to stderr through the C library's `syscall(2)`
+/// (`kind` 0), which binds to the shim's own door as std's futex-based locks
+/// and once-cells do when they wait or wake, or as a raw `syscall`
+/// instruction (`kind` 1, x86_64), which traps: the marker is written only if
+/// that call is serviced.
+#[cfg(feature = "planted-faults")]
+pub extern "C" fn patina_planted_reentry(kind: i32) -> u8 {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    PLANTED_REENTRY.store(kind, Ordering::Relaxed);
+    0
+}
+
+/// The reentry [`patina_planted_reentry`] armed, made once by a dispatch
+/// (`crate::sud::patina_sud_dispatch`). Said on the host's stderr first, so
+/// the stop it ends in is known to be this one.
+#[cfg(feature = "planted-faults")]
+pub(crate) fn planted_reentry() {
+    if PLANTED_REENTRY.load(Ordering::Relaxed) < 0 {
+        return;
+    }
+    let kind = PLANTED_REENTRY.swap(-1, Ordering::Relaxed);
+    let _ = crate::host_write_all(2, b"PATINA_PLANTED_REENTRY\n");
+    let serviced = b"PATINA_PLANTED_SERVICED\n";
+    if kind == 0 {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the planted defect: shim code calling its own syscall(2) door"
+        )]
+        // SAFETY: a write of a live buffer to stderr.
+        unsafe {
+            libc::syscall(libc::SYS_write, 2, serviced.as_ptr(), serviced.len())
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if kind == 1 {
+        // SAFETY: as above, made as the raw instruction; `rcx` and `r11` are
+        // the instruction's own clobbers.
+        unsafe {
+            std::arch::asm!(
+                "syscall",
+                inlateout("rax") libc::SYS_write => _,
+                in("rdi") 2,
+                in("rsi") serviced.as_ptr(),
+                in("rdx") serviced.len(),
+                out("rcx") _,
+                out("r11") _,
+                options(nostack),
+            );
+        }
+    }
+}
+
 /// The trap handler's first act: take the thread for the shim, with the
 /// interrupted stack pointer ([`claim`](crate::panic_boundary::claim)),
 /// writing the hold to `claim` for [`patina_trap_leave`]. Answers 1 when
 /// guest code was interrupted, 0 when shim code already owned the thread (an
 /// entry, a shim lock held, or the trap's own glue), whose fault is
-/// [`patina_trap_shim_fault`]. A trapped or held call there, made by guest
-/// code the shim called, nests in the shim's running call: its hold took
-/// nothing (`claim.took`), and its exit delivers nothing. An interrupted
-/// stack pointer on the private stack is shim code that let a delivery in
-/// (its unblock): the guest code it stands for is its entry's. Where `stack`
-/// names the frame's `uc_stack`, the handlers guest code has provably left
-/// are dropped ([`frames::resync`]).
+/// [`patina_trap_shim_fault`]. A trapped or held call there took nothing
+/// (`claim.took`), and the C side asks whether it nests
+/// ([`patina_trap_nested_syscall`], [`patina_door_nested_call`]): one made
+/// by guest code a shim entry called nests in the shim's running call, and
+/// its exit delivers nothing. An interrupted stack pointer on the private
+/// stack is shim code that let a delivery in (its unblock): the guest code it
+/// stands for is its entry's. Where `stack` names the frame's `uc_stack`, the
+/// handlers guest code has provably left are dropped ([`frames::resync`]).
 ///
 /// # Safety
 /// `claim` is writable: the C handler's `struct patina_claim`.
@@ -385,6 +469,80 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
     line.text(b"\n");
     let _ = crate::host_write_all(2, line.bytes());
     take_default(info.signo())
+}
+
+#[unsafe(no_mangle)]
+/// A raw system call `nr` at `pc` trapped while the shim already owned the
+/// thread (its hold took nothing): it nests in the shim's running call if
+/// guest code a shim entry called (its C allocator, say) made it, and this
+/// returns. Beneath a dispatch, or under a trap handler's or a door's hold,
+/// only the shim's own code and what it calls run: the shim reached its own
+/// boundary, and its dispatch would run over half-done shim state as the
+/// guest's call. That is
+/// a named stop before any dispatch, said with one raw write as
+/// [`patina_trap_shim_fault`] says its fault.
+///
+/// # Safety
+/// `claim` is the C handler's hold, which [`patina_trap_enter`] wrote.
+pub unsafe extern "C" fn patina_trap_nested_syscall(
+    claim: *const crate::panic_boundary::Claim,
+    nr: std::ffi::c_long,
+    pc: usize,
+) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    // SAFETY: per this function's contract.
+    if unsafe { &*claim }.nests() {
+        return;
+    }
+    let mut line = Line::default();
+    line.text(
+        b"patina: a raw system call trapped inside a dispatch or a trap's hold (shim code, or \
+          guest code it called, made it): not modeled: syscall ",
+    );
+    line.number(nr as u64, 10);
+    line.text(b" at pc ");
+    line.number(pc as u64, 16);
+    line.text(b"\n");
+    let _ = crate::host_write_all(2, line.bytes());
+    crate::host_abort()
+}
+
+#[unsafe(no_mangle)]
+/// A held libc door (`syscall(2)` serving `nr`, or a door the thunks forward
+/// when `nr` is -1) entered while the shim already owned the thread: it
+/// nests as [`patina_trap_nested_syscall`]'s call does, under a shim entry.
+/// Beneath a dispatch, or under a trap handler's or a door's hold, it is
+/// the shim calling its own door, as a std facility does wherever it lowers to one (its futex-based
+/// locks, once-cells and thread parking wait and wake through `syscall(2)`),
+/// or guest code it called doing so. Serviced, that call would be the
+/// guest's, so it is a named stop, said with one raw write (the caller may
+/// hold its locks).
+///
+/// # Safety
+/// `claim` is the door's hold, which [`patina_trap_enter`] wrote.
+pub unsafe extern "C" fn patina_door_nested_call(
+    claim: *const crate::panic_boundary::Claim,
+    nr: std::ffi::c_long,
+) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    // SAFETY: per this function's contract.
+    if unsafe { &*claim }.nests() {
+        return;
+    }
+    let mut line = Line::default();
+    line.text(
+        b"patina: a libc door was called inside a dispatch or a trap's hold (std's locks, \
+          once-cells and parking wait through syscall(2)): not modeled: ",
+    );
+    if nr < 0 {
+        line.text(b"a forwarded door");
+    } else {
+        line.text(b"syscall ");
+        line.number(nr as u64, 10);
+    }
+    line.text(b"\n");
+    let _ = crate::host_write_all(2, line.bytes());
+    crate::host_abort()
 }
 
 #[unsafe(no_mangle)]

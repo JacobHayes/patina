@@ -14,7 +14,10 @@
 //! handing it to the guest's handler as a fault would be a wrong answer.
 //! Anything else is not a counter read: the handler sends it where the kernel
 //! would under the guest's own SIGSEGV action (`thread/signals/fault.rs`), so a
-//! genuine segmentation fault is never swallowed.
+//! genuine segmentation fault is never swallowed. A counter read taken while
+//! the shim owns the thread (its own code, or guest code it runs) never reaches
+//! the dispatch: the handler checks ownership first and stops by name
+//! (`patina_trap_shim_fault`).
 //!
 //! **Interposer parity.** The counter is not a second clock. It is the run's
 //! virtual monotonic clock read through the SAME `patina_clock_now` entry point
@@ -41,7 +44,6 @@
 //! `mrs CNTVCT_EL0` has no equivalent trap and stays a refusal — see
 //! `native_escape_is_tsc_manageable` in `patina-target`.
 
-use std::cell::Cell;
 use std::ffi::{c_int, c_uint};
 
 unsafe extern "C" {
@@ -73,26 +75,6 @@ fn tsc_aux() -> c_uint {
 #[cfg(not(target_os = "linux"))]
 fn tsc_aux() -> c_uint {
     0
-}
-
-thread_local! {
-    /// Set while this thread is inside [`patina_tsc_dispatch`]. A nested trap —
-    /// a counter read taken *while servicing a counter read* — can only mean
-    /// shim/runtime code executed `rdtsc` itself, which the audit instruction
-    /// scan proves it does not. Without the guard that would be an unbounded
-    /// SIGSEGV storm; with it, it is one loud, named abort. This is the
-    /// standalone RED detector for the containment invariant, mirroring the SUD
-    /// dispatch guard.
-    static IN_DISPATCH: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Guest code a signal delivery runs inside a counter read (a handler the
-/// read's scheduling point releases) may read the counter itself.
-#[cfg(target_os = "linux")]
-pub(crate) fn with_guest_reads(body: impl FnOnce()) {
-    let outer = IN_DISPATCH.with(|cell| cell.replace(false));
-    body();
-    IN_DISPATCH.with(|cell| cell.set(outer));
 }
 
 /// Whether `bytes` start with a counter read under any run of legacy and REX
@@ -214,18 +196,9 @@ pub unsafe extern "C" fn patina_tsc_dispatch(
     let Some((kind, length)) = classify(window) else {
         return PATINA_TSC_NONE;
     };
-    if IN_DISPATCH.with(Cell::get) {
-        crate::trap_fatal(
-            "TSC: re-entered the timestamp-counter trap while servicing one: shim/runtime code \
-             executed rdtsc/rdtscp inside the SIGSEGV handler (the instruction scan proves this \
-             cannot happen — a reentry means the containment invariant is broken)",
-        );
-    }
     // The trap answers a guest counter read: one clock call.
     crate::charge::count(crate::charge::Op::ClockRead.class());
-    IN_DISPATCH.with(|cell| cell.set(true));
     let value = counter_now();
-    IN_DISPATCH.with(|cell| cell.set(false));
     // The read is the whole call: it ends here.
     crate::charge::finish_call(crate::charge::Op::ClockRead.class());
     let Some(value) = value else {

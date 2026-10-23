@@ -16,9 +16,16 @@
 //! semantically identical to the guest having called an interposed `read()` — so
 //! re-entering the deterministic runtime (taking `lock_state`, parking on the
 //! baton) is exactly what every C interposer already does. See `SUD-DESIGN.md`
-//! §4.2. The one invariant that must hold is that shim/runtime code never itself
-//! traps while servicing a dispatch; [`with_dispatch_guard`] is the standalone
-//! RED detector for a violation of it.
+//! §4.2. The one invariant that must hold is that only guest code reaches the
+//! boundary. Guest code a shim entry calls while it owns the thread (its C
+//! allocator, say) does reach it, and its call nests in the entry's; a trap
+//! taken, or a libc door called, beneath a dispatch (however it was entered:
+//! the SIGSYS handler, a held door, or an entry that holds nothing) or under
+//! a trap handler's or a door's own hold is the shim's own code reaching it,
+//! or guest code that code called, and a named stop before any dispatch
+//! (`patina_trap_nested_syscall`, `patina_door_nested_call`). The dispatch's
+//! own entry scope (`PanicScope::enter_syscall`) marks it, so no caller of
+//! [`patina_sud_dispatch`] can leave it unmarked.
 //!
 //! Dispatch is GENERATED from the syscall registry (`crate::registry`): every
 //! number the vendored kernel table lists has a row with a disposition, the
@@ -35,7 +42,6 @@ use crate::thread::signals::{
     patina_signal_action, patina_signal_altstack, patina_signal_mask, patina_signal_pending,
     patina_signal_wait,
 };
-use std::cell::Cell;
 
 use crate::registry::{Arch, Disposition, SYSCALLS, SyscallRow};
 use crate::{PatinaFlock, PatinaMetadata, PatinaTimestamp};
@@ -331,45 +337,6 @@ use crate::clocks::Timespec;
 /// Kernel `struct timeval` on 64-bit Linux.
 use crate::clocks::Timeval;
 
-thread_local! {
-    /// Set while this thread is inside [`patina_sud_dispatch`]. A nested SIGSYS
-    /// (i.e. a trap taken *while servicing a trap*) can only mean shim/runtime
-    /// code executed a raw syscall — the one thing the audit instruction scan
-    /// proves it never does. If the invariant were ever violated this flag turns
-    /// the recursion into a loud, named abort instead of an unbounded SIGSYS
-    /// storm. This is the standalone RED detector for the §4.2 soundness
-    /// invariant ("shim never traps").
-    static IN_DISPATCH: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Only the kernel-frame release may re-enter dispatch as guest code: a raw
-/// syscall, or a counter read, from a handler it runs.
-pub(crate) fn with_signal_delivery(body: impl FnOnce()) {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            IN_DISPATCH.with(|cell| cell.set(self.0));
-        }
-    }
-    let _restore = Restore(IN_DISPATCH.with(|cell| cell.replace(false)));
-    crate::tsc::with_guest_reads(body);
-}
-
-/// Run `body` with the reentry guard held. Re-entrant dispatch aborts loudly.
-fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
-    if IN_DISPATCH.with(Cell::get) {
-        crate::trap_fatal(&format!(
-            "SUD re-entered dispatch while servicing syscall {nr}: shim/runtime code executed a raw \
-             syscall inside the SIGSYS handler (the instruction scan proves this cannot happen — a \
-             reentry means the containment invariant is broken)"
-        ));
-    }
-    IN_DISPATCH.with(|cell| cell.set(true));
-    let result = body();
-    IN_DISPATCH.with(|cell| cell.set(false));
-    result
-}
-
 use std::collections::BTreeMap;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -433,14 +400,17 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     // needed to hold the invariant: arming strictly follows `set_current_task` in
     // the trampoline, so an armed non-main thread always has a task; a foreign
     // host thread never executes the guest's inline syscall instructions (the C
-    // handler already proved `call_addr` is in main-executable text); and shim/std
-    // text contains zero raw syscalls (audit-proven), backstopped by the reentry
-    // guard below.
+    // handler already proved `call_addr` is in main-executable text); and shim
+    // code that reaches the boundary itself from inside a dispatch (a raw
+    // syscall, or std calling the shim's own `syscall(2)` door) stops by name
+    // before a nested dispatch: the SIGSYS handler and the door hold ask
+    // whether a call that found the thread already the shim's nests, and
+    // beneath this entry's scope (`enter_syscall`) none does, whoever called.
     let args = [a0, a1, a2, a3, a4, a5];
-    let result = with_dispatch_guard(nr, || {
-        crate::thread::signals::refresh_handler_mask();
-        dispatch(nr, args)
-    });
+    #[cfg(feature = "planted-faults")]
+    crate::thread::signals::planted_reentry();
+    crate::thread::signals::refresh_handler_mask();
+    let result = dispatch(nr, args);
     deliver();
     result
 }

@@ -629,28 +629,26 @@ fn released(exit: &mut Exit) -> bool {
 /// Perform `exit`'s release from Rust: the delivery points whose exit is not
 /// yet C. The handlers run with the thread theirs.
 fn release(exit: &Exit) {
-    crate::sud::with_signal_delivery(|| {
-        let _guest = crate::panic_boundary::PanicScope::suspend();
-        match exit.release {
-            r if r == Release::Unblock as u8 => install_raw_mask(exit.mask),
-            _ => {
-                let rc = host(
-                    SYS_RT_TGSIGQUEUEINFO,
-                    [
-                        exit.pid as u64,
-                        exit.tid as u64,
-                        exit.sig as u64,
-                        &exit.info as *const _ as u64,
-                        0,
-                        0,
-                    ],
-                );
-                if rc != 0 {
-                    fatal("host signal-frame queue failed (rt_tgsigqueueinfo)");
-                }
+    let _guest = crate::panic_boundary::PanicScope::suspend();
+    match exit.release {
+        r if r == Release::Unblock as u8 => install_raw_mask(exit.mask),
+        _ => {
+            let rc = host(
+                SYS_RT_TGSIGQUEUEINFO,
+                [
+                    exit.pid as u64,
+                    exit.tid as u64,
+                    exit.sig as u64,
+                    &exit.info as *const _ as u64,
+                    0,
+                    0,
+                ],
+            );
+            if rc != 0 {
+                fatal("host signal-frame queue failed (rt_tgsigqueueinfo)");
             }
         }
-    });
+    }
 }
 
 /// Install the host mask `mask` as it is ([`next`] already kept the

@@ -45,6 +45,7 @@ extern void patina_sud_complete(ucontext_t *uc, long ret);
 extern long patina_sud_dispatch(long nr, unsigned long a0, unsigned long a1, unsigned long a2,
                                 unsigned long a3, unsigned long a4, unsigned long a5,
                                 uintptr_t call_addr);
+extern void patina_trap_nested_syscall(const struct patina_claim *claim, long nr, uintptr_t pc);
 _Static_assert(offsetof(siginfo_t, si_call_addr) == 16 && offsetof(siginfo_t, si_syscall) == 24 &&
                    offsetof(siginfo_t, si_arch) == 28,
                "Rust SIGSYS siginfo words");
@@ -66,9 +67,12 @@ __attribute__((visibility("hidden"))) void patina_sud_sigsys(int sig, siginfo_t 
      * registers, as the kernel's restart does. The guest's errno is the
      * handlers' from the deliveries on. A call nested in a shim call (guest
      * code the shim called, its C allocator say, made it) delivers nothing:
-     * that is left to the shim call it nests in. */
+     * that is left to the shim call it nests in. A trap taken beneath a
+     * dispatch, or under a trap handler's or a door's hold, is shim code's
+     * (or guest code it called): a named stop before any dispatch. */
     struct patina_claim claim;
     (void)patina_trap_enter(trap.sp, &uc->uc_stack, &claim);
+    if (!claim.took) patina_trap_nested_syscall(&claim, trap.nr, trap.call_addr);
     long ret;
     do {
         ret = patina_sud_dispatch(trap.nr, trap.args[0], trap.args[1], trap.args[2],

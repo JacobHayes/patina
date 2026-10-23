@@ -7,6 +7,8 @@ pub(crate) mod fd;
 mod frames;
 mod waits;
 pub(super) use fault::front_installed;
+#[cfg(feature = "planted-faults")]
+pub(crate) use fault::planted_reentry;
 use fault::{Scoped, SegvBlock, trap_routed};
 pub(super) use frames::{arm as arm_signal_stack, release as release_signal_stack};
 use patina_dst_abi::SignalTarget;

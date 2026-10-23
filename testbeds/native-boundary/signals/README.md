@@ -65,7 +65,15 @@ syscalls made on a 2 KiB stack and requires nothing written below it.
 in a shim built with the `planted-faults` feature) under a guest handler for
 the signal: a SIGSEGV, a SIGBUS and a SIGILL, which `native_containment` requires to be
 named stops that take the default action, never the handler, on every Linux
-arch.
+arch. `shim_reentry.c` arms a reentry planted the same way
+(`patina_planted_reentry`), then calls `syscall(2)`, which holds the thread
+(`held`), or `prctl(2)`, which does not (`unheld`): that call's dispatch
+reaches the shim's own boundary, through `syscall(2)`, the door std's
+futex-based locks and once-cells lower to (`door`, every Linux arch), and as a
+raw syscall instruction (`trap`, x86_64 under syscall-user-dispatch). Each must
+be a named stop before the shim's call is serviced as the guest's (which would
+write a marker). Guest code a shim entry calls outside a dispatch nests instead
+(`../syscall_allocator_probe.rs`).
 
 `fault_routing.c` covers the other signals an instruction raises, whose host
 disposition is the shim's fault front handler: in `swap-escape` a raised trap

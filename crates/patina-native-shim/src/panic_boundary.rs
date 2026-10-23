@@ -54,6 +54,13 @@ thread_local! {
     /// time the shim takes the thread from guest code it is a new one.
     #[cfg(target_os = "linux")]
     static ENTRY: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    /// Whether a system call's dispatch is running on this thread, with no
+    /// guest code handed the thread since ([`PanicScope::enter_syscall`],
+    /// [`PanicScope::suspend`]): only the shim's own code, and what it calls,
+    /// runs beneath one, so no call made there nests ([`Claim::nests`]),
+    /// whether or not a trap handler holds the thread around it.
+    #[cfg(target_os = "linux")]
+    static DISPATCHING: Cell<bool> = const { Cell::new(false) };
 }
 
 // Only POSIX-interposed binaries need this policy. Bare prefixed-C links have
@@ -68,6 +75,8 @@ pub(crate) struct PanicScope {
     previous_sp: usize,
     #[cfg(target_os = "linux")]
     previous_entry: u64,
+    #[cfg(target_os = "linux")]
+    previous_dispatching: bool,
     /// The guest call this entry began, if it took the thread from guest
     /// code as one.
     call: Option<crate::charge::Began>,
@@ -90,11 +99,14 @@ impl PanicScope {
     pub(crate) fn enter_op(op: crate::charge::Op) -> Self {
         Self::set(true, Some(op.class()))
     }
-    /// The trapped system call `nr`'s entry, charged as its operation's
-    /// class ([`crate::charge::syscall_class`]).
+    /// The system call `nr`'s entry, charged as its operation's class
+    /// ([`crate::charge::syscall_class`]): its dispatch runs beneath it
+    /// ([`DISPATCHING`]), whoever made the call.
     #[cfg(target_os = "linux")]
     pub(crate) fn enter_syscall(nr: i64) -> Self {
-        Self::set(true, Some(crate::charge::syscall_class(nr)))
+        let scope = Self::set(true, Some(crate::charge::syscall_class(nr)));
+        DISPATCHING.set(true);
+        scope
     }
     /// An entry the C side calls around a guest call (glue: a boundary note,
     /// a cancellation bracket, trap decode or completion, thread start): it
@@ -121,6 +133,9 @@ impl PanicScope {
         SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
         let mut scope = Self::set(false, None);
+        // Guest code makes its own calls, whatever dispatch it runs beneath.
+        #[cfg(target_os = "linux")]
+        DISPATCHING.set(false);
         // The call this frame belongs to gets its class back when the guest
         // code returns, whatever that code's own calls left behind (one a
         // handler's `siglongjmp` abandoned never ends itself).
@@ -148,7 +163,8 @@ impl PanicScope {
         let charged = charge.filter(|_| value && matches!(previous, Owner::Guest | Owner::Exit));
         let call = charged.map(crate::charge::begin);
         #[cfg(target_os = "linux")]
-        let (previous_sp, previous_entry) = (GUEST_SP.get(), ENTRY.get().0);
+        let (previous_sp, previous_entry, previous_dispatching) =
+            (GUEST_SP.get(), ENTRY.get().0, DISPATCHING.get());
         #[cfg(target_os = "linux")]
         if value && previous == Owner::Guest {
             // The shim never hands the thread to guest code (a suspended
@@ -176,6 +192,8 @@ impl PanicScope {
             previous_sp,
             #[cfg(target_os = "linux")]
             previous_entry,
+            #[cfg(target_os = "linux")]
+            previous_dispatching,
             #[cfg(not(test))]
             panicking_on_entry: std::thread::panicking(),
             _thread: std::marker::PhantomData,
@@ -240,6 +258,7 @@ impl Drop for PanicScope {
         {
             GUEST_SP.set(self.previous_sp);
             ENTRY.set((self.previous_entry, ENTRY.get().1));
+            DISPATCHING.set(self.previous_dispatching);
         }
     }
 }
@@ -370,6 +389,19 @@ impl Claim {
     /// delivers.
     pub(crate) fn took(&self) -> bool {
         self.took
+    }
+
+    /// Whether a system call or held libc call this hold found the thread
+    /// already the shim's for nests in the shim's running call: it does if a
+    /// shim entry held the thread ([`Owner::Shim`]), whose guest code (its C
+    /// allocator, say) made it, and no dispatch is running ([`DISPATCHING`]).
+    /// Under a trap handler's hold ([`Owner::Exit`] and the entries it made),
+    /// or beneath a dispatch however it was entered, only the shim's own code
+    /// and what it calls run: the call is the shim reaching its own boundary,
+    /// and nests in nothing. Asked as the hold is made, before anything else
+    /// runs.
+    pub(crate) fn nests(&self) -> bool {
+        !self.took && self.previous == Owner::Shim && !DISPATCHING.get()
     }
 }
 
@@ -541,13 +573,44 @@ mod tests {
             assert!(!in_shim());
             drop(callback);
             let nested = claim(0x2000);
-            assert!(!nested.took() && in_shim() && !exit_owned());
+            assert!(!nested.took() && nested.nests() && in_shim() && !exit_owned());
             {
                 let _call = PanicScope::enter();
                 assert!(in_shim() && !exit_owned());
             }
             release(nested);
             assert!(in_shim() && !exit_owned());
+            drop(entry);
+            assert!(!in_shim());
+        })
+        .join()
+        .unwrap();
+        // Beneath a system call's dispatch only the shim's own code runs,
+        // whoever entered it: a hold claimed there nests in nothing. Guest
+        // code the dispatch hands the thread to (a handler) makes its own
+        // calls, and an entry of its own nests what its guest code makes.
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(|| {
+            use super::{claim, release};
+            let entry = PanicScope::enter();
+            let dispatch = PanicScope::enter_syscall(0);
+            let own = claim(0x1000);
+            assert!(!own.took() && !own.nests());
+            release(own);
+            {
+                let _handler = PanicScope::suspend();
+                let _door = PanicScope::enter();
+                let guests = claim(0x2000);
+                assert!(!guests.took() && guests.nests());
+                release(guests);
+            }
+            let again = claim(0x3000);
+            assert!(!again.nests());
+            release(again);
+            drop(dispatch);
+            let after = claim(0x4000);
+            assert!(after.nests());
+            release(after);
             drop(entry);
             assert!(!in_shim());
         })

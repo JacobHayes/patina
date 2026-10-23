@@ -489,6 +489,44 @@ fn shim_faults_are_named_stops_never_the_guests() {
     }
 }
 
+/// Shim code that reaches the shim's own boundary from inside a dispatch
+/// (planted, in the dispatch of the guest's own call: `syscall(2)`, which
+/// holds the thread around it, or `prctl(2)`, which holds nothing) is a named
+/// stop before its call is serviced as the guest's: through the `syscall(2)` door
+/// std's futex-based locks and once-cells lower to, on every Linux arch, and
+/// as a raw syscall instruction, where the host has syscall-user-dispatch.
+/// The plant says so on stderr before it reaches the boundary, so an earlier
+/// death cannot pass; its call, serviced, writes a marker of its own. Guest
+/// code a shim entry calls nests instead
+/// (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`).
+#[cfg(target_os = "linux")]
+#[test]
+fn shim_code_reaching_its_own_boundary_is_a_named_stop() {
+    use std::os::unix::process::ExitStatusExt;
+    let g = assert_build_c_guest("signals/shim_reentry.c", CLink::PosixShimPlanted);
+    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    let mut kinds = vec!["door"];
+    if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
+        kinds.push("trap");
+    }
+    for kind in kinds {
+        for outer in ["held", "unheld"] {
+            let case = format!("{kind} {outer}");
+            let output = standalone_output(&g.binary, &[kind, outer], &env);
+            assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
+            let stderr = text(&output.stderr);
+            assert!(
+                stderr.contains("PATINA_PLANTED_REENTRY"),
+                "{case}: {output:?}"
+            );
+            assert!(
+                !stderr.contains("PATINA_PLANTED_SERVICED"),
+                "{case}: {output:?}"
+            );
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;

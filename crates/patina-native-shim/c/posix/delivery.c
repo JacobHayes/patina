@@ -129,15 +129,21 @@ static int patina_trap_exit_drive(ucontext_t *uc, long ret) {
  * in the handler's frame from `patina_trap_enter` to `patina_trap_leave`,
  * which gives the thread back to what held it before. `took`: the hold took
  * the thread from guest code, and its exit delivers. A hold that found the
- * thread already the shim's (guest code the shim called, its C allocator
- * say, made the call) took nothing: its call nests in the shim's, and its
- * exit delivers nothing. */
+ * thread already the shim's took nothing, and asks whether its call nests
+ * (`patina_trap_nested_syscall`, `patina_door_nested_call`, in
+ * src/thread/signals/fault.rs) before it runs. One made under a shim entry,
+ * outside any dispatch (guest code the shim called, its C allocator say, made
+ * it), nests in the shim's call, and its exit delivers nothing. One made
+ * beneath a dispatch (whoever entered it) or under a trap handler's or a
+ * door's hold is shim code reaching its own boundary (std's futex waits lower
+ * to syscall(2)), or guest code that code called: a named stop. */
 struct patina_claim {
     uint8_t previous;
     uint8_t took;
 };
 extern int patina_trap_enter(uintptr_t sp, stack_t *stack, struct patina_claim *claim);
 extern void patina_trap_leave(struct patina_claim claim);
+extern void patina_door_nested_call(const struct patina_claim *claim, long number);
 
 /* A held door's state, in its thunk's frame (one 8-byte slot): the hold, and
  * the errno the door's call met, which its handlers see, as the kernel's
@@ -149,11 +155,18 @@ struct patina_door_hold {
 };
 _Static_assert(sizeof(struct patina_door_hold) == 8, "the door thunks' hold slot");
 
+/* Hold the thread for the door syscall(2) serves as `number` (-1: a door
+ * the thunks forward) whose caller's stack pointer is `sp`. */
+static void patina_door_take(uintptr_t sp, struct patina_door_hold *door, long number) {
+    door->call_errno = errno;
+    (void)patina_trap_enter(sp, NULL, &door->claim);
+    if (!door->claim.took) patina_door_nested_call(&door->claim, number);
+}
+
 /* The door's caller's stack pointer is `sp`. */
 __attribute__((visibility("hidden"))) void patina_door_hold(uintptr_t sp,
                                                             struct patina_door_hold *door) {
-    door->call_errno = errno;
-    (void)patina_trap_enter(sp, NULL, &door->claim);
+    patina_door_take(sp, door, -1);
 }
 
 /* After the Rust door returned: answers whether it runs again (still held).
@@ -179,7 +192,7 @@ extern long patina_libc_syscall_fixed(long number, const uint64_t (*words)[6]);
 __attribute__((visibility("hidden"))) long patina_libc_syscall_door(
     long number, const uint64_t (*words)[6], uintptr_t sp) {
     struct patina_door_hold door;
-    patina_door_hold(sp, &door);
+    patina_door_take(sp, &door, number);
     long ret;
     do ret = patina_libc_syscall_fixed(number, words);
     while (patina_door_exit(&door));

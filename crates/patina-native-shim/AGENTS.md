@@ -17,7 +17,12 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   size read, a path walk lookup) uses the unrecorded, unfaulted `Context`
   variant, never the guest's recorded, faulted query. The crate's `clippy.toml`
   refuses both kinds of spelling; a true guest funnel says so with an
-  `#[expect(clippy::disallowed_methods, reason = ...)]` naming the call, and the
+  `#[expect(clippy::disallowed_methods, reason = ...)]` naming the call. At run
+  time a held door (`syscall(2)`, a forwarded door) or a SIGSYS trap reached
+  beneath a dispatch or under a trap's or a door's own hold is a named stop,
+  never the guest's call; under a shim entry outside a dispatch it nests
+  (guest code the entry called), so the lint is what keeps the shim's own
+  calls out there. The
   kernel's timeout clock reads go through `thread::wait_clock` (a deadline
   check that can end the wait without parking: a recorded poll),
   `thread::wait_anchor` (a monotonic read before or after a park: unrecorded),
