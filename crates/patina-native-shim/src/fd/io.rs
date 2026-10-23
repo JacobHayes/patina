@@ -564,8 +564,8 @@ pub(crate) unsafe fn fs_write_segments(
             };
             let accepted = &bytes[..written.min(bytes.len())];
             match at {
-                Some(at) => mem::written_in(context, fd.0, at, accepted)?,
-                None => mem::written_at_cursor_in(context, fd.0, accepted)?,
+                Some(at) => mem::written_in(&mut context.bookkeeping(), fd.0, at, accepted)?,
+                None => mem::written_at_cursor_in(&mut context.bookkeeping(), fd.0, accepted)?,
             }
             moved += written;
             if written < bytes.len() {

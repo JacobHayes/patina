@@ -542,9 +542,11 @@ impl Context {
     }
 
     /// Convert an absolute `deadline_nanos` in the `clock` domain to the
-    /// monotonic domain used by the timer registry. Realtime deadlines read
-    /// both clocks (recorded boundary observations) so the epoch is consistent
-    /// across record and replay; monotonic deadlines pass through unchanged.
+    /// monotonic domain used by the timer registry. A realtime deadline reads
+    /// the realtime clock as a recorded boundary observation (it carries the
+    /// epoch-jump view) and the monotonic clock unrecorded, which replays
+    /// alike because virtual time is a function of the recorded sleeps;
+    /// monotonic deadlines pass through unchanged.
     /// The one realtime-to-monotonic mapping of absolute deadlines: a sleep's
     /// and an embedder timer's (`TIMER_ABSTIME` on a realtime clock) resolve
     /// alike, including under an epoch jump, which the realtime read carries.
@@ -557,7 +559,7 @@ impl Context {
             ClockKind::Monotonic => Ok(deadline_nanos),
             ClockKind::Realtime => {
                 let realtime = self.now(ClockKind::Realtime)?;
-                let monotonic = self.now(ClockKind::Monotonic)?;
+                let monotonic = self.monotonic_now_unrecorded()?;
                 let epoch = realtime.saturating_sub(monotonic);
                 Ok(deadline_nanos.saturating_sub(epoch))
             }

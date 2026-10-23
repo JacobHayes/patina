@@ -11,9 +11,7 @@ use crate::abi::{SysResult, failed};
 #[cfg(patina_posix_exports)]
 use patina_dst_abi::ClockKind;
 
-use super::{
-    FdKind, TaskId, ThreadRuntime, WaitQueue, fatal, lock_state, wake_all, with_context_raw,
-};
+use super::{FdKind, TaskId, ThreadRuntime, WaitQueue, fatal, lock_state, wake_all};
 // The gather path: only the guest archive's `kqueue`/`kevent` doors reach it.
 #[cfg(patina_posix_exports)]
 use super::{
@@ -252,7 +250,7 @@ pub extern "C" fn patina_kqueue_apply(
                     fatal_filter(filter, fd, direction);
                 }
             }
-            let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+            let now = match crate::with_bookkeeping(|c| c.monotonic_now_unrecorded()) {
                 Ok(now) => now,
                 Err(errno) => return errno,
             };
@@ -599,7 +597,7 @@ pub(crate) unsafe fn gather_core(
         let Some(id) = kq_id(&state, kq_fd) else {
             return Err(failed(super::super::EBADF));
         };
-        let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+        let now = match crate::with_bookkeeping(|c| c.monotonic_now_unrecorded()) {
             Ok(now) => now,
             Err(errno) => return Err(failed(errno)),
         };

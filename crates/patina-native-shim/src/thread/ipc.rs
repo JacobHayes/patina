@@ -414,7 +414,7 @@ impl<T> Space<T> {
 
 /// The virtual realtime clock's seconds.
 fn now() -> i64 {
-    with_context_raw(|context| context.fs_time_unrecorded())
+    crate::with_bookkeeping(|context| context.fs_time_unrecorded())
         .map(|nanos| (nanos / 1_000_000_000) as i64)
         .unwrap_or(0)
 }

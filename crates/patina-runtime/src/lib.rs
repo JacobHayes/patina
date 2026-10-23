@@ -90,6 +90,7 @@ use patina_dst_trace::{HandoffConsumedState, TraceError};
 use std::collections::BTreeMap;
 use std::fmt;
 
+mod bookkeeping;
 mod buggify;
 mod builder;
 mod charge;
@@ -113,6 +114,7 @@ pub use config::{
     validate_cpus, validate_hostname,
 };
 
+pub use bookkeeping::Bookkeeping;
 pub use builder::RuntimeBuilder;
 pub use charge::CpuAlarms;
 pub use recording::TraceTransport;

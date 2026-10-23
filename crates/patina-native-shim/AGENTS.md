@@ -18,12 +18,21 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   variant, never the guest's recorded, faulted query. The crate's `clippy.toml`
   refuses both kinds of spelling; a true guest funnel says so with an
   `#[expect(clippy::disallowed_methods, reason = ...)]` naming the call, and the
-  kernel's timeout clock reads go through `thread::wait_clock` and
-  `thread::wait_deadline`. A step that finds a node and acts on it (a path
-  walk and `stat`'s read, a directory descriptor and its read) takes its
-  scheduling point first (`boundary_point`; `paths::resolve` takes it
-  on every answer, an early refusal and a virtual entry too) and then runs
-  through `with_context_raw`, so no other task changes the node in between.
+  kernel's timeout clock reads go through `thread::wait_clock` (a deadline
+  check that can end the wait without parking: a recorded poll),
+  `thread::wait_anchor` (a monotonic read before or after a park: unrecorded),
+  `thread::relative_deadline` (a relative timeout's start: a zero timeout is
+  a deadline check, any other an anchor) and `thread::wait_deadline`. A purely internal module (the page cache,
+  fsnotify, the reactors, the working directory's install) reaches the
+  context only through `with_bookkeeping`, whose `Bookkeeping` view names no
+  effectful method; a hook running inside a guest call's closure takes that
+  closure's `context.bookkeeping()`, and only a page write-back
+  (`fs_write_back_at`) takes the `Context` itself. A step that finds a node
+  and acts on it (a path walk and `stat`'s read, a directory descriptor and
+  its read) takes its scheduling point first (`boundary_point`;
+  `paths::resolve` takes it on every answer, an early refusal and a virtual
+  entry too) and then runs through `with_context_raw`, so no other task
+  changes the node in between.
 - A shared symbol allowance is not a fix. If a host effect escapes, first add or
   harden detection so the class fails loudly, then model, interpose, or deny-trap
   the specific surface.

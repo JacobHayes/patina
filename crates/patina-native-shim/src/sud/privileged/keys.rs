@@ -364,7 +364,7 @@ fn unmodeled_type(name: &[u8]) -> Stop {
 
 /// Virtual seconds, as the collector reads the clock.
 fn now_seconds() -> u64 {
-    crate::with_context_raw(|context| context.monotonic_now_unrecorded()).unwrap_or(0)
+    crate::with_bookkeeping(|context| context.monotonic_now_unrecorded()).unwrap_or(0)
         / 1_000_000_000
 }
 

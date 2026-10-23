@@ -156,11 +156,10 @@ pub extern "C" fn patina_dispatch_semaphore_wait(sem: *mut c_void, timeout: u64)
         // Resumed only by a signal, which removed us from the waiters.
         0
     } else {
-        let now = match super::wait_clock(ClockKind::Monotonic) {
-            Ok(now) => now,
+        let deadline = match super::relative_deadline(ClockKind::Monotonic, timeout) {
+            Ok(deadline) => deadline,
             Err(_) => fatal("dispatch semaphore timed wait could not read the virtual clock"),
         };
-        let deadline = now.saturating_add(timeout);
         match state.block_timed(
             me,
             "dispatch-sem-timedwait",

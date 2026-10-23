@@ -44,14 +44,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{Fd, FsEntryKind, FsMetadata};
-use patina_dst_runtime::{Context, RuntimeError};
+use patina_dst_runtime::{Bookkeeping, RuntimeError};
 
 use crate::SpinMutex;
 use crate::thread::inotify::{
     self, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_ISDIR, IN_MOVE_SELF,
     IN_MOVED_FROM, IN_MOVED_TO, IN_OPEN, Target,
 };
-use crate::with_context_raw as with_context;
+use crate::with_bookkeeping;
 
 pub(crate) use crate::thread::inotify::{IN_ACCESS, IN_ATTRIB, IN_MODIFY};
 pub(crate) use inotify::watching;
@@ -121,7 +121,7 @@ impl Dentries {
     /// or a FIFO endpoint (whose node the filesystem does not hold), has no
     /// name to rebuild; it is stale, and an event through it while a watch
     /// exists stops the run by name.
-    fn crashed(&mut self, context: &mut Context) {
+    fn crashed(&mut self, context: &mut Bookkeeping<'_>) {
         let holders = std::mem::take(&mut self.holders);
         self.all.clear();
         self.hashed.clear();
@@ -261,7 +261,7 @@ fn dentry_of(holder: Holder) -> Option<Dentry> {
 }
 
 fn lookup(path: &str) -> Option<FsMetadata> {
-    with_context(|context| context.fs_metadata_unrecorded(path)).ok()
+    with_bookkeeping(|context| context.fs_metadata_unrecorded(path)).ok()
 }
 
 /// The directory holding canonical `path` and the entry's name in it; none
@@ -354,7 +354,11 @@ fn last_name_gone(ino: u64, held: bool) {
 /// Driver handle `handle`, open on canonical `path`, holds the name it was
 /// opened through. On the context itself, for the working directory a run
 /// is installed with.
-pub(crate) fn bind(context: &mut Context, handle: Fd, path: &str) -> Result<(), RuntimeError> {
+pub(crate) fn bind(
+    context: &mut Bookkeeping<'_>,
+    handle: Fd,
+    path: &str,
+) -> Result<(), RuntimeError> {
     let metadata = context.fs_fd_metadata_unrecorded(handle)?;
     let parent = match split(path) {
         Some((dir, name)) => Some((context.fs_metadata_unrecorded(dir)?.ino, name.to_owned())),
@@ -373,7 +377,7 @@ type Located = (u64, bool, Option<(u64, String)>);
 
 /// Where descriptor `holder`'s node is now, read through it ([`Located`]);
 /// none when that node has no name.
-fn located(context: &mut Context, holder: Holder) -> Option<Located> {
+fn located(context: &mut Bookkeeping<'_>, holder: Holder) -> Option<Located> {
     // A FIFO endpoint is no driver handle: nothing to look its node up
     // through.
     let Holder::Handle(handle) = holder else {
@@ -398,7 +402,7 @@ fn located(context: &mut Context, holder: Holder) -> Option<Located> {
 /// After an in-process crash: the held names follow the rebuilt image
 /// ([`Dentries::crashed`]).
 pub(crate) fn crashed() {
-    let _ = with_context(|context| {
+    let _ = with_bookkeeping(|context| {
         DENTRIES.lock().crashed(context);
         Ok(())
     });
@@ -406,7 +410,7 @@ pub(crate) fn crashed() {
 
 /// [`bind`] from a filesystem entry.
 pub(crate) fn bound(handle: Fd, path: &str) {
-    let _ = with_context(|context| bind(context, handle, path));
+    let _ = with_bookkeeping(|context| bind(context, handle, path));
 }
 
 /// Driver handle `duplicate` holds the name `handle` holds (`fchdir`).
@@ -706,7 +710,7 @@ mod tests {
         dentries.orphans.insert(g.ino);
 
         context.fs_crash().unwrap();
-        dentries.crashed(&mut context);
+        dentries.crashed(&mut context.bookkeeping());
 
         let now = context.fs_fd_metadata_unrecorded(file).unwrap();
         let dir_now = context.fs_metadata_unrecorded("/d").unwrap();

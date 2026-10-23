@@ -10,7 +10,7 @@ use patina_dst_abi::ClockKind;
 use super::{
     DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, TaskId, ThreadRuntime, WaitQueue,
     WaiterLoc, Watched, current_task, fatal, lock_state, register_readiness_waiters, sched_point,
-    switch_and_park, unregister_waiters, wake_all, with_context_raw,
+    switch_and_park, unregister_waiters, wake_all,
 };
 
 // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -611,7 +611,7 @@ pub(crate) unsafe fn wait_core(
             Ok(id) => id,
             Err(errno) => return Err(failed(errno)),
         };
-        let now = match with_context_raw(|c| c.monotonic_now_unrecorded()) {
+        let now = match crate::with_bookkeeping(|c| c.monotonic_now_unrecorded()) {
             Ok(now) => now,
             Err(errno) => return Err(failed(errno)),
         };

@@ -101,7 +101,16 @@ pub use replay::Replayer;
 ///   `fs_metadata`), and the cursor reads of `FIONREAD`, a `SEEK_CUR` lock
 ///   and a file transfer. Format 20 traces would replay with operations the
 ///   replay never asks for, so they are refused.
-pub const TRACE_FORMAT_VERSION: u32 = 21;
+/// - 22: no field changes, but the kernel's clock reads around a timed wait
+///   that parks record nothing: the monotonic anchor of a nonzero relative
+///   timeout (`futex`, `poll`, `sigtimedwait`, `semtimedop`,
+///   `clock_nanosleep`) and an interrupted sleep's remaining time. A zero
+///   relative timeout stays a recorded deadline check, and a realtime
+///   absolute deadline records its realtime read only, in every family. On
+///   a host-capture filesystem the embedder's unrecorded reads record the
+///   host's answer alone, with no latency sleep. Format 21 traces would
+///   replay with operations the replay never asks for, so they are refused.
+pub const TRACE_FORMAT_VERSION: u32 = 22;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

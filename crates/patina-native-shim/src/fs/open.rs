@@ -38,7 +38,7 @@ fn driver_open(path: &str, flags: OpenFlags) -> Result<Fd, c_int> {
     with_free_number(|context| {
         let fd = context.fs_open(path, flags)?;
         #[cfg(target_os = "linux")]
-        let _ = fsnotify::bind(context, fd, path);
+        let _ = fsnotify::bind(&mut context.bookkeeping(), fd, path);
         Ok(fd)
     })
 }

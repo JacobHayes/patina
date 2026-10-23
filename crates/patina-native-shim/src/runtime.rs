@@ -553,15 +553,26 @@ pub(crate) fn with_context_raw<T>(
 }
 
 /// [`with_context_raw`] for the shim's own bookkeeping, which is no boundary
-/// effect and marks none ([`BOUNDARY_SEEN`]): handing counted calls over, a
-/// scheduling point showing the time they carried, and the working
-/// directory's root handle.
+/// effect and marks none ([`BOUNDARY_SEEN`]): handing counted calls over and
+/// a scheduling point showing the time they carried. A step that only reads
+/// takes [`with_bookkeeping`] instead.
 /// A harness's startup takes scheduling points (its locks and writes) before
 /// it installs the runtime.
 pub(crate) fn with_context_bookkeeping<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
     gateway(invoke)
+}
+
+/// The shim's own internal step: a page cache filling, a reactor reading
+/// the clock, a name table following a crash, the working directory's
+/// root. It takes no scheduling point and marks no boundary, and its
+/// closure sees only [`Bookkeeping`], so it cannot name a method that
+/// records, faults, delays, counts toward a crash or draws a seeded stream.
+pub(crate) fn with_bookkeeping<T>(
+    invoke: impl FnOnce(&mut Bookkeeping<'_>) -> Result<T, RuntimeError>,
+) -> Result<T, c_int> {
+    gateway(|context| invoke(&mut context.bookkeeping()))
 }
 
 fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Result<T, c_int> {
@@ -1280,7 +1291,7 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     // A configured `--cwd` is opened now, on the context directly: a path that
     // is not a directory refuses the run by name here rather than answering
     // ENOENT to every relative path later.
-    if let Err(error) = paths::install_cwd(&mut context) {
+    if let Err(error) = paths::install_cwd(&mut context.bookkeeping()) {
         record_init_error(error.to_string());
         return fail(runtime_errno(&error));
     }

@@ -132,8 +132,8 @@ pub(crate) fn futex_wait_timed(
     let deadline = if absolute != 0 {
         timeout_nanos
     } else {
-        match super::wait_clock(clock) {
-            Ok(now) => now.saturating_add(timeout_nanos),
+        match super::relative_deadline(clock, timeout_nanos) {
+            Ok(deadline) => deadline,
             Err(errno) => return super::fail(errno),
         }
     };

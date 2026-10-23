@@ -474,15 +474,16 @@ pub unsafe extern "C" fn patina_clock_nanosleep(
         Sleep::Refused(errno) => return -i64::from(errno),
     };
     let absolute = flags & TIMER_ABSTIME != 0;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "anchors the guest's relative clock_nanosleep(2): the kernel's timeout clock read, recorded as a guest clock read by design"
-    )]
+    // A relative sleep is anchored after the call's scheduling point
+    // (`relative_deadline`: a zero one is a recorded poll, any other the
+    // kernel's unrecorded anchor).
     let deadline = if absolute {
         requested
     } else {
-        match with_context(|context| context.now(domain)) {
-            Ok(now) => now.saturating_add(requested),
+        match crate::boundary_point()
+            .and_then(|()| crate::thread::relative_deadline(domain, requested))
+        {
+            Ok(deadline) => deadline,
             Err(errno) => return -i64::from(errno),
         }
     };

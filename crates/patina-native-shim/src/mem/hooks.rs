@@ -4,7 +4,7 @@
 
 use super::*;
 
-use patina_dst_runtime::{Context, RuntimeError};
+use patina_dst_runtime::{Bookkeeping, Context, RuntimeError};
 
 // ---------------------------------------------------------------- the funnels' hooks
 
@@ -78,14 +78,15 @@ pub(crate) fn written(handle: u64, offset: u64, bytes: &[u8]) {
 /// the closure makes its next one: a vectored write whose later segment is a
 /// view of the same file reads the bytes the earlier segment stored, as one
 /// kernel write through the page cache does. The handle's inode is asked of
-/// `context` itself (a second gateway would need the lock the caller holds),
-/// and the page cache is reached whatever the held Context lock says about
-/// shim-critical sections: this is a guest write, not shim memory. Every
-/// in-closure hook answers a runtime error that is no filesystem refusal (a
-/// crash, one that could not be carried out, a stop) for the closure to end
-/// with, as the gateway it stands in for would have ended the call.
+/// the caller's Context through its bookkeeping view (a second gateway would
+/// need the lock the caller holds), and the page cache is reached whatever
+/// the held Context lock says about shim-critical sections: this is a guest
+/// write, not shim memory. Every in-closure hook answers a runtime error
+/// that is no filesystem refusal (a crash, one that could not be carried out,
+/// a stop) for the closure to end with, as the gateway it stands in for would
+/// have ended the call.
 pub(crate) fn written_in(
-    context: &mut Context,
+    context: &mut Bookkeeping<'_>,
     handle: u64,
     offset: u64,
     bytes: &[u8],
@@ -104,7 +105,7 @@ pub(crate) fn written_in(
 /// [`written_in`] for a cursor write of `bytes` to `handle`'s file: they end
 /// at the cursor, wherever the description's `O_APPEND` put them.
 pub(crate) fn written_at_cursor_in(
-    context: &mut Context,
+    context: &mut Bookkeeping<'_>,
     handle: u64,
     bytes: &[u8],
 ) -> Result<(), RuntimeError> {
@@ -127,7 +128,7 @@ pub(crate) fn written_at_cursor_in(
 /// the same file. A write-back the filesystem refuses or takes short stays
 /// dirty and fails nothing.
 pub(crate) fn reading_in(context: &mut Context, handle: u64) -> Result<(), RuntimeError> {
-    let Some(ino) = cached_ino_in(context, handle)? else {
+    let Some(ino) = cached_ino_in(&mut context.bookkeeping(), handle)? else {
         return Ok(());
     };
     let Some(writer) = writer_of(ino) else {
@@ -160,9 +161,9 @@ fn refused_is_none<T>(result: Result<T, RuntimeError>) -> Result<Option<T>, Runt
 }
 
 /// [`cached_ino`] from inside a Context closure: the handle's inode is asked
-/// of `context` itself, whatever the held Context lock says about
-/// shim-critical sections.
-fn cached_ino_in(context: &mut Context, handle: u64) -> Result<Option<u64>, RuntimeError> {
+/// of the caller's Context through its bookkeeping view, whatever the held
+/// Context lock says about shim-critical sections.
+fn cached_ino_in(context: &mut Bookkeeping<'_>, handle: u64) -> Result<Option<u64>, RuntimeError> {
     if !CACHES.load(Ordering::Acquire) {
         return Ok(None);
     }
@@ -254,7 +255,7 @@ pub(crate) fn crashed() {
         // Bookkeeping, as at the first mapping: no injected fault reaches the
         // reload, which reads the whole file.
         let recovered =
-            crate::with_context_raw(|context| context.fs_fd_metadata_unrecorded(Fd(handle)));
+            crate::with_bookkeeping(|context| context.fs_fd_metadata_unrecorded(Fd(handle)));
         // A file the durable image does not hold (its name never became
         // durable) has nothing to reload: the views map an empty file, and a
         // touch is `SIGBUS` as after a truncation. The in-process crash has no

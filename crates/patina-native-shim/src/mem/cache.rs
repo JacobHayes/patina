@@ -344,7 +344,7 @@ pub(super) fn file_bytes(handle: u64, size: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(size);
     while bytes.len() < size {
         let offset = bytes.len();
-        let read = crate::with_context_raw(|context| {
+        let read = crate::with_bookkeeping(|context| {
             context.fs_read_at_unrecorded(Fd(handle), offset as u64, size - offset)
         });
         match read {

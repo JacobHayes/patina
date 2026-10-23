@@ -1205,26 +1205,58 @@ pub(crate) fn yield_site_context() -> String {
     )
 }
 
-/// The kernel's own clock read for a timed wait: anchoring a relative
-/// timeout, checking a deadline, the time an interrupted wait has left. It is
-/// recorded as a guest clock read, counted as a poll and, on the realtime
-/// clock, drawn from the epoch-jump stream, so a guest whose timed waits spin
-/// is a clock spin the runtime sees. Every such read goes through here (or
-/// [`wait_deadline`]), so the model's choice is made in one place.
+/// The kernel's own clock read for a timed wait that can end the wait
+/// without parking: a deadline check. It is recorded as a guest clock read,
+/// counted as a poll and, on the realtime clock, drawn from the epoch-jump
+/// stream, so a guest whose timed waits keep returning at once is a clock
+/// spin the runtime sees and escalates. The kernel's other timeout reads
+/// take [`wait_anchor`]; every such read goes through one of the two (or
+/// [`wait_deadline`] and [`relative_deadline`], which choose between them),
+/// so the model's choice is made in one place.
 #[expect(
     clippy::disallowed_methods,
-    reason = "the kernel's timeout clock read, recorded as a guest clock read by design"
+    reason = "the kernel's deadline check, recorded as a guest clock read by design"
 )]
 pub(crate) fn wait_clock(clock: ClockKind) -> Result<u64, c_int> {
     with_context_raw(|context| context.now(clock))
 }
 
+/// The kernel's own clock read for a timed wait that parks after it or has
+/// already parked: anchoring a nonzero relative timeout, the time an
+/// interrupted wait has left. The wait itself is what the runtime sees (its park and
+/// the sleep that ends it), so a monotonic read here is no guest poll: it
+/// records nothing and does not move a poll streak toward escalation. A
+/// realtime read stays the guest-visible one [`wait_clock`] takes, which
+/// carries the epoch-jump view.
+pub(crate) fn wait_anchor(clock: ClockKind) -> Result<u64, c_int> {
+    match clock {
+        ClockKind::Monotonic => {
+            crate::with_bookkeeping(|context| context.monotonic_now_unrecorded())
+        }
+        ClockKind::Realtime => wait_clock(clock),
+    }
+}
+
+/// The deadline of a wait whose relative `timeout` on `clock` starts now. A
+/// zero timeout has expired as the wait begins, so the wait is a deadline
+/// check that returns without blocking: its read is [`wait_clock`]'s, a
+/// recorded poll, and a loop of such waits is a clock spin the runtime
+/// escalates. Any other timeout anchors through [`wait_anchor`].
+pub(crate) fn relative_deadline(clock: ClockKind, timeout: u64) -> Result<u64, c_int> {
+    let now = if timeout == 0 {
+        wait_clock(clock)?
+    } else {
+        wait_anchor(clock)?
+    };
+    Ok(now.saturating_add(timeout))
+}
+
 /// A timed wait's absolute `deadline` on `clock`, moved onto the monotonic
-/// line the timer registry keeps. A realtime deadline reads both clocks as
-/// [`wait_clock`] does, recorded by design.
+/// line the timer registry keeps. A realtime deadline reads the realtime
+/// clock as [`wait_clock`] does, recorded by design for the epoch-jump view.
 #[expect(
     clippy::disallowed_methods,
-    reason = "the kernel's timeout clock reads, recorded as guest clock reads by design"
+    reason = "the kernel's realtime timeout read, recorded as a guest clock read by design"
 )]
 pub(crate) fn wait_deadline(
     context: &mut patina_dst_runtime::Context,
@@ -1341,7 +1373,7 @@ pub(crate) unsafe fn managed_sleep(
                 // Snapshot at interruption, not after a handler that may
                 // itself advance virtual time. A clock failure must never
                 // invent rem=0.
-                let now = wait_clock(clock)
+                let now = wait_anchor(clock)
                     .unwrap_or_else(|_| fatal("reading interrupted sleep clock failed"));
                 let rem = deadline.saturating_sub(now);
                 // `do_nanosleep`: a sleep with no time left finished,

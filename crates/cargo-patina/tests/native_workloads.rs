@@ -1025,6 +1025,68 @@ fn condvar_waits_use_exact_virtual_deadlines() {
     g.assert_record_replay_identity(5, &[], expected.as_bytes());
 }
 
+/// The clock reads per recorded run of `futex_anchor_probe.rs`, by kind.
+#[cfg(target_os = "linux")]
+fn recorded_kind_count(g: &Guest, waits: usize, timeout_ns: u64, kind: &str) -> u64 {
+    let waits_env = format!("FUTEX_WAITS={waits}");
+    let timeout_env = format!("FUTEX_TIMEOUT_NS={timeout_ns}");
+    let flags = ["--env", waits_env.as_str(), "--env", timeout_env.as_str()];
+    let baseline = g.assert_run_success(1, &flags).stdout;
+    assert_eq!(
+        assert_unique_line_payload(&baseline, "NATIVE_FUTEX_ANCHOR "),
+        waits.to_string(),
+        "every wait times out"
+    );
+    let trace = g.assert_record_replay_identity(1, &flags, &baseline);
+    let output = assert_success(
+        common::invoke_with_deadline(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            common::native_workspace(),
+            &[
+                "trace",
+                "stats",
+                trace.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .expect("trace stats exceeded 60s"),
+    );
+    let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    stats["trace_stats"]["kinds"][kind]["count"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+/// A relative timed wait's anchor is the kernel's own clock read, before it
+/// parks: it records no clock read and so adds nothing to a poll streak; the
+/// park and the sleep that ends it are what the runtime sees. So more timed
+/// `futex` waits record no more clock reads, and the run replays. RED before:
+/// each wait recorded its anchor as a guest `clock_now`, so a timed-wait loop
+/// read as a clock spin and escalated sooner than the guest's own reads warrant.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_timed_waits_anchor_is_no_guest_clock_read() {
+    let g = Guest::assert_build("futex_anchor_probe.rs");
+    let [few, many] = [2, 6].map(|waits| recorded_kind_count(&g, waits, 1_000_000, "clock_now"));
+    assert_eq!(few, many, "clock reads recorded for 2 and 6 timed waits");
+}
+
+/// A relative wait whose timeout is zero has expired as it begins: it returns
+/// without parking, so its read of the clock is the guest's deadline check,
+/// recorded as a poll, and a loop of such waits is a clock spin the runtime
+/// escalates. Each zero-timeout `futex` wait records one clock read, and the
+/// run replays. RED with the zero timeout anchored unrecorded: more waits
+/// recorded no more reads, and a spin of them never escalated.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_zero_timeout_wait_is_a_recorded_poll() {
+    let g = Guest::assert_build("futex_anchor_probe.rs");
+    let [few, many] = [2, 6].map(|waits| recorded_kind_count(&g, waits, 0, "clock_now"));
+    assert_eq!(many - few, 6 - 2, "one clock read per zero-timeout wait");
+}
+
 #[test]
 fn recv_timeout_delivers_five_messages_and_five_timeouts() {
     let g = Guest::assert_build("recv_timeout_probe.rs");

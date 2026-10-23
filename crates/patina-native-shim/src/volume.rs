@@ -508,7 +508,7 @@ const ANON_INODE_INO: u64 = 69;
 /// realtime clock, so it is their difference at any instant (0 before the
 /// runtime is installed).
 fn boot_instant() -> u64 {
-    crate::with_context_raw(|context| {
+    crate::with_bookkeeping(|context| {
         let realtime = context.fs_time_unrecorded()?;
         let monotonic = context.monotonic_now_unrecorded()?;
         Ok(realtime.saturating_sub(monotonic))

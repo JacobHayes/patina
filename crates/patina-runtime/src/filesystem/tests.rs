@@ -5,7 +5,8 @@ use crate::config::RuntimeConfig;
 use crate::filesystem::FsTime;
 use crate::{Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, RuntimeError};
 use patina_dst_abi::{
-    ClockKind, EffectError, ErrorCode, Fd, FsClock, OpenFlags, Operation, Outcome, SeekWhence,
+    ClockKind, EffectError, ErrorCode, Fd, FsClock, FsMetadata, OpenFlags, Operation, Outcome,
+    SeekWhence,
 };
 use patina_dst_driver_api::FsDriver;
 
@@ -280,4 +281,53 @@ fn captured_host_files_replay_without_host_access_and_fail_on_branch_miss() {
             ..
         }))
     ));
+}
+
+/// The unrecorded reads stay bookkeeping on a host-capture filesystem: they
+/// record the host's answers for the replay, which executes no driver, and
+/// draw no latency, so the clock stands still under a latency knob and the
+/// trace replays them. RED with a capture read routed through the guest
+/// operation: the knob delays it and the clock moves.
+#[test]
+fn captured_unrecorded_reads_draw_no_latency_and_replay() {
+    fn exercise(ctx: &mut Context) -> (FsMetadata, u64, Vec<u8>) {
+        let fd = ctx
+            .fs_open("/fixtures/value", OpenFlags::read_only())
+            .unwrap();
+        let latency = |ctx: &Context| {
+            let report = ctx.fs_fault_report().unwrap();
+            (report.eligible_ops, report.latency_applied)
+        };
+        let (before, delays) = (ctx.monotonic_now_unrecorded().unwrap(), latency(ctx));
+        let by_fd = ctx.fs_fd_metadata_unrecorded(fd).unwrap();
+        assert_eq!(
+            ctx.fs_metadata_unrecorded("/fixtures/value").unwrap(),
+            by_fd
+        );
+        let cursor = ctx.fs_cursor_unrecorded(fd).unwrap();
+        let bytes = ctx.fs_read_at_unrecorded(fd, 0, 32).unwrap();
+        assert_eq!(ctx.monotonic_now_unrecorded().unwrap(), before);
+        assert_eq!(latency(ctx), delays);
+        ctx.fs_close(fd).unwrap();
+        (by_fd, cursor, bytes)
+    }
+    let directory = tempdir().unwrap();
+    let host = directory.path().join("host");
+    std::fs::create_dir(&host).unwrap();
+    std::fs::write(host.join("value"), b"captured").unwrap();
+    let trace = directory.path().join("capture.patina");
+    let build = |config: RuntimeConfig| {
+        RuntimeBuilder::new(config.with_fs_latency_nanos(10, 20))
+            .with_clock(VirtualClock::new(0))
+            .with_captured_filesystem(HostCaptureFs::new("/fixtures", &host).unwrap())
+            .build()
+            .unwrap()
+    };
+    let mut record = build(RuntimeConfig::record(3, &trace, "capture-v1"));
+    let recorded = exercise(&mut record);
+    record.finish().unwrap();
+    std::fs::remove_file(host.join("value")).unwrap();
+    let mut replay = build(RuntimeConfig::replay(&trace, "capture-v1"));
+    assert_eq!(exercise(&mut replay), recorded);
+    replay.finish().unwrap();
 }

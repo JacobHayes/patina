@@ -187,11 +187,11 @@ pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> 
         if resolved.kind == FdKind::File {
             let handle = Fd(resolved.handle);
             let size =
-                crate::with_context_raw(|context| context.fs_fd_metadata_unrecorded(handle))?.len;
+                crate::with_bookkeeping(|context| context.fs_fd_metadata_unrecorded(handle))?.len;
             if let Some((first, last)) = cached_pages(size, range) {
                 stat.nr_cache = last - first + 1;
                 let dirty = |first, last| {
-                    crate::with_context_raw(|context| {
+                    crate::with_bookkeeping(|context| {
                         context.fs_dirty_pages_unrecorded(handle, first, last)
                     })
                 };

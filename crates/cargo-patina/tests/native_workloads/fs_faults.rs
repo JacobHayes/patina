@@ -178,3 +178,54 @@ fn the_path_walk_draws_no_filesystem_fault() {
         "the rate must fail some calls and pass others: {plain}"
     );
 }
+
+/// Calls that do no filesystem I/O answer from memory in Linux (an inode's
+/// size, a lock table, the descriptor table, the working directory), so no
+/// filesystem fault reaches one: `fault_plane_probe.rs` gets the same answers
+/// with every filesystem operation faulted as with none, and the faulted run
+/// draws no fault at all. Run with and without `--cwd`, whose directory the
+/// run installs before the guest starts. A regression pin for the fixes that
+/// moved each of these reads off the guest's faulted queries; the
+/// `Bookkeeping` view, which keeps the shim's internal modules off them by
+/// type, is not what it checks. RED with any one row's fix reverted:
+/// `FIONREAD`, a `SEEK_END` lock, `mmap`, `cachestat` and `fchdir` read the
+/// size or mode through the guest's faulted `fstat`; the first `getcwd`
+/// opened `/` through a faulted open; `open` at `RLIMIT_NOFILE` reached the
+/// driver before it found no number free; and `--cwd` refused the run.
+#[cfg(target_os = "linux")]
+#[test]
+fn calls_without_filesystem_io_draw_no_filesystem_fault() {
+    let g = Guest::assert_build("fault_plane_probe.rs");
+    for cwd in [&[][..], &["--cwd", "/tmp"]] {
+        let [calm, faulted] = ["0", "1000"].map(|permille| {
+            let rates = [
+                "--fs-error-permille",
+                permille,
+                "--fs-short-permille",
+                permille,
+            ];
+            let run = [&rates[..], &["--seed", "1", "--format", "json"], cwd].concat();
+            let output = g.command("run", &run);
+            assert!(
+                output.status.success(),
+                "{cwd:?} at {permille}: {}: {}{}",
+                output.status,
+                text(&output.stdout),
+                text(&output.stderr)
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            // The run reports no filesystem fault plane when no operation
+            // was eligible for a fault.
+            let eligible = envelope["fault_reports"]["fs"]["eligible_ops"].as_u64();
+            assert_eq!(eligible.unwrap_or(0), 0, "{cwd:?}: {envelope:#}");
+            let stdout = envelope["stdout"].as_str().unwrap();
+            stdout
+                .lines()
+                .filter(|line| line.starts_with("NATIVE_FAULT_PLANE "))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        assert!(!calm.is_empty(), "{cwd:?}: the probe printed no rows");
+        assert_eq!(calm, faulted, "{cwd:?}");
+    }
+}

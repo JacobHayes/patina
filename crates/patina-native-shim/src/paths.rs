@@ -31,12 +31,12 @@ use std::ffi::c_int;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use patina_dst_abi::{Fd, FsEntryKind, FsMetadata};
-use patina_dst_runtime::{Context, RuntimeError};
+use patina_dst_runtime::{Bookkeeping, RuntimeError};
 
 use crate::fdtable::FdKind;
 use crate::{
     EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, mark_boundary,
-    resolve_fd, with_context, with_context_bookkeeping, with_context_raw,
+    resolve_fd, with_bookkeeping, with_context,
 };
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
@@ -232,7 +232,7 @@ fn cwd_handle() -> Result<Fd, c_int> {
     }
     // No scheduling point and no guest effect: the root opens inside the call
     // that first needs it, and no other task runs before it is held.
-    let fd = with_context_bookkeeping(|context| context.fs_open_path_unrecorded("/"))?;
+    let fd = with_bookkeeping(|context| context.fs_open_path_unrecorded("/"))?;
     *cwd = Some(fd);
     Ok(fd)
 }
@@ -252,10 +252,12 @@ pub(crate) fn cwd_path() -> Result<String, c_int> {
 /// pure function of the filesystem the driver rebuilds on replay. The call
 /// is a boundary call, and the runtime is installed first, as its own
 /// gateway would.
-fn namei<T>(lookup: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Result<T, c_int> {
+fn namei<T>(
+    lookup: impl FnOnce(&mut Bookkeeping<'_>) -> Result<T, RuntimeError>,
+) -> Result<T, c_int> {
     mark_boundary();
     ensure_runtime()?;
-    with_context_raw(lookup)
+    with_bookkeeping(lookup)
 }
 
 fn replace_cwd(new: Fd) -> Result<(), c_int> {
@@ -331,7 +333,7 @@ pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
 /// unrecorded: replay reads the directory from the trace and opens it here
 /// again, before the guest runs, with no fault, latency, crash ordinal or
 /// clock movement on either side.
-pub(crate) fn install_cwd(context: &mut Context) -> Result<(), RuntimeError> {
+pub(crate) fn install_cwd(context: &mut Bookkeeping<'_>) -> Result<(), RuntimeError> {
     let Some(path) = context.guest_cwd().map(str::to_owned) else {
         return Ok(());
     };
