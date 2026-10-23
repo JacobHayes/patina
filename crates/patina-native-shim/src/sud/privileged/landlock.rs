@@ -185,7 +185,7 @@ pub(in crate::sud) fn landlock_add_rule(_: &Credential, a: &[u64; 6]) -> Answer 
 /// ruleset, or a node on an internal filesystem or mount (an anonymous
 /// pipe's pipefs, sockfs, the anonymous inodes, nsfs, a queue's internal mqueue
 /// mount, a memfd's shmem or hugetlbfs mount, secret memory's), is
-/// `EBADFD`. An entry on the volume, a FIFO there, and `/dev/urandom` on
+/// `EBADFD`. An entry on the volume, a FIFO there, and a memory device on
 /// devtmpfs pass, and the rule is added.
 fn parent_beneath(parent: c_int) -> Answer {
     let resolved = match crate::resolve_fd(parent) {
@@ -201,11 +201,11 @@ fn parent_beneath(parent: c_int) -> Answer {
             refuse(errno::EBADFD)
         }
         // devtmpfs's `ptmx` node and a devpts node are on mounts of the
-        // namespace, like the entropy device.
+        // namespace, like the memory devices.
         FdKind::File
         | FdKind::Dir
         | FdKind::OPath
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::PtyMaster
         | FdKind::PtySlave
         | FdKind::Proc

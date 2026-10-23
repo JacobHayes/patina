@@ -155,7 +155,7 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
     #[cfg(target_os = "linux")]
     thread::forget_description(release.desc);
     match release.kind {
-        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::Urandom => Ok(()),
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::MemDevice => Ok(()),
         FdKind::File | FdKind::Dir | FdKind::OPath => {
             #[cfg(target_os = "linux")]
             mem::released(release.handle);

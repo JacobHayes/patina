@@ -469,7 +469,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   name too, from before its open waits for a partner: its opens, closes
   and attribute changes reach the directory and the FIFO, its reads and
   writes only the FIFO (Ubuntu's 6.8 carries the special-file fix of
-  CVE-2025-68788 from 6.8.0-108). A watch on `/dev`, the entropy device's
+  CVE-2025-68788 from 6.8.0-108). A watch on `/dev`, the memory devices'
   directory, stops by name. The per-user limits are 6.8's for the virtual
   machine: 128 instances, 16384 queued events, 31954 watches (1% of 4 GiB
   over `INOTIFY_WATCH_COST`). Trace

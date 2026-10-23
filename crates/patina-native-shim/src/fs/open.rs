@@ -75,7 +75,7 @@ pub(crate) fn deny_raw(message: &str) -> i64 {
 /// file, a directory (whether or not `O_DIRECTORY` asked for one — the kernel
 /// hands back a directory descriptor for `open(dir, O_RDONLY)` too, and it is
 /// what `fchdir`, `*at` resolution and `getdents` key off), an `O_PATH`
-/// location, the `/dev/urandom` device, or a FIFO's pipe endpoint.
+/// location, a memory device (`crate::memdev`), or a FIFO's pipe endpoint.
 ///
 /// `O_NOFOLLOW` leaves a trailing symlink unresolved, which is then `ELOOP`
 /// (`cap-primitives` keys its manual symlink walk off it, and std's
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn patina_openat2(
 /// An open of an entry the resolver answers itself.
 fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
     match entry {
-        paths::Virtual::Urandom => open_urandom(entry, flags, cloexec),
+        paths::Virtual::MemDevice(device) => open_mem_device(device, flags, cloexec),
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(index) => open_namespace(index, flags, cloexec),
         #[cfg(target_os = "linux")]
@@ -139,14 +139,16 @@ fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
     }
 }
 
-/// An open of the entropy device, a character device. On Linux, in
-/// `do_open`'s order: `O_CREAT|O_EXCL` is `EEXIST`, `O_DIRECTORY` `ENOTDIR`;
-/// a read-only open (`O_CREAT`, `O_TRUNC`, `O_APPEND`, `O_NONBLOCK` taken)
-/// is a [`FdKind::Urandom`] description; an `O_PATH` or writing open (which
-/// would feed the input pool) stops by name. On Darwin only a plain
-/// read-only open is modeled; anything else is `EACCES`.
-fn open_urandom(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
-    let status = if cfg!(target_os = "linux") {
+/// An open of a memory device, a character device. In `do_open`'s order:
+/// `O_CREAT|O_EXCL` is `EEXIST`, `O_DIRECTORY` `ENOTDIR`; an open in any
+/// access mode (`O_CREAT` and `O_TRUNC` ignored, `O_APPEND` and
+/// `O_NONBLOCK` kept) is a [`FdKind::MemDevice`] description; an `O_PATH`
+/// open, and a writing open of an entropy device (which would feed the input
+/// pool), stop by name. On Darwin an entropy device's only modeled open is a
+/// plain read-only one; anything else is `EACCES`.
+fn open_mem_device(device: crate::memdev::MemDevice, flags: u32, cloexec: bool) -> c_int {
+    let entry = paths::Virtual::MemDevice(device);
+    let status = if cfg!(target_os = "linux") || !device.draws_entropy() {
         if flags & O_PATH != 0 {
             entry.unmodeled("an O_PATH open");
         }
@@ -156,10 +158,10 @@ fn open_urandom(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         if flags & O_DIRECTORY != 0 {
             return fail(ENOTDIR);
         }
-        if flags & O_WRITE != 0 {
+        if flags & O_WRITE != 0 && device.draws_entropy() {
             entry.unmodeled("an open for writing (feeding the input pool)");
         }
-        O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK))
+        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK)) | O_OPENED
     } else {
         if flags & (O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_PATH) != 0
             || flags & O_READ == 0
@@ -168,7 +170,7 @@ fn open_urandom(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         }
         O_READ | O_OPENED
     };
-    match install_fd(FdKind::Urandom, 0, status, cloexec) {
+    match install_fd(FdKind::MemDevice, device.handle(), status, cloexec) {
         Ok(number) => {
             set_errno(0);
             number

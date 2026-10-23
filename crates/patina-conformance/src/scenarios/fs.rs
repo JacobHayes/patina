@@ -34,6 +34,7 @@ pub mod legacy_paths;
 pub mod lfs64;
 pub mod libc_io;
 pub mod libc_times;
+pub mod mem_devices;
 pub mod metadata;
 pub mod mount;
 pub mod mount_api;

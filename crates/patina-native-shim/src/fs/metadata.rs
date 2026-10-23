@@ -36,7 +36,7 @@ pub(crate) const PATINA_FS_SOCKFS: u32 = 2;
 /// A namespace file's nsfs inode (`crate::nsfs`): root's, on device 0:4.
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_NSFS: u32 = 3;
-/// The entropy device's node (`volume::urandom_metadata`): root's, on
+/// A memory device's node (`memdev::MemDevice::metadata`): root's, on
 /// devtmpfs (0:5).
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_DEVTMPFS: u32 = 4;
@@ -45,7 +45,7 @@ pub(crate) const PATINA_FS_DEVTMPFS: u32 = 4;
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_DEVPTS: u32 = 5;
 /// The pseudoterminal multiplexer's node, `/dev/ptmx`: root's and the tty
-/// group's, on devtmpfs (0:5) like the entropy device's, bound at its own
+/// group's, on devtmpfs (0:5) like a memory device's, bound at its own
 /// path.
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_PTMX: u32 = 6;
@@ -419,7 +419,7 @@ pub(crate) unsafe fn metadata_at(
 /// `access`/`faccessat`'s answer for the node a record describes, both
 /// doors: 0 or the errno. The caller is the one modeled identity: the owner
 /// of every volume entry (the owner triad answers), and not root, so a
-/// root-owned node (a namespace file's, the entropy device) answers from the
+/// root-owned node (a namespace file's, a memory device) answers from the
 /// other triad; asking a namespace file's immutable inode for write access
 /// is `EPERM` first (`inode_permission`'s `IS_IMMUTABLE`).
 ///
@@ -457,7 +457,7 @@ pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mod
 
 /// The owner `stat` reports for a node on the `PATINA_FS_*` filesystem
 /// `fs`, both doors: the caller's ([`caller`]), but for a namespace file's
-/// nsfs inode, the entropy device and the anonymous inode, which are root's
+/// nsfs inode, a memory device and the anonymous inode, which are root's
 /// (boot made them), the pseudoterminal
 /// multiplexer, root's and the tty group's, and a pseudoterminal's slave
 /// node, its opener's (the caller's) and the tty group's.
@@ -507,7 +507,7 @@ pub(crate) fn read_namespace_link(index: usize, buf: *mut c_char, len: usize) ->
 
 /// A change to the attributes (mode, owner, times, size) of an entry the
 /// resolver answers itself, by `operation`: a namespace file's nsfs inode is
-/// immutable (`notify_change`: `EPERM`); the entropy device and the
+/// immutable (`notify_change`: `EPERM`); a memory device and the
 /// pseudoterminal multiplexer are root's, so changing their mode is `EPERM`
 /// (not the owner, no `CAP_FOWNER`); a devpts name no pair has is `ENOENT`;
 /// a procfs node's mode never changes (`proc_setattr`: `EPERM`), and
@@ -525,7 +525,7 @@ fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
         };
     }
     let root_owned_device = match entry {
-        paths::Virtual::Urandom => true,
+        paths::Virtual::MemDevice(_) => true,
         #[cfg(target_os = "linux")]
         paths::Virtual::Ptmx => true,
         #[cfg(target_os = "linux")]
@@ -564,16 +564,16 @@ fn caller_capable(capability: registry::Capability) -> bool {
 
 /// The metadata of an entry the resolver answers itself, `nofollow` naming
 /// the entry itself: a namespace file's nsfs inode (its link, a procfs
-/// inode, is not modeled) and, on Linux, the entropy device's node and the
+/// inode, is not modeled) and, on Linux, a memory device's node and the
 /// pseudoterminals' (devpts's root is not modeled); `None` where the model
 /// ends.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetadata> {
     match entry {
         #[cfg(target_os = "linux")]
-        paths::Virtual::Urandom => Some(volume::urandom_metadata()),
+        paths::Virtual::MemDevice(device) => Some(device.metadata()),
         #[cfg(not(target_os = "linux"))]
-        paths::Virtual::Urandom => None,
+        paths::Virtual::MemDevice(_) => None,
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(_) if nofollow => None,
         #[cfg(target_os = "linux")]
@@ -589,7 +589,7 @@ fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetad
     }
 }
 
-/// Write a record the shim made itself (a namespace file's, the entropy
+/// Write a record the shim made itself (a namespace file's, a memory
 /// device's).
 fn write_patina_metadata(metadata: PatinaMetadata, out: *mut PatinaMetadata) -> c_int {
     if out.is_null() {
@@ -687,14 +687,15 @@ pub(crate) unsafe fn fd_metadata_full(
         };
     }
     // A namespace file is the namespace's nsfs inode (`O_PATH` too:
-    // `fstat` takes it); the entropy device, its devtmpfs node.
+    // `fstat` takes it); a memory device, its devtmpfs node.
     #[cfg(target_os = "linux")]
     if let Ok(resolved) = resolve_fd(raw_fd) {
         if matches!(resolved.kind, FdKind::Namespace | FdKind::NamespacePath) {
             return write_patina_metadata(nsfs::metadata(resolved.handle as usize), out);
         }
-        if resolved.kind == FdKind::Urandom {
-            return write_patina_metadata(volume::urandom_metadata(), out);
+        if resolved.kind == FdKind::MemDevice {
+            let device = crate::memdev::MemDevice::of_handle(resolved.handle);
+            return write_patina_metadata(device.metadata(), out);
         }
         if matches!(resolved.kind, FdKind::Proc | FdKind::ProcDir) {
             let node = crate::procfs::node_of(resolved.handle);
@@ -813,7 +814,7 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     }
     // A namespace file's nsfs inode is root's and immutable
     // (`notify_change`'s `IS_IMMUTABLE`); a procfs node's mode never changes
-    // (`proc_setattr`); the entropy device is root's (not the owner, no
+    // (`proc_setattr`); a memory device is root's (not the owner, no
     // `CAP_FOWNER`).
     #[cfg(target_os = "linux")]
     if let Ok(resolved) = resolve_fd(raw_fd) {
@@ -823,9 +824,10 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         ) {
             return fail(EPERM);
         }
-        if resolved.kind == FdKind::Urandom {
+        if resolved.kind == FdKind::MemDevice {
             if caller_capable(registry::Capability::Fowner) {
-                paths::Virtual::Urandom.unmodeled("fchmod");
+                let device = crate::memdev::MemDevice::of_handle(resolved.handle);
+                paths::Virtual::MemDevice(device).unmodeled("fchmod");
             }
             return fail(EPERM);
         }
@@ -1244,7 +1246,9 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
         Ok(paths::Resolution::Volume(resolved)) => resolved,
         // `vfs_truncate`: a character device is no regular file (`EINVAL`,
         // before any permission); the immutable nsfs inode refuses (`EPERM`).
-        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) if cfg!(target_os = "linux") => {
+        Ok(paths::Resolution::Virtual(paths::Virtual::MemDevice(_)))
+            if cfg!(target_os = "linux") =>
+        {
             return fail(EINVAL);
         }
         Ok(paths::Resolution::Virtual(entry)) => {
@@ -1346,7 +1350,7 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::Stdin
         | FdKind::Stdout
         | FdKind::Stderr
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
         FdKind::EventFd

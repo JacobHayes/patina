@@ -173,7 +173,10 @@ fn descriptor_statfs(fd: c_int, out: *mut DarwinStatfs) -> SysResult<()> {
         FdKind::File | FdKind::Dir | FdKind::OPath => copy_out(out),
         FdKind::Pipe if crate::thread::fifo_ino(fd).is_some() => copy_out(out),
         FdKind::Pipe | FdKind::Socket | FdKind::Kqueue => Err(failed(libc::EINVAL)),
-        FdKind::Urandom => paths::Virtual::Urandom.unmodeled("the filesystem statistics"),
+        FdKind::MemDevice => {
+            paths::Virtual::MemDevice(crate::memdev::MemDevice::of_handle(resolved.handle))
+                .unmodeled("the filesystem statistics")
+        }
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(failed(libc::EBADF)),
     }
 }

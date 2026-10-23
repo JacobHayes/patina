@@ -918,6 +918,13 @@ fn urandom_device_is_seeded_and_replayable() {
 }
 
 #[test]
+fn a_thread_writing_to_dev_null_lets_a_sleeping_peer_run() {
+    let g = Guest::assert_build("devnull_spin_probe.rs");
+    let out = g.assert_run_success(1, &[]).stdout;
+    assert_exact_line(&out, "NATIVE_DEVNULL_SPIN stopped=true");
+}
+
+#[test]
 fn condvar_waits_use_exact_virtual_deadlines() {
     let g = Guest::assert_build("timed_wait_probe.rs");
     g.assert_audit_clean();

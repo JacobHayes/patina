@@ -440,11 +440,14 @@ pub(crate) unsafe fn ctl_core(
         target.kind,
         FdKind::File
             | FdKind::Dir
-            | FdKind::Urandom
             | FdKind::LandlockRuleset
             | FdKind::Namespace
             | FdKind::ProcDir
     ) || (target.kind == FdKind::Proc && !crate::procfs::polls(target.handle))
+        // Of the memory devices only `/dev/random` polls (`random_poll`).
+        || (target.kind == FdKind::MemDevice
+            && crate::memdev::MemDevice::of_handle(target.handle)
+                != crate::memdev::MemDevice::Random)
     {
         return Err(failed(EPERM));
     }

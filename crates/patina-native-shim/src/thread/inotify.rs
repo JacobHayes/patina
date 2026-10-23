@@ -484,12 +484,14 @@ pub(crate) unsafe fn add_watch(fd: c_int, path: *const c_char, mask: u32) -> i64
     if metadata.mode & 0o400 == 0 {
         return errno(EACCES);
     }
-    // The entropy device's directory: on 6.8 that is a devtmpfs mount whose
-    // watches see `/dev/urandom` opened and closed; the volume's `/dev`
-    // cannot stand for it.
-    if crate::paths::URANDOM.rsplit_once('/').map(|(dir, _)| dir) == Some(found.path.as_str()) {
+    // The memory devices' directory: on 6.8 that is a devtmpfs mount whose
+    // watches see the devices opened and closed; the volume's `/dev` cannot
+    // stand for it.
+    if crate::memdev::MemDevice::ALL.into_iter().any(|device| {
+        device.path().rsplit_once('/').map(|(dir, _)| dir) == Some(found.path.as_str())
+    }) {
         crate::trap_fatal(
-            "inotify_add_watch: a watch on /dev, where the entropy device lives, is not \
+            "inotify_add_watch: a watch on /dev, where the memory devices live, is not \
              modeled; failing closed",
         );
     }

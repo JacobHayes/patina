@@ -622,13 +622,13 @@ int32_t patina_access_answer(const struct patina_metadata *values, int32_t mode)
  */
 int32_t patina_statfs(const char *path, void *out);
 /*
- * What statx adds to the basic statistics of a node on the PATINA_FS_*
- * filesystem `fs`, asked for `mask`: the returned mask bits (the mount id's,
+ * What statx adds to the basic statistics of the node `ino` on the
+ * PATINA_FS_* filesystem `fs`, asked for `mask`: the returned mask bits (the mount id's,
  * STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; STATX_BTIME when
  * asked for and the filesystem records one), and the node's mount id,
  * written to `mount_id`.
  */
-uint32_t patina_statx_extra(uint32_t fs, uint32_t mask, uint64_t *mount_id);
+uint32_t patina_statx_extra(uint32_t fs, uint64_t ino, uint32_t mask, uint64_t *mount_id);
 /*
  * Linux in-kernel copies, each with its syscall's contract and refusal order:
  * copy_file_range between two regular files (offsets read and advanced

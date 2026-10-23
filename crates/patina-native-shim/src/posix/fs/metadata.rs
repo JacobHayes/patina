@@ -322,7 +322,7 @@ unsafe fn write_statx(values: &PatinaMetadata, mask: u32, status: *mut libc::sta
         ptr::write_bytes(status.cast::<u8>(), 0, size_of::<libc::statx>());
         let mut mount_id = 0;
         (*status).stx_mask = libc::STATX_BASIC_STATS
-            | crate::volume::patina_statx_extra(values.fs, mask, &mut mount_id);
+            | crate::volume::patina_statx_extra(values.fs, values.ino, mask, &mut mount_id);
         (*status).stx_blksize = crate::fs::stat_blksize(values) as u32;
         (*status).stx_mode = crate::fs::stat_mode(values) as u16;
         (*status).stx_nlink = values.nlink;

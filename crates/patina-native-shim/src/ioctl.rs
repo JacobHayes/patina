@@ -13,7 +13,7 @@
 //! object: a pipe's `FIONREAD` is the bytes queued in it, a socket's
 //! (`SIOCINQ`) what a receive would take now, and a socket answers the
 //! interface requests (`SIOCGIF*`, `thread::net::iface`); a userfaultfd, a
-//! namespace file, an inotify instance and the entropy device have ioctls
+//! namespace file, an inotify instance and the memory devices have ioctls
 //! of their own; any
 //! other request, and `FIONREAD` on a directory or a descriptor with no such
 //! answer, is `ENOTTY`.
@@ -136,11 +136,8 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             #[cfg(target_os = "linux")]
             FdKind::ProcDir => fail(ENOTTY),
             // Not a regular file: the request goes to the device's own
-            // ioctl (`random_ioctl`), which refuses what it does not know.
-            #[cfg(target_os = "linux")]
-            FdKind::Urandom => fail(EINVAL),
-            #[cfg(target_os = "macos")]
-            FdKind::Urandom => fail(ENOTTY),
+            // ioctl, see `mem_device_ioctl`.
+            FdKind::MemDevice => mem_device_ioctl(resolved.handle, request),
             // `SIOCINQ`: what a receive would take now.
             FdKind::Socket => match thread::net::socket_pending(resolved.handle) {
                 Ok(pending) => put_int(arg, pending),
@@ -236,19 +233,7 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             request,
             arg as usize,
         )),
-        // The entropy device's own ioctl (`random_ioctl`): its `RND*`
-        // requests (type 'R') read or feed the input pool, which is not
-        // modeled; any other is `EINVAL`.
-        #[cfg(target_os = "linux")]
-        _ if resolved.kind == FdKind::Urandom => {
-            if (request >> 8) & 0xff == u64::from(b'R') {
-                crate::trap_fatal(&format!(
-                    "ioctl: entropy-pool request {request:#x} on /dev/urandom is not modeled; \
-                     failing closed"
-                ))
-            }
-            fail(EINVAL)
-        }
+        _ if resolved.kind == FdKind::MemDevice => mem_device_ioctl(resolved.handle, request),
         // `inotify_ioctl`: the next watch descriptor tried, by value.
         #[cfg(target_os = "linux")]
         thread::inotify::INOTIFY_IOC_SETNEXTWD if resolved.kind == FdKind::Inotify => {
@@ -314,7 +299,7 @@ mod vfs {
         /// namespace file); a memfd's shmem inode has file attributes.
         Regular { attributes: bool },
         /// Neither: a pipe, a socket, a device, an anonymous inode; `fasync`
-        /// where the file has one (pipes, sockets, the entropy device).
+        /// where the file has one (pipes, sockets, the entropy devices).
         Special { fasync: bool },
         /// A procfs file or directory: no file attributes, extent map or
         /// block map, and no `fasync`.
@@ -335,11 +320,13 @@ mod vfs {
             }
             FdKind::File => Inode::Volume { directory: false },
             FdKind::MessageQueue | FdKind::Namespace => Inode::Regular { attributes: false },
-            FdKind::Pipe
-            | FdKind::Socket
-            | FdKind::Urandom
-            | FdKind::PtyMaster
-            | FdKind::PtySlave => Inode::Special { fasync: true },
+            FdKind::Pipe | FdKind::Socket | FdKind::PtyMaster | FdKind::PtySlave => {
+                Inode::Special { fasync: true }
+            }
+            // `random_fasync`; `mem.c`'s devices have none.
+            FdKind::MemDevice => Inode::Special {
+                fasync: crate::memdev::MemDevice::of_handle(resolved.handle).draws_entropy(),
+            },
             FdKind::EventFd
             | FdKind::Epoll
             | FdKind::SignalFd
@@ -488,6 +475,37 @@ mod vfs {
         }
         // SAFETY: a 0 answer wrote the record.
         Ok(unsafe { metadata.assume_init() }.blocks as i64 * 512)
+    }
+}
+
+/// A memory device's own ioctl, for a request the generic layer passed on.
+/// On Linux the entropy devices' is `random_ioctl`: its `RND*` requests
+/// (type 'R') read or feed the input pool, which is not modeled, and any
+/// other is `EINVAL`; `mem.c`'s devices have none, so every request is
+/// `ENOTTY` (`vfs_ioctl`). On Darwin `random_ioctl` is `ENOTTY`; what
+/// `mmioctl` answers for `/dev/null` and `/dev/zero` is not read live, so
+/// such a request stops by name.
+fn mem_device_ioctl(handle: u64, request: u64) -> c_int {
+    let device = crate::memdev::MemDevice::of_handle(handle);
+    if !device.draws_entropy() {
+        #[cfg(target_os = "macos")]
+        crate::paths::Virtual::MemDevice(device)
+            .unmodeled(&format!("an ioctl request {request:#x}"));
+        #[cfg(target_os = "linux")]
+        return fail(ENOTTY);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if (request >> 8) & 0xff == u64::from(b'R') {
+            crate::paths::Virtual::MemDevice(device)
+                .unmodeled(&format!("an entropy-pool ioctl request {request:#x}"));
+        }
+        fail(EINVAL)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = request;
+        fail(ENOTTY)
     }
 }
 

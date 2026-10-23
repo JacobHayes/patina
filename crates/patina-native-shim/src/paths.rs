@@ -34,6 +34,7 @@ use patina_dst_abi::{Fd, FsEntryKind, FsMetadata};
 use patina_dst_runtime::{Bookkeeping, RuntimeError};
 
 use crate::fdtable::FdKind;
+use crate::memdev::MemDevice;
 use crate::{
     EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, mark_boundary,
     resolve_fd, with_bookkeeping, with_context,
@@ -68,8 +69,8 @@ pub(crate) const RESOLVE_IN_ROOT: u32 = 1 << 3;
 /// Follow no symlink (`RESOLVE_NO_SYMLINKS`): meeting one is `ELOOP`.
 pub(crate) const RESOLVE_NO_SYMLINKS: u32 = 1 << 4;
 /// Cross no mount (`RESOLVE_NO_XDEV`): the volume is one mount, and the
-/// entries outside it (`/dev/urandom`, `/dev/ptmx`, `/dev/tty`, devpts at
-/// `/dev/pts`) are `EXDEV`.
+/// entries outside it (the memory devices, `/dev/ptmx`, `/dev/tty`, devpts
+/// at `/dev/pts`) are `EXDEV`.
 pub(crate) const RESOLVE_NO_XDEV: u32 = 1 << 5;
 /// Resolve from the cache alone (`RESOLVE_CACHED`). Every lookup here is in
 /// memory, so the walk is unchanged; the open refuses a creating or
@@ -88,15 +89,8 @@ pub(crate) const RESOLVE_SCOPE_FLAGS: u32 = RESOLVE_BENEATH
     | RESOLVE_CACHED
     | RESOLVE_NO_MAGICLINKS;
 
-/// The one path that names a device the shim owns rather than a filesystem
-/// entry, on a mount of its own (devtmpfs). It is resolved without consulting
-/// the driver so the entropy device exists whether or not the image has a
-/// `/dev` — recognized lexically, before the walk, so a spelling that reaches
-/// it only through a symlink or a `..` goes to the volume instead.
-pub(crate) const URANDOM: &str = "/dev/urandom";
-
 /// The pseudoterminal multiplexer, devtmpfs's `ptmx` node (Linux), resolved
-/// the same way.
+/// as the memory devices are ([`Virtual::MemDevice`]).
 #[cfg(target_os = "linux")]
 pub(crate) const PTMX: &str = "/dev/ptmx";
 
@@ -116,8 +110,12 @@ pub(crate) const TTY: &str = "/dev/tty";
 /// ([`Virtual::unmodeled`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Virtual {
-    /// The entropy device, [`URANDOM`].
-    Urandom,
+    /// A memory device (`crate::memdev`), each on a mount of its own
+    /// (devtmpfs). Its path is recognized lexically, before the walk, so it
+    /// exists whether or not the image has a `/dev`, and a spelling that
+    /// reaches it only through a symlink or a `..` goes to the volume
+    /// instead.
+    MemDevice(MemDevice),
     /// A namespace file, `/proc/self/ns/<entry>`, by its index in
     /// `nsfs::ENTRIES`.
     #[cfg(target_os = "linux")]
@@ -147,7 +145,7 @@ impl Virtual {
     /// The canonical path that names it.
     pub(crate) fn path(self) -> String {
         match self {
-            Virtual::Urandom => URANDOM.to_owned(),
+            Virtual::MemDevice(device) => device.path().to_owned(),
             #[cfg(target_os = "linux")]
             Virtual::Namespace(index) => {
                 format!("/proc/self/ns/{}", crate::nsfs::ENTRIES[index].name)
@@ -436,7 +434,7 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::Stdin
         | FdKind::Stdout
         | FdKind::Stderr
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Socket
         | FdKind::Pipe => return Err(ENOTDIR),
         #[cfg(target_os = "linux")]
@@ -593,11 +591,11 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
             .chain(remaining.iter().filter(|component| *component != "."))
             .cloned()
             .collect();
-        if join(&lexical) == URANDOM {
+        if let Some(device) = MemDevice::at(&join(&lexical)) {
             if flags & RESOLVE_NO_XDEV != 0 {
                 return Err(EXDEV);
             }
-            return Ok(Resolution::Virtual(Virtual::Urandom));
+            return Ok(Resolution::Virtual(Virtual::MemDevice(device)));
         }
         // A trailing `/` asks a device node for a directory (`ENOTDIR`), or
         // a missing one for nothing (`ENOENT`).

@@ -128,7 +128,7 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         | FdKind::Stdin
         | FdKind::Stdout
         | FdKind::Stderr
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Socket
         | FdKind::EventFd
         | FdKind::TimerFd

@@ -1244,7 +1244,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Privileged,
                 Disposition::Modeled,
-                "Over the virtual machine's mount table (`volume::MOUNTS`: the volume at `/`, the entropy device's devtmpfs bind at `/dev/urandom`; unique ids from 2^32 + 1; `sud::privileged::statmount`): a flag (`EINVAL`), the request (`copy_mnt_id_req`: `EFAULT`, `E2BIG`, `EINVAL`, a nonzero spare `EINVAL`), the buffer's range (`EFAULT`), the mount (`ENOENT`); then the superblock and mount basics and the strings (after a leading empty one, as the pinned build lays them out; no room `EOVERFLOW`). `CAP_SYS_ADMIN` reaches only mounts past the caller's root, and every mount is reachable.",
+                "Over the virtual machine's mount table (`volume::MOUNTS`: the volume at `/`, the memory devices' and the pseudoterminal multiplexer's devtmpfs binds at their own paths, devpts and procfs; unique ids from 2^32 + 1; `sud::privileged::statmount`): a flag (`EINVAL`), the request (`copy_mnt_id_req`: `EFAULT`, `E2BIG`, `EINVAL`, a nonzero spare `EINVAL`), the buffer's range (`EFAULT`), the mount (`ENOENT`); then the superblock and mount basics and the strings (after a leading empty one, as the pinned build lays them out; no room `EOVERFLOW`). `CAP_SYS_ADMIN` reaches only mounts past the caller's root, and every mount is reachable.",
                 None,
             )
             .capabilities(&[Capability::SysAdmin]),

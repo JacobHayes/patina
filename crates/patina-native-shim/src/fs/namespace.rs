@@ -576,7 +576,7 @@ pub(crate) unsafe fn read_link(
         Err(errno) => return Err(crate::abi::failed(errno)),
     };
     // A descriptor whose node is not on the volume (a namespace file's nsfs
-    // inode, the entropy device, a pipe, a socket, an anonymous inode) names
+    // inode, a memory device, a pipe, a socket, an anonymous inode) names
     // no link: an empty path is `ENOENT` (`do_readlinkat`).
     #[cfg(target_os = "linux")]
     if path.is_empty()
@@ -592,8 +592,8 @@ pub(crate) unsafe fn read_link(
         paths::RESOLVE_NOFOLLOW | paths::RESOLVE_EMPTY_PATH,
     ) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
-        // The entropy device is no link.
-        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
+        // A memory device is no link.
+        Ok(paths::Resolution::Virtual(paths::Virtual::MemDevice(_))) => {
             return Err(crate::abi::failed(EINVAL));
         }
         #[cfg(target_os = "linux")]
@@ -723,8 +723,8 @@ pub unsafe extern "C" fn patina_resolve_path(
                 .metadata
                 .map_or(0, |metadata| metadata_kind(metadata.kind)),
         ),
-        // The entropy device is a character device at its own name.
-        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Urandom)) => {
+        // A memory device is a character device at its own name.
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::MemDevice(_))) => {
             (entry.path(), PATINA_ENTRY_CHAR)
         }
         // A namespace file's link names no path (it reads `<type>:[<inode>]`).

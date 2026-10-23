@@ -11,7 +11,7 @@
 //! entry on the volume is on one of the kernel's pseudo-filesystems, which
 //! answer through `simple_statfs`: an anonymous pipe on pipefs, a socket on
 //! sockfs, an eventfd, signalfd or epoll instance on
-//! anon_inodefs. The entropy device `/dev/urandom` is on a mount of its own,
+//! anon_inodefs. The memory devices (`crate::memdev`) are each on a bind of
 //! devtmpfs (a tmpfs), described by constants like the volume; the procfs
 //! entries the model answers (`crate::procfs`) are on procfs, mounted at
 //! `/proc`, which answers through `simple_statfs` too. Every `f_fsid`
@@ -26,6 +26,7 @@ use std::ffi::{c_char, c_int};
 use crate::EINVAL;
 use crate::fdtable::FdKind;
 use crate::fs::VOLUME;
+use crate::memdev::MemDevice;
 use crate::{
     EBADF, EFAULT, ENOENT, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PATINA_FS_VOLUME, fs_device,
     path_from_c, paths, resolve_fd, set_errno, thread,
@@ -195,8 +196,8 @@ impl Filesystem {
                 f_bfree: 1 << 18,
                 f_bavail: 1 << 18,
                 f_files: 1 << 18,
-                // The one node on it: the entropy device.
-                f_ffree: (1 << 18) - 1,
+                // Its nodes: the memory devices and the multiplexer.
+                f_ffree: (1 << 18) - MemDevice::ALL.len() as u64 - 1,
                 f_fsid: self.fsid(),
                 f_namelen: NAME_MAX,
                 f_frsize: crate::PAGE_SIZE as i64,
@@ -258,7 +259,9 @@ pub(crate) struct MountIds {
 
 impl Filesystem {
     /// The mount a node on this filesystem is on, as `statx` names it: the
-    /// volume's and the entropy device's are in [`MOUNTS`]; every other is
+    /// volume's and devtmpfs's (`/dev/urandom`'s bind; each memory device and
+    /// the multiplexer are bound at their own paths, [`node_mount`]) are in
+    /// [`MOUNTS`]; every other is
     /// one of the kernel's internal mounts (`kern_mount`), in no namespace,
     /// so `statmount` of it is `ENOENT`. Their ids are the ones boot hands
     /// them on the pinned 6.8.0-139 build (read live), fixed like the
@@ -326,19 +329,29 @@ const STATX_BTIME: u32 = 0x0800;
 const STATX_MNT_ID: u32 = 0x1000;
 const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
 
-/// What `vfs_statx` adds to the basic statistics of a node on the
+/// The mount the node `ino` on the `PATINA_FS_*` filesystem `fs` is on: a
+/// devtmpfs node is bound at its own path, so its mount is its bind's.
+fn node_mount(fs: u32, ino: u64) -> MountIds {
+    if fs == crate::PATINA_FS_PTMX {
+        return MOUNTS[2].ids();
+    }
+    if fs == crate::PATINA_FS_DEVTMPFS
+        && let Some(device) = MemDevice::of_ino(ino)
+        && let Some(bind) = MOUNTS.iter().find(|mount| mount.point == device.path())
+    {
+        return bind.ids();
+    }
+    Filesystem::of_node(fs).mount()
+}
+
+/// What `vfs_statx` adds to the basic statistics of the node `ino` on the
 /// `PATINA_FS_*` filesystem `fs`, asked for `mask`: the mount id, whatever
 /// was asked (the unique one when `STATX_MNT_ID_UNIQUE` is asked for, else
 /// the small one), and `STATX_BTIME` when asked for and the filesystem
 /// records one. The mask bits, and the mount id.
-pub(crate) fn statx_extra(fs: u32, mask: u32) -> (u32, u64) {
+pub(crate) fn statx_extra(fs: u32, ino: u64, mask: u32) -> (u32, u64) {
     let filesystem = Filesystem::of_node(fs);
-    // The multiplexer's node is devtmpfs's, bound at its own path.
-    let mount = if fs == crate::PATINA_FS_PTMX {
-        MOUNTS[2].ids()
-    } else {
-        filesystem.mount()
-    };
+    let mount = node_mount(fs, ino);
     let btime = if mask & STATX_BTIME != 0 && filesystem.has_btime() {
         STATX_BTIME
     } else {
@@ -357,9 +370,14 @@ pub(crate) fn statx_extra(fs: u32, mask: u32) -> (u32, u64) {
 ///
 /// # Safety
 /// `mount_id` must be writable.
-pub unsafe extern "C" fn patina_statx_extra(fs: u32, mask: u32, mount_id: *mut u64) -> u32 {
+pub unsafe extern "C" fn patina_statx_extra(
+    fs: u32,
+    ino: u64,
+    mask: u32,
+    mount_id: *mut u64,
+) -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let (bits, id) = statx_extra(fs, mask);
+    let (bits, id) = statx_extra(fs, ino, mask);
     // SAFETY: writable per this function's contract.
     unsafe { mount_id.write(id) };
     bits
@@ -389,7 +407,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         | FdKind::Userfaultfd => Ok(Filesystem::AnonInodefs),
         FdKind::Namespace | FdKind::NamespacePath => Ok(Filesystem::Nsfs),
         FdKind::MessageQueue => Ok(Filesystem::Mqueue),
-        FdKind::Urandom | FdKind::PtyMaster => Ok(Filesystem::Devtmpfs),
+        FdKind::MemDevice | FdKind::PtyMaster => Ok(Filesystem::Devtmpfs),
         FdKind::PtySlave => Ok(Filesystem::Devpts),
         FdKind::Proc | FdKind::ProcDir => Ok(Filesystem::Proc),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
@@ -445,7 +463,7 @@ pub(crate) unsafe fn statfs(
             copy_out(Filesystem::Volume.describe(), out)
         }
         Ok(paths::Resolution::Volume(_)) => Err(crate::abi::failed(ENOENT)),
-        Ok(paths::Resolution::Virtual(paths::Virtual::Urandom)) => {
+        Ok(paths::Resolution::Virtual(paths::Virtual::MemDevice(_))) => {
             copy_out(Filesystem::Devtmpfs.describe(), out)
         }
         Ok(paths::Resolution::Virtual(paths::Virtual::Namespace(_))) => {
@@ -478,46 +496,6 @@ pub(crate) unsafe fn fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> crate::ab
     match descriptor_filesystem(raw_fd) {
         Ok(filesystem) => copy_out(filesystem.describe(), out),
         Err(errno) => Err(crate::abi::failed(errno)),
-    }
-}
-
-/// The entropy device's inode number on devtmpfs (as the pinned host's
-/// `/dev/urandom` reads live; devtmpfs numbers its nodes as boot makes them).
-const URANDOM_INO: u64 = 10;
-/// `mem`'s `urandom` device, 1:9.
-const URANDOM_DEVICE: (u32, u32) = (1, 9);
-
-/// When the entropy device's node was made, in nanoseconds on the virtual
-/// clock; 0 until first used.
-static URANDOM_MADE: crate::SpinMutex<u64> = crate::SpinMutex::new(0);
-
-/// The entropy device's node, `/dev/urandom`: a root-owned `0666` character
-/// device (1:9) on devtmpfs, one link, empty; every time the instant it was
-/// first used in the run (boot makes it; the model keeps the first use).
-pub(crate) fn urandom_metadata() -> crate::PatinaMetadata {
-    let now = crate::fs_time_unrecorded();
-    let made = {
-        let mut made = URANDOM_MADE.lock();
-        if *made == 0 {
-            *made = now;
-        }
-        *made
-    };
-    let made = crate::PatinaTimestamp::from_nanos(i128::from(made));
-    crate::PatinaMetadata {
-        kind: crate::PATINA_ENTRY_CHAR,
-        mode: 0o666,
-        nlink: 1,
-        fs: crate::PATINA_FS_DEVTMPFS,
-        rdev_major: URANDOM_DEVICE.0,
-        rdev_minor: URANDOM_DEVICE.1,
-        length: 0,
-        blocks: 0,
-        ino: URANDOM_INO,
-        atime: made,
-        mtime: made,
-        ctime: made,
-        btime: made,
     }
 }
 
@@ -615,15 +593,17 @@ const MOUNT_ATTR_NOEXEC: u64 = 0x8;
 
 /// The virtual machine's mounts, in the order they were made (so in unique
 /// id order, the order `listmount` walks): the volume at `/`, the
-/// namespace's root; the entropy device, a bind of devtmpfs's `urandom`
+/// namespace's root; `/dev/urandom`, a bind of devtmpfs's `urandom`
 /// node onto `/dev/urandom` (what `statfs` reports it on, and the crossing
 /// `RESOLVE_NO_XDEV` refuses); the pseudoterminal multiplexer, a bind of
 /// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; devpts at
-/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`); and
-/// procfs at `/proc` (`nosuid,nodev,noexec`, as hosts mount it). The
+/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`);
+/// procfs at `/proc` (`nosuid,nodev,noexec`, as hosts mount it); and the
+/// other memory devices' binds, `/dev/null`, `/dev/zero`, `/dev/random` and
+/// (Linux has it) `/dev/full`, the same way as `/dev/urandom`'s. The
 /// kernel's internal mounts (pipefs, sockfs, anon_inodefs, the IPC
 /// namespace's mqueue) are in no namespace, as in the kernel.
-pub(crate) const MOUNTS: [Mount; 5] = [
+pub(crate) const MOUNTS: [Mount; 9] = [
     Mount {
         id: 1,
         unique: MNT_UNIQUE_ID_BASE + 1,
@@ -639,7 +619,7 @@ pub(crate) const MOUNTS: [Mount; 5] = [
         parent: 0,
         filesystem: Filesystem::Devtmpfs,
         root: "/urandom",
-        point: paths::URANDOM,
+        point: MemDevice::Urandom.path(),
         attr: MOUNT_ATTR_NOSUID,
     },
     Mount {
@@ -668,6 +648,42 @@ pub(crate) const MOUNTS: [Mount; 5] = [
         root: "/",
         point: crate::procfs::ROOT,
         attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
+    },
+    Mount {
+        id: 7,
+        unique: MNT_UNIQUE_ID_BASE + 7,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/null",
+        point: MemDevice::Null.path(),
+        attr: MOUNT_ATTR_NOSUID,
+    },
+    Mount {
+        id: 8,
+        unique: MNT_UNIQUE_ID_BASE + 8,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/zero",
+        point: MemDevice::Zero.path(),
+        attr: MOUNT_ATTR_NOSUID,
+    },
+    Mount {
+        id: 10,
+        unique: MNT_UNIQUE_ID_BASE + 9,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/random",
+        point: MemDevice::Random.path(),
+        attr: MOUNT_ATTR_NOSUID,
+    },
+    Mount {
+        id: 11,
+        unique: MNT_UNIQUE_ID_BASE + 11,
+        parent: 0,
+        filesystem: Filesystem::Devtmpfs,
+        root: "/full",
+        point: MemDevice::Full.path(),
+        attr: MOUNT_ATTR_NOSUID,
     },
 ];
 
@@ -925,13 +941,36 @@ mod tests {
             }
         }
         assert_eq!(
-            statx_extra(PATINA_FS_VOLUME, STATX_MNT_ID_UNIQUE),
+            statx_extra(PATINA_FS_VOLUME, 0, STATX_MNT_ID_UNIQUE),
             (STATX_MNT_ID_UNIQUE, ROOT_MOUNT.unique)
         );
         assert_eq!(
-            statx_extra(PATINA_FS_VOLUME, STATX_BTIME),
+            statx_extra(PATINA_FS_VOLUME, 0, STATX_BTIME),
             (STATX_BTIME | STATX_MNT_ID, u64::from(ROOT_MOUNT.id))
         );
-        assert_eq!(statx_extra(PATINA_FS_PIPEFS, STATX_BTIME).0, STATX_MNT_ID);
+        assert_eq!(
+            statx_extra(PATINA_FS_PIPEFS, 0, STATX_BTIME).0,
+            STATX_MNT_ID
+        );
+    }
+
+    /// Each memory device is on its own bind: `statx` names the mount
+    /// listed at its path.
+    #[test]
+    fn each_memory_device_is_on_the_bind_at_its_path() {
+        let mut seen = Vec::new();
+        for device in MemDevice::ALL {
+            let node = device.metadata();
+            let (_, unique) = statx_extra(node.fs, node.ino, STATX_MNT_ID_UNIQUE);
+            let bind = MOUNTS
+                .iter()
+                .find(|mount| mount.point == device.path())
+                .expect("a bind at the device's path");
+            assert_eq!(unique, bind.unique, "{device:?}");
+            seen.push(unique);
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), MemDevice::ALL.len());
     }
 }

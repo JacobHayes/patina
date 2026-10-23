@@ -71,7 +71,7 @@ fn map_file(addr: usize, len: usize, prot: c_int, flags: c_int, fd: c_int, offse
     // what is not a vnode, or not a regular one, is `EINVAL`.
     match resolved.kind {
         FdKind::File => {}
-        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::Urandom => {
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::MemDevice => {
             return fail(crate::ENODEV);
         }
         FdKind::Dir | FdKind::OPath | FdKind::Socket | FdKind::Pipe | FdKind::Kqueue => {

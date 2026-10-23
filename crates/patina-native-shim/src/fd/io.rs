@@ -167,24 +167,8 @@ pub(crate) unsafe fn read_resolved(
             // writable for `length` bytes; this file path accesses it directly.
             unsafe { fs_read(Fd(resolved.handle), destination, length) }
         }
-        // A read that faults partway answers the bytes it wrote on Linux
-        // (`urandom_read_iter` is `get_random_bytes_user`). XNU's
-        // `random_read` returns the copy's `EFAULT`, which `dofileread`
-        // keeps after partial progress (it drops only interruption and
-        // would-block), so a short read there is `EFAULT`.
-        FdKind::Urandom => {
-            // SAFETY: forwarded from this function's own contract.
-            match unsafe {
-                crate::entropy::fill(destination, length, crate::entropy::EntropyWait::Never)
-            } {
-                #[cfg(target_os = "macos")]
-                Ok(written) if written < length => fail(EFAULT) as isize,
-                Ok(written) => {
-                    isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-                }
-                Err(errno) => fail(errno.get()) as isize,
-            }
-        }
+        // SAFETY: forwarded from this function's own contract.
+        FdKind::MemDevice => unsafe { crate::memdev::read(&resolved, destination, length) },
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
             thread::net::socket_read(resolved.handle, nonblocking, destination, length)
@@ -308,7 +292,8 @@ pub(crate) unsafe fn write_resolved(
     nonblocking: bool,
 ) -> isize {
     match resolved.kind {
-        FdKind::Stdin | FdKind::Urandom => fail(EBADF) as isize,
+        FdKind::Stdin => fail(EBADF) as isize,
+        FdKind::MemDevice => crate::memdev::write(&resolved, source, length),
         // SAFETY: forwarded from this function's own contract.
         FdKind::Stdout | FdKind::Stderr => unsafe {
             patina_stdio_write(resolved.handle as c_int, source, length)
@@ -397,11 +382,17 @@ pub(crate) fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved,
         // A procfs file is positioned (`seq_read`), a procfs directory too.
         #[cfg(target_os = "linux")]
         FdKind::Proc | FdKind::ProcDir => Ok((resolved, offset)),
+        // A memory device is positioned (`FMODE_PREAD`; XNU's `pread` takes
+        // a character device), and a positional transfer of one is not
+        // modeled.
+        FdKind::MemDevice => {
+            crate::paths::Virtual::MemDevice(crate::memdev::MemDevice::of_handle(resolved.handle))
+                .unmodeled("a positional transfer")
+        }
         FdKind::OPath
         | FdKind::Stdin
         | FdKind::Stdout
         | FdKind::Stderr
-        | FdKind::Urandom
         | FdKind::Socket
         | FdKind::Pipe => Err(ESPIPE),
         #[cfg(target_os = "linux")]

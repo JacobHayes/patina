@@ -121,7 +121,7 @@ fn socket_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         | FdKind::File
         | FdKind::Dir
         | FdKind::OPath
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Pipe => Err(super::ENOTSOCK),
         #[cfg(target_os = "linux")]
         FdKind::EventFd
@@ -156,7 +156,7 @@ fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         | FdKind::File
         | FdKind::Dir
         | FdKind::OPath
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Socket => Err(super::EBADF),
         #[cfg(target_os = "linux")]
         FdKind::EventFd

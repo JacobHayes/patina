@@ -142,6 +142,8 @@ pub fn run(p: &Probe) {
     p.require("open the caller's UTS namespace file", ns >= 0);
     let urandom = p.openat(AT_FDCWD, "/dev/urandom", O_RDONLY | O_CLOEXEC, 0);
     p.require("open the entropy device", urandom >= 0);
+    let null = p.openat(AT_FDCWD, "/dev/null", O_RDONLY | O_CLOEXEC, 0);
+    p.require("open the null device", null >= 0);
     use IoctlArg::{In, Out};
     #[rustfmt::skip]
     let generic = [
@@ -178,6 +180,10 @@ pub fn run(p: &Probe) {
         // The entropy device's own ioctl refuses what it does not know.
         ("the entropy device", urandom, "FS_IOC_GETFLAGS", FS_IOC_GETFLAGS, Out, EINVAL, None),
         ("the entropy device", urandom, "unknown", UNKNOWN_REQUEST, Out, EINVAL, None),
+        // `mem.c`'s devices have neither an ioctl nor a `fasync`.
+        ("the null device", null, "FIOASYNC", FIOASYNC, In(1), ENOTTY, None),
+        ("the null device", null, "FS_IOC_GETFLAGS", FS_IOC_GETFLAGS, Out, ENOTTY, None),
+        ("the null device", null, "unknown", UNKNOWN_REQUEST, Out, ENOTTY, None),
     ];
     for (what, f, name, request, arg, errno, value) in generic {
         let (r, got) = p.ioctl(f, request, name, arg);
@@ -203,7 +209,9 @@ pub fn run(p: &Probe) {
             && p.fcntl(fd, F_GETFD, 0) == i64::from(FD_CLOEXEC),
     );
 
-    for f in [fd, pipe[0], pipe[1], dirfd, location, event, ns, urandom] {
+    for f in [
+        fd, pipe[0], pipe[1], dirfd, location, event, ns, urandom, null,
+    ] {
         p.close(f);
     }
 }

@@ -228,17 +228,23 @@ fn map_file_judged(
     }
     let writable = resolved.status & crate::O_WRITE != 0;
     let secret = resolved.kind == FdKind::File && secret(resolved.handle);
+    // `/dev/zero` maps (`mmap_zero`: anonymous or shared-memory pages).
+    let zero = resolved.kind == FdKind::MemDevice
+        && crate::memdev::MemDevice::of_handle(resolved.handle) == crate::memdev::MemDevice::Zero;
     let shared = match judge(
         flags,
         prot,
         resolved.status & crate::O_READ != 0,
         writable,
-        resolved.kind == FdKind::File,
+        resolved.kind == FdKind::File || zero,
         secret,
     ) {
         Ok(shared) => shared,
         Err(errno) => return fail(errno),
     };
+    if zero {
+        crate::paths::Virtual::MemDevice(crate::memdev::MemDevice::Zero).unmodeled("a mapping");
+    }
     // `secretmem_mmap`: a shared mapping only, and its pages are locked
     // (`mlock_future_ok`: `EAGAIN` past the limit) as they fault in, unless
     // `MAP_LOCKED` populates them. It runs inside `mmap_region`, after a
@@ -369,8 +375,8 @@ pub(super) fn judge(
     if noexec && prot & PROT_EXEC != 0 {
         return Err(crate::EPERM);
     }
-    // Only a regular file has byte-addressable contents: a directory, a pipe,
-    // a socket, the streams and the entropy device have no `mmap`.
+    // Only a regular file (and `/dev/zero`) has an `mmap`: a directory, a
+    // pipe, a socket, the streams and the other memory devices have none.
     if !regular {
         return Err(ENODEV);
     }

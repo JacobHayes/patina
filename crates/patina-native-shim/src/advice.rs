@@ -59,7 +59,7 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::Stdin
         | FdKind::Stdout
         | FdKind::Stderr
-        | FdKind::Urandom
+        | FdKind::MemDevice
         | FdKind::Socket
         | FdKind::Pipe
         | FdKind::EventFd
@@ -261,7 +261,7 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
             | FdKind::Stdin
             | FdKind::Stdout
             | FdKind::Stderr
-            | FdKind::Urandom
+            | FdKind::MemDevice
             | FdKind::Socket
             | FdKind::EventFd
             | FdKind::TimerFd

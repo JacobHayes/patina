@@ -34,8 +34,8 @@
 //! (`fsnotify_file`'s `IN_ACCESS`/`IN_MODIFY`) at its own watches. Upstream
 //! v6.8 has no such rule. Its opens, closes and attribute changes still reach
 //! the directory. A FIFO is the only special file on the volume a guest can
-//! open for data (a device node there is `ENXIO`); `/dev/urandom` and its
-//! directory cannot be watched.
+//! open for data (a device node there is `ENXIO`); the memory devices and
+//! their directory cannot be watched.
 //!
 //! Every lookup here is bookkeeping inside the call (an unrecorded,
 //! never-faulted driver read), and no event is computed while no watch exists

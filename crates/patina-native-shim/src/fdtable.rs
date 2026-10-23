@@ -8,7 +8,7 @@
 //! number to the same description; `close` releases one number and frees the
 //! description only when its last number goes. Every class the shim models —
 //! captured stdio, deterministic-filesystem files and directories, the
-//! `/dev/urandom` device, virtual sockets, in-process pipes, eventfds,
+//! memory devices, virtual sockets, in-process pipes, eventfds,
 //! readiness reactors, process descriptors and Landlock rulesets — is a
 //! description here, and the guest number is the ONLY thing the guest sees. The
 //! class-specific tables (the net module's sockets and pipe ends, the driver's
@@ -54,9 +54,10 @@ pub(crate) enum FdKind {
     /// An `O_PATH` descriptor: names a location, opened nothing; `handle` is the
     /// driver `Fd`.
     OPath,
-    /// The `/dev/urandom` device: reads draw from the deterministic entropy
-    /// stream; no handle.
-    Urandom,
+    /// A memory device (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`,
+    /// `/dev/urandom`); `handle` is its
+    /// `MemDevice::handle`.
+    MemDevice,
     /// A socket of any modeled family (a socketpair end too); `handle` keys
     /// the net module's socket table.
     Socket,
@@ -145,7 +146,7 @@ impl FdKind {
             FdKind::File => 3,
             FdKind::Dir => 4,
             FdKind::OPath => 5,
-            FdKind::Urandom => 6,
+            FdKind::MemDevice => 6,
             FdKind::Socket => 7,
             FdKind::Pipe => 8,
             #[cfg(target_os = "linux")]
@@ -191,7 +192,7 @@ impl FdKind {
             FdKind::Stdin
             | FdKind::Stdout
             | FdKind::Stderr
-            | FdKind::Urandom
+            | FdKind::MemDevice
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
@@ -231,7 +232,7 @@ impl FdKind {
             | FdKind::Stderr
             | FdKind::File
             | FdKind::Dir
-            | FdKind::Urandom
+            | FdKind::MemDevice
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
@@ -255,13 +256,13 @@ impl FdKind {
     }
 
     /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
-    /// leaves the position, always 0, where it is. The entropy device's
-    /// (`random_fops`) and the eventfd, epoll, signalfd, timerfd,
+    /// leaves the position, always 0, where it is. The memory devices'
+    /// (`random_fops`; `null_lseek`, which resets it to 0) and the eventfd, epoll, signalfd, timerfd,
     /// userfaultfd and inotify files' are; a pidfd, a Landlock ruleset, a
     /// namespace file and a tty (`no_llseek`) have none (`ESPIPE`).
     pub(crate) fn seeks_nowhere(self) -> bool {
         match self {
-            FdKind::Urandom => cfg!(target_os = "linux"),
+            FdKind::MemDevice => cfg!(target_os = "linux"),
             #[cfg(target_os = "linux")]
             FdKind::EventFd
             | FdKind::Epoll

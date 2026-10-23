@@ -420,7 +420,7 @@ mod tests {
         let (root, last) = (MOUNTS[0], MOUNTS[MOUNTS.len() - 1]);
         let below = &uniques[1..];
         let all = uniques.len() as i64;
-        let mut ids = [0u64; 8];
+        let mut ids = [0u64; MOUNTS.len()];
         let below_root = request(24, 0, LSMT_ROOT, 0);
         assert_eq!(listmount_of(&below_root, &mut ids), all);
         assert_eq!(ids[..uniques.len()], uniques);
@@ -473,6 +473,9 @@ mod tests {
         let a = absent.as_ptr() as u64;
         assert_eq!(listmount(credential(), &args(a, 0, 8, 0)), e(errno::ENOENT));
         assert_eq!(listmount(credential(), &args(r, 0, 8, 0)), e(errno::EFAULT));
-        assert_eq!(listmount(credential(), &args(r, at, 8, 1 << 32)), Ok(all));
+        assert_eq!(
+            listmount(credential(), &args(r, at, all as u64, 1 << 32)),
+            Ok(all)
+        );
     }
 }

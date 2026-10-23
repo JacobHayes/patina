@@ -42,7 +42,7 @@ pub(crate) unsafe fn fill(
         let chunk = (length - written).min(ENTROPY_CHUNK);
         #[expect(
             clippy::disallowed_methods,
-            reason = "the guest's own entropy request (getrandom, getentropy, a /dev/urandom read)"
+            reason = "the guest's own entropy request (getrandom, getentropy, a /dev/random or /dev/urandom read)"
         )]
         let bytes = with_context(|context| context.entropy_bytes(chunk, wait)).map_err(failed)?;
         let landed = write_prefix(start.wrapping_add(written), &bytes);
@@ -65,7 +65,7 @@ pub(crate) unsafe fn fill(
 /// Copy `bytes` to the guest at `address` and answer how many landed: all of
 /// them, or, when the range faults, the ones before the first granule that
 /// could not be written.
-fn write_prefix(address: usize, bytes: &[u8]) -> usize {
+pub(crate) fn write_prefix(address: usize, bytes: &[u8]) -> usize {
     if uaccess::write_bytes(address, bytes).is_ok() {
         return bytes.len();
     }
@@ -153,4 +153,4 @@ pub(crate) fn getrandom_flags_accepted(flags: u32) -> bool {
 /// The most one read-like call transfers: `MAX_RW_COUNT`, `INT_MAX` rounded
 /// down to the modeled 4096-byte page.
 #[cfg(target_os = "linux")]
-const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;
+pub(crate) const MAX_RW_COUNT: usize = i32::MAX as usize & !4095;

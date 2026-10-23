@@ -9,7 +9,7 @@
 //! numbers `ns_alloc_inum` hands out at boot (both as 6.8.0-139 answers
 //! live).
 //!
-//! Like `/dev/urandom`, the entries are recognized lexically by the resolver
+//! Like the memory devices, the entries are recognized lexically by the resolver
 //! (`paths::resolve`), before procfs (`crate::procfs`) is walked; any other
 //! way to the namespace files stops the run by name. An open follows the link: read-only gives a
 //! `FdKind::Namespace` description, `O_PATH` a `FdKind::NamespacePath` one

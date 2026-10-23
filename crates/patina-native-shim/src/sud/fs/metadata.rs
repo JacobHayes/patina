@@ -379,7 +379,7 @@ pub(in crate::sud) fn sys_statx(
     // node's filesystem records one.
     const STATX_BASIC_STATS: u32 = 0x07ff;
     const STATX_BTIME: u32 = 0x0800;
-    let (extra, mount_id) = crate::volume::statx_extra(values.fs, flags_mask as u32);
+    let (extra, mount_id) = crate::volume::statx_extra(values.fs, values.ino, flags_mask as u32);
     let timestamp = |time: crate::PatinaTimestamp| StatxTimestamp {
         tv_sec: time.sec,
         tv_nsec: time.nsec as u32,

@@ -228,7 +228,7 @@ pub(in crate::sud) fn fsconfig(_: &Credential, a: &[u64; 6]) -> Answer {
             | FdKind::File
             | FdKind::Dir
             | FdKind::OPath
-            | FdKind::Urandom
+            | FdKind::MemDevice
             | FdKind::Socket
             | FdKind::Pipe
             | FdKind::EventFd

@@ -149,10 +149,23 @@ fn poll_description(
         FdKind::Stdin => (POLLIN | POLLRDNORM | POLLHUP, (0, 0)),
         // The captured streams always accept bytes.
         FdKind::Stdout | FdKind::Stderr => (POLLOUT | POLLWRNORM, (0, 0)),
+        // `/dev/random`'s `random_poll`, the one memory device poll: readable
+        // (and only that) once the pool is ready, which the model's pool is
+        // by every `/dev/random` read (`memdev::read`). A pool not yet known
+        // ready, which only the entropy fault leaves after a nonblocking
+        // `getrandom`, still polls readable here.
+        FdKind::MemDevice
+            if matches!(
+                crate::memdev::MemDevice::of_handle(handle),
+                crate::memdev::MemDevice::Random
+            ) =>
+        {
+            (POLLIN | POLLRDNORM, (0, 0))
+        }
         // `DEFAULT_POLLMASK`: files and devices are always ready (and
         // cannot be registered with epoll at all: `EPERM` at
         // `epoll_ctl`).
-        FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::Urandom => {
+        FdKind::File | FdKind::Dir | FdKind::OPath | FdKind::MemDevice => {
             (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0))
         }
         // An nsfs inode has no poll method either, nor has a procfs node

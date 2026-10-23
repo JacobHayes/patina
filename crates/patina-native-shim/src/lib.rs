@@ -149,6 +149,9 @@ mod limits;
 mod localtime;
 // Memory mappings, and the page cache behind a mapped file. See `mem/mod.rs`.
 mod mem;
+// The memory devices, `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`
+// and `/dev/urandom`. See `memdev.rs`.
+mod memdev;
 // The caller's namespace files, `/proc/self/ns/*`. See `nsfs.rs`.
 #[cfg(target_os = "linux")]
 mod nsfs;
