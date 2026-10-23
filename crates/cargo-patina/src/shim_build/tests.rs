@@ -134,7 +134,7 @@ fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() 
 fn incomplete_shim_source_bundle_is_repaired() {
     let cache = tempfile::tempdir().unwrap();
     let bundles = cache.path().join("shim-src");
-    let key = shim_bundle::EMBEDDED_SHIM_BUNDLE_SHA256;
+    let key = embedded_shim_bundle_sha256();
     let partial = bundles.join(key);
     fs::create_dir_all(&partial).unwrap();
     fs::write(partial.join("Cargo.toml"), b"interrupted old extraction").unwrap();

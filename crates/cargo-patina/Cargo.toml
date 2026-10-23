@@ -49,8 +49,7 @@ toml.workspace = true
 [build-dependencies]
 # build.rs packs the shim source bundle: `toml` normalizes each embedded
 # manifest (resolving workspace inheritance so a crates.io/git checkout is a
-# no-op path) and `sha2` content-addresses the bundle for the runtime cache.
-sha2.workspace = true
+# no-op path).
 toml.workspace = true
 
 [dev-dependencies]
