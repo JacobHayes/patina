@@ -529,14 +529,15 @@ pub(in crate::sud) fn userfaultfd(credential: &Credential, a: &[u64; 6]) -> Answ
     } else {
         0
     };
-    let handle = crate::mem::userfaultfd::created();
     let status = crate::O_READ | nonblocking;
-    match crate::install_fd(FdKind::Userfaultfd, handle, status, flags & O_CLOEXEC != 0) {
+    let created = crate::at_free_numbers(|| {
+        let handle = crate::mem::userfaultfd::created();
+        crate::install_fd(FdKind::Userfaultfd, handle, status, flags & O_CLOEXEC != 0)
+            .inspect_err(|_| crate::mem::userfaultfd::released(handle))
+    });
+    match created {
         Ok(fd) => Ok(i64::from(fd)),
-        Err(code) => {
-            crate::mem::userfaultfd::released(handle);
-            refuse(code as u32)
-        }
+        Err(code) => refuse(code as u32),
     }
 }
 

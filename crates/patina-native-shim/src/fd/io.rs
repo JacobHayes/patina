@@ -14,23 +14,74 @@ use crate::iov::GuestIovec;
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
-#[expect(clippy::disallowed_methods, reason = "the guest's own read(2)")]
 unsafe fn fs_read(fd: Fd, destination: *mut c_void, length: usize) -> isize {
+    let segment = GuestIovec {
+        base: destination,
+        len: length,
+    };
+    // SAFETY: forwarded from this function's own contract.
+    match unsafe { fs_read_segments(fd, None, &[segment]) } {
+        Ok(read) => isize::try_from(read).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
+        Err(errno) => fail(errno) as isize,
+    }
+}
+
+/// Read filesystem handle `fd` into `segments` contiguously, at the cursor
+/// (`offset` `None`, the cursor moving past the bytes) or from `offset`, as
+/// ONE step: every segment is read inside a single Context closure, which
+/// takes no scheduling point, so no other task moves a shared cursor or
+/// writes the file between them. Linux reads a vector through one
+/// description under its `f_pos_lock`, so two tasks reading one description
+/// each get contiguous bytes. Before each segment what the file's shared
+/// views stored is written back ([`mem::reading`], then [`mem::reading_in`]),
+/// so a segment reads what an earlier one copied into a view of the same
+/// file, as the kernel's page cache does. A segment read short ends the call,
+/// and so does a failed one once bytes have moved; the call answers the bytes
+/// moved.
+///
+/// # Safety
+/// Each segment must be writable for its length.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guest's own read(2), readv(2) and preadv(2)"
+)]
+pub(crate) unsafe fn fs_read_segments(
+    fd: Fd,
+    offset: Option<u64>,
+    segments: &[GuestIovec],
+) -> Result<usize, c_int> {
     mem::reading(fd.0);
-    match with_context(|context| context.fs_read(fd, length)) {
-        Ok(bytes) => {
+    with_context(|context| {
+        let mut moved = 0usize;
+        for segment in segments {
+            if moved != 0 {
+                mem::reading_in(context, fd.0)?;
+            }
+            let read = match offset {
+                Some(offset) => context.fs_read_at(fd, offset + moved as u64, segment.len),
+                None => context.fs_read(fd, segment.len),
+            };
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(RuntimeError::Effect(_)) if moved != 0 => break,
+                Err(error) => return Err(error),
+            };
             if !bytes.is_empty() {
-                // SAFETY: the caller upholds this function's buffer contract,
-                // and the filesystem returns at most `length` bytes.
+                // SAFETY: guaranteed by this function's contract, and the
+                // filesystem returns at most the segment's length.
                 unsafe {
-                    slice::from_raw_parts_mut(destination.cast::<u8>(), length)[..bytes.len()]
+                    slice::from_raw_parts_mut(segment.base.cast::<u8>(), segment.len)
+                        [..bytes.len()]
                         .copy_from_slice(&bytes);
                 }
             }
-            isize::try_from(bytes.len()).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
+            moved += bytes.len();
+            if bytes.len() < segment.len {
+                break;
+            }
         }
-        Err(errno) => fail(errno) as isize,
-    }
+        Ok(moved)
+    })
 }
 
 /// The guest's standard input: EOF, deterministically. Still a boundary call
@@ -206,17 +257,13 @@ pub(crate) unsafe fn read_resolved(
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
 unsafe fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
-    let bytes = if length == 0 {
-        &[]
-    } else {
-        // SAFETY: the caller upholds this function's buffer contract.
-        unsafe { slice::from_raw_parts(source.cast::<u8>(), length) }
+    let segment = GuestIovec {
+        base: source.cast_mut(),
+        len: length,
     };
-    match with_context(|context| context.fs_write(fd, bytes)) {
-        Ok(written) => {
-            mem::written_at_cursor(fd.0, &bytes[..written.min(bytes.len())]);
-            isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize)
-        }
+    // SAFETY: forwarded from this function's own contract.
+    match unsafe { fs_write_segments(fd, Placement::Cursor, &[segment]) } {
+        Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
         Err(errno) => fail(errno) as isize,
     }
 }
@@ -432,6 +479,10 @@ pub unsafe extern "C" fn patina_pread(
 /// Where a file write's bytes land.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Placement {
+    /// At the cursor, which moves past the bytes; at the end of the file
+    /// instead when the description is `O_APPEND`, which the filesystem
+    /// applies to each cursor write (`write`, `writev`).
+    Cursor,
     /// At this offset, the cursor staying where it is (`pwrite`, `pwritev`).
     At(u64),
     /// At the end of the file, the cursor staying where it is: a positional
@@ -459,10 +510,11 @@ pub(crate) fn positional_placement(resolved: Resolved, offset: u64, append: bool
 /// Write `segments` to filesystem handle `fd` contiguously from `placement`,
 /// as ONE step: the end of the file is found and every segment written inside
 /// a single Context closure, which takes no scheduling point, so neither
-/// another task nor a signal handler runs between them. Linux finds an
-/// appending write's position and writes the whole vector under `inode_lock`;
-/// a gateway between the size read and the write would let another task's
-/// append land there and be overwritten. The size is the kernel's `i_size`,
+/// another task nor a signal handler runs between them. Linux finds a
+/// write's position and writes the whole vector under `inode_lock`; a gateway
+/// between the size read and the write would let another task's append land
+/// there and be overwritten, and one between two segments would let its
+/// write land between them. The size is the kernel's `i_size`,
 /// not a guest `fstat`: read unrecorded and unfaulted, which the driver
 /// reproduces on replay. Each accepted segment reaches the file's page cache
 /// before the next is read, so a later segment that is a view of the file
@@ -478,14 +530,17 @@ pub(crate) unsafe fn fs_write_segments(
     segments: &[GuestIovec],
 ) -> Result<usize, c_int> {
     with_context(|context| {
+        // Where the first byte lands, when the call decides it: a plain cursor
+        // write leaves it to the filesystem.
         #[expect(
             clippy::disallowed_methods,
             reason = "an appending write on a cursor moves it to the end in the driver, as the kernel sets f_pos to i_size; a recorded seek, never faulted"
         )]
         let start = match placement {
-            Placement::At(offset) => offset,
-            Placement::End => context.fs_fd_metadata_unrecorded(fd)?.len,
-            Placement::EndAtCursor => context.fs_seek(fd, 0, SeekWhence::End)?,
+            Placement::Cursor => None,
+            Placement::At(offset) => Some(offset),
+            Placement::End => Some(context.fs_fd_metadata_unrecorded(fd)?.len),
+            Placement::EndAtCursor => Some(context.fs_seek(fd, 0, SeekWhence::End)?),
         };
         let mut moved = 0usize;
         for segment in segments {
@@ -497,17 +552,21 @@ pub(crate) unsafe fn fs_write_segments(
                 // SAFETY: guaranteed by this function's contract.
                 unsafe { slice::from_raw_parts(segment.base.cast::<u8>(), segment.len) }
             };
-            let at = start + moved as u64;
-            let written = match placement {
-                Placement::At(_) | Placement::End => context.fs_write_at(fd, at, bytes),
-                Placement::EndAtCursor => context.fs_write(fd, bytes),
+            let at = start.map(|start| start + moved as u64);
+            let written = match (placement, at) {
+                (Placement::At(_) | Placement::End, Some(at)) => context.fs_write_at(fd, at, bytes),
+                _ => context.fs_write(fd, bytes),
             };
             let written = match written {
                 Ok(written) => written,
                 Err(RuntimeError::Effect(_)) if moved != 0 => break,
                 Err(error) => return Err(error),
             };
-            mem::written_in(context, fd.0, at, &bytes[..written.min(bytes.len())]);
+            let accepted = &bytes[..written.min(bytes.len())];
+            match at {
+                Some(at) => mem::written_in(context, fd.0, at, accepted)?,
+                None => mem::written_at_cursor_in(context, fd.0, accepted)?,
+            }
             moved += written;
             if written < bytes.len() {
                 break;

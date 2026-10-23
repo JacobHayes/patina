@@ -52,7 +52,9 @@ pub(super) fn sys_pidfd_open(pid: u64, flags: u64) -> i64 {
                 0
             };
             let status = crate::O_READ | crate::O_WRITE | nonblock;
-            match crate::install_fd(FdKind::Pidfd, pid as u64, status, true) {
+            match crate::at_free_numbers(|| {
+                crate::install_fd(FdKind::Pidfd, pid as u64, status, true)
+            }) {
                 Ok(fd) => i64::from(fd),
                 Err(code) => -i64::from(code),
             }

@@ -10,7 +10,7 @@ pub(crate) fn dup(raw_fd: c_int) -> crate::abi::SysResult<c_int> {
 }
 
 pub(crate) fn dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> crate::abi::SysResult<c_int> {
-    match fd_table().lock().dup(raw_fd, minimum, cloexec != 0) {
+    match crate::at_free_numbers(|| fd_table().lock().dup(raw_fd, minimum, cloexec != 0)) {
         Ok(number) => {
             set_errno(0);
             Ok(number)

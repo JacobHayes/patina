@@ -69,9 +69,46 @@ pub fn run(p: &Probe) {
             && p.fcntl(a, F_GETFL, 0) as i32 & O_APPEND == O_APPEND,
     );
     p.check(
+        "with O_APPEND set, a write after a rewind lands at the end",
+        p.lseek(a, 0, SEEK_SET) == 0 && p.write(a, b"!") == 1 && p.lseek(a, 0, SEEK_CUR) == 6,
+    );
+    p.check(
         "F_SETFL cannot change the access mode",
         p.fcntl(a, F_SETFL, 0) == 0 && p.fcntl(a, F_GETFL, 0) as i32 & O_ACCMODE == O_RDWR,
     );
+    p.check(
+        "with O_APPEND cleared, a write after a rewind lands at the cursor",
+        p.lseek(a, 0, SEEK_SET) == 0 && p.write(a, b"H") == 1 && p.lseek(a, 0, SEEK_END) == 6,
+    );
+    p.check(
+        "back to the end of the first write",
+        p.lseek(a, 5, SEEK_SET) == 5,
+    );
+
+    // ---- O_APPEND places each write, not the cursor at open ----
+    let appending = |flags: i32| {
+        p.openat(
+            AT_FDCWD,
+            &format!("{root}/appending"),
+            flags | O_APPEND | O_CLOEXEC,
+            0o640,
+        )
+    };
+    let first = appending(O_WRONLY | O_CREAT);
+    p.require("an O_APPEND open", first >= 0);
+    p.check("write through it", p.write(first, b"abc") == 3);
+    p.check("close it", p.close(first) == 0);
+    let again = appending(O_RDWR);
+    p.require("reopen it O_APPEND", again >= 0);
+    p.check(
+        "an O_APPEND open starts at 0, not the end",
+        p.lseek(again, 0, SEEK_CUR) == 0,
+    );
+    p.check(
+        "and reads from the start",
+        p.read(again, 8) == (3, b"abc".to_vec()),
+    );
+    p.check("close it again", p.close(again) == 0);
     p.check(
         "with no owner or signal set, F_GETOWN and F_GETSIG answer 0",
         p.fcntl(a, F_GETOWN, 0) == 0 && p.fcntl(a, F_GETSIG, 0) == 0,

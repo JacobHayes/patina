@@ -123,30 +123,28 @@ fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
 
 #[cfg(patina_posix_exports)]
 pub(crate) fn create() -> SysResult<c_int> {
-    let mut state = lock_state();
-    if let Err(error) = state.ensure_active() {
-        return Err(failed(c_int::from(error.into_posix())));
-    }
-    let id = state.net.next_kq;
-    state.net.next_kq = state.net.next_kq.wrapping_add(1);
-    state.net.kqueues.insert(
-        id,
-        KqueueSlot {
-            kq: Kqueue::default(),
-        },
-    );
-    // A kqueue descriptor is close-on-exec from birth (xnu sets
-    // FD_CLOEXEC on it) and reports O_RDWR.
-    match super::super::install_fd(FdKind::Kqueue, id, O_READ | O_WRITE, true) {
-        Ok(fd) => {
-            super::super::set_errno(0);
-            Ok(fd)
-        }
-        Err(errno) => {
+    let fd = crate::at_free_numbers(|| {
+        let mut state = lock_state();
+        state
+            .ensure_active()
+            .map_err(|error| c_int::from(error.into_posix()))?;
+        let id = state.net.next_kq;
+        state.net.next_kq = state.net.next_kq.wrapping_add(1);
+        state.net.kqueues.insert(
+            id,
+            KqueueSlot {
+                kq: Kqueue::default(),
+            },
+        );
+        // A kqueue descriptor is close-on-exec from birth (xnu sets
+        // FD_CLOEXEC on it) and reports O_RDWR.
+        super::super::install_fd(FdKind::Kqueue, id, O_READ | O_WRITE, true).inspect_err(|_| {
             state.net.kqueues.remove(&id);
-            Err(failed(errno))
-        }
-    }
+        })
+    })
+    .map_err(failed)?;
+    super::super::set_errno(0);
+    Ok(fd)
 }
 
 /// Free a kqueue registry whose description's last reference went,

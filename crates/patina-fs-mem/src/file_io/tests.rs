@@ -90,6 +90,49 @@ fn append_descriptions_use_current_eof_and_write_at_stays_positional() {
 }
 
 #[test]
+fn an_append_description_starts_at_zero_and_reads_from_the_start() {
+    let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
+    let fd = fs
+        .open(
+            FsClock::EPOCH,
+            "/log",
+            OpenFlags {
+                append: true,
+                ..read_write()
+            },
+        )
+        .unwrap();
+    assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 0);
+    assert_eq!(fs.read(FsClock::EPOCH, fd, 8).unwrap(), b"head");
+    fs.write(FsClock::EPOCH, fd, b"!").unwrap();
+    assert_eq!(fs.seek(fd, 0, SeekWhence::Current).unwrap(), 5);
+}
+
+#[test]
+fn set_append_places_later_cursor_writes_through_every_handle_of_the_description() {
+    let mut fs = MemFs::new().with_file("/log", b"head").unwrap();
+    let fd = fs.open(FsClock::EPOCH, "/log", read_write()).unwrap();
+    let duplicate = fs.dup(fd).unwrap();
+
+    fs.set_append(duplicate, true).unwrap();
+    fs.write(FsClock::EPOCH, fd, b"-a").unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), b"head-a");
+
+    fs.set_append(fd, false).unwrap();
+    fs.seek(fd, 0, SeekWhence::Start).unwrap();
+    fs.write(FsClock::EPOCH, duplicate, b"H").unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), b"Head-a");
+
+    let location = fs
+        .open(FsClock::EPOCH, "/log", OpenFlags::path_only())
+        .unwrap();
+    assert_eq!(
+        fs.set_append(location, true).unwrap_err().code,
+        ErrorCode::InvalidHandle
+    );
+}
+
+#[test]
 fn positional_write_does_not_move_the_shared_cursor() {
     let mut fs = MemFs::new().with_file("/value", b"abcde").unwrap();
     let fd = fs

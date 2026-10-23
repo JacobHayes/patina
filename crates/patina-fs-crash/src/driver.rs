@@ -140,6 +140,10 @@ impl FsDriver for CrashFs {
         Ok(duplicate)
     }
 
+    fn set_append(&mut self, fd: Fd, append: bool) -> DriverResult<()> {
+        self.live.set_append(fd, append)
+    }
+
     fn metadata(&mut self, path: &str) -> DriverResult<FsMetadata> {
         self.live.metadata(path)
     }

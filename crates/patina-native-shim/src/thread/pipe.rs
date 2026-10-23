@@ -356,13 +356,16 @@ pub unsafe extern "C" fn patina_pipe(
     if read_fd_out.is_null() || write_fd_out.is_null() {
         return super::fail(EINVAL);
     }
+    // Both numbers before anything is made; a full table's refusal takes a
+    // scheduling point, so a loop retrying `pipe` lets a closing peer run.
+    // Nothing below takes one before the pair is bound.
+    if let Err(errno) = super::ensure_free_numbers(2) {
+        return super::fail(errno);
+    }
     let now = pipe_inode_time();
     let mut state = lock_state();
     if let Err(error) = state.ensure_active() {
         return super::fail(c_int::from(error.into_posix()));
-    }
-    if let Err(errno) = super::fd_table().lock().ensure_free(2) {
-        return super::fail(errno);
     }
     let inode = mint_pipe_inode(&mut state, false, now, 2);
     let channel = state.net.next_channel;
@@ -579,9 +582,13 @@ pub(crate) fn fifo_open(
     );
     // The guest number is reserved BEFORE the rendezvous, as the kernel's
     // `do_sys_openat2` takes its slot before the blocking `fifo_open` — so a
-    // second open on another thread while this one waits numbers after it.
-    let fd = match super::install_fd(FdKind::Pipe, end as u64, status, cloexec) {
-        Ok(fd) => fd,
+    // second open on another thread while this one waits numbers after it —
+    // and is bound only once the open succeeds: while it waits the number
+    // names nothing, so no other task closes, reads or `dup2`s over it.
+    // Darwin's wait is never interrupted here, so only Linux takes it again.
+    #[cfg_attr(not(target_os = "linux"), expect(unused_mut))]
+    let mut number = match super::ReservedNumber::take(cloexec) {
+        Ok(number) => Some(number),
         Err(errno) => {
             drop(state);
             let _ = pipe_close_locked(end as u64);
@@ -596,11 +603,12 @@ pub(crate) fn fifo_open(
     #[cfg(target_os = "linux")]
     crate::fsnotify::fifo_bound(end as u64, ino, path);
     // An open that fails lets its name go without a close event, then
-    // closes through the ordinary path.
-    let abandon = || {
+    // releases its end through the ordinary pipe close, and its number.
+    let abandon = |number: Option<super::ReservedNumber>| {
         #[cfg(target_os = "linux")]
         crate::fsnotify::fifo_abandoned(end as u64);
-        super::patina_close(fd);
+        let _ = pipe_close_locked(end as u64);
+        drop(number);
     };
     // The channel is the node's one reference: taken when it comes into
     // existence, dropped when it is reclaimed. Outside the state lock, like
@@ -608,7 +616,7 @@ pub(crate) fn fifo_open(
     if opened_channel
         && let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino))
     {
-        abandon();
+        abandon(number);
         wake_all(woken);
         return super::fail(errno);
     }
@@ -649,21 +657,42 @@ pub(crate) fn fifo_open(
                     drop(state);
                     // The descriptor never came into existence, so release
                     // the number and the end this open registered — through
-                    // the ordinary close path, so the partner's EOF/`EPIPE`
+                    // the ordinary pipe close, so the partner's EOF/`EPIPE`
                     // bookkeeping and the channel reclamation are the usual
                     // ones.
-                    abandon();
+                    abandon(number);
                     return super::fail(errno);
                 }
             }
             lock_state().timed_out.remove(&me);
+            // A handler that interrupts the wait runs after the open let its
+            // number go (`put_unused_fd` on the `-ERESTARTSYS` exit). A
+            // restarted open waits on, taking the lowest free number again;
+            // an interrupted one releases its end once the handler ran.
             #[cfg(target_os = "linux")]
-            if signals::resume() == signals::Resumed::Eintr {
-                abandon();
-                return super::fail(super::EINTR);
+            match signals::resume_with(|resumed| {
+                if resumed != signals::Resumed::Normal {
+                    drop(number.take());
+                }
+            }) {
+                signals::Resumed::Normal => {}
+                signals::Resumed::Restart => match super::ReservedNumber::take(cloexec) {
+                    Ok(taken) => number = Some(taken),
+                    Err(errno) => {
+                        abandon(None);
+                        return super::fail(errno);
+                    }
+                },
+                signals::Resumed::Eintr => {
+                    abandon(None);
+                    return super::fail(super::EINTR);
+                }
             }
         }
     }
+    let fd = number
+        .expect("a wait that let the number go took it again or ended the open")
+        .install(FdKind::Pipe, end as u64, status);
     #[cfg(target_os = "linux")]
     crate::fsnotify::fifo_opened(end as u64);
     super::set_errno(0);

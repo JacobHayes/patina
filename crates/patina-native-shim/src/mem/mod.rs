@@ -504,8 +504,8 @@ pub(crate) use hooks::written;
 #[cfg(target_os = "linux")]
 pub(crate) use hooks::{allocated, syncing_all};
 pub(crate) use hooks::{
-    crashed, inspecting, inspecting_ino, reading, resized_ino, syncing, written_at_cursor,
-    written_in,
+    crashed, inspecting, inspecting_ino, reading, reading_in, resized_ino, syncing,
+    written_at_cursor_in, written_in,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use locks::huge_page_size;
@@ -525,7 +525,8 @@ pub(crate) use views::view_dirty_pages;
 #[cfg(all(test, target_os = "linux"))]
 use views::writer_among;
 use views::{
-    alias, cache_for, cached_ino, forget, settle, write_back, write_back_counted, writer_of,
+    alias, cache_for, cached_ino, forget, settle, write_back, write_back_counted,
+    write_back_through, writer_of,
 };
 #[cfg(target_os = "linux")]
 use views::{finish, take_all};

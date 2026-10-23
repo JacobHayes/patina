@@ -325,6 +325,8 @@ pub(crate) struct Resolved {
 
 /// Errors are POSIX errno values, as every shim entry reports them.
 const EBADF: c_int = 9;
+#[cfg(any(target_os = "linux", patina_posix_exports, test))]
+const EBUSY: c_int = 16;
 const EINVAL: c_int = 22;
 const EMFILE: c_int = 24;
 
@@ -335,6 +337,10 @@ pub(crate) const CLOSE_RANGE_UNSHARE: u32 = 1 << 1;
 
 pub(crate) struct GuestFdTable {
     slots: Vec<Option<Slot>>,
+    /// Numbers taken for a call that has not made its object yet
+    /// ([`GuestFdTable::reserve`]): neither free nor naming anything, each
+    /// with the `FD_CLOEXEC` bit the descriptor bound there starts with.
+    reserved: BTreeMap<usize, bool>,
     descriptions: BTreeMap<DescId, Description>,
     next_desc: DescId,
     limit: usize,
@@ -346,6 +352,7 @@ impl GuestFdTable {
     pub(crate) fn new(limit: usize, stdin: Status, stdout: Status, stderr: Status) -> Self {
         let mut table = Self {
             slots: Vec::new(),
+            reserved: BTreeMap::new(),
             descriptions: BTreeMap::new(),
             next_desc: 0,
             limit,
@@ -377,11 +384,14 @@ impl GuestFdTable {
         usize::try_from(fd).ok()
     }
 
-    /// The lowest free number at or above `minimum`, or `EMFILE`.
+    /// The lowest free number at or above `minimum`, or `EMFILE`. A reserved
+    /// number is not free.
     fn lowest_free(&self, minimum: usize) -> Result<usize, c_int> {
         let mut index = minimum;
         while index < self.limit {
-            if self.slots.get(index).is_none_or(Option::is_none) {
+            if self.slots.get(index).is_none_or(Option::is_none)
+                && !self.reserved.contains_key(&index)
+            {
                 return Ok(index);
             }
             index += 1;
@@ -460,14 +470,51 @@ impl GuestFdTable {
         Ok((a as c_int, b as c_int))
     }
 
-    /// `EMFILE` unless `count` numbers are free: what `accept`/`socketpair`
-    /// reserve before they create anything.
+    /// `EMFILE` unless `count` numbers are free: what a call that binds its
+    /// numbers in the same step as it creates its object checks first.
     pub(crate) fn ensure_free(&self, count: usize) -> Result<(), c_int> {
         let mut index = 0;
         for _ in 0..count {
             index = self.lowest_free(index)? + 1;
         }
         Ok(())
+    }
+
+    /// Take the lowest free number for a call that makes its object later,
+    /// after a wait (`get_unused_fd_flags` before a blocking `accept` or FIFO
+    /// open): until [`GuestFdTable::install_reserved`] or
+    /// [`GuestFdTable::unreserve`] it names nothing (`EBADF`), allocates to no
+    /// one else, and `dup2` onto it is `EBUSY`. `EMFILE` when none is free.
+    /// The number's `FD_CLOEXEC` bit is set now (`alloc_fd`), from `cloexec`,
+    /// and `close_range(CLOSE_RANGE_CLOEXEC)` over it sets it while it waits.
+    pub(crate) fn reserve(&mut self, cloexec: bool) -> Result<c_int, c_int> {
+        let index = self.lowest_free(0)?;
+        self.reserved.insert(index, cloexec);
+        Ok(index as c_int)
+    }
+
+    /// Bind a fresh description to the number [`GuestFdTable::reserve`] took,
+    /// with the `FD_CLOEXEC` bit it holds.
+    pub(crate) fn install_reserved(
+        &mut self,
+        number: c_int,
+        kind: FdKind,
+        handle: u64,
+        status: Status,
+    ) {
+        let index = number as usize;
+        let cloexec = self
+            .reserved
+            .remove(&index)
+            .unwrap_or_else(|| panic!("number {number} was reserved"));
+        let desc = self.new_description(kind, handle, status);
+        self.bind(index, desc, cloexec);
+    }
+
+    /// Free a number [`GuestFdTable::reserve`] took for a call that made
+    /// nothing (`put_unused_fd`).
+    pub(crate) fn unreserve(&mut self, number: c_int) {
+        self.reserved.remove(&(number as usize));
     }
 
     /// The two numbers [`GuestFdTable::install_pair`] would bind next.
@@ -530,8 +577,9 @@ impl GuestFdTable {
     /// `dup3(2)` (and `dup2` after its equal-number special case): bind `newfd`
     /// to `oldfd`'s description, closing whatever `newfd` named first. The
     /// kernel checks `oldfd` (`EBADF`), then the target range (`EBADF`), then
-    /// closes the old target. A closed target's last reference is returned for
-    /// the caller to free once the table lock is dropped.
+    /// closes the old target; a target reserved for a call still making its
+    /// object is `EBUSY` (`do_dup2`). A closed target's last reference is
+    /// returned for the caller to free once the table lock is dropped.
     #[cfg(any(target_os = "linux", patina_posix_exports, test))]
     pub(crate) fn dup3(
         &mut self,
@@ -546,6 +594,9 @@ impl GuestFdTable {
         let index = Self::slot_index(newfd).ok_or(EBADF)?;
         if index >= self.limit {
             return Err(EBADF);
+        }
+        if self.reserved.contains_key(&index) {
+            return Err(EBUSY);
         }
         let released = self.close(newfd).unwrap_or(None);
         self.bind(index, resolved.desc, cloexec);
@@ -590,9 +641,11 @@ impl GuestFdTable {
     /// `close_range(2)`: close (or, with `CLOSE_RANGE_CLOEXEC`, mark
     /// close-on-exec) every open number in `[first, last]`. `first > last` or an
     /// unknown flag is `EINVAL`; the range is clamped to the table, so a `last`
-    /// of `u32::MAX` is the idiom it is on Linux. Returns every number closed,
-    /// lowest first, each with its description's release when that was its last
-    /// reference.
+    /// of `u32::MAX` is the idiom it is on Linux. A number reserved for a call
+    /// still making its object is not closed (it names nothing yet), and is
+    /// marked: the kernel sets the range's bits whether their slots are filled.
+    /// Returns every number closed, lowest first, each with its description's
+    /// release when that was its last reference.
     pub(crate) fn close_range(
         &mut self,
         first: u32,
@@ -603,6 +656,11 @@ impl GuestFdTable {
             return Err(EINVAL);
         }
         let first = first as usize;
+        if flags & CLOSE_RANGE_CLOEXEC != 0 {
+            for (_, cloexec) in self.reserved.range_mut(first..=last as usize) {
+                *cloexec = true;
+            }
+        }
         let last = (last as usize).min(self.slots.len().saturating_sub(1));
         let mut closed = Vec::new();
         let mut index = first;
@@ -818,6 +876,53 @@ mod tests {
             Ok((3, 4))
         );
         assert!(table.cloexec(3).unwrap() && table.cloexec(4).unwrap());
+    }
+
+    #[test]
+    fn a_reserved_number_is_neither_free_nor_open_until_installed() {
+        let mut table = table();
+        let reserved = table.reserve(false).unwrap();
+        assert_eq!(reserved, 3);
+        assert_eq!(table.resolve(reserved), None);
+        assert_eq!(table.close(reserved), Err(EBADF));
+        let file = table.install(FdKind::File, 10, O_READ, false).unwrap();
+        assert_eq!(file, 4, "a reserved number allocates to no one else");
+        assert_eq!(table.dup3(file, reserved, false), Err(EBUSY));
+        table.install_reserved(reserved, FdKind::Socket, 20, O_READ);
+        assert_eq!(table.kind(reserved), Some(FdKind::Socket));
+
+        let abandoned = table.reserve(false).unwrap();
+        table.unreserve(abandoned);
+        assert_eq!(
+            table.install(FdKind::File, 11, O_READ, false),
+            Ok(abandoned)
+        );
+    }
+
+    #[test]
+    fn close_range_leaves_a_reserved_number_held_and_marks_it_close_on_exec() {
+        let mut table = table();
+        let reserved = table.reserve(false).unwrap();
+        assert_eq!(
+            table.close_range(0, u32::MAX, 0).map(|closed| closed.len()),
+            Ok(3)
+        );
+        assert_eq!(table.install(FdKind::File, 10, O_READ, false), Ok(0));
+        table
+            .close_range(reserved as u32, u32::MAX, CLOSE_RANGE_CLOEXEC)
+            .unwrap();
+        table.install_reserved(reserved, FdKind::Pipe, 20, O_READ);
+        assert_eq!(table.cloexec(reserved), Ok(true));
+    }
+
+    #[test]
+    fn a_reservation_counts_against_the_limit() {
+        let mut table = GuestFdTable::new(4, O_READ, O_WRITE, O_WRITE);
+        let reserved = table.reserve(false).unwrap();
+        assert_eq!(table.reserve(false), Err(EMFILE));
+        assert_eq!(table.ensure_free(1), Err(EMFILE));
+        table.unreserve(reserved);
+        assert_eq!(table.ensure_free(1), Ok(()));
     }
 
     #[test]

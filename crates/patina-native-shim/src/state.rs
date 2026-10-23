@@ -72,6 +72,64 @@ pub(crate) fn with_free_number<T>(
     })?
 }
 
+/// `EMFILE` unless `count` guest numbers are free, through
+/// [`at_free_numbers`].
+pub(crate) fn ensure_free_numbers(count: usize) -> Result<(), c_int> {
+    at_free_numbers(|| fd_table().lock().ensure_free(count))
+}
+
+/// Run `call`, a call that binds new guest numbers and, refused `EMFILE`,
+/// has made nothing. A refusal is still a boundary call: it takes its
+/// scheduling point and answers `call` run again after it, so a loop
+/// retrying the call lets the peer that frees a number run. A call that is
+/// not refused takes no extra point, and `call`'s own checks keep their
+/// order against `EMFILE`.
+pub(crate) fn at_free_numbers<T>(mut call: impl FnMut() -> Result<T, c_int>) -> Result<T, c_int> {
+    const EMFILE: c_int = 24;
+    match call() {
+        Err(EMFILE) => {}
+        answer => return answer,
+    }
+    mark_boundary();
+    ensure_runtime()?;
+    thread::sched_point()?;
+    call()
+}
+
+/// A guest number taken for a call that makes its object only after a wait
+/// (a blocking `accept`, a FIFO open's rendezvous), as the kernel takes it
+/// with `get_unused_fd_flags` before the wait: while the call waits, the
+/// number names nothing, no other task's call is handed it, and `dup2` onto
+/// it is `EBUSY`. Dropped without [`ReservedNumber::install`], the number is
+/// free again (`put_unused_fd`).
+pub(crate) struct ReservedNumber(c_int);
+
+impl ReservedNumber {
+    /// The lowest free number, close-on-exec from now when `cloexec`, or
+    /// `EMFILE`.
+    pub(crate) fn take(cloexec: bool) -> Result<Self, c_int> {
+        fd_table().lock().reserve(cloexec).map(Self)
+    }
+
+    /// Bind a fresh description to the number, answering it. The descriptor's
+    /// `FD_CLOEXEC` is the number's: what the call asked, or what a
+    /// `close_range` marked while it waited.
+    pub(crate) fn install(self, kind: FdKind, handle: u64, status: u32) -> c_int {
+        let number = self.0;
+        std::mem::forget(self);
+        fd_table()
+            .lock()
+            .install_reserved(number, kind, handle, status);
+        number
+    }
+}
+
+impl Drop for ReservedNumber {
+    fn drop(&mut self) {
+        fd_table().lock().unreserve(self.0);
+    }
+}
+
 /// Bind a fresh description to the lowest free guest number, or `EMFILE`.
 pub(crate) fn install_fd(
     kind: FdKind,

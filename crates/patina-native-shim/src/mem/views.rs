@@ -238,6 +238,23 @@ pub(super) fn write_back(ino: u64, handle: u64) -> Result<(), c_int> {
 /// [`write_back`], also answering whether it wrote to the file at all: a
 /// write-back that fails partway may have written its first pages.
 pub(super) fn write_back_counted(ino: u64, handle: u64) -> (bool, Result<(), c_int>) {
+    write_back_through(
+        ino,
+        |offset, bytes| {
+            crate::with_context_raw(|context| context.fs_write_back_at(Fd(handle), offset, bytes))
+        },
+        || crate::EIO,
+    )
+}
+
+/// The write-back [`write_back_counted`] makes, each page through `write`
+/// (the recorded write-back, through one description open for writing); a
+/// page written short is the error `short` makes.
+pub(super) fn write_back_through<E>(
+    ino: u64,
+    mut write: impl FnMut(u64, &[u8]) -> Result<usize, E>,
+    short: impl Fn() -> E,
+) -> (bool, Result<(), E>) {
     let pages = match MAPPINGS.lock().caches.get(&ino) {
         Some(cache) => cache.dirty_pages(),
         None => return (false, Ok(())),
@@ -245,14 +262,12 @@ pub(super) fn write_back_counted(ino: u64, handle: u64) -> (bool, Result<(), c_i
     let tried = !pages.is_empty();
     let written_all = || {
         for (offset, bytes) in pages {
-            let written = crate::with_context_raw(|context| {
-                context.fs_write_back_at(Fd(handle), offset, &bytes)
-            })?;
+            let written = write(offset, &bytes)?;
             if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
                 cache.accept(offset, &bytes[..written.min(bytes.len())]);
             }
             if written < bytes.len() {
-                return Err(crate::EIO);
+                return Err(short());
             }
         }
         Ok(())

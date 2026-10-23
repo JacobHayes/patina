@@ -1097,6 +1097,81 @@ fn main() {
         );
     }
 
+    // The unexportable image, with the crash point reached by the write-back a
+    // vectored read makes between its segments: the first segment copies into
+    // a shared view of the file the second reads.
+    #[cfg(target_os = "linux")]
+    const UNEXPORTABLE_READV_CRASH_SOURCE: &str = r#"
+use std::ffi::c_void;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
+
+#[repr(C)]
+struct Iov {
+    base: *mut c_void,
+    len: usize,
+}
+
+unsafe extern "C" {
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut c_void;
+    fn readv(fd: i32, iov: *const Iov, count: i32) -> isize;
+}
+
+fn main() {
+    let mut big = OpenOptions::new().create(true).read(true).write(true).open("/big").unwrap();
+    big.write_all(&vec![7_u8; (64 << 20) + 4096]).unwrap();
+    big.sync_all().unwrap();
+    let mut file = OpenOptions::new().create(true).read(true).write(true).open("/small").unwrap();
+    file.write_all(b"ABCD").unwrap();
+    let view = unsafe { mmap(std::ptr::null_mut(), 4096, 3, 1, file.as_raw_fd(), 0) };
+    assert_ne!(view as isize, -1);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    let mut tail = [0_u8; 1];
+    let segments = [
+        Iov { base: unsafe { view.cast::<u8>().add(2) }.cast(), len: 1 },
+        Iov { base: tail.as_mut_ptr().cast(), len: 1 },
+    ];
+    let read = unsafe { readv(file.as_raw_fd(), segments.as_ptr(), 2) };
+    println!("READV_RETURNED {read}");
+}
+"#;
+
+    /// The failed crash fails closed from inside a vectored read too: the
+    /// guest's `readv` never returns.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_fs_crash_that_cannot_be_exported_ends_a_vectored_read() {
+        let directory = tempdir().unwrap();
+        let bin = build_native_guest(
+            directory.path(),
+            "unexportable-readv",
+            UNEXPORTABLE_READV_CRASH_SOURCE,
+        );
+        let envelope = run_envelope(&[
+            "run",
+            bin.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--fs-crash-at",
+            "write:3",
+            "--format",
+            "json",
+        ]);
+        let stdout = envelope["stdout"].as_str().unwrap();
+        assert!(!stdout.contains("READV_RETURNED"), "{envelope:#}");
+        assert_eq!(
+            envelope["refusal"]["class"], "fs_crash_failed",
+            "{envelope:#}"
+        );
+        let refusal = envelope["refusal"]["message"].as_str().unwrap();
+        assert!(refusal.contains("write:3"), "{refusal}");
+        assert_eq!(
+            envelope["crash_restart"]["terminal_outcome"]["kind"], "crash_failed",
+            "{envelope:#}"
+        );
+    }
+
     /// A crash that cannot be exported still leaves the record run's trace,
     /// and replaying it reaches the same refusal.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

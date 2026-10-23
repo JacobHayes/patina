@@ -255,19 +255,11 @@ pub(crate) unsafe fn open_at(
         Err(errno) => return fail(errno),
     };
     // The number comes before the path walk, so a full table is `EMFILE`
-    // whatever the walk would answer. A refused open is still a boundary call:
-    // it takes its scheduling point and answers the check made after it, so a
-    // loop retrying the open lets the peer that frees a number run. An open
-    // with a number free takes its point in the driver step, which checks
-    // again.
-    if fd_table().lock().ensure_free(1).is_err() {
-        mark_boundary();
-        if let Err(errno) = ensure_runtime().and_then(|()| thread::sched_point()) {
-            return fail(errno);
-        }
-        if let Err(errno) = fd_table().lock().ensure_free(1) {
-            return fail(errno);
-        }
+    // whatever the walk would answer ([`ensure_free_numbers`], whose refusal
+    // takes a scheduling point). An open with a number free takes its point in
+    // the driver step, which checks again.
+    if let Err(errno) = ensure_free_numbers(1) {
+        return fail(errno);
     }
     let nofollow = flags & O_NOFOLLOW != 0;
     let nonblocking = flags & O_NONBLOCK != 0;

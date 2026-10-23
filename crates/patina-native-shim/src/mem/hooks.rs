@@ -4,6 +4,8 @@
 
 use super::*;
 
+use patina_dst_runtime::{Context, RuntimeError};
+
 // ---------------------------------------------------------------- the funnels' hooks
 
 /// Before a read of `handle`'s file: what the views stored is what the read
@@ -62,6 +64,7 @@ pub(crate) fn syncing_all() -> Result<(), c_int> {
 }
 
 /// After the filesystem accepted `bytes` for `handle`'s file at `offset`.
+#[cfg(target_os = "linux")]
 pub(crate) fn written(handle: u64, offset: u64, bytes: &[u8]) {
     let Some(ino) = cached_ino(handle) else {
         return;
@@ -77,42 +80,105 @@ pub(crate) fn written(handle: u64, offset: u64, bytes: &[u8]) {
 /// kernel write through the page cache does. The handle's inode is asked of
 /// `context` itself (a second gateway would need the lock the caller holds),
 /// and the page cache is reached whatever the held Context lock says about
-/// shim-critical sections: this is a guest write, not shim memory.
+/// shim-critical sections: this is a guest write, not shim memory. Every
+/// in-closure hook answers a runtime error that is no filesystem refusal (a
+/// crash, one that could not be carried out, a stop) for the closure to end
+/// with, as the gateway it stands in for would have ended the call.
 pub(crate) fn written_in(
-    context: &mut patina_dst_runtime::Context,
+    context: &mut Context,
     handle: u64,
     offset: u64,
     bytes: &[u8],
-) {
-    if !CACHES.load(Ordering::Acquire) || bytes.is_empty() {
-        return;
+) -> Result<(), RuntimeError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if let Some(ino) = cached_ino_in(context, handle)?
+        && let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino)
+    {
+        cache.store(offset, bytes);
+    }
+    Ok(())
+}
+
+/// [`written_in`] for a cursor write of `bytes` to `handle`'s file: they end
+/// at the cursor, wherever the description's `O_APPEND` put them.
+pub(crate) fn written_at_cursor_in(
+    context: &mut Context,
+    handle: u64,
+    bytes: &[u8],
+) -> Result<(), RuntimeError> {
+    if bytes.is_empty() || cached_ino_in(context, handle)?.is_none() {
+        return Ok(());
+    }
+    let Some(cursor) = refused_is_none(context.fs_cursor_unrecorded(Fd(handle)))? else {
+        return Ok(());
+    };
+    written_in(
+        context,
+        handle,
+        cursor.saturating_sub(bytes.len() as u64),
+        bytes,
+    )
+}
+
+/// [`reading`] from inside the Context closure that reads, before a vectored
+/// read's later segment: an earlier segment may have copied into a view of
+/// the same file. A write-back the filesystem refuses or takes short stays
+/// dirty and fails nothing.
+pub(crate) fn reading_in(context: &mut Context, handle: u64) -> Result<(), RuntimeError> {
+    let Some(ino) = cached_ino_in(context, handle)? else {
+        return Ok(());
+    };
+    let Some(writer) = writer_of(ino) else {
+        return Ok(());
+    };
+    let written = write_back_through(
+        ino,
+        |offset, bytes| {
+            context
+                .fs_write_back_at(Fd(writer), offset, bytes)
+                .map_err(Some)
+        },
+        || None,
+    )
+    .1;
+    match written {
+        Ok(()) | Err(None) => Ok(()),
+        Err(Some(error)) => refused_is_none::<()>(Err(error)).map(drop),
+    }
+}
+
+/// A filesystem refusal (`Effect`) as `None`; any other runtime error is the
+/// closure's to end with.
+fn refused_is_none<T>(result: Result<T, RuntimeError>) -> Result<Option<T>, RuntimeError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(RuntimeError::Effect(_)) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// [`cached_ino`] from inside a Context closure: the handle's inode is asked
+/// of `context` itself, whatever the held Context lock says about
+/// shim-critical sections.
+fn cached_ino_in(context: &mut Context, handle: u64) -> Result<Option<u64>, RuntimeError> {
+    if !CACHES.load(Ordering::Acquire) {
+        return Ok(None);
     }
     let known = MAPPINGS.lock().handles.get(&handle).copied();
     let ino = match known {
         Some(ino) => ino,
-        None => match context.fs_fd_metadata_unrecorded(Fd(handle)) {
-            Ok(metadata) => {
-                MAPPINGS.lock().handles.insert(handle, metadata.ino);
-                metadata.ino
-            }
-            Err(_) => return,
-        },
+        None => {
+            let Some(metadata) = refused_is_none(context.fs_fd_metadata_unrecorded(Fd(handle)))?
+            else {
+                return Ok(None);
+            };
+            MAPPINGS.lock().handles.insert(handle, metadata.ino);
+            metadata.ino
+        }
     };
-    if let Some(cache) = MAPPINGS.lock().caches.get_mut(&ino) {
-        cache.store(offset, bytes);
-    }
-}
-
-/// After a cursor write of `bytes` to `handle`'s file: they end at the
-/// cursor.
-pub(crate) fn written_at_cursor(handle: u64, bytes: &[u8]) {
-    if cached_ino(handle).is_none() || bytes.is_empty() {
-        return;
-    }
-    if let Ok(cursor) = crate::with_context_raw(|context| context.fs_cursor_unrecorded(Fd(handle)))
-    {
-        written(handle, cursor.saturating_sub(bytes.len() as u64), bytes);
-    }
+    Ok(MAPPINGS.lock().caches.contains_key(&ino).then_some(ino))
 }
 
 /// After `handle`'s file became `len` bytes long.

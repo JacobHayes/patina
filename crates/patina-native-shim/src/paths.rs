@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use patina_dst_abi::{Fd, FsEntryKind, FsMetadata, OpenFlags};
+use patina_dst_abi::{Fd, FsEntryKind, FsMetadata};
 use patina_dst_runtime::{Context, RuntimeError};
 
 use crate::fdtable::FdKind;
@@ -214,9 +214,10 @@ pub(crate) fn set_umask(mask: u32) -> u32 {
 /// The working directory's driver handle. `None` until first use (the default
 /// `/`, opened lazily so a run that never touches a relative path or `getcwd`
 /// holds no handle for it) or until install opened a configured directory.
-/// Both opens are the shim's own (`fs_open_path_unrecorded`): no guest called
-/// open, so neither draws a fault, takes latency, counts toward an `open`
-/// crash ordinal or moves the clock.
+/// Every open of it, and the close of the one a `chdir` replaces, is the
+/// shim's own (`fs_open_path_unrecorded`, `fs_close_unrecorded`): no guest
+/// called open or close, so none draws a fault, takes latency, counts toward
+/// an `open` or `close` crash ordinal or moves the clock.
 static CWD: SpinMutex<Option<Fd>> = SpinMutex::new(None);
 
 fn cwd_handle() -> Result<Fd, c_int> {
@@ -260,7 +261,7 @@ fn namei<T>(lookup: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Res
 fn replace_cwd(new: Fd) -> Result<(), c_int> {
     let previous = CWD.lock().replace(new);
     if let Some(previous) = previous {
-        with_context(|context| context.fs_close(previous))?;
+        with_context(|context| context.fs_close_unrecorded(previous))?;
         #[cfg(target_os = "linux")]
         crate::fsnotify::unbound(previous);
     }
@@ -296,7 +297,7 @@ pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved,
 /// working directory.
 pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
     let resolved = searchable_directory(dirfd, path)?;
-    let fd = with_context(|context| context.fs_open(&resolved.path, OpenFlags::path_only()))?;
+    let fd = with_context(|context| context.fs_open_path_unrecorded(&resolved.path))?;
     #[cfg(target_os = "linux")]
     crate::fsnotify::bound(fd, &resolved.path);
     replace_cwd(fd)

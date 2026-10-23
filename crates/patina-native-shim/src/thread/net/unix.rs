@@ -463,7 +463,11 @@ pub(super) fn peer_creds(state: &ThreadRuntime, handle: c_int) -> Creds {
 }
 
 /// `accept4(2)` (`unix_accept`): the next embryo, and its peer's name.
-pub(super) fn accept(handle: c_int, nonblocking: bool) -> Result<(c_int, Vec<u8>), c_int> {
+pub(super) fn accept(
+    handle: c_int,
+    nonblocking: bool,
+    interrupted: &mut dyn FnMut(),
+) -> Result<(c_int, Vec<u8>), c_int> {
     let deadline = {
         let state = lock_state();
         let socket = sock(&state, handle)?;
@@ -492,7 +496,14 @@ pub(super) fn accept(handle: c_int, nonblocking: bool) -> Result<(c_int, Vec<u8>
         if nonblocking || expired(deadline)? {
             return Err(EWOULDBLOCK);
         }
-        park(state, handle, Dir::Recv, deadline, "unix-accept")?;
+        super::park_releasing(
+            state,
+            handle,
+            Dir::Recv,
+            deadline,
+            "unix-accept",
+            interrupted,
+        )?;
     }
 }
 

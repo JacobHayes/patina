@@ -39,40 +39,40 @@ pub(crate) fn create(initval: u32, flags: c_int) -> SysResult<c_int> {
     if flags & !(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK) != 0 {
         return Err(failed(EINVAL));
     }
-    let mut state = lock_state();
-    if let Err(error) = state.ensure_active() {
-        return Err(failed(c_int::from(error.into_posix())));
-    }
-    let handle = next_handle(&mut state);
-    state.net.eventfds.insert(
-        handle,
-        EventFd {
-            value: u64::from(initval),
-            semaphore: flags & EFD_SEMAPHORE != 0,
-            write_events: 0,
-            read_waiters: WaitQueue::new(),
-        },
-    );
     let nonblock = if flags & EFD_NONBLOCK != 0 {
         O_NONBLOCK
     } else {
         0
     };
-    match super::install_fd(
-        FdKind::EventFd,
-        handle as u64,
-        O_READ | O_WRITE | nonblock,
-        flags & EFD_CLOEXEC != 0,
-    ) {
-        Ok(fd) => {
-            super::set_errno(0);
-            Ok(fd)
-        }
-        Err(errno) => {
+    // `do_eventfd` makes the counter, then takes the number.
+    let fd = crate::at_free_numbers(|| {
+        let mut state = lock_state();
+        state
+            .ensure_active()
+            .map_err(|error| c_int::from(error.into_posix()))?;
+        let handle = next_handle(&mut state);
+        state.net.eventfds.insert(
+            handle,
+            EventFd {
+                value: u64::from(initval),
+                semaphore: flags & EFD_SEMAPHORE != 0,
+                write_events: 0,
+                read_waiters: WaitQueue::new(),
+            },
+        );
+        super::install_fd(
+            FdKind::EventFd,
+            handle as u64,
+            O_READ | O_WRITE | nonblock,
+            flags & EFD_CLOEXEC != 0,
+        )
+        .inspect_err(|_| {
             state.net.eventfds.remove(&handle);
-            Err(failed(errno))
-        }
-    }
+        })
+    })
+    .map_err(failed)?;
+    super::set_errno(0);
+    Ok(fd)
 }
 
 /// Read a virtual eventfd: 8 bytes, returns-and-resets the counter (or

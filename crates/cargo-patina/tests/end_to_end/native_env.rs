@@ -398,6 +398,88 @@ fn main() {
         );
     }
 
+    // `chdir` holds the new working directory through the shim's own handle and
+    // lets the old one go the same way: neither is a guest open or close, so
+    // `open:1` and `close:1` are the guest's own first open and close, which
+    // each incarnation reaches and only the restarted one gets past.
+    const CHDIR_ADMIN_SOURCE: &str = r#"
+fn main() {
+    std::env::set_current_dir("/tmp").unwrap();
+    std::env::set_current_dir("/").unwrap();
+    println!("CHDIR_ADMIN before-open");
+    let created = std::fs::File::create("created").unwrap();
+    println!("CHDIR_ADMIN after-open");
+    println!("CHDIR_ADMIN before-close");
+    drop(created);
+    println!("CHDIR_ADMIN after-close");
+}
+"#;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_chdir_handles_count_toward_no_crash_ordinal() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("chdir_admin.rs");
+        fs::write(&source, CHDIR_ADMIN_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let bin = directory.path().join("chdir-admin");
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let bin = bin.to_str().unwrap();
+        let count = |output: &Output, line: &str| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|printed| *printed == format!("CHDIR_ADMIN {line}"))
+                .count()
+        };
+        for (point, before, after) in [
+            ("open:1", "before-open", "after-open"),
+            ("close:1", "before-close", "after-close"),
+        ] {
+            let output = invoke(
+                workspace,
+                &["run", bin, "--seed", "4", "--fs-crash-at", point],
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                count(&output, before),
+                2,
+                "{point}: both incarnations must reach the guest's own call:\n{stdout}"
+            );
+            assert_eq!(
+                count(&output, after),
+                1,
+                "{point}: the crash must fire at the guest's own call:\n{stdout}"
+            );
+        }
+
+        let trace = directory.path().join("chdir-admin.patina");
+        let recorded = invoke(
+            workspace,
+            &[
+                "run",
+                bin,
+                "--seed",
+                "4",
+                "--record",
+                trace.to_str().unwrap(),
+            ],
+        );
+        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+        assert_eq!(
+            String::from_utf8_lossy(&recorded.stdout),
+            String::from_utf8_lossy(&replayed.stdout),
+            "record and replay diverged"
+        );
+    }
+
     // Guest-driven environment mutation is a deterministic in-process operation, so
     // `setenv`/`unsetenv` succeed and every reader agrees: the `getenv` interposer,
     // the `environ` array std::env::vars walks, and the seeded `--env` map share one

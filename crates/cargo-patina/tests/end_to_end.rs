@@ -55,6 +55,8 @@ mod native_build;
 mod native_env;
 #[path = "end_to_end/native_faults.rs"]
 mod native_faults;
+#[path = "end_to_end/native_fds.rs"]
+mod native_fds;
 #[path = "end_to_end/native_fs.rs"]
 mod native_fs;
 #[path = "end_to_end/native_gate.rs"]

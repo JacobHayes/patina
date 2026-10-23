@@ -77,6 +77,15 @@ pub trait FsDriver: Send {
     fn dup(&mut self, _fd: Fd) -> DriverResult<Fd> {
         Err(unsupported_filesystem_operation("dup"))
     }
+    /// `F_SETFL`'s `O_APPEND`: whether a cursor [`FsDriver::write`] through
+    /// `fd` lands at the end of the file. The flag belongs to the open file
+    /// description, as the kernel's `f_flags` does, so every handle
+    /// [`FsDriver::dup`] made of it sees the change. Never faulted: the
+    /// description changes in memory, and no storage access happens that could
+    /// fail.
+    fn set_append(&mut self, _fd: Fd, _append: bool) -> DriverResult<()> {
+        Err(unsupported_filesystem_operation("set append"))
+    }
     fn metadata(&mut self, _path: &str) -> DriverResult<FsMetadata> {
         Err(unsupported_filesystem_operation("metadata"))
     }

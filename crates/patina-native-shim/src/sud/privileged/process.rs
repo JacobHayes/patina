@@ -266,12 +266,12 @@ pub(super) fn getfd_from(
     }
     match target() {
         Err(code) => refuse(code),
-        Ok(process) if process == Process::current() => {
-            Ok(match crate::fd_table().lock().dup(a[1] as c_int, 0, true) {
+        Ok(process) if process == Process::current() => Ok(
+            match crate::at_free_numbers(|| crate::fd_table().lock().dup(a[1] as c_int, 0, true)) {
                 Ok(fd) => i64::from(fd),
                 Err(code) => -i64::from(code),
-            })
-        }
+            },
+        ),
         Ok(process) => other_process(credential, process, errno::EPERM),
     }
 }

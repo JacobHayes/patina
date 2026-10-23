@@ -5,11 +5,13 @@
 //! `UIO_MAXIOV` (or negative) is `EINVAL`, a NULL vector with a count is
 //! `EFAULT`, a segment whose length is negative as an `ssize_t` is `EINVAL`, a
 //! count of zero touches nothing — after the descriptor and its access mode
-//! have been judged, as `vfs_readv`/`vfs_writev` judge them. The transfer is
-//! the single-buffer one (`read_resolved`/`write_resolved`, the positional
-//! file reads and writes) applied segment by segment: a short segment ends the
-//! call, and once bytes have moved a later segment never waits, so a stream
-//! answers what it has exactly as one kernel read of the whole vector does.
+//! have been judged, as `vfs_readv`/`vfs_writev` judge them. A regular file
+//! moves the whole vector in one step (`fs_read_segments`/`fs_write_segments`),
+//! so no other task's transfer lands between its segments. Every other kind
+//! takes the single-buffer transfer (`read_resolved`/`write_resolved`) segment
+//! by segment. Either way a short segment ends the call, and once bytes have
+//! moved a later segment never waits, so a stream answers what it has exactly
+//! as one kernel read of the whole vector does.
 
 use std::ffi::{c_int, c_void};
 use std::slice;
@@ -19,8 +21,8 @@ use patina_dst_abi::Fd;
 use crate::fdtable::{FdKind, Resolved};
 use crate::{
     EBADF, EFAULT, EINVAL, EOPNOTSUPP, O_NONBLOCK, O_READ, O_WRITE, Placement, fail, fdget,
-    fs_pread, fs_write_segments, positional_placement, positional_target, read_resolved, set_errno,
-    transferred, write_resolved,
+    fs_pread, fs_read_segments, fs_write_segments, positional_placement, positional_target,
+    read_resolved, set_errno, transferred, write_resolved,
 };
 
 /// Linux and Darwin `UIO_MAXIOV`: the most segments one vector may carry.
@@ -70,6 +72,16 @@ pub(crate) unsafe fn import(
         return Err(EINVAL);
     }
     Ok(segments)
+}
+
+/// The segments that carry bytes: an empty one moves nothing and ends no
+/// transfer.
+fn nonempty(segments: &[GuestIovec]) -> Vec<GuestIovec> {
+    segments
+        .iter()
+        .copied()
+        .filter(|segment| segment.len != 0)
+        .collect()
 }
 
 fn total(segments: &[GuestIovec]) -> usize {
@@ -152,6 +164,15 @@ unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking:
         }
         return got;
     }
+    if matches!(resolved.kind, FdKind::File | FdKind::Dir) {
+        let segments = nonempty(segments);
+        // SAFETY: forwarded from this function's own contract.
+        let read = unsafe { fs_read_segments(Fd(resolved.handle), None, &segments) };
+        return match read {
+            Ok(moved) => finish(moved, None),
+            Err(errno) => finish(0, Some(errno)),
+        };
+    }
     let mut moved = 0usize;
     for segment in segments.iter().filter(|segment| segment.len != 0) {
         // SAFETY: the segment is guest memory writable for its length.
@@ -175,10 +196,12 @@ unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking:
 }
 
 /// Gather writes at the description's cursor (`writev`, and `pwritev2` at
-/// position -1). `RWF_APPEND` moves the cursor to the end first, as
-/// `IOCB_APPEND` does, in the same step as the writes
-/// ([`fs_write_segments`]), and `RWF_DSYNC`/`RWF_SYNC` make the written data
-/// durable before the call returns (`generic_write_sync`).
+/// position -1). A file takes the whole vector in one step
+/// ([`fs_write_segments`]), as Linux writes it under `inode_lock`: no other
+/// task's write lands between its segments. `RWF_APPEND` moves the cursor to
+/// the end first, as `IOCB_APPEND` does, in the same step, and
+/// `RWF_DSYNC`/`RWF_SYNC` make the written data durable before the call
+/// returns (`generic_write_sync`).
 ///
 /// # Safety
 /// As [`cursor_readv`], each segment readable for its length.
@@ -188,15 +211,15 @@ unsafe fn cursor_writev(
     nonblocking: bool,
     flags: i32,
 ) -> isize {
-    if resolved.kind == FdKind::File && flags & RWF_APPEND != 0 {
-        let segments: Vec<GuestIovec> = segments
-            .iter()
-            .copied()
-            .filter(|segment| segment.len != 0)
-            .collect();
+    if resolved.kind == FdKind::File {
+        let placement = if flags & RWF_APPEND != 0 {
+            Placement::EndAtCursor
+        } else {
+            Placement::Cursor
+        };
+        let segments = nonempty(segments);
         // SAFETY: forwarded from this function's own contract.
-        let written =
-            unsafe { fs_write_segments(Fd(resolved.handle), Placement::EndAtCursor, &segments) };
+        let written = unsafe { fs_write_segments(Fd(resolved.handle), placement, &segments) };
         return match written {
             Ok(moved) => sync_written(resolved, moved, flags, None),
             Err(errno) => finish(0, Some(errno)),
@@ -333,6 +356,16 @@ pub unsafe extern "C" fn patina_preadv(
     if let Some(errno) = rwf_refusal(&resolved, flags) {
         return fail(errno) as isize;
     }
+    if resolved.kind == FdKind::File {
+        let segments = nonempty(&segments);
+        // SAFETY: forwarded from this function's own contract.
+        let read = unsafe { fs_read_segments(Fd(resolved.handle), Some(offset), &segments) };
+        let moved = match read {
+            Ok(moved) => finish(moved, None),
+            Err(errno) => finish(0, Some(errno)),
+        };
+        return transferred(&resolved, moved, false);
+    }
     let mut moved = 0usize;
     for segment in segments.iter().filter(|segment| segment.len != 0) {
         // SAFETY: the segment is guest memory writable for its length.
@@ -380,10 +413,7 @@ pub unsafe extern "C" fn patina_pwritev(
         return fail(errno) as isize;
     }
     let placement = positional_placement(resolved, offset, flags & RWF_APPEND != 0);
-    let segments: Vec<GuestIovec> = segments
-        .into_iter()
-        .filter(|segment| segment.len != 0)
-        .collect();
+    let segments = nonempty(&segments);
     // SAFETY: each segment is guest memory readable for its length.
     let moved = match unsafe { fs_write_segments(Fd(resolved.handle), placement, &segments) } {
         Ok(moved) => sync_written(resolved, moved, flags, None),

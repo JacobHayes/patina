@@ -190,19 +190,10 @@ impl FsDriver for MemFs {
             }
         }
 
+        // An `O_APPEND` description starts at 0 like any other: the flag
+        // places each write, not the cursor at open.
         let node = self.file_inode(&path)?;
-        let cursor = if flags.append {
-            let len = self
-                .inodes
-                .get(&node)
-                .expect("file path references an inode")
-                .contents
-                .len();
-            usize::try_from(len).unwrap_or(usize::MAX)
-        } else {
-            0
-        };
-        self.allocate_handle(node, cursor, Access::from_flags(flags), FsEntryKind::File)
+        self.allocate_handle(node, 0, Access::from_flags(flags), FsEntryKind::File)
     }
 
     fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
@@ -359,6 +350,21 @@ impl FsDriver for MemFs {
             .fds += 1;
         self.handles.insert(duplicate, id);
         Ok(duplicate)
+    }
+
+    fn set_append(&mut self, fd: Fd, append: bool) -> DriverResult<()> {
+        let description = self.description_mut(fd)?;
+        if description.path_only {
+            return Err(EffectError::new(
+                ErrorCode::InvalidHandle,
+                format!(
+                    "virtual handle {} names a location and has no status flags",
+                    fd.0
+                ),
+            ));
+        }
+        description.append = append;
+        Ok(())
     }
 
     fn seek(&mut self, fd: Fd, offset: i64, whence: SeekWhence) -> DriverResult<u64> {

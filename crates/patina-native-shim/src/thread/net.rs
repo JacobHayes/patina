@@ -310,15 +310,52 @@ pub(super) fn park(
     park_until(state, handle, dir, deadline, deadline.is_some(), reason)
 }
 
+/// [`park`] for a call holding what the kernel lets go when a handler
+/// interrupts its wait: `interrupted` runs then, before the handler, as the
+/// call's `-ERESTARTSYS` exit runs before delivery (a blocking `accept`
+/// releases the number it took).
+pub(super) fn park_releasing(
+    state: StateGuard,
+    handle: c_int,
+    dir: Dir,
+    deadline: Option<u64>,
+    reason: &'static str,
+    interrupted: &mut dyn FnMut(),
+) -> Result<(), c_int> {
+    park_until_then(
+        state,
+        handle,
+        dir,
+        deadline,
+        deadline.is_some(),
+        reason,
+        interrupted,
+    )
+}
+
 /// [`park`] until `until`, which may be earlier than the socket's timeout
 /// (a delivery the network has scheduled); `timed`: the socket has one.
 pub(super) fn park_until(
+    state: StateGuard,
+    handle: c_int,
+    dir: Dir,
+    until: Option<u64>,
+    timed: bool,
+    reason: &'static str,
+) -> Result<(), c_int> {
+    park_until_then(state, handle, dir, until, timed, reason, &mut || {})
+}
+
+/// [`park_until`], running `interrupted` before the handler of a signal
+/// that ends the wait ([`park_releasing`]).
+fn park_until_then(
     mut state: StateGuard,
     handle: c_int,
     dir: Dir,
     until: Option<u64>,
     timed: bool,
     reason: &'static str,
+    interrupted: &mut dyn FnMut(),
 ) -> Result<(), c_int> {
     let me = current_task();
     let Some(socket) = state.net.sockets.table.get_mut(&handle) else {
@@ -355,14 +392,18 @@ pub(super) fn park_until(
     // handler's `SA_RESTART`; one that waits forever is `ERESTARTSYS`, which
     // the call's end settles ([`restarting`]).
     #[cfg(target_os = "linux")]
-    match signals::resume_timed(timed) {
+    match signals::resume_timed_with(timed, |resumed| {
+        if resumed != signals::Resumed::Normal {
+            interrupted();
+        }
+    }) {
         signals::Resumed::Normal => {}
         _ if timed => return Err(crate::EINTR),
         signals::Resumed::Restart => return Err(RESTART),
         signals::Resumed::Eintr => return Err(INTERRUPTED),
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = timed;
+    let _ = (timed, interrupted);
     Ok(())
 }
 
@@ -462,8 +503,12 @@ fn install(
     nonblocking: bool,
     cloexec: bool,
 ) -> Result<c_int, c_int> {
-    let status = O_READ | O_WRITE | if nonblocking { O_NONBLOCK } else { 0 };
-    match crate::install_fd(FdKind::Socket, handle as u64, status, cloexec) {
+    match crate::install_fd(
+        FdKind::Socket,
+        handle as u64,
+        socket_status(nonblocking),
+        cloexec,
+    ) {
         Ok(fd) => Ok(fd),
         Err(errno) => {
             if let Some(socket) = state.net.sockets.table.remove(&handle) {
@@ -472,6 +517,11 @@ fn install(
             Err(errno)
         }
     }
+}
+
+/// A socket description's status flags.
+fn socket_status(nonblocking: bool) -> u32 {
+    O_READ | O_WRITE | if nonblocking { O_NONBLOCK } else { 0 }
 }
 
 /// `SOCK_NONBLOCK`/`SOCK_CLOEXEC` split off a type or `accept4` flags.
@@ -527,9 +577,12 @@ fn create(state: &mut ThreadRuntime, family: i32, ty: i32, protocol: i32) -> Res
 pub(crate) fn socket(family: c_int, ty: c_int, protocol: c_int) -> crate::abi::SysResult<i64> {
     (|| {
         let (nonblocking, cloexec) = creation_flags(ty & !SOCK_TYPE_MASK)?;
-        let mut state = lock_state();
-        let handle = create(&mut state, family, ty & SOCK_TYPE_MASK, protocol)?;
-        install(&mut state, handle, nonblocking, cloexec).map(i64::from)
+        // `__sys_socket` makes the socket, then takes the number.
+        crate::at_free_numbers(|| {
+            let mut state = lock_state();
+            let handle = create(&mut state, family, ty & SOCK_TYPE_MASK, protocol)?;
+            install(&mut state, handle, nonblocking, cloexec).map(i64::from)
+        })
     })()
     .map_err(crate::abi::Errno::new)
 }
@@ -545,9 +598,10 @@ pub(crate) fn socketpair(
     (|| {
         let (nonblocking, cloexec) = creation_flags(ty & !SOCK_TYPE_MASK)?;
         let ty = ty & SOCK_TYPE_MASK;
-        let mut state = lock_state();
         // The kernel reserves both numbers and writes them first; the table
         // allocates lowest-free, so they are the two it is about to hand out.
+        crate::ensure_free_numbers(2)?;
+        let mut state = lock_state();
         let (first, second) = crate::fd_table().lock().next_free_pair()?;
         uaccess::write(sv, &[first, second])?;
         let a = create(&mut state, family, ty, protocol)?;
@@ -566,7 +620,7 @@ pub(crate) fn socketpair(
             return Err(EOPNOTSUPP);
         }
         unix::pair(&mut state, a, b);
-        let status = O_READ | O_WRITE | if nonblocking { O_NONBLOCK } else { 0 };
+        let status = socket_status(nonblocking);
         let installed = crate::fd_table().lock().install_pair(
             FdKind::Socket,
             (a as u64, status),
@@ -687,7 +741,14 @@ pub(crate) fn listen(fd: c_int, backlog: c_int) -> crate::abi::SysResult<i64> {
     .map_err(crate::abi::Errno::new)
 }
 
-/// `accept4(2)` (`accept` is flags 0).
+/// `accept4(2)` (`accept` is flags 0). Linux takes the new number before it
+/// waits for a connection (`get_unused_fd_flags` before `do_accept`), so a
+/// task that opens while this one waits numbers after it, and a connection
+/// dequeued always gets its descriptor. A handler that interrupts the wait
+/// runs after the number is let go (`put_unused_fd` on the `-ERESTARTSYS`
+/// exit), and a restarted call takes the lowest free one again. Darwin takes
+/// it after the wait (`falloc` once a connection is queued), dropping the
+/// connection when the table filled meanwhile.
 pub(crate) fn accept(
     fd: c_int,
     addr: usize,
@@ -698,13 +759,29 @@ pub(crate) fn accept(
         let (nonblocking_new, cloexec) = creation_flags(flags)?;
         sched_point()?;
         let (handle, nonblocking) = lookup(fd)?;
+        #[cfg(target_os = "linux")]
+        let mut number = Some(crate::ReservedNumber::take(cloexec)?);
+        #[cfg(not(target_os = "linux"))]
         crate::fd_table().lock().ensure_free(1)?;
+        #[cfg(target_os = "linux")]
+        let mut release = || drop(number.take());
+        #[cfg(not(target_os = "linux"))]
+        let mut release = || {};
         let (accepted, peer) = match family_of(handle)? {
-            Family::Inet => inet::accept(handle, nonblocking)?,
-            Family::Unix => unix::accept(handle, nonblocking)?,
+            Family::Inet => inet::accept(handle, nonblocking, &mut release)?,
+            Family::Unix => unix::accept(handle, nonblocking, &mut release)?,
             #[cfg(target_os = "linux")]
             Family::Netlink => return Err(EOPNOTSUPP),
         };
+        #[cfg(target_os = "linux")]
+        let new_fd = number
+            .expect("a wait that let the number go ends the call")
+            .install(
+                FdKind::Socket,
+                accepted as u64,
+                socket_status(nonblocking_new),
+            );
+        #[cfg(not(target_os = "linux"))]
         let new_fd = {
             let mut state = lock_state();
             install(&mut state, accepted, nonblocking_new, cloexec)?

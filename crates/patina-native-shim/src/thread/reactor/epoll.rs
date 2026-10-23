@@ -339,34 +339,34 @@ pub(crate) fn create1(flags: c_int) -> SysResult<c_int> {
     if flags & !EPOLL_CLOEXEC != 0 {
         return Err(failed(super::EINVAL));
     }
-    let mut state = lock_state();
-    if let Err(error) = state.ensure_active() {
-        return Err(failed(c_int::from(error.into_posix())));
-    }
-    let id = state.net.next_epoll;
-    state.net.next_epoll = state.net.next_epoll.wrapping_add(1);
-    state.net.epolls.insert(
-        id,
-        EpollSlot {
-            ep: Epoll::default(),
-        },
-    );
-    // An epoll instance reports O_RDWR through F_GETFL.
-    match super::super::install_fd(
-        FdKind::Epoll,
-        id,
-        O_READ | O_WRITE,
-        flags & EPOLL_CLOEXEC != 0,
-    ) {
-        Ok(fd) => {
-            super::super::set_errno(0);
-            Ok(fd)
-        }
-        Err(errno) => {
+    // `do_epoll_create` allocates the instance, then takes the number.
+    let fd = crate::at_free_numbers(|| {
+        let mut state = lock_state();
+        state
+            .ensure_active()
+            .map_err(|error| c_int::from(error.into_posix()))?;
+        let id = state.net.next_epoll;
+        state.net.next_epoll = state.net.next_epoll.wrapping_add(1);
+        state.net.epolls.insert(
+            id,
+            EpollSlot {
+                ep: Epoll::default(),
+            },
+        );
+        // An epoll instance reports O_RDWR through F_GETFL.
+        super::super::install_fd(
+            FdKind::Epoll,
+            id,
+            O_READ | O_WRITE,
+            flags & EPOLL_CLOEXEC != 0,
+        )
+        .inspect_err(|_| {
             state.net.epolls.remove(&id);
-            Err(failed(errno))
-        }
-    }
+        })
+    })
+    .map_err(failed)?;
+    super::super::set_errno(0);
+    Ok(fd)
 }
 
 #[unsafe(no_mangle)]

@@ -41,11 +41,12 @@ use super::{
     EBADF, EBUSY, EDEADLK, EINVAL, EISCONN, ENOTCONN, ENXIO, EOPNOTSUPP, EOVERFLOW, EPERM, EPIPE,
     ESRCH, ETIMEDOUT, EWOULDBLOCK, O_NONBLOCK, O_READ, O_WRITE, PATINA_ENTRY_FIFO,
     PATINA_ENTRY_SOCKET, PATINA_FS_PIPEFS, PATINA_FS_SOCKFS, PatinaMetadata, PatinaTimestamp,
-    SpinGuard, SpinMutex, TaskId, fail, fd_table, fs_time_unrecorded, host_write_all, install_fd,
-    patina_close, set_errno, with_context, with_context_msg, with_context_raw,
+    ReservedNumber, SpinGuard, SpinMutex, TaskId, ensure_free_numbers, fail, fd_table,
+    fs_time_unrecorded, host_write_all, set_errno, with_context, with_context_msg,
+    with_context_raw,
 };
 #[cfg(target_os = "linux")]
-use super::{EINTR, PATINA_FS_VOLUME};
+use super::{EINTR, PATINA_FS_VOLUME, install_fd};
 #[cfg(target_os = "macos")]
 use crate::{hostapi, in_shim_bootstrap, in_shim_critical};
 

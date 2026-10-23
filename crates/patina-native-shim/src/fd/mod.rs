@@ -103,9 +103,22 @@ pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 /// `F_SETFL`: replace the description's `O_APPEND`/`O_NONBLOCK` with the bits
 /// in `flags` (`PATINA_O_*`); every other bit is ignored, as the kernel ignores
-/// the access mode and creation flags in an `F_SETFL` argument.
+/// the access mode and creation flags in an `F_SETFL` argument. A file's
+/// `O_APPEND` places its cursor writes in the filesystem, so a change to it
+/// reaches the driver's description too ([`Context::fs_set_append_unrecorded`]),
+/// in the same step: no scheduling point, so no write runs between the two.
 pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let resolved = fd_table().lock().resolve(raw_fd);
+    if let Some(resolved) = resolved
+        && resolved.kind == FdKind::File
+        && (resolved.status ^ flags) & O_APPEND != 0
+        && let Err(errno) = with_context_raw(|context| {
+            context.fs_set_append_unrecorded(Fd(resolved.handle), flags & O_APPEND != 0)
+        })
+    {
+        return fail(errno);
+    }
     match fd_table().lock().set_status(raw_fd, O_SETFL_MASK, flags) {
         Ok(()) => {
             set_errno(0);

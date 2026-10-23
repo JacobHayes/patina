@@ -12,9 +12,9 @@ pub(super) use frames::{arm as arm_signal_stack, release as release_signal_stack
 use patina_dst_abi::SignalTarget;
 use std::sync::atomic::Ordering;
 use waits::Blocked;
-pub(crate) use waits::{Resumed, resume, resume_timed};
+pub(crate) use waits::{Resumed, resume};
 pub(crate) use waits::{Timespec, WaitMode, patina_signal_wait};
-pub(super) use waits::{resume_with, take_sync_resume};
+pub(super) use waits::{resume_timed_with, resume_with, take_sync_resume};
 
 mod constants;
 pub(super) use constants::*;

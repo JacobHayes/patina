@@ -183,10 +183,13 @@ pub(crate) fn resume() -> Resumed {
     resume_with(|_| {})
 }
 
-/// [`resume`] for a wait with a timeout when `timed` (a socket's
+/// [`resume_with`] for a wait with a timeout when `timed` (a socket's
 /// `SO_RCVTIMEO`/`SO_SNDTIMEO`, `sock_intr_errno`): never restarted.
-pub(crate) fn resume_timed(timed: bool) -> Resumed {
-    resume_policy(!timed, |_| {})
+pub(in crate::thread) fn resume_timed_with(
+    timed: bool,
+    before_delivery: impl FnOnce(Resumed),
+) -> Resumed {
+    resume_policy(!timed, before_delivery)
 }
 
 /// A signal wait a deliverable signal ended (`EINTR`): delivered here, or

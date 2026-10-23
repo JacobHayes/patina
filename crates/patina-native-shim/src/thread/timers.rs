@@ -1098,42 +1098,45 @@ pub(crate) fn timerfd_create(clock: i32, flags: c_int) -> i64 {
         _ => return errno(EINVAL),
     };
     super::signals::activate();
-    let handle = {
-        let mut state = lock_state();
-        let handle = state.timers.next_fd;
-        state.timers.next_fd += 1;
-        state.timers.fds.insert(
-            handle,
-            TimerFd {
-                realtime,
-                expires: 0,
-                queued: false,
-                interval: 0,
-                ticks: 0,
-                fires: 0,
-                expired: false,
-                waiters: WaitQueue::new(),
-                open: true,
-            },
-        );
-        handle
-    };
     let nonblock = if flags & TFD_NONBLOCK != 0 {
         O_NONBLOCK
     } else {
         0
     };
-    match crate::install_fd(
-        FdKind::TimerFd,
-        handle,
-        O_READ | O_WRITE | nonblock,
-        flags & TFD_CLOEXEC != 0,
-    ) {
-        Ok(fd) => i64::from(fd),
-        Err(code) => {
+    let created = crate::at_free_numbers(|| {
+        let handle = {
+            let mut state = lock_state();
+            let handle = state.timers.next_fd;
+            state.timers.next_fd += 1;
+            state.timers.fds.insert(
+                handle,
+                TimerFd {
+                    realtime,
+                    expires: 0,
+                    queued: false,
+                    interval: 0,
+                    ticks: 0,
+                    fires: 0,
+                    expired: false,
+                    waiters: WaitQueue::new(),
+                    open: true,
+                },
+            );
+            handle
+        };
+        crate::install_fd(
+            FdKind::TimerFd,
+            handle,
+            O_READ | O_WRITE | nonblock,
+            flags & TFD_CLOEXEC != 0,
+        )
+        .inspect_err(|_| {
             lock_state().timers.fds.remove(&handle);
-            errno(code)
-        }
+        })
+    });
+    match created {
+        Ok(fd) => i64::from(fd),
+        Err(code) => errno(code),
     }
 }
 

@@ -377,42 +377,45 @@ pub(crate) fn init1(flags: i32) -> i64 {
     if flags & !(IN_CLOEXEC | IN_NONBLOCK) != 0 {
         return errno(EINVAL);
     }
-    let handle = {
-        let mut state = lock_state();
-        if let Err(error) = state.ensure_active() {
-            return errno(c_int::from(error.into_posix()));
-        }
-        if state.inotify.instances.len() >= MAX_USER_INSTANCES {
-            return errno(EMFILE);
-        }
-        let handle = state.inotify.next_handle;
-        state.inotify.next_handle += 1;
-        state.inotify.instances.insert(
-            handle,
-            Instance {
-                cursor: 1,
-                open: true,
-                ..Instance::default()
-            },
-        );
-        handle
-    };
     let nonblock = if flags & IN_NONBLOCK != 0 {
         O_NONBLOCK
     } else {
         0
     };
-    match crate::install_fd(
-        FdKind::Inotify,
-        handle,
-        O_READ | nonblock,
-        flags & IN_CLOEXEC != 0,
-    ) {
-        Ok(fd) => i64::from(fd),
-        Err(code) => {
+    let created = crate::at_free_numbers(|| {
+        let handle = {
+            let mut state = lock_state();
+            state
+                .ensure_active()
+                .map_err(|error| c_int::from(error.into_posix()))?;
+            if state.inotify.instances.len() >= MAX_USER_INSTANCES {
+                return Err(EMFILE);
+            }
+            let handle = state.inotify.next_handle;
+            state.inotify.next_handle += 1;
+            state.inotify.instances.insert(
+                handle,
+                Instance {
+                    cursor: 1,
+                    open: true,
+                    ..Instance::default()
+                },
+            );
+            handle
+        };
+        crate::install_fd(
+            FdKind::Inotify,
+            handle,
+            O_READ | nonblock,
+            flags & IN_CLOEXEC != 0,
+        )
+        .inspect_err(|_| {
             lock_state().inotify.instances.remove(&handle);
-            errno(code)
-        }
+        })
+    });
+    match created {
+        Ok(fd) => i64::from(fd),
+        Err(code) => errno(code),
     }
 }
 

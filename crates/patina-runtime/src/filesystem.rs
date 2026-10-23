@@ -394,11 +394,13 @@ impl Context {
 
     /// A path-only handle on canonical `path` the runtime's embedder holds
     /// for itself (the native shim's working directory: the configured one at
-    /// install, or the root on first use), opened UNRECORDED, never faulted
+    /// install, the root on first use, or the one a `chdir` names), opened
+    /// UNRECORDED, never faulted
     /// ([`FsDriver::open_path_unfaulted`]), with no latency and no `open`
     /// crash ordinal. No guest called open: the open happens at the same point
-    /// on replay (install reads the trace's working directory, the root opens
-    /// at the same guest call), and a path-only open changes nothing, so the
+    /// on replay (install reads the trace's working directory; the root and a
+    /// `chdir`'s directory open at the same guest call), and a path-only open
+    /// changes nothing, so the
     /// driver hands back the same handle there. A host-capture replay executes
     /// no driver, so there it is the recorded open.
     pub fn fs_open_path_unrecorded(&mut self, path: &str) -> Result<Fd, RuntimeError> {
@@ -411,6 +413,40 @@ impl Context {
             .as_mut()
             .ok_or_else(|| EffectError::missing_driver("filesystem"))?
             .open_path_unfaulted(clock, path)?)
+    }
+
+    /// Release a handle [`Self::fs_open_path_unrecorded`] opened, UNRECORDED
+    /// and with no `close` crash ordinal: the embedder lets go of its own
+    /// handle (the native shim's working directory, replaced by a `chdir`) at
+    /// the same guest call on replay, where the driver releases it again. A
+    /// host-capture replay executes no driver, so there it is the recorded
+    /// close its recorded open pairs with.
+    pub fn fs_close_unrecorded(&mut self, fd: Fd) -> Result<(), RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_close(fd);
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .close(fd)?)
+    }
+
+    /// `F_SETFL`'s `O_APPEND` on filesystem handle `fd`'s description
+    /// ([`FsDriver::set_append`]), UNRECORDED and never faulted, with no
+    /// latency: the guest's `fcntl` happens at the same point on replay, so
+    /// the driver changes the description there again, and every recorded
+    /// write after it lands where it did. A host-capture handle is read-only,
+    /// so the flag changes no write it can make, and nothing executes there.
+    pub fn fs_set_append_unrecorded(&mut self, fd: Fd, append: bool) -> Result<(), RuntimeError> {
+        if self.filesystem_is_capture {
+            return Ok(());
+        }
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .set_append(fd, append)?)
     }
 
     /// The metadata of the entry at canonical `path`, read UNRECORDED and

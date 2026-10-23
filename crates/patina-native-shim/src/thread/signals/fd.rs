@@ -29,8 +29,8 @@ pub unsafe extern "C" fn patina_signalfd(
     }
     activate();
     let mask = uncatchable(mask);
-    let mut state = lock_state();
     if fd != -1 {
+        let mut state = lock_state();
         let Some(entry) = crate::fd_table().lock().resolve(fd) else {
             return -i64::from(crate::EBADF);
         };
@@ -65,26 +65,29 @@ pub unsafe extern "C" fn patina_signalfd(
         wake_all(ready);
         return i64::from(fd);
     }
-    let handle = state.signals.next_fd;
-    state.signals.next_fd += 1;
     let status = O_READ
         | if flags & SFD_NONBLOCK != 0 {
             crate::O_NONBLOCK
         } else {
             0
         };
-    match crate::install_fd(FdKind::SignalFd, handle, status, flags & SFD_CLOEXEC != 0) {
-        Ok(fd) => {
-            state.signals.signalfds.insert(
-                handle,
-                SignalFd {
-                    mask,
-                    waiters: WaitQueue::new(),
-                    arrivals: 0,
-                },
-            );
-            i64::from(fd)
-        }
+    let created = crate::at_free_numbers(|| {
+        let mut state = lock_state();
+        let handle = state.signals.next_fd;
+        state.signals.next_fd += 1;
+        let fd = crate::install_fd(FdKind::SignalFd, handle, status, flags & SFD_CLOEXEC != 0)?;
+        state.signals.signalfds.insert(
+            handle,
+            SignalFd {
+                mask,
+                waiters: WaitQueue::new(),
+                arrivals: 0,
+            },
+        );
+        Ok(fd)
+    });
+    match created {
+        Ok(fd) => i64::from(fd),
         Err(errno) => -i64::from(errno),
     }
 }

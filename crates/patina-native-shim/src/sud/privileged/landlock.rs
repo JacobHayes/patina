@@ -74,12 +74,14 @@ pub(in crate::sud) fn landlock_create_ruleset(_: &Credential, a: &[u64; 6]) -> A
         return refuse(errno::ENOMSG);
     }
     let status = crate::O_READ | crate::O_WRITE;
-    match crate::install_fd(
-        FdKind::LandlockRuleset,
-        ruleset_handle(fs, net),
-        status,
-        true,
-    ) {
+    match crate::at_free_numbers(|| {
+        crate::install_fd(
+            FdKind::LandlockRuleset,
+            ruleset_handle(fs, net),
+            status,
+            true,
+        )
+    }) {
         Ok(fd) => Ok(i64::from(fd)),
         Err(code) => refuse(code as u32),
     }

@@ -63,6 +63,7 @@ pub(in crate::thread::net) fn listening(state: &ThreadRuntime, handle: c_int) ->
 pub(in crate::thread::net) fn accept(
     handle: c_int,
     nonblocking: bool,
+    interrupted: &mut dyn FnMut(),
 ) -> Result<(c_int, Vec<u8>), c_int> {
     let deadline = {
         let state = lock_state();
@@ -87,7 +88,14 @@ pub(in crate::thread::net) fn accept(
                 if nonblocking || expired(deadline)? || deadline.is_some_and(|d| d == 0) {
                     return Err(EWOULDBLOCK);
                 }
-                park(state, handle, Dir::Recv, deadline, "tcp-accept")?;
+                park_releasing(
+                    state,
+                    handle,
+                    Dir::Recv,
+                    deadline,
+                    "tcp-accept",
+                    interrupted,
+                )?;
                 if expired(deadline)? {
                     return Err(EWOULDBLOCK);
                 }

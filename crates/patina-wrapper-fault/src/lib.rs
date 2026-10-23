@@ -291,6 +291,11 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.dup(fd)
     }
 
+    /// Never faulted: `F_SETFL` changes the description in memory.
+    fn set_append(&mut self, fd: Fd, append: bool) -> DriverResult<()> {
+        self.inner.set_append(fd, append)
+    }
+
     fn metadata(&mut self, path: &str) -> DriverResult<FsMetadata> {
         if let Some(error) = self.maybe_error(FsFaultOp::Metadata) {
             return Err(error);
