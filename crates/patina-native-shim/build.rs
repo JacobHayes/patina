@@ -1,4 +1,9 @@
 // Publish the embedded source location and generate native C staging inputs.
+#![allow(
+    clippy::disallowed_macros,
+    clippy::disallowed_methods,
+    reason = "the build script runs on the build host, where no shim door exists; it speaks to cargo on stdout"
+)]
 mod build_support;
 mod symbol_metadata;
 

@@ -537,6 +537,7 @@ pub unsafe extern "C" fn patina_read_link(
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `buf` must be
 /// writable for `len` bytes.
+#[expect(clippy::disallowed_methods, reason = "the guest's own readlink(2)")]
 pub(crate) unsafe fn read_link(
     dirfd: c_int,
     path: *const c_char,

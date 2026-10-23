@@ -478,6 +478,10 @@ pub(crate) unsafe fn fs_write_segments(
     segments: &[GuestIovec],
 ) -> Result<usize, c_int> {
     with_context(|context| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "an appending write on a cursor moves it to the end in the driver, as the kernel sets f_pos to i_size; a recorded seek, never faulted"
+        )]
         let start = match placement {
             Placement::At(offset) => offset,
             Placement::End => context.fs_fd_metadata_unrecorded(fd)?.len,

@@ -1204,6 +1204,35 @@ pub(crate) fn yield_site_context() -> String {
     )
 }
 
+/// The kernel's own clock read for a timed wait: anchoring a relative
+/// timeout, checking a deadline, the time an interrupted wait has left. It is
+/// recorded as a guest clock read, counted as a poll and, on the realtime
+/// clock, drawn from the epoch-jump stream, so a guest whose timed waits spin
+/// is a clock spin the runtime sees. Every such read goes through here (or
+/// [`wait_deadline`]), so the model's choice is made in one place.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the kernel's timeout clock read, recorded as a guest clock read by design"
+)]
+pub(crate) fn wait_clock(clock: ClockKind) -> Result<u64, c_int> {
+    with_context_raw(|context| context.now(clock))
+}
+
+/// A timed wait's absolute `deadline` on `clock`, moved onto the monotonic
+/// line the timer registry keeps. A realtime deadline reads both clocks as
+/// [`wait_clock`] does, recorded by design.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the kernel's timeout clock reads, recorded as guest clock reads by design"
+)]
+pub(crate) fn wait_deadline(
+    context: &mut patina_dst_runtime::Context,
+    clock: ClockKind,
+    deadline: u64,
+) -> Result<u64, patina_dst_runtime::RuntimeError> {
+    context.monotonic_deadline(clock, deadline)
+}
+
 /// Take a deterministic scheduling point at a boundary call. A no-op until
 /// the thread subsystem activates, so single-threaded programs are
 /// unaffected.
@@ -1311,7 +1340,7 @@ pub(crate) unsafe fn managed_sleep(
                 // Snapshot at interruption, not after a handler that may
                 // itself advance virtual time. A clock failure must never
                 // invent rem=0.
-                let now = with_context_raw(|context| context.now(clock))
+                let now = wait_clock(clock)
                     .unwrap_or_else(|_| fatal("reading interrupted sleep clock failed"));
                 let rem = deadline.saturating_sub(now);
                 // `do_nanosleep`: a sleep with no time left finished,

@@ -69,12 +69,12 @@ pub(in crate::sud) fn sys_name_to_handle_at(
     } else {
         0
     };
-    // The kernel encodes the handle from the in-memory inode, so the
-    // descriptor form reads it unfaulted.
+    // The kernel encodes the handle from the in-memory inode, so neither form
+    // reads it as a guest stat.
     let values = if dirfd as c_int != AT_FDCWD as c_int && is_empty_path(path, flags) {
         fd_inode_values(dirfd as c_int)
     } else {
-        path_stat_values(dirfd, path, resolve)
+        path_inode_values(dirfd, path, resolve)
     };
     let values = match values {
         Ok(values) => values,
@@ -185,6 +185,12 @@ pub(in crate::sud) fn sys_getdents64(fd: i64, dirp: u64, count: u64) -> i64 {
 }
 
 pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFormat) -> i64 {
+    // The call's one scheduling point, before the descriptor resolves: the
+    // access notification and the snapshot read below are of the one
+    // description the number names in this step.
+    if let Err(errno) = crate::boundary_point() {
+        return -i64::from(errno);
+    }
     // Linux directory iteration needs an opened directory (`fdget_pos`): a
     // number that names nothing, or an `O_PATH` one, is EBADF; anything else
     // (a file, a socket) is ENOTDIR.
@@ -206,22 +212,38 @@ pub(in crate::sud) fn getdents(fd: i64, dirp: u64, count: u64, format: DirentFor
     let Ok(fd) = c_int::try_from(fd) else {
         return -EBADF;
     };
-    let mut map = DIR_ITERATIONS.lock().unwrap();
+    // The snapshot is read before the iteration lock is taken: the read is
+    // the call's driver step, and no shim lock is held across a driver
+    // step.
+    let needs_snapshot = DIR_ITERATIONS
+        .lock()
+        .get(&fd)
+        .is_none_or(|dir| dir.snapshot == 0);
+    let mut fresh: *mut c_void = std::ptr::null_mut();
+    if needs_snapshot {
+        // The snapshot is read through the DESCRIPTOR: its `r` was charged at
+        // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
+        // descriptor (which opened nothing) cannot iterate at all.
+        // SAFETY: `fresh` is writable local storage.
+        let rc =
+            crate::abi::raw(unsafe { crate::fs::read_dir_after_point(fd, &mut fresh) }.map(|_| 0));
+        if rc != 0 {
+            return rc;
+        }
+    }
+    let mut map = DIR_ITERATIONS.lock();
     let dir = map.entry(fd).or_insert(DirIteration {
         snapshot: 0,
         position: 0,
         pending: None,
     });
-    if dir.snapshot == 0 {
-        let mut snapshot: *mut c_void = std::ptr::null_mut();
-        // The snapshot is read through the DESCRIPTOR: its `r` was charged at
-        // open, so a later `chmod` cannot break a walk under way and an `O_PATH`
-        // descriptor (which opened nothing) cannot iterate at all.
-        // SAFETY: `snapshot` is writable local storage.
-        let rc = crate::abi::raw(unsafe { crate::fs::read_dir(fd, &mut snapshot) }.map(|_| 0));
-        if rc != 0 {
-            return rc;
-        }
+    if dir.snapshot != 0 {
+        // Another task's getdents on the descriptor took its snapshot while
+        // this one read: the iteration goes on from that one.
+        // SAFETY: `fresh` is null or the box `read_dir` just made.
+        unsafe { crate::fs::free_dir(fresh) };
+    } else {
+        let snapshot = fresh;
         dir.snapshot = snapshot as usize;
         // Resume at the position: skip the entries before it.
         let mut name = [0u8; 256];

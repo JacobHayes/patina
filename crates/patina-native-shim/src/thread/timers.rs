@@ -85,6 +85,10 @@ fn now_on(line: Line) -> Result<u64, c_int> {
 
 /// A reading of `line` a row takes: a recorded clock observation (so a
 /// guest polling a timer is a clock spin the runtime can see).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guest's own timer read (timer_gettime, timerfd_gettime, a timer's overrun), a recorded clock observation"
+)]
 fn observe(line: Line) -> Result<u64, c_int> {
     match line {
         Line::Monotonic => crate::with_context(|context| context.now(ClockKind::Monotonic)),
@@ -100,7 +104,7 @@ fn deadline(value: u64, absolute: bool, realtime: bool, now: u64) -> Result<u64,
         (false, _) => now.saturating_add(value),
         (true, false) => value,
         (true, true) => {
-            with_context_raw(|context| context.monotonic_deadline(ClockKind::Realtime, value))?
+            with_context_raw(|context| super::wait_deadline(context, ClockKind::Realtime, value))?
         }
     })
 }

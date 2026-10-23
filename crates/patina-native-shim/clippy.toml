@@ -1,9 +1,97 @@
-# The faulted content reads are the guest's own reads. The shim reading a
-# file for itself (a mapped file's page cache) gets no injected short or failed
-# read, which no kernel's page cache load has: it uses
-# `fs_read_at_unrecorded`. A guest read funnel says so with an `expect`.
+# The shim is one object that also defines the guest's libc doors, so its own
+# code must not take a guest-facing effect (an injected fault, a recorded op,
+# fs latency, a crash ordinal, a seeded draw the guest did not ask for), nor
+# make a call that binds to one of its own interposers. These rules refuse the
+# spellings that do. A guest funnel that really is the guest's call says so
+# with one `expect`; every other site uses the internal variant its reason
+# names. Shim unit tests run as ordinary host test binaries, where no door
+# exists, so `lib.rs` allows them in test code.
 disallowed-methods = [
+  # The guest's own filesystem reads and queries: faulted, recorded, charged
+  # latency. The shim's own reads of in-memory inode, cursor and file state
+  # use the unrecorded, unfaulted variants.
   { path = "patina_dst_runtime::Context::fs_read", reason = "a guest read; the shim's own loads use fs_read_at_unrecorded" },
   { path = "patina_dst_runtime::Context::fs_read_at", reason = "a guest read; the shim's own loads use fs_read_at_unrecorded" },
   { path = "patina_dst_runtime::Context::read_file", reason = "opens and reads through the guest's faulted calls; the shim's own loads use fs_read_at_unrecorded" },
+  { path = "patina_dst_runtime::Context::fs_metadata", reason = "the guest's stat(2); a path lookup or an in-memory inode read uses fs_metadata_unrecorded" },
+  { path = "patina_dst_runtime::Context::fs_fd_metadata", reason = "the guest's fstat(2); the kernel's read of an open file's inode uses fs_fd_metadata_unrecorded or fs_fd_ino" },
+  { path = "patina_dst_runtime::Context::fs_inode_metadata", reason = "the guest's fstat(2) of a node the filesystem holds no handle to; an in-memory inode read uses fs_inode_metadata_unrecorded" },
+  { path = "patina_dst_runtime::Context::fs_read_link", reason = "the guest's readlink(2); the path walk follows a symlink with fs_read_link_unrecorded" },
+  { path = "patina_dst_runtime::Context::fs_seek", reason = "the guest's lseek(2), a recorded op; the cursor reads as fs_cursor_unrecorded, the size as fs_fd_metadata_unrecorded" },
+  # The guest's clock reads: recorded, counted as polls, and on the realtime
+  # clock drawing the epoch-jump stream.
+  { path = "patina_dst_runtime::Context::now", reason = "the guest's clock read, recorded and counted as a poll; the shim's own monotonic reads use monotonic_now_unrecorded" },
+  { path = "patina_dst_runtime::Context::monotonic_deadline", reason = "reads both clocks as the guest's recorded clock reads; the shim's own monotonic reads use monotonic_now_unrecorded" },
+  # Seeded streams that belong to one guest funnel each.
+  { path = "patina_dst_runtime::Context::entropy_bytes", reason = "the guest's entropy request (getrandom, getentropy, /dev/urandom); the shim draws nothing from it" },
+  { path = "patina_dst_runtime::Context::buggify_rng", reason = "the guest's patina_dst::rng() stream; the shim draws nothing from it" },
+  { path = "patina_dst_runtime::Context::apply_sleep_jitter", reason = "drawn once per guest sleep, at its one entry; the shim draws nothing from it" },
+  # std calls that lower to a name the shim defines, or read host state.
+  { path = "std::env::var", reason = "binds to the shim's own getenv; the control plane reads through runtime::control_env" },
+  { path = "std::env::var_os", reason = "binds to the shim's own getenv; the control plane reads through runtime::control_env" },
+  { path = "std::env::vars", reason = "reads the guest's published environ; the control plane reads through runtime::control_env" },
+  { path = "std::env::vars_os", reason = "reads the guest's published environ; the control plane reads through runtime::control_env" },
+  { path = "std::time::Instant::now", reason = "binds to the shim's own clock_gettime; virtual time comes from the Context, host time from host_clock_gettime" },
+  { path = "std::time::SystemTime::now", reason = "binds to the shim's own clock_gettime; virtual time comes from the Context, host time from host_clock_gettime" },
+  { path = "std::thread::sleep", reason = "binds to the shim's own nanosleep, a guest sleep in virtual time; the shim never sleeps" },
+  { path = "std::thread::yield_now", reason = "binds to the shim's own sched_yield, a guest scheduling point; spin with std::hint::spin_loop" },
+  { path = "std::thread::available_parallelism", reason = "reads the host's CPUs; the virtual machine's count is crate::cpus" },
+  { path = "std::thread::spawn", reason = "binds to the shim's own pthread_create, a managed guest thread; the shim's host threads use thread::spawn_host_thread" },
+  { path = "std::thread::Builder::spawn", reason = "binds to the shim's own pthread_create, a managed guest thread; the shim's host threads use thread::spawn_host_thread" },
+  # libc names the shim itself defines. A call from shim code binds to its own
+  # interposer, which no undefined-symbol scan can see.
+  { path = "libc::read", reason = "the shim's own read door; the host's is host_read" },
+  { path = "libc::write", reason = "the shim's own write door; the host's is host_write or host_write_all" },
+  { path = "libc::pread", reason = "the shim's own pread door; the host's is host_pread" },
+  { path = "libc::pwrite", reason = "the shim's own pwrite door; the host's is host_pwrite" },
+  { path = "libc::close", reason = "the shim's own close door; the host's is host_close" },
+  { path = "libc::ftruncate", reason = "the shim's own ftruncate door; the host's is host_ftruncate" },
+  { path = "libc::unlink", reason = "the shim's own unlink door; the host's is host_unlink" },
+  { path = "libc::mmap", reason = "the shim's own mmap door; the host's is host_mmap" },
+  { path = "libc::munmap", reason = "the shim's own munmap door; the host's is host_munmap" },
+  { path = "libc::mprotect", reason = "the shim's own mprotect door; the host's is host_mprotect" },
+  { path = "libc::msync", reason = "the shim's own msync door; the host's is host_msync" },
+  { path = "libc::getenv", reason = "the shim's own getenv door, the guest's environment; the control plane reads through runtime::control_env" },
+  { path = "libc::secure_getenv", reason = "the shim's own secure_getenv door, the guest's environment; the control plane reads through runtime::control_env", allow-invalid = true },
+  { path = "libc::clock_gettime", reason = "the shim's own clock_gettime door, virtual time; the host's is host_clock_gettime" },
+  { path = "libc::gettimeofday", reason = "the shim's own gettimeofday door, virtual time; the host's is host_clock_gettime" },
+  { path = "libc::time", reason = "the shim's own time door, virtual time; the host's is host_clock_gettime" },
+  { path = "libc::nanosleep", reason = "the shim's own nanosleep door, a guest sleep in virtual time; the shim never sleeps" },
+  { path = "libc::clock_nanosleep", reason = "the shim's own clock_nanosleep door, a guest sleep in virtual time; the shim never sleeps", allow-invalid = true },
+  { path = "libc::sleep", reason = "the shim's own sleep door, a guest sleep in virtual time; the shim never sleeps" },
+  { path = "libc::getrandom", reason = "the shim's own getrandom door, the guest's seeded entropy; the shim draws none", allow-invalid = true },
+  { path = "libc::getentropy", reason = "the shim's own getentropy door, the guest's seeded entropy; the shim draws none" },
+  { path = "libc::syscall", reason = "the shim's own syscall door, dispatched as the guest's; the host's is host_syscall", allow-invalid = true },
+  { path = "libc::sched_yield", reason = "the shim's own sched_yield door, a guest scheduling point; spin with std::hint::spin_loop" },
+  { path = "libc::pthread_mutex_init", reason = "the shim's own pthread mutex door, the guest's lock model; the shim locks with crate::SpinMutex" },
+  { path = "libc::pthread_mutex_destroy", reason = "the shim's own pthread mutex door, the guest's lock model; the shim locks with crate::SpinMutex" },
+  { path = "libc::pthread_mutex_lock", reason = "the shim's own pthread mutex door, the guest's lock model; the shim locks with crate::SpinMutex" },
+  { path = "libc::pthread_mutex_trylock", reason = "the shim's own pthread mutex door, the guest's lock model; the shim locks with crate::SpinMutex" },
+  { path = "libc::pthread_mutex_unlock", reason = "the shim's own pthread mutex door, the guest's lock model; the shim locks with crate::SpinMutex" },
+  { path = "libc::pthread_create", reason = "the shim's own pthread_create door, a managed guest thread; the host's is host_pthread_create" },
+  { path = "libc::pthread_join", reason = "the shim's own pthread_join door; the host's is host_pthread_join" },
+  { path = "libc::pthread_detach", reason = "the shim's own pthread_detach door; the host's is host_pthread_detach" },
+  { path = "libc::pthread_kill", reason = "the shim's own pthread_kill door, a modeled signal; the host's is host_pthread_kill" },
+  { path = "libc::pthread_sigmask", reason = "the shim's own pthread_sigmask door, the guest's modeled mask; the host's is host_pthread_sigmask" },
+  { path = "libc::sigaction", reason = "the shim's own sigaction door, the guest's modeled disposition; the host's is host_sigaction" },
+  { path = "libc::exit", reason = "the shim's own exit door, the guest's modeled exit; the host's is host_exit" },
+  { path = "libc::abort", reason = "the shim's own abort door, the guest's modeled abort; the shim's is host_abort" },
+]
+
+# Each writes through the shim's own write door onto the guest's captured
+# streams.
+disallowed-macros = [
+  { path = "std::print", reason = "writes through the shim's own write door to the guest's stdout; shim diagnostics use host_write_all(2, ..)" },
+  { path = "std::println", reason = "writes through the shim's own write door to the guest's stdout; shim diagnostics use host_write_all(2, ..)" },
+  { path = "std::eprint", reason = "writes through the shim's own write door to the guest's stderr; shim diagnostics use host_write_all(2, ..)" },
+  { path = "std::eprintln", reason = "writes through the shim's own write door to the guest's stderr; shim diagnostics use host_write_all(2, ..)" },
+  { path = "std::dbg", reason = "writes through the shim's own write door to the guest's stderr; shim diagnostics use host_write_all(2, ..)" },
+]
+
+# std's locks park through the shim's own futex and pthread doors, as the
+# guest's do, and skip the shim's self-deadlock check.
+disallowed-types = [
+  { path = "std::sync::Mutex", reason = "contends through the shim's own futex/pthread doors; the shim locks with crate::SpinMutex" },
+  { path = "std::sync::RwLock", reason = "contends through the shim's own futex/pthread doors; the shim locks with crate::SpinMutex" },
+  { path = "std::sync::Condvar", reason = "waits through the shim's own futex/pthread doors; a shim wait parks on the scheduler" },
 ]

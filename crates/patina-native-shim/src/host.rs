@@ -13,6 +13,32 @@ type HostDlAddr = unsafe extern "C" fn(*const c_void, *mut libc::Dl_info) -> c_i
 type HostDlAddr1 =
     unsafe extern "C" fn(*const c_void, *mut libc::Dl_info, *mut *mut c_void, c_int) -> c_int;
 
+/// Name a host symbol the alias table could not resolve on host fd 2, through
+/// `write`: the host's `write`, resolved for the purpose (null when even that
+/// failed, and then nothing is written). The table is not built yet, so no
+/// `host_*` alias exists, and the public `write` is the shim's own door.
+///
+/// # Safety
+/// `write` is null or the host's `write`.
+unsafe fn unresolved_symbol_diagnostic(write: *mut c_void, name: &std::ffi::CStr) {
+    type Write = unsafe extern "C" fn(c_int, *const c_void, usize) -> isize;
+    if write.is_null() {
+        return;
+    }
+    // SAFETY: `write` is the host's `write`, per the contract.
+    let write = unsafe { std::mem::transmute::<*mut c_void, Write>(write) };
+    let parts: [&[u8]; 3] = [
+        b"patina native shim fatal: could not resolve host symbol ",
+        name.to_bytes(),
+        b" via dlsym(RTLD_NEXT)\n",
+    ];
+    for part in parts {
+        // SAFETY: `part` is readable for its length. One attempt each, since
+        // the process aborts next.
+        unsafe { write(2, part.as_ptr().cast(), part.len()) };
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) mod hostapi {
     use std::ffi::{CStr, c_char, c_int, c_void};
@@ -191,10 +217,9 @@ pub(crate) mod hostapi {
         if ptr.is_null() {
             // A core libSystem symbol failed to resolve: the process image is
             // unusable, so fail closed rather than continue with a null vehicle.
-            eprintln!(
-                "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
-            );
             unsafe {
+                let write = dlsym(RTLD_NEXT, c"write".as_ptr());
+                super::unresolved_symbol_diagnostic(write, name);
                 let abort = dlsym(RTLD_NEXT, c"abort".as_ptr());
                 if !abort.is_null() {
                     std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(abort)();
@@ -509,11 +534,10 @@ pub(crate) mod hostapi {
         if ptr.is_null() {
             // A core glibc symbol failed to resolve: the process image is
             // unusable, so fail closed rather than continue with a null vehicle.
-            eprintln!(
-                "patina native shim fatal: could not resolve host symbol {name:?} via dlsym(RTLD_NEXT)"
-            );
             // Resolve directly: the alias table is still being initialized.
             unsafe {
+                let write = __real_dlsym(RTLD_NEXT, c"write".as_ptr());
+                super::unresolved_symbol_diagnostic(write, name);
                 let abort = __real_dlsym(RTLD_NEXT, c"abort".as_ptr());
                 if !abort.is_null() {
                     std::mem::transmute::<*mut c_void, unsafe extern "C" fn() -> !>(abort)();

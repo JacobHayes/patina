@@ -331,7 +331,7 @@ pub unsafe extern "C" fn patina_signal_wait(
         if timeout.sec < 0 || !(0..1_000_000_000).contains(&timeout.nsec) {
             return -i64::from(EINVAL);
         }
-        let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
+        let now = crate::thread::wait_clock(ClockKind::Monotonic)
             .unwrap_or_else(|_| fatal("signal wait clock read failed"));
         Some(
             now.saturating_add((timeout.sec as u64).saturating_mul(1_000_000_000))
@@ -353,7 +353,7 @@ pub unsafe extern "C" fn patina_signal_wait(
             return i64::from(instance.sig);
         }
         if let Some(deadline) = deadline {
-            let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
+            let now = crate::thread::wait_clock(ClockKind::Monotonic)
                 .unwrap_or_else(|_| fatal("signal wait clock read failed"));
             if now >= deadline {
                 return -i64::from(EAGAIN);

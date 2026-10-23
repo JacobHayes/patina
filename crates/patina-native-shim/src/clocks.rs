@@ -474,6 +474,10 @@ pub unsafe extern "C" fn patina_clock_nanosleep(
         Sleep::Refused(errno) => return -i64::from(errno),
     };
     let absolute = flags & TIMER_ABSTIME != 0;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "anchors the guest's relative clock_nanosleep(2): the kernel's timeout clock read, recorded as a guest clock read by design"
+    )]
     let deadline = if absolute {
         requested
     } else {
@@ -588,6 +592,10 @@ const INITIAL_JIFFIES: u64 = (-300i64 * HZ as i64) as u32 as u64;
 /// an arbitrary point (`jiffies_64_to_clock_t(get_jiffies_64())`); a
 /// buffer that cannot be written is `EFAULT`.
 pub(crate) fn times(out: *mut [i64; 4]) -> i64 {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guest's times(2) tick count, its own clock read"
+    )]
     let (uptime, cpu) = match with_context(|context| {
         let uptime = context.now(ClockKind::Monotonic)?;
         Ok((uptime, cpu_time_unrecorded(context, CpuOf::Process)))

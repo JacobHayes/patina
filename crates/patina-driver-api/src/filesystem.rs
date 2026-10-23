@@ -335,6 +335,11 @@ pub trait FsDriver: Send {
     fn metadata_unfaulted(&mut self, path: &str) -> DriverResult<FsMetadata> {
         self.metadata(path)
     }
+    /// [`FsDriver::read_link`] as the same never-faulted bookkeeping (the
+    /// target the path walk follows a symlink to inside another call).
+    fn read_link_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.read_link(clock, path)
+    }
     /// [`FsDriver::fd_metadata`] as the same never-faulted bookkeeping (the
     /// inode and size of a descriptor's file).
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {

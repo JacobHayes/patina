@@ -225,15 +225,13 @@ pub(crate) fn semtimedop(
         let timed = match (relative, deadline) {
             (None, _) => None,
             (Some(_), Some(at)) => Some((ClockKind::Monotonic, at)),
-            (Some(relative), None) => {
-                match with_context_raw(|context| context.now(ClockKind::Monotonic)) {
-                    Ok(now) => Some((
-                        ClockKind::Monotonic,
-                        *deadline.insert(now.saturating_add(relative)),
-                    )),
-                    Err(errno) => return fail(errno),
-                }
-            }
+            (Some(relative), None) => match crate::thread::wait_clock(ClockKind::Monotonic) {
+                Ok(now) => Some((
+                    ClockKind::Monotonic,
+                    *deadline.insert(now.saturating_add(relative)),
+                )),
+                Err(errno) => return fail(errno),
+            },
         };
         let loc = IpcWait::Sem(id);
         match wait_on(state, me, "semop", wait, loc, timed, EAGAIN) {

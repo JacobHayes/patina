@@ -94,7 +94,14 @@ pub use replay::Replayer;
 /// - 20: the required [`RunMetadata::cpus`], the virtual machine's CPU count.
 ///   Earlier formats ran guests on one virtual CPU and recorded no count, so
 ///   they are refused rather than replayed on a machine the guest never saw.
-pub const TRACE_FORMAT_VERSION: u32 = 20;
+/// - 21: no field changes, but the native shim's own steps inside a guest
+///   call record nothing: the path walk's lookups (each component's
+///   metadata, a symlink's target, the base directory's path), which the
+///   call's own operation alone is recorded for (`stat` records its own
+///   `fs_metadata`), and the cursor reads of `FIONREAD`, a `SEEK_CUR` lock
+///   and a file transfer. Format 20 traces would replay with operations the
+///   replay never asks for, so they are refused.
+pub const TRACE_FORMAT_VERSION: u32 = 21;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

@@ -1,15 +1,7 @@
-//! Filesystem metadata, ownership, allocation, and directory iteration.
+//! Filesystem metadata, ownership and allocation.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-use patina_dst_abi::FsDirectoryEntry;
-
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-struct ReadDirState {
-    entries: Vec<FsDirectoryEntry>,
-    position: usize,
-}
 
 /// The `PATINA_ENTRY_*` wire values (`include/patina_native.h`). The C side ORs
 /// the corresponding `S_IF*` bit onto the entry's permission bits.
@@ -321,13 +313,13 @@ pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-/// Read the metadata of the entry `(dirfd, path)` resolves to: the one entry
-/// behind `stat`, `lstat`, `fstatat`, `statx`, `access`, `statfs` and every
-/// other by-path metadata read on both doors. `flags` are `PATINA_RESOLVE_*`:
-/// `NOFOLLOW` names a trailing symlink itself (`lstat`, `AT_SYMLINK_NOFOLLOW`),
-/// `EMPTY_PATH` lets an empty path name the base (`AT_EMPTY_PATH` on
-/// `AT_FDCWD` is the working directory). Symlinks are walked to the kernel's
-/// 40-hop limit. A missing entry is `ENOENT`.
+/// Read the metadata of the entry `(dirfd, path)` resolves to: the guest's
+/// own `stat`, the one entry behind `stat`, `lstat`, `fstatat`, `statx`,
+/// `access` and every other by-path metadata read on both doors. `flags` are
+/// `PATINA_RESOLVE_*`: `NOFOLLOW` names a trailing symlink itself (`lstat`,
+/// `AT_SYMLINK_NOFOLLOW`), `EMPTY_PATH` lets an empty path name the base
+/// (`AT_EMPTY_PATH` on `AT_FDCWD` is the working directory). Symlinks are
+/// walked to the kernel's 40-hop limit. A missing entry is `ENOENT`.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `out` to a
@@ -339,6 +331,35 @@ pub unsafe extern "C" fn patina_metadata_at(
     out: *mut PatinaMetadata,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: per this function's contract.
+    unsafe { metadata_at(dirfd, path, flags, out, MetadataLookup::Fstat) }
+}
+
+/// The guest's `stat` of the canonical `path` the walk resolved: a recorded
+/// filesystem operation, charged latency and fault-eligible. It takes no
+/// scheduling point: the walk took the call's, so no other task can change
+/// what `path` names between the walk and this read.
+#[expect(clippy::disallowed_methods, reason = "the guest's own stat(2)")]
+fn guest_stat(path: &str) -> Result<patina_dst_abi::FsMetadata, c_int> {
+    with_context_raw(|context| context.fs_metadata(path))
+}
+
+/// [`patina_metadata_at`] read as `lookup`. The path walk's lookups are the
+/// kernel's own (no fault, latency or trace op). [`MetadataLookup::Fstat`]
+/// then reads the entry it found as the guest's `stat`, the one recorded,
+/// faultable operation of the call. [`MetadataLookup::Inode`] answers from
+/// the walk alone, as the kernel reads the in-memory inode namei found
+/// (`name_to_handle_at` by path).
+///
+/// # Safety
+/// As [`patina_metadata_at`].
+pub(crate) unsafe fn metadata_at(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    out: *mut PatinaMetadata,
+    lookup: MetadataLookup,
+) -> c_int {
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
@@ -358,16 +379,31 @@ pub unsafe extern "C" fn patina_metadata_at(
         }
         Err(errno) => return fail(errno),
     };
-    let Some(metadata) = resolved.metadata else {
-        return fail(ENOENT);
+    // What a mapped file's views stored is written back first, so the answer
+    // counts it: whether it was, after which the walk's metadata is stale.
+    let write_back = || {
+        resolved
+            .metadata
+            .is_some_and(|found| found.kind == FsEntryKind::File && mem::inspecting_ino(found.ino))
     };
-    if metadata.kind == FsEntryKind::File && mem::inspecting_ino(metadata.ino) {
-        return match with_context(|context| context.fs_inode_metadata(metadata.ino)) {
-            Ok(metadata) => write_metadata(metadata, out),
-            Err(errno) => fail(errno),
-        };
+    let metadata = match lookup {
+        MetadataLookup::Fstat => {
+            write_back();
+            guest_stat(&resolved.path)
+        }
+        #[cfg(target_os = "linux")]
+        MetadataLookup::Inode => match resolved.metadata {
+            None => Err(ENOENT),
+            Some(_) if write_back() => {
+                with_context_raw(|context| context.fs_metadata_unrecorded(&resolved.path))
+            }
+            Some(found) => Ok(found),
+        },
+    };
+    match metadata {
+        Ok(metadata) => write_metadata(metadata, out),
+        Err(errno) => fail(errno),
     }
-    write_metadata(metadata, out)
 }
 
 #[unsafe(no_mangle)]
@@ -556,6 +592,10 @@ pub(crate) enum MetadataLookup {
 }
 
 impl MetadataLookup {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Fstat is the guest's own fstat(2); Inode reads unrecorded"
+    )]
     fn of_fd(
         self,
         context: &mut Context,
@@ -568,6 +608,10 @@ impl MetadataLookup {
         }
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Fstat is the guest's own fstat(2) of a FIFO endpoint's node; Inode reads unrecorded"
+    )]
     fn of_inode(
         self,
         context: &mut Context,
@@ -1337,104 +1381,6 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
             0
         }
         Err(errno) => fail(errno),
-    }
-}
-
-/// Capture a directory snapshot and return the owned snapshot pointer.
-///
-/// # Safety
-/// `state_out` must be writable.
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) unsafe fn read_dir(
-    raw_fd: c_int,
-    state_out: *mut *mut c_void,
-) -> crate::abi::SysResult<()> {
-    if state_out.is_null() {
-        return Err(crate::abi::failed(EINVAL));
-    }
-    let fd = match fs_handle(raw_fd) {
-        Ok(fd) => fd,
-        Err(errno) => return Err(crate::abi::failed(errno)),
-    };
-    match with_context(|context| context.fs_read_directory_fd(fd)) {
-        Ok(listed) => {
-            let state = Box::new(ReadDirState {
-                entries: listed,
-                position: 0,
-            });
-            // SAFETY: `state_out` was checked and is required to be writable.
-            unsafe { state_out.write(Box::into_raw(state).cast()) };
-            set_errno(0);
-            Ok(())
-        }
-        Err(errno) => Err(crate::abi::failed(errno)),
-    }
-}
-
-/// A getdents on directory descriptor `raw_fd` reached `iterate_dir`: the
-/// directory's watches see `IN_ACCESS` unless it is dead, whatever the call
-/// then answers.
-#[cfg(target_os = "linux")]
-pub(crate) fn dir_accessed(raw_fd: c_int) {
-    if let Ok(resolved) = resolve_fd(raw_fd)
-        && resolved.kind == FdKind::Dir
-    {
-        fsnotify::dir_read(Fd(resolved.handle));
-    }
-}
-
-/// Copy the next entry from a captured directory snapshot.
-///
-/// # Safety
-/// `state` must be a snapshot returned by [`read_dir`], `name_buf` must be
-/// writable for `buf_len` bytes, and `kind` and `ino` must be writable.
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) unsafe fn read_dir_next(
-    state: *mut c_void,
-    name_buf: *mut c_char,
-    buf_len: usize,
-    kind: *mut u32,
-    ino: *mut u64,
-) -> crate::abi::SysResult<c_int> {
-    if state.is_null() || kind.is_null() || ino.is_null() || (buf_len != 0 && name_buf.is_null()) {
-        return Err(crate::abi::failed(EINVAL));
-    }
-    // SAFETY: Guaranteed by this function's C ABI contract.
-    let state = unsafe { &mut *state.cast::<ReadDirState>() };
-    let Some(entry) = state.entries.get(state.position) else {
-        set_errno(0);
-        return Ok(0);
-    };
-    let bytes = entry.name.as_bytes();
-    if bytes
-        .len()
-        .checked_add(1)
-        .is_none_or(|needed| needed > buf_len)
-    {
-        return Err(crate::abi::failed(EINVAL));
-    }
-    // SAFETY: The destination buffer has room for the bytes plus a NUL.
-    unsafe {
-        let destination = slice::from_raw_parts_mut(name_buf.cast::<u8>(), buf_len);
-        destination[..bytes.len()].copy_from_slice(bytes);
-        destination[bytes.len()] = 0;
-        kind.write(metadata_kind(entry.kind));
-        ino.write(entry.ino);
-    }
-    state.position += 1;
-    set_errno(0);
-    Ok(1)
-}
-
-/// Free a snapshot produced by [`read_dir`].
-///
-/// # Safety
-/// `state` must be null or a live, not-yet-freed pointer returned by [`read_dir`].
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) unsafe fn free_dir(state: *mut c_void) {
-    if !state.is_null() {
-        // SAFETY: Guaranteed by this function's C ABI contract.
-        drop(unsafe { Box::from_raw(state.cast::<ReadDirState>()) });
     }
 }
 

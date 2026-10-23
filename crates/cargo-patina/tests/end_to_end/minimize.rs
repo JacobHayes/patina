@@ -772,7 +772,7 @@ fn main() {
                 "--gens",
                 "1",
                 "--seed-start",
-                "2",
+                "5",
                 "--faults",
                 "--out-dir",
                 out.to_str().unwrap(),

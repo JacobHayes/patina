@@ -370,9 +370,7 @@ pub(crate) unsafe fn mq_unlink(name: *const c_char) -> i64 {
 pub(super) fn passed(deadline: Option<u64>) -> Result<bool, c_int> {
     match deadline {
         None => Ok(false),
-        Some(at) => {
-            with_context_raw(|context| context.now(ClockKind::Realtime)).map(|now| now >= at)
-        }
+        Some(at) => crate::thread::wait_clock(ClockKind::Realtime).map(|now| now >= at),
     }
 }
 

@@ -455,7 +455,7 @@ pub unsafe extern "C" fn patina_cond_timedwait(
     let mut scheduler = RealScheduler;
     let clock = state.table.cond_clock(cond_key);
     let past = with_context_raw(|context| {
-        let due = context.monotonic_deadline(clock, deadline)?;
+        let due = super::wait_deadline(context, clock, deadline)?;
         Ok(due <= context.monotonic_now_unrecorded()?)
     });
     match past {

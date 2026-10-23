@@ -758,12 +758,21 @@ pub(crate) fn with_context_msg<T>(
 pub(crate) fn with_context<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
-    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
-    ensure_runtime()?;
-    thread::sched_point()?;
+    boundary_point()?;
     // The scheduling point showed the time the thread's calls carried, so
     // the door observes their cost.
     with_context_raw(invoke)
+}
+
+/// A boundary call's scheduling point, taken on its own: before a step
+/// that must find a node and act on it with no other task running between
+/// (a path walk and the call's operation on the node it found, a directory
+/// descriptor's resolution and its read), which then go through
+/// [`with_context_raw`].
+pub(crate) fn boundary_point() -> Result<(), c_int> {
+    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    ensure_runtime()?;
+    thread::sched_point()
 }
 
 /// The instant the deterministic filesystem would stamp an entry with now, for
@@ -778,6 +787,11 @@ pub(crate) fn fs_time_unrecorded() -> u64 {
         .unwrap_or(0)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the control plane's one host-environment read, for a direct C-ABI user, whose \
+              Rust-only library defines no getenv door; never reached after the startup constructor"
+)]
 pub(crate) fn control_env(name: &str) -> Option<String> {
     if let Some(value) = control_plane().lock().get(name).cloned() {
         return Some(value);

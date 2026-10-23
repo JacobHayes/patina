@@ -613,6 +613,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.metadata_unfaulted(path)
     }
 
+    fn read_link_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.inner.read_link_unfaulted(clock, path)
+    }
+
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
         self.inner.fd_metadata_unfaulted(fd)
     }

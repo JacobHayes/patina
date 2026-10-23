@@ -27,14 +27,14 @@ mod tests {
         let trace2 = directory.path().join("eio2.patina");
         // The seeds pick a fault schedule whose first injected error lands on the
         // operation under test (the read / the write), not on the setup write or
-        // the open before it; the schedule is a function of the whole operation
-        // stream, which the resolver's per-path metadata lookups are part of.
+        // the open before it; the schedule is a function of the guest's own
+        // filesystem operations (the path walk's lookups draw nothing).
         let eio_args = |trace: &Path| {
             vec![
                 "run".to_string(),
                 bin.clone(),
                 "--seed".to_string(),
-                "58".to_string(),
+                "70".to_string(),
                 "--record".to_string(),
                 trace.to_str().unwrap().to_string(),
                 "--fs-error-permille".to_string(),
@@ -84,7 +84,7 @@ mod tests {
                 "run",
                 &bin,
                 "--seed",
-                "60",
+                "29",
                 "--fs-error-permille",
                 "100",
                 "--",

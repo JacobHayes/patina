@@ -5,6 +5,11 @@ use common::native::*;
 
 #[path = "native_workloads/cpus.rs"]
 mod cpus;
+#[path = "native_workloads/fs_faults.rs"]
+mod fs_faults;
+#[cfg(target_os = "linux")]
+#[path = "native_workloads/path_races.rs"]
+mod path_races;
 
 /// Class detector: call-free code with a runnable peer is a named terminal
 /// limit, while identical compute with no runnable peer must complete.
@@ -912,96 +917,6 @@ empty_nonblocking={eagain} insecure=16 hashmap=1 getentropy=0 nonblocking_after=
     assert_eq!(entropy["failures_injected"], 3, "{reports}");
     assert_eq!(entropy["vacuous"], false, "{reports}");
     g.assert_seeded_record_replay_identity(1, &["--entropy-fail-permille", "1000"]);
-}
-
-/// A mapped file's page cache is the whole file whatever the filesystem faults
-/// do to the guest's own I/O: it is sized from the file's size and filled by a
-/// read no fault reaches. So every page of a `MAP_SHARED` view is backed and
-/// holds the file's bytes, `mmap` answers no injected errno, and the reload
-/// after an in-process crash is whole too. RED before: a short injected read
-/// sized the page cache to the bytes it returned, so the first store past them
-/// was `SIGBUS`, and an injected error failed `mmap` with `EIO`. Class pairing:
-/// the shim's `clippy.toml` keeps the faulted content reads out of everything
-/// but the guest's own read funnels.
-#[test]
-fn a_mapped_file_is_whole_under_filesystem_faults() {
-    let g = Guest::assert_build("mmap_short_read_probe.rs");
-    for mode in [&[][..], &["--env", "MMAP_SHORT_READ_MODE=crash"]] {
-        for faults in [
-            ["--fs-short-permille", "1000"],
-            ["--fs-error-permille", "500"],
-        ] {
-            let flags = [&faults[..], mode].concat();
-            let out = g.assert_seeded_record_replay_identity(1, &flags);
-            assert_eq!(
-                assert_unique_line_payload(&out, "NATIVE_MMAP_SHORT_READ "),
-                "pages_written=64",
-                "{flags:?}"
-            );
-        }
-    }
-}
-
-/// What `inode_read_fault_probe.rs` prints for each call Linux answers from
-/// in-memory inode and file state: a 4096-byte file read from offset 1000, and
-/// every other call succeeding (`copy_file_range` copies nothing from the end
-/// of its source and refuses an overlap within one file).
-#[cfg(target_os = "linux")]
-const INODE_READ_ANSWERS: [(&str, &str); 9] = [
-    ("fionread", "3096"),
-    ("fioqsize", "4096"),
-    ("lock_end", "0"),
-    ("fchdir", "0"),
-    ("copy_file_range", "at_end=0 overlap=EINVAL"),
-    ("name_to_handle_at", "0"),
-    ("utimensat_fd", "0"),
-    ("fchown_file", "0"),
-    ("fchown_fifo", "0"),
-];
-
-/// A call the kernel answers from the in-memory inode gets Linux's answer
-/// under filesystem faults, and the shim's inode read inside it draws no
-/// fault. The probe never calls `fstat` itself, so a run whose fault report
-/// attributes an injected error to `fd_metadata` has a shim step that read
-/// the inode through the guest's `fstat`. That attribution is what judges
-/// `utimensat` and `fchown`, whose own attribute write can fail and is
-/// retried. Each call runs alone so a failure names its site; the whole probe
-/// then repeats and replays under the same faults. RED before: each site read
-/// the inode through the faulted `fstat`, so the calls that do no I/O failed
-/// with `EIO` and every site drew `fd_metadata` faults.
-#[cfg(target_os = "linux")]
-#[test]
-fn in_memory_inode_reads_answer_under_filesystem_faults() {
-    let g = Guest::assert_build("inode_read_fault_probe.rs");
-    let faults = ["--fs-error-permille", "500", "--fs-short-permille", "1000"];
-    for (site, expected) in INODE_READ_ANSWERS {
-        let env = format!("INODE_READ_SITE={site}");
-        let run = ["--seed", "1", "--env", &env, "--format", "json"];
-        let output = g.command("run", &[&faults[..], &run].concat());
-        assert!(
-            output.status.success(),
-            "{site}: {}: {}{}",
-            output.status,
-            text(&output.stdout),
-            text(&output.stderr)
-        );
-        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let stdout = envelope["stdout"].as_str().unwrap();
-        let prefix = format!("NATIVE_INODE_READ {site} ");
-        assert_eq!(
-            assert_unique_line_payload(stdout.as_bytes(), &prefix),
-            expected,
-            "{site}"
-        );
-        let errors = &envelope["fault_reports"]["fs"]["errors_by_op"];
-        assert!(errors.is_object(), "{site}: {envelope:#}");
-        assert_eq!(errors.get("fd_metadata"), None, "{site}: {errors}");
-    }
-    let out = g.assert_seeded_record_replay_identity(1, &faults);
-    for (site, expected) in INODE_READ_ANSWERS {
-        let prefix = format!("NATIVE_INODE_READ {site} ");
-        assert_eq!(assert_unique_line_payload(&out, &prefix), expected);
-    }
 }
 
 /// The libc entropy surface answers as the host's own libc does, the native

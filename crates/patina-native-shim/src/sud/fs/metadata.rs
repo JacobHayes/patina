@@ -139,16 +139,37 @@ fn fd_values(fd: c_int, lookup: crate::fs::MetadataLookup) -> Result<StatValues,
 }
 
 /// The metadata of what `(dirfd, path)` resolves to, through the one by-path
-/// metadata entry the C stat family calls (`flags` are `PATINA_RESOLVE_*`).
+/// metadata entry the C stat family calls (`flags` are `PATINA_RESOLVE_*`):
+/// the guest's `stat`.
 pub(in crate::sud) fn path_stat_values(
     dirfd: i64,
     path: u64,
     flags: u32,
 ) -> Result<StatValues, i64> {
+    path_values(dirfd, path, flags, crate::fs::MetadataLookup::Fstat)
+}
+
+/// What `(dirfd, path)` resolves to, as the kernel reads the in-memory inode
+/// the path walk found inside another call: never faulted, and nothing
+/// recorded.
+pub(in crate::sud) fn path_inode_values(
+    dirfd: i64,
+    path: u64,
+    flags: u32,
+) -> Result<StatValues, i64> {
+    path_values(dirfd, path, flags, crate::fs::MetadataLookup::Inode)
+}
+
+fn path_values(
+    dirfd: i64,
+    path: u64,
+    flags: u32,
+    lookup: crate::fs::MetadataLookup,
+) -> Result<StatValues, i64> {
     let path = guest_path(path)?;
     let mut v = empty_metadata();
     // SAFETY: `path` is a valid guest C string; the out-pointer is local storage.
-    let rc = unsafe { crate::fs::patina_metadata_at(dirfd as c_int, path, flags, &mut v) };
+    let rc = unsafe { crate::fs::metadata_at(dirfd as c_int, path, flags, &mut v, lookup) };
     if rc != 0 {
         return Err(-(crate::environment::patina_errno() as i64));
     }

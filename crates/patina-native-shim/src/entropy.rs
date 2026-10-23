@@ -40,6 +40,10 @@ pub(crate) unsafe fn fill(
     let mut written = 0;
     loop {
         let chunk = (length - written).min(ENTROPY_CHUNK);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the guest's own entropy request (getrandom, getentropy, a /dev/urandom read)"
+        )]
         let bytes = with_context(|context| context.entropy_bytes(chunk, wait)).map_err(failed)?;
         let landed = write_prefix(start.wrapping_add(written), &bytes);
         written += landed;

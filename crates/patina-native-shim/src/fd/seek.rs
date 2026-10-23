@@ -24,6 +24,7 @@ pub extern "C" fn patina_seek(raw_fd: c_int, offset: i64, whence: u32) -> i64 {
     seek(raw_fd, offset, whence).unwrap_or(-1)
 }
 
+#[expect(clippy::disallowed_methods, reason = "the guest's own lseek(2)")]
 pub(crate) fn seek(raw_fd: c_int, offset: i64, whence: u32) -> crate::abi::SysResult<i64> {
     let handle = match resolve_fd(raw_fd) {
         #[cfg(target_os = "linux")]

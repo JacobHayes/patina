@@ -87,7 +87,7 @@ impl PrctlState {
     }
 }
 
-static PRCTL_STATE: Mutex<PrctlState> = Mutex::new(PrctlState::new());
+static PRCTL_STATE: crate::SpinMutex<PrctlState> = crate::SpinMutex::new(PrctlState::new());
 
 /// The threads that set `no_new_privs`, by thread id. The kernel keeps it
 /// per task (`PFA_NO_NEW_PRIVS`), a new thread copies its creator's
@@ -259,7 +259,7 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
         _ => {}
     }
 
-    let mut state = PRCTL_STATE.lock().unwrap();
+    let mut state = PRCTL_STATE.lock();
     match option {
         PR_SET_VMA => 0,
         PR_SET_THP_DISABLE if arg3 != 0 || arg4 != 0 || arg5 != 0 => -EINVAL,
@@ -400,9 +400,9 @@ mod tests {
     use super::*;
 
     fn reset_prctl_state() -> std::sync::MutexGuard<'static, ()> {
-        static SERIAL: Mutex<()> = Mutex::new(());
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let guard = SERIAL.lock().unwrap();
-        *PRCTL_STATE.lock().unwrap() = PrctlState::new();
+        *PRCTL_STATE.lock() = PrctlState::new();
         NO_NEW_PRIVS.lock().clear();
         guard
     }

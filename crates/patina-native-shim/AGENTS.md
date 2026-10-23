@@ -9,6 +9,21 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   not public interposable symbols. The guest and shim may use the same native
   primitive only when the shim reaches the real host entry through the alias
   table and guest calls still bind to the interposer.
+- Shim code takes no guest-facing effect of its own. The guest archive is one
+  object that defines the interposers, so a shim call of a libc name it defines
+  (or a std API that lowers to one: `std::env::var`, `Instant::now`,
+  `eprintln!`, `std::sync::Mutex`) binds to its own door, and no undefined-symbol
+  scan sees it. A kernel-internal step inside a guest call (an inode, cursor or
+  size read, a path walk lookup) uses the unrecorded, unfaulted `Context`
+  variant, never the guest's recorded, faulted query. The crate's `clippy.toml`
+  refuses both kinds of spelling; a true guest funnel says so with an
+  `#[expect(clippy::disallowed_methods, reason = ...)]` naming the call, and the
+  kernel's timeout clock reads go through `thread::wait_clock` and
+  `thread::wait_deadline`. A step that finds a node and acts on it (a path
+  walk and `stat`'s read, a directory descriptor and its read) takes its
+  scheduling point first (`boundary_point`; `paths::resolve` takes it
+  on every answer, an early refusal and a virtual entry too) and then runs
+  through `with_context_raw`, so no other task changes the node in between.
 - A shared symbol allowance is not a fix. If a host effect escapes, first add or
   harden detection so the class fails loudly, then model, interpose, or deny-trap
   the specific surface.

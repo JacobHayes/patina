@@ -483,6 +483,10 @@ impl FsDriver for CrashFs {
         self.live.metadata_unfaulted(path)
     }
 
+    fn read_link_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.live.read_link_unfaulted(clock, path)
+    }
+
     fn fd_metadata_unfaulted(&mut self, fd: Fd) -> DriverResult<FsMetadata> {
         self.live.fd_metadata_unfaulted(fd)
     }

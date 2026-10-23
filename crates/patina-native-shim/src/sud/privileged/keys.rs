@@ -64,7 +64,7 @@ use crate::registry::{Capability, KERNEL_CONFIG};
 use linux_raw_sys::errno;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_int;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 /// The first serial the model hands out.
 const FIRST_SERIAL: i32 = 0x1000_0000;
@@ -302,7 +302,8 @@ struct Keys {
 /// Where the model ends at a keyring its last thread left.
 const COLLECTING: &str = "key collection after the last process-keyring credential reference (the collector frees keys and links at a time the model does not know)";
 
-static KEYS: LazyLock<Mutex<Keys>> = LazyLock::new(|| Mutex::new(Keys::new()));
+static KEYS: LazyLock<crate::SpinMutex<Keys>> =
+    LazyLock::new(|| crate::SpinMutex::new(Keys::new()));
 
 /// The guest's string at `address` as `strncpy_from_user` into `max` bytes
 /// reads it: `EFAULT` for a byte before its NUL that cannot be read, `None`

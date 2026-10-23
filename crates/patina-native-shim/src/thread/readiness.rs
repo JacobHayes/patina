@@ -47,7 +47,7 @@ fn poll_sources(
     }
     let update_remaining = |deadline: Option<u64>, remaining: &mut Option<&mut u64>| {
         if let (Some(deadline), Some(out)) = (deadline, remaining.as_deref_mut()) {
-            let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
+            let now = super::wait_clock(ClockKind::Monotonic)
                 .unwrap_or_else(|_| fatal("readiness wait clock read failed"));
             *out = deadline.saturating_sub(now);
         }
@@ -94,12 +94,12 @@ fn poll_sources(
         if deadline.is_none()
             && let Some(timeout) = timeout
         {
-            let now = with_context_raw(|context| context.now(ClockKind::Monotonic))
+            let now = super::wait_clock(ClockKind::Monotonic)
                 .unwrap_or_else(|_| fatal("readiness wait clock read failed"));
             deadline = Some(now.saturating_add(timeout));
         }
         if deadline.is_some_and(|deadline| {
-            with_context_raw(|context| context.now(ClockKind::Monotonic))
+            super::wait_clock(ClockKind::Monotonic)
                 .unwrap_or_else(|_| fatal("readiness wait clock read failed"))
                 >= deadline
         }) {

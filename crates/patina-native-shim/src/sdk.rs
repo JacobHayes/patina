@@ -450,6 +450,10 @@ unsafe fn custom_op_bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 
 #[unsafe(no_mangle)]
 /// `patina_dst::rng()`: a deterministic 64-bit draw bridged to the root seed.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guest's own patina_dst::rng() draw"
+)]
 pub extern "C" fn patina_rng() -> u64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     with_context(|context| Ok(context.buggify_rng())).unwrap_or(0)

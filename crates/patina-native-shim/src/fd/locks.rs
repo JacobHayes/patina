@@ -162,7 +162,7 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
         1 | 2 if !resolved.kind.is_fs() => 0,
         1 => {
             let handle = Fd(resolved.handle);
-            let position = with_context(|context| context.fs_seek(handle, 0, SeekWhence::Current))?;
+            let position = with_context(|context| context.fs_cursor_unrecorded(handle))?;
             i64::try_from(position).map_err(|_| EOVERFLOW)?
         }
         2 => {

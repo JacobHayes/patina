@@ -15,6 +15,19 @@
 //!
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
 
+// The crate's `clippy.toml` refuses calls that bind to the shim's own doors or
+// take a guest-facing effect. Unit tests are ordinary host test binaries that
+// define no door, so their std and libc calls reach the host.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "unit tests run on the host, outside every shim door"
+    )
+)]
+
 // Enabled only on the guest archive, never the runner's dependency rlib.
 #[cfg(patina_posix_exports)]
 mod posix;

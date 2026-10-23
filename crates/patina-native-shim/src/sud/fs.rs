@@ -48,7 +48,8 @@ pub(super) struct DirRecord {
 
 /// Live `getdents64` snapshots, keyed by the runtime directory fd. Only fds the
 /// runtime's own directory table already knows ever appear here.
-pub(super) static DIR_ITERATIONS: Mutex<BTreeMap<i32, DirIteration>> = Mutex::new(BTreeMap::new());
+pub(super) static DIR_ITERATIONS: crate::SpinMutex<BTreeMap<i32, DirIteration>> =
+    crate::SpinMutex::new(BTreeMap::new());
 
 /// What `fd` names, per the descriptor table shared with the C interposers:
 /// `None` for a number that names nothing (or cannot be a number at all).
@@ -319,7 +320,7 @@ pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
 /// but closed through *libc* still releases its snapshot — the two entry paths
 /// share the descriptor, so they must share its teardown.
 pub(crate) fn release_dir_iteration(fd: c_int) {
-    if let Some(iteration) = DIR_ITERATIONS.lock().unwrap().remove(&fd) {
+    if let Some(iteration) = DIR_ITERATIONS.lock().remove(&fd) {
         // SAFETY: `snapshot` is null or the live `read_dir` box for this fd.
         unsafe { crate::fs::free_dir(iteration.snapshot as *mut c_void) };
     }
@@ -333,7 +334,7 @@ pub(crate) fn release_dir_iteration(fd: c_int) {
 /// `d_off` cookie resumes from, and what `lseek(fd, 0, SEEK_SET)` (rustix
 /// `Dir::rewind`) rewinds to.
 pub(crate) fn seek_dir_iteration(fd: c_int, offset: i64, whence: u32) -> Option<u64> {
-    let mut map = DIR_ITERATIONS.lock().unwrap();
+    let mut map = DIR_ITERATIONS.lock();
     let position = map.get(&fd).map_or(0, |dir| dir.position);
     let target = match whence {
         uapi::SEEK_SET => offset,
@@ -373,8 +374,8 @@ pub(super) use dirents::{DirentFormat, getdents};
 pub(super) use metadata::STAT_AT_FLAGS;
 use metadata::STATX_MNT_ID_VALUE;
 pub(super) use metadata::{
-    fd_inode_values, path_stat_values, sys_fstat, sys_fstatfs, sys_newfstatat, sys_statfs,
-    sys_statx,
+    fd_inode_values, path_inode_values, path_stat_values, sys_fstat, sys_fstatfs, sys_newfstatat,
+    sys_statfs, sys_statx,
 };
 pub(super) use namespace::{
     sys_faccessat, sys_fchmod, sys_fchmodat, sys_linkat, sys_mkdirat, sys_mknodat, sys_readlinkat,

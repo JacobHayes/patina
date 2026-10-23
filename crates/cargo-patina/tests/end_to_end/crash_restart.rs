@@ -556,7 +556,7 @@ fn main() {
         let trace = directory.path().join("crash-restart.patina");
         record_crash_restart_canary(&bin, &trace);
 
-        // Alter the outcome of incarnation 1's first operation (its look-up of
+        // Alter the outcome of incarnation 1's first operation (its open of
         // `/pid0`); only a replay of incarnation 1's own segment can notice. The
         // diverged operation fails in the guest and the runtime reports the
         // unconsumed remainder of the segment.
@@ -567,8 +567,8 @@ fn main() {
                 .iter_mut()
                 .find(|event| event["incarnation"] == 1)
                 .expect("incarnation 1 recorded operations");
-            let len = &mut first_restarted["outcome"]["value"]["len"];
-            *len = (len.as_u64().expect("a metadata outcome") + 1).into();
+            let handle = &mut first_restarted["outcome"]["value"];
+            *handle = (handle.as_u64().expect("a handle outcome") + 1).into();
         });
         let replayed = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),

@@ -10,12 +10,12 @@ fn caller_tid() -> c_int {
 /// A new thread `child` of `parent` shares its creator's process keyring
 /// (`copy_creds`).
 pub(in crate::sud) fn keyring_spawned(parent: c_int, child: c_int) {
-    KEYS.lock().unwrap().spawned(parent, child);
+    KEYS.lock().spawned(parent, child);
 }
 
 /// Thread `tid` exited, with its reference to its process keyring.
 pub(in crate::sud) fn keyring_exited(tid: c_int) {
-    KEYS.lock().unwrap().exited(tid);
+    KEYS.lock().exited(tid);
 }
 
 /// `add_key(type, description, payload, plen, ringid)`.
@@ -43,7 +43,7 @@ fn add_key_at(credential: &Credential, tid: c_int, a: &[u64; 6], now: u64) -> Re
     } else {
         Vec::new()
     };
-    let mut keys = KEYS.lock().unwrap();
+    let mut keys = KEYS.lock();
     keys.collect(now)?;
     let (ring, _) = keys.lookup(credential, tid, a[4] as i32, true, Some(NEED_WRITE))?;
     let keyring_type = match key_type(&type_name) {
@@ -94,7 +94,7 @@ fn request_key_at(
     } else {
         None
     };
-    let mut keys = KEYS.lock().unwrap();
+    let mut keys = KEYS.lock();
     keys.collect(now)?;
     let destination = match a[3] as i32 {
         0 => None,
@@ -165,13 +165,13 @@ pub(super) fn keyctl_at(
                     errno::EPERM.into()
                 });
             }
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (ring, _) = keys.lookup(credential, tid, a[2] as i32, true, Some(NEED_WRITE))?;
             keys.persistent(credential, ring, now)
         }
         KEYCTL_LINK => {
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (ring, _) = keys.lookup(credential, tid, a[2] as i32, true, Some(NEED_WRITE))?;
             let (serial, _) = keys.lookup(credential, tid, id, true, Some(NEED_LINK))?;
@@ -181,7 +181,7 @@ pub(super) fn keyctl_at(
         KEYCTL_SEARCH => {
             let kind = type_from_user(a[2])?;
             let description = guest_strndup(a[3], KEY_MAX_DESC_SIZE)?;
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (ring, possessed) = keys.lookup(credential, tid, id, false, Some(NEED_SEARCH))?;
             if a[4] as i32 != 0 {
@@ -196,7 +196,7 @@ pub(super) fn keyctl_at(
                 .map(i64::from)
         }
         KEYCTL_INVALIDATE => {
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (serial, _) = match keys.lookup(credential, tid, id, false, Some(NEED_SEARCH)) {
                 Err(Stop::Refuse(_)) if credential.capable(Capability::SysAdmin) => {
@@ -207,7 +207,7 @@ pub(super) fn keyctl_at(
             keys.invalidate(serial).map(|()| 0)
         }
         KEYCTL_GET_KEYRING_ID => {
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             keys.lookup(credential, tid, id, a[2] as i32 != 0, Some(NEED_SEARCH))
                 .map(|(serial, _)| i64::from(serial))
@@ -222,7 +222,7 @@ pub(super) fn keyctl_at(
             } else {
                 Vec::new()
             };
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (serial, _) = keys.lookup(credential, tid, id, false, Some(NEED_WRITE))?;
             if !matches!(keys.keys[&serial].payload, Payload::User(_)) {
@@ -234,7 +234,7 @@ pub(super) fn keyctl_at(
             keys.update(serial, data).map(|()| 0)
         }
         KEYCTL_REVOKE => {
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             // Write permission, or failing that, setattr.
             let (serial, _) = match keys.lookup(credential, tid, id, false, Some(NEED_WRITE)) {
@@ -253,7 +253,7 @@ pub(super) fn keyctl_at(
         }
         KEYCTL_CHOWN => chown(credential, tid, id, a[2] as u32, a[3] as u32, now),
         KEYCTL_DESCRIBE => {
-            let mut keys = KEYS.lock().unwrap();
+            let mut keys = KEYS.lock();
             keys.collect(now)?;
             let (serial, _) = keys.lookup(credential, tid, id, false, Some(NEED_VIEW))?;
             let key = &keys.keys[&serial];
@@ -304,7 +304,7 @@ pub(super) fn chown(
     if uid == UNCHANGED && gid == UNCHANGED {
         return Ok(0);
     }
-    let mut keys = KEYS.lock().unwrap();
+    let mut keys = KEYS.lock();
     keys.collect(now)?;
     let (serial, _) = keys.lookup(credential, tid, id, true, Some(NEED_SETATTR))?;
     let key = keys.keys.get_mut(&serial).unwrap();
@@ -337,7 +337,7 @@ pub(super) fn read(
     length: usize,
     now: u64,
 ) -> Result<i64, Stop> {
-    let mut keys = KEYS.lock().unwrap();
+    let mut keys = KEYS.lock();
     keys.collect(now)?;
     let (serial, possessed) = keys
         .lookup(credential, tid, id, false, None)

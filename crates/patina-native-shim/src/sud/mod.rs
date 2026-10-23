@@ -372,8 +372,6 @@ fn with_dispatch_guard<F: FnOnce() -> i64>(nr: i64, body: F) -> i64 {
 
 use std::collections::BTreeMap;
 
-use std::sync::Mutex;
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::registry::Syscall;

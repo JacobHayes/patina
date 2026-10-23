@@ -188,7 +188,7 @@ fn wait_on(
             }
         }
         if let Some((clock, at)) = deadline {
-            match with_context_raw(|context| context.now(clock)) {
+            match super::wait_clock(clock) {
                 Ok(now) if now >= at => return fail(ETIMEDOUT),
                 Ok(_) => {}
                 Err(code) => return -i64::from(code),

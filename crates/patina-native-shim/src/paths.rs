@@ -35,8 +35,8 @@ use patina_dst_runtime::{Context, RuntimeError};
 
 use crate::fdtable::FdKind;
 use crate::{
-    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, resolve_fd,
-    with_context, with_context_bookkeeping,
+    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, mark_boundary,
+    resolve_fd, with_context, with_context_bookkeeping, with_context_raw,
 };
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
@@ -236,11 +236,25 @@ fn cwd_handle() -> Result<Fd, c_int> {
     Ok(fd)
 }
 
-/// Where the working directory's node is NOW. `ENOENT` once its last name is
-/// gone, exactly as `getcwd(2)` answers for an unlinked directory.
+/// Where the working directory's node is NOW, as `getcwd(2)` asks: its own
+/// recorded operation. `ENOENT` once its last name is gone, exactly as
+/// `getcwd(2)` answers for an unlinked directory.
 pub(crate) fn cwd_path() -> Result<String, c_int> {
     let fd = cwd_handle()?;
     with_context(|context| context.fs_fd_path(fd))
+}
+
+/// One lookup of the path walk. The walk is the kernel's own (namei) inside
+/// the call that resolves a path, so a lookup takes no scheduling point, no
+/// fault, no latency and no trace op: only the call's own operation does,
+/// and an injected error or a delay is never the walk's. Each lookup is a
+/// pure function of the filesystem the driver rebuilds on replay. The call
+/// is a boundary call, and the runtime is installed first, as its own
+/// gateway would.
+fn namei<T>(lookup: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Result<T, c_int> {
+    mark_boundary();
+    ensure_runtime()?;
+    with_context_raw(lookup)
 }
 
 fn replace_cwd(new: Fd) -> Result<(), c_int> {
@@ -340,7 +354,7 @@ pub(crate) fn install_cwd(context: &mut Context) -> Result<(), RuntimeError> {
 /// The metadata of `path`, or `None` when it does not exist. Every other error
 /// (a search refusal, a non-directory prefix) is the caller's to report.
 fn metadata(path: &str) -> Result<Option<FsMetadata>, c_int> {
-    match with_context(|context| context.fs_metadata(path)) {
+    match namei(|context| context.fs_metadata_unrecorded(path)) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(errno) if errno == ENOENT => Ok(None),
         Err(errno) => Err(errno),
@@ -438,7 +452,7 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return Err(ENOTDIR),
     };
-    with_context(|context| context.fs_fd_path(handle))
+    namei(|context| context.fs_fd_path_unrecorded(handle))
 }
 
 /// How one resolution walks: the flags that change what a component does.
@@ -470,7 +484,16 @@ enum Step {
 /// answer alone (a missing name — is the parent there? — a refusal, a prefix
 /// through a file, a `..`) does the resolver walk the path one component at a
 /// time, expanding each symlink it meets exactly where the kernel would.
+///
+/// The call's scheduling point comes first, whatever the resolution answers
+/// (an early refusal, a device node or namespace file the virtual machine
+/// answers without the filesystem, a failed walk), so a call polling a path
+/// lets the other tasks run; the lookups take none. It is the scheduler's
+/// point alone: an answer that needs no filesystem needs no runtime either
+/// (other tasks exist only under one), and every lookup that does reach the
+/// filesystem installs it or fails closed ([`namei`]).
 pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution, c_int> {
+    crate::thread::sched_point()?;
     if path.len() >= PATH_MAX {
         return Err(ENAMETOOLONG);
     }
@@ -487,7 +510,8 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
     let base = if path.starts_with('/') && !scoped {
         "/".to_owned()
     } else if dirfd == AT_FDCWD {
-        cwd_path()?
+        let cwd = cwd_handle()?;
+        namei(|context| context.fs_fd_path_unrecorded(cwd))?
     } else {
         fd_path(dirfd, path.is_empty() && empty_path)?
     };
@@ -672,7 +696,7 @@ fn expand(
     if *hops > SYMLINK_HOPS {
         return Err(ELOOP);
     }
-    let target = with_context(|context| context.fs_read_link(link))?;
+    let target = namei(|context| context.fs_read_link_unrecorded(link))?;
     if target.starts_with('/') {
         if rules.beneath {
             return Err(EXDEV);

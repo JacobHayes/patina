@@ -414,9 +414,11 @@ impl Context {
     }
 
     /// The metadata of the entry at canonical `path`, read UNRECORDED and
-    /// never faulted as [`Self::fs_fd_metadata_unrecorded`] is: the directory
-    /// an fs notification is reported to, looked up inside the call that
-    /// caused it.
+    /// never faulted as [`Self::fs_fd_metadata_unrecorded`] is, with no
+    /// latency: the native shim's path walk (each lookup the kernel's namei
+    /// does inside the call, which only the call's own operation pays for),
+    /// and the directory an fs notification is reported to, looked up inside
+    /// the call that caused it.
     pub fn fs_metadata_unrecorded(&mut self, path: &str) -> Result<FsMetadata, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_metadata(path);
@@ -428,10 +430,30 @@ impl Context {
             .metadata_unfaulted(path)?)
     }
 
+    /// The target of the symlink at canonical `path` ([`Self::fs_read_link`]),
+    /// read UNRECORDED, never faulted and with no latency, as
+    /// [`Self::fs_metadata_unrecorded`] is: the native shim's path walk
+    /// following a symlink it meets. The read stamps the link's `atime` as
+    /// the recorded read does, at the same point on replay. A host-capture
+    /// replay executes no driver, so there it is the recorded read.
+    pub fn fs_read_link_unrecorded(&mut self, path: &str) -> Result<String, RuntimeError> {
+        if self.filesystem_is_capture {
+            return self.fs_read_link(path);
+        }
+        let clock = self.fs_clock()?;
+        Ok(self
+            .filesystem
+            .as_mut()
+            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
+            .read_link_unfaulted(clock, path)?)
+    }
+
     /// Where filesystem handle `fd`'s node is now ([`Self::fs_fd_path`]),
     /// read UNRECORDED and never faulted as [`Self::fs_fd_metadata_unrecorded`]
-    /// is: after an in-process crash rebuilt the image, the native shim's fs
-    /// notifications look up again the name each descriptor holds.
+    /// is: the base the native shim's path walk starts from (the working
+    /// directory, an `*at` call's directory descriptor), and, after an
+    /// in-process crash rebuilt the image, the name each descriptor holds for
+    /// its fs notifications.
     pub fn fs_fd_path_unrecorded(&mut self, fd: Fd) -> Result<String, RuntimeError> {
         if self.filesystem_is_capture {
             return self.fs_fd_path(fd);

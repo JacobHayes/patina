@@ -24,7 +24,7 @@
 
 use std::ffi::{c_int, c_void};
 
-use patina_dst_abi::{Fd, SeekWhence};
+use patina_dst_abi::Fd;
 
 #[cfg(target_os = "linux")]
 use crate::EINVAL;
@@ -80,7 +80,7 @@ fn put_int(arg: *mut c_void, value: i32) -> c_int {
 fn file_fionread(handle: Fd, arg: *mut c_void) -> c_int {
     let queued = with_context(|context| {
         let size = context.fs_fd_metadata_unrecorded(handle)?.len;
-        let position = context.fs_seek(handle, 0, SeekWhence::Current)?;
+        let position = context.fs_cursor_unrecorded(handle)?;
         Ok(size.wrapping_sub(position))
     });
     match queued {

@@ -66,10 +66,14 @@ fn pipe_of(resolved: &Resolved) -> Option<u64> {
 }
 
 fn cursor(handle: Fd) -> Result<i64, c_int> {
-    with_context(|context| context.fs_seek(handle, 0, SeekWhence::Current))
+    with_context(|context| context.fs_cursor_unrecorded(handle))
         .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guest's transfer moves its description's offset, as the call itself does"
+)]
 fn set_cursor(handle: Fd, position: i64) -> Result<(), c_int> {
     with_context(|context| context.fs_seek(handle, position, SeekWhence::Start)).map(|_| ())
 }

@@ -18,6 +18,10 @@ pub extern "C" fn patina_test_arm_clock_panic() {
 ///
 /// # Safety
 /// `nanos` must point to writable `uint64_t` storage.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the guest's own clock read (clock_gettime, gettimeofday, time)"
+)]
 pub unsafe extern "C" fn patina_clock_now(clock_id: u32, nanos: *mut u64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockRead);
     #[cfg(feature = "test-panic")]
@@ -93,6 +97,10 @@ pub unsafe extern "C" fn patina_sleep_until_remaining(
     // draw is owned by the deterministic context (seeded, replayed), so the
     // jittered deadline reproduces exactly. `with_context_raw` avoids taking an
     // extra scheduling point, leaving unjittered runs byte-for-byte unchanged.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the guest's one sleep entry, which jitters each sleep once"
+    )]
     let deadline_nanos =
         match with_context_raw(|context| Ok(context.apply_sleep_jitter(deadline_nanos))) {
             Ok(deadline) => deadline,
