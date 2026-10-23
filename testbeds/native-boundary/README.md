@@ -97,10 +97,11 @@ salvage it without enabling callback salvage on the asynchronous path. `single`
 first spawns and joins a trivial peer to arm the observer. It and `parked` run
 long compute with no runnable peer (the latter uses a mutex/condvar handshake,
 never a synchronization sleep). `finite` keeps a peer runnable while doing
-finite call-free work: it must complete below a raised bound, but recording with
-a short bound and replaying with a long bound must both stop. A partial stderr
-line before peer creation pins fresh-line diagnostic framing even if host thread
-startup stalls. `native_workloads` requires named known-limit findings, a nonzero
+finite call-free work: it must complete below a bound as long as the test's
+deadline, however loaded the host, but recording with a short bound and
+replaying with a long bound must both stop. A partial stderr line before peer
+creation pins fresh-line diagnostic framing even if the run stops as soon as
+the peer exists. `native_workloads` requires named known-limit findings, a nonzero
 interrupted PC or explicit sampling deadline, and valid eligible terminal traces.
 Synchronous replay stops explicitly report an unsampled PC (`synchronous-stop`).
 Repeated recordings agree on overlapping decisions; host timing can stop each
@@ -110,7 +111,7 @@ unit pairing independently proves the open-custom-perform case.
 
 Specialized modes emit lifecycle receipts only after entering their hazard;
 at least one of each mode's two recordings must contain its receipt. Early
-startup stops still replay correctly, but two such stops are not hazard coverage.
+stops still replay correctly, but two such stops are not hazard coverage.
 The guarded small-stack receipt is a write from the switched stack through SUD.
 An isolated real-host sampler unit detector additionally requires an
 authenticated nonzero PC; permanent delivery failure cannot pass as expiry.

@@ -197,11 +197,11 @@ fn main() {
                 custom_op(|| (0..4097).map(|n| (n % 256) as u8).collect());
             }
             // Establish output probes before a runnable peer makes even host
-            // startup/descheduling gaps eligible for the watchdog.
+            // descheduling gaps eligible for the watchdog.
             eprint!("COMPUTE_PARTIAL_STDERR");
             if mode == "sync-buffer" {
                 // No newline/flush: a synchronous replay refusal must salvage
-                // this stream even if recording stopped during thread startup.
+                // this stream even if recording stopped before the perform.
                 assert!(unsafe { printf(c"WATCHDOG_BUFFERED_C_STDOUT".as_ptr()) } > 0);
             }
             let started = Arc::new(AtomicBool::new(false));

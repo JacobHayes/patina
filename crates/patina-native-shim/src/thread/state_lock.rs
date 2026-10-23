@@ -145,6 +145,8 @@ impl ThreadRuntime {
             inotify: inotify::Inotify::default(),
             handles: BTreeMap::new(),
             sems: BTreeMap::new(),
+            #[cfg(target_os = "linux")]
+            starting: None,
             net: NetState::new(),
             futexes: BTreeMap::new(),
             #[cfg(target_os = "linux")]
@@ -241,8 +243,11 @@ pub(super) fn unsettled_state() -> SpinGuard<'static, ThreadRuntime> {
 
 /// Observer lock order is the ordinary ThreadRuntime -> Context order.
 /// Never wait for the guest: a busy shim is not compute-only starvation.
+/// `observe` also learns whether the baton holder is creating a thread: it
+/// then waits, off the guest, for the new host thread's start-up, which a
+/// loaded host can stretch past any bound.
 pub(crate) fn watchdog_observe(
-    observe: impl FnOnce(&mut crate::Context, &BTreeMap<usize, TaskId>),
+    observe: impl FnOnce(&mut crate::Context, &BTreeMap<usize, TaskId>, bool),
 ) {
     let Some(state) = thread_runtime().try_lock() else {
         return;
@@ -253,7 +258,12 @@ pub(crate) fn watchdog_observe(
     let Some(mut slot) = crate::slot().try_lock() else {
         return;
     };
+    #[cfg(target_os = "linux")]
+    let creating = state.starting.is_some();
+    // Darwin's creator returns without waiting for its new thread.
+    #[cfg(not(target_os = "linux"))]
+    let creating = false;
     if let Some(context) = slot.as_mut() {
-        observe(context, &state.handles);
+        observe(context, &state.handles, creating);
     }
 }

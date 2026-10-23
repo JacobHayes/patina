@@ -101,7 +101,7 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
         platform::wait_ms(poll);
         let now = platform::monotonic_ms();
         let mut observed = false;
-        super::thread::watchdog_observe(|context, handles| {
+        super::thread::watchdog_observe(|context, handles, creating| {
             observed = true;
             if let Some(stop) = context.replay_compute_stop_due() {
                 let handle = handles
@@ -110,8 +110,14 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
                 let error = context.stop_compute_bound(stop.task);
                 report_and_abort(&error, handle, None);
             }
-            let Some(task) = window.observe(Some(context.compute_watchdog_candidate()), now, bound)
-            else {
+            // A creator waiting for its new thread's host start-up runs no
+            // guest code: a confirmed ineligible state, not a missed lock.
+            let candidate = if creating {
+                None
+            } else {
+                context.compute_watchdog_candidate()
+            };
+            let Some(task) = window.observe(Some(candidate), now, bound) else {
                 return;
             };
             // Both locks stay held: the guest cannot add a modeled effect or

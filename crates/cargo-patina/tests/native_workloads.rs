@@ -231,6 +231,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
     use std::time::{Duration, Instant};
     let g = Guest::assert_build("compute_watchdog.rs");
     g.assert_audit_clean();
+    let deadline = Duration::from_secs(15);
     // Direct managed execution excludes supervisor/audit startup from timing.
     let direct = |mode: &str, bound: &str| {
         let started = Instant::now();
@@ -241,7 +242,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
                 .env("PATINA_SEED", "7")
                 .env("PATINA_COMPUTE_WATCHDOG_MS", bound)
                 .arg(mode),
-            Duration::from_secs(15),
+            deadline,
         )
         .unwrap();
         (output, started.elapsed())
@@ -256,7 +257,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
             // A valid CLI value must override even an invalid inherited knob.
             .env("PATINA_COMPUTE_WATCHDOG_MS", "0");
         let started = Instant::now();
-        let output = common::output_with_deadline(&mut command, Duration::from_secs(15))
+        let output = common::output_with_deadline(&mut command, deadline)
             .expect("compute watchdog must stop without an outer kill");
         (output, started.elapsed())
     };
@@ -277,7 +278,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
         // paired-bound detector proves that the configured bound is load-bearing.
         eprintln!("compute watchdog {mode}: direct stop={direct_elapsed:?} bound=25ms");
         // Host time may truncate same-seed runs at different eligible prefixes,
-        // including thread-startup waits before the intended compute region.
+        // including descheduling before the intended compute region.
         // Replay each independently; compare only their overlapping decisions.
         let mut previous: Option<Vec<patina_dst_trace::TraceEvent>> = None;
         let mut reached_hazard = false;
@@ -394,7 +395,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
                 terminal.task.0, terminal.steps
             );
         }
-        // Prefix/replay checks accept legitimate early startup stops, but
+        // Prefix/replay checks accept legitimate early stops, but
         // neither recording reaching the hazard is NOT specialized coverage.
         // Class pairing: planted pre-hazard compute must fail this detector.
         assert!(
@@ -406,10 +407,18 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
         return;
     }
     for mode in ["single", "parked", "finite"] {
-        let bound = if mode == "finite" { "5000" } else { "25" };
+        // single and parked leave no runnable peer, so even the tight bound
+        // must not stop them. finite's peer stays runnable, so its bound is
+        // the deadline: every compute the harness waits for ends inside it,
+        // however loaded the host, so any stop fired before its bound.
+        let bound = if mode == "finite" {
+            deadline.as_millis().to_string()
+        } else {
+            "25".to_owned()
+        };
         // Time the identical executable without the supervisor/audit startup;
         // otherwise that overhead could make an empty compute control pass.
-        let (output, direct_elapsed) = direct(mode, bound);
+        let (output, direct_elapsed) = direct(mode, &bound);
         assert_success(output);
         assert!(
             direct_elapsed > Duration::from_millis(100),
@@ -417,9 +426,9 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
         );
         eprintln!("compute watchdog negative {mode}: direct compute={direct_elapsed:?}");
         if mode == "finite" {
-            // At least two maximum-length polls, but below the configured bound.
+            // The observer saw the same runnable-peer candidate across at
+            // least two maximum-length polls.
             assert!(direct_elapsed > Duration::from_millis(250));
-            assert!(direct_elapsed < Duration::from_millis(5000));
         }
         let negative_trace = g.dir.path().join(format!("negative-{mode}.patina"));
         let (output, elapsed) = run(
@@ -432,7 +441,7 @@ fn assert_compute_watchdog_cases(modes: &[&str], negative_controls: bool) {
                 "--",
                 mode,
             ],
-            bound,
+            &bound,
         );
         let output = assert_success(output);
         if mode == "single" {

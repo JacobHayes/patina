@@ -841,6 +841,11 @@ struct ThreadRuntime {
     handles: BTreeMap<usize, TaskId>,
     /// Per-task baton semaphores.
     sems: BTreeMap<TaskId, Arc<baton::Semaphore>>,
+    /// The task whose host thread runs its off-baton prelude while its
+    /// creator, the baton holder, waits in `patina_thread_create` and runs no
+    /// guest code: the compute watchdog's ineligible start-up window.
+    #[cfg(target_os = "linux")]
+    starting: Option<TaskId>,
     /// Virtual datagram sockets delegating to the runtime's `SimNet`.
     net: NetState,
     /// Tasks parked on a Linux futex word, keyed by the word's address.

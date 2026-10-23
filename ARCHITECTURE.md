@@ -563,7 +563,10 @@ raise it for deliberately longer compute with runnable or timed parked peers.
 This is wall time, not a CPU-time claim: host descheduling counts. A baton
 holder blocked in an untracked host call with the shim locks released can also exceed this window;
 the diagnostic means **no scheduling point**, not proven CPU computation. Such
-host blocking is not currently excluded. Polling adds up to two sampling
+host blocking is not currently excluded, with one shim wait the observer can
+name: on Linux a thread's creator waits, off the guest, until the new host
+thread has taken over its registrations, and that wait is ineligible however
+long a loaded host takes to start the thread. Polling adds up to two sampling
 periods (each at most 100 ms), plus host dispatch/export time; it is not a
 real-time deadline. A lone compute task and compute with every peer in an
 untimed park are exempt regardless of duration. A timed park is eligible: its

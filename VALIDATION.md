@@ -240,8 +240,12 @@ silently omitting the PC outcome. A planted record-only startup delay stops
 `worker-starved` on its main task before the spin: its synchronous replay
 previously failed the observer-only assertion, and now reports that outcome.
 Independent records agree on overlapping decisions; their host-time stops may
-truncate different eligible prefixes, including during thread startup before
-the intended spin. Every recording must name its recorded baton holder with a
+truncate different eligible prefixes, including during host descheduling
+before the intended spin. A creator's wait for its new thread's host start-up
+is never eligible: a planted 200 ms delay in every new thread's prelude stops
+`worker-starved` on its main task at its spawn and leaves `allocator-held`
+without its hazard receipt, and stops the `single` and `parked` controls,
+unless the observer treats that wait as ineligible. Every recording must name its recorded baton holder with a
 runnable peer, and each replays its own exact terminal task/count under a one-day
 host bound. A planted call-free delay before stderr setup reproduces the former
 same-seed byte-identity failure with three versus fifteen committed decisions;
@@ -260,8 +264,9 @@ the 25 ms test bound and complete. The single-task control first spawns and
 joins a peer to arm the observer; its trace
 must show both spawn and completion (the old unarmed control fails that pin).
 The Linux x86_64 `small-stack` mode retains its guarded 2 KiB stack probe. Finite
-compute with a runnable peer must complete under a raised 5,000 ms bound (not
-fire at the second poll), yet record-short/replay-long must preserve its stop.
+compute with a runnable peer must complete (not fire at the second poll)
+under a bound as long as the test's deadline, so host load cannot stretch the
+compute past it, yet record-short/replay-long must preserve its stop.
 The CLI bound overrides even an invalid inherited env bound. A partial guest
 stderr line must be followed by a column-zero violation marker. No sleep
 arranges any guest state. Shim unit detectors check negative/positive/minimum

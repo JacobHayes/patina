@@ -526,11 +526,18 @@ pub unsafe extern "C" fn patina_thread_create(
         fatal(&format!("host thread creation failed with code {rc}"));
     }
     state.handles.insert(handle as usize, task);
-    drop(state);
     // The new thread takes over its host registrations off the baton;
-    // wait for that before the guest can ask about them.
+    // wait for that before the guest can ask about them. However long the
+    // host takes to run it, this wait is not guest compute.
     #[cfg(target_os = "linux")]
-    creation_settled().wait();
+    {
+        state.starting = Some(task);
+        drop(state);
+        creation_settled().wait();
+        lock_state().starting = None;
+    }
+    #[cfg(not(target_os = "linux"))]
+    drop(state);
     // SAFETY: `thread_out` is non-null and writable per the pthread contract.
     unsafe { thread_out.write(handle) };
     0
