@@ -1109,7 +1109,18 @@ Escape hatches are explicit:
 - `--allow` / `--allow-unsupported-symbols` permit named symbols, loudly and
   recorded beside the trace;
 - host capture (`patina-dst-fs-host`, `--mount`) is read-only, allowlisted, and
-  fingerprinted — never ambient.
+  fingerprinted — never ambient. A `--mount` image carries each entry's
+  contents and what a guest can observe of its metadata (permission bits and
+  modification time; access, change and birth times are derived from that
+  modification time, and ownership is the guest's own identity). It hashes in two halves,
+  contents then metadata, so a replay against a corpus that differs is
+  refused before the guest starts, naming whether its contents differ or only
+  its metadata (a fresh checkout restamps mtimes): a `fingerprint_mismatch`
+  refusal whose `mismatch` is `mount_contents` or `mount_metadata`. The
+  recorded hash is read where the run's own fingerprint puts its `+fsimg:`
+  component, never out of the user's label. The shim adds the identity's home
+  to the rebuilt tree before the captured metadata is applied, so a captured
+  `/home` keeps its mode and mtime.
 
 ## Native ABI shim
 

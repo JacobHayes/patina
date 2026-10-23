@@ -222,6 +222,17 @@ pub(crate) const FINGERPRINT_MISMATCH_REFUSAL: &str = "fingerprint_mismatch";
 /// Emit the envelope of a native run the supervisor refused before the guest
 /// started, so no `guest_exit` exists.
 pub(crate) fn emit_native_refusal(artifact: &Path, class: &str, message: String) {
+    emit_native_mismatch_refusal(artifact, class, message, None);
+}
+
+/// [`emit_native_refusal`] of a mismatch the supervisor judged, naming which
+/// input differs (`refusal.mismatch`) when it knows.
+pub(crate) fn emit_native_mismatch_refusal(
+    artifact: &Path,
+    class: &str,
+    message: String,
+    mismatch: Option<&'static str>,
+) {
     let mut env = Envelope::new("run", "error", 2);
     env.family = Some("native".into());
     env.artifact = Some(artifact.to_string_lossy().into_owned());
@@ -229,6 +240,7 @@ pub(crate) fn emit_native_refusal(artifact: &Path, class: &str, message: String)
         class: class.into(),
         message: message.clone(),
         guest_exit_code: None,
+        mismatch,
     });
     env.message = Some(message);
     env.emit();

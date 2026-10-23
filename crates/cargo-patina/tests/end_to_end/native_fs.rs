@@ -241,20 +241,29 @@ fn main() {
     }
 
     // A guest that reads a file the supervisor mounted into the deterministic
-    // filesystem. Used to exercise `--mount` composing with `--record`/`replay`,
-    // which hands the child TWO inherited descriptors at once.
+    // filesystem, and the mode and modification time it was captured with.
+    // Used to exercise `--mount` composing with `--record`/`replay`, which
+    // hands the child TWO inherited descriptors at once.
     const MOUNT_READER_SOURCE: &str = r#"
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 
 fn main() {
     let contents = fs::read_to_string("/data.txt").expect("read mounted file");
-    print!("{contents}");
+    let metadata = fs::metadata("/data.txt").expect("stat mounted file");
+    print!("{contents}mode={:o} mtime={}\n", metadata.mode() & 0o7777, metadata.mtime());
 }
 "#;
+
+    /// The mounted file's metadata as the reader prints it.
+    const MOUNTED_MODE_AND_MTIME: &str = "mode=640 mtime=1704067200\n";
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_mount_composes_with_record_and_replay_two_inherited_descriptors() {
+        // A label holding what the corpus component looks like: the hash is
+        // read where patina put it, not out of the label.
+        const LABEL: &str = "read-mount+fsimg:label";
         let directory = tempdir().unwrap();
         let source = directory.path().join("read_mount.rs");
         fs::write(&source, MOUNT_READER_SOURCE).unwrap();
@@ -272,7 +281,19 @@ fn main() {
 
         let mount = directory.path().join("corpus");
         fs::create_dir(&mount).unwrap();
-        fs::write(mount.join("data.txt"), "MOUNTED-CONTENT\n").unwrap();
+        let data = mount.join("data.txt");
+        fs::write(&data, "MOUNTED-CONTENT\n").unwrap();
+        let set_metadata = |mtime_secs: u64| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o640)).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&data)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs))
+                .unwrap();
+        };
+        set_metadata(1_704_067_200);
 
         let trace = directory.path().join("mount.patina");
         let recorded = invoke(
@@ -287,13 +308,13 @@ fn main() {
                 "--record",
                 trace.to_str().unwrap(),
                 "--fingerprint",
-                "read-mount",
+                LABEL,
             ],
         );
         assert_eq!(
             String::from_utf8_lossy(&recorded.stdout),
-            "MOUNTED-CONTENT\n",
-            "record mode with --mount did not see the mounted file"
+            format!("MOUNTED-CONTENT\n{MOUNTED_MODE_AND_MTIME}"),
+            "record mode with --mount did not see the mounted file as captured"
         );
 
         // `replay` re-supplies the host corpus with --mount (a host input the trace
@@ -308,14 +329,53 @@ fn main() {
                 "--mount",
                 mount.to_str().unwrap(),
                 "--fingerprint",
-                "read-mount",
+                LABEL,
             ],
         );
         assert_eq!(
             String::from_utf8_lossy(&replayed.stdout),
-            "MOUNTED-CONTENT\n",
+            format!("MOUNTED-CONTENT\n{MOUNTED_MODE_AND_MTIME}"),
             "strict replay with --mount diverged from the recorded run"
         );
+
+        // The same contents restamped, as a fresh checkout leaves them: the
+        // guest can see the mtime, so the supervisor refuses this corpus too,
+        // before the guest runs, naming the half that moved.
+        set_metadata(1_704_153_600);
+        let restamped = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                bin.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--mount",
+                mount.to_str().unwrap(),
+                "--fingerprint",
+                LABEL,
+                "--format",
+                "json",
+            ],
+        );
+        let restamped_stdout = String::from_utf8_lossy(&restamped.stdout);
+        let envelope: serde_json::Value = serde_json::from_str(restamped_stdout.trim())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "envelope was not one JSON object: {error}\n{restamped_stdout}\nstderr:\n{}",
+                    String::from_utf8_lossy(&restamped.stderr)
+                )
+            });
+        assert!(!restamped.status.success(), "{envelope:#}");
+        assert_eq!(
+            envelope["refusal"]["class"], "fingerprint_mismatch",
+            "{envelope:#}"
+        );
+        assert_eq!(
+            envelope["refusal"]["mismatch"], "mount_metadata",
+            "{envelope:#}"
+        );
+        assert!(envelope["guest_exit"].is_null(), "{envelope:#}");
+        set_metadata(1_704_067_200);
 
         // A DIFFERENT corpus at replay hashes to a different image, so the hash
         // folded into the fingerprint no longer matches and replay must fail closed —
@@ -334,7 +394,7 @@ fn main() {
                 "--mount",
                 other_mount.to_str().unwrap(),
                 "--fingerprint",
-                "read-mount",
+                LABEL,
             ],
         );
         let cross_stderr = String::from_utf8_lossy(&cross.stderr);
@@ -342,13 +402,8 @@ fn main() {
             !cross.status.success(),
             "replay against a different --mount corpus must fail closed:\nstderr:\n{cross_stderr}"
         );
-        assert!(
-            cross_stderr.contains("failed to initialize")
-                && cross_stderr.contains("fingerprint mismatch"),
-            "cross-corpus replay must name the fingerprint mismatch, not abort mutely:\nstderr:\n{cross_stderr}"
-        );
-        // The named mismatch carries the corpus image hash (`+fsimg:<hash>`): it is
-        // the recorded corpus's hash that no longer matches the substituted one, so
+        // The refusal carries the corpus image hash (`+fsimg:<hash>`): it is the
+        // recorded corpus's hash that no longer matches the substituted one, so
         // the fail-closed reason points squarely at the corpus, not a generic error.
         assert!(
             cross_stderr.contains("+fsimg:"),

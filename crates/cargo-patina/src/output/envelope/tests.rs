@@ -97,6 +97,7 @@ fn fully_populated_envelope() -> Envelope {
         class: "fingerprint_mismatch".into(),
         message: "trace fingerprint mismatch".into(),
         guest_exit_code: None,
+        mismatch: Some("mount_metadata"),
     });
     env.guest_exit = Some(GuestExit {
         code: 134,

@@ -14,10 +14,10 @@ fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
     // crash exactly as with an empty filesystem. `CrashFs::new` here uses the
     // same default policy as `CrashFs::default()` (torn-write probability 1),
     // so the mount does not change crash behavior.
-    let image = patina_dst_fs_mem::FsImage::new(vec![patina_dst_fs_mem::FsImageEntry::File {
-        path: "/corpus/data.txt".into(),
-        contents: b"mounted-and-durable".to_vec(),
-    }]);
+    let image = patina_dst_fs_mem::FsImage::new(vec![patina_dst_fs_mem::FsImageEntry::file(
+        "/corpus/data.txt",
+        "mounted-and-durable",
+    )]);
     let mounted = image.into_memfs().unwrap();
     let mut fs = CrashFs::new(mounted);
 

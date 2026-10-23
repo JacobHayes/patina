@@ -137,7 +137,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "--mount",
                     None,
                     Value::Required("HOST_DIR", Kind::Path),
-                    "Capture a host directory read-only into the guest filesystem at `/`.",
+                    "Capture a host directory read-only (contents, modes and mtimes) into the guest filesystem at `/`.",
                     false,
                 ),
                 f(
@@ -650,7 +650,7 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, t
                     "--mount",
                     None,
                     Value::Required("HOST_DIR", Kind::Path),
-                    "Re-supply the host corpus whose hash the fingerprint verifies.",
+                    "Re-supply the host corpus whose hash (contents, then modes and mtimes) the fingerprint verifies.",
                     false,
                 ),
                 f(

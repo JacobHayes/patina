@@ -240,6 +240,9 @@ impl Envelope {
             if let Some(code) = v.guest_exit_code {
                 rm.insert("guest_exit_code".into(), Value::from(code));
             }
+            if let Some(mismatch) = v.mismatch {
+                rm.insert("mismatch".into(), Value::from(mismatch));
+            }
             m.insert("refusal".into(), Value::Object(rm));
         }
         if let Some(v) = &self.guest_exit {

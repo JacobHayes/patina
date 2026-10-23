@@ -142,6 +142,7 @@ pub(super) fn refusal(exit_code: i32, stdout: &str, stderr: &str) -> Option<Refu
             class: (*class).to_string(),
             message: line.trim().to_string(),
             guest_exit_code: guest_exit_code(line),
+            mismatch: None,
         })
     })
 }
@@ -161,11 +162,13 @@ pub(super) fn guest_exit_code(line: &str) -> Option<i32> {
 
 /// A patina fail-closed refusal: which class, the line that announced it, and —
 /// when the refusal destroyed the guest's own exit status by aborting — what
-/// that status was.
+/// that status was; for a mismatch the supervisor judged itself, which of the
+/// run's inputs differs.
 pub struct Refusal {
     pub(super) class: String,
     pub(super) message: String,
     pub(super) guest_exit_code: Option<i32>,
+    pub(super) mismatch: Option<&'static str>,
 }
 
 /// Known structured marker prefixes **patina itself** emits, worth surfacing

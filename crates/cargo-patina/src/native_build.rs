@@ -1065,11 +1065,30 @@ pub(super) fn native_run_fingerprint(
     buggify: bool,
     policy: &SchedulePolicyFingerprint,
 ) -> String {
-    let mut fingerprint = instrumentation_fingerprint(base, instrumentation);
-    if let Some(hash) = image_hash {
-        fingerprint.push_str("+fsimg:");
-        fingerprint.push_str(hash);
+    let (head, tail) = native_run_fingerprint_around(base, instrumentation, buggify, policy);
+    match image_hash {
+        Some(hash) => format!("{head}{IMAGE_FINGERPRINT_COMPONENT}{hash}{tail}"),
+        None => head + &tail,
     }
+}
+
+/// The mounted-corpus component of a native run's fingerprint, before its
+/// image hash.
+pub(super) const IMAGE_FINGERPRINT_COMPONENT: &str = "+fsimg:";
+
+/// A native run's fingerprint either side of its mounted-corpus component
+/// ([`native_run_fingerprint`]): the base and instrumentation suffix, then
+/// the buggify and policy suffixes. Where the image hash sits is known only
+/// from these, never from the string itself, whose base is the user's free
+/// text.
+pub(super) fn native_run_fingerprint_around(
+    base: &str,
+    instrumentation: GuestInstrumentation,
+    buggify: bool,
+    policy: &SchedulePolicyFingerprint,
+) -> (String, String) {
+    let head = instrumentation_fingerprint(base, instrumentation);
+    let mut fingerprint = String::new();
     if buggify {
         fingerprint.push('+');
         fingerprint.push_str(patina_dst_runtime::FINGERPRINT_BUGGIFY);
@@ -1086,7 +1105,7 @@ pub(super) fn native_run_fingerprint(
     if policy.swarm {
         fingerprint.push_str("+swarm");
     }
-    fingerprint
+    (head, fingerprint)
 }
 
 /// The exploration-policy fingerprint components of a native run. On a fresh run

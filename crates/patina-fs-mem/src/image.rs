@@ -1,7 +1,9 @@
 //! A deterministic, self-describing wire format for a read-only filesystem tree.
 //!
-//! An [`FsImage`] is an ordered set of directory, file, and symlink entries that
-//! encodes to a byte stream and decodes back identically. It exists so a
+//! An [`FsImage`] is an ordered set of directory, file, and symlink entries,
+//! each with the metadata a guest can observe of it (permission bits and
+//! modification time), that encodes to a byte stream and decodes back
+//! identically. It exists so a
 //! non-interposed supervisor process (which may freely read the host
 //! filesystem) can capture a directory tree, hand the encoded bytes to a fully
 //! interposed guest over an inherited descriptor, and have the guest rebuild the
@@ -12,39 +14,112 @@
 //! across runs and machines and can be hashed to fingerprint the corpus a trace
 //! was recorded against. Symlinks are preserved verbatim (target string, no
 //! following), matching [`MemFs`]'s inert no-follow symlink model.
+//!
+//! The image also encodes in two halves ([`FsImage::encode_contents`],
+//! [`FsImage::encode_metadata`]), so a corpus hashed by halves can be said to
+//! differ from a recorded one in its contents or only in its metadata.
 
 use std::fmt;
 
 use patina_dst_abi::{DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_UMASK, FsClock};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
-use crate::MemFs;
+use crate::{DIRECTORY_MODE, FILE_MODE, MODE_MASK, MemFs};
 
 /// Magic prefix identifying an encoded [`FsImage`] stream.
 const MAGIC: &[u8; 8] = b"PATFSIMG";
 /// Wire-format version. Bump on any incompatible layout change.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 const KIND_DIRECTORY: u8 = 0;
 const KIND_FILE: u8 = 1;
 const KIND_SYMLINK: u8 = 2;
 
-/// One entry in an [`FsImage`]: an absolute guest path plus its kind and
-/// payload. File contents and symlink targets travel verbatim; directories
-/// carry no payload.
+/// One entry in an [`FsImage`]: an absolute guest path plus its kind,
+/// payload and metadata. File contents and symlink targets travel verbatim;
+/// directories carry no payload. `mode` is the permission bits (`0o7777`), which
+/// a symlink does not have; `mtime_nanos` is the modification time in
+/// nanoseconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FsImageEntry {
-    Directory { path: String },
-    File { path: String, contents: Vec<u8> },
-    Symlink { path: String, target: String },
+    Directory {
+        path: String,
+        mode: u32,
+        mtime_nanos: i128,
+    },
+    File {
+        path: String,
+        contents: Vec<u8>,
+        mode: u32,
+        mtime_nanos: i128,
+    },
+    Symlink {
+        path: String,
+        target: String,
+        mtime_nanos: i128,
+    },
 }
 
 impl FsImageEntry {
+    /// A directory as an image builder's `mkdir` makes one: `0o755`, at the
+    /// epoch.
+    pub fn directory(path: impl Into<String>) -> Self {
+        FsImageEntry::Directory {
+            path: path.into(),
+            mode: DIRECTORY_MODE,
+            mtime_nanos: 0,
+        }
+    }
+
+    /// A file as an image builder writes one: `0o644`, at the epoch.
+    pub fn file(path: impl Into<String>, contents: impl Into<Vec<u8>>) -> Self {
+        FsImageEntry::File {
+            path: path.into(),
+            contents: contents.into(),
+            mode: FILE_MODE,
+            mtime_nanos: 0,
+        }
+    }
+
+    /// A symlink to `target`, at the epoch.
+    pub fn symlink(path: impl Into<String>, target: impl Into<String>) -> Self {
+        FsImageEntry::Symlink {
+            path: path.into(),
+            target: target.into(),
+            mtime_nanos: 0,
+        }
+    }
+
     fn path(&self) -> &str {
         match self {
-            FsImageEntry::Directory { path }
+            FsImageEntry::Directory { path, .. }
             | FsImageEntry::File { path, .. }
             | FsImageEntry::Symlink { path, .. } => path,
+        }
+    }
+
+    /// The permission bits, or `None` for a symlink.
+    fn mode(&self) -> Option<u32> {
+        match self {
+            FsImageEntry::Directory { mode, .. } | FsImageEntry::File { mode, .. } => Some(*mode),
+            FsImageEntry::Symlink { .. } => None,
+        }
+    }
+
+    fn mtime_nanos(&self) -> i128 {
+        match self {
+            FsImageEntry::Directory { mtime_nanos, .. }
+            | FsImageEntry::File { mtime_nanos, .. }
+            | FsImageEntry::Symlink { mtime_nanos, .. } => *mtime_nanos,
+        }
+    }
+
+    /// The kind byte and the payload: what the content half of the image is.
+    fn content(&self) -> (u8, &[u8]) {
+        match self {
+            FsImageEntry::Directory { .. } => (KIND_DIRECTORY, &[]),
+            FsImageEntry::File { contents, .. } => (KIND_FILE, contents),
+            FsImageEntry::Symlink { target, .. } => (KIND_SYMLINK, target.as_bytes()),
         }
     }
 }
@@ -69,30 +144,49 @@ impl FsImage {
     }
 
     /// Encode to the self-describing wire format. Deterministic: identical
-    /// entry sets always produce identical bytes.
+    /// entry sets always produce identical bytes. Each entry is its kind, path
+    /// and payload, then its permission bits (directories and files only) and
+    /// its modification time.
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         bytes.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
         for entry in &self.entries {
-            match entry {
-                FsImageEntry::Directory { path } => {
-                    bytes.push(KIND_DIRECTORY);
-                    encode_field(&mut bytes, path.as_bytes());
-                    encode_field(&mut bytes, &[]);
-                }
-                FsImageEntry::File { path, contents } => {
-                    bytes.push(KIND_FILE);
-                    encode_field(&mut bytes, path.as_bytes());
-                    encode_field(&mut bytes, contents);
-                }
-                FsImageEntry::Symlink { path, target } => {
-                    bytes.push(KIND_SYMLINK);
-                    encode_field(&mut bytes, path.as_bytes());
-                    encode_field(&mut bytes, target.as_bytes());
-                }
+            let (kind, payload) = entry.content();
+            bytes.push(kind);
+            encode_field(&mut bytes, entry.path().as_bytes());
+            encode_field(&mut bytes, payload);
+            if let Some(mode) = entry.mode() {
+                bytes.extend_from_slice(&mode.to_le_bytes());
             }
+            bytes.extend_from_slice(&entry.mtime_nanos().to_le_bytes());
+        }
+        bytes
+    }
+
+    /// The tree's contents alone: every entry's kind, path and payload, and
+    /// nothing of its metadata. Together with [`FsImage::encode_metadata`] it
+    /// determines [`FsImage::encode`].
+    pub fn encode_contents(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for entry in &self.entries {
+            let (kind, payload) = entry.content();
+            bytes.push(kind);
+            encode_field(&mut bytes, entry.path().as_bytes());
+            encode_field(&mut bytes, payload);
+        }
+        bytes
+    }
+
+    /// The tree's metadata alone: every entry's path, permission bits (a
+    /// symlink's, which it has none of, as `u32::MAX`) and modification time.
+    pub fn encode_metadata(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for entry in &self.entries {
+            encode_field(&mut bytes, entry.path().as_bytes());
+            bytes.extend_from_slice(&entry.mode().unwrap_or(u32::MAX).to_le_bytes());
+            bytes.extend_from_slice(&entry.mtime_nanos().to_le_bytes());
         }
         bytes
     }
@@ -120,16 +214,23 @@ impl FsImage {
                     if !payload.is_empty() {
                         return Err(FsImageError::Malformed("directory carries a payload"));
                     }
-                    FsImageEntry::Directory { path }
+                    FsImageEntry::Directory {
+                        path,
+                        mode: reader.take_mode()?,
+                        mtime_nanos: reader.take_i128()?,
+                    }
                 }
                 KIND_FILE => FsImageEntry::File {
                     path,
                     contents: payload,
+                    mode: reader.take_mode()?,
+                    mtime_nanos: reader.take_i128()?,
                 },
                 KIND_SYMLINK => FsImageEntry::Symlink {
                     path,
                     target: String::from_utf8(payload)
                         .map_err(|_| FsImageError::Malformed("symlink target is not UTF-8"))?,
+                    mtime_nanos: reader.take_i128()?,
                 },
                 other => return Err(FsImageError::UnknownKind(other)),
             };
@@ -151,27 +252,46 @@ impl FsImage {
     /// Rebuild the tree as a fresh [`MemFs`]. Ancestor directories are created
     /// top-down on demand, so an image whose intermediate directories are
     /// implicit still yields a walkable tree; directory entries additionally
-    /// preserve empty directories that carry no files.
+    /// preserve empty directories that carry no files. Once the whole tree
+    /// exists, each entry takes its captured metadata, so adding a child does
+    /// not restamp its directory and a directory without search permission
+    /// does not stop its children being seeded.
     pub fn into_memfs(&self) -> DriverResult<MemFs> {
+        self.into_memfs_with(Ok)
+    }
+
+    /// [`FsImage::into_memfs`] with `setup` run on the rebuilt tree before
+    /// its captured metadata is applied: what setup adds (a directory the
+    /// system image always has) is made as the tree's own entries were, and
+    /// the captured metadata is the last word on every entry the image holds,
+    /// whatever setup did to it.
+    pub fn into_memfs_with(
+        &self,
+        setup: impl FnOnce(MemFs) -> DriverResult<MemFs>,
+    ) -> DriverResult<MemFs> {
         let mut fs = MemFs::new();
         // Entries are already sorted by path, so every parent precedes its
         // children; `ensure_directory` is defensive against implicit parents.
         for entry in &self.entries {
             match entry {
-                FsImageEntry::Directory { path } => ensure_directory(&mut fs, path)?,
-                FsImageEntry::File { path, contents } => {
+                FsImageEntry::Directory { path, .. } => ensure_directory(&mut fs, path)?,
+                FsImageEntry::File { path, contents, .. } => {
                     if let Some(parent) = parent_of(path) {
                         ensure_directory(&mut fs, parent)?;
                     }
                     fs = fs.with_file(path, contents.clone())?;
                 }
-                FsImageEntry::Symlink { path, target } => {
+                FsImageEntry::Symlink { path, target, .. } => {
                     if let Some(parent) = parent_of(path) {
                         ensure_directory(&mut fs, parent)?;
                     }
                     fs.symlink(FsClock::EPOCH, target, path)?;
                 }
             }
+        }
+        let mut fs = setup(fs)?;
+        for entry in &self.entries {
+            fs.seed_metadata(entry.path(), entry.mode(), entry.mtime_nanos())?;
         }
         Ok(fs)
     }
@@ -307,6 +427,20 @@ impl<'a> Reader<'a> {
         Ok(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
     }
 
+    fn take_i128(&mut self) -> Result<i128, FsImageError> {
+        let bytes = self.take(16)?;
+        Ok(i128::from_le_bytes(bytes.try_into().expect("16 bytes")))
+    }
+
+    /// Permission bits: nothing outside `0o7777`.
+    fn take_mode(&mut self) -> Result<u32, FsImageError> {
+        let mode = self.take_u32()?;
+        if mode & !MODE_MASK != 0 {
+            return Err(FsImageError::Malformed("mode has bits outside 0o7777"));
+        }
+        Ok(mode)
+    }
+
     fn take_field(&mut self) -> Result<Vec<u8>, FsImageError> {
         let len = self.take_u64()?;
         Ok(self.take(len as usize)?.to_vec())
@@ -358,21 +492,10 @@ mod tests {
 
     fn sample() -> FsImage {
         FsImage::new(vec![
-            FsImageEntry::File {
-                path: "/docs/guide/intro.txt".into(),
-                contents: b"PATINA_MARKER here".to_vec(),
-            },
-            FsImageEntry::Directory {
-                path: "/data/empty".into(),
-            },
-            FsImageEntry::Symlink {
-                path: "/link_to_readme".into(),
-                target: "README".into(),
-            },
-            FsImageEntry::File {
-                path: "/README".into(),
-                contents: b"top level".to_vec(),
-            },
+            FsImageEntry::file("/docs/guide/intro.txt", "PATINA_MARKER here"),
+            FsImageEntry::directory("/data/empty"),
+            FsImageEntry::symlink("/link_to_readme", "README"),
+            FsImageEntry::file("/README", "top level"),
         ])
     }
 
@@ -434,8 +557,9 @@ mod tests {
     }
 
     /// Hand-encode a raw stream with the given entries so the decoder sees input
-    /// the trusted `FsImage::new` sorter would never produce.
-    fn hand_encode(entries: &[(u8, &str, &[u8])]) -> Vec<u8> {
+    /// the trusted `FsImage::new` sorter would never produce. Directories and
+    /// files carry `mode`; every entry is at the epoch.
+    fn hand_encode_with_mode(entries: &[(u8, &str, &[u8])], mode: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -444,8 +568,16 @@ mod tests {
             bytes.push(*kind);
             encode_field(&mut bytes, path.as_bytes());
             encode_field(&mut bytes, payload);
+            if *kind != KIND_SYMLINK {
+                bytes.extend_from_slice(&mode.to_le_bytes());
+            }
+            bytes.extend_from_slice(&0i128.to_le_bytes());
         }
         bytes
+    }
+
+    fn hand_encode(entries: &[(u8, &str, &[u8])]) -> Vec<u8> {
+        hand_encode_with_mode(entries, FILE_MODE)
     }
 
     #[test]
@@ -494,21 +626,10 @@ mod tests {
         // Same entry set discovered in two different (host readdir) orders must
         // yield byte-identical images and identically sorted guest enumeration.
         let forward = vec![
-            FsImageEntry::File {
-                path: "/src/a.rs".into(),
-                contents: b"fn a".to_vec(),
-            },
-            FsImageEntry::File {
-                path: "/src/b.rs".into(),
-                contents: b"fn b".to_vec(),
-            },
-            FsImageEntry::File {
-                path: "/src/c.rs".into(),
-                contents: b"fn c".to_vec(),
-            },
-            FsImageEntry::Directory {
-                path: "/src".into(),
-            },
+            FsImageEntry::file("/src/a.rs", "fn a"),
+            FsImageEntry::file("/src/b.rs", "fn b"),
+            FsImageEntry::file("/src/c.rs", "fn c"),
+            FsImageEntry::directory("/src"),
         ];
         let mut shuffled = forward.clone();
         shuffled.rotate_left(2);
@@ -529,5 +650,102 @@ mod tests {
             .map(|entry| entry.name)
             .collect();
         assert_eq!(names, vec!["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn decode_refuses_mode_bits_beyond_the_permission_bits() {
+        let entry = [(KIND_FILE, "/a", &b"x"[..])];
+        assert!(FsImage::decode(&hand_encode_with_mode(&entry, 0o7777)).is_ok());
+        assert!(matches!(
+            FsImage::decode(&hand_encode_with_mode(&entry, 0o100644)),
+            Err(FsImageError::Malformed(_))
+        ));
+    }
+
+    const SECOND: i128 = 1_000_000_000;
+
+    /// Captured metadata survives the round trip and the rebuild: each entry
+    /// reads back its own bits and mtime (its other times derived from it), a
+    /// directory keeps its mtime although children were added after it, and a
+    /// directory without search permission still has its children seeded.
+    #[test]
+    fn into_memfs_gives_each_entry_its_captured_mode_and_mtime() {
+        let (dir_time, file_time, link_time) = (
+            1_704_067_200 * SECOND,
+            1_704_153_600 * SECOND + 5,
+            -631_152_000 * SECOND,
+        );
+        let image = FsImage::new(vec![
+            FsImageEntry::Directory {
+                path: "/dir".into(),
+                mode: 0o750,
+                mtime_nanos: dir_time,
+            },
+            FsImageEntry::File {
+                path: "/dir/run.sh".into(),
+                contents: b"#!/bin/sh".to_vec(),
+                mode: 0o4755,
+                mtime_nanos: file_time,
+            },
+            FsImageEntry::Symlink {
+                path: "/dir/link".into(),
+                target: "run.sh".into(),
+                mtime_nanos: link_time,
+            },
+            FsImageEntry::Directory {
+                path: "/locked".into(),
+                mode: 0o000,
+                mtime_nanos: dir_time,
+            },
+            FsImageEntry::File {
+                path: "/locked/secret".into(),
+                contents: Vec::new(),
+                mode: 0o600,
+                mtime_nanos: file_time,
+            },
+        ]);
+        let mut fs = FsImage::decode(&image.encode())
+            .unwrap()
+            .into_memfs()
+            .unwrap();
+        for (path, mode, mtime) in [
+            ("/dir", Some(0o750), dir_time),
+            ("/dir/run.sh", Some(0o4755), file_time),
+            ("/dir/link", None, link_time),
+            ("/locked", Some(0o000), dir_time),
+        ] {
+            let metadata = fs.metadata(path).unwrap();
+            if let Some(mode) = mode {
+                assert_eq!(metadata.mode, mode, "{path}");
+            }
+            assert_eq!(metadata.mtime_nanos, mtime, "{path}");
+            assert_eq!(metadata.atime_nanos, mtime, "{path}");
+            assert_eq!(metadata.ctime_nanos, mtime, "{path}");
+            assert_eq!(metadata.btime_nanos, mtime, "{path}");
+        }
+        assert_eq!(fs.metadata("/dir/link").unwrap().kind, FsEntryKind::Symlink);
+        // Behind a directory without search permission: read without the
+        // guards a guest's lookup runs.
+        let secret = fs.leaf("/locked/secret").unwrap();
+        assert_eq!((secret.mode, secret.times.mtime_nanos), (0o600, file_time));
+    }
+
+    /// The two halves split what an image holds: a metadata-only change moves
+    /// the metadata half and the whole encoding, never the contents half.
+    #[test]
+    fn contents_and_metadata_encode_apart() {
+        let base = FsImage::new(vec![FsImageEntry::file("/a", "x")]);
+        let touched = FsImage::new(vec![FsImageEntry::File {
+            path: "/a".into(),
+            contents: b"x".to_vec(),
+            mode: FILE_MODE,
+            mtime_nanos: 7,
+        }]);
+        let edited = FsImage::new(vec![FsImageEntry::file("/a", "y")]);
+        assert_eq!(base.encode_contents(), touched.encode_contents());
+        assert_ne!(base.encode_metadata(), touched.encode_metadata());
+        assert_ne!(base.encode(), touched.encode());
+        assert_ne!(base.encode_contents(), edited.encode_contents());
+        assert_eq!(base.encode_metadata(), edited.encode_metadata());
     }
 }

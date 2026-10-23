@@ -120,6 +120,41 @@ pub(super) fn denied(path: &str, action: &str) -> EffectError {
 }
 
 impl MemFs {
+    /// Give a seeded entry the metadata it was captured with: its permission
+    /// bits (`None` for a symlink, which has none of its own) and its
+    /// modification time, truncated to the filesystem's range like any set
+    /// time. Its other times are derived from that one, as on a tree that was
+    /// written once and not read since: access, change and birth all equal it.
+    pub(super) fn seed_metadata(
+        &mut self,
+        path: &str,
+        mode: Option<u32>,
+        mtime_nanos: i128,
+    ) -> DriverResult<()> {
+        let mtime = TimeRange::Ext4.truncate(mtime_nanos);
+        let (times, bits) = if let Some(inode) = self.names.get(path).copied() {
+            let inode = self
+                .inodes
+                .get_mut(&inode)
+                .expect("name references an inode");
+            (&mut inode.times, &mut inode.mode)
+        } else if let Some(metadata) = self.directories.get_mut(path) {
+            (&mut metadata.times, &mut metadata.mode)
+        } else {
+            return Err(not_found(path));
+        };
+        if let Some(mode) = mode {
+            *bits = mode & MODE_MASK;
+        }
+        *times = Times {
+            atime_nanos: mtime,
+            mtime_nanos: mtime,
+            ctime_nanos: mtime,
+            btime_nanos: mtime,
+        };
+        Ok(())
+    }
+
     /// A name appeared in or disappeared from `directory`: its `mtime` and
     /// `ctime`, as every namespace operation stamps its parent.
     pub(super) fn stamp_directory(&mut self, clock: FsClock, directory: &str) {

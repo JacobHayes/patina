@@ -962,17 +962,22 @@ pub(crate) fn fs_image_base() -> Result<MemFs, RuntimeError> {
             let image = FsImage::decode(&bytes).map_err(|error| {
                 RuntimeError::Config(format!("invalid filesystem image: {error}"))
             })?;
-            image
-                .into_memfs()
-                .and_then(with_identity_home)
-                .map_err(|error| {
-                    RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
-                })
+            rebuilt_image(&image).map_err(|error| {
+                RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))
+            })
         }
         (None, None) => with_identity_home(MemFs::new()).map_err(|error| {
             RuntimeError::Config(format!("failed to seed the filesystem image: {error}"))
         }),
     }
+}
+
+/// A `--mount` corpus rebuilt with the identity's home added: the home is
+/// made before the captured metadata is applied, so making it neither
+/// restamps a captured `/home` nor needs write permission on one, and every
+/// captured entry ends with the metadata it was captured with.
+fn rebuilt_image(image: &FsImage) -> Result<MemFs, patina_dst_abi::EffectError> {
+    image.into_memfs_with(with_identity_home)
 }
 
 /// The identity's home directory in a fresh image, as the pinned system's
@@ -1339,6 +1344,28 @@ pub(crate) fn clock(value: u32) -> Result<ClockKind, c_int> {
 mod identity_home_tests {
     use super::*;
     use patina_dst_driver_api::FsDriver;
+
+    /// A corpus with `/home` but not the identity's home gains the home, and
+    /// `/home` keeps the mode and mtime it was captured with, a mode that
+    /// denies writing it included.
+    #[test]
+    fn a_corpus_home_keeps_its_captured_metadata_when_the_identity_home_is_added() {
+        use patina_dst_fs_mem::FsImageEntry;
+        let captured = 1_704_067_200 * 1_000_000_000;
+        for mode in [0o755, 0o555] {
+            let image = FsImage::new(vec![FsImageEntry::Directory {
+                path: "/home".into(),
+                mode,
+                mtime_nanos: captured,
+            }]);
+            let mut fs =
+                rebuilt_image(&image).unwrap_or_else(|error| panic!("/home {mode:o}: {error}"));
+            let home = fs.metadata("/home").unwrap();
+            assert_eq!((home.mode & 0o7777, home.mtime_nanos), (mode, captured));
+            let identity = fs.metadata(registry::IDENTITY_HOME).unwrap();
+            assert_eq!(identity.kind, patina_dst_abi::FsEntryKind::Directory);
+        }
+    }
 
     /// The home `getpwuid_r` answers for the identity is a directory in a
     /// fresh image, with the pinned system's modes.

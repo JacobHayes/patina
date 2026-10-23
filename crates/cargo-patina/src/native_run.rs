@@ -6,8 +6,9 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    SchedulePolicyFingerprint, binary_instrumentation, native_policy_from_trace,
-    native_run_fingerprint, resolve_artifact, trace_has_buggify,
+    IMAGE_FINGERPRINT_COMPONENT, SchedulePolicyFingerprint, binary_instrumentation,
+    native_policy_from_trace, native_run_fingerprint, native_run_fingerprint_around,
+    resolve_artifact, trace_has_buggify,
 };
 use crate::output;
 use crate::parse::{knob_env_pairs, knob_env_vars, liveness_env_pairs, schedule_env_pairs};
@@ -62,7 +63,7 @@ use child::reconcile_replay_argv;
 use child::spawn_native_child;
 #[cfg(unix)]
 use child::wait_native_child_once;
-use fs_image::build_fs_image_file;
+use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
 pub(super) use gate::effective_native_allow;
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
@@ -221,6 +222,53 @@ liveness-safe."
         None => None,
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
+    // A replay's `+buggify` component: requested, or recorded in the trace.
+    let replay_buggify =
+        |bundle: &TraceBundle| invocation.buggify.is_some() || trace_has_buggify(bundle);
+    // A replay against another corpus would only fail as a fingerprint
+    // mismatch inside the guest; refuse it here and say which half differs.
+    // The recorded hash is read where this replay's fingerprint puts its
+    // own, so it is compared only when the fingerprints differ in nothing
+    // else.
+    if let (
+        NativeRunMode::Replay { fingerprint, .. },
+        Some(bundle),
+        Some(current),
+        Some(host_dir),
+    ) = (
+        &invocation.mode,
+        &replay_trace,
+        &image_hash,
+        &invocation.mount,
+    ) {
+        let (head, tail) = native_run_fingerprint_around(
+            fingerprint,
+            instrumentation,
+            replay_buggify(bundle),
+            &native_policy_from_trace(bundle),
+        );
+        if let Some(recorded) = recorded_image_hash(&bundle.metadata.fingerprint, &head, &tail)
+            && let Some(mismatch) = FsImageHash::mismatch(recorded, current)
+        {
+            let message = format!(
+                "--mount {} is not the corpus this trace recorded: {}. Replay against the \
+                 recorded corpus (trace {IMAGE_FINGERPRINT_COMPONENT}{recorded}, this corpus \
+                 {IMAGE_FINGERPRINT_COMPONENT}{current})",
+                host_dir.display(),
+                mismatch.describe()
+            );
+            if output::facts_active() {
+                output::emit_native_mismatch_refusal(
+                    &binary,
+                    output::FINGERPRINT_MISMATCH_REFUSAL,
+                    message,
+                    Some(mismatch.input()),
+                );
+                return Ok(2);
+            }
+            return Err(CliError(message));
+        }
+    }
     let coverage_file = match &invocation.coverage_out {
         Some(path) => Some(fs::File::create(path).map_err(|error| {
             CliError(format!(
@@ -291,7 +339,7 @@ liveness-safe."
             let bundle = replay_trace
                 .as_ref()
                 .expect("a native replay loads its trace first");
-            let buggify = invocation.buggify.is_some() || trace_has_buggify(bundle);
+            let buggify = replay_buggify(bundle);
             let policy = native_policy_from_trace(bundle);
             vec![
                 (ENV_MODE, "replay".into()),
