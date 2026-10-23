@@ -96,27 +96,37 @@ impl AllocatorRouting {
         Some(vec![format!("-DPATINA_RUST_ALLOC_PREFIX={prefix}")])
     }
 
-    /// The compiler-driver arguments that route the entry points, given the
-    /// routing `object` compiled under [`Self::defines`] and the shim archive
-    /// `staticlib`: each entry point's wrap, the object, and the archive again
-    /// after it, so a single-pass archive scan finds the routers the object
-    /// jumps to wherever the link put the archive first.
-    pub(super) fn linker_args(&self, object: &Path, staticlib: &Path) -> Vec<OsString> {
+    /// The entry points' full names, or none where the platform routes nothing.
+    pub(super) fn entry_points(&self) -> Vec<String> {
         let Some(prefix) = &self.prefix else {
             return Vec::new();
         };
-        let mut args: Vec<OsString> = ENTRY_POINTS
+        ENTRY_POINTS
             .iter()
-            .map(|entry| format!("-Wl,--wrap={prefix}{entry}").into())
+            .map(|entry| format!("{prefix}{entry}"))
+            .collect()
+    }
+
+    /// The compiler-driver arguments that route the entry points, given the
+    /// routing `object` compiled under [`Self::defines`]: each entry point's
+    /// wrap, and the object, which jumps to the routers the sealed engine
+    /// exports.
+    pub(super) fn linker_args(&self, object: &Path) -> Vec<OsString> {
+        let entries = self.entry_points();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+        let mut args: Vec<OsString> = entries
+            .iter()
+            .map(|entry| format!("-Wl,--wrap={entry}").into())
             .collect();
         args.push(object.into());
-        args.push(staticlib.into());
         args
     }
 
     /// [`Self::linker_args`] as rustc `-C` values.
-    pub(super) fn link_args(&self, object: &Path, staticlib: &Path) -> Vec<OsString> {
-        self.linker_args(object, staticlib)
+    pub(super) fn link_args(&self, object: &Path) -> Vec<OsString> {
+        self.linker_args(object)
             .into_iter()
             .map(|arg| {
                 let mut value = OsString::from("link-arg=");
@@ -142,22 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_point_is_wrapped_and_the_object_links_before_the_archive_again() {
+    fn every_entry_point_is_wrapped_and_the_object_links() {
         let routing = AllocatorRouting::from_names(&names(&ENTRY_POINTS)).expect("a complete set");
-        let (object, staticlib) = (Path::new("routing.o"), Path::new("libshim.a"));
-        let args = routing.link_args(object, staticlib);
+        let args = routing.link_args(Path::new("routing.o"));
         for entry in ENTRY_POINTS {
             let wrap = format!("link-arg=-Wl,--wrap=_RNvCsdtSMxSA38aw_7___rustc{entry}");
             assert!(args.contains(&OsString::from(wrap)), "{entry}");
         }
-        let tail: Vec<_> = args.iter().rev().take(2).rev().cloned().collect();
-        assert_eq!(
-            tail,
-            [
-                OsString::from("link-arg=routing.o"),
-                OsString::from("link-arg=libshim.a")
-            ]
-        );
+        assert_eq!(args.last(), Some(&OsString::from("link-arg=routing.o")));
         let defines = routing.defines().expect("defines");
         assert_eq!(
             defines,
@@ -230,6 +232,7 @@ mod tests {
         }
         let none = AllocatorRouting { prefix: None };
         assert_eq!(none.defines(), None);
-        assert!(none.link_args(Path::new("o"), Path::new("a")).is_empty());
+        assert!(none.link_args(Path::new("o")).is_empty());
+        assert!(none.entry_points().is_empty());
     }
 }

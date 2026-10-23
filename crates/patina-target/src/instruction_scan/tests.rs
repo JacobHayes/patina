@@ -379,3 +379,71 @@ fn aarch64_thread_pointer_write_is_refused_by_name() {
     assert_eq!(render_thread_pointer_note(&[]), None);
     assert_eq!(render_cpu_nondeterminism_note(&denied), None);
 }
+
+/// A relocatable object with one section `segment`/`name` of `kind` holding
+/// `text`, and a global function `entry` at `offset` in it.
+fn relocatable(
+    format: object::BinaryFormat,
+    architecture: Architecture,
+    (segment, name, kind): (&[u8], &[u8], SectionKind),
+    text: &[u8],
+    (entry, offset): (&[u8], u64),
+) -> Vec<u8> {
+    use object::write;
+    let mut file = write::Object::new(format, architecture, object::Endianness::Little);
+    let section = file.add_section(segment.to_vec(), name.to_vec(), kind);
+    file.append_section_data(section, text, 4);
+    file.add_symbol(write::Symbol {
+        name: entry.to_vec(),
+        value: offset,
+        size: 0,
+        kind: object::SymbolKind::Text,
+        scope: object::SymbolScope::Dynamic,
+        weak: false,
+        section: write::SymbolSection::Section(section),
+        flags: object::SymbolFlags::None,
+    });
+    file.write().unwrap()
+}
+
+/// The engine gate decodes from every symbol: a stray byte the decoder
+/// cannot measure, ahead of a function's entry, neither hides the function
+/// nor passes itself.
+#[test]
+fn the_relocatable_gate_restarts_at_each_symbol_and_refuses_undecodable_bytes() {
+    // 0x06 (`push es`) is invalid in 64-bit mode; `syscall; ret` follows.
+    let bytes = relocatable(
+        object::BinaryFormat::Elf,
+        Architecture::X86_64,
+        (b"", b".text.planted", SectionKind::Text),
+        &[0x06, 0x0f, 0x05, 0xc3],
+        (b"planted", 1),
+    );
+    let categories: BTreeSet<&str> = relocatable_raw_opcode_sites(&bytes)
+        .unwrap()
+        .iter()
+        .map(|site| site.category)
+        .collect();
+    assert_eq!(
+        categories,
+        BTreeSet::from(["direct-syscall", "undecodable-instruction"])
+    );
+}
+
+/// The engine gate selects Mach-O code by its instruction attributes, not
+/// the `__text` name: `svc #0` in another code section is found.
+#[test]
+fn the_relocatable_gate_scans_every_mach_o_code_section() {
+    let bytes = relocatable(
+        object::BinaryFormat::MachO,
+        Architecture::Aarch64,
+        (b"__TEXT", b"__raw", SectionKind::Text),
+        &aarch64_text(&[0xd400_0001, 0xd65f_03c0]),
+        (b"_planted", 0),
+    );
+    let sites = relocatable_raw_opcode_sites(&bytes).unwrap();
+    assert!(
+        sites.iter().any(|site| site.category == "direct-syscall"),
+        "{sites:?}"
+    );
+}

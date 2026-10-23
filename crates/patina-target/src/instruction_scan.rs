@@ -3,8 +3,10 @@
 use crate::import_policy::NativeFormat;
 use crate::provenance::NativeProvenanceIndex;
 use crate::{NativeEscape, TargetError, code_ranges, x86_scan};
-use object::{Architecture, Object, ObjectSection, SectionKind};
-use std::collections::BTreeSet;
+use object::{
+    Architecture, Object, ObjectSection, ObjectSymbol, SectionFlags, SectionKind, SymbolKind,
+};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The escape category of a *host-identity* instruction finding: an inline read
 /// of the host CPU's own identity (x86-64 `cpuid`), or of its protection-key
@@ -90,6 +92,123 @@ pub fn native_host_identity_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, Tar
         .collect())
 }
 
+/// The raw system calls and counter or entropy reads in a relocatable object's
+/// code, and every byte run the decoder cannot measure: the seal gate's
+/// opcode check over the sealed shim engine, which must reach the kernel only
+/// through libc, the region syscall-user-dispatch allows.
+///
+/// Stricter than the binary scan, as a gate over code Patina compiled itself
+/// can be. Code is every section marked as holding instructions (ELF
+/// `SHF_EXECINSTR`, Mach-O's instruction attributes), whatever its name.
+/// Decoding restarts at every symbol in it, so leading data or a stray byte
+/// cannot carry the walk past a function's entry, and an undecodable byte or
+/// an instruction running over the next symbol is itself a finding. Fails
+/// closed on a parse error or an architecture the scan cannot decode.
+pub fn relocatable_raw_opcode_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
+    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let architecture = file.architecture();
+    if !matches!(architecture, Architecture::Aarch64 | Architecture::X86_64) {
+        return Err(TargetError::UnsupportedNativeArchitecture(architecture));
+    }
+    let provenance = NativeProvenanceIndex::new(&file);
+    let mut entries: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
+    for symbol in file.symbols() {
+        if let Some(section) = symbol.section_index()
+            && !matches!(symbol.kind(), SymbolKind::Section | SymbolKind::File)
+        {
+            entries
+                .entry(section.0)
+                .or_default()
+                .insert(symbol.address());
+        }
+    }
+    let mut escapes = Vec::new();
+    for section in file.sections().filter(holds_instructions) {
+        let data = section.data().map_err(TargetError::NativeParse)?;
+        let name = section.name().unwrap_or("<text>");
+        let address = section.address();
+        let mut starts = BTreeSet::from([0]);
+        starts.extend(
+            entries
+                .get(&section.index().0)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| usize::try_from(entry.checked_sub(address)?).ok())
+                .filter(|offset| *offset < data.len()),
+        );
+        let ends = starts.iter().skip(1).copied().chain([data.len()]);
+        for range in starts
+            .iter()
+            .copied()
+            .zip(ends)
+            .map(|(start, end)| start..end)
+        {
+            if architecture == Architecture::X86_64 {
+                x86_scan::scan(data, range, name, address, &provenance, &mut escapes);
+                continue;
+            }
+            if range.start % 4 != 0 || range.len() % 4 != 0 {
+                escapes.push(NativeEscape::new(
+                    format!("instruction@{name}+0x{:x}", range.start),
+                    UNDECODABLE_CATEGORY,
+                    vec![provenance.for_address(address + range.start as u64, Some(name))],
+                ));
+            }
+            scan_aarch64(data, range, name, address, &provenance, &mut escapes);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    escapes.retain(|escape| {
+        matches!(
+            escape.category,
+            "direct-syscall" | "cpu-nondeterminism" | UNDECODABLE_CATEGORY
+        ) && seen.insert((escape.symbol.clone(), escape.category))
+    });
+    Ok(escapes)
+}
+
+/// The category of a byte run the decoder cannot measure as an instruction.
+const UNDECODABLE_CATEGORY: &str = "undecodable-instruction";
+
+/// Whether `section` is marked as holding instructions.
+fn holds_instructions(section: &object::Section<'_, '_>) -> bool {
+    match section.flags() {
+        SectionFlags::Elf { sh_flags } => sh_flags & u64::from(object::elf::SHF_EXECINSTR) != 0,
+        SectionFlags::MachO { flags } => {
+            flags
+                & (object::macho::S_ATTR_PURE_INSTRUCTIONS
+                    | object::macho::S_ATTR_SOME_INSTRUCTIONS)
+                != 0
+        }
+        _ => section.kind() == SectionKind::Text,
+    }
+}
+
+/// Classify each aligned word of `data[range]` as an aarch64 instruction.
+fn scan_aarch64(
+    data: &[u8],
+    range: std::ops::Range<usize>,
+    name: &str,
+    address: u64,
+    provenance: &NativeProvenanceIndex,
+    escapes: &mut Vec<NativeEscape>,
+) {
+    for (index, instruction) in data[range.clone()].as_chunks::<4>().0.iter().enumerate() {
+        let instruction = u32::from_le_bytes(*instruction);
+        if let Some((category, mnemonic)) = aarch64_instruction_category(instruction) {
+            let offset = range.start + index * 4;
+            escapes.push(
+                NativeEscape::new(
+                    format!("instruction@{name}+0x{offset:x}"),
+                    category,
+                    vec![provenance.for_address(address + offset as u64, Some(name))],
+                )
+                .with_mnemonic(mnemonic),
+            );
+        }
+    }
+}
+
 /// The escape category of a *thread-pointer* instruction finding: an inline write
 /// of the register TLS resolves through (x86-64 `wrfsbase`, or an FS selector
 /// load by `mov fs`/`pop fs`/`lfs`; aarch64 `msr tpidr_el0`).
@@ -169,23 +288,14 @@ pub(super) fn scan_instruction_ranges(
         let name = section.name().unwrap_or("<text>");
         match architecture {
             Architecture::Aarch64 => {
-                for (index, instruction) in data.as_chunks::<4>().0.iter().enumerate() {
-                    let instruction = u32::from_le_bytes(*instruction);
-                    if let Some((category, mnemonic)) = aarch64_instruction_category(instruction) {
-                        let offset = index * 4;
-                        escapes.push(
-                            NativeEscape::new(
-                                format!("instruction@{name}+0x{offset:x}"),
-                                category,
-                                vec![
-                                    provenance
-                                        .for_address(section.address() + offset as u64, Some(name)),
-                                ],
-                            )
-                            .with_mnemonic(mnemonic),
-                        );
-                    }
-                }
+                scan_aarch64(
+                    data,
+                    0..data.len(),
+                    name,
+                    section.address(),
+                    provenance,
+                    &mut escapes,
+                );
             }
             Architecture::X86_64 => {
                 let whole_section = 0..data.len();

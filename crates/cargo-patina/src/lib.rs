@@ -54,6 +54,7 @@ mod parse;
 mod render;
 mod rollup;
 mod sdk_report;
+mod seal;
 mod shim_build;
 mod shim_cache;
 mod sites;
@@ -683,9 +684,10 @@ enum UnsupportedPolicy {
 }
 
 /// The compiler-driver arguments that route Rust's allocator entry points
-/// through the shim archive `staticlib`'s arena router, for a link `cargo
-/// patina build` does not drive (the test suites' C and C++ guests): the
-/// routing object is compiled into `dir` with `cc`.
+/// through the arena router of the engine sealed from the shim archive
+/// `staticlib`, for a link `cargo patina build` does not drive (the test
+/// suites' C and C++ guests): the routing object is compiled into `dir` with
+/// `cc`.
 #[doc(hidden)]
 pub fn shim_allocator_linker_args(staticlib: &Path, dir: &Path) -> Result<Vec<OsString>, CliError> {
     let routing = allocator_routing::AllocatorRouting::read(staticlib)?;
@@ -709,7 +711,26 @@ pub fn shim_allocator_linker_args(staticlib: &Path, dir: &Path) -> Result<Vec<Os
             "compiling the allocator routing failed".to_owned(),
         ));
     }
-    Ok(routing.linker_args(&object, staticlib))
+    Ok(routing.linker_args(&object))
+}
+
+/// Seal the shim archive `staticlib` with the C seams object `posix` into
+/// `dir`, as `cargo patina build` seals it, for a link it does not drive:
+/// returns the façade and the engine objects, which a guest links in place of
+/// the two. Always seals afresh, replacing a previous seal in `dir`
+/// atomically. Refuses an engine the seal's gate refuses.
+#[doc(hidden)]
+pub fn seal_shim(staticlib: &Path, posix: &Path, dir: &Path) -> Result<[PathBuf; 2], CliError> {
+    let routing = allocator_routing::AllocatorRouting::read(staticlib)?;
+    fs::create_dir_all(dir).map_err(|error| CliError(format!("{}: {error}", dir.display())))?;
+    let stale = dir.join(seal::FACADE);
+    if let Err(error) = fs::remove_file(&stale)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(CliError(format!("{}: {error}", stale.display())));
+    }
+    let sealed = seal::seal(staticlib, posix, &routing, dir)?;
+    Ok([sealed.facade, sealed.engine])
 }
 
 pub fn entrypoint() -> Result<i32, CliError> {

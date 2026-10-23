@@ -146,7 +146,7 @@ use instruction_scan::scan_instruction_classes;
 pub use instruction_scan::{
     FAR_TRANSFER_CATEGORY, GO_BUILD_MARKER_CATEGORY, HOST_IDENTITY_CATEGORY,
     THREAD_POINTER_CATEGORY, native_escape_is_go_build_marker, native_escape_is_host_identity,
-    native_go_build_marker_sites, native_host_identity_sites,
+    native_go_build_marker_sites, native_host_identity_sites, relocatable_raw_opcode_sites,
 };
 pub use native_audit::NativeAudit;
 pub use provenance::NativeProvenance;
