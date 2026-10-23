@@ -49,15 +49,30 @@ debug = "line-tables-only"
 # no workspace member, and one member is on that path too: patina-dst-target
 # scans the guest binary before every `run`, `replay` and `audit`, which
 # unoptimized costs about 0.5 s per call. With it optimized a call costs what
-# it does with every workspace crate optimized. The other workspace crates,
-# including the test harnesses, stay at opt-level 0; debug assertions and
-# overflow checks stay on; `cargo build` and `cargo run` (the dev profile) are
+# it does with every workspace crate optimized. Debug assertions and overflow
+# checks stay on; `cargo build` and `cargo run` (the dev profile) are
 # unaffected.
 [profile.test.package."*"]
 opt-level = 3
 
 [profile.test.package.patina-dst-target]
 opt-level = 3
+
+# The other workspace crates, among them the runtime, trace and filesystem
+# crates the cargo-patina binary links, build at opt-level 1: the supervisor
+# moves every recorded event through their generic code, which unoptimized
+# costs seconds per large recording. cargo-patina itself, the crate an edit
+# recompiles most, stays at opt-level 0, and so does the shim crate, whose unit
+# tests are the only thing the test profile builds it for. Below opt-level 2 a
+# crate reuses its dependencies' generic instantiations.
+[profile.test]
+opt-level = 1
+
+[profile.test.package.cargo-patina]
+opt-level = 0
+
+[profile.test.package.patina-dst-native-shim]
+opt-level = 0
 
 [workspace.package]
 version = "0.1.0"
