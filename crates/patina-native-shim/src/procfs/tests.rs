@@ -240,6 +240,7 @@ fn a_walk_follows_self_and_leaves_by_dot_dot() {
     );
     assert_eq!(walked(Node::Root, "uptime/x", false, false), Err(ENOTDIR));
     assert_eq!(link_target(Node::SelfLink), Some(me().to_string()));
+    assert_eq!(link_target(Node::NetLink).as_deref(), Some("self/net"));
     assert_eq!(link_target(Node::Root), None);
 }
 
@@ -298,4 +299,88 @@ fn a_process_lists_its_threads_under_task() {
         .map(|entry| entry.name.clone())
         .collect();
     assert_eq!(init_tids, [Process::INIT.pid().to_string()]);
+}
+
+/// `net` is followed to the caller's `net` directory, whose `..` is the
+/// process's; its tables come in `proc_match`'s order and look up to what
+/// is listed, each one header line at the width its `seq_show` pads to.
+#[test]
+fn net_leads_to_the_callers_socket_tables() {
+    let at = |node| Ok(Walked::At(node));
+    let net = Node::Net(me());
+    assert_eq!(walked(Node::Root, "net", false, false), at(net));
+    assert_eq!(walked(Node::Root, "net", true, false), at(Node::NetLink));
+    assert_eq!(
+        walked(Node::Root, "net/tcp", true, false),
+        at(Node::NetFile(me(), NetFile::Tcp))
+    );
+    assert_eq!(
+        walked(Node::Root, "net/..", false, false),
+        at(Node::Process(me()))
+    );
+    assert_eq!(
+        walked(Node::Root, "net/../..", false, false),
+        at(Node::Root)
+    );
+    assert_eq!(walked(Node::Root, "net", false, true), Err(ELOOP));
+    assert_eq!(
+        walked(Node::Root, &format!("{}/net", me()), false, false),
+        at(net)
+    );
+    let entries = listing(net);
+    assert_eq!(entries[1].ino, Node::Process(me()).ino());
+    let names: Vec<&str> = entries[2..]
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    let ordered = |a: &str, b: &str| (a.len(), a.as_bytes()) < (b.len(), b.as_bytes());
+    assert!(
+        names.windows(2).all(|pair| ordered(pair[0], pair[1])),
+        "{names:?}"
+    );
+    for entry in &entries[2..] {
+        let Ok(Node::NetFile(pid, file)) = lookup(net, &entry.name) else {
+            panic!("{} is no table", entry.name);
+        };
+        assert_eq!(pid, me());
+        assert_eq!(
+            node_at(&Node::NetFile(pid, file).path()),
+            Some(Node::NetFile(pid, file))
+        );
+        let header = net::header(file);
+        let lines = header.split_inclusive(|byte| *byte == b'\n').count();
+        assert_eq!(lines, 1, "{}", entry.name);
+        assert!(header.ends_with(b"\n"));
+        let padded = match file {
+            NetFile::Tcp => Some(150),
+            NetFile::Udp => Some(128),
+            NetFile::Tcp6 | NetFile::Udp6 | NetFile::Unix => None,
+        };
+        if let Some(len) = padded {
+            assert_eq!(header.len(), len, "{}", entry.name);
+        } else {
+            assert_ne!(header[header.len() - 2], b' ', "{}", entry.name);
+        }
+    }
+}
+
+/// Every directory's link count is two plus the directories it lists, as
+/// `pid_entry_nlink` and `proc_root_getattr` count them.
+#[test]
+fn a_directory_links_the_directories_it_lists() {
+    let mut directories = vec![Node::Root];
+    while let Some(dir) = directories.pop() {
+        let listed: Vec<Node> = listing(dir)[2..]
+            .iter()
+            .filter(|entry| entry.kind == FsEntryKind::Directory)
+            .map(|entry| lookup(dir, &entry.name).unwrap())
+            .collect();
+        assert_eq!(
+            metadata(dir).nlink as usize,
+            2 + listed.len(),
+            "{}",
+            dir.path()
+        );
+        directories.extend(listed);
+    }
 }

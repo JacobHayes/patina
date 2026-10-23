@@ -162,9 +162,14 @@ pub(super) fn generate(node: Node) -> Result<Vec<u8>, c_int> {
             let task = Task::of_thread(pid, tid, &census, &reading)?;
             return Ok(task.text(file));
         }
-        Node::Root | Node::SelfLink | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) => {
-            crate::trap_fatal("a procfs directory or link has no text")
-        }
+        Node::NetFile(pid, file) => return Ok(super::net::text(pid, file)),
+        Node::Root
+        | Node::SelfLink
+        | Node::NetLink
+        | Node::Process(_)
+        | Node::Tasks(_)
+        | Node::Thread(..)
+        | Node::Net(_) => crate::trap_fatal("a procfs directory or link has no text"),
     };
     Ok(text.into_bytes())
 }

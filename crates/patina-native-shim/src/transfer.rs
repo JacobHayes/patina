@@ -86,7 +86,7 @@ impl File {
     fn spliced_from(resolved: &Resolved) -> Option<Self> {
         match resolved.kind {
             FdKind::File if !secret(resolved) => Some(Self::Volume(Fd(resolved.handle))),
-            FdKind::Proc if crate::procfs::is_machine_file(resolved.handle) => {
+            FdKind::Proc if crate::procfs::splices(resolved.handle) => {
                 Some(Self::Proc(resolved.handle))
             }
             _ => None,

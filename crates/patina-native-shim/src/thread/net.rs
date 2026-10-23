@@ -1185,6 +1185,18 @@ pub(crate) fn at_mark(handle: u64) -> Option<Result<bool, c_int>> {
     }
 }
 
+/// Whether the process holds a socket of `family` (and of type `ty`, where
+/// one is named): what procfs's socket tables would list.
+#[cfg(target_os = "linux")]
+pub(crate) fn holds_socket(family: i32, ty: Option<i32>) -> bool {
+    lock_state()
+        .net
+        .sockets
+        .table
+        .values()
+        .any(|socket| socket.family == family && ty.is_none_or(|ty| socket.ty == ty))
+}
+
 /// The socket's family, which the interface requests judge.
 #[cfg(target_os = "linux")]
 pub(crate) fn socket_family(handle: u64) -> Option<i32> {

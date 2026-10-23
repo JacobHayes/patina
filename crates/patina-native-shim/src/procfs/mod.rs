@@ -3,27 +3,32 @@
 //! machine's own state, never the host's, so a read is the same on every
 //! host and in a replay:
 //!
-//! * the root, `/proc` (`0555`, root's): `self`, the machine-wide files and
-//!   a directory per process of the pid namespace (`identity::processes`:
-//!   init and the guest), listed in the kernel's order (the files by name
-//!   length, then bytes, as `proc_match` keeps them; then `self`; then the
-//!   pids, ascending);
-//! * `/proc/self`, a symlink (`0777`, root's) to the caller's process;
+//! * the root, `/proc` (`0555`, root's): `self`, `net`, the machine-wide
+//!   files and a directory per process of the pid namespace
+//!   (`identity::processes`: init and the guest), listed in the kernel's
+//!   order (the files by name length, then bytes, as `proc_match` keeps
+//!   them, `net` among them; then `self`; then the pids, ascending);
+//! * `/proc/self`, a symlink (`0777`, root's) to the caller's process, and
+//!   `/proc/net`, one to `self/net`;
 //! * the machine-wide files (`0444`, root's): `stat`, `uptime`, `vmstat`,
 //!   `loadavg` and `meminfo` ([`text`]);
-//! * `/proc/<pid>` (`0555`, the process's owner) with its `task` directory
-//!   and its `status` and `stat` (`0444`);
+//! * `/proc/<pid>` (`0555`, the process's owner) with its `task` and `net`
+//!   directories and its `status` and `stat` (`0444`);
 //! * `/proc/<pid>/task` (`0555`, the process's owner), a directory per live
 //!   thread by id (the thread census's; init has its one), each holding the
 //!   thread's own `status` and `stat`: its name, its state (sleeping while
-//!   it waits in a modeled wait), its scheduling and its CPU time.
+//!   it waits in a modeled wait), its scheduling and its CPU time;
+//! * `/proc/<pid>/net` (`0555`, the process's owner), the socket tables
+//!   (`0444`, root's): `tcp`, `udp`, `tcp6`, `udp6` and `unix` ([`net`]),
+//!   each its header with no rows; a read of one while the guest holds a
+//!   socket it would list stops the run.
 //!
 //! A file holds only what the model answers: a keyed line the model has no
 //! value for is left out, and `<pid>/stat` stops after the last field it can
 //! fill (`starttime`), since the host maps the guest's memory and the model
 //! cannot say how much; a thread's stops before `starttime` but for the
-//! process's first thread, the model keeping no start for the others. Any other name in procfs is `ENOENT`, as a name no
-//! entry has; `thread-self`, a thread's directory by its id at the root, a
+//! process's first thread, the model keeping no start for the others. Any
+//! other name in procfs is `ENOENT`, as a name no entry has; `thread-self`, a thread's directory by its id at the root, a
 //! thread's `ns`, the namespace files by any spelling but
 //! `/proc/self/ns/<entry>` (`crate::nsfs`) and an `O_PATH` open stop the
 //! run by name.
@@ -33,24 +38,27 @@
 //! read ended (a seek to the start leaves it to the next read); a read takes
 //! the bytes from that position. The machine's files have
 //! `proc_iter_file_ops`' `poll` (always ready, so epoll takes them) and
-//! `splice_read` (`sendfile` and `splice` read them); a process's files and
-//! every directory have neither (`EPERM`, `EINVAL`). A process directory
+//! `splice_read` (`sendfile` and `splice` read them); the socket tables
+//! have the `poll` alone; a process's files and every directory have
+//! neither (`EPERM`, `EINVAL`). A process directory
 //! open names its process to `pidfd_send_signal`. A write, a
 //! creation or a removal is refused as the kernel refuses an unprivileged
 //! caller (the modes above), and the nodes report procfs's metadata: size 0,
 //! the procfs device (0:25), the 1 KiB block, every time the instant the
-//! node was first used in the run (the root and `self` the boot's).
+//! node was first used in the run (the root and the links the boot's).
 //!
 //! The resolver (`paths::resolve`) enters procfs at `/proc`, however the walk
 //! reaches it, and leaves it by `..` at its root (`..` elsewhere names the
 //! directory a node is in). Known differences: the
 //! volume need not hold a `/proc` directory for the mount to be there (a
 //! listing of `/` shows one only if the volume has it); the root's listing
-//! leaves out `thread-self`, whose lookup stops the run; a process's and a
-//! thread's directories hold only the entries above; the inode numbers of
-//! the machine-wide files were read live on an x86_64 7.0 host, not on the
-//! pinned 6.8, and a process's and a thread's are the model's own; a directory's `d_off`
-//! cookies count its entries, as the volume's do.
+//! leaves out `thread-self`, whose lookup stops the run; a process's, a
+//! thread's and a `net` directory hold only the entries above, and their
+//! link counts only the subdirectories above; the inode numbers of the
+//! machine-wide files, `/proc/net` and the socket tables were read live on
+//! an x86_64 7.0 host, not on the pinned 6.8, and a process's and a
+//! thread's are the model's own; a directory's `d_off` cookies count its
+//! entries, as the volume's do.
 
 use crate::fdtable::FdKind;
 use crate::identity::Process;
@@ -65,7 +73,10 @@ use patina_dst_abi::{FsDirectoryEntry, FsEntryKind};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_int;
 
+mod net;
 mod text;
+
+pub(crate) use net::NetFile;
 
 #[cfg(test)]
 mod tests;
@@ -82,6 +93,8 @@ pub(crate) enum Node {
     Root,
     /// `/proc/self`, a symlink to the caller's process.
     SelfLink,
+    /// `/proc/net`, a symlink to the caller's `net` directory.
+    NetLink,
     /// A machine-wide file, `/proc/<name>`.
     Machine(Machine),
     /// A process's directory, `/proc/<pid>`.
@@ -94,6 +107,10 @@ pub(crate) enum Node {
     Thread(i32, i32),
     /// A file in a thread's directory.
     OfThread(i32, i32, OfProcess),
+    /// A process's `net` directory, `/proc/<pid>/net`.
+    Net(i32),
+    /// A socket table in it.
+    NetFile(i32, NetFile),
 }
 
 /// A machine-wide file.
@@ -133,6 +150,8 @@ const ROOT_INO: u64 = 1;
 /// `/proc/self`'s inode: the first `proc_alloc_inum` hands out
 /// (`proc_self_init`, at the root's creation).
 const SELF_INO: u64 = 0xF000_0000;
+/// `/proc/net`'s, as the host's `/proc` numbered it (`proc_net_init`).
+const NET_LINK_INO: u64 = 0xF000_0003;
 /// Where the model numbers the processes' nodes: `get_next_ino` hands the
 /// kernel's out as they are made, so any distinct numbers would do.
 const PROCESS_INO_BASE: u64 = 0x1_0000;
@@ -148,6 +167,7 @@ impl Node {
         match self {
             Node::Root => ROOT.to_owned(),
             Node::SelfLink => format!("{ROOT}/self"),
+            Node::NetLink => format!("{ROOT}/net"),
             Node::Machine(file) => format!("{ROOT}/{}", machine_name(file)),
             Node::Process(pid) => format!("{ROOT}/{pid}"),
             Node::Of(pid, file) => format!("{ROOT}/{pid}/{}", of_process_name(file)),
@@ -156,6 +176,8 @@ impl Node {
             Node::OfThread(pid, tid, file) => {
                 format!("{ROOT}/{pid}/task/{tid}/{}", of_process_name(file))
             }
+            Node::Net(pid) => format!("{ROOT}/{pid}/net"),
+            Node::NetFile(pid, file) => format!("{ROOT}/{pid}/net/{}", net::name(file)),
         }
     }
 
@@ -163,33 +185,39 @@ impl Node {
     pub(crate) fn is_directory(self) -> bool {
         matches!(
             self,
-            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..)
+            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) | Node::Net(_)
         )
     }
 
     /// The directory `..` names from it: the root's is itself.
     fn parent(self) -> Node {
         match self {
-            Node::Of(pid, _) | Node::Tasks(pid) => Node::Process(pid),
+            Node::Of(pid, _) | Node::Tasks(pid) | Node::Net(pid) => Node::Process(pid),
             Node::Thread(pid, _) => Node::Tasks(pid),
             Node::OfThread(pid, tid, _) => Node::Thread(pid, tid),
-            Node::Root | Node::SelfLink | Node::Machine(_) | Node::Process(_) => Node::Root,
+            Node::NetFile(pid, _) => Node::Net(pid),
+            Node::Root | Node::SelfLink | Node::NetLink | Node::Machine(_) | Node::Process(_) => {
+                Node::Root
+            }
         }
     }
 
     fn kind(self) -> FsEntryKind {
         match self {
-            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) => {
+            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) | Node::Net(_) => {
                 FsEntryKind::Directory
             }
-            Node::SelfLink => FsEntryKind::Symlink,
-            Node::Machine(_) | Node::Of(..) | Node::OfThread(..) => FsEntryKind::File,
+            Node::SelfLink | Node::NetLink => FsEntryKind::Symlink,
+            Node::Machine(_) | Node::Of(..) | Node::OfThread(..) | Node::NetFile(..) => {
+                FsEntryKind::File
+            }
         }
     }
 
     /// The `PATINA_FS_*` value its owner reads from: a guest process's
-    /// directory and files, its threads' included, are the process's (the
-    /// caller's); everything else is root's.
+    /// directory and files, its threads' and its `net` directory included,
+    /// are the process's (the caller's); everything else, the socket tables
+    /// included, is root's.
     fn fs(self) -> u32 {
         match self {
             Node::Process(pid)
@@ -197,6 +225,7 @@ impl Node {
             | Node::Tasks(pid)
             | Node::Thread(pid, _)
             | Node::OfThread(pid, ..)
+            | Node::Net(pid)
                 if pid != Process::INIT.pid() =>
             {
                 PATINA_FS_PROC_OWN
@@ -213,6 +242,7 @@ impl Node {
         match self {
             Node::Root => ROOT_INO,
             Node::SelfLink => SELF_INO,
+            Node::NetLink => NET_LINK_INO,
             // As the host's `/proc` numbered them.
             Node::Machine(Machine::Stat) => 4_026_532_024,
             Node::Machine(Machine::Uptime) => 4_026_532_025,
@@ -223,6 +253,8 @@ impl Node {
             Node::Of(pid, OfProcess::Status) => process(pid, 1),
             Node::Of(pid, OfProcess::Stat) => process(pid, 2),
             Node::Tasks(pid) => process(pid, 3),
+            Node::Net(pid) => process(pid, 4),
+            Node::NetFile(_, file) => net::ino(file),
             Node::Thread(pid, tid) => thread(pid, tid, 0),
             Node::OfThread(pid, tid, OfProcess::Status) => thread(pid, tid, 1),
             Node::OfThread(pid, tid, OfProcess::Stat) => thread(pid, tid, 2),
@@ -266,6 +298,9 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
             if name == "self" {
                 return Ok(Node::SelfLink);
             }
+            if name == "net" {
+                return Ok(Node::NetLink);
+            }
             if name == "thread-self" {
                 Virtual::Proc(Node::Root).unmodeled("a lookup of thread-self in");
             }
@@ -285,6 +320,7 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
             }
         }
         Node::Process(pid) if name == "task" => Ok(Node::Tasks(pid)),
+        Node::Process(pid) if name == "net" => Ok(Node::Net(pid)),
         Node::Process(pid) => OF_PROCESS
             .iter()
             .find(|(_, each)| *each == name)
@@ -307,7 +343,17 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
             .find(|(_, each)| *each == name)
             .map(|(file, _)| Node::OfThread(pid, tid, *file))
             .ok_or(ENOENT),
-        Node::SelfLink | Node::Machine(_) | Node::Of(..) | Node::OfThread(..) => Err(ENOTDIR),
+        Node::Net(pid) => net::NET
+            .iter()
+            .find(|(_, each)| *each == name)
+            .map(|(file, _)| Node::NetFile(pid, *file))
+            .ok_or(ENOENT),
+        Node::SelfLink
+        | Node::NetLink
+        | Node::Machine(_)
+        | Node::Of(..)
+        | Node::OfThread(..)
+        | Node::NetFile(..) => Err(ENOTDIR),
     }
 }
 
@@ -350,8 +396,9 @@ pub(crate) enum Walked {
 
 /// Walk `remaining` from `start` as `link_path_walk` does: `.` stays, `..`
 /// goes up (out of procfs at its root), a component through a file is
-/// `ENOTDIR`, and `self` is followed (one of the walk's `hops`; `ELOOP`
-/// under `no_symlinks`) unless it is the final component and `nofollow`.
+/// `ENOTDIR`, and a link (`self`, `net`) is followed, its target walked from
+/// the link's directory (one of the walk's `hops`; `ELOOP` under
+/// `no_symlinks`), unless it is the final component and `nofollow`.
 pub(crate) fn walk(
     start: Node,
     remaining: &mut VecDeque<String>,
@@ -375,17 +422,20 @@ pub(crate) fn walk(
                     return namespaces(pid, remaining);
                 }
                 let next = lookup(node, name)?;
-                if next == Node::SelfLink && !(nofollow && remaining.is_empty()) {
-                    if no_symlinks {
-                        return Err(ELOOP);
+                match link_target(next) {
+                    Some(target) if !(nofollow && remaining.is_empty()) => {
+                        if no_symlinks {
+                            return Err(ELOOP);
+                        }
+                        *hops += 1;
+                        if *hops > SYMLINK_HOPS {
+                            return Err(ELOOP);
+                        }
+                        for component in target.rsplit('/').filter(|name| !name.is_empty()) {
+                            remaining.push_front(component.to_owned());
+                        }
                     }
-                    *hops += 1;
-                    if *hops > SYMLINK_HOPS {
-                        return Err(ELOOP);
-                    }
-                    node = Node::Process(Process::current().pid());
-                } else {
-                    node = next;
+                    _ => node = next,
                 }
             }
         }
@@ -422,7 +472,7 @@ static MADE: SpinMutex<BTreeMap<Node, u64>> = SpinMutex::new(BTreeMap::new());
 /// cached; the model keeps the first).
 fn made(node: Node) -> u64 {
     let now = match node {
-        Node::Root | Node::SelfLink => crate::volume::boot_instant(),
+        Node::Root | Node::SelfLink | Node::NetLink => crate::volume::boot_instant(),
         _ => crate::fs_time_unrecorded(),
     };
     *MADE.lock().entry(node).or_insert(now)
@@ -432,9 +482,10 @@ fn made(node: Node) -> u64 {
 /// `proc_getattr`): its kind and mode, its owner's filesystem, size 0,
 /// every time the instant it was [`made`]. The root's link count is the
 /// kernel's `proc_root` count (two, with no subdirectory modeled) plus the
-/// processes; a process directory's is two plus its `task` directory
-/// (`pid_entry_nlink` of the entries modeled), `task`'s two plus its
-/// threads, and a thread directory's two, with no subdirectory modeled.
+/// processes; a process directory's is two plus its `task` and `net`
+/// directories (`pid_entry_nlink` of the entries modeled), `task`'s two
+/// plus its threads, and a thread's or a `net` directory's two, with no
+/// subdirectory modeled.
 pub(crate) fn metadata(node: Node) -> PatinaMetadata {
     let made = PatinaTimestamp::from_nanos(i128::from(made(node)));
     let (kind, mode) = match node.kind() {
@@ -444,9 +495,9 @@ pub(crate) fn metadata(node: Node) -> PatinaMetadata {
     };
     let nlink = match node {
         Node::Root => 2 + crate::identity::processes().len() as u32,
-        Node::Process(_) => 3,
+        Node::Process(_) => 4,
         Node::Tasks(pid) => 2 + threads(pid).len() as u32,
-        Node::Thread(..) => 2,
+        Node::Thread(..) | Node::Net(_) => 2,
         _ => 1,
     };
     PatinaMetadata {
@@ -466,15 +517,19 @@ pub(crate) fn metadata(node: Node) -> PatinaMetadata {
     }
 }
 
-/// What a symlink reads: `self`'s target, the caller's pid; `None` for a
-/// node that is no link.
+/// What a symlink reads: `self`'s target, the caller's pid, and `net`'s,
+/// `self/net`; `None` for a node that is no link.
 pub(crate) fn link_target(node: Node) -> Option<String> {
-    (node == Node::SelfLink).then(|| Process::current().pid().to_string())
+    match node {
+        Node::SelfLink => Some(Process::current().pid().to_string()),
+        Node::NetLink => Some("self/net".to_owned()),
+        _ => None,
+    }
 }
 
 /// A directory's entries, `.` and `..` first (the root's `..` is itself, the
-/// root of its mount), as `proc_root_readdir`, `proc_pident_readdir` and
-/// `proc_task_readdir` (the threads by id) list them.
+/// root of its mount), as `proc_root_readdir`, `proc_pident_readdir`,
+/// `proc_task_readdir` (the threads by id) and `proc_readdir_de` list them.
 pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
     let entry = |name: &str, node: Node| FsDirectoryEntry {
         name: name.to_owned(),
@@ -484,11 +539,13 @@ pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
     let mut entries = vec![entry(".", dir), entry("..", dir.parent())];
     match dir {
         Node::Root => {
-            entries.extend(
-                MACHINE
-                    .iter()
-                    .map(|(file, name)| entry(name, Node::Machine(*file))),
-            );
+            let mut files: Vec<(&str, Node)> = MACHINE
+                .iter()
+                .map(|(file, name)| (*name, Node::Machine(*file)))
+                .chain([("net", Node::NetLink)])
+                .collect();
+            files.sort_by_key(|(name, _)| (name.len(), name.as_bytes()));
+            entries.extend(files.into_iter().map(|(name, node)| entry(name, node)));
             entries.push(entry("self", Node::SelfLink));
             for listed in crate::identity::processes() {
                 let pid = listed.process.pid();
@@ -497,6 +554,7 @@ pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
         }
         Node::Process(pid) => {
             entries.push(entry("task", Node::Tasks(pid)));
+            entries.push(entry("net", Node::Net(pid)));
             entries.extend(
                 OF_PROCESS
                     .iter()
@@ -513,7 +571,17 @@ pub(crate) fn listing(dir: Node) -> Vec<FsDirectoryEntry> {
                 .iter()
                 .map(|(file, name)| entry(name, Node::OfThread(pid, tid, *file))),
         ),
-        Node::SelfLink | Node::Machine(_) | Node::Of(..) | Node::OfThread(..) => {}
+        Node::Net(pid) => entries.extend(
+            net::NET
+                .iter()
+                .map(|(file, name)| entry(name, Node::NetFile(pid, *file))),
+        ),
+        Node::SelfLink
+        | Node::NetLink
+        | Node::Machine(_)
+        | Node::Of(..)
+        | Node::OfThread(..)
+        | Node::NetFile(..) => {}
     }
     entries
 }
@@ -533,7 +601,7 @@ struct Open {
 static OPENS: SpinMutex<(u64, BTreeMap<u64, Open>)> = SpinMutex::new((1, BTreeMap::new()));
 
 /// An open of `node` (`do_open`'s order): `O_CREAT|O_EXCL` is `EEXIST`;
-/// `self` itself (under `O_NOFOLLOW`) `ELOOP`; `O_DIRECTORY` on a file
+/// a link itself (under `O_NOFOLLOW`) `ELOOP`; `O_DIRECTORY` on a file
 /// `ENOTDIR`; creating or writing a directory (`O_TRUNC` asks for write
 /// access) `EISDIR`; writing a file `EACCES` (`0444`, and the caller holds
 /// no `CAP_DAC_OVERRIDE`). A read-only open is a [`FdKind::Proc`] or
@@ -547,7 +615,7 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
     if flags & (O_CREATE | O_EXCLUSIVE) == O_CREATE | O_EXCLUSIVE {
         return fail(EEXIST);
     }
-    if node == Node::SelfLink {
+    if link_target(node).is_some() {
         return fail(ELOOP);
     }
     let directory = node.is_directory();
@@ -616,12 +684,19 @@ pub(crate) fn ino_of(handle: u64) -> u64 {
     node_of(handle).ino()
 }
 
-/// Whether a procfs file is one of the machine's: those are
-/// `proc_create_single`'s, whose `proc_iter_file_ops` have a `poll`
-/// (`proc_reg_poll`, answering `DEFAULT_POLLMASK`) and a `splice_read`; a
-/// process's files are `proc_single_file_operations`', with neither, so
-/// `epoll_ctl` refuses them and a splice from one is `EINVAL`.
-pub(crate) fn is_machine_file(handle: u64) -> bool {
+/// Whether a procfs file has a `poll`: the machine's files
+/// (`proc_create_single`'s `proc_iter_file_ops`) and the socket tables
+/// (`proc_create_net`'s, read through `proc_reg_file_ops`) have
+/// `proc_reg_poll`, answering `DEFAULT_POLLMASK`; a process's and a
+/// thread's files are `proc_single_file_operations`', with none, so
+/// `epoll_ctl` refuses them.
+pub(crate) fn polls(handle: u64) -> bool {
+    matches!(node_of(handle), Node::Machine(_) | Node::NetFile(..))
+}
+
+/// Whether a procfs file has a `splice_read`: only `proc_iter_file_ops`
+/// (the machine's files) has one; a splice from any other is `EINVAL`.
+pub(crate) fn splices(handle: u64) -> bool {
     matches!(node_of(handle), Node::Machine(_))
 }
 

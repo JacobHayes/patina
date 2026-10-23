@@ -444,7 +444,7 @@ pub(crate) unsafe fn ctl_core(
             | FdKind::LandlockRuleset
             | FdKind::Namespace
             | FdKind::ProcDir
-    ) || (target.kind == FdKind::Proc && !crate::procfs::is_machine_file(target.handle))
+    ) || (target.kind == FdKind::Proc && !crate::procfs::polls(target.handle))
     {
         return Err(failed(EPERM));
     }

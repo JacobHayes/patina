@@ -44,7 +44,13 @@
 //!   `fstatfs` procfs's);
 //! * a new name is `ENOENT` to every call that would make it (procfs's
 //!   lookups answer first), an entry `EEXIST` to `mkdir`; removing a machine
-//!   file or a process directory is `EACCES`.
+//!   file or a process directory is `EACCES`;
+//! * `/proc/net` is root's link to `self/net`, the caller's `0555`
+//!   directory (its `..` the caller's process directory), which lists the
+//!   socket tables (`tcp`, `udp`, `tcp6`, `udp6`, `unix`) as root's `0444`
+//!   files; each table begins with the header its `seq_show` writes, at the
+//!   width it pads to; epoll takes one (`proc_reg_poll`), and `sendfile`
+//!   from one is `EINVAL` (`proc_reg_file_ops` has no `splice_read`).
 //!
 //! The figures themselves (times, counts, sizes) are the host's natively and
 //! the virtual machine's under patina, so they are related here, never
@@ -68,6 +74,41 @@ const COMM_LEN: usize = 16;
 
 /// The machine's files the model answers.
 const MACHINE_FILES: [&str; 5] = ["stat", "uptime", "vmstat", "loadavg", "meminfo"];
+
+/// The socket tables of `/proc/<pid>/net` the model answers, with the header
+/// line each one's `seq_show` writes, and the width it pads its lines to
+/// (`seq_setwidth`; `tcp`'s `TMPSZ - 1`, `udp`'s 127), where it pads them.
+const NET_TABLES: [(&str, &str, usize); 5] = [
+    (
+        "tcp",
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  \
+         timeout inode",
+        149,
+    ),
+    (
+        "udp",
+        "   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  \
+         timeout inode ref pointer drops",
+        127,
+    ),
+    (
+        "tcp6",
+        "  sl  local_address                         remote_address                        st \
+         tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+        0,
+    ),
+    (
+        "udp6",
+        "  sl  local_address                         remote_address                        st \
+         tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops",
+        0,
+    ),
+    (
+        "unix",
+        "Num       RefCount Protocol Flags    Type St Inode Path",
+        0,
+    ),
+];
 
 fn open(p: &Probe, path: &str, flags: i32) -> i64 {
     let c = std::ffi::CString::new(path).unwrap();
@@ -724,10 +765,18 @@ fn state_of(stat: &str) -> Option<char> {
         .and_then(|(_, rest)| rest.trim_start().chars().next())
 }
 
+/// The most `pread`s of a thread's `stat` [`threads`] polls through for the
+/// thread to reach its next wait: seconds of reads natively, where the
+/// thread runs beside the poller, and a bound under patina, where it runs
+/// only at the poller's scheduling points.
+const POLLED_READS: usize = 1_000_000;
+
 /// `/proc/self/task`: the caller's thread is listed, its `stat` names it
 /// running; a second thread sleeping in a `read` of an empty pipe shows
 /// sleeping (`S`), and its `status` gives the process as `Tgid` and the
-/// thread as `Pid`.
+/// thread as `Pid`. Woken while the caller does nothing but read its `stat`
+/// from one description, it reaches its next wait within [`POLLED_READS`]:
+/// each read that makes the text again lets it run.
 fn threads(p: &Probe) {
     let pid = call0(p, Syscall::N_getpid);
     let me = i64::from(crate::signals::gettid());
@@ -741,14 +790,19 @@ fn threads(p: &Probe) {
         "the caller's thread is running, by its stat",
         own.starts_with(&format!("{me} (")) && state_of(&own) == Some('R'),
     );
-    let mut ends = [0i32; 2];
-    let r = p.call_unrecorded(
-        Syscall::N_pipe2,
-        [ends.as_mut_ptr() as i64, i64::from(O_CLOEXEC), 0, 0, 0, 0],
-    );
-    p.require("pipe2 answers", r == 0);
+    let pipe = || {
+        let mut ends = [0i32; 2];
+        let r = p.call_unrecorded(
+            Syscall::N_pipe2,
+            [ends.as_mut_ptr() as i64, i64::from(O_CLOEXEC), 0, 0, 0, 0],
+        );
+        p.require("pipe2 answers", r == 0);
+        ends
+    };
+    let (ends, next) = (pipe(), pipe());
     let tid = std::sync::atomic::AtomicI32::new(0);
-    let (sleeping, status) = std::thread::scope(|scope| {
+    let woken = std::sync::atomic::AtomicBool::new(false);
+    let (sleeping, status, polled) = std::thread::scope(|scope| {
         scope.spawn(|| {
             tid.store(
                 crate::signals::gettid(),
@@ -757,6 +811,9 @@ fn threads(p: &Probe) {
             let mut byte = 0u8;
             // SAFETY: one writable byte.
             unsafe { libc::read(ends[0], (&raw mut byte).cast(), 1) };
+            woken.store(true, std::sync::atomic::Ordering::SeqCst);
+            // SAFETY: one writable byte.
+            unsafe { libc::read(next[0], (&raw mut byte).cast(), 1) };
         });
         p.rec.quiet(|| {
             crate::signals::wait_until(std::time::Duration::from_millis(1), || {
@@ -771,18 +828,43 @@ fn threads(p: &Probe) {
             })
         });
         let status = text(p, &format!("/proc/self/task/{worker}/status")).unwrap_or_default();
+        let fd = open(p, &path, O_RDONLY);
         // SAFETY: one readable byte.
         unsafe { libc::write(ends[1], b"x".as_ptr().cast(), 1) };
-        (sleeping, (worker, status))
+        let mut buf = [0u8; 512];
+        let polled = fd >= 0
+            && (0..POLLED_READS).any(|_| {
+                // Read after the flag, so a sleep it shows is the next wait's.
+                let past = woken.load(std::sync::atomic::Ordering::SeqCst);
+                let n = p.call_unrecorded(
+                    Syscall::N_pread64,
+                    [fd, buf.as_mut_ptr() as i64, buf.len() as i64, 0, 0, 0],
+                );
+                past && n > 0
+                    && std::str::from_utf8(&buf[..n as usize])
+                        .ok()
+                        .and_then(state_of)
+                        == Some('S')
+            });
+        if fd >= 0 {
+            close(p, fd);
+        }
+        // SAFETY: one readable byte.
+        unsafe { libc::write(next[1], b"x".as_ptr().cast(), 1) };
+        (sleeping, (worker, status), polled)
     });
     let (worker, status) = status;
     p.check("a thread waiting in a read sleeps, by its stat", sleeping);
+    p.check(
+        "a thread woken while the caller only reads its stat reaches its next wait",
+        polled,
+    );
     p.check(
         "a thread's status names the process as Tgid and the thread as Pid",
         keyed(&status, "Tgid") == Some(pid.to_string().as_str())
             && keyed(&status, "Pid") == Some(worker.to_string().as_str()),
     );
-    for end in ends {
+    for end in ends.into_iter().chain(next) {
         close(p, i64::from(end));
     }
 }
@@ -897,6 +979,106 @@ fn transfers(p: &Probe, own: i64) {
     }
 }
 
+/// What `readlinkat` reads at `path`.
+fn link(p: &Probe, path: &str) -> Option<Vec<u8>> {
+    let c = std::ffi::CString::new(path).unwrap();
+    let mut buf = [0u8; 64];
+    let r = p.call_unrecorded(
+        Syscall::N_readlinkat,
+        [
+            i64::from(AT_FDCWD),
+            c.as_ptr() as i64,
+            buf.as_mut_ptr() as i64,
+            buf.len() as i64,
+            0,
+            0,
+        ],
+    );
+    (r >= 0).then(|| buf[..r as usize].to_vec())
+}
+
+/// `/proc/net` and the caller's `net` directory: the link, the directory's
+/// owner and parent, the tables' kind and owner, each table's header, and
+/// a table's `poll` (`proc_reg_poll`) with no `splice_read`.
+fn net(p: &Probe) {
+    let pid = call0(p, Syscall::N_getpid);
+    let euid = call0(p, Syscall::N_geteuid);
+    p.check(
+        "/proc/net is root's link reading self/net",
+        link(p, "/proc/net").as_deref() == Some(b"self/net".as_slice())
+            && stat(p, "/proc/net")
+                .is_some_and(|(mode, uid, _, _)| mode == S_IFLNK | 0o777 && uid == 0),
+    );
+    let own = stat(p, &format!("/proc/{pid}"));
+    p.check(
+        "/proc/self/net is the caller's 0555 directory, whose .. is the caller's directory",
+        stat(p, "/proc/self/net")
+            .is_some_and(|(mode, uid, _, _)| mode == S_IFDIR | 0o555 && i64::from(uid) == euid)
+            && own.is_some()
+            && stat(p, "/proc/net/..").map(|(.., ino)| ino) == own.map(|(.., ino)| ino),
+    );
+    let entries = listing(p, "/proc/net").unwrap_or_default();
+    p.check(
+        "the net directory lists the socket tables as regular files",
+        NET_TABLES
+            .iter()
+            .all(|(name, ..)| entries.contains(&((*name).to_owned(), DT_REG))),
+    );
+    p.check(
+        "the socket tables are root's 0444 regular files of size 0",
+        NET_TABLES.iter().all(|(name, ..)| {
+            stat(p, &format!("/proc/net/{name}")).is_some_and(|(mode, uid, size, _)| {
+                mode == S_IFREG | 0o444 && uid == 0 && size == 0
+            })
+        }),
+    );
+    p.check(
+        "each socket table begins with its header line, padded as its seq_show pads it",
+        NET_TABLES.iter().all(|(name, header, width)| {
+            text(p, &format!("/proc/net/{name}")).is_some_and(|table| {
+                table.split_inclusive('\n').next() == Some(&format!("{header:<width$}\n"))
+            })
+        }),
+    );
+    let table = open(p, "/proc/net/unix", O_RDONLY);
+    p.require("/proc/net/unix opens", table >= 0);
+    let epoll = p.call_unrecorded(
+        Syscall::N_epoll_create1,
+        [i64::from(EPOLL_CLOEXEC), 0, 0, 0, 0, 0],
+    );
+    p.require("epoll_create1 answers", epoll >= 0);
+    let mut event = epoll_event {
+        events: EPOLLIN as u32,
+        u64: 0,
+    };
+    let added = p.call_unrecorded(
+        Syscall::N_epoll_ctl,
+        [
+            epoll,
+            i64::from(EPOLL_CTL_ADD),
+            table,
+            &mut event as *mut epoll_event as i64,
+            0,
+            0,
+        ],
+    );
+    p.check("epoll takes a socket table", added == 0);
+    let mut ends = [0i32; 2];
+    let r = p.call_unrecorded(
+        Syscall::N_pipe2,
+        [ends.as_mut_ptr() as i64, i64::from(O_CLOEXEC), 0, 0, 0, 0],
+    );
+    p.require("pipe2 answers", r == 0);
+    let (reader, writer) = (i64::from(ends[0]), i64::from(ends[1]));
+    p.check(
+        "sendfile from a socket table is EINVAL (no splice_read)",
+        p.call_unrecorded(Syscall::N_sendfile, [writer, table, 0, 4096, 0, 0]) == neg(EINVAL),
+    );
+    for each in [reader, writer, epoll, table] {
+        close(p, each);
+    }
+}
+
 pub fn run(p: &Probe) {
     root(p);
     machine(p);
@@ -905,6 +1087,7 @@ pub fn run(p: &Probe) {
     descriptions(p);
     names(p);
     threads(p);
+    net(p);
     behaviour(p);
 }
 
