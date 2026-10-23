@@ -16,8 +16,9 @@ crate-type = ["rlib", "staticlib"]
 # (`patina_planted_fault`), the private signal stack's bounds for its budget
 # detector (`patina_planted_private_stack`), and the signal-frame detectors'
 # counts (`patina_planted_live_scopes`, `patina_planted_handlers_over_shim`)
-# and must-fail control (`patina_planted_drive_under_scope`); never in a
-# guest's build.
+# and must-fail control (`patina_planted_drive_under_scope`), and a hold on the
+# leader's host thread after its raw exit (`patina_planted_hold_leader_exit`);
+# never in a guest's build.
 planted-faults = []
 # Clock and variadic boundary failpoints used only by native acceptance tests.
 test-panic = []

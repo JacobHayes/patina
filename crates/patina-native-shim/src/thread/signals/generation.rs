@@ -290,8 +290,44 @@ pub extern "C" fn patina_raw_exit(status: i32) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let me = activate();
     thread_finish(me, (status & 255) as usize, status & 255);
+    #[cfg(feature = "planted-faults")]
+    planted_leader_exit_hold(me);
     host(SYS_EXIT, [(status & 255) as u64, 0, 0, 0, 0, 0]);
     fatal("host exit returned")
+}
+
+/// Whether the main task's raw `exit` holds its host thread
+/// ([`patina_planted_hold_leader_exit`]).
+#[cfg(feature = "planted-faults")]
+static HOLD_LEADER_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make the main task's raw `exit` hold its host thread for up to 10 s
+/// (wall clock) after its task completed, before the host's `exit` (a shim
+/// built with `planted-faults`): the host leader keeps its memory while the
+/// guest's other threads run on, as a loaded host can leave it, so a
+/// guest-visible answer taken from the host leader rather than the model
+/// shows.
+#[cfg(feature = "planted-faults")]
+#[unsafe(no_mangle)]
+pub extern "C" fn patina_planted_hold_leader_exit() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    HOLD_LEADER_EXIT.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// [`patina_planted_hold_leader_exit`]'s hold, on the host thread of a
+/// completed task; the run's `exit_group` ends it sooner.
+#[cfg(feature = "planted-faults")]
+fn planted_leader_exit_hold(task: TaskId) {
+    if task != main_task() || !HOLD_LEADER_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let pause = [0i64, 100_000_000];
+    for _ in 0..100 {
+        host(
+            crate::registry::Syscall::N_nanosleep.number() as i64,
+            [pause.as_ptr() as u64, 0, 0, 0, 0, 0],
+        );
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -439,6 +439,21 @@ mod linux {
         }
     }
 
+    /// After the main thread's raw `exit`, a worker's `process_vm_readv`
+    /// by its own id copies and by the exited leader's pid answers as it
+    /// does natively, from the thread model: with the leader's host thread
+    /// held after its exit (a shim built with `planted-faults`), so the host
+    /// still has the leader's memory, the answers are the native ones.
+    #[test]
+    fn an_exited_leaders_memory_is_gone_however_late_its_host_thread_exits() {
+        let native = assert_build_c_guest("leader_exit_copy.c", CLink::Unlinked);
+        let patina = assert_build_c_guest("leader_exit_copy.c", CLink::PosixShimPlanted);
+        let oracle = assert_standalone_success(&native.binary, &[], &[]);
+        let (output, _) = patina.record_standalone(&[]);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(text(&output.stdout), text(&oracle.stdout));
+    }
+
     /// Where glibc ends a thread and the model cannot follow, the run stops
     /// by name instead of aborting in the unwinder or running on: a
     /// `pthread_exit` or an acting cancel inside a guest signal handler

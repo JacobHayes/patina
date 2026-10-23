@@ -372,18 +372,21 @@ fn remote_pages(remote: &[[u64; 2]]) -> bool {
 /// `process_vm_readv`/`process_vm_writev(pid, local, liovcnt, remote,
 /// riovcnt, flags)` (mm/process_vm_access.c `process_vm_rw`). The guest's own
 /// process (by its pid or any of its threads' tids) is the host kernel's to
-/// answer, on this process. Any other pid meets the checks made before the
-/// target is looked up, in their order: a flag (`EINVAL`), the local vector
-/// ([`local_bytes`]), nothing to copy (0), the remote vector, no remote page
-/// to copy (0); then no such process (`ESRCH`), or init, root's, whose
-/// memory is [`ptrace_may_access`]'s (`mm_access`: `CAP_SYS_PTRACE`, else
-/// `EACCES`, reported `EPERM`).
+/// answer, on this process, but for the pid of its exited leader, which has
+/// no memory behind it ([`crate::uaccess::guest_process_vm`]). That pid and
+/// any other meet the checks made before the target is looked up, in their
+/// order: a flag (`EINVAL`), the local vector ([`local_bytes`]), nothing to
+/// copy (0), the remote vector, no remote page to copy (0); then no such
+/// process or no memory (`ESRCH`: `mm_access` finds no `mm`), or init,
+/// root's, whose memory is [`ptrace_may_access`]'s (`mm_access`:
+/// `CAP_SYS_PTRACE`, else `EACCES`, reported `EPERM`).
 fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
     let found = find_process(a[0] as i32);
     if let Some((process, leader)) = found
         && process == Process::current()
+        && let Some(copied) = crate::uaccess::guest_process_vm(write, leader, a)
     {
-        return Ok(crate::uaccess::guest_process_vm(write, leader, a));
+        return Ok(copied);
     }
     if a[5] != 0 {
         return refuse(errno::EINVAL);
@@ -399,8 +402,10 @@ fn process_vm(credential: &Credential, a: &[u64; 6], write: bool) -> Answer {
         Err(code) => return refuse(code),
     }
     match found {
-        Some((process, _)) => other_process(credential, process, errno::EPERM),
-        None => refuse(errno::ESRCH),
+        Some((process, _)) if process != Process::current() => {
+            other_process(credential, process, errno::EPERM)
+        }
+        _ => refuse(errno::ESRCH),
     }
 }
 

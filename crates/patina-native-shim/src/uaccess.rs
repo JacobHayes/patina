@@ -221,11 +221,13 @@ fn raw_result(result: std::ffi::c_long) -> std::ffi::c_long {
 /// of its own process: the host kernel's, on this process, with the guest's
 /// vectors, counts and flags as given, so every refusal, fault and short count
 /// is the kernel's own. A guest that named the thread group's leader (`leader`)
-/// names it on the host too, whose `ESRCH` once it has exited is the answer;
-/// one that named another of its live threads names memory that is there
-/// ([`on_self`]). Raw result: `-errno` on failure.
+/// names it on the host too while the thread model has it live; once its task
+/// has exited there is no memory behind it to copy (`None`), whatever the host
+/// leader's own teardown, which a loaded host can leave unfinished long after,
+/// has reached. One that named another of its live threads names memory that
+/// is there ([`on_self`]). Raw result: `-errno` on failure.
 #[cfg(target_os = "linux")]
-pub(crate) fn guest_process_vm(write: bool, leader: bool, args: &[u64; 6]) -> i64 {
+pub(crate) fn guest_process_vm(write: bool, leader: bool, args: &[u64; 6]) -> Option<i64> {
     let row = if write {
         patina_dst_syscalls::Syscall::N_process_vm_writev
     } else {
@@ -243,11 +245,12 @@ pub(crate) fn guest_process_vm(write: bool, leader: bool, args: &[u64; 6]) -> i6
             args[5] as std::ffi::c_long,
         )
     };
-    if leader {
-        raw_result(copy(host_pid()))
-    } else {
-        on_self(copy)
+    if !leader {
+        return Some(on_self(copy));
     }
+    // The caller holds the baton, so the leader cannot exit between the
+    // model's answer and the host's copy.
+    crate::thread::live_tid(crate::patina_pid()).then(|| raw_result(copy(host_pid())))
 }
 
 /// What a `process_vm_readv`/`writev` of `len` bytes that returned `copied`
