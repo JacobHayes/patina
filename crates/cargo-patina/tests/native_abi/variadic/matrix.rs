@@ -14,7 +14,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
     // not touch, in the optimized one.
     for (strategy, opt_level) in [("unwind", 0), ("abort", 3)] {
         let dir = tempfile::tempdir().unwrap();
-        let archive = common::test_panic_shim("variadic", strategy, opt_level).archive;
+        let archive = common::test_panic_shim(strategy, opt_level).archive;
         let object = common::compile_posix_object(dir.path());
         let mut cases = vec![
             (7, 0, "printf"),

@@ -36,56 +36,64 @@ pub(super) struct Probes {
 pub(super) fn probes() -> &'static Probes {
     static PROBES: OnceLock<Probes> = OnceLock::new();
     PROBES.get_or_init(|| {
-        let native_target = common::guest_target_dir("conformance-native");
-        let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-            .args([
-                "build",
-                "--quiet",
-                "--locked",
-                "--release",
-                "--manifest-path",
-            ])
-            .arg(common::workspace_manifest())
-            .args(["-p", "patina-dst-conformance", "--bin", "conformance-probe"])
-            .arg("--target-dir")
-            .arg(&native_target)
-            .status()
-            .expect("cargo build runs");
-        assert!(
-            status.success(),
-            "building the native conformance probe failed"
-        );
-        // Run the shim-linked probe from the path Cargo produced, never from an
-        // `--output` copy: every test process (nextest runs one per test)
-        // rebuilds the probe, and a copy rewrites the file in place while
-        // another process may be executing it (ETXTBSY). Cargo replaces its
-        // output by link, which a running executable survives; the conformance
-        // scenarios are Linux-only, where the target dir hard-links.
-        let patina_target = common::guest_target_dir("conformance");
-        let package = common::native_workspace().join("crates/patina-conformance");
-        let built = common::invoke_in_with_env(
-            common::native_workspace(),
-            &[
-                "build",
-                package.to_str().unwrap(),
-                "--bin",
-                "conformance-probe",
-                "--release",
-            ],
-            &[("CARGO_TARGET_DIR", patina_target.to_str().unwrap())],
-        );
-        let patina = PathBuf::from(common::native::assert_unique_line_payload(
-            &built.stdout,
-            "PATINA_NATIVE_BUILD output=",
-        ));
-        Probes {
-            native: named_like_the_guest(
-                &native_target,
-                &native_target.join("release/conformance-probe"),
-            ),
-            patina,
-        }
+        // Every test process asks for the probes, and nothing they are built
+        // from changes during a run: build them once per run.
+        let built = common::once_per_run("conformance-probes", build_probes);
+        let [native, patina] = <[PathBuf; 2]>::try_from(built).expect("two probe paths");
+        Probes { native, patina }
     })
+}
+
+/// Build the native and the shim-linked probe; their paths, in that order.
+fn build_probes() -> Vec<PathBuf> {
+    let native_target = common::guest_target_dir("conformance-native");
+    let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args([
+            "build",
+            "--quiet",
+            "--locked",
+            "--release",
+            "--manifest-path",
+        ])
+        .arg(common::workspace_manifest())
+        .args(["-p", "patina-dst-conformance", "--bin", "conformance-probe"])
+        .arg("--target-dir")
+        .arg(&native_target)
+        .status()
+        .expect("cargo build runs");
+    assert!(
+        status.success(),
+        "building the native conformance probe failed"
+    );
+    // Run the shim-linked probe from the path Cargo produced, never from an
+    // `--output` copy: a later run's build may rewrite the copy in place while
+    // a process of this run still executes it (ETXTBSY). Cargo replaces its
+    // output by link, which a running executable survives; the conformance
+    // scenarios are Linux-only, where the target dir hard-links.
+    let patina_target = common::guest_target_dir("conformance");
+    let package = common::native_workspace().join("crates/patina-conformance");
+    let built = common::invoke_in_with_env(
+        common::native_workspace(),
+        &[
+            "build",
+            package.to_str().unwrap(),
+            "--bin",
+            "conformance-probe",
+            "--release",
+        ],
+        &[("CARGO_TARGET_DIR", patina_target.to_str().unwrap())],
+    );
+    let patina = PathBuf::from(common::native::assert_unique_line_payload(
+        &built.stdout,
+        "PATINA_NATIVE_BUILD output=",
+    ));
+    vec![
+        named_like_the_guest(
+            &native_target,
+            &native_target.join("release/conformance-probe"),
+        ),
+        patina,
+    ]
 }
 
 /// A link to the native probe named as `cargo patina` names every guest in

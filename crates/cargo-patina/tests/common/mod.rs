@@ -149,15 +149,28 @@ pub struct TestPanicShim {
     pub dependency_dirs: BTreeSet<PathBuf>,
 }
 
-/// Build (idempotently) the test-panic shim into a persistent target per
-/// `consumer` and variant. Test binaries run concurrently, and a build Cargo
-/// finds fresh can still republish its outputs, so a target shared across
-/// binaries could swap an archive out from under another binary's `nm` or
-/// link. Each consumer keys its own target; its callers run one at a time.
-pub fn test_panic_shim(consumer: &str, strategy: &str, opt_level: u8) -> TestPanicShim {
-    let target_dir = guest_target_dir(&format!(
-        "shim-test-panic-{consumer}-{strategy}-o{opt_level}"
-    ));
+/// The test-panic shim of one variant, built into a persistent target once per
+/// nextest run and shared by every test binary that links it. A build Cargo
+/// finds fresh can still republish its outputs, so Cargo runs for a variant
+/// only once a run, never under another binary's `nm` or link.
+pub fn test_panic_shim(strategy: &str, opt_level: u8) -> TestPanicShim {
+    let name = format!("shim-test-panic-{strategy}-o{opt_level}");
+    let mut paths = once_per_run(&name, || {
+        let built = build_test_panic_shim(&guest_target_dir(&name), strategy, opt_level);
+        [built.archive, built.rlib]
+            .into_iter()
+            .chain(built.dependency_dirs)
+            .collect()
+    })
+    .into_iter();
+    TestPanicShim {
+        archive: paths.next().expect("the shim archive"),
+        rlib: paths.next().expect("the shim rlib"),
+        dependency_dirs: paths.collect(),
+    }
+}
+
+fn build_test_panic_shim(target_dir: &Path, strategy: &str, opt_level: u8) -> TestPanicShim {
     let output = assert_success(
         Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
             .current_dir(native_workspace())
@@ -173,7 +186,7 @@ pub fn test_panic_shim(consumer: &str, strategy: &str, opt_level: u8) -> TestPan
                 "test-panic",
                 "--target-dir",
             ])
-            .arg(&target_dir)
+            .arg(target_dir)
             .arg("--")
             .args(patina_dst_native_shim::POSIX_RUST_FLAGS)
             .args(["-C", &format!("panic={strategy}")])

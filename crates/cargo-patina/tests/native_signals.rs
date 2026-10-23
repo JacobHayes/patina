@@ -676,7 +676,7 @@ fn internal_rust_panic_never_finalizes_an_invalid_trace() {
     for strategy in ["unwind", "abort"] {
         let dir = tempfile::tempdir().unwrap();
         let shim = common::native_workspace().join("crates/patina-native-shim");
-        let built = common::test_panic_shim("signals", strategy, 0);
+        let built = common::test_panic_shim(strategy, 0);
         let binary = dir.path().join("panic-guest");
         let posix = common::compile_posix_object(dir.path());
         let mut cc = common::c_compiler();

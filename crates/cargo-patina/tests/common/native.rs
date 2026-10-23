@@ -404,47 +404,126 @@ pub fn assert_build_c_library(name: &str, dir: &Path) -> PathBuf {
 }
 
 fn build_native_guest(mut cc: Command, name: &str, link: CLink, flags: &[&str]) -> Guest {
-    static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
-    static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("c-guest");
     cc.args(["-Wall", "-Wextra", "-Werror"])
         .arg("-I")
         .arg(native_workspace().join("crates/patina-native-shim/include"))
         .arg(guest_source(name));
-    match link {
-        CLink::Unlinked => {}
-        CLink::Shim => {
-            static PREFIXED: OnceLock<PathBuf> = OnceLock::new();
-            cc.arg(PREFIXED.get_or_init(super::prefixed_shim_archive));
-        }
-        CLink::PosixShim | CLink::PosixShimWithoutSud | CLink::PosixShimPlanted => {
-            static PLANTED: OnceLock<PathBuf> = OnceLock::new();
-            let (_, object) = POSIX.get_or_init(|| {
-                let dir = tempfile::tempdir().unwrap();
-                let obj = super::compile_posix_object(dir.path());
-                (dir, obj)
-            });
-            let archive = if matches!(link, CLink::PosixShimPlanted) {
-                PLANTED.get_or_init(|| super::shim_archive_with(&["planted-faults"]))
-            } else {
-                ARCHIVE.get_or_init(super::shim_archive)
-            };
-            if matches!(link, CLink::PosixShimWithoutSud) {
-                super::compile_posix_object(dir.path());
-                cc.arg(super::compile_staged_posix_object(
-                    dir.path(),
-                    &["-DPATINA_TEST_NO_SUD"],
-                ));
-            } else {
-                cc.arg(object);
+    let variant = match link {
+        CLink::Unlinked => "unlinked",
+        CLink::Shim => "shim",
+        CLink::PosixShim => "posix",
+        CLink::PosixShimWithoutSud => "posix-without-sud",
+        CLink::PosixShimPlanted => "posix-planted",
+    };
+    let stage = |cc: &mut Command| {
+        static ARCHIVE: OnceLock<PathBuf> = OnceLock::new();
+        static POSIX: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+        match link {
+            CLink::Unlinked => {}
+            CLink::Shim => {
+                static PREFIXED: OnceLock<PathBuf> = OnceLock::new();
+                cc.arg(PREFIXED.get_or_init(super::prefixed_shim_archive));
             }
-            cc.arg(archive)
-                .args(super::shim_linker_args(archive, dir.path()));
+            CLink::PosixShim | CLink::PosixShimWithoutSud | CLink::PosixShimPlanted => {
+                static PLANTED: OnceLock<PathBuf> = OnceLock::new();
+                let (_, object) = POSIX.get_or_init(|| {
+                    let dir = tempfile::tempdir().unwrap();
+                    let obj = super::compile_posix_object(dir.path());
+                    (dir, obj)
+                });
+                let archive = if matches!(link, CLink::PosixShimPlanted) {
+                    PLANTED.get_or_init(|| super::shim_archive_with(&["planted-faults"]))
+                } else {
+                    ARCHIVE.get_or_init(super::shim_archive)
+                };
+                if matches!(link, CLink::PosixShimWithoutSud) {
+                    super::compile_posix_object(dir.path());
+                    cc.arg(super::compile_staged_posix_object(
+                        dir.path(),
+                        &["-DPATINA_TEST_NO_SUD"],
+                    ));
+                } else {
+                    cc.arg(object);
+                }
+                cc.arg(archive)
+                    .args(super::shim_linker_args(archive, dir.path()));
+            }
+        }
+        cc.args(flags);
+    };
+    link_once_per_run(cc, variant, flags, &binary, stage);
+    Guest { dir, binary }
+}
+
+/// Run `cc`, a compile and link of one executable, after `stage` adds the
+/// link inputs, with `-o output`; or reuse the executable the same build
+/// linked earlier in this nextest run.
+///
+/// Linking a guest against the shim archive is most of a C guest's build, and
+/// many tests build the same guest. Within one run no input of a link
+/// changes, so the build is identified by what it is asked for: the compiler
+/// command before staging (its program, working directory, environment and
+/// arguments, a file argument also by its bytes), the linkage `variant`, the
+/// extra `flags` and the output's file name. Staging writes the per-test link
+/// inputs (the POSIX layer and allocator routing objects, the shim archive is
+/// shared) and is skipped on reuse. A build outside nextest links afresh.
+fn link_once_per_run(
+    mut cc: Command,
+    variant: &str,
+    flags: &[&str],
+    output: &Path,
+    stage: impl FnOnce(&mut Command),
+) {
+    if std::env::var_os("NEXTEST_RUN_ID").is_none() {
+        stage(&mut cc);
+        assert_success(cc.arg("-o").arg(output).output().unwrap());
+        return;
+    }
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut field = |bytes: &[u8]| {
+        sha2::Digest::update(&mut hasher, (bytes.len() as u64).to_le_bytes());
+        sha2::Digest::update(&mut hasher, bytes);
+    };
+    field(cc.get_program().as_encoded_bytes());
+    field(
+        cc.get_current_dir()
+            .map_or(&b""[..], |dir| dir.as_os_str().as_encoded_bytes()),
+    );
+    for (name, value) in cc.get_envs() {
+        field(name.as_encoded_bytes());
+        field(value.map_or(&b"\0unset"[..], |value| value.as_encoded_bytes()));
+    }
+    for arg in cc.get_args() {
+        field(arg.as_encoded_bytes());
+        if let Ok(bytes) = std::fs::read(arg) {
+            field(&bytes);
         }
     }
-    assert_success(cc.args(flags).arg("-o").arg(&binary).output().unwrap());
-    Guest { dir, binary }
+    field(variant.as_bytes());
+    for flag in flags {
+        field(flag.as_bytes());
+    }
+    // The macOS linker signs an executable under its file name.
+    field(output.file_name().unwrap().as_encoded_bytes());
+    let key: String = sha2::Digest::finalize(hasher)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let linked = super::once_per_run(&format!("c-guest-{key}"), || {
+        let dir = super::guest_target_dir("c-guests").join(&key);
+        // Link beside the published path under the same file name, then
+        // rename it over that path.
+        let partial = dir.join("partial").join(output.file_name().unwrap());
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        stage(&mut cc);
+        assert_success(cc.arg("-o").arg(&partial).output().unwrap());
+        let linked = dir.join(output.file_name().unwrap());
+        std::fs::rename(&partial, &linked).unwrap();
+        vec![linked]
+    });
+    std::fs::copy(&linked[0], output).unwrap();
 }
 
 /// Run a direct C guest with only the explicitly supplied host environment.
