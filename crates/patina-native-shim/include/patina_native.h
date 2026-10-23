@@ -832,6 +832,11 @@ int32_t patina_sched_yield(void);
  * carrying the instrumented guest site for divergence diagnostics.
  */
 void patina_yield_point(const void *site);
+/*
+ * A compute meter's batch (patina_go_meter.c): charge `units` of metered
+ * computation as virtual CPU time, then take a scheduling point.
+ */
+void patina_compute_point(uint64_t units);
 int32_t patina_crash(void);
 /*
  * Append to the captured stdout (`sink` 1) or stderr (`sink` 2) STREAM -- the

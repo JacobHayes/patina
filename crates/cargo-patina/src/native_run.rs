@@ -77,7 +77,7 @@ use trace::TraceCommitFailure;
 use trace::write_unsupported_sidecar;
 
 #[cfg(unix)]
-pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32, CliError> {
+pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<i32, CliError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -102,6 +102,12 @@ pub(super) fn execute_native_run(invocation: NativeRunInvocation) -> Result<i32,
         })?),
         NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
     };
+
+    // A replay restores the recorded environment; a new run of a Go guest
+    // gets the settings its runtime needs under Patina.
+    if replay_trace.is_none() {
+        crate::go_build::apply_go_guest_defaults(&binary, &mut invocation.environment)?;
+    }
 
     // The build identity a recording stores and a replay must match. A replay
     // against another build is refused here, by component, before the guest

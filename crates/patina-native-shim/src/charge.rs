@@ -148,7 +148,8 @@ pub(crate) fn syscall_class(nr: i64) -> ChargeClass {
 thread_local! {
     /// This thread's counted, not yet flushed calls, one counter per class:
     /// a door's entry pays one thread-local increment, nothing more.
-    static OWED: [Cell<u64>; 3] = const { [Cell::new(0), Cell::new(0), Cell::new(0)] };
+    static OWED: [Cell<u64>; ChargeClass::ALL.len()] =
+        const { [Cell::new(0), Cell::new(0), Cell::new(0), Cell::new(0)] };
     /// The class the innermost live guest call was counted as, until it
     /// parks ([`parked`]) or returns.
     static CURRENT: Cell<Option<ChargeClass>> = const { Cell::new(None) };
@@ -189,6 +190,7 @@ fn slot(class: ChargeClass) -> usize {
         ChargeClass::Clock => 0,
         ChargeClass::Sync => 1,
         ChargeClass::Syscall => 2,
+        ChargeClass::Compute => 3,
     }
 }
 
@@ -199,6 +201,17 @@ pub(crate) fn count(class: ChargeClass) {
     OWED.with(|owed| {
         let counter = &owed[slot(class)];
         counter.set(counter.get().wrapping_add(1));
+    });
+}
+
+/// Count `units` of metered guest computation on this thread: a compute
+/// meter's batch ([`crate::patina_compute_point`]). Computation is no call,
+/// so it never becomes the running call.
+#[inline]
+pub(crate) fn count_compute(units: u64) {
+    OWED.with(|owed| {
+        let counter = &owed[slot(ChargeClass::Compute)];
+        counter.set(counter.get().wrapping_add(units));
     });
 }
 
@@ -440,12 +453,17 @@ pub(crate) fn timers_due() -> bool {
     const CLOCK: patina_dst_abi::CpuCharge = ChargeClass::Clock.cost();
     const SYNC: patina_dst_abi::CpuCharge = ChargeClass::Sync.cost();
     const SYSCALL: patina_dst_abi::CpuCharge = ChargeClass::Syscall.cost();
-    let [clock, sync, syscall] = OWED.with(|owed| {
-        [ChargeClass::Clock, ChargeClass::Sync, ChargeClass::Syscall]
-            .map(|class| owed[slot(class)].get())
-    });
-    let owed_user = clock * CLOCK.user_ns + sync * SYNC.user_ns + syscall * SYSCALL.user_ns;
-    let owed_system = clock * CLOCK.system_ns + sync * SYNC.system_ns + syscall * SYSCALL.system_ns;
+    const COMPUTE: patina_dst_abi::CpuCharge = ChargeClass::Compute.cost();
+    let [clock, sync, syscall, compute] =
+        OWED.with(|owed| ChargeClass::ALL.map(|class| owed[slot(class)].get()));
+    let owed_user = clock * CLOCK.user_ns
+        + sync * SYNC.user_ns
+        + syscall * SYSCALL.user_ns
+        + compute * COMPUTE.user_ns;
+    let owed_system = clock * CLOCK.system_ns
+        + sync * SYNC.system_ns
+        + syscall * SYSCALL.system_ns
+        + compute * COMPUTE.system_ns;
     owed_user >= user || owed_user + owed_system >= total
 }
 

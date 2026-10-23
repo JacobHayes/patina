@@ -19,10 +19,19 @@ pub enum ChargeClass {
     /// Anything else: a system call (a short user-side wrapper, the rest in
     /// the kernel).
     Syscall,
+    /// A unit of metered computation: guest code built with a compute meter
+    /// counts its own work and hands it over in batches, so code that makes
+    /// no calls still spends virtual CPU time (all user time).
+    Compute,
 }
 
 impl ChargeClass {
-    pub const ALL: [ChargeClass; 3] = [ChargeClass::Clock, ChargeClass::Sync, ChargeClass::Syscall];
+    pub const ALL: [ChargeClass; 4] = [
+        ChargeClass::Clock,
+        ChargeClass::Sync,
+        ChargeClass::Syscall,
+        ChargeClass::Compute,
+    ];
 
     /// What one call of this class costs.
     pub const fn cost(self) -> CpuCharge {
@@ -30,6 +39,7 @@ impl ChargeClass {
             ChargeClass::Clock => CpuCharge::new(25, 0),
             ChargeClass::Sync => CpuCharge::new(20, 0),
             ChargeClass::Syscall => CpuCharge::new(50, 200),
+            ChargeClass::Compute => CpuCharge::new(COMPUTE_UNIT_NS, 0),
         }
     }
 
@@ -38,9 +48,15 @@ impl ChargeClass {
             ChargeClass::Clock => 0,
             ChargeClass::Sync => 1,
             ChargeClass::Syscall => 2,
+            ChargeClass::Compute => 3,
         }
     }
 }
+
+/// What one metered unit of computation costs. A Go guest's meter counts
+/// the integer comparisons its code makes, about one every few
+/// instructions.
+pub const COMPUTE_UNIT_NS: u64 = 2;
 
 /// Virtual CPU time, split as the kernel accounts it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,7 +91,7 @@ pub const STARTUP_CPU_CHARGE: CpuCharge = CpuCharge::new(
 
 /// Guest calls counted by class, not yet charged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ChargeCounts([u64; 3]);
+pub struct ChargeCounts([u64; ChargeClass::ALL.len()]);
 
 impl ChargeCounts {
     /// Count one call of `class`.
@@ -91,7 +107,7 @@ impl ChargeCounts {
 
     /// No calls counted.
     pub const fn new() -> Self {
-        Self([0; 3])
+        Self([0; ChargeClass::ALL.len()])
     }
 
     pub fn calls(&self, class: ChargeClass) -> u64 {
@@ -99,7 +115,7 @@ impl ChargeCounts {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0 == [0; 3]
+        self.0.iter().all(|calls| *calls == 0)
     }
 
     /// What the counted calls cost.
@@ -127,12 +143,14 @@ mod tests {
         counts.count(ChargeClass::Clock);
         counts.count(ChargeClass::Sync);
         counts.count(ChargeClass::Syscall);
-        let expected = [ChargeClass::Clock, ChargeClass::Sync, ChargeClass::Syscall]
-            .into_iter()
-            .fold(CpuCharge::default(), |mut total, class| {
-                total.add(class.cost());
-                total
-            });
+        counts.count(ChargeClass::Compute);
+        let expected =
+            ChargeClass::ALL
+                .into_iter()
+                .fold(CpuCharge::default(), |mut total, class| {
+                    total.add(class.cost());
+                    total
+                });
         assert_eq!(counts.charge(), expected);
         assert!(!counts.is_empty() && ChargeCounts::new().is_empty());
         assert_eq!(STARTUP_CPU_CHARGE.total_ns(), crate::STARTUP_CPU_NANOS);

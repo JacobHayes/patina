@@ -5,7 +5,11 @@
 # The guest (main.go) uses only the Go standard library: goroutines that block
 # (so the runtime starts threads, through the shim's pthread_create), a channel,
 # timers, SHA-1 (which links Go's crypto/internal/boring/sig build marker), a
-# file round trip in the guest filesystem and fmt. The Go command the PATH
+# file round trip in the guest filesystem and fmt; a goroutine that computes
+# without calls until a timer cancels it, a loop that calls nothing until a
+# timer's goroutine sets a word, and goroutines that allocate while the
+# garbage collector sweeps (each stopped as compute-bound before Go guests got
+# a compute meter and one P). The Go command the PATH
 # names switches to exactly the release go.mod's toolchain line pins, and the
 # script refuses to build with any other.
 #
@@ -84,7 +88,7 @@ for stream in out err; do
     exit 1
   fi
 done
-expected='^GO_GUEST_RESULT sha=3411092e total=4950 data="hello from go\\n" mode=-rw-r----- slept=true$'
+expected='^GO_GUEST_RESULT sha=3411092e total=4950 data="hello from go\\n" mode=-rw-r----- slept=true compute=cancelled allocated=8000$'
 if ! grep -Eq "$expected" "$out/run1.out"; then
   echo "go-guest: FAIL [2] unexpected GO_GUEST_RESULT:" >&2
   cat "$out/run1.out" >&2; exit 1

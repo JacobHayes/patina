@@ -3,9 +3,10 @@
 use crate::harness::{cargo_metadata, metadata_target_dir};
 use crate::native_run::target_has_sud;
 use crate::shim_build::{
-    BuiltNativeShim, PATINA_POSIX_OBJECT, PATINA_SANCOV_STUB_OBJECT, RustcInvocation,
-    apply_rustc_env, build_native_shim, check_native_toolchain_agreement, link_arg,
-    lock_target_dir, prepare_shim_sources, stage_instrumentation_object, stage_shim_object,
+    BuiltNativeShim, PATINA_GO_METER_OBJECT, PATINA_POSIX_OBJECT, PATINA_SANCOV_STUB_OBJECT,
+    RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
+    link_arg, lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
+    stage_shim_object,
 };
 use crate::wasi_exec::run_wasi_build;
 use crate::{
@@ -25,6 +26,9 @@ pub(super) const PATINA_YIELD_C: &str = include_str!("../c/patina_yield.c");
 /// under `--coverage-points[=<STRIDE>]` and mutually exclusive with
 /// `PATINA_YIELD_C` (they define the same SanitizerCoverage entry points).
 pub(super) const PATINA_COV_C: &str = include_str!("../c/patina_cov.c");
+/// A Go guest's compute meter: the libFuzzer comparison hooks its
+/// instrumentation calls, linked only by `cargo patina build --go`.
+pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c");
 /// Weak, inert SanitizerCoverage entry points so an instrumented artifact that
 /// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
 /// under `--yield-points`/`--coverage-points`, alongside (and overridden by)
@@ -290,6 +294,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
                 .as_deref()
                 .expect("a Go native-build requires --output"),
             &object,
+            &stage_shim_object(&built_shim, &PATINA_GO_METER_OBJECT, &host_target, &[])?,
             &built_shim,
             &built_shim.allocator_linker_args(&host_target)?,
             &go_args,

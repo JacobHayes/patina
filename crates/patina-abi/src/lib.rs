@@ -55,7 +55,7 @@ mod verdict;
 /// a newline and forge a second marker line.
 pub mod verdict_line;
 
-pub use charge::{ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
+pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
 pub use effect::{EntropyWait, Operation, Outcome};
 pub use error::{EffectError, ErrorCode};
 pub use filesystem::{
@@ -160,4 +160,7 @@ pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 ///   rest; the CPU clocks, resource usage and CPU-time timers read the user
 ///   and system totals; a poll loop is escalated by charging the iterations it
 ///   would spend, not by a recorded advance.
-pub const TIME_MODEL: u32 = 3;
+/// - 4: metered computation costs time ([`ChargeClass::Compute`]): a guest
+///   built with a compute meter (every Go guest) charges each batch of
+///   counted comparisons as user time and takes a scheduling point.
+pub const TIME_MODEL: u32 = 4;

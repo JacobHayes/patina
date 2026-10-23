@@ -1,8 +1,8 @@
 //! Embedded shim sources, toolchain agreement, builds, and object staging.
 
 use crate::native_build::{
-    GuestInstrumentation, PATINA_COV_C, PATINA_SANCOV_STUB_C, PATINA_YIELD_C, hash_file_contents,
-    host_target_triple,
+    GuestInstrumentation, PATINA_COV_C, PATINA_GO_METER_C, PATINA_SANCOV_STUB_C, PATINA_YIELD_C,
+    hash_file_contents, host_target_triple,
 };
 use crate::{CliError, hash_bytes, hash_os, hex, output, shim_cache};
 use patina_dst_trace::lock_exclusive;
@@ -849,6 +849,25 @@ const PATINA_COV_OBJECT: ShimObject = ShimObject {
         "-Werror",
     ],
     what: "the Patina coverage-point hook",
+};
+
+/// A Go guest's compute meter (`patina_go_meter.c`), linked by every
+/// `cargo patina build --go`. Compiled without instrumentation, so the hooks
+/// never call themselves.
+pub(super) const PATINA_GO_METER_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_go_meter.o",
+    source_name: "patina_go_meter.c",
+    source: PATINA_GO_METER_C,
+    header: None,
+    companion_sources: &[],
+    cc_flags: &[
+        "-std=c11",
+        "-fno-stack-protector",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    what: "the Patina Go compute meter",
 };
 
 /// The weak SanitizerCoverage stubs. Unlike every other shim object this one is

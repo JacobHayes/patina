@@ -31,6 +31,20 @@ pub extern "C" fn patina_yield_point(site: *const c_void) {
 }
 
 #[unsafe(no_mangle)]
+/// A compute meter's batch: guest code built with a meter (a Go guest's
+/// comparison hooks, `patina_go_meter.c`) counts its own work on this thread
+/// and hands over `units` of it here. The work is charged as computation,
+/// which moves virtual time, and the thread takes a scheduling point, so a
+/// loop that makes no calls still lets due timers fire and other threads run.
+/// The countdown is the thread's own, so the batches fall at the same guest
+/// instructions on every run of a seed.
+pub extern "C" fn patina_compute_point(units: u64) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    charge::count_compute(units);
+    let _ = thread::sched_point();
+}
+
+#[unsafe(no_mangle)]
 /// The runtime side of the packaged `exit` interposer (patina_posix.c). It runs
 /// at the process's main-return / `exit(3)` boundary — the one point that
 /// executes on the exiting thread AFTER its managed body but BEFORE the C runtime

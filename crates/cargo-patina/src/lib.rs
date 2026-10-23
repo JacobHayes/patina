@@ -713,6 +713,13 @@ pub fn shim_allocator_linker_args(staticlib: &Path, dir: &Path) -> Result<Vec<Os
 }
 
 pub fn entrypoint() -> Result<i32, CliError> {
+    // A Go guest's build runs this executable as its `-toolexec` wrapper
+    // around every Go tool; that role is not a verb, and it skips the
+    // supervisor setup a run needs.
+    let mut raw = env::args_os().skip(1);
+    if raw.next().as_deref() == Some(OsStr::new(go_build::TOOLEXEC_ROLE)) {
+        return go_build::run_as_toolexec(raw.collect());
+    }
     supervisor_identity::establish()?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     // Strip the cross-cutting output/config flags (`--format`, `--render`,
