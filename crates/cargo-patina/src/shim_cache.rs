@@ -9,6 +9,8 @@ use std::{
 };
 
 pub(super) const KEEP_ARTIFACTS: usize = 4;
+/// Helper-object entries kept: one per C compiler and C seams source.
+pub(super) const KEEP_OBJECTS: usize = 4;
 pub(super) const KEEP_SOURCES: usize = 4;
 /// Shim build work dirs kept warm: two toolchains, each in both profiles.
 pub(super) const KEEP_BUILDS: usize = 4;

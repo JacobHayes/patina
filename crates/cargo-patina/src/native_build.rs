@@ -3,15 +3,14 @@
 use crate::harness::{cargo_metadata, metadata_target_dir};
 use crate::native_run::target_has_sud;
 use crate::shim_build::{
-    BuiltNativeShim, PATINA_GO_METER_OBJECT, PATINA_POSIX_OBJECT, PATINA_SANCOV_STUB_OBJECT,
-    RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
-    link_arg, lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
-    stage_shim_object,
+    BuiltNativeShim, PATINA_GO_METER_OBJECT, PATINA_SANCOV_STUB_OBJECT, RustcInvocation,
+    apply_rustc_env, build_native_shim, check_native_toolchain_agreement, link_arg,
+    lock_target_dir, prepare_shim_sources, stage_instrumentation_object, stage_shim_object,
 };
 use crate::wasi_exec::run_wasi_build;
 use crate::{
     ArtifactRef, BuildSpec, BuildSpecKind, CliError, NativeBuildInvocation, NativeBuildTarget,
-    NativeSchedule, hex, output, shim_cache,
+    NativeSchedule, hex, output,
 };
 use patina_dst_trace::TraceBundle;
 use sha2::{Digest, Sha256};
@@ -239,7 +238,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
 
     // Stable immutable paths keep Cargo's link fingerprints warm. The owning
     // handle pins every input through compilation and the guest's final link.
-    let object = stage_shim_object(&built_shim, &PATINA_POSIX_OBJECT, &host_target, &[])?;
+    let object = built_shim.facade.clone();
     // The SanitizerCoverage hook object is compiled and linked only under
     // `--yield-points`/`--coverage-points`; a plain build never references
     // SanitizerCoverage symbols.
@@ -294,7 +293,12 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
                 .as_deref()
                 .expect("a Go native-build requires --output"),
             &object,
-            &stage_shim_object(&built_shim, &PATINA_GO_METER_OBJECT, &host_target, &[])?,
+            &stage_shim_object(
+                &built_shim.objects,
+                &PATINA_GO_METER_OBJECT,
+                &host_target,
+                &[],
+            )?,
             &built_shim,
             &built_shim.allocator_linker_args(&host_target)?,
             &go_args,
@@ -377,9 +381,9 @@ fn build_native_source(
     rustc_args: &[OsString],
     rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
-    let staticlib = &shim.staticlib;
+    let engine = &shim.engine;
     let mut command = Command::new(&rustc.command);
-    shim_cache::inherit(&mut command, &shim._lease)?;
+    shim.inherit(&mut command)?;
     command
         .arg("--edition")
         .arg(edition)
@@ -391,7 +395,7 @@ fn build_native_source(
         .arg("-C")
         .arg(link_arg(object))
         .arg("-C")
-        .arg(link_arg(staticlib));
+        .arg(link_arg(engine));
     if let Some(yield_object) = yield_object {
         // SanitizerCoverage is driven entirely through stable `-C` codegen flags
         // (no `RUSTC_BOOTSTRAP`); the hook object below resolves the emitted
@@ -506,7 +510,6 @@ fn build_native_package(
     yield_object: Option<&Path>,
     rustc: &RustcInvocation,
 ) -> Result<PathBuf, CliError> {
-    let staticlib = &shim.staticlib;
     if !manifest.is_file() {
         return Err(CliError(format!(
             "no Cargo manifest at {}",
@@ -546,13 +549,13 @@ fn build_native_package(
         .arg("--")
         .args(native_package_link_args(
             object,
-            staticlib,
+            &shim.engine,
             allocator,
             yield_object,
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&selected.target_dir)?;
-    shim_cache::inherit(&mut command, &shim._lease)?;
+    shim.inherit(&mut command)?;
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;
@@ -854,7 +857,7 @@ pub(super) fn stage_sancov_stub(
     if !yield_points {
         return Ok(None);
     }
-    stage_shim_object(shim, &PATINA_SANCOV_STUB_OBJECT, target, &[]).map(Some)
+    stage_shim_object(&shim.objects, &PATINA_SANCOV_STUB_OBJECT, target, &[]).map(Some)
 }
 
 /// The shim's link arguments for a package build, as the trailing arguments of
@@ -882,16 +885,16 @@ pub(super) fn stage_sancov_stub(
 /// link exactly as before. See
 /// `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`.
 pub(super) fn native_package_link_args(
-    object: &Path,
-    staticlib: &Path,
+    facade: &Path,
+    engine: &Path,
     allocator: &[OsString],
     yield_object: Option<&Path>,
 ) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         OsString::from("-C"),
-        link_arg(object),
+        link_arg(facade),
         OsString::from("-C"),
-        link_arg(staticlib),
+        link_arg(engine),
     ];
     if let Some(yield_object) = yield_object {
         args.push(OsString::from("-C"));

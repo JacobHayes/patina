@@ -1,5 +1,6 @@
-//! Guest-only C variadic doors. Compile this archive with one codegen unit so
-//! the definitions, extraction anchor and assembler aliases share an object.
+//! Guest-only C variadic doors. Compile an archive linked directly with one
+//! codegen unit so the definitions, extraction anchor and assembler aliases
+//! share an object (the sealed Linux debug archive need not; ARCHITECTURE.md).
 use core::ffi::{CStr, c_int};
 
 mod fcntl;

@@ -7,14 +7,13 @@ use crate::native_build::{
 use crate::native_run::execute_native_run;
 use crate::parse::knob_flag_pairs;
 use crate::shim_build::{
-    PATINA_POSIX_OBJECT, RustcInvocation, apply_rustc_env, build_native_shim,
-    check_native_toolchain_agreement, lock_target_dir, prepare_shim_sources,
-    stage_instrumentation_object, stage_shim_object,
+    RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
+    lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
 };
 use crate::wasi_exec::execute_wasi_run;
 use crate::{
     ArtifactRef, CliError, ExploreInvocation, ExploreTarget, Mode, NativeHarnessInvocation,
-    NativeRunMode, execute, exit_code, output, shim_cache,
+    NativeRunMode, execute, exit_code, output,
 };
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -201,9 +200,7 @@ fn build_native_harness(
         &shim,
         invocation.instrumentation,
     )?;
-    let staticlib = &built_shim.staticlib;
     let host_target = host_target_triple(&rustc)?;
-    let object = stage_shim_object(&built_shim, &PATINA_POSIX_OBJECT, &host_target, &[])?;
     let yield_object =
         stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
     let sancov_stub = stage_sancov_stub(&built_shim, yield_object.is_some(), &host_target)?;
@@ -244,14 +241,14 @@ fn build_native_harness(
     command
         .arg("--")
         .args(native_package_link_args(
-            &object,
-            staticlib,
+            &built_shim.facade,
+            &built_shim.engine,
             &built_shim.allocator_link_args(&host_target)?,
             yield_object.as_deref(),
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&target_dir)?;
-    shim_cache::inherit(&mut command, &built_shim._lease)?;
+    built_shim.inherit(&mut command)?;
     let built = command.output().map_err(|error| {
         CliError(format!(
             "failed to run cargo rustc for native harness: {error}"

@@ -54,7 +54,11 @@ The guest archive uses the common `POSIX_RUST_FLAGS` recipe:
 one object by construction. The C constructor's private unresolved reference
 extracts that object even when an earlier libc/libSystem already supplied the
 public spelling. Public definitions stay strong. No whole-archive link is
-needed, and unrelated bundled std/dependency members are not forced in.
+needed, and unrelated bundled std/dependency members are not forced in. This
+holds for an archive linked directly; the Linux debug archive the seal
+consumes (`POSIX_SEALED_RUST_FLAGS`, ARCHITECTURE.md "The sealed shim") drops
+the single codegen unit because the seal links the whole archive and makes the
+route aliases itself.
 
 Dependency rlibs, shim unit tests and bare prefixed-ABI archives omit the
 private cfg. A Cargo feature is unsuitable for this isolation: feature

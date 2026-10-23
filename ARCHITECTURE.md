@@ -74,21 +74,79 @@ assembly in the Rust module, then calls a fixed Rust dispatcher; it preserves
 the guest-stack restoration path. These entries retain the registry's platform
 scope and use the existing models.
 
-The POSIX object's unique anchor extracts the Rust member even when libc has
-already supplied the public name. Guest archive compilation uses one codegen
-unit to keep that anchor, the definitions and Linux's hidden route aliases
-together; no whole-archive link is needed. C retains acting cancellation and thread-exit frames, guest callback frames, clock stores,
+Linux guests link the sealed shim below, not the archive. For an archive linked
+directly (Darwin guests, and tests) the POSIX object's unique anchor
+extracts the Rust member even when libc has already supplied the public name,
+and compilation uses one codegen unit to keep that anchor, the definitions and
+Linux's hidden route aliases together; no whole-archive link is needed. The
+Linux debug build the seal consumes drops that constraint: the seal links the
+whole archive, roots every door itself and makes the route aliases, so the
+shim rebuilds across codegen units (about a second instead of five). C retains acting cancellation and thread-exit frames, guest callback frames, clock stores,
 host-resolution vehicles. Linux abort retains a C
 entry so its Rust model can inspect caller panic ownership before entering its
 guard. The [C-to-Rust design](docs/arcs/c-to-rust.md) lists the retained seams;
 the [variadic interposer design](docs/arcs/c-variadic-interposers.md) describes
 raw capture and formatter boundaries.
 
+### The sealed shim
+
+A Linux guest links two objects in place of the POSIX object and the archive
+(`crates/cargo-patina/src/seal.rs`). The **engine** is the archive partially
+linked (`ld -r` with section garbage collection, every door, data row, `patina_*` ABI name and
+allocator entry rooted) into one relocatable object, then rewritten in place
+(`seal/elf.rs`): each Rust door's definition is renamed `patina_impl_<name>`,
+the engine's own references to the door and to its route alias become
+undefined references to the door's name, and every other global definition is
+made local. A COMDAT group whose signature ends up local stops being COMDAT, so
+a guest's group of the same name cannot discard it. The allocator entries stay
+as weak definitions so the routing object's wrappers still reach them. The **façade** is the POSIX object
+unchanged plus one generated thunk per Rust door, a landing pad and a tail jump
+to `patina_impl_<name>`. A door therefore has one public address, the
+façade's, whether the guest calls it, the engine calls it or `dlsym` resolves
+it. Nothing is rebound: every reference the engine makes still reaches the
+same definition as before, and the seal writes those references to
+`patina_engine.references` for review.
+
+The seal is also the gate. It refuses an engine whose exports differ from the
+inventory (registry rows the Rust side defines, the runtime's `patina_*` ABI,
+and toolchain glue such as `DW.ref.*` and mangled Rust names, which the
+localisation keeps out of the export set anyway), a row both the seams and the
+Rust side define or neither does, a façade export that is neither a registry
+row nor the ABI, and any raw system call or counter read in the engine's code.
+That scan is stricter than the binary audit's: it covers every section marked
+as holding instructions, restarts decoding at every symbol, and refuses bytes
+it cannot decode. The outputs are cached in the artifact entry, keyed by the
+archive, the C compiler and a digest of the seal's own source and of the linker
+it runs; a reused engine is scanned again, so a changed scanner judges it.
+Resealing costs under a second.
+
+The engine carries its own copy of `std`, and that is a behaviour change: a
+panic in the engine runs the engine copy's hook, `thread::panicking()` and
+`io::stderr`, not the guest's, so a guest `set_hook` or `catch_unwind` never
+sees a shim panic, and the engine's thread-locals and destructors are its own.
+The two-copy tests (`tests/native_workloads/two_copy.rs`) pin what must still
+hold across the copies: guest thread-local destructors reach the doors after
+the engine registered thread-locals on the same thread, guest parking and
+blocking initialisation share the futex model, and an engine panic aborts past
+the guest's hook and `catch_unwind`.
+
+Darwin does not seal yet: its guests link the POSIX object and the archive as
+before, with one `std`, so neither the gate nor the two-copy behaviour applies
+there. Apple's linker blocks the ELF recipe. The C seams call runtime ABI the
+Rust side defines as private externs (hidden), and a relocatable ld64 link either
+refuses to export a private extern or, by default, makes it local, so the
+façade's references go unresolved. `-keep_private_externs` keeps them
+linkable, but it also leaves every symbol the exported-symbols list demotes as a
+private extern rather than a local, so the engine's `std` and its dependencies
+collide with the guest's (`duplicate symbol`). A Darwin seal needs those hidden
+names exported by default visibility, or a localisation of its own after the
+link.
+
 A guest binary is never stale with respect to the shim it links. Package builds inject the shim link arguments through `CARGO_ENCODED_RUSTFLAGS`, and Cargo fingerprints that *string*, not the files it names — so the injected flags also carry a hash of the link inputs' bytes. Rebuild the shim or the runtime beneath it and the flags change, which is what makes Cargo relink; leave them alone and the flags are byte-identical, so an unchanged rebuild stays a cache hit.
 
 The shim is built on the user's machine, from source that travels inside the `cargo-patina` binary. A prebuilt staticlib is not an option, because the shim must be compiled by the exact rustc that compiles the guest; a source checkout is not assumed, because an installed binary (`cargo install`, a git checkout that is gone, CI) has none. `cargo-patina`'s build script therefore embeds the shim's whole workspace dependency closure — twelve crates, discovered through each crate's `links` metadata so the same channel works in-tree, from the crates.io registry, and from a git checkout — plus the `Cargo.lock` that pins their third-party dependencies. At guest-build time the bundle is unpacked, content-addressed by its own digest, into a per-user cache (`$XDG_CACHE_HOME/patina`, else `~/.cache/patina` on Linux and `~/Library/Caches/patina` on macOS) as a self-contained Cargo workspace. Native shim caches live below `<cache>/shim-target/patina-native-shim` by default; an explicit `PATINA_SHIM_TARGET_DIR`, else `CARGO_TARGET_DIR`, is the authoritative base, with the same `patina-native-shim` namespace beneath it (relative bases are anchored to the caller); `PATINA_SHIM_TARGET_DIR` moves only the shim, so guests built in separate target dirs share one shim build. The `builds/` entries share Cargo scratch state across bundles, keyed only by the complete compiler identity; Cargo keeps debug and release outputs side by side. Each has a stable source-workspace path; on a bundle switch the workspace is replaced and Cargo cleans just the bundled packages before rebuilding. Registry dependencies remain reusable. Cargo's locked mode preserves the embedded dependency lockfile. Incremental compilation is disabled for this private build; `CARGO_PROFILE_DEV_DEBUG=1` keeps backtraces and source locations without the disk cost of full type information. Source bundles and private source copies are trusted only after a completion marker written last.
 
-Guest links never read that mutable scratch state. Only the final archive is copied (reflink where supported, plain copy otherwise, never a hard link) and atomically renamed into an `artifacts/` entry keyed by bundle, complete compiler identity, profile, archive bytes, C compiler identity and instrumentation variant. C helper objects are content-addressed and atomically published below that same entry. Sources, workspaces and artifacts have kernel-held leases acquired under their catalog lock before exposing any path; guest builders retain the artifact lease until linking finishes, and waiting builders pin scratch state before taking its build lock. Consuming subprocesses inherit only shared leases, protecting their entries from eviction after parent death. Build and catalog locks stay close-on-exec: long-lived compiler-wrapper daemons must not block later builds. The shared lock helpers use `std::fs::File` locking, translating `TryLockError::WouldBlock` into the callers' I/O contention result and retrying interrupted acquisitions. These locks require working advisory `flock` semantics; NFS configurations that do not provide them are unsupported cache locations. Pruning under the catalog lock cannot unlink a leased entry or replace its lock inode. An evicted entry is first atomically renamed to a hidden tombstone, so interrupted deletion cannot leave a partial cache hit. Tombstones and staging directories never count toward retention and are swept on later accesses. Cleanup failures warn and leave retryable garbage rather than failing a build. Publication uses bounded, lock-protected staging files; a retry clears an abandoned partial rather than accumulating more.
+Guest links never read that mutable scratch state. Only the final archive is copied (reflink where supported, plain copy otherwise, never a hard link) and atomically renamed into an `artifacts/` entry keyed by bundle, complete compiler identity, profile, archive bytes, C compiler identity and instrumentation variant. The sealed façade and engine are published below that same entry. C helper objects are content-addressed and atomically published in a separate `objects/` catalog keyed by the POSIX object's hash (four kept), so artifacts that differ only in the Rust archive share them. Sources, workspaces and artifacts have kernel-held leases acquired under their catalog lock before exposing any path; guest builders retain the artifact lease until linking finishes, and waiting builders pin scratch state before taking its build lock. Consuming subprocesses inherit only shared leases, protecting their entries from eviction after parent death. Build and catalog locks stay close-on-exec: long-lived compiler-wrapper daemons must not block later builds. The shared lock helpers use `std::fs::File` locking, translating `TryLockError::WouldBlock` into the callers' I/O contention result and retrying interrupted acquisitions. These locks require working advisory `flock` semantics; NFS configurations that do not provide them are unsupported cache locations. Pruning under the catalog lock cannot unlink a leased entry or replace its lock inode. An evicted entry is first atomically renamed to a hidden tombstone, so interrupted deletion cannot leave a partial cache hit. Tombstones and staging directories never count toward retention and are swept on later accesses. Cleanup failures warn and leave retryable garbage rather than failing a build. Publication uses bounded, lock-protected staging files; a retry clears an abandoned partial rather than accumulating more.
 
 On use, entries are touched and least-recently-used entries are pruned: four artifacts and four source bundles keep a short upgrade/rollback window; two build entries keep two compiler identities warm. Live leases may temporarily exceed these counts; the next access reclaims released excess entries. Scratch targets over a 2 GiB high-water mark are reset before their next build, bounding accumulated Cargo configurations without imposing a mid-build quota. Old 64-hex-named target directories are garbage-collected only after an hour without observed use, honoring their old build locks; they are not a compatibility layout. Finish all commands from pre-lease cargo-patina versions before upgrading: those versions neither pin their archives and sources nor coordinate lock-file discovery with eviction. Automatic legacy cleanup assumes that migration is quiescent; it cannot retroactively protect uncoordinated old processes.
 
@@ -309,9 +367,10 @@ and leave the trace incomplete.
 POSIX startup installs a production panic hook independently of Context setup.
 Thread-local Rust ABI ownership, suspended for guest callbacks, distinguishes
 shim panics from guest panics; owned panics report through host writes and private
-abort. Guest panics retain the prior hook and can be caught. Guard-unwind and
-panic-time abort checks preserve the private-abort policy if the guest replaces
-the hook. Bare prefixed-C/staticlib links have no public abort interposer and do
+abort. Guest panics retain the prior hook and can be caught. The hook lives in the
+sealed engine's own `std`, so a guest that replaces its hook replaces only its
+own copy's; guard-unwind and panic-time abort checks still preserve the
+private-abort policy for unsealed links. Bare prefixed-C/staticlib links have no public abort interposer and do
 not install this policy or require the POSIX host aliases. Libtest retains its
 own panic handling.
 A default-fatal batch releases only its fatal signal, never another queued handler

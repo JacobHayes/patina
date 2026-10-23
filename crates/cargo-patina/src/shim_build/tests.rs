@@ -239,7 +239,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&backdate, fs::Permissions::from_mode(0o755)).unwrap();
     rustc.cargo_command = backdate.as_os_str().into();
-    let link = |built: &BuiltNativeShim, expected: u32| {
+    let link = |built: &PublishedShim, expected: u32| {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("guest.c");
         let guest = dir.path().join("guest");

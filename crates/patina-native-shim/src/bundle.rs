@@ -14,6 +14,11 @@ pub const POSIX_C_SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/patina_
 /// Guest-only flags keep the extraction anchor and aliases with the definitions.
 /// Never apply these to a dependency rlib or bare prefixed-ABI archive.
 pub const POSIX_RUST_FLAGS: &[&str] = &["--cfg=patina_posix_exports", "-Ccodegen-units=1"];
+/// [`POSIX_RUST_FLAGS`] for an archive `cargo patina` seals before any guest
+/// links it, without the single codegen unit: the sealed engine is one object
+/// holding every door, so nothing is extracted, and the seal resolves every
+/// route alias to its door, whichever unit defined it.
+pub const POSIX_SEALED_RUST_FLAGS: &[&str] = &["--cfg=patina_posix_exports"];
 /// Code-generation flags shared by the shipped POSIX object and its tests.
 /// Unwind tables let glibc's forced pthread unwind cross C shim frames.
 pub const POSIX_C_FLAGS: &[&str] = &[

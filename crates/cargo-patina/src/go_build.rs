@@ -35,9 +35,9 @@
 //! keep the meter's settings: the tag is added to its list and the debug flag
 //! to each `-gcflags` value, since the Go command keeps only the last match.
 
+use crate::CliError;
 use crate::native_build::{PLATFORM_LINKER_ARGS, install_built_executable};
 use crate::shim_build::BuiltNativeShim;
-use crate::{CliError, shim_cache};
 use object::{Object, ObjectKind};
 use patina_dst_target::native_binary_is_shim_linked;
 use sha2::Digest;
@@ -450,21 +450,17 @@ pub(super) fn run_as_toolexec(arguments: Vec<OsString>) -> Result<i32, CliError>
     }
 }
 
-/// The `-ldflags` value that links externally with the shim: its POSIX
-/// object, its archive, the allocator routing, and the platform arguments,
+/// The `-ldflags` value that links externally with the shim: its objects
+/// (the façade, the engine, the meter), the allocator routing, and the
+/// platform arguments,
 /// with unused sections collected as rustc's link collects them.
 ///
 /// The Go command splits `-ldflags` into fields, and the Go linker splits
 /// `-extldflags` again, each honouring single and double quotes but no
 /// escapes; so each linker argument is single-quoted inside one double-quoted
 /// `-extldflags` field, and an argument containing a quote is refused.
-pub(super) fn go_ldflags(
-    objects: &[&Path],
-    staticlib: &Path,
-    allocator: &[OsString],
-) -> Result<String, CliError> {
+pub(super) fn go_ldflags(objects: &[&Path], allocator: &[OsString]) -> Result<String, CliError> {
     let mut linker_args: Vec<&OsStr> = objects.iter().map(|object| object.as_os_str()).collect();
-    linker_args.push(staticlib.as_os_str());
     linker_args.extend(allocator.iter().map(OsString::as_os_str));
     linker_args.extend(PLATFORM_LINKER_ARGS.iter().map(OsStr::new));
     linker_args.push(OsStr::new("-Wl,--gc-sections"));
@@ -511,7 +507,7 @@ pub(super) fn build_go_package(
         )));
     }
     check_go_args(go_args)?;
-    let ldflags = go_ldflags(&[object, meter], &shim.staticlib, allocator)?;
+    let ldflags = go_ldflags(&[object, &shim.engine, meter], allocator)?;
     let experiment = go_env(package_dir, "GOEXPERIMENT")?;
     let mut effective_args = inherited_go_flags(&go_env(package_dir, "GOFLAGS")?);
     effective_args.extend_from_slice(go_args);
@@ -531,7 +527,7 @@ pub(super) fn build_go_package(
         .map_err(|error| CliError(format!("failed to create a link directory: {error}")))?;
     let linked = link_dir.path().join(GO_LINK_NAME);
     let mut command = Command::new("go");
-    shim_cache::inherit(&mut command, &shim._lease)?;
+    shim.inherit(&mut command)?;
     command
         .current_dir(package_dir)
         .env("CGO_ENABLED", "1")
@@ -660,8 +656,11 @@ mod tests {
             OsString::from("/r/route.o"),
         ];
         let ldflags = go_ldflags(
-            &[Path::new("/o/posix.o"), Path::new("/o/meter.o")],
-            Path::new("/a/lib.a"),
+            &[
+                Path::new("/o/facade.o"),
+                Path::new("/a/engine.o"),
+                Path::new("/o/meter.o"),
+            ],
             &allocator,
         )
         .expect("plain paths quote");
@@ -671,9 +670,9 @@ mod tests {
             .strip_prefix("-extldflags=")
             .expect("one -extldflags field");
         let mut expected = vec![
-            "/o/posix.o",
+            "/o/facade.o",
+            "/a/engine.o",
             "/o/meter.o",
-            "/a/lib.a",
             "-Wl,--wrap=a b",
             "/r/route.o",
         ];
@@ -682,7 +681,7 @@ mod tests {
         assert_eq!(split_go_quoted(extld), expected);
         assert_eq!(fields.len(), 2);
         // A quote cannot be carried through the quoted field, so it is refused.
-        assert!(go_ldflags(&[Path::new("/o/it's.o")], Path::new("/a/lib.a"), &[]).is_err());
+        assert!(go_ldflags(&[Path::new("/o/it's.o")], &[]).is_err());
     }
 
     #[test]

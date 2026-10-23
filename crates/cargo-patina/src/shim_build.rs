@@ -41,7 +41,7 @@ pub(super) fn embedded_shim_bundle_sha256() -> &'static str {
 }
 
 const NATIVE_SHIM_STATICLIB: &str = "libpatina_dst_native_shim.a";
-/// Subdirectory of the shim's own profile target dir where the content-addressed
+/// Subdirectory of a helper-objects catalog entry where the content-addressed
 /// POSIX/yield helper objects are staged, so their `-Clink-arg` paths stay stable
 /// across builds and Cargo's crate fingerprints stay warm.
 const NATIVE_SHIM_OBJECTS_DIR: &str = "patina-shim-objects";
@@ -100,10 +100,24 @@ pub(super) struct ShimSources {
     _lease: shim_cache::Lease,
 }
 
-pub(super) struct BuiltNativeShim {
+/// A shim archive published under its content address, before sealing.
+pub(super) struct PublishedShim {
     pub(super) staticlib: PathBuf,
-    // Guest builders must retain this, not just the path, until linking ends.
+    /// Where the content-addressed helper objects' catalog lives.
+    objects_root: PathBuf,
     pub(super) _lease: shim_cache::Lease,
+}
+
+/// The sealed shim a guest links (`seal.rs`): the façade and the engine, both
+/// under the published archive's lease, and the catalog of helper objects. On
+/// Darwin, unsealed: the POSIX object and the archive.
+pub(super) struct BuiltNativeShim {
+    pub(super) facade: PathBuf,
+    pub(super) engine: PathBuf,
+    routing: crate::allocator_routing::AllocatorRouting,
+    // Guest builders must retain these, not just the paths, until linking ends.
+    pub(super) _lease: shim_cache::Lease,
+    pub(super) objects: shim_cache::Lease,
 }
 
 impl BuiltNativeShim {
@@ -113,8 +127,8 @@ impl BuiltNativeShim {
     /// `host_target`. Empty where the platform routes nothing.
     pub(super) fn allocator_link_args(&self, host_target: &str) -> Result<Vec<OsString>, CliError> {
         Ok(self
-            .allocator_routing(host_target)?
-            .map(|(routing, object)| routing.link_args(&object, &self.staticlib))
+            .routing_object(host_target)?
+            .map(|object| self.routing.link_args(&object))
             .unwrap_or_default())
     }
 
@@ -125,28 +139,31 @@ impl BuiltNativeShim {
         host_target: &str,
     ) -> Result<Vec<OsString>, CliError> {
         Ok(self
-            .allocator_routing(host_target)?
-            .map(|(routing, object)| routing.linker_args(&object, &self.staticlib))
+            .routing_object(host_target)?
+            .map(|object| self.routing.linker_args(&object))
             .unwrap_or_default())
     }
 
-    /// The archive's allocator routing and its staged object, or `None` where
-    /// the platform routes nothing.
-    fn allocator_routing(
-        &self,
-        host_target: &str,
-    ) -> Result<Option<(crate::allocator_routing::AllocatorRouting, PathBuf)>, CliError> {
-        let routing = crate::allocator_routing::AllocatorRouting::read(&self.staticlib)?;
-        let Some(defines) = routing.defines() else {
+    /// The routing's staged object, or `None` where the platform routes
+    /// nothing.
+    fn routing_object(&self, host_target: &str) -> Result<Option<PathBuf>, CliError> {
+        let Some(defines) = self.routing.defines() else {
             return Ok(None);
         };
-        let object = stage_shim_object(
-            self,
+        stage_shim_object(
+            &self.objects,
             &PATINA_ALLOCATOR_ROUTING_OBJECT,
             host_target,
             &defines,
-        )?;
-        Ok(Some((routing, object)))
+        )
+        .map(Some)
+    }
+
+    /// Let `command`'s process hold both leases, so a link outliving this
+    /// process still pins its inputs.
+    pub(super) fn inherit(&self, command: &mut Command) -> Result<(), CliError> {
+        shim_cache::inherit(command, &self._lease)?;
+        shim_cache::inherit(command, &self.objects)
     }
 }
 
@@ -248,7 +265,43 @@ pub(super) fn build_native_shim(
         env::var_os("PATINA_SHIM_TARGET_DIR"),
         env::var_os("CARGO_TARGET_DIR"),
     );
-    build_native_shim_at(release, rustc, shim, explicit.as_deref(), instrumentation)
+    let published =
+        build_native_shim_at(release, rustc, shim, explicit.as_deref(), instrumentation)?;
+    seal_published(published, &host_target_triple(rustc)?)
+}
+
+/// Seal a published archive (`seal.rs`) beside it, or reuse its seal. The C
+/// seams come from the helper-object catalog, keyed by their own content, so
+/// a change to the Rust side alone recompiles no C. Darwin seals nothing yet:
+/// its guests link the seams and the archive.
+fn seal_published(
+    published: PublishedShim,
+    host_target: &str,
+) -> Result<BuiltNativeShim, CliError> {
+    let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
+    let seams = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, host_target, &[])?;
+    let objects = shim_cache::acquire(&published.objects_root, &seams, shim_cache::KEEP_OBJECTS)?;
+    let posix = stage_shim_object(&objects, &PATINA_POSIX_OBJECT, host_target, &[])?;
+    let routing = crate::allocator_routing::AllocatorRouting::read(&published.staticlib)?;
+    let (facade, engine) = if cfg!(target_os = "linux") {
+        let _lock = lock_target_dir(&published._lease.dir)?;
+        let sealed = crate::seal::seal(
+            &published.staticlib,
+            &posix,
+            &routing,
+            &published._lease.dir,
+        )?;
+        (sealed.facade, sealed.engine)
+    } else {
+        (posix, published.staticlib.clone())
+    };
+    Ok(BuiltNativeShim {
+        facade,
+        engine,
+        routing,
+        _lease: published._lease,
+        objects,
+    })
 }
 
 /// `PATINA_SHIM_TARGET_DIR` sets the shim's base alone, so guest builds with
@@ -269,7 +322,7 @@ fn build_native_shim_at(
     shim: &ShimSources,
     explicit: Option<&OsStr>,
     instrumentation: GuestInstrumentation,
-) -> Result<BuiltNativeShim, CliError> {
+) -> Result<PublishedShim, CliError> {
     let base = native_shim_cache_base(&shim.cache_root, explicit)?;
     shim_cache::prune_legacy(&base);
     let profile = if release { "release" } else { "debug" };
@@ -352,12 +405,12 @@ fn build_native_shim_at(
             // Cargo >=1.91 can redirect intermediate state independently. Keep
             // it in our bounded scratch too; older Cargo ignores this variable.
             .env("CARGO_BUILD_BUILD_DIR", &target_dir)
-            // A debug shim keeps incremental history: the single codegen unit
-            // the guest archive needs (`POSIX_RUST_FLAGS`) makes every shim
-            // edit regenerate all of the crate's code, and incremental reuse
-            // of the rest of the compilation more than halves the rebuild. A
-            // release shim, rebuilt rarely, keeps none. Neither needs full
-            // type debug info: level 1 retains backtraces and source locations.
+            // A debug shim keeps incremental history, and since the seal
+            // makes one object of the archive anyway, builds in many codegen
+            // units (`POSIX_SEALED_RUST_FLAGS`): an edit regenerates only the
+            // units it touches. A release shim, rebuilt rarely, keeps none,
+            // and one unit for its code's sake. Neither needs full type debug
+            // info: level 1 retains backtraces and source locations.
             .env("CARGO_INCREMENTAL", if release { "0" } else { "1" })
             .env("CARGO_PROFILE_DEV_DEBUG", "1");
         apply_rustc_env(&mut command, rustc);
@@ -409,7 +462,12 @@ fn build_native_shim_at(
     }
     build
         .arg("--")
-        .args(patina_dst_native_shim::POSIX_RUST_FLAGS);
+        // Darwin keeps one unit until its seal is verified on a Mac.
+        .args(if release || !cfg!(target_os = "linux") {
+            patina_dst_native_shim::POSIX_RUST_FLAGS
+        } else {
+            patina_dst_native_shim::POSIX_SEALED_RUST_FLAGS
+        });
     let status = build
         .status()
         .map_err(|e| CliError(format!("building shim: {e}")))?;
@@ -423,7 +481,12 @@ fn build_native_shim_at(
     // entries, rather than accumulating objects inside one eternally hot entry.
     let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
     let c_identity = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, &host_target_triple(rustc)?, &[])?;
-    let recipe = format!("{profile}:{c_identity}:{instrumentation:?}");
+    // The seal's own source names its outputs too: a cargo-patina that seals
+    // differently never reuses another's seal of the same archive.
+    let recipe = format!(
+        "{profile}:{c_identity}:{instrumentation:?}:{}",
+        crate::seal::recipe_digest()
+    );
     publish_native_shim(
         &staticlib,
         &base,
@@ -484,7 +547,7 @@ fn publish_native_shim(
     bundle: &str,
     toolchain: &RustcIdentity,
     profile: &str,
-) -> Result<BuiltNativeShim, CliError> {
+) -> Result<PublishedShim, CliError> {
     let mut hasher = Sha256::new();
     hash_file_contents(&mut hasher, staticlib)?;
     hash_bytes(&mut hasher, bundle.as_bytes());
@@ -504,8 +567,9 @@ fn publish_native_shim(
         fs::rename(&partial, &published)
             .map_err(|e| CliError(format!("publishing shim archive: {e}")))?;
     }
-    Ok(BuiltNativeShim {
+    Ok(PublishedShim {
         staticlib: published,
+        objects_root: base.join("objects"),
         _lease: lease,
     })
 }
@@ -1011,25 +1075,25 @@ mode={} scheduler-hook={scheduler_hook} fingerprint-suffix={} -- {}",
     } else {
         println!("{note}");
     }
-    stage_shim_object(shim, object, host_target, &defines).map(Some)
+    stage_shim_object(&shim.objects, object, host_target, &defines).map(Some)
 }
 
 /// Compile `object` to a stable, content-addressed path under `base` and return
 /// it, reusing an already-staged object without recompiling. Staging is
 /// race-safe: under its build lock the object is compiled in a private sandbox
 /// to a fixed partial file, then atomically renamed into place. A retry clears
-/// any interrupted partial. Production callers keep the artifact entry leased
-/// until the guest link completes; eviction reclaims its helper objects together
-/// with the archive.
+/// any interrupted partial. Production callers keep the objects' catalog entry
+/// leased until the guest link completes. The entry is keyed by the C seams'
+/// content, not the archive's, so a Rust-only shim change reuses every object.
 pub(super) fn stage_shim_object(
-    shim: &BuiltNativeShim,
+    objects: &shim_cache::Lease,
     object: &ShimObject,
     target: &str,
     defines: &[String],
 ) -> Result<PathBuf, CliError> {
     let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
     let hash = shim_object_hash(&cc, object, target, defines)?;
-    let dir = shim._lease.dir.join(NATIVE_SHIM_OBJECTS_DIR).join(hash);
+    let dir = objects.dir.join(NATIVE_SHIM_OBJECTS_DIR).join(hash);
     let _lock = lock_target_dir(&dir)?;
     let staged = dir.join(object.object_name);
     if staged.exists() {
@@ -1068,7 +1132,7 @@ pub(super) fn stage_shim_object(
         .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?;
     let temp_object = dir.join("object.partial");
     shim_cache::clear_partial(&temp_object)?;
-    shim_cache::inherit(&mut command, &shim._lease)?;
+    shim_cache::inherit(&mut command, objects)?;
     command
         .arg("-c")
         .arg(&source_path)
