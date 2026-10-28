@@ -1,0 +1,7 @@
+{
+  "generations": 200,
+  "guest_args": ["--seed", "7", "--base-port", "6001", "--timeout-secs", "30"],
+  "faults": ["net", "sleep"],
+  "exclude_knobs": ["--net-connect-refuse-permille", "--net-reset-permille"],
+  "classify": {"patterns": {"LIVENESS": ["PUBSUB_FAILURE not-converged"]}}
+}

@@ -119,6 +119,24 @@ directory:
    must differ from the no-fault trace at the same seed (non-vacuity), and the
    faulted run must record + strict-replay byte-identically.
 
+## Campaign
+
+`campaign.json` sweeps the clean broker with `cargo patina campaign`: every
+generation draws its schedule seed and its net and sleep faults from the
+generation number, and a sample of clean generations is re-run to check they
+reproduce.
+
+```sh
+cargo patina campaign ../../target/testbeds/pubsub/patina/pubsub --spec campaign.json
+```
+
+The spec excludes connection-refused and reset faults
+(`exclude_knobs`): the clients treat a lost connection as fatal and never
+reconnect, so either fault ends a generation before the delivery contract is
+tested. A `PUBSUB_FAILURE not-converged` run is classed `LIVENESS` by the
+spec's `classify` rule, since that outcome carries no verdict. Adding
+`"--bug", "NAME"` to `guest_args` sweeps a planted bug instead.
+
 Fault model: Patina's `--net-jitter-nanos` / `--net-drop-permille` knobs act on
 the SimNet TCP *stream* path this app uses (task #37). Jitter adds a seeded
 per-segment delivery delay; a "drop" is a reliable-transport retransmit — the

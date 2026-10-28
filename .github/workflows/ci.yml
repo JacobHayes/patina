@@ -219,8 +219,8 @@ jobs:
   # Heavy randomized campaign, beyond the per-push budget. The per-push Linux
   # jobs already run the flagship workq testbed's full self-checking battery;
   # nightly adds breadth by sweeping 200 randomized fault-combination
-  # generations, including the schedule-fuzz tier, and 200 disk-crash restart
-  # generations. The campaign runs on Linux,
+  # generations, including the schedule-fuzz tier, 200 workq disk-crash restart
+  # generations and 200 pubsub network-fault generations. The campaign runs on Linux,
   # where it covers the same deterministic model without duplicating
   # macOS campaign work; the macOS job runs the full deterministic gate suite.
   nightly:
@@ -255,3 +255,13 @@ jobs:
           "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
             "$CARGO_TARGET_DIR/patina/workq" --spec testbeds/workq/campaign.json \
             --out-dir "$CARGO_TARGET_DIR/crash-campaign"
+      # pubsub's network faults: 200 `cargo patina campaign` generations.
+      - if: ${{ !cancelled() }}
+        env:
+          CARGO_TARGET_DIR: target/testbeds/workq-sweep
+        run: |
+          "$CARGO_TARGET_DIR/release/cargo-patina" patina build testbeds/pubsub \
+            --output "$CARGO_TARGET_DIR/patina/pubsub" --release >/dev/null
+          "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
+            "$CARGO_TARGET_DIR/patina/pubsub" --spec testbeds/pubsub/campaign.json \
+            --out-dir "$CARGO_TARGET_DIR/pubsub-campaign"

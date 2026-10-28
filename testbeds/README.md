@@ -32,8 +32,9 @@ sweep) on every routine Linux CI run and every macOS run.
 `workq/fuzz-sweep.sh` is the home of the randomized-but-deterministic
 fault-combination campaign (including its schedule-fuzz tier) that runs nightly
 on Linux. `liveness-campaign` and `buggify-wasi`
-are small fixtures; `buggify-wasi`'s campaign is a `cargo patina campaign`
-spec (`buggify-wasi/campaign.json`). `buggify-campaign.sh` (this directory) is the shared
+are small fixtures. `cargo patina campaign` specs sweep `workq` disk
+crash-restarts (`workq/campaign.json`), pubsub's network faults
+(`pubsub/campaign.json`) and `buggify-wasi` (`buggify-wasi/campaign.json`). `buggify-campaign.sh` (this directory) is the shared
 campaign layer — Wave 2 `PATINA_SDK_REPORT` parsing, one-run
 `cargo patina sites --exercised` join checks, cross-generation coverage
 accumulation, the `ALWAYS_VIOLATION`/`SOMETIMES_UNMET` classes — sourced by the
