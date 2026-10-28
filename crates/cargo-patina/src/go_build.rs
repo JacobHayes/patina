@@ -285,7 +285,7 @@ fn stage_runtime_hooks(
         return Ok(None);
     };
     let digest = crate::hex(&sha2::Sha256::digest(metered.as_bytes()));
-    let dir = shim._lease.dir.join("go-runtime-hooks").join(digest);
+    let dir = shim.dir.join("go-runtime-hooks").join(digest);
     let staged = dir.join("libfuzzer.go");
     if staged.exists() {
         return Ok(Some(staged));
@@ -504,7 +504,6 @@ pub(super) fn build_go_package(
         .map_err(|error| CliError(format!("failed to create a link directory: {error}")))?;
     let linked = link_dir.path().join(GO_LINK_NAME);
     let mut command = Command::new("go");
-    shim.inherit(&mut command)?;
     command
         .current_dir(package_dir)
         .env("CGO_ENABLED", "1")

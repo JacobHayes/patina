@@ -77,7 +77,7 @@ use parse::{
     BUGGIFY_ENV_VARS, ParseResult, buggify_env_pairs, current_verb, knob_env_pairs, knob_env_vars,
     locate_positionals, package_integrates_patina, parse, reject_stranded_artifact,
 };
-use shim_build::{TARGET_DIR_LOCK, lock_target_dir};
+use shim_build::lock_target_dir;
 use wasi_exec::{execute_wasi_audit, execute_wasi_build, execute_wasi_run};
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";

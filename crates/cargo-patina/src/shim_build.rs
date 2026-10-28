@@ -117,8 +117,6 @@ pub(super) struct ShimSources {
     pub(super) dir: PathBuf,
     /// The content address of the embedded source bundle that produced `dir`.
     bundle_hash: &'static str,
-    // Pins sources from before toolchain probing through the last guest link.
-    _lease: shim_cache::Lease,
 }
 
 /// A shim archive published under its content address, before sealing.
@@ -126,19 +124,21 @@ pub(super) struct PublishedShim {
     pub(super) staticlib: PathBuf,
     /// Where the content-addressed helper objects' catalog lives.
     objects_root: PathBuf,
-    pub(super) _lease: shim_cache::Lease,
+    /// The archive's cache entry, where its seal is written too.
+    pub(super) dir: PathBuf,
 }
 
 /// The sealed shim a guest links (`seal.rs`): the façade and the engine, both
-/// under the published archive's lease, and the catalog of helper objects. On
+/// in the published archive's entry, and the helper objects' entry. On
 /// Darwin, unsealed: the POSIX object and the archive.
 pub(super) struct BuiltNativeShim {
     pub(super) facade: PathBuf,
     pub(super) engine: PathBuf,
     routing: crate::allocator_routing::AllocatorRouting,
-    // Guest builders must retain these, not just the paths, until linking ends.
-    pub(super) _lease: shim_cache::Lease,
-    pub(super) objects: shim_cache::Lease,
+    /// The published archive's entry.
+    pub(super) dir: PathBuf,
+    /// The helper objects' entry.
+    pub(super) objects: PathBuf,
 }
 
 impl BuiltNativeShim {
@@ -179,13 +179,6 @@ impl BuiltNativeShim {
         )
         .map(Some)
     }
-
-    /// Let `command`'s process hold both leases, so a link outliving this
-    /// process still pins its inputs.
-    pub(super) fn inherit(&self, command: &mut Command) -> Result<(), CliError> {
-        shim_cache::inherit(command, &self._lease)?;
-        shim_cache::inherit(command, &self.objects)
-    }
 }
 
 /// Unpack the embedded shim source bundle into the per-user cache (a no-op when
@@ -201,24 +194,22 @@ impl BuiltNativeShim {
 /// checkout (which an installed binary does not have).
 pub(super) fn prepare_shim_sources() -> Result<ShimSources, CliError> {
     let cache_root = patina_cache_root()?;
-    let lease = shim_cache::acquire_initialized(
+    let dir = shim_cache::entry_initialized(
         &cache_root.join("shim-src"),
         embedded_shim_bundle_sha256(),
-        shim_cache::KEEP_SOURCES,
         || unpack_embedded_shim_sources(&cache_root).map(|_| ()),
     )?;
     Ok(ShimSources {
         cache_root,
-        dir: lease.dir.clone(),
+        dir,
         bundle_hash: embedded_shim_bundle_sha256(),
-        _lease: lease,
     })
 }
 
 /// Write the bundle to `<cache_root>/shim-src/<sha256>` atomically: stage into
 /// a temporary sibling and rename into place, with a completion marker written
-/// last. The caller holds the source catalog lock. Incomplete/old directories
-/// are retired before repair; directory existence alone is never a cache hit.
+/// last. The caller holds the source catalog lock. An incomplete directory is
+/// retired before repair; directory existence alone is never a cache hit.
 fn unpack_embedded_shim_sources(cache_root: &Path) -> Result<PathBuf, CliError> {
     let bundles = cache_root.join("shim-src");
     let bundle_dir = bundles.join(embedded_shim_bundle_sha256());
@@ -275,7 +266,7 @@ fn unpack_embedded_shim_sources(cache_root: &Path) -> Result<PathBuf, CliError> 
     Ok(bundle_dir)
 }
 
-/// Build in reusable scratch state; publish and pin only immutable link inputs.
+/// Build in reusable scratch state; publish only immutable link inputs.
 pub(super) fn build_native_shim(
     release: bool,
     rustc: &RustcInvocation,
@@ -301,17 +292,12 @@ fn seal_published(
 ) -> Result<BuiltNativeShim, CliError> {
     let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
     let seams = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, host_target, &[])?;
-    let objects = shim_cache::acquire(&published.objects_root, &seams, shim_cache::KEEP_OBJECTS)?;
+    let objects = shim_cache::entry(&published.objects_root, &seams)?;
     let posix = stage_shim_object(&objects, &PATINA_POSIX_OBJECT, host_target, &[])?;
     let routing = crate::allocator_routing::AllocatorRouting::read(&published.staticlib)?;
     let (facade, engine) = if cfg!(target_os = "linux") {
-        let _lock = lock_target_dir(&published._lease.dir)?;
-        let sealed = crate::seal::seal(
-            &published.staticlib,
-            &posix,
-            &routing,
-            &published._lease.dir,
-        )?;
+        let _lock = lock_target_dir(&published.dir)?;
+        let sealed = crate::seal::seal(&published.staticlib, &posix, &routing, &published.dir)?;
         (sealed.facade, sealed.engine)
     } else {
         (posix, published.staticlib.clone())
@@ -320,7 +306,7 @@ fn seal_published(
         facade,
         engine,
         routing,
-        _lease: published._lease,
+        dir: published.dir,
         objects,
     })
 }
@@ -345,7 +331,6 @@ fn build_native_shim_at(
     instrumentation: GuestInstrumentation,
 ) -> Result<PublishedShim, CliError> {
     let base = native_shim_cache_base(&shim.cache_root, explicit)?;
-    shim_cache::prune_legacy(&base);
     let profile = if release { "release" } else { "debug" };
     let mut hasher = Sha256::new();
     // Each profile builds in a work dir of its own, under its own lock: an
@@ -353,17 +338,12 @@ fn build_native_shim_at(
     // and the debug shim every test guest links must not queue behind it.
     hash_bytes(&mut hasher, rustc.identity.verbose.as_bytes());
     hash_bytes(&mut hasher, profile.as_bytes());
-    let work = shim_cache::acquire(
-        &base.join("builds"),
-        &hex(&hasher.finalize()),
-        shim_cache::KEEP_BUILDS,
-    )?;
-    // Pin before waiting: the pruner must not unlink this lock's inode while a
-    // second builder is queued. Only the Cargo build is serialized, not links.
-    let _lock = lock_target_dir(&work.dir)?;
-    let target_dir = work.dir.join("target");
-    let source_dir = work.dir.join("source");
-    let marker = work.dir.join("bundle");
+    let work = shim_cache::entry(&base.join("builds"), &hex(&hasher.finalize()))?;
+    // Only the Cargo build is serialized, not links.
+    let _lock = lock_target_dir(&work)?;
+    let target_dir = work.join("target");
+    let source_dir = work.join("source");
+    let marker = work.join("bundle");
     let previous = match fs::read_to_string(&marker) {
         Ok(value) => Some(value),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -371,9 +351,6 @@ fn build_native_shim_at(
     };
     let needs_switch = previous.as_deref() != Some(shim.bundle_hash)
         || !shim_cache::complete(&source_dir, shim.bundle_hash)?;
-    // Size is a high-water mark, not a mid-build quota. A single build may be
-    // larger; its next use resets scratch state without touching pinned links.
-    shim_cache::trim_build_target(&work.dir);
     // The closure packages whose sources this build replaces, or `None` for a
     // whole reset. A switch from an intact previous bundle replaces only the
     // packages whose bytes differ, so their unchanged dependencies keep their
@@ -424,7 +401,7 @@ fn build_native_shim_at(
             .current_dir(&source_dir)
             .env("CARGO_TARGET_DIR", &target_dir)
             // Cargo >=1.91 can redirect intermediate state independently. Keep
-            // it in our bounded scratch too; older Cargo ignores this variable.
+            // it in our scratch too; older Cargo ignores this variable.
             .env("CARGO_BUILD_BUILD_DIR", &target_dir)
             // A debug shim keeps incremental history, and since the seal
             // makes one object of the archive anyway, builds in many codegen
@@ -455,7 +432,6 @@ fn build_native_shim_at(
             // survive it, since rustc verifies every reuse against the sources.
             let kept = shim_cache::IncrementalHistory::set_aside(&target_dir, &cleaned)?;
             let mut clean = command();
-            shim_cache::inherit(&mut clean, &work)?;
             clean.arg("clean");
             for package in &cleaned {
                 clean.arg("-p").arg(package);
@@ -476,7 +452,6 @@ fn build_native_shim_at(
             .map_err(|e| CliError(format!("writing shim bundle marker: {e}")))?;
     }
     let mut build = command();
-    shim_cache::inherit(&mut build, &work)?;
     build.args(["rustc", "--lib", "--locked", "-p", "patina-dst-native-shim"]);
     if release {
         build.arg("--release");
@@ -498,8 +473,7 @@ fn build_native_shim_at(
         ));
     }
     let staticlib = target_dir.join(profile).join(NATIVE_SHIM_STATICLIB);
-    // C compiler and instrumentation variants get independently evictable
-    // entries, rather than accumulating objects inside one eternally hot entry.
+    // C compiler and instrumentation variants get entries of their own.
     let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
     let c_identity = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, &host_target_triple(rustc)?, &[])?;
     // The seal's own source names its outputs too: a cargo-patina that seals
@@ -574,14 +548,10 @@ fn publish_native_shim(
     hash_bytes(&mut hasher, bundle.as_bytes());
     hash_bytes(&mut hasher, toolchain.verbose.as_bytes());
     hash_bytes(&mut hasher, profile.as_bytes());
-    let lease = shim_cache::acquire(
-        &base.join("artifacts"),
-        &hex(&hasher.finalize()),
-        shim_cache::KEEP_ARTIFACTS,
-    )?;
-    let _lock = lock_target_dir(&lease.dir)?;
-    let published = lease.dir.join(NATIVE_SHIM_STATICLIB);
-    let partial = lease.dir.join("archive.partial");
+    let dir = shim_cache::entry(&base.join("artifacts"), &hex(&hasher.finalize()))?;
+    let _lock = lock_target_dir(&dir)?;
+    let published = dir.join(NATIVE_SHIM_STATICLIB);
+    let partial = dir.join("archive.partial");
     shim_cache::clear_partial(&partial)?;
     if !published.exists() {
         shim_cache::copy(staticlib, &partial)?;
@@ -591,7 +561,7 @@ fn publish_native_shim(
     Ok(PublishedShim {
         staticlib: published,
         objects_root: base.join("objects"),
-        _lease: lease,
+        dir,
     })
 }
 
@@ -605,8 +575,8 @@ fn publish_native_shim(
 /// shim archive it publishes, the guest executable it copies out — therefore
 /// holds this from before its Cargo invocation until that read is done, or a
 /// concurrent build's Cargo can rewrite the file mid-read. OpenOptions creates
-/// CLOEXEC descriptors on Unix; keep that flag set for build and catalog locks
-/// so a compiler wrapper's daemon cannot retain an exclusive lock after exec.
+/// CLOEXEC descriptors on Unix, so a compiler wrapper's daemon cannot retain
+/// a lock after exec.
 pub(super) fn lock_target_dir(target_dir: &Path) -> Result<fs::File, CliError> {
     fs::create_dir_all(target_dir).map_err(|error| {
         CliError(format!(
@@ -1103,18 +1073,17 @@ mode={} scheduler-hook={scheduler_hook} fingerprint-suffix={} -- {}",
 /// it, reusing an already-staged object without recompiling. Staging is
 /// race-safe: under its build lock the object is compiled in a private sandbox
 /// to a fixed partial file, then atomically renamed into place. A retry clears
-/// any interrupted partial. Production callers keep the objects' catalog entry
-/// leased until the guest link completes. The entry is keyed by the C seams'
+/// any interrupted partial. The `objects` entry is keyed by the C seams'
 /// content, not the archive's, so a Rust-only shim change reuses every object.
 pub(super) fn stage_shim_object(
-    objects: &shim_cache::Lease,
+    objects: &Path,
     object: &ShimObject,
     target: &str,
     defines: &[String],
 ) -> Result<PathBuf, CliError> {
     let cc = env::var_os("CC").unwrap_or_else(|| OsString::from("cc"));
     let hash = shim_object_hash(&cc, object, target, defines)?;
-    let dir = objects.dir.join(NATIVE_SHIM_OBJECTS_DIR).join(hash);
+    let dir = objects.join(NATIVE_SHIM_OBJECTS_DIR).join(hash);
     let _lock = lock_target_dir(&dir)?;
     let staged = dir.join(object.object_name);
     if staged.exists() {
@@ -1153,7 +1122,6 @@ pub(super) fn stage_shim_object(
         .map_err(|error| CliError(format!("failed to stage {}: {error}", object.what)))?;
     let temp_object = dir.join("object.partial");
     shim_cache::clear_partial(&temp_object)?;
-    shim_cache::inherit(&mut command, objects)?;
     command
         .arg("-c")
         .arg(&source_path)

@@ -383,7 +383,6 @@ fn build_native_source(
 ) -> Result<PathBuf, CliError> {
     let engine = &shim.engine;
     let mut command = Command::new(&rustc.command);
-    shim.inherit(&mut command)?;
     command
         .arg("--edition")
         .arg(edition)
@@ -555,7 +554,6 @@ fn build_native_package(
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&selected.target_dir)?;
-    shim.inherit(&mut command)?;
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;

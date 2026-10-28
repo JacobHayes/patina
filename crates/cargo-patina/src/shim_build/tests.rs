@@ -1,7 +1,6 @@
 use super::*;
 use crate::native_build::GuestInstrumentation;
 use std::ffi::{OsStr, OsString};
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
@@ -138,17 +137,14 @@ fn incomplete_shim_source_bundle_is_repaired() {
     let partial = bundles.join(key);
     fs::create_dir_all(&partial).unwrap();
     fs::write(partial.join("Cargo.toml"), b"interrupted old extraction").unwrap();
-    let lease = shim_cache::acquire_initialized(&bundles, key, 1, || {
+    let dir = shim_cache::entry_initialized(&bundles, key, || {
         unpack_embedded_shim_sources(cache.path()).map(|_| ())
     })
     .unwrap();
-    assert!(shim_cache::complete(&lease.dir, key).unwrap());
+    assert!(shim_cache::complete(&dir, key).unwrap());
     for (package, files) in shim_bundle::EMBEDDED_SHIM_SOURCES {
         for (path, bytes) in *files {
-            assert_eq!(
-                fs::read(lease.dir.join(package).join(path)).unwrap(),
-                *bytes
-            );
+            assert_eq!(fs::read(dir.join(package).join(path)).unwrap(), *bytes);
         }
     }
 }
@@ -159,17 +155,14 @@ fn incomplete_shim_source_bundle_is_repaired() {
 #[test]
 #[cfg(unix)]
 fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
-    if shim_cache::isolated_test() {
-        return;
-    }
     let cache = tempfile::tempdir().unwrap();
     let make_bundle = |key: &'static str, answer: u32, lock_tail: &str| {
-        let lease = shim_cache::acquire(&cache.path().join("shim-src"), key, 4).unwrap();
+        let bundle = shim_cache::entry(&cache.path().join("shim-src"), key).unwrap();
         // Even an ambient/configured Cargo intermediate directory must not
-        // escape the leased, size-bounded scratch target.
-        fs::create_dir_all(lease.dir.join(".cargo")).unwrap();
+        // escape the shim's scratch target.
+        fs::create_dir_all(bundle.join(".cargo")).unwrap();
         fs::write(
-            lease.dir.join(".cargo/config.toml"),
+            bundle.join(".cargo/config.toml"),
             format!(
                 "[build]\nbuild-dir = {:?}\n",
                 cache.path().join("escaped-build-dir")
@@ -187,7 +180,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
             .unwrap();
         for (package, _) in shim_bundle::EMBEDDED_SHIM_SOURCES {
             members.push(format!("{package:?}"));
-            let dir = lease.dir.join(package);
+            let dir = bundle.join(package);
             fs::create_dir_all(dir.join("src")).unwrap();
             let is_shim = *package == "patina-dst-native-shim";
             fs::write(dir.join("Cargo.toml"), format!(
@@ -209,7 +202,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
             }
         }
         fs::write(
-            lease.dir.join("Cargo.toml"),
+            bundle.join("Cargo.toml"),
             format!(
                 "[workspace]\nresolver = \"2\"\nmembers = [{}]\n",
                 members.join(",")
@@ -217,12 +210,11 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         )
         .unwrap();
         lock.push_str(lock_tail);
-        fs::write(lease.dir.join("Cargo.lock"), lock).unwrap();
+        fs::write(bundle.join("Cargo.lock"), lock).unwrap();
         ShimSources {
             cache_root: cache.path().into(),
-            dir: lease.dir.clone(),
+            dir: bundle,
             bundle_hash: key,
-            _lease: lease,
         }
     };
     let a = make_bundle("a", 17, "");
@@ -358,72 +350,6 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         build_native_shim_at(false, &rustc, &relocked, None, GuestInstrumentation::None).unwrap();
     link(&built, 17);
 
-    // A compiler-wrapper server can outlive the command that started it.
-    // It may pin shared state, but the next real build must acquire the
-    // exclusive build lock without waiting for that server to exit.
-    let fifo = cache.path().join("daemon-control");
-    assert!(
-        Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success()
-    );
-    struct ResumeDaemon(fs::File);
-    impl Drop for ResumeDaemon {
-        fn drop(&mut self) {
-            use std::io::Write;
-            let _ = self.0.write_all(b"finish\n");
-        }
-    }
-    let resume = ResumeDaemon(
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&fifo)
-            .unwrap(),
-    );
-    let ready = cache.path().join("daemon-ready");
-    let claim = cache.path().join("daemon-started");
-    let wrapper = cache.path().join("cargo-daemon-wrapper");
-    fs::write(&wrapper, format!(
-        "#!/bin/sh\nset -eu\nif [ \"$1\" = rustc ] && mkdir {} 2>/dev/null; then\n  (exec 3< {}; : > {}; read reply <&3) </dev/null >/dev/null 2>&1 &\nfi\nexec {} \"$@\"\n",
-        quote(claim.as_os_str()), quote(fifo.as_os_str()), quote(ready.as_os_str()), quote(backdate.as_os_str())
-    )).unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut daemon_rustc = rustc.clone();
-    daemon_rustc.cargo_command = wrapper.into();
-    let first =
-        build_native_shim_at(false, &daemon_rustc, &a, None, GuestInstrumentation::None).unwrap();
-    link(&first, 17);
-    for _ in 0..100 {
-        if ready.exists() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(
-        ready.exists(),
-        "wrapper's long-lived child never became ready"
-    );
-    std::thread::scope(|scope| {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let next = scope.spawn(move || {
-            let built =
-                build_native_shim_at(false, &daemon_rustc, &b, None, GuestInstrumentation::None);
-            tx.send(()).unwrap();
-            built
-        });
-        let unblocked = rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok();
-        drop(resume); // release the server even when detecting the regression
-        let built = next.join().unwrap().unwrap();
-        assert!(
-            unblocked,
-            "a wrapper daemon retained the exclusive build lock"
-        );
-        link(&built, 29);
-    });
-
     let builds = native_shim_cache_base(cache.path(), None)
         .unwrap()
         .join("builds");
@@ -474,14 +400,9 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
             .exists()
     );
     assert_ne!(release.staticlib, debug.staticlib);
-    let growth = work.join("target/oversized-scratch");
-    fs::File::create(&growth)
-        .unwrap()
-        .set_len(shim_cache::BUILD_BYTES + 1)
-        .unwrap();
     // Model an old torn entry: the completion marker is missing but the
     // bundle marker survived alongside a broken private copy. Retrying A must
-    // replace it, and oversized scratch must actually be removed.
+    // replace it.
     fs::remove_file(work.join("source").join(shim_cache::COMPLETE)).unwrap();
     // Keep the old bundle marker: it alone is not proof of source integrity.
     fs::write(
@@ -492,7 +413,6 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
     let restored =
         build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
     link(&restored, 17);
-    assert!(!growth.exists());
 }
 
 #[test]
@@ -565,7 +485,7 @@ fn published_shim_staticlib_is_named_by_its_bytes() {
         || publish_native_shim(&staticlib, directory.path(), "bundle", &identity, "debug").unwrap();
     fs::write(&staticlib, b"shim bytes").unwrap();
     let first = publish();
-    let abandoned = first._lease.dir.join("archive.partial");
+    let abandoned = first.dir.join("archive.partial");
     fs::write(&abandoned, b"interrupted publication").unwrap();
     assert_eq!(publish().staticlib, first.staticlib);
     assert!(!abandoned.exists());

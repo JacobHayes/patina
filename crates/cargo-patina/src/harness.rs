@@ -248,7 +248,6 @@ fn build_native_harness(
         ))
         .args(NATIVE_AUDIT_METADATA_ARGS);
     let _lock = lock_target_dir(&target_dir)?;
-    built_shim.inherit(&mut command)?;
     let built = command.output().map_err(|error| {
         CliError(format!(
             "failed to run cargo rustc for native harness: {error}"

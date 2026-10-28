@@ -1,56 +1,18 @@
-//! Bounded cache entries with kernel-held shared leases. Catalog locks cover
-//! discovery, pinning and atomic retirement; only leases survive child exec.
-use super::{CliError, TARGET_DIR_LOCK, lock_target_dir};
-use patina_dst_trace::{lock_exclusive, lock_shared};
+//! Content-addressed shim cache entries. Each catalog has one lock, held while
+//! an entry is looked up or created and while idle entries are removed.
+use super::{CliError, lock_target_dir};
 use std::{
     fs, io,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
-pub(super) const KEEP_ARTIFACTS: usize = 4;
-/// Helper-object entries kept: one per C compiler and C seams source.
-pub(super) const KEEP_OBJECTS: usize = 4;
-pub(super) const KEEP_SOURCES: usize = 4;
-/// Shim build work dirs kept warm: two toolchains, each in both profiles.
-pub(super) const KEEP_BUILDS: usize = 4;
-pub(super) const BUILD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const COMPLETE: &str = ".complete";
-const LEASE: &str = ".lease";
-const LEGACY_GRACE: Duration = Duration::from_secs(3600);
-
-pub(super) struct Lease {
-    pub dir: PathBuf,
-    file: fs::File,
-}
-
-/// Inherit ONLY a shared lease. Build/catalog locks retain OpenOptions' CLOEXEC:
-/// a compiler wrapper may daemonize, and its server must not monopolize builds.
-/// A clone belongs to the consuming command; clearing CLOEXEC happens only in
-/// its child, never by changing descriptor flags in the multithreaded parent.
-pub(super) fn inherit(command: &mut std::process::Command, lease: &Lease) -> Result<(), CliError> {
-    #[cfg(unix)]
-    {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        let file = lease
-            .file
-            .try_clone()
-            .map_err(|e| CliError(format!("cloning shim cache lease: {e}")))?;
-        // SAFETY: pre_exec only calls async-signal-safe fcntl on a live fd. The
-        // crate's variadic declaration also preserves the Darwin arm64 ABI.
-        unsafe {
-            command.pre_exec(move || {
-                if super::fcntl(file.as_raw_fd(), super::F_SETFD, 0) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (command, lease);
-    Ok(())
-}
+/// Touched each time an entry is taken; its mtime is the entry's last use.
+const USED: &str = ".used";
+/// How long an entry outlives its last use. Taking an entry marks it used
+/// under the catalog lock, so only an entry nobody has taken for a day goes.
+const KEEP_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn error(path: &Path, e: io::Error) -> CliError {
     CliError(format!("shim cache {}: {e}", path.display()))
@@ -62,105 +24,65 @@ fn cleanup_warning(result: Result<(), CliError>) {
     }
 }
 
-/// Pin before exposing a path, while the same catalog lock excludes pruning.
-/// The pruner never waits for an exclusive lease under the catalog lock.
-pub(super) fn acquire(root: &Path, key: &str, keep: usize) -> Result<Lease, CliError> {
-    acquire_initialized(root, key, keep, || Ok(()))
+/// The entry `root/key`, created if missing and marked used now.
+pub(super) fn entry(root: &Path, key: &str) -> Result<PathBuf, CliError> {
+    entry_initialized(root, key, || Ok(()))
 }
 
-pub(super) fn acquire_initialized(
+/// [`entry`], running `initialize` first under the catalog lock.
+pub(super) fn entry_initialized(
     root: &Path,
     key: &str,
-    keep: usize,
     initialize: impl FnOnce() -> Result<(), CliError>,
-) -> Result<Lease, CliError> {
+) -> Result<PathBuf, CliError> {
     let _catalog = lock_target_dir(root)?;
     initialize()?;
     let dir = root.join(key);
     fs::create_dir_all(&dir).map_err(|e| error(&dir, e))?;
-    let path = dir.join(LEASE);
-    let file = fs::OpenOptions::new()
-        .read(true)
+    let used = dir.join(USED);
+    fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
-        .map_err(|e| error(&path, e))?;
-    lock_shared(&file, true).map_err(|e| error(&path, e))?;
-    file.set_modified(SystemTime::now())
-        .map_err(|e| error(&path, e))?;
-    let lease = Lease { dir, file };
-    cleanup_warning(prune_locked(root, keep, &|path| fs::remove_dir_all(path)));
-    Ok(lease)
+        .open(&used)
+        .and_then(|file| file.set_modified(SystemTime::now()))
+        .map_err(|e| error(&used, e))?;
+    cleanup_warning(prune_idle(root, SystemTime::now()));
+    Ok(dir)
 }
 
-/// Remove the discoverable name BEFORE deleting any bytes. The caller holds
-/// the catalog (or private workspace) lock and has excluded live readers.
-fn tombstone(dir: &Path) -> Result<PathBuf, CliError> {
+/// Remove the discoverable name BEFORE deleting any bytes, so an interrupted
+/// delete never leaves a torn entry under its key. The caller holds the lock.
+pub(super) fn retire(dir: &Path) -> Result<(), CliError> {
     let stage = tempfile::Builder::new()
         .prefix(".tombstone-")
         .tempdir_in(dir.parent().expect("cache entry has a parent"))
         .map_err(|e| error(dir, e))?;
     fs::rename(dir, stage.path()).map_err(|e| error(dir, e))?;
-    Ok(stage.keep())
-}
-
-pub(super) fn retire(dir: &Path) -> Result<(), CliError> {
-    let dead = tombstone(dir)?;
-    cleanup_warning(fs::remove_dir_all(&dead).map_err(|e| error(&dead, e)));
+    cleanup_warning(fs::remove_dir_all(stage.keep()).map_err(|e| error(dir, e)));
     Ok(())
 }
 
-fn prune_locked(
-    root: &Path,
-    keep: usize,
-    remove: &impl Fn(&Path) -> io::Result<()>,
-) -> Result<(), CliError> {
-    let mut entries = Vec::new();
+/// Under the catalog lock: drop hidden directories (staging and tombstones,
+/// which only a crashed holder of the lock leaves) and entries idle past
+/// [`KEEP_IDLE`] at `now`.
+fn prune_idle(root: &Path, now: SystemTime) -> Result<(), CliError> {
     for entry in fs::read_dir(root).map_err(|e| error(root, e))? {
         let entry = entry.map_err(|e| error(root, e))?;
-        if !entry
-            .file_type()
-            .map_err(|e| error(&entry.path(), e))?
-            .is_dir()
-        {
-            continue;
-        }
         let dir = entry.path();
-        // All staging/retirement runs under this catalog. Hidden directories
-        // can never be cache hits or consume retention slots, even after a crash.
-        if entry.file_name().as_encoded_bytes().starts_with(b".") {
-            cleanup_warning(remove(&dir).map_err(|e| error(&dir, e)));
+        if !entry.file_type().map_err(|e| error(&dir, e))?.is_dir() {
             continue;
         }
-        let lease = dir.join(LEASE);
-        let modified = match fs::metadata(&lease) {
-            Ok(meta) => meta.modified().map_err(|e| error(&lease, e))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => SystemTime::UNIX_EPOCH,
-            Err(e) => return Err(error(&lease, e)),
-        };
-        entries.push((modified, dir));
-    }
-    entries.sort_by(|a, b| b.cmp(a));
-    for (_, dir) in entries.into_iter().skip(keep) {
-        let path = dir.join(LEASE);
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| error(&path, e))?;
-        match lock_exclusive(&file, false) {
-            Ok(()) => {
-                // A failed rename leaves a whole live entry; a failed delete
-                // leaves only an undiscoverable tombstone. Both are retryable.
-                match tombstone(&dir) {
-                    Ok(dead) => cleanup_warning(remove(&dead).map_err(|e| error(&dead, e))),
-                    Err(e) => cleanup_warning(Err(e)),
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(error(&path, e)),
+        if entry.file_name().as_encoded_bytes().starts_with(b".") {
+            cleanup_warning(fs::remove_dir_all(&dir).map_err(|e| error(&dir, e)));
+            continue;
+        }
+        let used = fs::metadata(dir.join(USED))
+            .or_else(|_| fs::metadata(&dir))
+            .and_then(|meta| meta.modified())
+            .map_err(|e| error(&dir, e))?;
+        if now.duration_since(used).unwrap_or_default() > KEEP_IDLE {
+            cleanup_warning(retire(&dir));
         }
     }
     Ok(())
@@ -181,7 +103,7 @@ pub(super) fn copy_sources(from: &Path, to: &Path) -> Result<(), CliError> {
     fs::create_dir_all(to).map_err(|e| error(to, e))?;
     for entry in fs::read_dir(from).map_err(|e| error(from, e))? {
         let entry = entry.map_err(|e| error(from, e))?;
-        if entry.file_name() == LEASE || entry.file_name() == COMPLETE {
+        if cache_metadata(&entry.file_name()) {
             continue;
         }
         let dest = to.join(entry.file_name());
@@ -258,10 +180,10 @@ impl IncrementalHistory {
     }
 }
 
-/// Whether `name` is this cache's own bookkeeping (a lease or completion
+/// Whether `name` is this cache's own bookkeeping (a use or completion
 /// marker), which is never part of an entry's sources.
 pub(super) fn cache_metadata(name: &std::ffi::OsStr) -> bool {
-    name == LEASE || name == COMPLETE
+    name == USED || name == COMPLETE
 }
 
 /// Whether `a` and `b` hold the same bytes: one file each, or two directories
@@ -305,118 +227,6 @@ pub(super) fn same_tree(a: &Path, b: &Path) -> Result<bool, CliError> {
     Ok(true)
 }
 
-fn bytes(dir: &Path) -> Result<u64, CliError> {
-    let mut size = 0;
-    if !dir.exists() {
-        return Ok(size);
-    }
-    for entry in fs::read_dir(dir).map_err(|e| error(dir, e))? {
-        let entry = entry.map_err(|e| error(dir, e))?;
-        let meta = entry.metadata().map_err(|e| error(&entry.path(), e))?;
-        if meta.is_dir() {
-            size += bytes(&entry.path())?;
-        } else {
-            size += meta.len();
-        }
-    }
-    Ok(size)
-}
-
-/// Optional high-water cleanup under the private workspace's build lock. As
-/// with catalog eviction, failed deletion must not turn a cache miss into a
-/// failed user build; interrupted deletion stays behind an undiscoverable name.
-pub(super) fn trim_build_target(work: &Path) {
-    cleanup_warning((|| {
-        for entry in fs::read_dir(work).map_err(|e| error(work, e))? {
-            let entry = entry.map_err(|e| error(work, e))?;
-            if entry
-                .file_name()
-                .as_encoded_bytes()
-                .starts_with(b".tombstone-")
-                && entry
-                    .file_type()
-                    .map_err(|e| error(&entry.path(), e))?
-                    .is_dir()
-            {
-                cleanup_warning(
-                    fs::remove_dir_all(entry.path()).map_err(|e| error(&entry.path(), e)),
-                );
-            }
-        }
-        let target = work.join("target");
-        if bytes(&target)? > BUILD_BYTES {
-            retire(&target)?;
-        }
-        Ok(())
-    })());
-}
-
-// Inspect directory mtimes and file mtime/atime without reading their contents.
-// Directory atimes are excluded: our own scan would refresh them indefinitely.
-fn last_use(path: &Path) -> Result<SystemTime, CliError> {
-    let meta = fs::symlink_metadata(path).map_err(|e| error(path, e))?;
-    let mut latest = meta.modified().map_err(|e| error(path, e))?;
-    if meta.is_dir() {
-        for entry in fs::read_dir(path).map_err(|e| error(path, e))? {
-            latest = latest.max(last_use(&entry.map_err(|e| error(path, e))?.path())?);
-        }
-    } else if meta.is_file() {
-        latest = latest.max(meta.accessed().map_err(|e| error(path, e))?);
-    }
-    Ok(latest)
-}
-
-/// Old layouts have no leases. Honor their build locks and leave recently used
-/// entries alone for an hour. This grace is not a substitute for quiescent
-/// migration: old-version readers/waiters cannot join the new protocol.
-pub(super) fn prune_legacy(base: &Path) {
-    cleanup_warning(prune_legacy_locked(base));
-}
-
-fn prune_legacy_locked(base: &Path) -> Result<(), CliError> {
-    let _catalog = lock_target_dir(base)?;
-    for entry in fs::read_dir(base).map_err(|e| error(base, e))? {
-        let entry = entry.map_err(|e| error(base, e))?;
-        if !entry
-            .file_type()
-            .map_err(|e| error(&entry.path(), e))?
-            .is_dir()
-        {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".tombstone-") {
-            cleanup_warning(fs::remove_dir_all(entry.path()).map_err(|e| error(&entry.path(), e)));
-            continue;
-        }
-        if name.len() != 64 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
-            continue;
-        }
-        let path = entry.path().join(TARGET_DIR_LOCK);
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| error(&path, e))?;
-        match lock_exclusive(&file, false) {
-            Ok(()) => {
-                if SystemTime::now()
-                    .duration_since(last_use(&entry.path())?)
-                    .unwrap_or_default()
-                    > LEGACY_GRACE
-                {
-                    cleanup_warning(retire(&entry.path()));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(error(&path, e)),
-        }
-    }
-    Ok(())
-}
-
 /// Call only while holding the containing entry's publication/build lock.
 pub(super) fn clear_partial(path: &Path) -> Result<(), CliError> {
     match fs::remove_file(path) {
@@ -432,175 +242,38 @@ pub(super) fn copy(from: &Path, to: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Tests that assert immediate lock release run in their own single-test
-/// process. Unrelated libtest threads can fork while a descriptor is open; their
-/// pre-exec children legitimately retain it briefly, even with CLOEXEC.
-///
-/// The calling test is named by its libtest thread, so the re-run selects
-/// exactly that test, and a re-run that runs no test fails.
-#[cfg(test)]
-pub(super) fn isolated_test() -> bool {
-    let current = std::thread::current();
-    let name = current.name().expect("libtest names each test's thread");
-    if std::env::var("PATINA_SHIM_CACHE_TEST").as_deref() == Ok(name) {
-        return false;
-    }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", name, "--test-threads=1", "--nocapture"])
-        .env("PATINA_SHIM_CACHE_TEST", name)
-        .stderr(std::process::Stdio::inherit())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    print!("{stdout}");
-    assert!(
-        output.status.success(),
-        "isolated test {name} failed: {}",
-        output.status
-    );
-    assert!(
-        stdout.contains(" 1 passed;"),
-        "the isolated re-run of {name} ran no test"
-    );
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pruning_pins_readers_and_waiting_builders_then_reclaims_them() {
-        if isolated_test() {
-            return;
-        }
-        // Class detector: no path handoff without a lease, including waiters.
+    fn taking_an_entry_removes_only_entries_idle_past_a_day() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let active = acquire(root, "active", 1).unwrap();
-        fs::write(active.dir.join("archive"), b"original").unwrap();
-        let waiting = acquire(root, "active", 1).unwrap();
-        let newer = acquire(root, "newer", 1).unwrap();
-        assert_eq!(fs::read(active.dir.join("archive")).unwrap(), b"original");
-        drop(active);
-        let newest = acquire(root, "newest", 1).unwrap();
-        assert!(waiting.dir.join("archive").exists());
-        let old = waiting.dir.clone();
-        drop(waiting);
-        let _trigger = acquire(root, "newest", 1).unwrap();
-        assert!(!old.exists());
-        assert!(newer.dir.exists());
-        assert!(newest.dir.exists());
-    }
-
-    #[test]
-    fn interrupted_eviction_is_undiscoverable_and_failed_cleanup_is_retryable() {
-        if isolated_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let old = acquire(temp.path(), "old", 1).unwrap();
-        fs::write(old.dir.join("archive"), b"old bytes").unwrap();
-        let old_path = old.dir.clone();
-        drop(old);
-        let _catalog = lock_target_dir(temp.path()).unwrap();
-        // Inject a failed recursive delete AFTER the atomic rename.
-        prune_locked(temp.path(), 0, &|_| {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        })
-        .unwrap();
-        assert!(!old_path.exists());
-        let dead = fs::read_dir(temp.path())
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|p| p.is_dir())
-            .unwrap();
-        assert_eq!(fs::read(dead.join("archive")).unwrap(), b"old bytes");
-        fs::remove_file(dead.join("archive")).unwrap(); // interrupted partial delete
-        let staging = temp.path().join(".abandoned.staging");
-        fs::create_dir(&staging).unwrap();
-        drop(_catalog);
-        let fresh = acquire(temp.path(), "old", 1).unwrap();
-        fs::write(fresh.dir.join("archive"), b"fresh bytes").unwrap();
-        assert_eq!(fs::read(fresh.dir.join("archive")).unwrap(), b"fresh bytes");
-        assert!(!dead.exists());
-        assert!(!staging.exists());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn consuming_subprocess_keeps_only_shared_lease_after_parent_handles_close() {
-        if isolated_test() {
-            return;
-        }
-        use std::io::{BufRead, Write};
-        use std::process::{Command, Stdio};
-        let temp = tempfile::tempdir().unwrap();
-        let lease = acquire(temp.path(), "old", 1).unwrap();
-        fs::write(lease.dir.join("archive"), b"pinned").unwrap();
-        let build_lock = lock_target_dir(&lease.dir).unwrap();
-        let old = lease.dir.clone();
-        let mut command = Command::new("sh");
-        command
-            .args([
-                "-c",
-                "echo READY; read reply; test -f \"$1/archive\"",
-                "lease-child",
-            ])
-            .arg(&old)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped());
-        inherit(&mut command, &lease).unwrap();
-        let mut child = command.spawn().unwrap();
-        drop(command);
-        drop(build_lock);
-        drop(lease);
-        let mut ready = String::new();
-        std::io::BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut ready)
-            .unwrap();
-        assert_eq!(ready.trim(), "READY");
-        let _new = acquire(temp.path(), "new", 1).unwrap();
-        assert!(old.join("archive").exists());
-        let probe = fs::OpenOptions::new()
+        let idle = entry(root, "idle").unwrap();
+        fs::write(idle.join("archive"), b"old").unwrap();
+        let recent = entry(root, "recent").unwrap();
+        let ago = SystemTime::now() - KEEP_IDLE - Duration::from_secs(60);
+        fs::File::options()
             .write(true)
-            .open(old.join(TARGET_DIR_LOCK))
+            .open(idle.join(USED))
+            .unwrap()
+            .set_modified(ago)
             .unwrap();
-        lock_exclusive(&probe, false).unwrap(); // exclusive lock did NOT survive exec
-        child.stdin.take().unwrap().write_all(b"finish\n").unwrap();
-        assert!(child.wait().unwrap().success());
-        let _new = acquire(temp.path(), "new", 1).unwrap();
-        assert!(!old.exists());
-    }
-
-    #[test]
-    fn legacy_targets_are_collected_but_locked_builds_and_unrelated_dirs_survive() {
-        if isolated_test() {
-            return;
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let old = temp.path().join("a".repeat(64));
-        let lock = lock_target_dir(&old).unwrap();
-        let unrelated = temp.path().join("builds");
-        fs::create_dir(&unrelated).unwrap();
-        prune_legacy(temp.path());
-        assert!(old.exists());
-        drop(lock);
-        prune_legacy(temp.path());
-        assert!(old.exists(), "recent legacy use must get its grace period");
-        let ago = SystemTime::now() - LEGACY_GRACE - Duration::from_secs(60);
-        for path in [old.join(TARGET_DIR_LOCK), old.clone()] {
-            fs::File::open(path)
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(ago).set_accessed(ago))
-                .unwrap();
-        }
-        let lock = lock_target_dir(&old).unwrap();
-        prune_legacy(temp.path());
-        assert!(old.exists(), "old but locked must survive too");
-        drop(lock);
-        prune_legacy(temp.path());
-        assert!(!old.exists());
-        assert!(unrelated.exists());
+        fs::create_dir(root.join(".staging-abandoned")).unwrap();
+        let taken = entry(root, "taken").unwrap();
+        assert!(!idle.exists());
+        assert!(recent.exists());
+        assert!(taken.exists());
+        assert!(!root.join(".staging-abandoned").exists());
+        // An entry taken again is fresh, whatever its age before.
+        fs::File::options()
+            .write(true)
+            .open(recent.join(USED))
+            .unwrap()
+            .set_modified(ago)
+            .unwrap();
+        assert_eq!(entry(root, "recent").unwrap(), recent);
+        assert!(recent.exists());
     }
 }
