@@ -453,7 +453,7 @@ pub(super) struct Verifier<'a> {
     pub(super) self_exe: &'a Path,
     pub(super) artifact: &'a Path,
     pub(super) invocation: &'a [String],
-    pub(super) guest_args: &'a [String],
+    pub(super) guest_tail: &'a [String],
     pub(super) timeout_secs: u64,
     pub(super) rules: &'a ClassifyRules,
     pub(super) traces_dir: &'a Path,
@@ -524,7 +524,7 @@ impl Verifier<'_> {
                 trace_path: &trace_path,
                 coverage_out: coverage_path.as_deref(),
             },
-            self.guest_args,
+            self.guest_tail,
             self.timeout_secs,
         );
         let digest = trace_digest(&trace_path);

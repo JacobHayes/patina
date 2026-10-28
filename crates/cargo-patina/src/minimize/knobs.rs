@@ -72,7 +72,8 @@ pub(super) struct KnobOracle {
     pub(super) seed: u64,
     /// Invocation shape every candidate keeps (`--harness`, the pre-run gate).
     pub(super) pinned: Vec<String>,
-    pub(super) guest_args: Vec<String>,
+    /// The guest argv as the child `run` takes it.
+    pub(super) guest_tail: Vec<String>,
     pub(super) timeout_secs: u64,
     pub(super) target: Target,
     /// How the unreduced vector's run ended, once [`KnobOracle::establish`]
@@ -166,7 +167,7 @@ impl KnobOracle {
             self.seed,
             &self.flags(knobs),
             trace_path,
-            &self.guest_args,
+            &self.guest_tail,
             self.timeout_secs,
         )?;
         let (stdout, stderr) = run.streams();
@@ -286,10 +287,7 @@ pub(super) fn repro_command(oracle: &KnobOracle, knobs: &[Knob]) -> String {
         oracle.seed.to_string(),
     ];
     parts.extend(oracle.flags(knobs));
-    if !oracle.guest_args.is_empty() {
-        parts.push("--".to_string());
-        parts.extend(oracle.guest_args.iter().cloned());
-    }
+    parts.extend(oracle.guest_tail.iter().cloned());
     parts.join(" ")
 }
 

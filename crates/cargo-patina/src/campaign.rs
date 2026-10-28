@@ -402,6 +402,27 @@ fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
     flags
 }
 
+/// The child-`run` tokens that hand the campaign's guest argv to the guest, in
+/// the spelling each family's `run` takes: a native program's arguments follow
+/// `--`; a WASI module's are `--arg` values, inline (`--arg=VALUE`) so one that
+/// looks like a flag still reaches the guest. Every generation, reproduce
+/// command and reduction appends exactly these.
+fn guest_tail(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
+    if spec.guest_args.is_empty() {
+        return Vec::new();
+    }
+    if family == "wasi" {
+        return spec
+            .guest_args
+            .iter()
+            .map(|arg| format!("--arg={arg}"))
+            .collect();
+    }
+    std::iter::once("--".to_string())
+        .chain(spec.guest_args.iter().cloned())
+        .collect()
+}
+
 /// Dampen one band's drawn INTENSITY by a per-mille scale.
 ///
 /// Shared by both dials — `--fault-scale-permille` over the fault bands and

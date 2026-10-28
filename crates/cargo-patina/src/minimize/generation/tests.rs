@@ -10,7 +10,7 @@ fn repro_with(class: &str, verdicts: Vec<VerdictFacts>) -> crate::campaign::Gene
         seed: 7,
         flags: Vec::new(),
         pinned: Vec::new(),
-        guest_args: Vec::new(),
+        guest_tail: Vec::new(),
         timeout_secs: 30,
         class: class.to_string(),
         cross_run: crate::campaign::CampaignClass::ALL
