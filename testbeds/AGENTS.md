@@ -1,7 +1,6 @@
 # Testbed agent guidance
 
-Read the root `AGENTS.md`, `docs/agent-operations.md`, and this file before
-changing any testbed.
+Read the root `AGENTS.md` and this file before changing any testbed.
 
 ## Purpose
 

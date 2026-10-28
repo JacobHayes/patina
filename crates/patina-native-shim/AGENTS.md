@@ -41,6 +41,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - A shared symbol allowance is not a fix. If a host effect escapes, first add or
   harden detection so the class fails loudly, then model, interpose, or deny-trap
   the specific surface.
+- Shim C code links into every guest, so one new libc call is an import the
+  pre-run audit refuses for every native program unless it is already
+  interposed or known-safe. Prefer a few lines of hand-rolled code.
 - Dynamic resolution (`dlsym` on Linux) is a second, non-static path into libc:
   the guest never imports the name, so the pre-run audit cannot see it. It
   answers every name the shim defines as a libc contract (the registry's

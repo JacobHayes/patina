@@ -11,21 +11,19 @@ anything; it tells you where truth lives and which gates must stay green.
 | [INTENTS.md](./INTENTS.md) | goals, non-goals, trade-offs, design principles |
 | [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first, the rules new surface must meet, where evidence comes from, the platform policy; cite it when proposing new surface |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim, the WASI host — the source of truth for system shape |
-| [VALIDATION.md](./VALIDATION.md) | capability acceptance gates (V0–V7), required evidence, the gate taxonomy |
-| [IMPLEMENTATION.md](./IMPLEMENTATION.md) | completed and planned implementation slices |
+| [VALIDATION.md](./VALIDATION.md) | what is validated and how to run it, the guarantees and their oracles, known gaps |
 | [USAGE-MODES.md](./USAGE-MODES.md) | the three adoption levels and the crate map |
 | [README.md](./README.md) | the user-facing summary; must stay honest about status |
 | [TUTORIAL.md](./TUTORIAL.md) | the command-by-command walkthrough (every command verified) |
 | `llms.txt` | compact machine-oriented CLI/SDK map |
 | [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) | the tool-agnostic agent skill handed to agents *using* Patina: what it is, the capability map, and how to discover the current surface from the generated registry. Deliberately near-flagless — keep it that way; teach the discovery method, not a flag catalog |
-| [docs/agent-operations.md](./docs/agent-operations.md) | shared agent operating rules: verification, delegation, non-vacuity, cross-platform evidence |
 | [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
 | [testbeds/README.md](./testbeds/README.md) | the dogfooding guests and their conventions |
 | Nearest `AGENTS.md` files | focused guidance for high-risk subtrees such as the native shim and testbeds |
 
 **When changing intent, architecture, or user-visible behavior, update the
-relevant docs in the same change.** Doc drift is treated as a bug; part of it is
-mechanically gated (see below). If `AGENTS.local.md` exists, read it for local
+relevant docs in the same change.** Docs describe the current state; history
+lives in git. If `AGENTS.local.md` exists, read it for local
 maintainer recipes; it is gitignored and is not project doctrine.
 
 ## The CLI: verbs, and where its truth lives
@@ -68,60 +66,21 @@ Every execution verb also accepts `--format json`, usually emitting one
 own schemas (for example `coverage --format json` emits `patina.coverage/v1`).
 Prefer JSON when parsing results programmatically.
 
-## Check ladder (run before claiming done)
+## Build, test and land
 
-With [mise](https://mise.jdx.dev/) for the non-Rust tools, and rustup, which
-installs the Rust toolchain, components and targets `rust-toolchain.toml` pins:
-
-- `mise run check` — the local pre-landing battery: fmt, clippy (host, plus
-  `aarch64-apple-darwin` for Darwin-cfg code from Linux or
-  `x86_64-unknown-linux-gnu` for Linux-cfg code from macOS; CI's gates job lints
-  both Linux architectures natively), the cheap classifier selftests, docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
-  test suite including `end_to_end`, native acceptance tests and the syscall
-  conformance scenarios, WASI/cross smoke, and the workq/pubsub/macro-adopter
-  and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first,
-  then one build of the workspace suite, whose `cargo-patina` drives every
-  testbed; the suite then runs alone under nextest, and the
-  testbed and smoke rungs follow it concurrently. The runner prints
-  one overall result and a retained log directory (commands and per-rung timings),
-  suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
-  the audit corpus.
-- `mise run smoke`, `mise run audit-corpus`, `mise run demo` — individual pieces.
-
-Rust is pinned only in `rust-toolchain.toml`; `mise.toml` unsets
-`RUSTUP_TOOLCHAIN` so a global mise Rust cannot override it.
-
-Run cargo and repository scripts through `mise exec --` or `mise run` so the repo
-selected toolchain is active. `scripts/check.sh` is the quiet/timed log-replay
-runner behind the mise tasks, not a separate tier.
-
-What to run after touching common surfaces:
-
-- Runtime crates (`patina-runtime`, drivers, traces, schedulers): run the
-  focused crate tests; run `mise run check` before handing off.
-- Native shim C/Rust or native audit/run behavior: run the focused command you
-  need, then `mise run smoke` or `mise run check`.
-- Harness/SDK macro behavior: run the focused crate or testbed test, then
-  `mise run check`.
-- CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs` and its `help/` modules, run
-  the focused CLI tests through `mise exec --`, then `mise run check`.
-
-Gates worth knowing individually:
-
-- `mise run check:native-abi` — focused native ABI integration tests; other native
-  targets (`native_conformance`, `native_containment`, `native_raw`, `native_signals`,
-  `native_trace`, `native_workloads`) run in the full workspace-test tier and CI.
-- `mise run conformance` — the syscall conformance scenarios
-  (`crates/patina-conformance`) natively and under patina, the live host kernel
-  as the oracle — authoritative only on the pinned system (Ubuntu 24.04: the
-  6.8 kernel and glibc 2.39), report-only (`DIVERGES`) elsewhere; `mise run conformance:coverage` lists registry entries no
-  scenario or exclusion accounts for (a local report, not a gate). `scripts/validate-wasi.sh` and
-  `scripts/smoke-cross-target.sh` are the WASI/cross-target acceptance batteries
-  (VALIDATION.md defines what each proves).
-- `testbeds/workq/fuzz-sweep.sh --selftest` — the sweep outcome classifier
-  proves every class fireable; it runs per-push in CI.
-- `testbeds/audit-corpus/run.sh` (`--selftest` to prove the drift detection
-  bites) — the strict-xfail ecosystem symbol-audit corpus.
+- rustup installs the Rust toolchain `rust-toolchain.toml` pins on first use;
+  mise supplies nextest and ast-grep. Run cargo and repository scripts through
+  `mise run` or `mise exec --` so those tools are active.
+- Iterate with the focused command: the crate's or testbed's own tests,
+  `mise run check:native-abi`, or `mise run conformance`. `cargo patina` embeds
+  the native shim's C sources, so rebuild it after touching the C layer.
+- `mise run check` is the landing gate; VALIDATION.md lists what it runs.
+  Gate on its exit code, and run one heavy battery per host at a time.
+- Land by pushing the branch and fast-forwarding `main` once CI is green.
+  Keep commits targeted and linear.
+- Prove a behavior change with a planted failure: the check must go red without
+  the fix. Treat a harness or oracle finding as a hypothesis until a standalone
+  reproduction or the trace confirms it.
 
 ## Project doctrine
 
@@ -149,13 +108,12 @@ Gates worth knowing individually:
 - **Detection before fixes.** A new bug class needs a standalone detector that
   provably fires (red-before/green-after) before or alongside the point fix.
   Per "Structure before tests", the strongest detector is the type or lint
-  that rejects the class at compile time. Every new point-level regression pin
-  must name its class-level pairing (VALIDATION.md, "Maintenance rule").
+  that rejects the class at compile time.
 - **No cruft.** No deprecation aliases, compatibility shims, or dual code
   paths for renamed surfaces — migrate every caller and doc in the same change.
 - **Determinism claims are verified, not asserted.** Byte-identical repeats,
   record→replay identity, and seed variation are the standard evidence shape;
-  a check that cannot fail is treated as a bug (see the selftests above).
+  a check that cannot fail is treated as a bug.
 - **Core patina is guest-agnostic.** No testbed- or guest-specific identifiers,
   markers, or workaround branches in the core crates (`crates/*`). Anything a
   specific guest needs for classification or configuration belongs in that
@@ -174,17 +132,13 @@ Gates worth knowing individually:
   running or complete.
 - Measure rather than guess. Quote durations only when observed, and label
   estimates as estimates.
-- Use read-only scouts to find the next likely rungs of a failure class while a
-  builder fixes the current one; batch the fixes instead of serializing through
-  one CI round per discovery.
 - Verify delegated work by reading the diff and checking its evidence. Builder
   reports are useful leads, not acceptance.
 - Prefer isolated workspaces/checkouts for parallel work, and keep one writer
   for any shared file set. Shared campaign outputs, generated binaries, and
   build artifacts are single-writer while a run is live.
-- Convert historical incidents into detectors or guidance, not folklore. If a
-  lesson affects future work, document it in `docs/agent-operations.md` or the
-  relevant subtree `AGENTS.md`.
+- Convert incidents into detectors, or into one line of current guidance in
+  the relevant `AGENTS.md`, never into narrative.
 
 ## Naming
 
