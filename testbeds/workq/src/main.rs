@@ -82,6 +82,9 @@ struct Options {
     /// behavior; this exists so a `--dns-entry`-backed campaign has a real DNS
     /// call site to exercise (workq otherwise never resolves a hostname).
     server_host: Option<String>,
+    /// Keep producer acks on disk here too, so the durability invariant spans
+    /// a process restart (see `producer::AckedLedger`).
+    ack_ledger: Option<PathBuf>,
 }
 
 fn main() {
@@ -94,7 +97,7 @@ fn main() {
         eprintln!(
             "usage: workq [--seed N] [--jobs N] [--workers N] [--producers N] [--base-port N] \
              [--data-dir PATH] [--timeout-secs N] [--tick-ms N] [--segment-bytes N] \
-             [--crash-at-completed N] [--bug NAME] [--server-host NAME] | \
+             [--crash-at-completed N] [--bug NAME] [--server-host NAME] [--ack-ledger PATH] | \
              --check-recovery-fail-closed\n\
              valid --bug names: {}",
             Bug::NAMES.join(", ")
@@ -203,7 +206,36 @@ fn orchestrate(options: Options) -> i32 {
     };
 
     let accumulator: AccumulatorHandle = Arc::new(Mutex::new(Accumulator::default()));
-    let acked: AckedHandle = Arc::new(Mutex::new(AckedLedger::default()));
+    // Opened before the server starts, so the ledger is durable on its own.
+    let mut ledger = match &options.ack_ledger {
+        Some(path) => match AckedLedger::open(path) {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                eprintln!("error: --ack-ledger {}: {error}", path.display());
+                return 2;
+            }
+        },
+        None => AckedLedger::default(),
+    };
+    // Hold the recovered log to the earlier incarnation's acks NOW, before a
+    // producer can resend: a resent request for a lost job can be re-acked
+    // under its old id and pass a check made only at the end.
+    if !ledger.prior().is_empty() {
+        match wal::recover(&options.data_dir) {
+            Ok(recovered) => ledger.audit_prior(
+                &audit_wal(&recovered.records)
+                    .facts
+                    .into_iter()
+                    .map(|(id, (producer, seq, ..))| (id, (producer, seq)))
+                    .collect(),
+            ),
+            Err(error) => {
+                report_fail_closed("restart-wal", &FailClosed::from(&error));
+                return 2;
+            }
+        }
+    }
+    let acked: AckedHandle = Arc::new(Mutex::new(ledger));
     let observation: ObservationHandle = Arc::new(Mutex::new(ServerObservation::default()));
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut supervisor = ServerSupervisor::spawn(config, observation.clone());
@@ -426,6 +458,19 @@ fn report(
             violations.push(("no-loss", format!("acked-job-{id}-never-terminated")));
         }
     }
+    // (1b) Durability across a process restart: a job an earlier incarnation
+    //      was acked for is still in the log under the same client identity.
+    //      Checked at startup (before any resend) and again here.
+    let mut lost = acked.prior_lost().clone();
+    for (&id, &identity) in acked.prior() {
+        let recovered = audit.facts.get(&id).map(|&(producer, seq, ..)| (producer, seq));
+        if recovered != Some(identity) {
+            lost.insert(id);
+        }
+    }
+    for id in lost {
+        violations.push(("durability", format!("acked-job-{id}-lost-across-restart")));
+    }
     // (3) Exactly-once: the accumulator is internally consistent and every applied
     //     job is a real enqueued job.
     if let Err(detail) = accumulator.verify_internal() {
@@ -493,6 +538,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         crash_at_completed: 0,
         bug: Bug::None,
         server_host: None,
+        ack_ledger: None,
     };
     let mut data_dir: Option<PathBuf> = None;
     while let Some(flag) = args.next() {
@@ -523,6 +569,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "--segment-bytes" => o.segment_bytes = n("--segment-bytes")?,
             "--crash-at-completed" => o.crash_at_completed = n("--crash-at-completed")?,
             "--server-host" => o.server_host = Some(val("--server-host")?),
+            "--ack-ledger" => o.ack_ledger = Some(PathBuf::from(val("--ack-ledger")?)),
             "--bug" => {
                 let name = val("--bug")?;
                 o.bug = Bug::parse(&name).ok_or_else(|| {

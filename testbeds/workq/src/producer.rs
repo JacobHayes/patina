@@ -2,8 +2,11 @@
 //! `(producer, client_seq)` is the idempotency key, so a retry never creates a
 //! second job.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,17 +35,88 @@ pub fn derive_job(seed: u64, producer: u32, client_seq: u64) -> (u32, u64) {
 
 /// Job ids a producer got an `EnqueueAck` for. Every one MUST survive
 /// crash-recovery (the durability invariant checked in `report`).
+///
+/// In memory it survives only the in-process server restart. A process
+/// restart (Patina's `--fs-crash-at`) starts the whole program afresh, so
+/// `--ack-ledger PATH` also keeps the acks on disk, the way a real client that
+/// outlives the server would remember them: each ack is appended and fsync'd,
+/// and the acks an earlier incarnation recorded come back as [`Self::prior`]
+/// for `report` to hold the recovered log to.
 #[derive(Default)]
 pub struct AckedLedger {
     job_ids: BTreeSet<u64>,
+    /// Acks an earlier incarnation recorded: job id -> `(producer, client_seq)`.
+    prior: BTreeMap<u64, (u32, u64)>,
+    /// Prior acks the log no longer held when this incarnation started.
+    prior_lost: BTreeSet<u64>,
+    file: Option<File>,
 }
 
 impl AckedLedger {
-    pub fn record(&mut self, job_id: u64) {
+    /// Open the on-disk ledger, reading what earlier incarnations recorded.
+    /// Creating it makes its directory entry durable too, before the server
+    /// creates anything, so the ledger never depends on the queue's own fsyncs.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let mut prior = BTreeMap::new();
+        match File::open(path) {
+            Ok(mut file) => {
+                let mut text = String::new();
+                file.read_to_string(&mut text)?;
+                // Only whole lines: a crash can tear the last, unsynced one.
+                for line in text.split_inclusive('\n').filter(|l| l.ends_with('\n')) {
+                    let fields: Vec<u64> =
+                        line.split_whitespace().filter_map(|f| f.parse().ok()).collect();
+                    if let [job_id, producer, client_seq] = fields[..] {
+                        prior.insert(job_id, (producer as u32, client_seq));
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
+        Ok(Self {
+            job_ids: BTreeSet::new(),
+            prior,
+            prior_lost: BTreeSet::new(),
+            file: Some(file),
+        })
+    }
+
+    pub fn record(&mut self, job_id: u64, producer: u32, client_seq: u64) {
         self.job_ids.insert(job_id);
+        if let Some(file) = &mut self.file {
+            // A lost ledger line would silently drop this ack's cross-restart
+            // check, so a failed write ends the run instead of passing it.
+            if let Err(error) =
+                writeln!(file, "{job_id} {producer} {client_seq}").and_then(|()| file.sync_all())
+            {
+                eprintln!("WORKQ_FAILURE ack-ledger-write-failed: {error}");
+                std::process::exit(2);
+            }
+        }
+    }
+    /// Record which prior acks `recovered` (job id -> identity) lacks.
+    pub fn audit_prior(&mut self, recovered: &BTreeMap<u64, (u32, u64)>) {
+        self.prior_lost = self
+            .prior
+            .iter()
+            .filter(|&(id, &(producer, seq))| {
+                recovered.get(id) != Some(&(producer, seq))
+            })
+            .map(|(&id, _)| id)
+            .collect();
+    }
+    pub fn prior_lost(&self) -> &BTreeSet<u64> {
+        &self.prior_lost
     }
     pub fn ids(&self) -> &BTreeSet<u64> {
         &self.job_ids
+    }
+    pub fn prior(&self) -> &BTreeMap<u64, (u32, u64)> {
+        &self.prior
     }
 }
 
@@ -91,7 +165,7 @@ pub fn run(spec: ProducerSpec) {
             if let Some(Msg::EnqueueAck(producer, acked, job_id)) = Msg::recv(&socket, &mut buffer)
             {
                 if producer == spec.id && acked == client_seq {
-                    spec.acked.lock().unwrap().record(job_id);
+                    spec.acked.lock().unwrap().record(job_id, producer, client_seq);
                     break;
                 }
             }

@@ -19,7 +19,9 @@
 #       as completed or failed) and NEVER violates an invariant;
 #   [4] native fs-crash restart sweep: every configured crash selector reaches
 #       exactly one fresh-incarnation restart (27 total), and no violation
-#       verdict is allowed;
+#       verdict is allowed. The runs keep producer acks on disk
+#       (--ack-ledger), so a job acked before the crash must still be in the
+#       log the restarted process recovers;
 #   [5] crash-RECOVERY: the server is killed + restarted in-process on the same
 #       WAL (--crash-at-completed); acked jobs survive, the run converges, and it
 #       is byte-identical across repeats. Plus the in-process fail-closed-recovery
@@ -187,7 +189,7 @@ for spec in write:1 write:5 write:12 write:40 sync:1 sync:4 sync:16 close:1 clos
   for s in 1 2 3; do
     safe_spec="${spec/:/.}"
     err="$work/f.$safe_spec.$s.err"
-    if run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at "$spec" -- "${ARGS[@]}" >/dev/null 2>"$err"; then code=0; else code=$?; fi
+    if run --seed "$s" ${ALLOW[@]+"${ALLOW[@]}"} --fs-crash-at "$spec" -- "${ARGS[@]}" --ack-ledger /workq-acks >/dev/null 2>"$err"; then code=0; else code=$?; fi
     if [[ $code -ne 0 ]]; then
       echo "      FAIL: fs-crash $spec seed $s unexpected exit=$code"; fail=1; stderr_tail "$err"; continue
     fi
