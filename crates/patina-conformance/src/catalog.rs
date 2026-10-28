@@ -524,6 +524,7 @@ macro_rules! for_each_scenario {
             fs_paths => fs::paths,
             fs_posix_fadvise => fs::posix_fadvise,
             fs_realpath => fs::realpath,
+            fs_record_locks => fs::record_locks,
             fs_renameat2 => fs::renameat2,
             fs_rw => fs::rw,
             fs_size => fs::size,

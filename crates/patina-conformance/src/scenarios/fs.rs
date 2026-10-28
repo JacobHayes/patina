@@ -47,6 +47,7 @@ pub mod paths;
 pub mod posix_fadvise;
 pub mod readlink_width;
 pub mod realpath;
+pub mod record_locks;
 pub mod renameat2;
 pub mod rw;
 pub mod size;

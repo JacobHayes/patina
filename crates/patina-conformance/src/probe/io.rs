@@ -183,6 +183,51 @@ impl Probe {
         result
     }
 
+    /// `fcntl(fd, cmd, &flock)` through the vehicle for a record-lock command
+    /// over `len` bytes from `start` with lock type `kind`; returns the lock
+    /// the call leaves. A GETLK's answer records the conflicting lock (its
+    /// range and owner pid, normalized) or `l_type` `F_UNLCK`.
+    pub fn fcntl_lock(
+        &self,
+        fd: i32,
+        cmd: i32,
+        kind: i16,
+        start: i64,
+        len: i64,
+    ) -> (i64, libc::flock) {
+        // SAFETY: an all-zero flock is a valid value (and `l_pid` 0, as the
+        // OFD commands require).
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = kind;
+        lock.l_whence = libc::SEEK_SET as i16;
+        lock.l_start = start;
+        lock.l_len = len;
+        let pointer = &mut lock as *mut libc::flock as i64;
+        let result = self.call(Syscall::N_fcntl, [fd as i64, cmd as i64, pointer, 0, 0, 0]);
+        let builder = self.event(Syscall::N_fcntl, result);
+        let builder = self
+            .fd_arg(builder, "fd", fd)
+            .arg("cmd", cmd)
+            .arg("l_type", kind)
+            .arg("l_start", start)
+            .arg("l_len", len)
+            .field("l_type", lock.l_type);
+        let conflict = result == 0
+            && (cmd == libc::F_GETLK || cmd == libc::F_OFD_GETLK)
+            && lock.l_type != libc::F_UNLCK as i16;
+        let builder = if conflict {
+            builder
+                .field("l_start", lock.l_start)
+                .field("l_len", lock.l_len)
+                .field("l_pid", lock.l_pid)
+                .norm("fields.l_pid", Norm::Identity(Id::Process))
+        } else {
+            builder
+        };
+        builder.emit();
+        (result, lock)
+    }
+
     pub fn flock(&self, fd: i32, operation: i32) -> i64 {
         let result = self.call(Syscall::N_flock, [fd as i64, operation as i64, 0, 0, 0, 0]);
         let builder = self.event(Syscall::N_flock, result);
