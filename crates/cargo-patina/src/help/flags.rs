@@ -246,13 +246,6 @@ pub(super) const WASI_HOST_FLAGS: &[Flag] = &[
         false,
     ),
     f(
-        "--arg",
-        None,
-        Value::Required("VALUE", Kind::Str),
-        "Append a guest argv entry (recorded and restored on replay).",
-        true,
-    ),
-    f(
         "--env",
         None,
         Value::Required("K=V", Kind::KeyValue),

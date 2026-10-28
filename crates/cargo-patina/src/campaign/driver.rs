@@ -25,8 +25,8 @@ use super::verify::{
     samples_clean_rerun, trace_digest,
 };
 use super::{
-    CampaignClass, CampaignInvocation, classify, derive_flags, generation_hash, guest_tail,
-    invocation_flags, non_native_invocation_flag, signature,
+    CampaignClass, CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
+    non_native_invocation_flag, signature,
 };
 use crate::CliError;
 use crate::guided::{GuidanceDecision, GuidanceTally};
@@ -235,12 +235,12 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     // reproduction attempt shares across generations.
     let invocation = invocation_flags(&state.spec, state.artifact.family);
     let rules = state.spec.classify.clone();
-    let guest_tail = guest_tail(&state.spec, state.artifact.family);
+    let guest_args = state.spec.guest_args.clone();
     let verifier = Verifier {
         self_exe: &self_exe,
         artifact: &artifact_path,
         invocation: &invocation,
-        guest_tail: &guest_tail,
+        guest_args: &guest_args,
         timeout_secs: effective_timeout_secs,
         rules: &rules,
         traces_dir: &traces_dir,
@@ -281,7 +281,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 trace_path: &trace_path,
                 coverage_out: coverage_map_path.as_deref(),
             },
-            &guest_tail,
+            &state.spec.guest_args,
             effective_timeout_secs,
         )?;
         let exit = run.facts.facts.exit_code;
@@ -390,7 +390,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 seed,
                 &flags,
                 &invocation,
-                &guest_tail,
+                &state.spec.guest_args,
                 replayable,
                 &format!("generation-{generation}.patina"),
             );

@@ -211,7 +211,7 @@ pub(super) fn run_generation(
     seed: u64,
     flags: &[String],
     files: GenerationFiles<'_>,
-    guest_tail: &[String],
+    guest_args: &[String],
     timeout_secs: u64,
 ) -> Result<GenerationRun, CliError> {
     let mut command = child_command(self_exe, "run")?;
@@ -227,7 +227,12 @@ pub(super) fn run_generation(
     if let Some(path) = files.coverage_out {
         command.arg("--coverage-out").arg(path);
     }
-    command.args(guest_tail);
+    if !guest_args.is_empty() {
+        command.arg("--");
+        for arg in guest_args {
+            command.arg(arg);
+        }
+    }
     collect_child(command, timeout_secs)
 }
 

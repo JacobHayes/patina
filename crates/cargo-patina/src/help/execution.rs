@@ -11,7 +11,7 @@ pub(super) const RUN: Verb = Verb {
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
         "cargo patina run [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--budget N] [--arg VALUE]... [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS]",
+        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--budget N] [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS] [-- PROGRAM ARGS]",
         "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],

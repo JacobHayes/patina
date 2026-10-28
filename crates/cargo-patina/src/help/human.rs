@@ -133,8 +133,8 @@ fn render_overview() -> String {
         "A flag that takes a required value accepts both `--flag VALUE` and `--flag=VALUE` in \
 every family. A flag with an OPTIONAL value (e.g. --buggify, --sched-pct, --starve, \
 --liveness-watchdog, --converge-within) accepts only the bare `--flag` or `--flag=VALUE` — the \
-space form is ambiguous with a positional. Everything after a `--` separator is passed to the \
-guest/oracle untouched, so `--arg=--help` is how a WASI guest receives a literal `--help`.",
+space form is ambiguous with a positional. Everything after a `--` separator is the \
+guest's argv (or the oracle's), passed untouched in every family.",
     );
 
     out.push_str("\nArtifact inference:\n");

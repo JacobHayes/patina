@@ -91,17 +91,6 @@ pub(crate) fn parse_native_audit_from(
     })
 }
 
-fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
-    match arguments.iter().position(|argument| argument == "--") {
-        Some(index) => {
-            let trailing = arguments.split_off(index + 1);
-            arguments.pop();
-            trailing
-        }
-        None => Vec::new(),
-    }
-}
-
 pub(crate) fn parse_native_build(
     mut arguments: Vec<OsString>,
 ) -> Result<NativeBuildInvocation, CliError> {

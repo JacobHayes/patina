@@ -245,7 +245,7 @@ mod tests {
     // `patina_sdk` imports (the macros are inert without `cfg(patina)`), while
     // `cargo patina build --target wasi` lowers them to `patina_sdk` imports the
     // deterministic host backs — the guest runs, fires, and emits a parseable
-    // PATINA_SDK_REPORT, record/replay reproduces its digest, and `--arg violate`
+    // PATINA_SDK_REPORT, record/replay reproduces its digest, and `-- violate`
     // trips the ALWAYS_VIOLATION oracle on wasip1.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
@@ -350,7 +350,7 @@ wasm32-wasip1 target not installed"
             "wasi buggify replay diverged on the guest digest"
         );
 
-        // `--arg violate` makes the always! invariant false: the host records the
+        // `-- violate` makes the always! invariant false: the host records the
         // `violation` verdict and fails the run on wasip1.
         let violated = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
@@ -361,7 +361,7 @@ wasm32-wasip1 target not installed"
                 "--seed",
                 "5",
                 "--buggify",
-                "--arg",
+                "--",
                 "violate",
             ],
         );

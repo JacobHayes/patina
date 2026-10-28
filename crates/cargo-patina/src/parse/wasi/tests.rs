@@ -14,8 +14,6 @@ fn parses_wasi_run_record_and_branch_modes() {
         "7",
         "--record",
         "run.patina",
-        "--arg",
-        "one",
         "--env",
         "MODE=test",
         "--socket",
@@ -42,6 +40,8 @@ fn parses_wasi_run_record_and_branch_modes() {
         "4096",
         "--max-iovecs",
         "16",
+        "--",
+        "one",
     ]))
     .unwrap();
     assert_eq!(

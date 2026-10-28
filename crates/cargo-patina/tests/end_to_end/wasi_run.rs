@@ -66,9 +66,9 @@ mod tests {
 
     // The trace is authoritative for a WASI run: the realtime epoch (the default,
     // and the `--realtime-epoch` override applied to the in-process clock), the
-    // guest argv (the `--arg` values) and the fault configuration are recorded and
+    // guest argv (the `-- ARGS`) and the fault configuration are recorded and
     // restored by a flag-free replay. A re-supplied epoch is refused; a re-supplied
-    // `--arg` must match the recording or the replay is refused up front, naming
+    // `--` tail must match the recording or the replay is refused up front, naming
     // both.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
@@ -206,9 +206,8 @@ mod tests {
                 trace.to_str().unwrap(),
                 "--fs-latency-nanos",
                 "1..2",
-                "--arg",
+                "--",
                 "alpha",
-                "--arg",
                 "beta",
             ],
         );
@@ -219,7 +218,7 @@ mod tests {
             String::from_utf8_lossy(&recorded.stderr)
         );
 
-        // Flag-free replay: neither `--arg` nor `--fs-latency-nanos` is re-passed, yet the
+        // Flag-free replay: neither the guest args nor `--fs-latency-nanos` is re-passed, yet the
         // run reproduces byte-identically because the trace is authoritative.
         let replayed = invoke_unchecked(patina, cwd, &["replay", argc, trace.to_str().unwrap()]);
         assert_eq!(
@@ -229,7 +228,7 @@ mod tests {
             String::from_utf8_lossy(&replayed.stderr)
         );
 
-        // A re-supplied `--arg` matching the recording is accepted.
+        // A re-supplied `--` tail matching the recording is accepted.
         let matching = invoke_unchecked(
             patina,
             cwd,
@@ -237,19 +236,18 @@ mod tests {
                 "replay",
                 argc,
                 trace.to_str().unwrap(),
-                "--arg",
+                "--",
                 "alpha",
-                "--arg",
                 "beta",
             ],
         );
         assert_eq!(matching.status.code(), recorded_code);
 
-        // A conflicting `--arg` is refused up front, naming the conflict.
+        // A conflicting `--` tail is refused up front, naming the conflict.
         let conflict = invoke_unchecked(
             patina,
             cwd,
-            &["replay", argc, trace.to_str().unwrap(), "--arg", "gamma"],
+            &["replay", argc, trace.to_str().unwrap(), "--", "gamma"],
         );
         assert!(!conflict.status.success());
         let conflict_stderr = String::from_utf8_lossy(&conflict.stderr);

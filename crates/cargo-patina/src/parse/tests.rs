@@ -203,9 +203,8 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     assert!(!is_help(&["campaign", "artifact", "--", "--help"]));
     assert!(!is_help(&["test", "--", "--help"]));
     assert!(!is_version(&["run", "mycrate", "--", "--version"]));
-    // So the inline `--arg=--help` is the only way to deliver a literal
-    // `--help` to a WASI guest's argv.
-    let inv = parse_wasi_run(strings(&["m.wasm", "--arg=--help", "--arg", "tail"])).unwrap();
+    // So a WASI guest's argv, like a native one's, follows `--` verbatim.
+    let inv = parse_wasi_run(strings(&["m.wasm", "--seed", "1", "--", "--help", "tail"])).unwrap();
     assert_eq!(
         inv.arguments,
         vec!["--help".to_string(), "tail".to_string()]

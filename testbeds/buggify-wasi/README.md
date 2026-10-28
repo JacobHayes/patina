@@ -51,7 +51,7 @@ reports a `PATINA_VERDICT ... kind=violation` line and traps):
 
 ```sh
 cargo patina run target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
-  --seed 7 --buggify --arg violate
+  --seed 7 --buggify -- violate
 ```
 
 ## Conventions

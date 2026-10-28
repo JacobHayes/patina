@@ -8,10 +8,8 @@ mod tests {
     // a registered flag before the module runs identically to the module-leading
     // spelling; a real artifact stranded behind an UNKNOWN flag is a loud routing
     // error; and a nonexistent path-like artifact fails closed with a usage error
-    // rather than falling through to a confusing `cargo run`. `--arg=--help` is the
-    // only way to deliver a literal `--help` to a WASI guest, because a bare
-    // `--help` before `--` is intercepted as Patina help: the inline form runs the
-    // guest, the space form shows help.
+    // rather than falling through to a confusing `cargo run`. A `--help` after `--`
+    // is guest argv and runs the guest; before `--` it is Patina help.
     #[test]
     fn run_routes_options_and_literal_arguments_around_the_wasi_artifact() {
         let directory = tempdir().unwrap();
@@ -68,25 +66,25 @@ mod tests {
             );
         }
 
-        // Inline: the guest runs and exits 0; Patina help is NOT shown.
-        let inline = run(&["run", module, "--arg=--help"]);
+        // After `--`: the guest runs and exits 0; Patina help is NOT shown.
+        let guest = run(&["run", module, "--", "--help"]);
         assert!(
-            inline.status.success(),
-            "inline --arg=--help failed: {}\n{}",
-            inline.status,
-            String::from_utf8_lossy(&inline.stderr)
+            guest.status.success(),
+            "run -- --help failed: {}\n{}",
+            guest.status,
+            String::from_utf8_lossy(&guest.stderr)
         );
         assert!(
-            !String::from_utf8_lossy(&inline.stdout).contains("cargo patina run"),
-            "inline --arg=--help wrongly triggered Patina help"
+            !String::from_utf8_lossy(&guest.stdout).contains("cargo patina run"),
+            "a --help after -- wrongly triggered Patina help"
         );
-        // Space form: the bare `--help` is intercepted and prints run help (exit 0).
-        let spaced = run(&["run", module, "--arg", "--help"]);
-        assert!(spaced.status.success(), "run --arg --help should exit 0");
+        // Before `--`: the bare `--help` is intercepted and prints run help (exit 0).
+        let help = run(&["run", module, "--help"]);
+        assert!(help.status.success(), "run --help should exit 0");
         assert!(
-            String::from_utf8_lossy(&spaced.stdout).contains("cargo patina run"),
-            "space-form --help should show run help:\n{}",
-            String::from_utf8_lossy(&spaced.stdout)
+            String::from_utf8_lossy(&help.stdout).contains("cargo patina run"),
+            "--help should show run help:\n{}",
+            String::from_utf8_lossy(&help.stdout)
         );
     }
 

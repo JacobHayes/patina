@@ -35,12 +35,12 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
         ))
     })?;
     // A replay/branch restores the recorded guest argv from the trace so the run
-    // reproduces without the `--arg` values being re-passed. Any `--arg` the
+    // reproduces without the `-- ARGS` being re-passed. Any guest args the
     // operator did supply must match the recording byte-for-byte or the replay is
     // refused up front, naming both — the same authoritative-trace contract the
     // native family enforces. The restored argv is folded into the WASI
     // fingerprint below exactly as it was at record time. A pre-argv trace keeps
-    // today's contract: the supplied `--arg` values are used as-is.
+    // today's contract: the supplied guest args are used as-is.
     if let Some(trace) = replay_trace_path(&invocation.mode) {
         invocation.arguments = reconcile_wasi_replay_argv(trace, &invocation.arguments)?;
     }
@@ -133,7 +133,7 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
                 .map_err(|error| CliError(error.to_string()))?;
         }
     }
-    // Record the guest argv (the `--arg` values) into the trace metadata so a
+    // Record the guest argv (the `-- ARGS`) into the trace metadata so a
     // later `replay` restores them flag-free. Always recorded on `--record`, even
     // when empty, so a zero-argument run reproduces zero arguments rather than
     // inheriting whatever the replay command line supplies.
@@ -343,11 +343,11 @@ fn replay_trace_path(mode: &Mode) -> Option<&Path> {
 }
 
 /// Restore the recorded guest argv from a WASI trace, reconciling it with any
-/// `--arg` values the operator also supplied on the replay. The trace is
-/// authoritative: with no `--arg` the recorded argv is adopted verbatim; supplied
+/// `-- ARGS` the operator also supplied on the replay. The trace is
+/// authoritative: with none the recorded argv is adopted verbatim; supplied
 /// values must match the recording exactly or the replay is refused up front,
 /// naming both. A trace recorded before argv capture (`guest_argv` absent) keeps
-/// the historical contract — the supplied `--arg` values are used as-is.
+/// the historical contract — the supplied guest args are used as-is.
 fn reconcile_wasi_replay_argv(trace: &Path, supplied: &[String]) -> Result<Vec<String>, CliError> {
     let bundle = TraceBundle::load(trace)
         .map_err(|error| CliError(format!("failed to load trace {}: {error}", trace.display())))?;
@@ -355,8 +355,8 @@ fn reconcile_wasi_replay_argv(trace: &Path, supplied: &[String]) -> Result<Vec<S
         Some(recorded) => {
             if !supplied.is_empty() && supplied != recorded.as_slice() {
                 return Err(CliError(format!(
-                    "replay --arg values {supplied:?} conflict with the trace's recorded guest \
-arguments {recorded:?}; the trace is authoritative, so omit --arg (or supply matching values)"
+                    "replay guest arguments {supplied:?} conflict with the trace's recorded guest \
+arguments {recorded:?}; the trace is authoritative, so omit the `--` tail (or supply matching values)"
                 )));
             }
             Ok(recorded)
@@ -402,7 +402,7 @@ fn wasi_compatibility_fingerprint(
     hash_bytes(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
     hash_bytes(&mut hasher, bytes);
     // Each section is domain-tagged and count-prefixed so fields cannot
-    // migrate between sections (`--arg k --arg v` must not fingerprint like
+    // migrate between sections (`-- k v` must not fingerprint like
     // `--env k=v`).
     hash_bytes(&mut hasher, b"wasi-arguments-v1");
     hash_bytes(
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn wasi_fingerprint_covers_argv_environment_preopens_and_resource_limits() {
         let module = b"module";
-        let arguments = wasi_invocation(&["wasi-run", "module.wasm", "--arg", "k", "--arg", "v"]);
+        let arguments = wasi_invocation(&["wasi-run", "module.wasm", "--", "k", "v"]);
         let environment = wasi_invocation(&["wasi-run", "module.wasm", "--env", "k=v"]);
         assert_ne!(
             wasi_compatibility_fingerprint(module, &arguments, false),

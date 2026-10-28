@@ -18,9 +18,9 @@ pub(crate) fn parse_wasi_run(mut arguments: Vec<OsString>) -> Result<WasiInvocat
 /// Parse the flags of a WASI `run` given an already-resolved module reference
 /// The host-supplied inputs a WASI run/replay shares: fuel, guest argv, guest
 /// environment, datagram sockets, preopens, and resource-limit overrides. These
-/// are genuine host inputs (not recorded semantic state — except `--arg`, which
-/// becomes the recorded guest argv), so both `run` and `replay` accept them and
-/// they feed the WASI compatibility fingerprint.
+/// are genuine host inputs (not recorded semantic state — except the trailing
+/// `-- ARGS`, which become the recorded guest argv), so both `run` and `replay`
+/// accept them and they feed the WASI compatibility fingerprint.
 #[derive(Default)]
 pub(super) struct WasiHostInputs {
     pub(super) fuel: Option<u64>,
@@ -70,8 +70,9 @@ fn wasi_invocation_from(
 /// on the native family.
 pub(crate) fn parse_wasi_run_from(
     module: ArtifactRef,
-    arguments: Vec<OsString>,
+    mut arguments: Vec<OsString>,
 ) -> Result<WasiInvocation, CliError> {
+    let guest_args = split_trailing_args(&mut arguments);
     let args = cli::parse("run", help::Family::Wasi, arguments)?;
     let seed = args.u64("--seed").unwrap_or(0);
     let mode = match args.path("--record") {
@@ -83,7 +84,7 @@ pub(crate) fn parse_wasi_run_from(
         ..wasi_invocation_from(
             module,
             mode,
-            wasi_host_inputs_of(&args)?,
+            wasi_host_inputs_of(&args, guest_args)?,
             args.u64("--budget"),
             knobs_of(&args)?,
             buggify_of(&args),
@@ -94,20 +95,21 @@ pub(crate) fn parse_wasi_run_from(
 
 /// Parse the WASI `replay <MODULE.wasm> <TRACE>` verb given an already-resolved
 /// module reference and trace path. Flag-free for semantics: the seed and fault
-/// knobs are restored from the trace, and `--arg` values (the recorded guest
-/// argv) are restored and conflict-checked at execution. Only genuine host inputs
+/// knobs are restored from the trace, and the trailing `-- ARGS` (the recorded
+/// guest argv) are restored and conflict-checked at execution. Only genuine host inputs
 /// stay as flags (`--fuel`/`--env`/`--socket`/`--preopen`/resource limits), plus
 /// the timeline selector and branch controls the WASI runtime supports.
 pub(crate) fn parse_wasi_replay(
     module: ArtifactRef,
     trace: PathBuf,
-    arguments: Vec<OsString>,
+    mut arguments: Vec<OsString>,
 ) -> Result<WasiInvocation, CliError> {
+    let guest_args = split_trailing_args(&mut arguments);
     let args = cli::parse("replay", help::Family::Wasi, arguments)?;
     Ok(wasi_invocation_from(
         module,
         replay_mode(&args, trace)?,
-        wasi_host_inputs_of(&args)?,
+        wasi_host_inputs_of(&args, guest_args)?,
         // `replay` registers no --budget: it re-executes a recorded operation
         // stream whose length is already fixed by the trace.
         None,

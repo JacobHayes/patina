@@ -6,11 +6,9 @@ mod tests {
     use super::super::run_facts::{outcome_guest, shared_sdk_guest};
     use super::super::*;
 
-    // A WASI campaign's `-- GUEST_ARGS` reach the guest in every generation. WASI
-    // `run` takes its argv as `--arg VALUE`, not after `--`, so forwarding the
-    // native spelling failed every generation as INFRA. The guest exits with
-    // `argc - 3`: clean only when the program name and both arguments arrive,
-    // including one that looks like a flag.
+    // A WASI campaign's `-- GUEST_ARGS` reach the guest in every generation. The
+    // guest exits with `argc - 3`: clean only when the program name and both
+    // arguments arrive, including one that looks like a flag.
     #[test]
     fn wasi_campaign_forwards_guest_args_to_every_generation() {
         let directory = tempdir().unwrap();

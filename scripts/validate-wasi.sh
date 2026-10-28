@@ -240,23 +240,23 @@ if [[ ! -x $runner ]]; then
   echo "validate-wasi: $runner is not an executable cargo-patina" >&2
   exit 2
 fi
-guest=(--arg validation --env MODE=test)
+guest=(--env MODE=test -- validation)
 "$runner" audit "$tmp/probe.wasm" >"$tmp/imports"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-1"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 >"$tmp/seed-2"
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 124 >"$tmp/seed-other"
+"$runner" run "$tmp/probe.wasm" --seed 123 "${guest[@]}" >"$tmp/seed-1"
+"$runner" run "$tmp/probe.wasm" --seed 123 "${guest[@]}" >"$tmp/seed-2"
+"$runner" run "$tmp/probe.wasm" --seed 124 "${guest[@]}" >"$tmp/seed-other"
 cmp "$tmp/seed-1" "$tmp/seed-2"
 if cmp -s "$tmp/seed-1" "$tmp/seed-other"; then
   echo 'validate-wasi: distinct seeds produced identical output' >&2
   exit 1
 fi
-# The `--arg` values are the recorded guest argv (restored from the trace on
+# The `-- ARGS` are the recorded guest argv (restored from the trace on
 # replay); `--env` is a genuine host input (not recorded) that is re-supplied and
 # verified through the compatibility fingerprint.
 host=(--env MODE=test)
-"$runner" run "$tmp/probe.wasm" "${guest[@]}" --seed 123 --record "$tmp/run.patina" >"$tmp/record"
-# `replay <mod.wasm> <trace>` is flag-free for semantics: the seed and the `--arg`
-# guest argv are restored from the trace, so `--arg` is NOT re-passed and the
+"$runner" run "$tmp/probe.wasm" --seed 123 --record "$tmp/run.patina" "${guest[@]}" >"$tmp/record"
+# `replay <mod.wasm> <trace>` is flag-free for semantics: the seed and the guest
+# argv are restored from the trace, so `-- ARGS` is NOT re-passed and the
 # output is byte-identical to the recording. Host inputs (`--env`) are re-supplied.
 "$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" "${host[@]}" >"$tmp/replay"
 cmp "$tmp/record" "$tmp/replay"
@@ -271,8 +271,8 @@ if cmp -s "$tmp/record" "$tmp/branch"; then
 fi
 # A conflicting re-supplied guest arg is refused up front (the trace is
 # authoritative), naming the conflict.
-if "$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" --arg conflicting >/dev/null 2>&1; then
-  echo 'validate-wasi: a conflicting replay --arg was accepted' >&2
+if "$runner" replay "$tmp/probe.wasm" "$tmp/run.patina" -- conflicting >/dev/null 2>&1; then
+  echo 'validate-wasi: a conflicting replay guest arg was accepted' >&2
   exit 1
 fi
 sockets=(--socket '4=node-a->node-b' --socket '5=node-b->node-a')

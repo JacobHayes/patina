@@ -8,7 +8,7 @@
 //! the buggify decisions, so record/replay reproduces the printed digest
 //! byte-for-byte and distinct seeds diverge it.
 //!
-//! Modes (first `--arg`):
+//! Modes (first guest arg, after `--`):
 //!   (none)      normal run; the `always!` invariant holds.
 //!   `violate`   plants an `always!` violation so the host reports a
 //!               `violation` verdict and traps — the WASI mirror of the native

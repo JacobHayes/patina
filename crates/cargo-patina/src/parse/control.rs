@@ -248,8 +248,34 @@ pub(super) fn key_values(
     Ok(map)
 }
 
-/// The host-supplied inputs a WASI run/replay shares.
-pub(super) fn wasi_host_inputs_of(args: &cli::Args) -> Result<WasiHostInputs, CliError> {
+/// Split off a trailing `-- ARGS` section: everything after the first `--` is
+/// the guest's argument vector, in every family.
+pub(super) fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
+    match arguments.iter().position(|argument| argument == "--") {
+        Some(index) => {
+            let trailing = arguments.split_off(index + 1);
+            arguments.pop();
+            trailing
+        }
+        None => Vec::new(),
+    }
+}
+
+/// The host-supplied inputs a WASI run/replay shares. `guest_args` is the
+/// trailing `-- ARGS` section; WASI argv entries are strings, so a non-UTF-8
+/// one is refused.
+pub(super) fn wasi_host_inputs_of(
+    args: &cli::Args,
+    guest_args: Vec<OsString>,
+) -> Result<WasiHostInputs, CliError> {
+    let arguments = guest_args
+        .into_iter()
+        .map(|argument| {
+            argument.into_string().map_err(|argument| {
+                CliError::usage(format!("WASI guest arguments must be UTF-8: {argument:?}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let fuel = args.u64("--fuel");
     let mut sockets = Vec::new();
     let mut socket_fds = BTreeSet::new();
@@ -285,11 +311,7 @@ pub(super) fn wasi_host_inputs_of(args: &cli::Args) -> Result<WasiHostInputs, Cl
         .collect();
     Ok(WasiHostInputs {
         fuel,
-        arguments: args
-            .texts("--arg")
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+        arguments,
         environment: key_values(args, "--env")?,
         sockets,
         preopens,

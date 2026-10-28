@@ -2,7 +2,7 @@
 
 use super::generation::{GenerationFiles, run_generation};
 use super::state::{load_campaign_state, verify_campaign_build};
-use super::{GenerationRun, VerdictFacts, guest_tail, invocation_flags};
+use super::{GenerationRun, VerdictFacts, invocation_flags};
 use crate::CliError;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +11,7 @@ pub(super) fn reproduce_command(
     seed: u64,
     flags: &[String],
     invocation: &[String],
-    guest_tail: &[String],
+    guest_args: &[String],
     trace: Option<&str>,
     record: &str,
 ) -> String {
@@ -52,7 +52,10 @@ pub(super) fn reproduce_command(
         record.to_string(),
     ];
     parts.extend(flags.iter().cloned());
-    parts.extend(guest_tail.iter().cloned());
+    if !guest_args.is_empty() {
+        parts.push("--".to_string());
+        parts.extend(guest_args.iter().cloned());
+    }
     parts.join(" ")
 }
 
@@ -135,8 +138,7 @@ pub(crate) struct GenerationRepro {
     /// guest needs to run at all, so a reducer must never drop them: doing so
     /// would lose the failure for a reason that has nothing to do with faults.
     pub(crate) pinned: Vec<String>,
-    /// The guest argv as the child `run` takes it ([`guest_tail`]).
-    pub(crate) guest_tail: Vec<String>,
+    pub(crate) guest_args: Vec<String>,
     pub(crate) timeout_secs: u64,
     pub(crate) class: String,
     /// The class is a property of two runs (`NONDETERMINISM`), which no oracle
@@ -192,7 +194,7 @@ pub(crate) fn generation_repro(
         seed: outcome.seed,
         flags: outcome.flags.clone(),
         pinned: invocation_flags(&state.spec, state.artifact.family),
-        guest_tail: guest_tail(&state.spec, state.artifact.family),
+        guest_args: state.spec.guest_args.clone(),
         timeout_secs: state.spec.timeout_secs,
         class: outcome.class.as_str().to_string(),
         cross_run: outcome.class.is_cross_run(),
@@ -210,7 +212,7 @@ pub(crate) fn run_reduced_generation(
     seed: u64,
     flags: &[String],
     trace_path: &Path,
-    guest_tail: &[String],
+    guest_args: &[String],
     timeout_secs: u64,
 ) -> Result<GenerationRun, CliError> {
     run_generation(
@@ -222,7 +224,7 @@ pub(crate) fn run_reduced_generation(
             trace_path,
             coverage_out: None,
         },
-        guest_tail,
+        guest_args,
         timeout_secs,
     )
 }
