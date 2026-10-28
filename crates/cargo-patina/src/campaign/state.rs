@@ -1010,6 +1010,17 @@ pub(super) fn absolute_out_dir(out_dir: &Path) -> Result<PathBuf, CliError> {
     Ok(cwd.join(out_dir))
 }
 
+/// Exclusive ownership of a campaign out-dir for this process's lifetime.
+///
+/// A classic POSIX record lock (`fcntl` `F_SETLK`), not `flock` or an OFD lock:
+/// those belong to the open file description, which every child the campaign
+/// spawns shares from fork until its exec closes the descriptor, so a campaign
+/// killed while starting a generation left the out-dir locked by a child that
+/// was not yet a generation, and an immediate `--resume` was refused. A record
+/// lock is owned by the process: fork never inherits it, and it dies with the
+/// campaign. The cost is the classic hazard: closing ANY descriptor for
+/// `campaign.lock` in this process releases it, so nothing else may open that
+/// file; this struct holds its only descriptor.
 #[derive(Debug)]
 pub(super) struct CampaignLock {
     _file: File,
@@ -1032,25 +1043,54 @@ impl CampaignLock {
                     path.display()
                 ))
             })?;
-        acquire_flock(&file, out_dir)?;
+        lock_out_dir(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                CliError(format!(
+                    "another campaign is writing this out-dir: {}",
+                    out_dir.display()
+                ))
+            } else {
+                CliError(format!(
+                    "failed to lock campaign out-dir {}: {error}",
+                    out_dir.display()
+                ))
+            }
+        })?;
         Ok(Self { _file: file })
     }
 }
 
-fn acquire_flock(file: &File, out_dir: &Path) -> Result<(), CliError> {
-    crate::lock_exclusive(file, false).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            CliError(format!(
-                "another campaign is writing this out-dir: {}",
-                out_dir.display()
-            ))
-        } else {
-            CliError(format!(
-                "failed to lock campaign out-dir {}: {error}",
-                out_dir.display()
-            ))
+/// Take a non-blocking whole-file write record lock on `file`; contention is
+/// [`std::io::ErrorKind::WouldBlock`].
+#[cfg(unix)]
+fn lock_out_dir(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `flock` is plain old data; all-zero is a valid value, and the
+    // fields that matter are set below.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    // `l_start = 0, l_len = 0`: the whole file, however long it grows.
+    loop {
+        // SAFETY: a valid open descriptor and a pointer to a live `flock`.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut lock) } == 0 {
+            return Ok(());
         }
-    })
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            // POSIX allows either errno for a lock another process holds.
+            Some(libc::EAGAIN | libc::EACCES) => return Err(std::io::ErrorKind::WouldBlock.into()),
+            _ => return Err(error),
+        }
+    }
+}
+
+/// Elsewhere the fork inheritance above does not exist, and the handle lock
+/// std takes is the process's own.
+#[cfg(not(unix))]
+fn lock_out_dir(file: &File) -> std::io::Result<()> {
+    patina_dst_trace::lock_exclusive(file, false)
 }
 
 #[cfg(test)]
@@ -1205,17 +1245,5 @@ mod tests {
         let mut bad_class = parsed_json;
         bad_class["classes"] = serde_json::json!({"MYSTERY": 1, "OK": 1});
         assert!(CampaignState::from_json(&bad_class).is_err());
-    }
-
-    #[test]
-    fn campaign_lock_refuses_a_second_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let _first = CampaignLock::acquire(dir.path()).unwrap();
-        let error = CampaignLock::acquire(dir.path()).unwrap_err().to_string();
-        assert!(
-            error.contains("another campaign is writing this out-dir")
-                || error.contains("failed to lock campaign out-dir"),
-            "{error}"
-        );
     }
 }

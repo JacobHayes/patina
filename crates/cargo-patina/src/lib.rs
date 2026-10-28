@@ -24,7 +24,7 @@ use patina_dst_runtime::{
     ENV_GUEST_HOSTNAME, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS,
     ENV_SEED, ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, FaultKnob,
 };
-use patina_dst_trace::{lock_exclusive, remove_dead_scratch};
+use patina_dst_trace::remove_dead_scratch;
 use patina_dst_wasi_host::{MountPolicy, ResourceLimits};
 use sha2::{Digest, Sha256};
 
