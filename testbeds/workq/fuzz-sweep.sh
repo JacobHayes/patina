@@ -14,11 +14,13 @@
 #                                         covering EVERY outcome class
 #
 # Per generation a config combines 2-3 fault knobs (net drop, net jitter, sleep
-# jitter, fs-crash, in-process crash-recovery, cooperative buggify, job/worker/
-# producer counts) and records a self-contained trace under out-fuzz/gen-G/.
+# jitter, in-process crash-recovery, cooperative buggify, job/worker/producer
+# counts) and records a self-contained trace under out-fuzz/gen-G/. Disk
+# crashes (`--fs-crash-at` process restarts) are swept by `cargo patina
+# campaign` from campaign.json instead, not here.
 #
 # Two planes. The MESSAGE/FAULT plane (BREADTH/TRAFFIC tiers, the plain binary)
-# crosses network/storage/crash/buggify faults. The SCHEDULE plane (SCHEDULE
+# crosses network/crash-recovery/buggify faults. The SCHEDULE plane (SCHEDULE
 # tier, ~20% of gens, the yield-points binary) isolates thread INTERLEAVINGS at
 # atomics granularity: the yield-points build routes every instrumented edge
 # through the DetScheduler, so a race window that is pure atomics between two
@@ -31,10 +33,9 @@
 # The outcome is classified by a PURE function (testable via --selftest) that is
 # deliberately not vacuous: a planted violation VERDICT is a SAFETY_BUG even on
 # exit 0; an exit 1 (liveness) is only tolerated for a "heavy" config; any other
-# exit (including an exit-2 fail-closed abort, fs-crash or not), a crash marker,
-# or a cargo-patina error line (TOOL_ERROR) is a failure. An fs-crash restarts
-# workq as a fresh process that recovers its WAL, so a crash generation is held
-# to the same bar as any other. The campaign NEVER injects --bug: it fuzzes the
+# exit (including an exit-2 fail-closed abort), a crash marker, or a
+# cargo-patina error line (TOOL_ERROR) is a failure. The campaign NEVER injects
+# --bug: it fuzzes the
 # CLEAN app (the two seeded bugs live in run-patina.sh leg [7]).
 #
 # On OK the gen dir is deleted; every other class is kept for reproduction.
@@ -65,7 +66,7 @@
 # analog and are deliberately NOT ported: a client-side pacing window and its
 # window-0 workload-shape discriminator (the 10x converge-or-confirm keeps the
 # false-positive guard without it), and a storage-fault recovery dimension (workq
-# has no storage-recovery flag: every fs-crash restart recovers the WAL).
+# has no storage-recovery flag).
 ###############################################################################
 set -uo pipefail
 
@@ -102,13 +103,6 @@ FUZZ_LOCK="$target_dir/patina/.fuzz-sweep.lock"
 # Virtual-clock budget base (Instant is virtual under Patina, so this is generous
 # without costing wall time) and base port (SimNet, so never really bound).
 TIMEOUT_BASE=120
-# workq's certain file-boundary operations, which bound a reachable fs-crash
-# selector (see sample_breadth): each job appends an enqueue and a terminal WAL
-# record, one write each (src/wal.rs `Wal::append`); and every run closes the
-# directory-fsync handle, the WAL segment at shutdown, and the final recovery
-# read (`fsync_dir`, `Wal::open`, main.rs `report`).
-WAL_RECORDS_PER_JOB=2
-CERTAIN_CLOSES=3
 BASE_PORT=5001
 DATA_DIR=/workq
 
@@ -192,10 +186,6 @@ $err"
   #    would file the tool's exit 2 as a guest abort.
   if printf '%s' "$combined" | grep -Eq "$TOOL_ERROR_LINE"; then echo TOOL_ERROR; return; fi
 
-  # 2b. An armed fs-crash selector the run never reached: the runtime's named
-  #     refusal. The config never exercised the crash it asked for, so this is
-  #     a sampler/workload drift, named apart from the abort it exits with.
-  if printf '%s' "$combined" | grep -q 'PATINA_FS_CRASH_SELECTOR_UNREACHED'; then echo VACUOUS_CRASH; return; fi
 
   # 3. Exit-code semantics (0 converged / 1 liveness / anything else a failure).
   case "$exit_code" in
@@ -215,7 +205,7 @@ $err"
       ;;
     2)
       # A fail-closed abort (an abort_intent verdict): workq recovers its WAL on
-      # every start, fs-crash restarts included, so no config expects one.
+      # every start, so no config expects one.
       echo UNEXPECTED_ABORT
       ;;
     *)
@@ -345,25 +335,6 @@ sample_breadth() {
     buggify=1; fire=$(( 150 + (BYTE[14] % 6) * 50 )); act=$(( 300 + (BYTE[15] % 5) * 100 ))
     bspec="fire${fire}/act${act}"
   fi
-  # fs-crash (~35%): a selector every run of this config reaches, because an
-  # armed selector the run never reaches is a named failure (VACUOUS_CRASH).
-  # Every job appends WAL_RECORDS_PER_JOB records, one write each, and without
-  # buggify each append is fsync'd; a buggify wal-fsync-skip instead defers
-  # fsyncs to one shared flush per tick, which leaves no job count of syncs
-  # certain, so sync is drawn only when buggify is off. A run closes
-  # CERTAIN_CLOSES files.
-  local fs_crash=0 fspec="off" fs_op="" fs_n=0 fs_reach=0
-  if (( BYTE[7] < 90 )); then
-    fs_crash=1
-    local op_tbl=(write close)
-    (( buggify )) || op_tbl+=(sync)
-    fs_op=${op_tbl[$(( BYTE[8] % ${#op_tbl[@]} ))]}
-    case "$fs_op" in
-      write | sync) fs_reach=$(( WAL_RECORDS_PER_JOB * JOBS_N )) ;;
-      close) fs_reach=$CERTAIN_CLOSES ;;
-    esac
-    fs_n=$(( 1 + BYTE[9] % fs_reach )); fspec="${fs_op}:${fs_n}"
-  fi
   # in-process crash-recovery (~35%): crash + restart the server on the same WAL
   # once `completed` first reaches K.
   local crash_at=0 kspec="off"
@@ -378,7 +349,6 @@ sample_breadth() {
   (( drop > 0 ))  && PKNOBS+=(--net-drop-permille "$drop")
   (( jitter_on )) && PKNOBS+=(--net-jitter-nanos "${jmin_ns}..${jmax_ns}")
   (( sleep_on ))  && PKNOBS+=(--sleep-jitter-nanos "${smin_ns}..${smax_ns}")
-  (( fs_crash ))  && PKNOBS+=(--fs-crash-at "${fs_op}:${fs_n}")
   (( buggify ))   && PKNOBS+=(--buggify="$fire" --buggify-activation-permille "$act" --buggify-after-setup)
 
   HARGS=(--seed "$G" --jobs "$JOBS_N" --workers "$workers" --producers "$producers"
@@ -387,12 +357,12 @@ sample_breadth() {
   (( crash_at > 0 )) && HARGS+=(--crash-at-completed "$crash_at")
 
   HEAVY=0; (( drop >= 400 )) && HEAVY=1
-  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=$jspec sleep=$sspec fscrash=$fspec crash=$kspec buggify=$bspec seg=$seg tick=$tick timeout=${timeout}s heavy=$HEAVY"
+  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=$jspec sleep=$sspec crash=$kspec buggify=$bspec seg=$seg tick=$tick timeout=${timeout}s heavy=$HEAVY"
 }
 
 # TRAFFIC tier: a longer-horizon workload. More jobs, always jitter, light-to-
-# moderate loss, ~half with in-process crash-recovery, ~half with buggify. No
-# fs-crash, so a liveness timeout here (drop<=200) is NEVER tolerated.
+# moderate loss, ~half with in-process crash-recovery, ~half with buggify. A
+# liveness timeout here (drop<=200) is NEVER tolerated.
 sample_traffic() {
   local G="$1"
   local jobs_tbl=(48 64); JOBS_N=${jobs_tbl[$(( BYTE[16] % 2 ))]}
@@ -424,14 +394,14 @@ sample_traffic() {
          --base-port "$BASE_PORT" --data-dir "$DATA_DIR" --timeout-secs "$timeout" --tick-ms "$tick")
   (( crash_at > 0 )) && HARGS+=(--crash-at-completed "$crash_at")
 
-  HEAVY=0    # drop<=200 and no fs-crash -> a timeout here is always a regression
-  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=${jmin_ms}-${jmax_ms}ms sleep=off fscrash=off crash=$kspec buggify=$bspec tick=$tick timeout=${timeout}s heavy=0 plane=TRAFFIC"
+  HEAVY=0    # drop<=200 -> a timeout here is always a regression
+  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=${jmin_ms}-${jmax_ms}ms sleep=off crash=$kspec buggify=$bspec tick=$tick timeout=${timeout}s heavy=0 plane=TRAFFIC"
 }
 
 # SCHEDULE tier: isolate the interleaving plane on the yield-points binary. The
 # SEED is the explorer -- the DetScheduler derives its choice at each of the
 # vastly more numerous boundaries from the seed. Network faults are OFF for most
-# gens (~1/3 add LIGHT drop); no jitter, sleep, fs-crash, crash-recovery, or
+# gens (~1/3 add LIGHT drop); no jitter, sleep, crash-recovery, or
 # buggify -- HEAVY is always 0, so a liveness timeout here is NEVER tolerated.
 # Small workloads: the plane is interleaving-dominated, so a tiny workload
 # already exercises a huge decision space cheaply.
@@ -478,7 +448,7 @@ sample_schedule() {
          --base-port "$BASE_PORT" --data-dir "$DATA_DIR" --timeout-secs "$timeout" --tick-ms "$tick")
 
   HEAVY=0
-  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=off sleep=off fscrash=off crash=off buggify=off tick=$tick timeout=${timeout}s heavy=0 plane=SCHEDULE(yield-points) policy=$POLICY_SPEC"
+  CFG_SUMMARY="seed=$G jobs=$JOBS_N workers=$workers producers=$producers drop=$drop jitter=off sleep=off crash=off buggify=off tick=$tick timeout=${timeout}s heavy=0 plane=SCHEDULE(yield-points) policy=$POLICY_SPEC"
 }
 
 # Pick the tier for G and sample it. The SCHEDULE overlay is gated on BYTE[21]
@@ -514,7 +484,7 @@ derive_config() {
     local nfault=0 k
     for k in ${PKNOBS[@]+"${PKNOBS[@]}"}; do
       case "$k" in
-        --net-drop-permille | --net-jitter-nanos | --sleep-jitter-nanos | --fs-crash-at) (( nfault++ )) ;;
+        --net-drop-permille | --net-jitter-nanos | --sleep-jitter-nanos) (( nfault++ )) ;;
       esac
     done
     if (( nfault >= 2 && BYTE[25] < 64 )); then
@@ -583,7 +553,7 @@ PATINA_VERDICT seq=1 kind=violation label=no-loss detail=acked-job-3-never-termi
     "$(classify 1 24 18 0 24 0 '' 'WORKQ_FAILURE not-converged enqueued=24 completed=18 failed=0 target=24')" \
     "liveness-unexpected"
 
-  # ABORT: exit 2 is a failure in every generation, fs-crash included. The
+  # ABORT: exit 2 is a failure in every generation. The
   # guest attributes its deliberate stop with an `abort_intent` verdict, which
   # is NOT a violation and so must not be promoted to SAFETY_BUG by rule 0.
   assert_class UNEXPECTED_ABORT \
@@ -702,15 +672,6 @@ PATINA_VERDICT seq=0 kind=violation label=x detail=src/main.rs:42")" "always-vio
   assert_class TOOL_ERROR "$(classify 2 '' '' '' 24 0 '' "$refusal")" "refusal-is-tool-error"
   if is_failure TOOL_ERROR; then printf '  ok   %-24s -> failure\n' "tool-error-is-failure"
   else printf '  FAIL %-24s (tolerated)\n' "tool-error-is-failure"; SELFTEST_FAIL=1; fi
-  # VACUOUS_CRASH: the runtime's named refusal of an armed selector the run
-  # never reached, a failure the exit-134 abort would otherwise file as a crash.
-  local unreached='patina: runtime shutdown failed: PATINA_FS_CRASH_SELECTOR_UNREACHED requested Close:20 but only observed open=3 write=48 sync=49 close=3 successful boundary operations guest_exit_code=0'
-  assert_class VACUOUS_CRASH "$(classify 134 24 24 0 24 0 '' "$ok
-$unreached")" "unreached-selector"
-  # A crash marker outranks both named classes: a worker panic that left the
-  # selector unreached is a crash first.
-  assert_class UNEXPECTED_CRASH "$(classify 134 24 24 0 24 0 '' "thread 'worker' panicked at src/worker.rs:9: bad
-$unreached")" "crash-marker-wins-over-vacuous-crash"
 
   if is_infra '' 'cargo-patina: failed to run native program /w/workq: Resource temporarily unavailable (os error 11)'; then printf '  ok   %-24s -> true\n' "infra-detects-exhaustion"
   else printf '  FAIL %-24s\n' "infra-detects-exhaustion"; SELFTEST_FAIL=1; fi
@@ -726,7 +687,7 @@ $unreached")" "crash-marker-wins-over-vacuous-crash"
 
   echo
   if (( SELFTEST_FAIL )); then echo "SELFTEST FAILED"; return 1; fi
-  echo "SELFTEST PASSED (every class covered, incl. a planted workq violation verdict -> SAFETY_BUG, an always! site verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, a cargo-patina refusal -> TOOL_ERROR, VACUOUS_CRASH, and policy bug_depth/starve_vacuous parsing)"
+  echo "SELFTEST PASSED (every class covered, incl. a planted workq violation verdict -> SAFETY_BUG, an always! site verdict -> ALWAYS_VIOLATION, STARVATION_STALL, VACUOUS_SCHEDULE, VACUOUS_SWARM, SCHEDULE_DIVERGENCE, a cargo-patina refusal -> TOOL_ERROR, and policy bug_depth/starve_vacuous parsing)"
   return 0
 }
 
@@ -778,7 +739,7 @@ jobs_of() { local i; for (( i = 0; i < ${#HARGS[@]}; i++ )); do [[ "${HARGS[i]}"
 c_OK=0; c_SAFETY_BUG=0; c_LIVENESS_TIMEOUT=0; c_UNEXPECTED_LIVENESS=0
 c_UNEXPECTED_ABORT=0; c_UNEXPECTED_CRASH=0; c_DETERMINISM_BUG=0
 c_INFRA_ERROR=0; c_VACUOUS_SCHEDULE=0; c_SCHEDULE_DIVERGENCE=0; c_ALWAYS_VIOLATION=0
-c_STARVATION_STALL=0; c_VACUOUS_SWARM=0; c_TOOL_ERROR=0; c_VACUOUS_CRASH=0
+c_STARVATION_STALL=0; c_VACUOUS_SWARM=0; c_TOOL_ERROR=0
 bump() {
   case "$1" in
     OK) c_OK=$(( c_OK + 1 )) ;;
@@ -792,7 +753,6 @@ bump() {
     DETERMINISM_BUG) c_DETERMINISM_BUG=$(( c_DETERMINISM_BUG + 1 )) ;;
     INFRA_ERROR) c_INFRA_ERROR=$(( c_INFRA_ERROR + 1 )) ;;
     TOOL_ERROR) c_TOOL_ERROR=$(( c_TOOL_ERROR + 1 )) ;;
-    VACUOUS_CRASH) c_VACUOUS_CRASH=$(( c_VACUOUS_CRASH + 1 )) ;;
     VACUOUS_SCHEDULE) c_VACUOUS_SCHEDULE=$(( c_VACUOUS_SCHEDULE + 1 )) ;;
     VACUOUS_SWARM) c_VACUOUS_SWARM=$(( c_VACUOUS_SWARM + 1 )) ;;
     SCHEDULE_DIVERGENCE) c_SCHEDULE_DIVERGENCE=$(( c_SCHEDULE_DIVERGENCE + 1 )) ;;
@@ -1006,7 +966,7 @@ sweep() {
   local c_SOMETIMES_UNMET=${#unmet_sites[@]}
 
   local total=$(( end - start + 1 ))
-  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_TOOL_ERROR + c_VACUOUS_CRASH + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_VACUOUS_SWARM + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
+  local failures=$(( c_SAFETY_BUG + c_ALWAYS_VIOLATION + c_UNEXPECTED_LIVENESS + c_UNEXPECTED_ABORT + c_UNEXPECTED_CRASH + c_TOOL_ERROR + c_DETERMINISM_BUG + c_VACUOUS_SCHEDULE + c_VACUOUS_SWARM + c_SCHEDULE_DIVERGENCE + c_SOMETIMES_UNMET ))
   echo
   echo "==> sweep summary (generations $start..$end, $total total)"
   echo "    tiers: SCHEDULE=$c_t_schedule BREADTH=$c_t_breadth TRAFFIC=$c_t_traffic DETERMINISM=$c_t_determinism"
@@ -1024,7 +984,6 @@ sweep() {
   echo "    DETERMINISM_BUG     = $c_DETERMINISM_BUG"
   echo "    VACUOUS_SCHEDULE    = $c_VACUOUS_SCHEDULE   (SCHEDULE gen did not explore)"
   echo "    VACUOUS_SWARM       = $c_VACUOUS_SWARM   (--swarm gen had no candidate fault class)"
-  echo "    VACUOUS_CRASH       = $c_VACUOUS_CRASH   (fs-crash selector never reached)"
   echo "    SCHEDULE_DIVERGENCE = $c_SCHEDULE_DIVERGENCE   (yield-points double-run non-deterministic)"
   echo "    TOTAL FAILURES      = $failures"
   if (( c_SOMETIMES_UNMET > 0 )); then
@@ -1061,7 +1020,7 @@ the durable work queue under Patina. Every knob AND the tier for generation G is
 a pure function of SHA-256("patina-fuzz-G") (no $RANDOM, no date), so any
 generation re-runs by number and the whole campaign is a pure function of its
 [START,END] range. Two planes: the MESSAGE/FAULT plane (BREADTH/TRAFFIC tiers,
-plain binary) crosses net/storage/crash/buggify faults; the SCHEDULE plane
+plain binary) crosses net/crash-recovery/buggify faults; the SCHEDULE plane
 (~20% of gens, yield-points binary) isolates thread INTERLEAVINGS at atomics
 granularity. A ~4% DETERMINISM tier double-runs the identical config and requires
 an identical verdict stream + trace hash. The classifier is pure and

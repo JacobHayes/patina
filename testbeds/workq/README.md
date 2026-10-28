@@ -132,3 +132,15 @@ reproducible by number alone. Roughly a fifth of generations run a specially
 instrumented build that makes fine-grained thread interleavings schedulable, to
 hunt for races the coarse runs would miss. The sweep always fuzzes the *clean*
 app; the seeded bugs live only in the demo above.
+
+Disk crashes are swept by `cargo patina campaign` from `campaign.json`: every
+generation kills the whole process at a write, fsync or close it is known to
+reach, restarts it from what reached the disk, and crosses that with network
+and sleep faults. The restarted process cannot remember what the crashed one
+acknowledged, so the campaign passes `--ack-ledger`: producers also record
+each ack in a file of their own, and the restarted run checks that every job
+acked before the crash is still in the log it recovered.
+
+```sh
+cargo patina campaign ../../target/testbeds/workq/patina/workq --spec campaign.json
+```
