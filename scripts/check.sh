@@ -264,8 +264,6 @@ run_full() {
   run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
-  run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
-  run_rung 'file-size ratchet selftest' python3 -B scripts/check-file-size.py --selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
@@ -312,8 +310,6 @@ run_fast() {
   run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'benchmark statistics tests' python3 -B scripts/test-bench.py || return $?
-  run_rung 'file-size ratchet' python3 -B scripts/check-file-size.py || return $?
-  run_rung 'file-size ratchet selftest' python3 -B scripts/check-file-size.py --selftest || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
   run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?

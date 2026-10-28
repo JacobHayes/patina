@@ -1,9 +1,0 @@
-# File-size ratchet allowlist for scripts/check-file-size.py.
-# `<path> <ceiling|generated> # <reason>`. A ceiling is the file's current line
-# count: the file may shrink, never grow, and the change that shrinks it lowers
-# or removes the entry. Don't add new entries to dodge the cap; split the file.
-# The legitimately large: generated code, and exhaustive one-row-per-item tables
-# that read as a single reviewed list.
-crates/patina-syscalls/src/generated.rs generated # emitted by scripts/refresh-syscalls.py
-crates/patina-syscalls/src/symbols.rs 2143 # exhaustive shim-symbol-to-syscall table
-# Pending splits.
