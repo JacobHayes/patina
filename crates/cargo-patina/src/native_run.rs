@@ -429,7 +429,8 @@ liveness-safe."
         (Command, Vec<std::os::unix::io::RawFd>),
         CliError,
     > {
-        let mut command = Command::new(&binary);
+        // Exec the bytes the gate judged, not whatever the path names now.
+        let mut command = Command::new(image.exec_path(&binary));
         let mut fds = Vec::new();
         // Stamp a fixed, machine-independent `argv[0]`: the guest is exec'd from
         // an absolute host path, but that path must not leak into the guest's

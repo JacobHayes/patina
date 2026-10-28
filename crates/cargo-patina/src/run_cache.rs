@@ -80,6 +80,26 @@ impl Image {
         &self.map
     }
 
+    /// The path to exec the file these bytes were mapped from, `path`. On
+    /// Linux it is the open descriptor (`/proc/self/fd/N`, resolved at exec
+    /// before close-on-exec drops it), so the kernel runs the file that was
+    /// hashed and judged even if `path` was replaced since; the guest still
+    /// sees its real file as `/proc/self/exe` and the supervisor's fixed
+    /// `argv[0]`. Elsewhere it is `path`, which a replacement between the
+    /// gate and the exec would still swap.
+    pub(crate) fn exec_path(&self, path: &Path) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = path;
+            use std::os::unix::io::AsRawFd;
+            PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            path.to_path_buf()
+        }
+    }
+
     /// The BLAKE3 digest of [`Self::bytes`], in hex: the address of every
     /// cache entry about them.
     pub(crate) fn digest(&self) -> &str {
@@ -248,5 +268,24 @@ mod tests {
         }
         assert_eq!(image.bytes(), b"original bytes");
         assert!(!image.unchanged());
+    }
+
+    /// A path replaced after its bytes were mapped (a rebuild renaming a new
+    /// binary into place) does not change what runs: the exec reaches the
+    /// mapped file. `true` is mapped, then `false` takes its path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_mapped_file_runs_after_its_path_is_replaced() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guest");
+        let replacement = directory.path().join("replacement");
+        fs::copy("/bin/true", &path).unwrap();
+        fs::copy("/bin/false", &replacement).unwrap();
+        let image = Image::map(fs::File::open(&path).unwrap()).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let status = std::process::Command::new(image.exec_path(&path))
+            .status()
+            .unwrap();
+        assert!(status.success(), "the replacement ran: {status}");
     }
 }
