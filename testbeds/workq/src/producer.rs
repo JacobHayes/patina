@@ -160,13 +160,17 @@ pub fn run(spec: ProducerSpec) {
 
     for client_seq in 0..spec.count {
         let (key, work) = derive_job(spec.seed, spec.id, client_seq);
-        while !spec.shutdown.load(Ordering::Relaxed) {
+        'resend: while !spec.shutdown.load(Ordering::Relaxed) {
             Msg::Enqueue(spec.id, client_seq, key, work).send(&socket, server);
-            if let Some(Msg::EnqueueAck(producer, acked, job_id)) = Msg::recv(&socket, &mut buffer)
-            {
-                if producer == spec.id && acked == client_seq {
-                    spec.acked.lock().unwrap().record(job_id, producer, client_seq);
-                    break;
+            // Read past stale acks (a duplicate, or one for an earlier resend)
+            // rather than resending for each: every resend earns one more ack,
+            // so resending on a stale one keeps a stale ack queued forever.
+            while let Some(reply) = Msg::recv(&socket, &mut buffer) {
+                if let Msg::EnqueueAck(producer, acked, job_id) = reply {
+                    if producer == spec.id && acked == client_seq {
+                        spec.acked.lock().unwrap().record(job_id, producer, client_seq);
+                        break 'resend;
+                    }
                 }
             }
         }
