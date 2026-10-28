@@ -675,3 +675,130 @@ fn campaign_selftest_passes() {
         String::from_utf8_lossy(&ran.stdout)
     );
 }
+
+/// A campaign killed outright (SIGKILL, so nothing of it runs on the way out)
+/// takes its in-flight generation with it. The generation runs in its own
+/// process group, outside the campaign's, and its guest here would spin
+/// forever: with nobody left to enforce the timeout backstop, a surviving
+/// group would run on beside the `--resume` that re-runs the same generation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_killed_campaign_takes_its_generation_with_it() {
+    let workspace = native_workspace();
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("spin_forever.rs");
+    fs::write(
+        &source,
+        "fn main() {\n    loop {\n        std::hint::spin_loop();\n    }\n}\n",
+    )
+    .unwrap();
+    let guest = directory.path().join("spin-forever");
+    invoke(
+        workspace,
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+        ],
+    );
+
+    let out = directory.path().join("camp");
+    let mut campaign = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        .current_dir(workspace)
+        .args([
+            "campaign",
+            guest.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--timeout-secs",
+            "600",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(directory.path().join("campaign.stderr")).unwrap())
+        .spawn()
+        .unwrap();
+
+    // The generation is the campaign's child that leads its own process group;
+    // it is in flight once its guest runs in that group too.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let generation = loop {
+        let processes = process_table();
+        let in_flight = processes.iter().find(|leader| {
+            leader.ppid == campaign.id()
+                && leader.pgid == leader.pid
+                && processes
+                    .iter()
+                    .any(|member| member.ppid == leader.pid && member.pgid == leader.pid)
+        });
+        if let Some(leader) = in_flight {
+            break leader.pid;
+        }
+        let ended = campaign.try_wait().unwrap();
+        if ended.is_some() || Instant::now() >= deadline {
+            let _ = campaign.kill();
+            panic!(
+                "the campaign never had a generation's guest running (ended: {ended:?}):\n{}",
+                fs::read_to_string(directory.path().join("campaign.stderr")).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    campaign.kill().unwrap();
+    campaign.wait().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while process_group_alive(generation) {
+        if Instant::now() >= deadline {
+            crate::common::process_group::kill(generation).expect("clean up the orphaned group");
+            panic!("the generation's process group {generation} outlived its killed campaign");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct HostProcess {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+}
+
+/// Every host process, read from `ps` (POSIX, the same on Linux and macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_table() -> Vec<HostProcess> {
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields = line
+                .split_whitespace()
+                .map(|field| field.parse::<u32>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            match fields[..] {
+                [pid, ppid, pgid] => Some(HostProcess { pid, ppid, pgid }),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Whether any process remains in the process group `pgid`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn process_group_alive(pgid: u32) -> bool {
+    unsafe extern "C" {
+        #[link_name = "kill"]
+        fn host_kill(pid: i32, signal: i32) -> i32;
+    }
+    // SAFETY: signal 0 delivers nothing; it only probes for group members.
+    let probed = unsafe { host_kill(-(pgid as i32), 0) };
+    probed == 0
+        || std::io::Error::last_os_error().raw_os_error()
+            != Some(crate::common::process_group::ESRCH)
+}

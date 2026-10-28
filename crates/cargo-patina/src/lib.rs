@@ -46,6 +46,7 @@ mod go_build;
 mod guided;
 mod harness;
 mod help;
+mod lifeline;
 mod minimize;
 mod native_build;
 mod native_run;
@@ -742,6 +743,7 @@ pub fn entrypoint() -> Result<i32, CliError> {
     if raw.next().as_deref() == Some(OsStr::new(go_build::TOOLEXEC_ROLE)) {
         return go_build::run_as_toolexec(raw.collect());
     }
+    lifeline::watch()?;
     supervisor_identity::establish()?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     // Strip the cross-cutting output/config flags (`--format`, `--render`,

@@ -257,14 +257,11 @@ pub(super) fn run_replay(
 }
 
 /// The child `cargo patina <verb> --no-config --format json` command every
-/// campaign child shares, in its own process group.
+/// campaign child shares, in its own process group and tied to this campaign's
+/// life ([`crate::lifeline`]).
 fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
     let mut command = Command::new(self_exe);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    crate::lifeline::tie(&mut command)?;
     command
         .arg(verb)
         .arg("--no-config")

@@ -197,6 +197,7 @@ impl ReplayOracle {
         crate::config::scrub_child_config_env(&mut command, "replay");
         crate::supervisor_identity::expect_this_supervisor(&mut command)
             .map_err(|error| io::Error::other(error.to_string()))?;
+        crate::lifeline::tie(&mut command).map_err(|error| io::Error::other(error.to_string()))?;
         let output = command.output()?;
         let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
