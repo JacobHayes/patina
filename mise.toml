@@ -4,49 +4,21 @@
 # Heavy standalone testbeds keep their own setup and are not required for
 # ordinary local development.
 
-# Older mise resolves `rust = "latest"` to whatever is installed instead of
-# mise.lock's pin; refuse it. Before 2026.9.18 it can't read lockfile version 3;
-# before 2026.10.1 it takes core:rust's rustup symlinks for `mise link`ed
-# versions, which bypass the lockfile.
-min_version = "2026.10.17"
-
 [settings]
 # Lock every configured tool, including tools added later.
 lockfile = true
 
+[env]
+# rust-toolchain.toml is the Rust pin. Export its channel so a global mise Rust
+# cannot override it, and so a cargo started without rustup's proxy (nextest
+# runs one) still compiles dependencies, whose directories hold no toolchain
+# file, with the pin rather than rustup's default.
+RUSTUP_TOOLCHAIN = '''{{ exec(command=`awk -F'"' '/^channel/ {print $2}' rust-toolchain.toml`) }}'''
+
 [tools]
-# The selector follows releases only when mise.lock is deliberately refreshed.
-rust = "latest"
 ast-grep = "0.45.3"
 # The workspace test runner, locally (scripts/check.sh) and in CI.
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
-
-[tasks.setup]
-description = "Install the pinned root-workspace Rust toolchain, components and targets"
-run = """
-#!/usr/bin/env bash
-set -euo pipefail
-python3 - <<'PYTHON'
-import subprocess
-import tomllib
-from pathlib import Path
-
-# Keep components and cross-target std libraries in the rustup-facing file.
-toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]
-# Register an existing rustup install with mise too. This repairs older mise
-# Rust symlink registries that otherwise resolve `latest` from installed tools.
-subprocess.run(["mise", "install", "rust@" + toolchain["channel"]], check=True)
-subprocess.run(["mise", "install", "ast-grep", "github:nextest-rs/nextest"], check=True)
-args = ["rustup", "toolchain", "install", toolchain["channel"], "--profile", toolchain["profile"]]
-for component in toolchain["components"]:
-    args.extend(["--component", component])
-for target in toolchain["targets"]:
-    args.extend(["--target", target])
-subprocess.run(args, check=True)
-PYTHON
-cc --version >/dev/null
-echo "Patina local toolchain is ready."
-"""
 
 # The check runner keeps cheap, high-signal failures serial, builds the
 # workspace suite once and drives the CLI gates with its cargo-patina, runs only

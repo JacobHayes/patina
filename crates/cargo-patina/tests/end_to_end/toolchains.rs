@@ -109,7 +109,7 @@ mod tests {
         if !installed.lines().any(|line| line.starts_with(PINNED)) {
             eprintln!(
                 "SKIP a_rust_toolchain_pin_builds_with_the_guest_compiler: rustup toolchain \
-             {PINNED} is not installed (run `mise run setup`)"
+             {PINNED} is not installed (`rustup toolchain install {PINNED}`)"
             );
             return;
         }

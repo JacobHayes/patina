@@ -260,8 +260,6 @@ output_selftest() (
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'output contract selftest' output_selftest || return $?
-  run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
-  run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
@@ -304,8 +302,6 @@ run_full() {
 
 run_fast() {
   run_rung 'output contract selftest' output_selftest || return $?
-  run_rung 'toolchain pin drift' python3 -B scripts/check-toolchain.py || return $?
-  run_rung 'toolchain pin drift selftest' python3 -B scripts/check-toolchain.py --selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?

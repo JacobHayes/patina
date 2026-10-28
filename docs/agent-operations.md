@@ -50,12 +50,6 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   part of the evidence, not optional cleanup. The syscall conformance scenarios
   are Linux-only (both architectures); on macOS their test target compiles to
   nothing, while shared native signal/panic coverage still executes.
-- Verify the selected compiler as well as toolchain pin files. Mise 2026.9.18
-  can treat existing Rust install symlinks outside its managed directories as
-  user-linked tools and bypass lock resolution. Setup registers the pinned Rust
-  toolchain; the drift gate also checks `rustc -V` so agreeing files cannot hide
-  the wrong compiler. For lock-resolution proofs, isolate mise's install registry
-  without changing shared rustup defaults or uninstalling toolchains.
 - A green gate is only evidence if it can fail. Selftests and planted fixtures
   should prove classifiers, drift detectors, default-deny audits, and vacuity
   checks actually bite.

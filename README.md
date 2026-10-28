@@ -52,10 +52,7 @@ pre-run refusal — never a silent escape to the host.
 ## Quickstart
 
 Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.1 in
-`mise.lock`, with a checked `rust-toolchain.toml` mirror for rustup users.
-`mise.toml` selects `latest`; normal installs honor the lock. Advance the lock
-and mirror together when upgrading Rust. Setup registers the pin with mise;
-checks also reject an active compiler that differs from the pin.
+`rust-toolchain.toml`, which rustup installs on first use.
 
 ```sh
 git clone https://github.com/JacobHayes/patina
@@ -381,8 +378,7 @@ changes within the 6.8.0 series (`statmount`/`listmount` carry later
 releases' answers), so the pin is effectively the 6.8.0-139 build the oracle
 host runs: a host kernel update that moves an answer is a pin question. Moving to a newer kernel is an explicit, wholesale migration.
 
-If you use [mise](https://mise.jdx.dev/): `mise run setup` installs toolchains
-and targets, `mise run check:fast` is the inner-loop signal, `mise run check` is
+If you use [mise](https://mise.jdx.dev/): `mise run check:fast` is the inner-loop signal, `mise run check` is
 the local landing gate, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
 feedback, use `mise run check:native-abi`; the individually selectable native test
 targets and their platform coverage are listed in

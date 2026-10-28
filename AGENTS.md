@@ -70,8 +70,8 @@ Prefer JSON when parsing results programmatically.
 
 ## Check ladder (run before claiming done)
 
-With [mise](https://mise.jdx.dev/) (one-time `mise run setup` installs
-the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
+With [mise](https://mise.jdx.dev/) for the non-Rust tools, and rustup, which
+installs the Rust toolchain, components and targets `rust-toolchain.toml` pins:
 
 - `mise run check:fast` — the inner-loop tier: fmt, clippy (host, plus
   `aarch64-apple-darwin` for Darwin-cfg code from Linux or
@@ -79,7 +79,7 @@ the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
   both Linux architectures natively), every workspace
   test except `cargo-patina`'s `end_to_end` and seven native execution targets
   (syscall conformance among them), the cheap classifier selftests,
-  toolchain pin drift, WASI validation, and cross-target smoke. It is designed to
+  WASI validation, and cross-target smoke. It is designed to
   give ordinary edits an honest signal quickly, but it is not landing evidence.
 - `mise run check` — the local pre-landing battery: the cheap checks above,
   docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
@@ -94,12 +94,8 @@ the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
   the audit corpus.
 - `mise run smoke`, `mise run audit-corpus`, `mise run demo` — individual pieces.
 
-Rust is pinned in `mise.lock`; `mise.toml` uses `latest` so deliberate lockfile
-updates can advance it. `rust-toolchain.toml` mirrors the exact version for
-rustup users. `scripts/check-toolchain.py` checks both pins and the active
-compiler; its selftest plants drift in each file. Fast/full checks and every CI
-job run it. Setup also registers the toolchain with mise, repairing older Rust
-install symlink registries that can bypass lock resolution.
+Rust is pinned only in `rust-toolchain.toml`; `mise.toml` unsets
+`RUSTUP_TOOLCHAIN` so a global mise Rust cannot override it.
 
 Run cargo and repository scripts through `mise exec --` or `mise run` so the repo
 selected toolchain is active. `scripts/check.sh` is the quiet/timed log-replay

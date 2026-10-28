@@ -58,8 +58,3 @@ checksum = "sha256:6c23b7fb4ca82c571fc8dfedbab45bfa773d45918f933170c85d21cd7f4b8
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/cargo-nextest-0.9.148-universal-apple-darwin.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/620608067"
 provenance = "github-attestations"
-
-[[tools.rust]]
-version = "1.99.1"
-backend = "core:rust"
-specifiers = ["latest"]

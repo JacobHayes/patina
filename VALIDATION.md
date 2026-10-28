@@ -46,9 +46,7 @@ Required locally before landing (`mise run check`):
   `cargo test --doc --workspace` for the doctests
 - packaging (`cargo package --workspace --no-verify`) so manifest/readme/include
   drift fails before release work
-- `scripts/check-toolchain.py` checks `mise.lock`, `rust-toolchain.toml`, and
-  the active compiler; its selftest plants mismatches in each pin and a missing
-  lockfile. The self-sufficient-binary rodata detector runs in workspace tests,
+- the self-sufficient-binary rodata detector runs in workspace tests,
   and the `patina-dst` macros feature test runs on the pinned toolchain
 - `scripts/validate-wasi.sh` when validating V3
 - `mise run check:native-abi` for focused native ABI feedback; the full native acceptance tests and ecosystem testbeds are included in `mise run check`
@@ -58,18 +56,16 @@ Required locally before landing (`mise run check`):
 
 `mise run check:fast` is the inner loop: fmt, host and cross-cfg clippy, every workspace
 test except cargo-patina's e2e/native execution targets (conformance among them),
-the cheap selftests, toolchain pin drift, WASI validation, and
+the cheap selftests, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.
 
-Every CI job installs the toolchain through mise using the committed lock.
-The Rust toolchain, components and targets live inside a cached mise directory,
-with isolated Rust homes on every runner. Cargo build caches
-include the pin files in their keys and only main writes caches.
+Every CI job installs Rust with rustup from `rust-toolchain.toml` and the other
+tools through mise from the committed lock. Cargo build caches include the pin
+files in their keys and only main writes caches.
 
 These checks must run without network access after dependencies have been
-fetched. For local development, `mise run setup` installs the Rust
-toolchain/components/targets (and the pinned cargo-nextest) needed by these
-gates. After cheap failure checks, the full local gate builds the workspace
+fetched. For local development, rustup installs the Rust
+toolchain/components/targets on first use and mise the pinned cargo-nextest. After cheap failure checks, the full local gate builds the workspace
 suite once; that build's `cargo-patina` drives the campaign
 selftest gate and every testbed (`PATINA_CLI`), and the suite's native shim
 builds serve every testbed's guests (`PATINA_SHIM_TARGET_DIR`). The workspace

@@ -1,10 +1,5 @@
-# mise.lock is the authoritative tool version pin; keep this rustup mirror equal.
-# Mise's Rust backend sets RUSTUP_TOOLCHAIN from mise.toml + mise.lock, which
-# overrides rustup's directory selector. Idiomatic-file discovery is opt-in;
-# our explicit mise Rust entry selects the version, while setup reads the
-# components/targets below. Standalone rustup reads this file directly.
-# scripts/check-toolchain.py checks both pins and the active compiler, catching
-# older mise Rust install symlink registries that can bypass lock resolution.
+# The repository's only Rust pin. rustup installs this toolchain, its components
+# and targets on first use (or `rustup toolchain install`).
 [toolchain]
 channel = "1.99.1"
 profile = "minimal"
