@@ -126,9 +126,8 @@ Gates worth knowing individually:
   scenario or exclusion accounts for (a local report, not a gate). `scripts/validate-wasi.sh` and
   `scripts/smoke-cross-target.sh` are the WASI/cross-target acceptance batteries
   (VALIDATION.md defines what each proves).
-- `testbeds/workq/fuzz-sweep.sh --selftest` and
-  `cargo patina campaign --selftest` — the sweep/campaign outcome classifiers
-  prove every class fireable; these run per-push in CI.
+- `testbeds/workq/fuzz-sweep.sh --selftest` — the sweep outcome classifier
+  proves every class fireable; it runs per-push in CI.
 - `testbeds/audit-corpus/run.sh` (`--selftest` to prove the drift detection
   bites) — the strict-xfail ecosystem symbol-audit corpus.
 

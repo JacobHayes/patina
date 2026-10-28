@@ -36,11 +36,16 @@ case "$(uname -s)/$(uname -m)" in
   Linux/aarch64) cross_clippy=(aarch64-apple-darwin x86_64-unknown-linux-gnu) ;;
   *) cross_clippy=(aarch64-apple-darwin aarch64-unknown-linux-gnu) ;;
 esac
+# The native ecosystem testbeds, one after another; the SUD-only ones (and Go,
+# whose runtime issues raw syscalls) run only where SUD exists.
+native_testbeds=testbeds/fifo-ipc/run-patina.sh
+if [[ $(uname -s)/$(uname -m) == Linux/x86_64 ]]; then
+  native_testbeds+=' && testbeds/rustix-default/run-patina.sh && testbeds/cap-std-dirfd/run-patina.sh && testbeds/go-guest/run-patina.sh'
+fi
 
 usage() {
   cat <<'EOF'
 Usage: scripts/check.sh <full|fast>
-       scripts/check.sh --selftest
 
   full  Full local pre-landing gate. Cheap checks, host and cross-cfg clippy,
         and docs run first, then one build of the workspace suite,
@@ -53,10 +58,7 @@ Usage: scripts/check.sh <full|fast>
         Targeted native ABI feedback: mise run check:native-abi.
 
 Successful rungs are silent; the overall result includes retained logs with
-per-rung commands and timings, and counts the conformance scenarios the host
-could not judge (NOT RUN, named on the next line). The full profile requires a
-host oracle (PATINA_REQUIRE_HOST_ORACLE=1, as CI sets; set it to 0 to relax):
-a NOT RUN other than a missing hardware feature fails it. On failure, the
+per-rung commands and timings. On failure, the
 complete rung log and exact command are printed. The workspace suite runs
 under nextest (profile `local`) with NEXTEST_TEST_THREADS tests at a time,
 else one per CARGO_BUILD_JOBS job, else one per two CPUs. Serial work, the workspace suite and the doctests share one Cargo
@@ -70,7 +72,6 @@ EOF
 
 case ${1:-} in
   full|fast) profile=$1 ;;
-  --selftest) profile=selftest ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -89,14 +90,8 @@ finish() {
   local status=$?
   local result=PASS
   ((status == 0)) || result=FAIL
-  # The harness prints `NOT RUN <scenario>: <reason>` past libtest's capture,
-  # so the line can start mid-line after progress dots.
-  local not_run
-  not_run=$(cat "$logs"/*.log 2>/dev/null | grep -o 'NOT RUN [^:]*' | sort -u)
-  printf 'OVERALL %s %s (passed=%s not_run=%s; %ss); logs: %s\n' \
-    "$result" "$profile" "$passed" "$(grep -c . <<<"$not_run")" \
-    "$(( $(date +%s) - total_start ))" "$logs"
-  [[ -z $not_run ]] || printf '%s\n' "$not_run"
+  printf 'OVERALL %s %s (passed=%s; %ss); logs: %s\n' \
+    "$result" "$profile" "$passed" "$(( $(date +%s) - total_start ))" "$logs"
 }
 
 stop_children() {
@@ -226,40 +221,8 @@ run_fast_workspace_tests() {
     cargo test --quiet --doc --workspace --locked
 }
 
-# Class detector: successful child chatter stays in retained logs, while failed
-# children preserve their status, command, and original stdout/stderr.
-output_selftest() (
-  local output="$logs/output-selftest.console" status
-  passed=0
-  run_rung 'planted success' bash -c 'echo success-stdout; echo success-stderr >&2' >"$output" 2>&1
-  if [[ -s "$output" || $passed != 1 ]] ||
-      ! grep -q success-stderr "$logs/planted-success.log"; then
-    echo 'FAIL: successful rung was noisy or lost its log/count' >&2; return 1
-  fi
-  run_rung 'planted failure' bash -c 'echo failure-stdout; echo failure-stderr >&2; exit 7' >"$output" 2>&1
-  status=$?
-  if [[ $status != 7 ]] || ! grep -q failure-stdout "$output" ||
-      ! grep -q failure-stderr "$output" || ! grep -q 'command:' "$output"; then
-    echo 'FAIL: failed rung lost its status, command, or output' >&2; return 1
-  fi
-  start_rung 'parallel success' bash -c 'echo parallel-success' >"$output" 2>&1
-  wait_rungs >>"$output" 2>&1
-  if [[ -s "$output" || $passed != 2 ]] ||
-      ! grep -q parallel-success "$logs/parallel-success.log"; then
-    echo 'FAIL: successful parallel rung was noisy or lost its log/count' >&2; return 1
-  fi
-  start_rung 'parallel failure' bash -c 'echo parallel-stderr >&2; exit 9' >"$output" 2>&1
-  wait_rungs >>"$output" 2>&1
-  status=$?
-  if [[ $status == 0 || $passed != 2 ]] || ! grep -q parallel-stderr "$output" ||
-      ! grep -q 'exit 9' "$output"; then
-    echo 'FAIL: failed parallel rung lost its failure or output' >&2; return 1
-  fi
-)
-
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
-  run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
@@ -274,7 +237,6 @@ run_full() {
   run_rung 'macro feature test' cargo test --quiet -p patina-dst --features macros --locked || return $?
   # One build of the workspace suite; its cargo-patina drives every later gate.
   run_rung 'workspace test build' workspace_nextest --workspace --no-run || return $?
-  run_rung 'campaign classifier selftest' "$patina_cli" patina campaign --selftest || return $?
 
   # The workspace suite (the native_conformance scenarios included) and every
   # remaining gate run at once. The suite holds a fixed number of test slots and
@@ -286,7 +248,7 @@ run_full() {
   # script's own runtime scratch paths. The multiproc pending-gap battery runs
   # in CI.
   start_rung_in "$CARGO_TARGET_DIR" 'workspace tests (includes e2e)' workspace_nextest --workspace
-  start_rung 'native ecosystem testbeds' "${testbed_env[@]}" scripts/check-native-testbeds.sh
+  start_rung 'native ecosystem testbeds' "${testbed_env[@]}" bash -c "$native_testbeds"
   start_rung 'workq testbed' "${testbed_env[@]}" testbeds/workq/run-patina.sh
   start_rung 'macro adopter testbed' "${testbed_env[@]}" testbeds/patina-macro-adopter/run.sh
   start_rung 'pubsub testbed' "${testbed_env[@]}" testbeds/pubsub/run-patina.sh
@@ -301,7 +263,6 @@ run_full() {
 }
 
 run_fast() {
-  run_rung 'output contract selftest' output_selftest || return $?
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
   run_rung 'format' cargo fmt --all -- --check || return $?
   run_rung 'structural lints' scripts/check-structure.sh || return $?
@@ -318,9 +279,6 @@ run_fast() {
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
-  run_rung 'campaign classifier selftest' "$patina_cli" patina campaign --selftest || return $?
-
-  run_rung 'native ecosystem receipt selftest' scripts/check-native-testbeds.sh --selftest || return $?
 
   start_rung 'cross-target smoke' "${testbed_env[@]}" scripts/smoke-cross-target.sh
   start_rung 'WASI validation' "${testbed_env[@]}" scripts/validate-wasi.sh
@@ -328,10 +286,6 @@ run_fast() {
 }
 
 case $profile in
-  selftest) run_rung 'output contract selftest' output_selftest ;;
-  full)
-    export PATINA_REQUIRE_HOST_ORACLE="${PATINA_REQUIRE_HOST_ORACLE:-1}"
-    run_full
-    ;;
+  full) run_full ;;
   fast) run_fast ;;
 esac

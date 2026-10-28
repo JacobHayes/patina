@@ -49,12 +49,7 @@ fn recording_changes_no_observation() {
 #[test]
 fn a_killed_native_ipc_run_is_swept() {
     if let Err(reason) = strace() {
-        assert!(
-            !required("PATINA_REQUIRE_STRACE"),
-            "PATINA_REQUIRE_STRACE=1: {reason}"
-        );
-        not_run("the killed IPC runs", reason);
-        return;
+        panic!("the killed IPC runs need strace: {reason}");
     }
     let cases = [
         ("ipc/sysv_shm", "shmget"),
@@ -69,12 +64,7 @@ fn a_killed_native_ipc_run_is_swept() {
             .tempdir()
             .unwrap();
         if let Some((_, reason)) = host::needs_unmet(scenario, owned.path()) {
-            assert!(
-                !required("PATINA_REQUIRE_HOST_ORACLE"),
-                "PATINA_REQUIRE_HOST_ORACLE=1 but this host is no oracle for {name}: {reason}"
-            );
-            not_run(&format!("{name} killed"), &reason);
-            continue;
+            panic!("this host is no oracle for {name}: {reason}");
         }
         let dir = owned.path().join("run");
         let mut command = Command::new("strace");
@@ -133,12 +123,7 @@ fn a_killed_native_ipc_run_is_swept() {
 #[test]
 fn strace_leak_filter_flags_a_planted_escape() {
     if let Err(reason) = strace() {
-        assert!(
-            !required("PATINA_REQUIRE_STRACE"),
-            "PATINA_REQUIRE_STRACE=1: {reason}"
-        );
-        not_run("the planted strace escape", reason);
-        return;
+        panic!("the planted strace escape needs strace: {reason}");
     }
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("strace.log");

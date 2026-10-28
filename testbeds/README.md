@@ -60,9 +60,8 @@ Conventions:
   FIFO/rustix-default/cap-std gates. The multiproc native/pending-gap battery
   runs in x86_64 Linux CI. Native acceptance tests (the syscall
   conformance scenarios of `crates/patina-conformance` among them) run in the
-  full workspace-test tier and CI, not `check:fast`. FIFO/rustix-default/cap-std
-  run through `scripts/check-native-testbeds.sh`, which requires
-  capability-matched execution receipts. The audit corpus adds CI/final-gate breadth.
+  full workspace-test tier and CI, not `check:fast`. The SUD-only
+  rustix-default/cap-std and go-guest gates run on x86_64 Linux. The audit corpus adds CI/final-gate breadth.
 - The sweep/campaign scripts (`fuzz-sweep.sh`, `wasi-buggify-sweep.sh`,
   `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates

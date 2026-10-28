@@ -70,7 +70,7 @@ days (refreshed by successful GET_PERSISTENT).
 
 ```sh
 mise exec -- cargo test -p cargo-patina --test native_workloads keyutils_password
-PATINA_REQUIRE_HOST_ORACLE=1 mise exec -- cargo test -p cargo-patina --test native_conformance sys_keys
+mise exec -- cargo test -p cargo-patina --test native_conformance sys_keys
 ```
 
 The workload test audits without allowances, plants matching names in an isolated

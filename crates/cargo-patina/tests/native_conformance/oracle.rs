@@ -1,6 +1,5 @@
 //! Host-oracle authority, native judgments, crash classification, and diagnostics.
 
-use super::process::required;
 use patina_dst_conformance::catalog;
 use patina_dst_conformance::compare::{self, Ending, Failure, Observation, Termination};
 use patina_dst_conformance::host;
@@ -16,8 +15,7 @@ use std::sync::OnceLock;
 pub(super) struct Oracle {
     release: String,
     glibc: String,
-    /// The pinned kernel series and glibc (`host::pinned`), or
-    /// `PATINA_REQUIRE_PINNED_KERNEL=1`.
+    /// The pinned kernel series and glibc (`host::pinned`).
     authoritative: bool,
 }
 
@@ -32,20 +30,14 @@ fn glibc_version() -> String {
 impl Oracle {
     pub(super) fn detect() -> &'static Oracle {
         static ORACLE: OnceLock<Oracle> = OnceLock::new();
-        ORACLE.get_or_init(|| {
-            Oracle::on(
-                &host::kernel_release(),
-                &glibc_version(),
-                required("PATINA_REQUIRE_PINNED_KERNEL"),
-            )
-        })
+        ORACLE.get_or_init(|| Oracle::on(&host::kernel_release(), &glibc_version()))
     }
 
-    fn on(release: &str, glibc: &str, strict: bool) -> Oracle {
+    fn on(release: &str, glibc: &str) -> Oracle {
         Oracle {
             release: release.to_string(),
             glibc: glibc.to_string(),
-            authoritative: strict || host::pinned(release, glibc),
+            authoritative: host::pinned(release, glibc),
         }
     }
 
@@ -238,16 +230,15 @@ mod tests {
     /// On a faked host off the pinned kernel, or on the pinned kernel with
     /// another glibc, a difference from patina and a failed native check are
     /// reported — printed with the prefix and summarized — and fail nothing; on
-    /// the pinned system, or forced strict, they fail. Native vehicles that
+    /// the pinned system they fail. Native vehicles that
     /// disagree fail off the pin too.
     #[test]
     fn off_the_pinned_kernel_differences_only_report() {
         let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
         let glibc = host::PINNED_GLIBC;
-        let off = Oracle::on(&format!("{major}.{}.0-1017-azure", minor + 9), glibc, false);
-        let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), glibc, false);
-        let other_glibc = Oracle::on(&pinned.release, "2.40", false);
-        let forced = Oracle::on(&off.release, glibc, true);
+        let off = Oracle::on(&format!("{major}.{}.0-1017-azure", minor + 9), glibc);
+        let pinned = Oracle::on(&format!("{major}.{minor}.0-139-generic"), glibc);
+        let other_glibc = Oracle::on(&pinned.release, "2.40");
         let from = |leg, vehicle| Origin { leg, vehicle };
         let libc = from(Leg::Native, Vehicle::Libc);
         let native = planted(libc, &[("close", 0), ("check", 1)], Termination::Exited(0));
@@ -267,7 +258,6 @@ mod tests {
         assert_eq!(off.judged(judge(), &mut diverged), Ok(()));
         assert!(!diverged.is_empty());
         assert!(pinned.judged(judge(), &mut Vec::new()).is_err());
-        assert!(forced.judged(judge(), &mut Vec::new()).is_err());
         let mut reported = Vec::new();
         assert_eq!(other_glibc.judged(judge(), &mut reported), Ok(()));
         assert!(!reported.is_empty());
@@ -309,15 +299,13 @@ mod tests {
     /// Off the pinned system a native run that fails a check or dies of a
     /// signal it did not announce is reported and is no oracle: it neither
     /// becomes the reference nor is compared with it, so the next oracle
-    /// vehicle becomes the reference. On the pinned system, or forced strict,
-    /// it fails; a native run that stops otherwise (a precondition, nothing
+    /// vehicle becomes the reference. On the pinned system it fails; a native run that stops otherwise (a precondition, nothing
     /// recorded) fails on every host, as do two oracles that disagree.
     #[test]
     fn off_the_pinned_system_a_native_run_answering_otherwise_is_no_oracle() {
         let (major, minor, _) = parse_release(VIRTUAL_ABI).unwrap();
-        let off = Oracle::on(&format!("{major}.{minor}.0-139-generic"), "2.43", false);
-        let pinned = Oracle::on(&off.release, host::PINNED_GLIBC, false);
-        let forced = Oracle::on(&off.release, "2.43", true);
+        let off = Oracle::on(&format!("{major}.{minor}.0-139-generic"), "2.43");
+        let pinned = Oracle::on(&off.release, host::PINNED_GLIBC);
         let on = |vehicle| Origin {
             leg: Leg::Native,
             vehicle,
@@ -341,10 +329,7 @@ mod tests {
             );
             assert_eq!(diverged.len(), 1);
             assert!(reference.is_none());
-            for strict in [&pinned, &forced] {
-                let judged = judge_native(strict, answer, &mut None, &mut Vec::new());
-                assert!(judged.is_err());
-            }
+            assert!(judge_native(&pinned, answer, &mut None, &mut Vec::new()).is_err());
         }
 
         let oracle = planted(

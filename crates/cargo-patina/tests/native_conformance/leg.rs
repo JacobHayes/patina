@@ -4,7 +4,7 @@ use super::hang::HangWatch;
 use super::oracle::{Oracle, judge_native, prefixed, tail, undeclared_death, with_stderr};
 use super::process::{
     DIRECT_SEED, FINGERPRINT, PATINA_SEED, RUN_DEADLINE, direct_observation, envelope_observation,
-    not_run, pin_process_state, probes, required, run, text,
+    pin_process_state, probes, run, text,
 };
 use crate::common;
 use patina_dst_conformance::catalog::{self, Need, Scenario};
@@ -286,11 +286,7 @@ impl Leg<'_> {
         if self.vehicle == Vehicle::Raw
             && let Err(reason) = host::syscall_user_dispatch()
         {
-            if required("PATINA_REQUIRE_SUD") {
-                return Err(vec![format!("PATINA_REQUIRE_SUD=1: {reason}")]);
-            }
-            not_run(&format!("{} under patina", self.name()), &reason);
-            return Ok(());
+            return Err(vec![format!("raw vehicle under patina: {reason}")]);
         }
 
         let gaps: Vec<&catalog::Gap> = self.scenario.gaps_for(self.vehicle).collect();
@@ -366,11 +362,7 @@ impl Leg<'_> {
     /// `recorded` run did (on an authoritative host, as natively too).
     fn check_leak(&self, recorded: &Observation) -> Result<(), Vec<String>> {
         if let Err(reason) = strace() {
-            if required("PATINA_REQUIRE_STRACE") {
-                return Err(vec![format!("PATINA_REQUIRE_STRACE=1: {reason}")]);
-            }
-            not_run(&format!("{} under strace", self.name()), reason);
-            return Ok(());
+            return Err(vec![format!("strace run: {reason}")]);
         }
         let log = self.logs.join("strace.log");
         let traced = self

@@ -2,13 +2,12 @@
 mod common;
 
 use common::native::{
-    assert_fields, assert_required_sud, assert_thread_counts, assert_thread_ids,
-    assert_unique_line_payload,
+    assert_fields, assert_thread_counts, assert_thread_ids, assert_unique_line_payload,
 };
 use std::time::Duration;
 
 #[test]
-fn output_parsers_and_the_sud_requirement_reject_bad_input() {
+fn output_parsers_reject_bad_input() {
     let fields = assert_fields(b"RESULT a=1 b=2\n", "RESULT ", &["a", "b"]);
     assert_eq!(fields["a"], "1");
     for bad in [
@@ -37,13 +36,6 @@ fn output_parsers_and_the_sud_requirement_reject_bad_input() {
     assert!(std::panic::catch_unwind(|| assert_thread_counts([0, 1, 3], 3, 1)).is_err());
     assert!(
         std::panic::catch_unwind(|| assert_thread_ids(b"ORDER [0, broken]\n", "ORDER ")).is_err()
-    );
-    assert_required_sud(true, Some("1"));
-    assert_required_sud(false, None);
-    assert_required_sud(false, Some("0"));
-    assert!(
-        std::panic::catch_unwind(|| assert_required_sud(false, Some("1"))).is_err(),
-        "required SUD must reject a missing capability"
     );
 }
 

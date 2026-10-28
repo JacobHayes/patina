@@ -16,8 +16,7 @@
 #   fcntl(dirfd, F_GETFL) + openat(dirfd, ".").
 #
 # This testbed is SUD-ONLY (same gate as rustix-default): on a non-SUD kernel or
-# a non-Linux host it prints a LOUD, COUNTED skip line and exits 0 — never a
-# silent pass. Where SUD is present it asserts:
+# a non-Linux host it fails. Where SUD is present it asserts:
 #   [1] the raw `*at` sites audit as SUD-managed;
 #   [2] the guest runs with the expected CAPSTD_RESULT;
 #   [3] two same-seed runs are byte-identical (stdout AND captured stderr);
@@ -52,7 +51,7 @@ if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3
 fi
 
-# ---- SUD availability gate (loud, counted skip; never a silent pass) ----
+# ---- SUD availability gate (a host without it fails) ----
 sud_kernel=0
 if [[ "$(uname -s)" == Linux ]]; then
   cc="${CC:-cc}"
@@ -79,9 +78,8 @@ C
 fi
 
 if [[ "$sud_kernel" != 1 ]]; then
-  # The ecosystem wrapper independently verifies this unsupported-host receipt.
-  echo "cap-std-dirfd: SKIPPED 1 (host lacks syscall-user-dispatch: $(uname -s) $(uname -m); SUD is x86_64 Linux >= 5.11)"
-  exit 0
+  echo "FATAL: cap-std-dirfd needs syscall-user-dispatch (x86_64 Linux >= 5.11); this host is $(uname -s) $(uname -m)" >&2
+  exit 3
 fi
 
 echo "==> building the cap-std-dirfd MRE (packaged native build)"

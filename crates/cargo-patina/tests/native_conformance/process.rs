@@ -231,7 +231,3 @@ pub(super) fn pin_process_state(needs_keys: bool) -> std::io::Result<()> {
 pub(super) fn not_run(what: &str, reason: &NotRun) {
     writeln!(std::io::stderr(), "NOT RUN {what}: {reason}").unwrap();
 }
-
-pub(super) fn required(variable: &str) -> bool {
-    std::env::var(variable).as_deref() == Ok("1")
-}

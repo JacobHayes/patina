@@ -12,8 +12,7 @@
 #
 # This testbed is SUD-ONLY. SUD needs the kernel's generic-entry code
 # (x86_64 >= 5.11; arm64 not yet), so on a non-SUD kernel or a non-Linux host
-# the whole battery prints a LOUD, COUNTED skip line and exits 0 — never a silent
-# pass. Where SUD is present (GitHub CI's x86_64 runners), it asserts:
+# it fails. Where SUD is present (GitHub CI's x86_64 runners), it asserts:
 #   [1] audit reports the raw-syscall sites as SUD-managed (proving the dropped
 #       rustix_use_libc + the direct-syscall downgrade);
 #   [2] the program runs, observing virtual time / deterministic FS / SimNet /
@@ -51,7 +50,7 @@ if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3
 fi
 
-# ---- SUD availability gate (loud, counted skip; never a silent pass) ----
+# ---- SUD availability gate (a host without it fails) ----
 sud_kernel=0
 if [[ "$(uname -s)" == Linux ]]; then
   cc="${CC:-cc}"
@@ -78,9 +77,8 @@ C
 fi
 
 if [[ "$sud_kernel" != 1 ]]; then
-  # The ecosystem wrapper independently verifies this unsupported-host receipt.
-  echo "rustix-default: SKIPPED 1 (host lacks syscall-user-dispatch: $(uname -s) $(uname -m); SUD is x86_64 Linux >= 5.11)"
-  exit 0
+  echo "FATAL: rustix-default needs syscall-user-dispatch (x86_64 Linux >= 5.11); this host is $(uname -s) $(uname -m)" >&2
+  exit 3
 fi
 
 echo "==> building the rustix-default MRE (packaged native build; rustix_use_libc dropped on x86_64)"

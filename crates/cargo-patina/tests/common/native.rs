@@ -558,21 +558,14 @@ pub fn kernel_supports(feature: KernelFeature) -> bool {
             _ => panic!("capability probe crashed: {result:?}"),
         }
     });
-    if matches!(feature, KernelFeature::Sud) {
-        assert_required_sud(
-            supported,
-            std::env::var("PATINA_REQUIRE_SUD").ok().as_deref(),
-        );
-    }
-    supported
-}
-
-/// Refuse missing SUD evidence when the caller requires that capability.
-pub fn assert_required_sud(supported: bool, requirement: Option<&str>) {
+    // x86_64 Linux has had SUD since 5.11; its absence there is a broken host.
     assert!(
-        supported || requirement != Some("1"),
-        "PATINA_REQUIRE_SUD=1 but the host lacks syscall-user-dispatch"
+        supported
+            || !matches!(feature, KernelFeature::Sud)
+            || !cfg!(all(target_os = "linux", target_arch = "x86_64")),
+        "the host lacks syscall-user-dispatch"
     );
+    supported
 }
 
 /// Run a direct guest with an explicit environment and a bounded process group.

@@ -47,20 +47,6 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
         shard: [1, 2, 3, 4]
     runs-on: ${{ matrix.runner }}
-    env:
-      PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
-      # Every syscall conformance scenario must find the runner an oracle
-      # (covered rows present, needed capabilities present); rows past the
-      # virtual ABI that a newer runner kernel implements answer their declared
-      # ENOSYS natively instead. The runners' kernel is off the pinned 6.8, so
-      # the native-versus-patina comparison only reports there (DIVERGES lines,
-      # a step-summary section); PATINA_REQUIRE_PINNED_KERNEL=1 would fail it.
-      PATINA_REQUIRE_HOST_ORACLE: '1'
-      # strace is the Linux whole-run syscall-containment class detector
-      # (native_trace, and the conformance scenarios' leak run). It is installed
-      # below and required, so a runner image without strace hard-fails instead
-      # of silently dropping the containment gate.
-      PATINA_REQUIRE_STRACE: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-toolchain
@@ -114,12 +100,6 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
-      # check-native-testbeds.sh requires each SUD receipt on x86_64. (strace
-      # and the host-oracle requirement belong to the test suite, in `tests`.)
-      PATINA_REQUIRE_SUD: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
-      # ...and the go-guest receipt there too (Go guests on aarch64 are not
-      # gated yet), so a missing Go fails instead of reporting NOT RUN.
-      PATINA_REQUIRE_GO: ${{ matrix.runner == 'ubuntu-latest' && '1' || '0' }}
       # The gate scripts each default to a private target dir so the local
       # check runner can overlap them; here they run one after another, so they
       # share one and build the release cargo-patina and native shim once.
@@ -136,23 +116,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
       - run: scripts/validate-wasi.sh
-      # On x86_64 mise supplies the Go release testbeds/go-guest/go.mod pins.
+      - run: testbeds/fifo-ipc/run-patina.sh
+      # The SUD-only testbeds, and Go (whose runtime issues raw syscalls): x86_64.
       - if: matrix.runner == 'ubuntu-latest'
-        run: mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- scripts/check-native-testbeds.sh
-      - if: matrix.runner != 'ubuntu-latest'
-        run: scripts/check-native-testbeds.sh
+        run: |
+          testbeds/rustix-default/run-patina.sh
+          testbeds/cap-std-dirfd/run-patina.sh
+          mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- testbeds/go-guest/run-patina.sh
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-cross-target.sh
-      # Fast, build-free classifier selftests (pure functions over canned tuples;
-      # ~1.4s + ~0.5s locally). The fuzz-sweep bash classifier is NOT otherwise
-      # covered by a Rust test; the campaign selftest is ALSO exercised by the
-      # `campaign_selftest_passes` integration test but kept here as a direct
-      # CLI-level gate against the shipped subcommand.
+      # Fast, build-free classifier selftests (pure functions over canned tuples).
+      # The fuzz-sweep bash classifier is not otherwise covered by a Rust test.
       - run: testbeds/multiproc/run-patina.sh --selftest
       - run: testbeds/workq/fuzz-sweep.sh --selftest
       - run: testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest
-      - run: cargo run -p cargo-patina --quiet -- campaign --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
@@ -263,7 +241,7 @@ jobs:
       - if: matrix.part == 'testbeds'
         run: scripts/validate-wasi.sh
       - if: matrix.part == 'testbeds'
-        run: scripts/check-native-testbeds.sh
+        run: testbeds/fifo-ipc/run-patina.sh
       - if: matrix.part == 'testbeds'
         run: scripts/smoke-cross-target.sh
       - if: matrix.part == 'testbeds'

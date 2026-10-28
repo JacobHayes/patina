@@ -1,9 +1,9 @@
 //! Whole-run containment of ordinary std, on BOTH Linux architectures.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+//! macOS has no whole-run trace: ktrace cannot separate loader from guest, so
+//! the static audit and instruction scan are its containment evidence.
+#![cfg(target_os = "linux")]
 mod common;
-use std::io::Write;
 
-#[cfg(target_os = "linux")]
 mod linux {
     use super::*;
 
@@ -18,28 +18,7 @@ mod linux {
 
     #[test]
     fn std_whole_run_and_planted_openat_use_identical_filter() {
-        let available = Command::new("strace").arg("--version").output();
-        match available {
-            Ok(out) => {
-                assert_success(out);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                assert_ne!(
-                    std::env::var("PATINA_REQUIRE_STRACE").as_deref(),
-                    Ok("1"),
-                    "PATINA_REQUIRE_STRACE=1 but strace is missing"
-                );
-                // Bypass libtest capture: the unmet runtime proof is visible even
-                // on a successful ordinary cargo test.
-                writeln!(
-                    std::io::stderr(),
-                    "SKIPPED native_trace: strace not installed; no runtime containment evidence"
-                )
-                .unwrap();
-                return;
-            }
-            Err(e) => panic!("strace discovery: {e}"),
-        }
+        assert_success(Command::new("strace").arg("--version").output().unwrap());
         let clean = Guest::assert_build("std_probe.rs");
         let leak = assert_build_c_guest("escape_syscall_probe.c", CLink::Unlinked);
         let dir = tempfile::tempdir().unwrap();
@@ -79,27 +58,5 @@ mod linux {
         let (out, denied) = trace_and_filter(&clean.binary);
         assert_exact_line(&out.stdout, "PATINA_STRACE_MARKER");
         assert_eq!(text(&denied), "", "syscalls escaped deterministic boundary");
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod darwin {
-    use super::*;
-
-    #[test]
-    fn ktrace_requirement_is_explicitly_unsupported() {
-        assert_ne!(
-            std::env::var("PATINA_REQUIRE_KTRACE").as_deref(),
-            Ok("1"),
-            concat!(
-                "PATINA_REQUIRE_KTRACE=1: macOS whole-run containment cannot be verified: ",
-                "ktrace lacks decoded path context and a pre-main/post-init boundary"
-            )
-        );
-        let reason = concat!(
-            "SKIPPED native_trace: macOS ktrace cannot separate loader from guest; ",
-            "static audit and instruction scan are the containment evidence"
-        );
-        writeln!(std::io::stderr(), "{reason}").unwrap();
     }
 }

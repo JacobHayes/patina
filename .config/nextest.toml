@@ -12,10 +12,6 @@ final-status-level = "slow"
 failure-output = "immediate-final"
 
 [profile.local]
-# Keep passing tests' output, printed once at the end: the conformance harness
-# reports a scenario this host cannot judge with a `NOT RUN` line from a
-# passing test, and scripts/check.sh counts those lines in its summary.
-success-output = "final"
 failure-output = "immediate-final"
 slow-timeout = { period = "60s" }
 final-status-level = "slow"

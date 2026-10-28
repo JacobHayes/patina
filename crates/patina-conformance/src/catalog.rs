@@ -217,11 +217,10 @@ pub enum Need {
 impl Need {
     /// A fact of the machine — its CPU, its memory topology, its kernel's
     /// build configuration — rather than a prerequisite a test host is set up
-    /// to meet. Found absent, it leaves the scenario not run even where a
-    /// host oracle is required (`PATINA_REQUIRE_HOST_ORACLE=1`): a runner
+    /// to meet. Found absent, it leaves the scenario not run: a runner
     /// without protection keys is no misconfigured runner. Every other need,
     /// and a hardware need that fails any other way (a limit, a permission,
-    /// a broken detection), still fails there.
+    /// a broken detection), fails the scenario.
     pub fn hardware(self) -> bool {
         match self {
             Need::ProtectionKeys

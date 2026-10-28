@@ -18,8 +18,7 @@
 //! native run that fails a check or dies of a signal it did not announce, a
 //! native-versus-patina difference, a gap that no longer matches — is
 //! reported, `DIVERGES (host H, pinned P)` on stderr and a section of
-//! `$GITHUB_STEP_SUMMARY` when set, and fails nothing;
-//! `PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Such
+//! `$GITHUB_STEP_SUMMARY` when set, and fails nothing. Such
 //! a native run is no oracle: it is compared neither with patina nor with
 //! the other vehicles, and its vehicle's patina leg is reported unjudged,
 //! held only to what needs no oracle (record/replay, trace facts, strace, no
@@ -36,13 +35,12 @@
 //! A host that cannot be the oracle (a kernel lacking a covered
 //! row or older than the scenario's kernel floor, or a run-directory
 //! filesystem, per-user limit or privilege level lacking what the scenario
-//! needs) prints `NOT RUN` with the detected reason; a detection that fails
-//! unexpectedly is a failure. A host kernel implementing rows past the virtual
-//! ABI level is still an oracle: those rows answer their declared ENOSYS in
-//! the native run (only their native observation is not run);
-//! `PATINA_REQUIRE_HOST_ORACLE=1`, `PATINA_REQUIRE_SUD=1` and
-//! `PATINA_REQUIRE_STRACE=1` (set in CI) make the host, SUD and strace cases
-//! failures instead. Every run's streams and logs are kept under the target
+//! needs), or that lacks strace or (on x86_64) syscall-user-dispatch, fails
+//! the scenario. Only a machine fact found absent (no protection keys on this
+//! CPU) prints `NOT RUN` with the detected reason. A host kernel implementing
+//! rows past the virtual ABI level is still an oracle: those rows answer their
+//! declared ENOSYS in the native run (only their native observation is not
+//! run). Every run's streams and logs are kept under the target
 //! dir's `conformance/<scenario>/<vehicle>/`.
 #![cfg(target_os = "linux")]
 mod common;
@@ -66,18 +64,13 @@ mod scenarios;
 
 use leg::{Leg, replaying};
 use oracle::{Oracle, prefixed};
-use process::{logs_root, not_run, required};
+use process::{logs_root, not_run};
 
 /// Run `name` natively and under patina through every vehicle it has.
 fn conform(name: &str) {
     let scenario = catalog::scenario(name).unwrap_or_else(|| panic!("no scenario {name:?}"));
     if let Some(reason) = host::scenario_unmet(scenario) {
-        assert!(
-            !required("PATINA_REQUIRE_HOST_ORACLE"),
-            "PATINA_REQUIRE_HOST_ORACLE=1 but this host kernel is no oracle for {name}: {reason}"
-        );
-        not_run(name, &reason);
-        return;
+        panic!("this host kernel is no oracle for {name}: {reason}");
     }
     let logs = logs_root().join(name.replace('/', "-"));
     let _ = std::fs::remove_dir_all(&logs);
@@ -91,11 +84,10 @@ fn conform(name: &str) {
             "detecting what {name} needs failed: {reason}"
         );
         // A machine fact found absent (no protection keys on this CPU) is no
-        // misconfigured host: not run even where an oracle is required.
+        // misconfigured host: not run.
         assert!(
-            (need.hardware() && reason.cause == Cause::Absent)
-                || !required("PATINA_REQUIRE_HOST_ORACLE"),
-            "PATINA_REQUIRE_HOST_ORACLE=1 but this host is no oracle for {name}: {reason}"
+            need.hardware() && reason.cause == Cause::Absent,
+            "this host is no oracle for {name}: {reason}"
         );
         not_run(name, &reason);
         return;

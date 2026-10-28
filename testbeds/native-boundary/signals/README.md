@@ -24,8 +24,7 @@ calling it, and explicit guest SIGSYS generation aborts after registration. The
 unit detector also verifies the host action is unchanged. It also owns, under
 the timestamp-counter trap, the SIGSEGV cases: a registration through either
 door leaves the counter read answered and the handler unrun. These inline raw cases require x86_64 Linux SUD;
-missing capability is reported explicitly and `PATINA_REQUIRE_SUD=1` makes
-missing evidence fatal.
+missing SUD there fails them.
 
 `segv_routing.c` gives a guest its own SIGSEGV handler: an `SA_ONSTACK` one
 catches a stack overflow on its alternate stack and an access fault, leaving

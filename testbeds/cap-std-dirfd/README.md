@@ -52,8 +52,7 @@ The script builds and stages under `CARGO_TARGET_DIR`, defaulting to
 This testbed is **SUD-only**, for the same reason `rustix-default` is: the raw
 `*at` calls need the kernel's generic-entry syscall-user-dispatch (x86_64
 ≥ 5.11; arm64 does not have it yet). On a non-SUD kernel or a non-Linux host
-`run-patina.sh` prints a **loud, counted** `cap-std-dirfd: SKIPPED 1 …` line and
-exits 0 — never a silent pass. Where SUD is present it asserts: the binary
+`run-patina.sh` fails; only x86_64 Linux runs it. Where SUD is present it asserts: the binary
 audits as `direct-syscall (SUD-managed)`, runs with the expected
 `CAPSTD_RESULT`, is byte-identical across same-seed repeats **on stdout and the
 captured stderr**, and records/replays byte-identically, then prints

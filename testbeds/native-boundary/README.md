@@ -58,14 +58,9 @@ location without an override.
 Tokio supplies no rustix configuration override: the product selects raw on
 SUD targets and injects `rustix_use_libc` elsewhere.
 
-`mise run check`, `mise run smoke`, and CI run the FIFO/rustix-default/cap-std
-workloads through `scripts/check-native-testbeds.sh`. Its independent kernel
-probe requires each SUD workload's exact `branch=sud` receipt on a capable
-host; child success or a false-negative capability skip is insufficient.
-Unsupported hosts must emit the expected counted skip. `PATINA_REQUIRE_SUD=1`
-requires live SUD in both Rust tests and the wrapper, and is set on x86_64 Linux
-CI rows; a filtered capability probe is a failure, not a green refusal. The wrapper's selftest
-plants a false-negative probe, a duplicate receipt and a failed child.
+`mise run check` and CI run the FIFO workload everywhere and the
+rustix-default/cap-std/go-guest workloads on x86_64 Linux, where missing SUD
+fails both the Rust tests and those testbeds.
 
 ### Polling on a sleeping peer
 
@@ -193,9 +188,8 @@ not claim host equivalence.
 The std tracing filter has a narrow loader contract. Cargo's injected
 `LD_LIBRARY_PATH` is removed for direct guest exec; no extra directory accesses
 are allowlisted. Conformance has its own broader signal/process filter.
-`PATINA_REQUIRE_STRACE=1` fails when strace is missing and is set on every Linux
-CI row. `PATINA_REQUIRE_KTRACE=1` fails on macOS because ktrace lacks decoded
-paths and a usable initialization boundary. Unsupported tracing is visibly
+A missing strace fails the Linux trace tests. macOS has no whole-run trace test
+because ktrace lacks decoded paths and a usable initialization boundary. Unsupported tracing is visibly
 reported, not claimed as runtime containment. Unsupported SUD/TSC capabilities
 execute pre-run refusal assertions. The SUD-only vDSO property reports missing
 evidence without building a substitute guest; requiring SUD makes absence fatal.

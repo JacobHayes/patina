@@ -37,8 +37,7 @@ scenario's lines as a Markdown section appended to `$GITHUB_STEP_SUMMARY`
 when it is set. Such a native run is no oracle: it is compared neither with
 patina nor with the other vehicles, and its vehicle's patina leg is reported
 unjudged, held only to what needs no oracle (record/replay, trace facts,
-strace, no undeclared crash).
-`PATINA_REQUIRE_PINNED_KERNEL=1` judges any host as the pinned one. Native
+strace, no undeclared crash). Native
 oracles of two vehicles that disagree, a native run that fails otherwise
 (records nothing, stops at a precondition), patina's record/replay, trace
 and strace checks, and a run that crashes or overruns its deadline fail on
@@ -54,8 +53,7 @@ restricts (unprivileged BPF, perf events, kernel-fault userfaultfd) — detected
 live, an unmet one is reported not run and a detection that fails
 unexpectedly is a failure), the
 oldest kernel whose behaviour its checks assert (`kernel_floor`), its gaps, and
-the facts its recorded trace must show. Where a host oracle is required
-(`PATINA_REQUIRE_HOST_ORACLE=1`, CI), an unmet need or a kernel below a
+the facts its recorded trace must show. An unmet need or a kernel below a
 scenario's floor fails the test — the runner is misconfigured — except a
 machine fact found absent (`Need::hardware`: protection keys, shadow stacks,
 secret memory, one NUMA node, 4-level paging, no CPUID faulting), which no runner is set up to provide: that

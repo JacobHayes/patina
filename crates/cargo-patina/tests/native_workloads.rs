@@ -447,44 +447,32 @@ fn keyutils_password_lifecycle_is_isolated_and_replayable() {
     let mut canaries = Canaries(Vec::new());
     // SAFETY: integer arguments to anonymous JOIN_SESSION_KEYRING.
     let host_ring = unsafe { libc::syscall(libc::SYS_keyctl, 1, 0, 0, 0, 0) };
-    if host_ring < 0 {
-        let error = std::io::Error::last_os_error();
+    assert!(
+        host_ring >= 0,
+        "host key canary unavailable: {}",
+        std::io::Error::last_os_error()
+    );
+    for name in [
+        c"keyring-rs:password-user@patina-testbed",
+        c"keyring:password-user@patina-testbed",
+    ] {
+        // SAFETY: valid type/description strings and a one-byte payload.
+        let serial = unsafe {
+            libc::syscall(
+                libc::SYS_add_key,
+                c"user".as_ptr(),
+                name.as_ptr(),
+                b"H".as_ptr(),
+                1,
+                host_ring,
+            )
+        };
         assert!(
-            matches!(
-                error.raw_os_error(),
-                Some(libc::EPERM | libc::EACCES | libc::ENOSYS)
-            ),
-            "{error}"
+            serial > 0,
+            "host canary: {}",
+            std::io::Error::last_os_error()
         );
-        assert_ne!(
-            std::env::var("PATINA_REQUIRE_HOST_ORACLE").as_deref(),
-            Ok("1"),
-            "host key canary unavailable: {error}"
-        );
-        eprintln!("NOT RUN: host keyring canary ({error}); virtual lifecycle still runs");
-    } else {
-        for name in [
-            c"keyring-rs:password-user@patina-testbed",
-            c"keyring:password-user@patina-testbed",
-        ] {
-            // SAFETY: valid type/description strings and a one-byte payload.
-            let serial = unsafe {
-                libc::syscall(
-                    libc::SYS_add_key,
-                    c"user".as_ptr(),
-                    name.as_ptr(),
-                    b"H".as_ptr(),
-                    1,
-                    host_ring,
-                )
-            };
-            assert!(
-                serial > 0,
-                "host canary: {}",
-                std::io::Error::last_os_error()
-            );
-            canaries.0.push(serial);
-        }
+        canaries.0.push(serial);
     }
     let out = g.assert_run_success(7, &[]).stdout;
     assert_exact_line(
