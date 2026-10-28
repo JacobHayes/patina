@@ -96,7 +96,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The executable's bytes, mapped once: the build identity and the pre-run
     // gate both judge exactly these.
     let image = fs::File::open(&binary)
-        .and_then(|file| Image::map(&file))
+        .and_then(Image::map)
         .map_err(|error| {
             CliError(format!(
                 "failed to read native program {}: {error}",
