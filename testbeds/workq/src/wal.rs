@@ -208,6 +208,11 @@ impl Wal {
         ignore_short_write: bool,
     ) -> Result<(Self, Vec<FramedRecord>), WalError> {
         fs::create_dir_all(dir)?;
+        // Creating the data directory is a namespace op in its parent: without
+        // this fsync a crash loses the directory, and the whole log with it.
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fsync_dir(parent)?;
+        }
         let recovered = recover(dir)?;
         let path = dir.join(segment_name(recovered.last_index));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
