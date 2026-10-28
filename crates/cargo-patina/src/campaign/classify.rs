@@ -120,8 +120,8 @@ pub enum CampaignClass {
 }
 
 impl CampaignClass {
-    /// Every class, in severity order. [`every_class_is_reachable_from_structured_facts`]
-    /// requires each class a single run's facts reach to be listed here, in order.
+    /// Every class, in severity order. The compiler holds it complete: see
+    /// the exhaustive match below the `impl`.
     pub const ALL: &'static [CampaignClass] = &[
         CampaignClass::Ok,
         CampaignClass::Nondeterminism,
@@ -235,6 +235,39 @@ impl CampaignClass {
         self.is_failure() && !matches!(self, CampaignClass::Infra | CampaignClass::StarvationStall)
     }
 }
+
+// `CampaignClass::ALL` is complete by construction. The match has no
+// wildcard, so a variant added to the enum does not compile until it is given
+// a place here, its index in `ALL`; the loop then holds every entry of `ALL`
+// to its place and to declaration (severity) order.
+const _: () = {
+    const fn place(class: CampaignClass) -> usize {
+        match class {
+            CampaignClass::Ok => 0,
+            CampaignClass::Nondeterminism => 1,
+            CampaignClass::Violation => 2,
+            CampaignClass::Liveness => 3,
+            CampaignClass::VacuousFsFault => 4,
+            CampaignClass::VacuousDnsFault => 5,
+            CampaignClass::VacuousNetFault => 6,
+            CampaignClass::VacuousEntropyFault => 7,
+            CampaignClass::VacuousClockFault => 8,
+            CampaignClass::VacuousCustomOpFault => 9,
+            CampaignClass::VacuousSwarm => 10,
+            CampaignClass::GuestAbort => 11,
+            CampaignClass::FailClosedAbort => 12,
+            CampaignClass::StarvationStall => 13,
+            CampaignClass::Infra => 14,
+            CampaignClass::Unclassified => 15,
+        }
+    }
+    let all = CampaignClass::ALL;
+    let mut index = 0;
+    while index < all.len() {
+        assert!(place(all[index]) == index && all[index] as usize == index);
+        index += 1;
+    }
+};
 
 /// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). A guest that dies
 /// on SIGABRT has either hit a patina refusal (the shim aborts fail-closed via
@@ -1167,20 +1200,11 @@ mod tests {
             .filter(|class| !class.is_cross_run())
             .collect();
         assert_eq!(fired, single_run);
-        // Every class token round-trips, and ALL is in Ord (severity) order.
-        {
-            for class in CampaignClass::ALL {
-                assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
-            }
-            let mut sorted = CampaignClass::ALL.to_vec();
-            sorted.sort();
-            assert_eq!(
-                sorted,
-                CampaignClass::ALL.to_vec(),
-                "CampaignClass::ALL must be in `Ord` (severity) order"
-            );
-            assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
+        // Every class token round-trips (ALL's order is checked at compile time).
+        for class in CampaignClass::ALL {
+            assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
         }
+        assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
     }
 
     /// The structural half of the guest-agnostic doctrine: no built-in class may
