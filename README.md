@@ -378,7 +378,7 @@ changes within the 6.8.0 series (`statmount`/`listmount` carry later
 releases' answers), so the pin is effectively the 6.8.0-139 build the oracle
 host runs: a host kernel update that moves an answer is a pin question. Moving to a newer kernel is an explicit, wholesale migration.
 
-If you use [mise](https://mise.jdx.dev/): `mise run check:fast` is the inner-loop signal, `mise run check` is
+If you use [mise](https://mise.jdx.dev/): `mise run check` is
 the local landing gate, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
 feedback, use `mise run check:native-abi`; the individually selectable native test
 targets and their platform coverage are listed in

@@ -14,9 +14,7 @@ Each guest's internal assertions and its harness assertions form the proof.
 | `end_to_end` | `text_metadata_probe.rs`: native-return assertion, declared executable-text metadata refusal, and absent trace facts in the libtest result; portable import-refusal companion. `address_leak_probe.rs`: a guest whose failure token or recorded schedule comes from its host-randomized stack address (campaigns run it under `--allow-randomized-address-layout`), and deterministic twins, for campaign reproduction verification (`NONDETERMINISM`) | Metadata Linux x86_64; import refusal Linux + macOS; address leak Linux |
 
 All seven targets run in `mise run check` and the workspace-test CI jobs:
-Linux on both architectures and macOS, all on the pinned toolchain. They are **not** in
-`check:fast`. That tier retains `shim_host_alias`'s compiled-object scan and
-planted leak, and `test_support`'s parsing/deadline checks.
+Linux on both architectures and macOS, all on the pinned toolchain.
 
 ```sh
 mise run check:native-abi

@@ -73,21 +73,15 @@ Prefer JSON when parsing results programmatically.
 With [mise](https://mise.jdx.dev/) for the non-Rust tools, and rustup, which
 installs the Rust toolchain, components and targets `rust-toolchain.toml` pins:
 
-- `mise run check:fast` — the inner-loop tier: fmt, clippy (host, plus
+- `mise run check` — the local pre-landing battery: fmt, clippy (host, plus
   `aarch64-apple-darwin` for Darwin-cfg code from Linux or
   `x86_64-unknown-linux-gnu` for Linux-cfg code from macOS; CI's gates job lints
-  both Linux architectures natively), every workspace
-  test except `cargo-patina`'s `end_to_end` and seven native execution targets
-  (syscall conformance among them), the cheap classifier selftests,
-  WASI validation, and cross-target smoke. It is designed to
-  give ordinary edits an honest signal quickly, but it is not landing evidence.
-- `mise run check` — the local pre-landing battery: the cheap checks above,
-  docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
+  both Linux architectures natively), the cheap classifier selftests, docs, packaging, the `patina-dst` macros feature test, the full pinned workspace
   test suite including `end_to_end`, native acceptance tests and the syscall
   conformance scenarios, WASI/cross smoke, and the workq/pubsub/macro-adopter
   and FIFO/rustix-default/cap-std testbeds. Cheap failure checks run first,
-  then one build of the workspace suite, whose `cargo-patina` drives the CLI
-  gates and every testbed; the suite then runs alone under nextest, and the
+  then one build of the workspace suite, whose `cargo-patina` drives every
+  testbed; the suite then runs alone under nextest, and the
   testbed and smoke rungs follow it concurrently. The runner prints
   one overall result and a retained log directory (commands and per-rung timings),
   suppresses successful command chatter, and replays a failed rung's complete log. **This is the local landing gate.** CI/final gates add
@@ -103,22 +97,20 @@ runner behind the mise tasks, not a separate tier.
 
 What to run after touching common surfaces:
 
-- Runtime crates (`patina-runtime`, drivers, traces, schedulers): start with
-  `mise run check:fast`; run `mise run check` before handing off.
+- Runtime crates (`patina-runtime`, drivers, traces, schedulers): run the
+  focused crate tests; run `mise run check` before handing off.
 - Native shim C/Rust or native audit/run behavior: run the focused command you
-  need, then `mise run smoke` or `mise run check`; use `mise run check:fast` for
-  a quick guardrail after small edits.
+  need, then `mise run smoke` or `mise run check`.
 - Harness/SDK macro behavior: run the focused crate or testbed test, then
-  `mise run check:fast`; run `mise run check` if it changes runtime semantics.
+  `mise run check`.
 - CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs` and its `help/` modules, run
-  the focused CLI tests through `mise exec --`, then `mise run check:fast`.
+  the focused CLI tests through `mise exec --`, then `mise run check`.
 
 Gates worth knowing individually:
 
 - `mise run check:native-abi` — focused native ABI integration tests; other native
   targets (`native_conformance`, `native_containment`, `native_raw`, `native_signals`,
-  `native_trace`, `native_workloads`) run in the full workspace-test tier and CI,
-  not `check:fast`.
+  `native_trace`, `native_workloads`) run in the full workspace-test tier and CI.
 - `mise run conformance` — the syscall conformance scenarios
   (`crates/patina-conformance`) natively and under patina, the live host kernel
   as the oracle — authoritative only on the pinned system (Ubuntu 24.04: the

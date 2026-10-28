@@ -20,23 +20,11 @@ ast-grep = "0.45.3"
 # The workspace test runner, locally (scripts/check.sh) and in CI.
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 
-# The check runner keeps cheap, high-signal failures serial, builds the
-# workspace suite once and drives the CLI gates with its cargo-patina, runs only
-# measured overlap groups concurrently, retains per-rung timings in logs, hides
-# successful command chatter, and replays complete failure logs. That last
-# failure-log contract is the mise feature gap that keeps the small shell runner
-# in place.
+# mise can't hide a passing rung's output while replaying a failed rung's
+# complete log, so a small shell runner does.
 [tasks.check]
 description = "Full local pre-landing validation (audit-corpus runs in CI/final gates)"
-run = "scripts/check.sh full"
-
-# Inner-loop tier: fmt, host and cross-cfg clippy, all workspace tests except the
-# cargo-patina end_to_end and native execution targets (conformance included),
-# cheap selftests, flag and toolchain drift, WASI validation, and
-# cross-target smoke.
-[tasks."check:fast"]
-description = "Fast iteration tier of `check`; not sufficient for landing"
-run = "scripts/check.sh fast"
+run = "scripts/check.sh"
 
 [tasks."check:native-abi"]
 description = "Targetable native ABI feedback, without the full landing battery"

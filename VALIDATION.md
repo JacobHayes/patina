@@ -54,11 +54,6 @@ Required locally before landing (`mise run check`):
 - the workq/pubsub/macro-adopter and FIFO/rustix-default/cap-std testbeds; the
   syscall conformance scenarios run with the native acceptance tests
 
-`mise run check:fast` is the inner loop: fmt, host and cross-cfg clippy, every workspace
-test except cargo-patina's e2e/native execution targets (conformance among them),
-the cheap selftests, WASI validation, and
-cross-target smoke. It is intentionally not landing evidence.
-
 Every CI job installs Rust with rustup from `rust-toolchain.toml` and the other
 tools through mise from the committed lock. Cargo build caches include the pin
 files in their keys and only main writes caches.
@@ -205,7 +200,6 @@ integration testing, with reviewable guests in `testbeds/native-boundary/`:
 
 The seven native targets run in the full `check` workspace-test rung, in
 both Linux CI architectures and in the macOS job on the pinned toolchain.
-`check:fast` retains the cheap `shim_host_alias` object scan, not native execution.
 `mise run check:native-abi` selects just `native_abi`; a libtest filter selects an
 individual proof. The guest/build/gate map is in
 `testbeds/native-boundary/README.md`. The independent host-oracle scenarios

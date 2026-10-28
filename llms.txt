@@ -448,10 +448,8 @@ dev-dependency use under plain `cargo test`.
 
 ## Docs
 
-- Validation ladder: `mise run check:fast` is the inner loop (fmt, the four
-  clippy passes, workspace tests except cargo-patina's e2e/native execution targets,
-  cheap selftests, MSRV cargo check, WASI, cross smoke).
-  `mise run check` is the local landing gate (adds docs, packaging, full stable
+- Validation ladder: `mise run check` is the local landing gate (fmt, the
+  clippy passes, cheap selftests, docs, packaging, full stable
   tests including e2e, native acceptance tests and syscall conformance, ecosystem
   testbeds, and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86
   suite for CI/final-gate evidence.
@@ -480,8 +478,7 @@ dev-dependency use under plain `cargo test`.
 native targets are `native_conformance`, `native_containment`, `native_raw`,
 `native_signals`, `native_trace` and `native_workloads`; use Cargo's test-name
 filter for a single proof (one conformance scenario is one test, e.g.
-`fs_rw`). All run in `check` and the Linux/macOS workspace-test CI jobs, not
-`check:fast`. The full gate also runs receipt-checked FIFO/rustix-default/cap-std
-testbeds. See `testbeds/native-boundary/README.md` for
+`fs_rw`). All run in `check` and the Linux/macOS workspace-test CI jobs. The full gate
+also runs the FIFO/rustix-default/cap-std testbeds. See `testbeds/native-boundary/README.md` for
 exact owners and platform limits; Linux-only oracle expectations do not replace
 portable native ABI tests.

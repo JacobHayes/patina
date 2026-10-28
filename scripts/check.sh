@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
-# Timed, quiet orchestration for Patina's local validation gates.
-# Successful command output is suppressed; a failure replays its complete log.
-#
-# This script stays deliberately small-but-real because mise's task runner can
-# sequence tasks, limit jobs, print timings, and choose output styles, but it
-# cannot currently provide Patina's required output contract: hide successful
-# rung logs while replaying a failed rung's complete stdout/stderr. Keep the
-# ladder here until mise grows that behavior.
+# Patina's local landing gate (`mise run check`). Successful rungs are silent;
+# a failed rung replays its command and complete log. Every rung's log, with its
+# timing, is kept in the directory the OVERALL line names.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,11 +13,6 @@ export CARGO_TARGET_DIR="$check_target_base/serial"
 # shares the native shim builds of the serial target, whatever target dir the
 # guest itself builds in, so a check builds each shim profile once.
 export PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR"
-# The workspace suite's own cargo-patina (the test profile, which optimizes the
-# third-party crates and the guest scanner) drives every gate that needs a CLI,
-# so a check builds the CLI once.
-patina_cli="$CARGO_TARGET_DIR/debug/cargo-patina"
-testbed_env=(env PATINA_CLI="$patina_cli")
 # One test process per Cargo build job by default: a test can start guest
 # builds of its own, so this keeps the suite inside the build cap the host
 # already sets. NEXTEST_TEST_THREADS (nextest's own variable) overrides it.
@@ -36,45 +26,16 @@ case "$(uname -s)/$(uname -m)" in
   Linux/aarch64) cross_clippy=(aarch64-apple-darwin x86_64-unknown-linux-gnu) ;;
   *) cross_clippy=(aarch64-apple-darwin aarch64-unknown-linux-gnu) ;;
 esac
+
 # The native ecosystem testbeds, one after another; the SUD-only ones (and Go,
-# whose runtime issues raw syscalls) run only where SUD exists.
-native_testbeds=testbeds/fifo-ipc/run-patina.sh
-if [[ $(uname -s)/$(uname -m) == Linux/x86_64 ]]; then
-  native_testbeds+=' && testbeds/rustix-default/run-patina.sh && testbeds/cap-std-dirfd/run-patina.sh && testbeds/go-guest/run-patina.sh'
-fi
-
-usage() {
-  cat <<'EOF'
-Usage: scripts/check.sh <full|fast>
-
-  full  Full local pre-landing gate. Cheap checks, host and cross-cfg clippy,
-        and docs run first, then one build of the workspace suite,
-        whose cargo-patina drives the CLI gates. The workspace suite (nextest,
-        e2e and native acceptance included) then runs alongside the doctests,
-        crate packaging, WASI and cross-target smoke, and the native
-        ecosystem, workq, pubsub and macro-adopter testbeds.
-  fast  Inner-loop gate; excludes cargo-patina end_to_end and the seven native
-        execution targets and the landing-only docs/packaging/testbed rungs.
-        Targeted native ABI feedback: mise run check:native-abi.
-
-Successful rungs are silent; the overall result includes retained logs with
-per-rung commands and timings. On failure, the
-complete rung log and exact command are printed. The workspace suite runs
-under nextest (profile `local`) with NEXTEST_TEST_THREADS tests at a time,
-else one per CARGO_BUILD_JOBS job, else one per two CPUs. Serial work, the workspace suite and the doctests share one Cargo
-target dir; every other parallel rung gets its own under
-target/check/parallel/, plus the suite's cargo-patina (PATINA_CLI). Every
-guest shares the serial target's shim builds (PATINA_SHIM_TARGET_DIR).
-PATINA_CHECK_JOBS is intentionally not exposed: the full profile uses one
-reviewed concurrency group whose members have independent scratch/output paths.
-EOF
+# whose runtime issues raw syscalls) run only on x86_64 Linux.
+native_testbeds() {
+  testbeds/fifo-ipc/run-patina.sh || return
+  [[ $(uname -s)/$(uname -m) == Linux/x86_64 ]] || return 0
+  testbeds/rustix-default/run-patina.sh &&
+    testbeds/cap-std-dirfd/run-patina.sh &&
+    testbeds/go-guest/run-patina.sh
 }
-
-case ${1:-} in
-  full|fast) profile=$1 ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
 
 logs=$(mktemp -d "${TMPDIR:-/tmp}/patina-check.XXXXXX") || exit 1
 total_start=$(date +%s)
@@ -90,8 +51,8 @@ finish() {
   local status=$?
   local result=PASS
   ((status == 0)) || result=FAIL
-  printf 'OVERALL %s %s (passed=%s; %ss); logs: %s\n' \
-    "$result" "$profile" "$passed" "$(( $(date +%s) - total_start ))" "$logs"
+  printf 'OVERALL %s (passed=%s; %ss); logs: %s\n' \
+    "$result" "$passed" "$(( $(date +%s) - total_start ))" "$logs"
 }
 
 stop_children() {
@@ -203,24 +164,6 @@ workspace_nextest() {
   cargo nextest run --profile local --locked --test-threads "$test_threads" "$@"
 }
 
-run_fast_workspace_tests() {
-  # Keep the expensive execution targets in the full and focused gates.
-  # Enumerate the remaining cargo-patina targets alongside the other packages.
-  local cargo_patina_targets=(--lib --bin cargo-patina)
-  local test_path test_name
-  while IFS= read -r test_path; do
-    test_name=$(basename "${test_path%.rs}")
-    case "$test_name" in
-      native_abi|native_conformance|native_containment|native_raw|native_signals|native_trace|native_workloads) continue ;;
-    esac
-    cargo_patina_targets+=(--test "$test_name")
-  done < <(find crates/cargo-patina/tests -maxdepth 1 -type f -name '*.rs' ! -name end_to_end.rs | LC_ALL=C sort)
-
-  workspace_nextest --workspace --exclude cargo-patina &&
-    workspace_nextest -p cargo-patina "${cargo_patina_targets[@]}" &&
-    cargo test --quiet --doc --workspace --locked
-}
-
 run_full() {
   # Cheap, high-signal failures stay serial and stop before expensive work.
   run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
@@ -235,7 +178,8 @@ run_full() {
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
   run_rung 'macro feature test' cargo test --quiet -p patina-dst --features macros --locked || return $?
-  # One build of the workspace suite; its cargo-patina drives every later gate.
+  # One build of the workspace suite; its cargo-patina (the test profile, which
+  # optimizes the third-party crates and the guest scanner) drives every testbed.
   run_rung 'workspace test build' workspace_nextest --workspace --no-run || return $?
 
   # The workspace suite (the native_conformance scenarios included) and every
@@ -248,44 +192,19 @@ run_full() {
   # script's own runtime scratch paths. The multiproc pending-gap battery runs
   # in CI.
   start_rung_in "$CARGO_TARGET_DIR" 'workspace tests (includes e2e)' workspace_nextest --workspace
-  start_rung 'native ecosystem testbeds' "${testbed_env[@]}" bash -c "$native_testbeds"
-  start_rung 'workq testbed' "${testbed_env[@]}" testbeds/workq/run-patina.sh
-  start_rung 'macro adopter testbed' "${testbed_env[@]}" testbeds/patina-macro-adopter/run.sh
-  start_rung 'pubsub testbed' "${testbed_env[@]}" testbeds/pubsub/run-patina.sh
-  start_rung 'cross-target smoke' "${testbed_env[@]}" scripts/smoke-cross-target.sh
-  start_rung 'WASI validation' "${testbed_env[@]}" scripts/validate-wasi.sh
   start_rung_in "$CARGO_TARGET_DIR" 'doctests' cargo test --quiet --doc --workspace --locked
   # Every workspace member packages cleanly (manifest metadata, readme paths,
   # include/exclude). --no-verify skips the per-crate verify build; the release
   # dry run (scripts/publish.sh) covers that and the license-text audit.
   start_rung_in "$CARGO_TARGET_DIR" 'crate packaging' cargo package --workspace --no-verify --locked --allow-dirty
+  export PATINA_CLI="$CARGO_TARGET_DIR/debug/cargo-patina"
+  start_rung 'native ecosystem testbeds' native_testbeds
+  start_rung 'workq testbed' testbeds/workq/run-patina.sh
+  start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
+  start_rung 'pubsub testbed' testbeds/pubsub/run-patina.sh
+  start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
+  start_rung 'WASI validation' scripts/validate-wasi.sh
   wait_rungs || return $?
 }
 
-run_fast() {
-  run_rung 'syscall generator offline detectors' python3 -B scripts/test-refresh-syscalls.py || return $?
-  run_rung 'format' cargo fmt --all -- --check || return $?
-  run_rung 'structural lints' scripts/check-structure.sh || return $?
-  run_rung 'host clippy' cargo clippy --workspace --all-targets --locked -- -D warnings || return $?
-  for target in "${cross_clippy[@]}"; do
-    run_rung "$target clippy" cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings || return $?
-  done
-
-  # The fast test rung is cargo-heavy enough to inflate every other cargo-using
-  # smoke when overlapped, even though it no longer contains the e2e binary.
-  # Run it alone, then group the short independent smoke/selftest rungs. Its
-  # cargo-patina drives the CLI gates after it.
-  run_rung 'workspace tests (no e2e/native execution targets)' run_fast_workspace_tests || return $?
-  run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
-  run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
-  run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?
-
-  start_rung 'cross-target smoke' "${testbed_env[@]}" scripts/smoke-cross-target.sh
-  start_rung 'WASI validation' "${testbed_env[@]}" scripts/validate-wasi.sh
-  wait_rungs || return $?
-}
-
-case $profile in
-  full) run_full ;;
-  fast) run_fast ;;
-esac
+run_full

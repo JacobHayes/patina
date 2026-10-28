@@ -40,10 +40,7 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
 - Use the cheapest check that can catch the expected failure first, and encode
   recurring check sequences as one command or script. A prose checklist is not a
   gate.
-- `mise run check:fast` is an inner-loop tier, not landing evidence. It includes
-  fmt, host and cross-cfg clippy, all workspace tests except the `cargo-patina`
-  `end_to_end` binary and the seven native execution targets, cheap selftests, flag and toolchain
-  drift, WASI, and cross-target smoke. `mise run check` is the default local
+- `mise run check` is the default local
   landing gate; CI/final gates add audit corpus breadth. For runtime/shim/trace/target changes, the native acceptance
   targets (`native_abi`, `native_conformance`, `native_containment`, `native_raw`,
   `native_signals`, `native_trace`, `native_workloads`) and WASI/cross-target checks are
