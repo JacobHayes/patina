@@ -200,4 +200,72 @@ mod tests {
             "missing loud refusal pointing at the native path:\n{stderr}"
         );
     }
+
+    // `run <package dir>` builds on the fly and must reach the same pre-run gate
+    // a prebuilt binary of that package does: one refused package (an
+    // uninterposed process-class import kept behind an opaque branch) and one
+    // allowed, each judged the same way on both paths.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn run_package_dir_and_its_prebuilt_binary_get_the_same_gate_verdict() {
+        let directory = tempdir().unwrap();
+        let verdict = |out: &Output| {
+            let envelope: serde_json::Value = serde_json::from_slice(&out.stdout)
+                .unwrap_or_else(|error| panic!("{error}: {out:?}"));
+            (
+                out.status.code(),
+                envelope["refusal"]["class"].clone(),
+                envelope["guest_exit"].is_null(),
+            )
+        };
+        for (name, main, refused) in [
+            (
+                "refused",
+                "unsafe extern \"C\" { fn system(command: *const u8) -> i32; }\n\
+                 fn main() {\n\
+                 if std::hint::black_box(0) != 0 { unsafe { system(std::ptr::null()); } }\n\
+                 }\n",
+                true,
+            ),
+            ("allowed", "fn main() {}\n", false),
+        ] {
+            let pkg = directory.path().join(name);
+            write_plain_package(&pkg, &format!("patina-gate-{name}"), main);
+            let bin = directory.path().join(format!("{name}-bin"));
+            invoke(
+                &pkg,
+                &[
+                    "build",
+                    pkg.to_str().unwrap(),
+                    "--output",
+                    bin.to_str().unwrap(),
+                ],
+            );
+            let [prebuilt, package_dir] = [&bin, &pkg].map(|target| {
+                verdict(&invoke_unchecked(
+                    env!("CARGO_BIN_EXE_cargo-patina"),
+                    &pkg,
+                    &[
+                        "run",
+                        "--seed",
+                        "1",
+                        "--format",
+                        "json",
+                        target.to_str().unwrap(),
+                    ],
+                ))
+            });
+            assert_eq!(prebuilt, package_dir, "{name}");
+            assert_eq!(
+                prebuilt.2, refused,
+                "{name}: did the guest run? {prebuilt:?}"
+            );
+            if refused {
+                assert_eq!(prebuilt.0, Some(2), "{name}");
+                assert_eq!(prebuilt.1, "native_prerun_audit", "{name}");
+            } else {
+                assert_eq!(prebuilt.0, Some(0), "{name}");
+            }
+        }
+    }
 }
