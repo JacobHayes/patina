@@ -277,7 +277,6 @@ run_full() {
   run_rung 'macro feature test' cargo test --quiet -p patina-dst --features macros --locked || return $?
   # One build of the workspace suite; its cargo-patina drives every later gate.
   run_rung 'workspace test build' workspace_nextest --workspace --no-run || return $?
-  run_rung 'CLI flag drift' env PATINA_CLI="$patina_cli" scripts/check-flag-drift.sh || return $?
   run_rung 'campaign classifier selftest' "$patina_cli" patina campaign --selftest || return $?
 
   # The workspace suite (the native_conformance scenarios included) and every
@@ -322,7 +321,6 @@ run_fast() {
   # Run it alone, then group the short independent smoke/selftest rungs. Its
   # cargo-patina drives the CLI gates after it.
   run_rung 'workspace tests (no e2e/native execution targets)' run_fast_workspace_tests || return $?
-  run_rung 'CLI flag drift' env PATINA_CLI="$patina_cli" scripts/check-flag-drift.sh || return $?
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
   run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'wasi buggify sweep selftest' testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest || return $?

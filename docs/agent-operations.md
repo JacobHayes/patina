@@ -66,9 +66,8 @@ belong in the gitignored `AGENTS.local.md` at the repository root.
   trace, the actual on-disk state) rather than the oracle's word. False positives
   come from harness/oracle bugs far more often than from the tool under it, and an
   approximate repro that fails to reproduce proves nothing.
-- For docs-only changes that mention CLI flags, run `scripts/check-flag-drift.sh`
-  at minimum. If a doc or script mentions a Patina flag, it must come from the
-  generated CLI registry rather than memory.
+- If a doc or script mentions a Patina flag, it must come from the generated
+  CLI registry rather than memory.
 - Keep commits targeted and linear, but avoid wasting CI with rapid-fire pushes
   for commits that are ready back-to-back. If a batch is ready together, push it
   once; if the next commit will not be ready soon, push the current one and watch

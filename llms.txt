@@ -450,7 +450,7 @@ dev-dependency use under plain `cargo test`.
 
 - Validation ladder: `mise run check:fast` is the inner loop (fmt, the four
   clippy passes, workspace tests except cargo-patina's e2e/native execution targets,
-  cheap selftests, flag drift, MSRV cargo check, WASI, cross smoke).
+  cheap selftests, MSRV cargo check, WASI, cross smoke).
   `mise run check` is the local landing gate (adds docs, packaging, full stable
   tests including e2e, native acceptance tests and syscall conformance, ecosystem
   testbeds, and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86

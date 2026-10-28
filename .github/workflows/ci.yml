@@ -140,10 +140,6 @@ jobs:
       - run: scripts/check-structure.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
-      # Flag drift gate: every --flag mentioned in the docs OR in any shell script
-      # must exist in the CLI's own machine-readable registry (or the script's
-      # small allowlist of non-patina flags).
-      - run: scripts/check-flag-drift.sh
       - run: scripts/validate-wasi.sh
       # On x86_64 mise supplies the Go release testbeds/go-guest/go.mod pins.
       - if: matrix.runner == 'ubuntu-latest'

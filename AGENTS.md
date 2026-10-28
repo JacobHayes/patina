@@ -78,7 +78,7 @@ the pinned Rust toolchain, components and targets from `rust-toolchain.toml`):
   `x86_64-unknown-linux-gnu` for Linux-cfg code from macOS; CI's gates job lints
   both Linux architectures natively), every workspace
   test except `cargo-patina`'s `end_to_end` and seven native execution targets
-  (syscall conformance among them), the cheap classifier selftests, CLI flag drift,
+  (syscall conformance among them), the cheap classifier selftests,
   toolchain pin drift, WASI validation, and cross-target smoke. It is designed to
   give ordinary edits an honest signal quickly, but it is not landing evidence.
 - `mise run check` — the local pre-landing battery: the cheap checks above,
@@ -115,19 +115,10 @@ What to run after touching common surfaces:
 - Harness/SDK macro behavior: run the focused crate or testbed test, then
   `mise run check:fast`; run `mise run check` if it changes runtime semantics.
 - CLI parser/help/flag behavior: inspect `crates/cargo-patina/src/help.rs` and its `help/` modules, run
-  the focused CLI tests plus `scripts/check-flag-drift.sh` through `mise exec --`,
-  then `mise run check:fast`.
+  the focused CLI tests through `mise exec --`, then `mise run check:fast`.
 
 Gates worth knowing individually:
 
-- `scripts/check-flag-drift.sh` — extracts every flag-shaped token from the gated
-  docs (the `DOCS` list in the script: the root docs, `llms.txt`,
-  `docs/agent-operations.md`, the native-shim/testbed `AGENTS.md` files, and the
-  testbed READMEs) AND from every shell script (`scripts/*.sh`,
-  `testbeds/**/*.sh`), and fails on any flag the CLI registry does not define
-  (beyond a small allowlist of non-patina guest/tool/script flags). If you
-  mention or invoke a patina flag anywhere, it must exist; if you rename a flag,
-  the gate finds every stale mention — in prose or in a script's flag arrays.
 - `mise run check:native-abi` — focused native ABI integration tests; other native
   targets (`native_conformance`, `native_containment`, `native_raw`, `native_signals`,
   `native_trace`, `native_workloads`) run in the full workspace-test tier and CI,

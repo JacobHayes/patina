@@ -44,7 +44,6 @@ Required locally before landing (`mise run check`):
 - `cargo nextest run --workspace` on the pinned toolchain, including the
   `cargo-patina` `end_to_end` integration-test binary, and
   `cargo test --doc --workspace` for the doctests
-- `scripts/check-flag-drift.sh` (CLI flag drift gate over the user-facing docs and every shell script)
 - packaging (`cargo package --workspace --no-verify`) so manifest/readme/include
   drift fails before release work
 - `scripts/check-toolchain.py` checks `mise.lock`, `rust-toolchain.toml`, and
@@ -59,7 +58,7 @@ Required locally before landing (`mise run check`):
 
 `mise run check:fast` is the inner loop: fmt, host and cross-cfg clippy, every workspace
 test except cargo-patina's e2e/native execution targets (conformance among them),
-the cheap selftests, CLI flag drift, toolchain pin drift, WASI validation, and
+the cheap selftests, toolchain pin drift, WASI validation, and
 cross-target smoke. It is intentionally not landing evidence.
 
 Every CI job installs the toolchain through mise using the committed lock.
@@ -71,8 +70,8 @@ These checks must run without network access after dependencies have been
 fetched. For local development, `mise run setup` installs the Rust
 toolchain/components/targets (and the pinned cargo-nextest) needed by these
 gates. After cheap failure checks, the full local gate builds the workspace
-suite once; that build's `cargo-patina` drives the CLI flag-drift and campaign
-selftest gates and every testbed (`PATINA_CLI`), and the suite's native shim
+suite once; that build's `cargo-patina` drives the campaign
+selftest gate and every testbed (`PATINA_CLI`), and the suite's native shim
 builds serve every testbed's guests (`PATINA_SHIM_TARGET_DIR`). The workspace
 suite then runs alone under nextest (one test per Cargo build job), filling
 those shim builds; the doctests, WASI/cross-target smoke and the testbed rungs
@@ -904,7 +903,7 @@ Before a release, run the V2 end-to-end fixture for:
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The routine push/pull-request matrix in `.github/workflows/ci.yml` runs pinned Rust 1.99.1 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace` and sets `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the flag-drift gate, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
+The routine push/pull-request matrix in `.github/workflows/ci.yml` runs pinned Rust 1.99.1 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace` and sets `PATINA_REQUIRE_STRACE=1` so the syscall-containment pass cannot silently skip. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
 
 The GitHub-hosted macOS job runs as a platform safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
 
