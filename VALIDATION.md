@@ -928,7 +928,7 @@ The table shows, per workload and side, the median and p90 wall time, the median
 
 Every run writes one JSON record per workload (schema `patina.bench/v1`) to `target/bench/results/`, or to `--output`. A record holds the commit, date, OS, arch, CPU model and kernel, the workload and its arguments, every run's samples, and the statistics and ratios. It never holds a hostname, a username or a host path. Local records are never committed.
 
-CI runs the benchmark nightly and on manual dispatch. The `bench` job in `.github/workflows/ci.yml` runs ten timed runs per side on Linux x86_64 and aarch64, writes the table to the job summary and uploads its records as an artifact, including after a failure. It builds and runs repository code, so it holds only a read-only token, which it does not persist. When every `bench` job has succeeded on main, the `bench-publish` job, which holds a write token and builds nothing, runs `scripts/bench-publish.sh` to append each platform's records to `data/<os>-<arch>.jsonl` on the `bench-data` branch. That branch holds these data files and nothing else. The script refuses to publish outside a GitHub Actions run of main, and it refuses any record whose commit is not the run's own, so no developer machine's data can land there. When a concurrent job has moved the branch, git refuses the push, so the script fetches the new tip, appends again and retries; nothing is force-pushed. A dispatch with `bench_only` set runs only these jobs; from any other ref the records are computed and nothing is published. Hosted runners are shared machines, so read the series as a trend rather than judging a single night.
+CI does not run the benchmark; run it by hand when a speed change lands.
 
 ## Multi-process pending gaps
 
