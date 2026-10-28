@@ -50,7 +50,7 @@ built="$target_dir/patina/pubsub"
 PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
 
 # No --allow-unsupported-symbols: the harness passes the default-deny gate clean.
-# Escape hatch mirror of workq's: export PATINA_ALLOW_SYMS=name[,name...] if a
+# Escape hatch: export PATINA_ALLOW_SYMS=name[,name...] if a
 # shim/audit refactor transiently unclassifies a std-pulled symbol. The
 # COMMITTED default is empty, so the unqualified default-deny property is
 # enforced.
@@ -76,7 +76,7 @@ cd "$repo_root"
 # The legs below run without `set -e` (each handles its own nonzero exits), so
 # the build prelude must fail CLOSED explicitly: a gate that cannot build must
 # certify nothing — silently reusing a stale prebuilt binary would be a false
-# green (the fuzz-sweep FATAL convention).
+# green.
 if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi

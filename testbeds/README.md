@@ -26,19 +26,12 @@ simulator that depends on the Patina runtime crates directly.
 | [`multiproc/`](multiproc/) | Patina synthetic spawn/wait, fanout, pipeline, C/C++ fork/wait, build waves and SIGCHLD guests, plus process lifecycle adversaries | real native process oracles paired with strict named current-refusal expectations | pending process, exec, descriptor inheritance, signal and shared-memory gaps; native success and current containment are distinct legs |
 | [`bench/`](bench/) | five microworkloads: compute, small-file I/O, a condvar hand-off, and pipe and loopback-TCP round trips | halting, self-checking: each run prints a digest that must be identical natively and under Patina | the cost of each boundary for the overhead benchmark (`mise run bench`); measurement, not a gate |
 
-`workq` is the flagship: `workq/run-patina.sh` runs its full self-checking
-battery (determinism, record/replay, net/fs faults, crash-recovery, buggify
-sweep) on every routine Linux CI run and every macOS run.
-`workq/fuzz-sweep.sh` is the home of the randomized-but-deterministic
-fault-combination campaign (including its schedule-fuzz tier) that runs nightly
-on Linux. `liveness-campaign` and `buggify-wasi`
-are small fixtures. `cargo patina campaign` specs sweep `workq` disk
-crash-restarts (`workq/campaign.json`), pubsub's network faults
-(`pubsub/campaign.json`) and `buggify-wasi` (`buggify-wasi/campaign.json`). `buggify-campaign.sh` (this directory) is the shared
-campaign layer — Wave 2 `PATINA_SDK_REPORT` parsing, one-run
-`cargo patina sites --exercised` join checks, cross-generation coverage
-accumulation, the `ALWAYS_VIOLATION`/`SOMETIMES_UNMET` classes — sourced by the
-workq sweeps.
+`workq` is the flagship: `workq/run-patina.sh` runs its self-checking gate
+(a short campaign, the recovery self-test and the planted-bug catches) on every
+routine Linux CI run and every macOS run. `cargo patina campaign` specs sweep
+`workq` (`workq/campaign.json`) and pubsub (`pubsub/campaign.json`) for 200
+generations nightly, and `buggify-wasi` (`buggify-wasi/campaign.json`).
+`liveness-campaign` and `buggify-wasi` are small fixtures.
 
 Conventions:
 
@@ -63,7 +56,7 @@ Conventions:
   conformance scenarios of `crates/patina-conformance` among them) run in the
   full workspace-test tier and CI. The SUD-only
   rustix-default/cap-std and go-guest gates run on x86_64 Linux. The audit corpus adds CI/final-gate breadth.
-- The sweep/campaign scripts (`fuzz-sweep.sh`, `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
+- The sweep scripts (`audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates
   take no arguments: run them and read the legs they print.
 - Oracles live inside the guest binaries, and they **report through the verdict

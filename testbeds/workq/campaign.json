@@ -1,10 +1,12 @@
 {
   "generations": 200,
-  "guest_args": ["--seed", "7", "--jobs", "16", "--workers", "3", "--producers", "2",
-                 "--base-port", "5001", "--data-dir", "/workq", "--timeout-secs", "120",
+  "guest_args": ["--seed", "7", "--base-port", "5001", "--data-dir", "/workq",
                  "--segment-bytes", "256", "--crash-at-completed", "6",
                  "--ack-ledger", "/workq-acks"],
+  "buggify": true,
+  "swarm": true,
   "faults": ["net", "sleep"],
   "fs_crash_reach": ["write:32", "sync:32", "close:3"],
-  "allow_unmet_sometimes": true
+  "allow_unmet_sometimes": true,
+  "classify": {"patterns": {"LIVENESS": ["WORKQ_FAILURE not-converged"]}}
 }

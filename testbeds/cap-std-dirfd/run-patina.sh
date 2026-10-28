@@ -40,7 +40,7 @@ built="$out/cap-std-dirfd"
 PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
-# read as a silent green (the fuzz-sweep FATAL convention).
+# read as a silent green.
 if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi

@@ -1,7 +1,5 @@
 //! `cargo patina campaign` — a config-driven, deterministic fault-and-schedule
-//! sweep that generalizes the battle-tested shell campaign machinery
-//! (`testbeds/workq/fuzz-sweep.sh`, `testbeds/buggify-campaign.sh`) into a
-//! first-class product surface.
+//! sweep.
 //!
 //! A campaign runs `generations` independent child `cargo patina run` processes
 //! over one artifact. Everything is a pure function of the generation number, so a
@@ -11,8 +9,7 @@
 //!
 //! Per generation:
 //!   * the run seed and every randomized knob derive from `SHA-256("patina-campaign
-//!     -<seed_base>-<generation>")` (no wall clock, no `$RANDOM`), exactly the fuzz-sweep
-//!     scheme;
+//!     -<seed_base>-<generation>")` (no wall clock, no `$RANDOM`);
 //!   * the child streams a generalized result contract — `PATINA_RESULT <k=v…>`
 //!     and `PATINA_VIOLATION <class> <detail>` (harness-agnostic generalizations of
 //!     the existing per-testbed result/violation and `PATINA_SDK_REPORT`
@@ -22,7 +19,7 @@
 //!     [`CampaignClass`] — a finding, harness or catch-all class, or the
 //!     `VACUOUS_*` coverage class of one fault or exploration plane, one class
 //!     per plane — in the precedence `built_in_class` encodes, with
-//!     the same strictness discipline as fuzz-sweep (an explicit finding is never
+//!     a strict discipline (an explicit finding is never
 //!     downgraded, a nonzero exit is never silently OK, and an unrecognized outcome
 //!     lands loudly in `UNCLASSIFIED`);
 //!   * a per-failure [`Signature`] (class + normalized violation-detail shape +
@@ -787,7 +784,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
 }
 
 /// `SHA-256("patina-campaign-<seed_base>-<generation>")` — the deterministic per-generation
-/// derivation, mirroring the fuzz-sweep scheme (no wall clock / `$RANDOM`).
+/// derivation (no wall clock / `$RANDOM`).
 fn generation_hash(seed_base: u64, generation: u64) -> gen_byte::Hash {
     gen_byte::Hash::derive(seed_base, generation)
 }

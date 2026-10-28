@@ -69,10 +69,8 @@ real threads and real UDP are involved):
 ./run-native.sh
 ```
 
-Under Patina — the real gate. This builds the queue, then runs the full
-self-checking battery: clean-run determinism, record/replay, network faults,
-disk-crash recovery, in-process crash-recovery, a cooperative-fault sweep, and
-the seeded-bug demo below:
+Under Patina — the real gate. This builds the queue, then runs a short campaign
+(below), the fail-closed recovery self-test, and the seeded-bug demo:
 
 ```sh
 ./run-patina.sh
@@ -83,16 +81,22 @@ stages the binary under `CARGO_TARGET_DIR` (default:
 `../../target/testbeds/workq/patina/workq` from this directory):
 
 ```sh
-cargo patina run ../../target/testbeds/workq/patina/workq --seed 1 -- --jobs 24 --data-dir /workq
+cargo patina run ../../target/testbeds/workq/patina/workq --seed 1 -- --data-dir /workq
 ```
+
+Unless `--jobs`, `--workers` or `--producers` pin them, the queue draws its
+own workload: 16 to 64 jobs, 2 to 4 workers and 1 or 2 producers. Under Patina
+the draw is a pure function of the run seed, so a reproduce command re-draws the
+same workload. The `WORKQ_WORKLOAD` line shows what the run drew and its
+convergence budget (`--timeout-secs`, by default 120 virtual seconds per 16
+jobs). The draw is kept in the data dir, so a process restarted after a crash
+resumes the same workload.
 
 ## The one-command bug-catch demo
 
-The queue ships with three deliberately planted bugs, off by default and enabled
+The queue ships with four deliberately planted bugs, off by default and enabled
 with `--bug NAME`. Each is a subtle mistake a real engineer could make, and each
-is caught by the queue's *own* invariants — no special test assertion. Together
-they cover the three classic ways a queue like this breaks: a logic slip, a
-durability slip, and a threading race.
+is caught by the queue's *own* invariants — no special test assertion.
 
 - **`dedup-ignore-producer`** — the server de-duplicates retried enqueues by the
   request number alone, forgetting *which* producer sent it. Two producers using
@@ -105,6 +109,8 @@ durability slip, and a threading race.
   job?" *before* taking the lock that guards the apply, instead of inside it. When
   the same job is delivered to two workers at once, both can answer "no" and each
   applies it — a classic check-then-act race that does the work twice.
+- **`ignore-short-write`** — the log treats a short write as a whole one, so a
+  record the disk only partly took is acknowledged as durable.
 
 Watch Patina catch one (it fails, loudly and reproducibly):
 
@@ -113,33 +119,24 @@ cargo patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify=500
   -- --jobs 24 --data-dir /workq --bug skip-redelivery-commit
 ```
 
-`./run-patina.sh` leg **[7]** pins a catching seed for each bug and *requires*
+`./run-patina.sh` leg **[3]** pins a catching seed window for each bug and *requires*
 that Patina catch it (a clean pass there fails the leg — the demo can never go
 quiet), then records and strict-replays the failing run to prove the bug
 reproduces byte-for-byte.
 
 ## Fuzzing many faults at once
 
-`run-patina.sh` tests each fault in isolation. `fuzz-sweep.sh` crosses them:
-
-```sh
-./fuzz-sweep.sh 1 100     # run 100 randomized-but-deterministic fault combinations
-./fuzz-sweep.sh --selftest
-```
-
-Every generation's fault mix is a pure function of its number, so any run is
-reproducible by number alone. Roughly a fifth of generations run a specially
-instrumented build that makes fine-grained thread interleavings schedulable, to
-hunt for races the coarse runs would miss. The sweep always fuzzes the *clean*
-app; the seeded bugs live only in the demo above.
-
-Disk crashes are swept by `cargo patina campaign` from `campaign.json`: every
-generation kills the whole process at a write, fsync or close it is known to
-reach, restarts it from what reached the disk, and crosses that with network
-and sleep faults. The restarted process cannot remember what the crashed one
-acknowledged, so the campaign passes `--ack-ledger`: producers also record
-each ack in a file of their own, and the restarted run checks that every job
-acked before the crash is still in the log it recovered.
+`campaign.json` crosses every fault `cargo patina campaign` can draw for the
+queue. Each generation draws its schedule seed, its workload, net and sleep
+faults, cooperative buggify faults and a swarm subset of them from the
+generation number, restarts the server in-process once six jobs complete, and
+kills the whole process at a write, fsync or close it is known to reach,
+restarting it from what reached the disk. The restarted process cannot remember
+what the crashed one acknowledged, so the campaign passes `--ack-ledger`:
+producers also record each ack in a file of their own, and the restarted run
+checks that every job acked before the crash is still in the log it recovered.
+The campaign always sweeps the *clean* app; the seeded bugs live only in the
+demo above.
 
 ```sh
 cargo patina campaign ../../target/testbeds/workq/patina/workq --spec campaign.json

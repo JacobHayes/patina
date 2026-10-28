@@ -658,8 +658,7 @@ fn campaign_continuation_refusals_are_loud() {
 }
 
 // The campaign classifier `--selftest` proves every outcome class is reachable
-// and the signature store dedups/novelty logic bites — the campaign peer of
-// fuzz-sweep's `--selftest`.
+// and the signature store dedups/novelty logic bites.
 #[test]
 fn campaign_selftest_passes() {
     let ran = invoke(native_workspace(), &["campaign", "--selftest"]);

@@ -114,10 +114,8 @@ jobs:
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-cross-target.sh
-      # Fast, build-free classifier selftests (pure functions over canned tuples).
-      # The fuzz-sweep bash classifier is not otherwise covered by a Rust test.
+      # Fast, build-free classifier selftest (pure functions over canned tuples).
       - run: testbeds/multiproc/run-patina.sh --selftest
-      - run: testbeds/workq/fuzz-sweep.sh --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
@@ -216,13 +214,10 @@ jobs:
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done
 
-  # Heavy randomized campaign, beyond the per-push budget. The per-push Linux
-  # jobs already run the flagship workq testbed's full self-checking battery;
-  # nightly adds breadth by sweeping 200 randomized fault-combination
-  # generations, including the schedule-fuzz tier, 200 workq disk-crash restart
-  # generations and 200 pubsub network-fault generations. The campaign runs on Linux,
-  # where it covers the same deterministic model without duplicating
-  # macOS campaign work; the macOS job runs the full deterministic gate suite.
+  # Long campaigns, beyond the per-push budget. The per-push jobs run a short
+  # workq campaign in its gate; nightly runs the full 200 generations of the
+  # workq and pubsub specs. It runs on Linux, where it covers the same
+  # deterministic model without duplicating macOS campaign work.
   nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -232,33 +227,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          # The sweep builds cargo-patina and workq under the root target dir.
+          # The campaigns build cargo-patina and the guests under the root target dir.
           workspaces: .
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # The native shim's per-user build cache.
           cache-directories: |
             ~/.cache/patina
-      # A 200-generation randomized fault-combination campaign over the flagship
-      # workq testbed, including its schedule-fuzz tier.
-      - run: testbeds/workq/fuzz-sweep.sh 1 200
-      # workq's disk-crash restarts: 200 `cargo patina campaign` generations,
-      # each crashing at a drawn write/sync/close and restarting against the
-      # acked-job ledger. Runs even when the sweep found something, so one
-      # night reports both; the builds are no-ops after the sweep's.
-      - if: ${{ !cancelled() }}
-        env:
-          CARGO_TARGET_DIR: target/testbeds/workq-sweep
+      # workq: drawn workload sizes, net/sleep/buggify/swarm faults, and a
+      # disk crash-restart checked against the acked-job ledger.
+      - env:
+          CARGO_TARGET_DIR: target/testbeds/campaigns
         run: |
           cargo build --release --quiet -p cargo-patina
           "$CARGO_TARGET_DIR/release/cargo-patina" patina build testbeds/workq \
             --output "$CARGO_TARGET_DIR/patina/workq" --release >/dev/null
           "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
             "$CARGO_TARGET_DIR/patina/workq" --spec testbeds/workq/campaign.json \
-            --out-dir "$CARGO_TARGET_DIR/crash-campaign"
-      # pubsub's network faults: 200 `cargo patina campaign` generations.
+            --out-dir "$CARGO_TARGET_DIR/workq-campaign"
+      # pubsub's network faults. Runs even when workq found something.
       - if: ${{ !cancelled() }}
         env:
-          CARGO_TARGET_DIR: target/testbeds/workq-sweep
+          CARGO_TARGET_DIR: target/testbeds/campaigns
         run: |
           "$CARGO_TARGET_DIR/release/cargo-patina" patina build testbeds/pubsub \
             --output "$CARGO_TARGET_DIR/patina/pubsub" --release >/dev/null

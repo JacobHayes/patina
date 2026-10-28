@@ -175,7 +175,6 @@ run_full() {
   done
   run_rung 'documentation' cargo doc --workspace --no-deps --locked || return $?
   run_rung 'multiproc classifier selftest' testbeds/multiproc/run-patina.sh --selftest || return $?
-  run_rung 'workq classifier selftest' testbeds/workq/fuzz-sweep.sh --selftest || return $?
   run_rung 'macro feature test' cargo test --quiet -p patina-dst --features macros --locked || return $?
   # One build of the workspace suite; its cargo-patina (the test profile, which
   # optimizes the third-party crates and the guest scanner) drives every testbed.

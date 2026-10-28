@@ -111,8 +111,7 @@ pub(super) fn declared_rules_fixture() -> ClassifyRules {
 
 /// Prove every classifier class is reachable from the structured envelope facts
 /// (with the spec-declared rules as the only text-reading path), and that the
-/// signature store dedups repeats and flags novel signatures — mirroring the
-/// fuzz-sweep `--selftest` discipline.
+/// signature store dedups repeats and flags novel signatures.
 pub(super) fn selftest() -> Result<i32, CliError> {
     let mut failures = 0u32;
     let mut fired: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
