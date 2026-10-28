@@ -128,3 +128,48 @@ fn hostcall_counters_record_every_import_call_exactly() {
     assert!(matches!(error, WasiRunError::Depth(_)), "got {error:?}");
     check_depth_available(1).expect("a run that consumed fuel has depth data");
 }
+
+/// wasmi has no NaN-canonicalization knob, so the NaN bits a guest observes
+/// are whatever its float ops produce. NaNs made from ordinary operands must
+/// be canonical (quiet bit only; the sign is the one bit Wasm leaves free) and
+/// the same bytes on every run of a seed and on its replay.
+#[test]
+fn nan_bits_are_canonical_and_identical_across_runs_and_replay() {
+    let module = wat::parse_str(
+        r#"(module
+                (import "wasi_snapshot_preview1" "fd_write"
+                    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "\40\00\00\00\20\00\00\00")
+                (func (export "_start")
+                    (i64.store (i32.const 64) (i64.reinterpret_f64 (f64.sqrt (f64.const -1))))
+                    (i64.store (i32.const 72) (i64.reinterpret_f64 (f64.div (f64.const 0) (f64.const 0))))
+                    (i64.store (i32.const 80)
+                        (i64.reinterpret_f64 (f64.sub (f64.const inf) (f64.const inf))))
+                    (i32.store (i32.const 88) (i32.reinterpret_f32 (f32.sqrt (f32.const -1))))
+                    (i32.store (i32.const 92) (i32.reinterpret_f32 (f32.mul (f32.const 0) (f32.const inf))))
+                    (drop (call $fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8)))))"#,
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let trace = directory.path().join("nan.patina");
+    let run = |config| {
+        let context = Context::from_config(config).unwrap();
+        let execution = execute_preview1(&module, Preview1Host::new(context)).unwrap();
+        assert_eq!(execution.exit_code, 0);
+        execution.stdout
+    };
+    let recorded = run(RuntimeConfig::record(3, &trace, "nan-v1"));
+    assert_eq!(run(RuntimeConfig::seeded(3)), recorded);
+    assert_eq!(run(RuntimeConfig::replay(&trace, "nan-v1")), recorded);
+
+    let (doubles, singles) = recorded.split_at(24);
+    for bits in doubles.as_chunks::<8>().0 {
+        let bits = u64::from_le_bytes(*bits);
+        assert_eq!(bits & !(1 << 63), 0x7ff8_0000_0000_0000, "{bits:#x}");
+    }
+    for bits in singles.as_chunks::<4>().0 {
+        let bits = u32::from_le_bytes(*bits);
+        assert_eq!(bits & !(1 << 31), 0x7fc0_0000, "{bits:#x}");
+    }
+}

@@ -53,7 +53,8 @@ pub fn execute_preview1(
 ///   - NaN bit patterns: wasmi computes floats in software (`wasmi_core`), so
 ///     a NaN-producing op yields the same bits on every run and every host.
 ///     There is NO NaN-canonicalization knob to set (unlike a JIT engine,
-///     which needs one).
+///     which needs one);
+///     `nan_bits_are_canonical_and_identical_across_runs_and_replay` holds it.
 ///   - relaxed-SIMD: the ONE Wasm proposal whose results are implementation-
 ///     defined (relaxed FMA / swizzle / lane-select may legally differ across
 ///     engines) and therefore a determinism hole. It is reachable only under
