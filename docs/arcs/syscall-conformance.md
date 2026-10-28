@@ -222,8 +222,8 @@ forwards into the same dispatcher instead of its two-number allowlist.
   shim-linked binary's own wait status.
 - A scenario declares the rows it covers and the rows it asserts absent (past
   the virtual ABI level); a host kernel predating a covered row or the
-  scenario's kernel floor makes the scenario not run, printed with the reason —
-  as does a host capability the scenario declares it needs and the host lacks
+  scenario's kernel floor fails the scenario (only an absent machine fact
+  leaves it not run, printed with the reason) — as does a host capability the scenario declares it needs and the host lacks
   (on the run directory's filesystem: user xattrs, file handles, whiteouts; in
   the caller's limits or privileges: inotify, lockable pages, an unprivileged
   caller; in the hardware or kernel configuration: protection keys, shadow
@@ -231,17 +231,14 @@ forwards into the same dispatcher instead of its two-number allowlist.
   for the raw vehicle under patina, or one without strace for the leak run. A
   host kernel implementing an asserted-absent row stays an oracle: the native
   run answers that row with its declared ENOSYS and only that row's native
-  observation is not run (`PATINA_REQUIRE_HOST_ORACLE=1`,
-  `PATINA_REQUIRE_SUD=1` and `PATINA_REQUIRE_STRACE=1`, set in CI, turn those
-  into failures). The scenarios assert one pinned system, Ubuntu 24.04: its GA
+  observation is not run. The scenarios assert one pinned system, Ubuntu 24.04: its GA
   kernel (Ubuntu's 6.8 build, `VIRTUAL_ABI`) and its glibc (2.39,
   `host::PINNED_GLIBC`); a bump is an explicit, wholesale migration. Only a
   host with both (kernel release `6.8.*`, glibc `2.39`) is authoritative:
   elsewhere a native run that fails a check or dies of a signal it did not
   announce, a native-versus-patina difference or a gap that no longer matches
   prints `DIVERGES (host H, pinned P)` and joins `$GITHUB_STEP_SUMMARY`
-  without failing (`PATINA_REQUIRE_PINNED_KERNEL=1` judges any host
-  strictly); such a native run is compared with neither patina nor the other
+  without failing; such a native run is compared with neither patina nor the other
   vehicles, and its patina leg is reported unjudged, held only to replay,
   trace facts, strace and no undeclared crash, while disagreeing native
   oracles, a native run that fails
@@ -249,7 +246,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   temporary directory and runs under a deadline; a scenario's forked children
   are reaped within one.
 - The tests run in the full workspace suite (`mise run check`, CI on Linux
-  x86_64 and arm64) and not in `check:fast`; streams and logs
+  x86_64 and arm64); streams and logs
   are kept under the target dir's `conformance/<scenario>/<vehicle>/`.
 
 ## 6. Families

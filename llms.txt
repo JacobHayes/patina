@@ -451,8 +451,7 @@ dev-dependency use under plain `cargo test`.
 - Validation ladder: `mise run check` is the local landing gate (fmt, the
   clippy passes, cheap selftests, docs, packaging, full stable
   tests including e2e, native acceptance tests and syscall conformance, ecosystem
-  testbeds, and local MSRV detector/macros rungs). `mise run msrv` is the full Rust 1.86
-  suite for CI/final-gate evidence.
+  testbeds, and the macros feature test).
 - `docs/skills/patina-dst.md`: tool-agnostic agent skill — what Patina is, the
   capability map, and the method for discovering the current surface (the help
   registry's progressive disclosure, the environment registry, the report
