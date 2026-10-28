@@ -11,8 +11,7 @@
 //! strict replay almost any deletion desynchronizes the recorded stream and
 //! fails closed. Delta-debugging the *fault vector* of the same failure took 20
 //! runs and 0.3 s to go from 17 knobs to 2 — and "only the short-write fault
-//! matters" is the answer an operator actually wants
-//! (`docs/probes/minimize-oracle-perf.md`).
+//! matters" is the answer an operator actually wants.
 //!
 //! So `minimize --generation` runs the knob reducer first and hands the trace
 //! reducer a trace recorded from the *minimal-knob* run. Each knob candidate is

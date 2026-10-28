@@ -950,7 +950,7 @@ fn datagram_delivery_times(config: RuntimeConfig) -> Vec<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// Custom-operation failure injection (docs/arcs/custom-ops.md, Wave B)
+// Custom-operation failure injection
 // ---------------------------------------------------------------------------
 
 /// Run `count` custom operations under one context and report, per operation,

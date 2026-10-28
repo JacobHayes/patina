@@ -248,8 +248,7 @@ exit "$status"
     // dependency a stand-in for crc-fast rather than a trivial arithmetic crate —
     // and is deliberately NOT claimed as the duplicate-symbol discriminator: a
     // dependency like this still links clean under `-fPIC`, so that rung of the
-    // original report remains unreproduced synthetically (see
-    // `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`). Exercised under
+    // original report remains unreproduced synthetically. Exercised under
     // `--yield-points`, whose extra object travels the same path.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

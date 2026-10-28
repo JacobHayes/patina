@@ -214,8 +214,7 @@ const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
         // Not drawn: crash placement is native-only (WASI/Cargo refuse
         // --fs-crash-at by name), and a native crash band still needs a
         // reachable crash point, classifier awareness of the named crash
-        // errors, and `minimize` on two-incarnation traces
-        // (docs/DECISIONS.md row 12).
+        // errors, and `minimize` on two-incarnation traces.
         FaultKnob::FsCrashAt => BandPolicy::Waived(BandWaiver::CrashRestart),
         FaultKnob::FsTornGranularity => BandPolicy::Waived(BandWaiver::CrashModifier),
         FaultKnob::FsErrorPermille => BandPolicy::Draw(&[gen_byte::FS_ERROR]),

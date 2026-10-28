@@ -882,8 +882,7 @@ pub(super) fn stage_sancov_stub(
 /// for the one selected target only, which is the scope the shim link line needs:
 /// the guest binary (or libtest harness) and nothing else. Interposition is
 /// unaffected — the shim's strong symbol definitions still land in that final
-/// link exactly as before. See
-/// `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`.
+/// link.
 pub(super) fn native_package_link_args(
     facade: &Path,
     engine: &Path,
@@ -1107,8 +1106,7 @@ mod tests {
         assert!(arm.to_string_lossy().contains("rustix_use_libc"));
     }
 
-    // The scoping split behind
-    // `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`: the whole-graph
+    // The scoping split: the whole-graph
     // `RUSTFLAGS` carry cfgs and instrumentation, and the shim's link arguments
     // live in the `cargo rustc --` set that reaches one unit's final link. The
     // single deliberate exception is the weak SanitizerCoverage stub, which is

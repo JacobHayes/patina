@@ -35,7 +35,7 @@ pub(super) fn patina_buggify_fatal(marker: &str, label: &str) -> WasmiError {
 /// No marker of its own: the violation was already reported through the verdict
 /// ABI and drained into the guest's captured stderr as a `PATINA_VERDICT` line
 /// (which the run error carries), and that verdict is what the result envelope
-/// and the campaign classifier read (`docs/arcs/outcome-channel.md`). The trap
+/// and the campaign classifier read (ARCHITECTURE.md, "The verdict ABI"). The trap
 /// message names the label so the human message still says which invariant.
 fn patina_always_violation_trap(label: &str) -> WasmiError {
     WasmiError::new(format!("patina: always! invariant violated: label={label}"))

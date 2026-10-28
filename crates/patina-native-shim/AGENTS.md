@@ -310,8 +310,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   A C callee cannot make a guarded Rust caller safe across guest siglongjmp or
   context restoration. Before moving an adapter, trace model calls through
   sched_point, blocking resume and SUD dispatch as well as its explicit delivery
-  helper. The follow-up audit in `docs/arcs/c-to-rust.md` records the existing
-  model/delivery lifetime blocker; passing guest tests does not establish this
+  helper. The model/delivery frame lifetime is a known blocker (see
+  `docs/arcs/signal-frame-safety.md`); passing guest tests does not establish this
   Rust language invariant.
 
 - `raise` is a modeled entry on both platforms, not an audit allowance. Darwin's
@@ -497,14 +497,13 @@ the fcntl waiting commands and open doors; entry order is reviewed.
 The modeled stdio engine lives in `src/posix/stdio.rs`; Rust printf doors pass
 `VaList` directly to it. It formats byte buffers with a private resolved host
 vsnprintf, cloning the arguments before the stack pass for the heap fallback.
-The [C reduction design](../../docs/arcs/c-to-rust.md) also moves host-resolution
-vehicles. Retain its enumerated cancellation, cleanup,
-nonlocal-callback, emergency-fatal and guest-fault-store C seams. Environment
+Retain the C seams ARCHITECTURE.md enumerates: cancellation, cleanup,
+nonlocal-callback, emergency-fatal and guest-fault-store frames. Environment
 ownership is already Rust (`src/posix_env.rs`) in the guest-only archive. Linux's
 syscall assembly captures raw machine words for the fixed Rust entry; it must
 not decode six fictitious variadic arguments or lose the guest-SP sigreturn
 path. New doors must satisfy the export guard without exceptions and extend
-the compiled ABI acceptance cases. See [the design](../../docs/arcs/c-variadic-interposers.md).
+the compiled ABI acceptance cases.
 
 ## Source bundle and `links`
 

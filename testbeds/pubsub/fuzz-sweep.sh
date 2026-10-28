@@ -60,7 +60,7 @@ is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
 # pubsub's OWN verdict labels: every self-detected breach is announced through
 # `patina_dst::verdict` (see src/main.rs), and this is the per-guest
-# configuration docs/arcs/outcome-channel.md 4.3 prescribes -- patina itself
+# configuration the outcome channel prescribes -- patina itself
 # knows none of these strings. Scoping by label keeps pubsub's findings distinct
 # from an `always!` site violation, which the SDK lowers to the SAME channel.
 PUBSUB_VERDICT_LABELS='malformed-frame|unsubscribed-topic|seq-gap|liveness-timeout|incomplete-delivery|payload-divergence'

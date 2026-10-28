@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# workq -- the unified-fault-knobs arc's acceptance demo (docs/arcs/
-# unified-fault-knobs.md:543): "a campaign over a storage+network testbed with
+# workq -- the fault-knob acceptance demo: "a campaign over a storage+network testbed with
 # --faults --swarm shows fs/dns-fault generations firing (non-vacuous
 # reports), at least one planted-bug class ... caught and minimized, and
 # flag-free replay of a failing generation."
@@ -30,8 +29,7 @@
 # Every criterion above reads the run's `patina.result/v1` envelope -- verdicts
 # and the per-plane fault accounting -- rather than workq's printed WORKQ_*
 # dialect, and the campaign carries NO `classify.patterns` spec: workq reports
-# through the verdict ABI, so the envelope classifies it unaided
-# (docs/arcs/outcome-channel.md, Wave C).
+# through the verdict ABI, so the envelope classifies it unaided.
 #
 # workq otherwise has NO DNS surface at all: every socket address in
 # producer.rs/worker.rs/main.rs is a literal 127.0.0.1 numeric address, so a
@@ -112,7 +110,7 @@ replay() { "$PATINA" patina replay "$built" "$@"; }
 #   2  fs shorts_applied     3  dns "resolutions failures_injected latency_applied"
 # Everything comes from the envelope's structured fields -- the verdict channel
 # and the per-plane fault accounting -- so no leg reads the guest's printed
-# WORKQ_* dialect (docs/arcs/outcome-channel.md).
+# WORKQ_* dialect.
 envelope_facts() {
   local trace="$1"; shift
   replay "$trace" --format json "$@" 2>/dev/null | python3 -c '
@@ -148,8 +146,8 @@ OUT="$work/campaign-out"
 # NO campaign spec: workq reports its outcomes through the verdict ABI, so the
 # classifier reads them straight off each generation's structured envelope
 # (verdicts, per-plane fault accounting, refusal, guest exit) and needs no
-# per-guest `classify.patterns` declaration at all. The spec-declared patterns
-# of docs/arcs/outcome-channel.md 4.3 are the LEVEL-1 escape hatch -- for a guest
+# per-guest `classify.patterns` declaration at all. Spec-declared patterns
+# are the LEVEL-1 escape hatch -- for a guest
 # that only prints its findings -- and workq is no longer one.
 echo "==> [1] cargo patina campaign --faults --swarm --gens $GENS (--bug ignore-short-write, --dns-entry $SERVER_HOST)"
 campaign_json="$work/campaign.json"
@@ -275,8 +273,8 @@ fi
 # in campaign-state.json), so `minimize --generation` targets exactly those
 # verdicts by (kind, label) and requires a candidate to still report every one
 # of them AND to replay without diverging -- in-process, in parallel, with the
-# recorded invocation flags carried along. That is the recognition primitive of
-# docs/arcs/outcome-channel.md 4.5: one mechanism, two consumers. The oracle
+# recorded invocation flags carried along. That is the campaign's recognition
+# primitive: one mechanism, two consumers. The oracle
 # this leg used to spell out in shell (reject a diverged replay, reject a run
 # patina refused, then look for `PATINA_VERDICT ... kind=violation`) is what
 # the built-in target does structurally -- a refusal produces no run envelope

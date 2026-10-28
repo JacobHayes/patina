@@ -33,7 +33,7 @@
 # The overriding guard: a `violation` verdict on any clean run fails the script.
 #
 # Every leg reads the run's VERDICT channel (the `PATINA_VERDICT` wire lines the
-# SDK emits, docs/arcs/outcome-channel.md) rather than pubsub's printed PUBSUB_*
+# SDK emits) rather than pubsub's printed PUBSUB_*
 # dialect: the guest announces its outcomes through `patina_dst::verdict`, and
 # the printed lines are only a human echo. The one exception is the convergence
 # timeout, which reports no verdict by design (leg [4], lost-wakeup).

@@ -214,7 +214,7 @@ fn append_depth_progress(line: &mut String, depth: &DepthState) {
 
 /// The final depth block. Depth is labeled as a proxy everywhere: it says how far
 /// the guests ran and which host surface they touched, never which code they
-/// covered (`docs/arcs/coverage-depth.md` §5, §11).
+/// covered.
 fn print_depth_summary(depth: &DepthState) {
     println!("-- depth (wasi fuel/hostcalls) --");
     match depth {

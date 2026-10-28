@@ -5,8 +5,7 @@
  * compiles from source gains yield points, so a race window inside a dependency
  * is schedulable too. The real hooks live in `patina_yield.c`, which calls into
  * the shim staticlib, and both are scoped to the guest binary's own final link —
- * a dependency's shared library must not receive the shim (see
- * `docs/bugs/shim-link-args-reach-dependency-cdylibs.md`).
+ * a dependency's shared library must not receive the shim.
  *
  * That leaves one gap. A dependency whose `[lib]` declares a `cdylib`/`dylib`
  * crate type is built by the same instrumented rustc invocation as its `rlib`,

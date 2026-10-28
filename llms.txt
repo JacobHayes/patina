@@ -460,8 +460,7 @@ dev-dependency use under plain `cargo test`.
   come back to this file for exact spellings.
 - `TUTORIAL.md`: instrument a program with `buggify!`, sweep seeds, catch a
   planted bug, replay it, and render the timeline.
-- `ARCHITECTURE.md`, `IMPLEMENTATION.md`, `VALIDATION.md`: design, slice status,
-  and the verification gates.
+- `ARCHITECTURE.md`, `VALIDATION.md`: design, and what is validated and how.
 - `crates/patina-conformance`: syscall conformance scenarios with the live host
   kernel as the oracle; `cargo test -p cargo-patina --test native_conformance`
   (`mise run conformance`) runs each natively and under patina (plus record/replay

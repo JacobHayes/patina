@@ -141,8 +141,8 @@ is_infra() { printf '%s\n%s' "$1" "$2" | /usr/bin/grep -Eq "$INFRA_MARKERS"; }
 
 # workq's OWN verdict labels: every invariant `report()` and the recovery gate
 # announce through `patina_dst::verdict` (see src/main.rs). This is per-guest
-# configuration living with the guest, the shape docs/arcs/outcome-channel.md
-# 4.3 prescribes -- patina itself knows none of these strings. It exists to keep
+# configuration living with the guest, the shape the outcome channel
+# prescribes -- patina itself knows none of these strings. It exists to keep
 # workq's findings distinguishable from an `always!` violation, which the SDK
 # lowers to the SAME verdict channel under a site label.
 WORKQ_VERDICT_LABELS='durability|no-loss|exactly-once|wal-integrity|recovery-not-fail-closed'

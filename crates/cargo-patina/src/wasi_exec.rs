@@ -177,8 +177,7 @@ pub(super) fn execute_wasi_run(invocation: WasiInvocation) -> Result<i32, CliErr
             // an `always!` violation, an `unreachable`, a memory-cap trap. It
             // gets a real run envelope, so the verdicts the guest drained before
             // trapping survive and a campaign classifies the generation on them
-            // instead of filing it as harness noise (docs/arcs/outcome-channel.md,
-            // Wave B residue). Every OTHER failure — an audit refusal, an
+            // instead of filing it as harness noise. Every OTHER failure — an audit refusal, an
             // engine/link error, a host finalization error — is patina or the
             // module failing and stays a `CliError`, with one exception: a
             // replay the runtime reported, on its facts channel, as diverged

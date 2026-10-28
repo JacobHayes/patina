@@ -110,7 +110,7 @@ mod tests {
     use super::outcome_guest;
 
     // ---------------------------------------------------------------------------
-    // Outcome channel (docs/arcs/outcome-channel.md §4.2): the `patina.result/v1`
+    // Outcome channel: the `patina.result/v1`
     // envelope's runtime-owned facts. `fault_reports`/`runtime_findings` come from
     // the runtime's own `patina.runfacts/v1` document — the same report structs the
     // `PATINA_*_REPORT` lines are formatted from — while `refusal`/`guest_exit` are
@@ -315,7 +315,7 @@ mod tests {
     // A WASI guest that traps is reporting an outcome, not failing to run: the CLI
     // emits a `patina.result/v1` envelope for it, carrying the verdicts the guest
     // drained before the trap, so a campaign files the generation as the safety
-    // finding it is (docs/arcs/outcome-channel.md, Wave B residue).
+    // finding it is.
     #[test]
     fn wasi_guest_trap_emits_its_verdicts_and_a_campaign_classifies_it_violation() {
         let directory = tempdir().unwrap();

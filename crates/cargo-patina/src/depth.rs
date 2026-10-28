@@ -1,7 +1,7 @@
 //! Campaign accumulation of WASI **depth** — fuel plus per-import hostcall
 //! counts — and the `depth_plateau` signal derived from it.
 //!
-//! Depth is deliberately not called coverage (`docs/arcs/coverage-depth.md` §5):
+//! Depth is deliberately not called coverage:
 //! `wasm32-wasip1` has no sancov instrumentation, so there are no edges to union.
 //! What a WASI campaign can honestly accumulate is how far its guests ran (fuel
 //! high-water mark) and which host surface they touched (hostcall kinds), which

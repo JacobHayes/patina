@@ -17,7 +17,7 @@ pub struct WasiExecution {
     pub stderr: Vec<u8>,
     pub fuel_consumed: u64,
     /// Per-import call counts keyed by imported function name — the hostcall half
-    /// of the WASI depth proxy (see `docs/arcs/coverage-depth.md` §5). Like
+    /// of the WASI depth proxy. Like
     /// `fuel_consumed` this is a deterministic function of the executed
     /// instruction stream and is report-only: it never enters the trace, a
     /// fingerprint, or any canonical hash.
@@ -95,7 +95,7 @@ fn deterministic_wasmi_config() -> WasmiConfig {
 /// call, so a guest that ran to completion consumed fuel. Zero means the
 /// accounting stopped working — and a zero-valued depth report is
 /// indistinguishable from a genuine "did nothing" run, exactly the silent-empty
-/// report the coverage/depth arc refuses (`docs/arcs/coverage-depth.md` §10 D1).
+/// report that depth reporting refuses.
 fn check_depth_available(fuel_consumed: u64) -> Result<(), WasiRunError> {
     if fuel_consumed == 0 {
         return Err(WasiRunError::Depth(

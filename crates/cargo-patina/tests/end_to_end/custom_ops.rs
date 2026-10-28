@@ -3,13 +3,13 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Custom operations (docs/arcs/custom-ops.md, Wave A): a guest wraps an effect
+// Custom operations (ARCHITECTURE.md, "The custom-operation ABI"): a guest wraps an effect
 // Patina does not model; Patina records the result and reproduces it on replay
 // without ever running the wrapper again.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Seeded custom-op faults (docs/arcs/custom-ops.md, Wave B): a guest declares
+// Seeded custom-op faults: a guest declares
 // what failure means for an operation it wraps, and `--custom-op-fail-permille`
 // hands back that failure instead of running the effect.
 // ---------------------------------------------------------------------------

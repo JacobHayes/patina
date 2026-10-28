@@ -77,7 +77,7 @@ Conventions:
   the guests still print are a human echo; **nothing downstream needs them**, and
   no guest string is baked into patina (a guest that only prints its findings
   declares `classify.patterns` in its campaign spec instead — the level-1 escape
-  hatch of `docs/arcs/outcome-channel.md` §4.3).
+  hatch).
 - Two things the verdict channel deliberately does not carry. **Liveness**: the
   ABI has no liveness kind, and whether a run *should* have converged depends on
   the injected fault configuration the guest cannot see, so a guest's own

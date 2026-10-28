@@ -420,9 +420,8 @@ silently:
   Patina occupies.
 - [docs/SCOPE.md](./docs/SCOPE.md) — who Patina serves first and the rules new
   surface must meet.
-- [VALIDATION.md](./VALIDATION.md) — claim-by-claim acceptance gates and the
-  honest boundary of confidence.
-- [IMPLEMENTATION.md](./IMPLEMENTATION.md) — completed and planned slices.
+- [VALIDATION.md](./VALIDATION.md) — what is validated, the guarantees and
+  their oracles, and known gaps.
 - [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) — a tool-agnostic
   agent skill: what Patina is, what it can do, and how to discover the current
   CLI and SDK surface from the generated registry instead of from memory.

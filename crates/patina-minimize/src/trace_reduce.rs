@@ -274,8 +274,8 @@ pub(super) fn protected_prefix_len(bundle: &TraceBundle, timeline_index: usize) 
 /// complete as the restarting one.
 ///
 /// Resuming plus the verdict cache measured 3-3.7x fewer oracle calls than the
-/// restarting search on two real workq traces, for byte-identical output
-/// (`docs/probes/minimize-oracle-perf.md`). That measurement drove a ladder-free
+/// restarting search on two real workq traces, for byte-identical output.
+/// That measurement drove a ladder-free
 /// single-decision sweep; the coarse rungs kept here cost about 15 % of a run on
 /// those traces and are what shrinks a trace with genuinely removable blocks in
 /// a handful of calls instead of one per decision.

@@ -17,7 +17,7 @@ pub struct CoverageReport {
 
 /// The WASI family's depth proxy: fuel plus per-import hostcall counts. Depth is
 /// deliberately NOT called coverage — it measures how far a guest ran, not which
-/// edges it reached (`docs/arcs/coverage-depth.md` §5).
+/// edges it reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepthReport {
     pub family: String,

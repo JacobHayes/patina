@@ -687,7 +687,7 @@ liveness-safe."
     uninstrumented atomic critical section (std carries no yield point, so cooperative scheduling \
     cannot preempt a spinner while the lock holder is starved — the documented starvation limitation, \
     and the likely cause) from a run that is merely slower than this deadline. Not a liveness \
-    guarantee, and not a verdict on the guest — see IMPLEMENTATION.md \"Slice 7: exploration tier\". \
+    guarantee, and not a verdict on the guest. \
     Killed with a nonzero exit."
                             );
                             inherited_guard.restore()?;

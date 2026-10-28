@@ -47,7 +47,7 @@ pub(crate) fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
 /// The run's finding has already been reported through the verdict ABI and
 /// drained into the captured stderr as a `PATINA_VERDICT` line, so a second
 /// hand-formatted marker would be a duplicate channel — and the classifier reads
-/// the verdict, never a marker (`docs/arcs/outcome-channel.md`). The verdict is
+/// the verdict, never a marker (ARCHITECTURE.md, "The verdict ABI"). The verdict is
 /// the trace's last operation, so the finalized trace replays to it.
 fn abort_after_verdict() -> ! {
     crate::finalize_then_abort()

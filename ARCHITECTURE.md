@@ -84,9 +84,7 @@ whole archive, roots every door itself and makes the route aliases, so the
 shim rebuilds across codegen units (about a second instead of five). C retains acting cancellation and thread-exit frames, guest callback frames, clock stores,
 host-resolution vehicles. Linux abort retains a C
 entry so its Rust model can inspect caller panic ownership before entering its
-guard. The [C-to-Rust design](docs/arcs/c-to-rust.md) lists the retained seams;
-the [variadic interposer design](docs/arcs/c-variadic-interposers.md) describes
-raw capture and formatter boundaries.
+guard.
 
 ### The sealed shim
 
