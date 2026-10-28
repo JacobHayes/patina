@@ -368,8 +368,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 buggify-campaign.sh — shared cooperative-SUT (buggify) campaign LIBRARY.
 
 This file is meant to be SOURCED by the buggify-aware sweeps
-(testbeds/workq/fuzz-sweep.sh, testbeds/workq/run-patina.sh, and
-testbeds/buggify-wasi/wasi-buggify-sweep.sh). It provides the buggify classifier
+(testbeds/workq/fuzz-sweep.sh and testbeds/workq/run-patina.sh). It provides the buggify classifier
 (ALWAYS_VIOLATION / the buggify fatal markers), the SOMETIMES_UNMET campaign
 oracle, the PATINA_SDK_REPORT parser, the cross-generation campaign-state
 accumulator, and their selftest. Sourced, it defines functions only and honors no

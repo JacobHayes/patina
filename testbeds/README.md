@@ -32,11 +32,12 @@ sweep) on every routine Linux CI run and every macOS run.
 `workq/fuzz-sweep.sh` is the home of the randomized-but-deterministic
 fault-combination campaign (including its schedule-fuzz tier) that runs nightly
 on Linux. `liveness-campaign` and `buggify-wasi`
-are small fixtures. `buggify-campaign.sh` (this directory) is the shared
+are small fixtures; `buggify-wasi`'s campaign is a `cargo patina campaign`
+spec (`buggify-wasi/campaign.json`). `buggify-campaign.sh` (this directory) is the shared
 campaign layer — Wave 2 `PATINA_SDK_REPORT` parsing, one-run
 `cargo patina sites --exercised` join checks, cross-generation coverage
 accumulation, the `ALWAYS_VIOLATION`/`SOMETIMES_UNMET` classes — sourced by the
-workq, pubsub, and buggify-wasi sweeps.
+workq sweeps.
 
 Conventions:
 
@@ -61,8 +62,7 @@ Conventions:
   conformance scenarios of `crates/patina-conformance` among them) run in the
   full workspace-test tier and CI. The SUD-only
   rustix-default/cap-std and go-guest gates run on x86_64 Linux. The audit corpus adds CI/final-gate breadth.
-- The sweep/campaign scripts (`fuzz-sweep.sh`, `wasi-buggify-sweep.sh`,
-  `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
+- The sweep/campaign scripts (`fuzz-sweep.sh`, `audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates
   take no arguments: run them and read the legs they print.
 - Oracles live inside the guest binaries, and they **report through the verdict

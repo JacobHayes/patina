@@ -118,7 +118,6 @@ jobs:
       # The fuzz-sweep bash classifier is not otherwise covered by a Rust test.
       - run: testbeds/multiproc/run-patina.sh --selftest
       - run: testbeds/workq/fuzz-sweep.sh --selftest
-      - run: testbeds/buggify-wasi/wasi-buggify-sweep.sh --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The

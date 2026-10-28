@@ -16,41 +16,31 @@ What it proves:
   host import module (a plain `cargo build --target wasm32-wasip1` leaves the
   macros no-ops and the import table free of `patina_sdk` — the no-leakage
   contract, stated in `Cargo.toml`);
-- the Wave 2 `PATINA_SDK_REPORT` rows parse into the same shared campaign
-  classifier (`../buggify-campaign.sh`) the native sweeps use, and the sweep
-  proves one run joins through `cargo patina sites --exercised` with zero
-  unmatched runtime labels;
-- per-generation record→replay byte-identity with buggify active.
+- buggify sites register and fire under `cargo patina campaign --buggify`,
+  and every `sometimes!`/`reachable!` oracle is satisfied across the campaign;
+- record→replay byte-identity with buggify active (the campaign's
+  reproduction check).
 
 The fixture carries **no planted defect**: a clean campaign is all-OK. The
 `always!` oracle is plantable on demand (below) to show the violation path; the
-detectors themselves are RED-proven by the `cargo-patina` end-to-end tests and
-the shared selftest, not re-proven here.
+detectors themselves are RED-proven by the `cargo-patina` end-to-end tests, not
+re-proven here.
 
 ## Running
 
-The campaign (builds `cargo-patina` and the fixture, then runs generations
-whose seed and buggify knobs derive from `SHA-256("wasi-buggify-<G>")` — the
-whole campaign reproduces from the range alone):
-
-```sh
-./wasi-buggify-sweep.sh                # generations 1..40
-./wasi-buggify-sweep.sh 1 10          # a shorter range
-./wasi-buggify-sweep.sh --dry-run 3   # print gen 3's derived config, no run
-./wasi-buggify-sweep.sh --selftest    # shared campaign-layer selftest
-./wasi-buggify-sweep.sh --help        # full help, env knobs, exit codes
-```
-
-Output accumulates under `out-wasi-buggify/` (override with
-`WASI_BUGGIFY_OUT=DIR`); failing generations keep their `gen-N/` dir with the
-config, output, and trace.
-
-One run by hand, from the repository root (`build` prints the artifact path;
-the sweep stages under the same target directory):
+The campaign is a `cargo patina campaign` spec (`campaign.json`: 40
+generations with buggify on), from the repository root:
 
 ```sh
 export CARGO_TARGET_DIR=target/testbeds/buggify-wasi
 cargo patina build testbeds/buggify-wasi --target wasi
+cargo patina campaign target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
+  --spec testbeds/buggify-wasi/campaign.json --out-dir target/testbeds/buggify-wasi/campaign
+```
+
+One run by hand (`build` prints the artifact path):
+
+```sh
 cargo patina run target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm \
   --seed 7 --buggify --record /tmp/bw.patina
 cargo patina replay target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-fixture.wasm /tmp/bw.patina
@@ -68,8 +58,4 @@ cargo patina run target/testbeds/buggify-wasi/wasm32-wasip1/debug/buggify-wasi-f
 
 - Standalone cargo workspace (empty `[workspace]` table), dependency tree =
   `patina-dst` and nothing else.
-- The clean-run marker is `WASI_BUGGIFY_DIGEST …` on stdout; the sweep
-  classifies buggify markers first, then a hard-crash guard, then requires the
-  digest for OK.
-- A `sometimes!` site reached but never satisfied across the whole campaign
-  exits 7 (`SOMETIMES_UNMET`), per the shared campaign layer.
+- The clean-run marker is `WASI_BUGGIFY_DIGEST …` on stdout.
