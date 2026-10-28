@@ -1,7 +1,6 @@
 //! Performance qualification for the Patina runtime.
 //!
-//! This crate measures three qualities called out as release budgets in
-//! `VALIDATION.md`:
+//! This crate measures three qualities:
 //!
 //! - **runtime overhead**: wall-clock cost per boundary operation in seeded
 //!   execution, and the multiplier that record and replay add;

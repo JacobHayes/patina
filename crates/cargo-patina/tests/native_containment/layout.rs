@@ -62,8 +62,8 @@ fn replay_standalone(
 /// and its replay. On Darwin the thread stacks sit at fixed addresses; the
 /// main stack moves with the length of the kernel's random apple strings, and
 /// the heap (with the thread-local block dyld allocates from it) is placed by
-/// libmalloc from exec-time entropy no seed reaches (VALIDATION.md, the
-/// unpaired list).
+/// libmalloc from exec-time entropy no seed reaches (VALIDATION.md,
+/// Known gaps).
 ///
 /// The shim checks the layout the supervisor promised: a guest exec'd with
 /// the promise but with randomization on stops before `main`, and runs
