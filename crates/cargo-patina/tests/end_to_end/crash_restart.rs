@@ -902,4 +902,166 @@ fn main() {
             );
         }
     }
+
+    /// A log the guest acks record by record, after each record's own fsync,
+    /// into a ledger whose creation it makes durable first. A restarted
+    /// incarnation reports `LOST` and exits 3 when the ledger holds more acks
+    /// than the log holds records. Without `--fsync-data-dir` the log's directory is never made
+    /// durable, so a crash loses the whole log: the bug a crash band exists to
+    /// find, and nothing short of a crash can show.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const ACKED_LOG_SOURCE: &str = r#"
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+
+fn sync_dir(path: &str) {
+    File::open(path).unwrap().sync_all().unwrap();
+}
+
+fn lines(path: &str) -> usize {
+    fs::read_to_string(path).map_or(0, |text| text.matches('\n').count())
+}
+
+fn main() {
+    if fs::metadata("/acked").is_ok() {
+        let (acked, logged) = (lines("/acked"), lines("/data/log"));
+        if logged < acked {
+            println!("LOST acked={acked} logged={logged}");
+            std::process::exit(3);
+        }
+        println!("RESTARTED acked={acked} logged={logged}");
+        return;
+    }
+    let mut ledger = OpenOptions::new().create(true).append(true).open("/acked").unwrap();
+    sync_dir("/");
+    fs::create_dir("/data").unwrap();
+    if std::env::args().any(|arg| arg == "--fsync-data-dir") {
+        sync_dir("/");
+    }
+    let mut log = OpenOptions::new().create(true).append(true).open("/data/log").unwrap();
+    sync_dir("/data");
+    for record in 0..8 {
+        writeln!(log, "record {record}").unwrap();
+        log.sync_all().unwrap();
+        writeln!(ledger, "{record}").unwrap();
+        ledger.sync_all().unwrap();
+    }
+}
+"#;
+
+    /// A campaign that declares the crash points its guest reaches crashes and
+    /// restarts every generation there: it catches a log lost to a missing
+    /// directory fsync (red) and passes the fixed guest (green); a declared
+    /// point the guest never reaches is VACUOUS_CRASH, not INFRA; and
+    /// `minimize` reduces a crash generation's knobs but refuses, before any
+    /// run, to delta-debug its two-incarnation trace.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_campaign_crash_band_restarts_every_generation_at_a_declared_point() {
+        let guest = build_guest("acked_log", ACKED_LOG_SOURCE);
+        let spec = guest.dir.path().join("spec.json");
+        let campaign = |name: &str, reach: &str, guest_args: &[&str]| {
+            fs::write(
+                &spec,
+                format!(
+                    r#"{{"fs_crash_reach": [{reach}], "classify": {{"exit_codes": {{"VIOLATION": [3]}}}}}}"#
+                ),
+            )
+            .unwrap();
+            let out = guest.dir.path().join(name);
+            let mut args = vec![
+                "--gens",
+                "8",
+                "--spec",
+                spec.to_str().unwrap(),
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+                "--",
+            ];
+            args.extend_from_slice(guest_args);
+            let envelope = campaign_json_stdout(&guest.command("campaign", &args));
+            (out, envelope)
+        };
+        let classes = |envelope: &serde_json::Value| -> BTreeMap<String, u64> {
+            envelope["classes"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(class, count)| (class.clone(), count.as_u64().unwrap()))
+                .filter(|(_, count)| *count > 0)
+                .collect()
+        };
+
+        // The guest makes 16 writes, so every drawn point is reached.
+        let (red, envelope) = campaign("red", r#""write:16""#, &[]);
+        let red_classes = classes(&envelope);
+        assert!(red_classes.contains_key("VIOLATION"), "{envelope:#}");
+        assert!(
+            red_classes
+                .keys()
+                .all(|class| class == "OK" || class == "VIOLATION"),
+            "{envelope:#}"
+        );
+        let (_, envelope) = campaign("green", r#""write:16""#, &["--fsync-data-dir"]);
+        assert_eq!(
+            classes(&envelope).into_keys().collect::<Vec<_>>(),
+            ["OK"],
+            "{envelope:#}"
+        );
+        // Points past the 16th write are unreached.
+        let (_, envelope) = campaign("unreached", r#""write:64""#, &["--fsync-data-dir"]);
+        let unreached = classes(&envelope);
+        assert!(unreached.contains_key("VACUOUS_CRASH"), "{envelope:#}");
+        assert!(!unreached.contains_key("INFRA"), "{envelope:#}");
+
+        let violation = envelope_generation(&red, "VIOLATION");
+        let minimize = |extra: &[&str]| {
+            let mut args = vec![
+                "minimize",
+                "--generation",
+                &violation,
+                "--out-dir",
+                red.to_str().unwrap(),
+                "--marker",
+                "LOST",
+            ];
+            args.extend_from_slice(extra);
+            invoke_with_deadline(
+                env!("CARGO_BIN_EXE_cargo-patina"),
+                native_workspace(),
+                &args,
+                Duration::from_secs(60),
+            )
+            .expect("minimize exceeded 60s")
+        };
+        let refused = minimize(&[]);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("--no-trace-phase"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        let reduced = assert_success(minimize(&["--no-trace-phase"]));
+        assert!(
+            String::from_utf8_lossy(&reduced.stdout).contains("--fs-crash-at"),
+            "the reduction dropped the crash it needs:\n{}",
+            String::from_utf8_lossy(&reduced.stdout)
+        );
+    }
+
+    /// The first generation of a campaign out-dir classed `class`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn envelope_generation(out: &Path, class: &str) -> String {
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("campaign-state.json")).unwrap()).unwrap();
+        state["notable_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["class"] == class)
+            .unwrap_or_else(|| panic!("no {class} generation in {state:#}"))["generation"]
+            .to_string()
+    }
 }

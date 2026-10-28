@@ -93,8 +93,8 @@ fn native_only_knobs_are_skipped_for_wasi() {
         assert!(wasi.iter().any(|f| f == banded), "wasi lacks {banded}");
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
     }
-    // Crash-restart is never banded: campaign record/replay cannot represent
-    // a native crash-restart lifecycle.
+    // Crash restart rides on a declared reach, not on `--faults`: a spec
+    // without one never arms a crash point it cannot know the guest reaches.
     for family in ["native", "wasi", "cargo"] {
         for generation in 0..64 {
             let flags = derive_flags(&spec, &generation_hash(0, generation), family);
@@ -106,6 +106,54 @@ fn native_only_knobs_are_skipped_for_wasi() {
             );
         }
     }
+}
+
+/// A declared crash reach arms one crash point per native generation, always
+/// at or before a declared point (so the run reaches it), and the draws
+/// actually move: across generations both declared ops, many ordinals, and
+/// both torn-write granularities appear. Other families never get one.
+#[test]
+fn a_declared_crash_reach_draws_reachable_points_on_native_only() {
+    let reach =
+        ["write:32", "close:3"].map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap());
+    let spec = CampaignSpec {
+        fs_crash_reach: reach.to_vec(),
+        ..CampaignSpec::default()
+    };
+    let value = |flags: &[String], name: &str| -> String {
+        let at = flags.iter().position(|flag| flag == name);
+        flags[at.unwrap_or_else(|| panic!("{name} missing from {flags:?}")) + 1].clone()
+    };
+    let mut points = BTreeSet::new();
+    let mut torn = BTreeSet::new();
+    for generation in 0..128 {
+        let hash = generation_hash(0, generation);
+        let flags = derive_flags(&spec, &hash, "native");
+        assert_eq!(flags, derive_flags(&spec, &hash, "native"));
+        let point = patina_dst_runtime::CrashPoint::parse(&value(&flags, "--fs-crash-at")).unwrap();
+        let bound = reach.iter().find(|bound| bound.op == point.op).unwrap();
+        assert!(
+            (1..=bound.ordinal).contains(&point.ordinal),
+            "{point} lies past the declared {bound}"
+        );
+        points.insert(point.to_string());
+        torn.insert(value(&flags, "--fs-torn-granularity"));
+        for family in ["wasi", "cargo"] {
+            assert!(
+                !derive_flags(&spec, &hash, family)
+                    .iter()
+                    .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
+                "{family} generation {generation} armed a crash"
+            );
+        }
+    }
+    assert!(points.iter().any(|p| p.starts_with("write:")));
+    assert!(points.iter().any(|p| p.starts_with("close:")));
+    assert!(
+        points.len() > reach.len(),
+        "ordinals never moved: {points:?}"
+    );
+    assert_eq!(torn, BTreeSet::from(["block".into(), "byte".into()]));
 }
 
 /// `--faults=PLANE,...` emits exactly the selected planes' knobs, at the values
@@ -191,7 +239,7 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
 /// actively wrong to scale: `--net-tcp-buffer-bytes` is a capacity whose SMALL
 /// end is the harsh one, so multiplying it down would make a rare-fault
 /// campaign harsher than the default it was asked to be gentler than.
-/// Crash/torn-write placement is not drawn at all.
+/// Crash placement comes from the spec's declared reach, not the scale.
 #[test]
 fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
     let at = |permille: u64, generation: u64| {

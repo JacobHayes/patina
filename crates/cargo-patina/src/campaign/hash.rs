@@ -1,7 +1,7 @@
 //! Opaque campaign derivation material and its declared byte claims.
 //!
 //! Bytes 0..8 carry the child seed; every band reads through a named claim.
-//! Unclaimed original indices are 10, 17, 18, and 19; extension indices 33
+//! Unclaimed original indices are 10, 17, 18, and 19; extension indices 37
 //! through 63 are free. Claim a free byte for a new independent knob rather than
 //! correlating unrelated knobs by reusing an existing claim.
 //!
@@ -71,6 +71,13 @@ claims! {
     /// the gate is unconditionally open, which is what keeps the default sweep
     /// unchanged.
     STARVE_FIRE = 32,
+    /// Which declared crash reach a generation crashes in (`fs_crash_reach`).
+    FS_CRASH_OP = 33,
+    /// The crash ordinal within that reach, as a little-endian `u16`.
+    FS_CRASH_ORDINAL_LO = 34,
+    FS_CRASH_ORDINAL_HI = 35,
+    /// Block or byte torn-write granularity for the drawn crash.
+    FS_TORN = 36,
 }
 pub(super) use Claim::*;
 

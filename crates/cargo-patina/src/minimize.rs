@@ -153,6 +153,7 @@ fn execute_trace(invocation: TraceMinimize) -> Result<i32, CliError> {
             invocation.trace.display()
         ))
     })?;
+    refuse_a_crash_restart_trace(&original, &invocation.trace)?;
     // Pick the strategy automatically: a leaf timeline (or an unbranched main)
     // uses the strict suffix path; a non-leaf target or a branched bundle uses
     // the non-leaf branch-tree policy so shrinking never invalidates an
@@ -227,6 +228,27 @@ fn execute_trace(invocation: TraceMinimize) -> Result<i32, CliError> {
         println!("PATINA_MINIMIZE_COMPLETE {detail}");
     }
     Ok(0)
+}
+
+/// The trace reducer deletes decisions from one timeline, and a crash-restart
+/// trace is two incarnations joined at the crash: a deletion before the crash
+/// moves the crash point, which the replay refuses as a divergence, so every
+/// candidate would be rejected and the search would burn its whole budget
+/// reducing nothing. Refused by name instead.
+fn refuse_a_crash_restart_trace(bundle: &TraceBundle, path: &Path) -> Result<(), CliError> {
+    let segments = bundle
+        .crash_restart_segments()
+        .map_err(|error| CliError(format!("failed to load trace {}: {error}", path.display())))?;
+    if segments.is_some() {
+        return Err(CliError(format!(
+            "trace {} records a crash restart (--fs-crash-at), and the trace reducer cannot \
+             shrink one: deleting a decision before the crash moves the crash point, which the \
+             replay refuses. Reduce the run's fault knobs instead (`minimize --generation N \
+             --no-trace-phase` for a campaign generation).",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn execute_scenario(invocation: ScenarioMinimize) -> Result<i32, CliError> {

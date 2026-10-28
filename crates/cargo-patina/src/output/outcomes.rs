@@ -107,6 +107,11 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // system under test for a failure inside patina, whose reproduce command
     // does not even reproduce it (the abort needs the recording that the
     // reproduce command omits).
+    // An armed `--fs-crash-at` point the run never reached. The runtime names
+    // it at shutdown, inside the shutdown-failure line below, so it is listed
+    // first: the guest ran without the crash it asked for, which is a fact
+    // about the crash selector, not a recorder failure.
+    ("PATINA_FS_CRASH_SELECTOR_UNREACHED", "fs_crash_unreached"),
     ("patina: runtime shutdown failed", "shutdown_failure"),
     // The trace CHANNEL failed under a run that otherwise completed: the
     // recorder's scratch file could not be opened, read, or renamed. Unlike the

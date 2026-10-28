@@ -141,6 +141,14 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             state.artifact.family
         )));
     }
+    // `run` refuses crash restart under starvation, so a campaign that asked
+    // for both would refuse identically in every generation.
+    if !state.spec.fs_crash_reach.is_empty() && state.spec.starve {
+        return Err(CliError::usage(
+            "fs_crash_reach and --starve cannot be combined: native --fs-crash-at crash restart \
+             is not implemented under --starve, so every generation would be refused",
+        ));
+    }
 
     if let CampaignMode::Resume = mode
         && state.generations_done == state.spec.generations

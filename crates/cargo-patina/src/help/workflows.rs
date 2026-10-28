@@ -105,6 +105,16 @@ kills is reported as STARVATION_STALL and is NOT counted as a distinct bug found
 the backstop only arms under --starve, so the wedge is patina's own injector, not a \
 verdict on the guest.\n\
 \n\
+Disk crash-restart is drawn only when the spec declares where a crash can land: \
+`\"fs_crash_reach\": [\"write:32\", \"sync:32\", \"close:3\"]` lists, per operation, \
+the highest ordinal a generation is known to reach. Every native generation then \
+crashes at one drawn operation and ordinal within that bound, with a drawn torn \
+granularity, and restarts. A drawn point the generation never reaches is \
+VACUOUS_CRASH rather than a pass. The key is native-only (WASI and Cargo artifacts \
+refuse it by name) and is refused alongside --starve. `minimize --generation` on \
+a crash generation needs --no-trace-phase: its knob phase reruns seeds, but a \
+two-incarnation trace cannot be shortened without moving the crash point.\n\
+\n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
 generation: `--harness` for a patina-dst-harness (configure-then-run) binary, and \
 the pre-run gate surface `--allow SYMBOL` / `--allow-unsupported-symbols`. \
@@ -248,7 +258,7 @@ refused by name.",
                     "--fault-scale-permille",
                     None,
                     Value::Required("N", Kind::Permille),
-                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Crash/torn-write placement is not drawn. Shape bands such as TCP buffer size and the cooperative-SUT knobs are not intensity and are left alone.",
+                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Crash placement (the spec's fs_crash_reach) is not intensity and is left alone, as are shape bands such as TCP buffer size and the cooperative-SUT knobs.",
                     false,
                 ),
                 f(

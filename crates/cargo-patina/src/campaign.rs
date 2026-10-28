@@ -178,10 +178,6 @@ pub(crate) mod gen_byte;
 
 /// Explicit reasons a campaign leaves a knob undrawn.
 enum BandWaiver {
-    /// Crash restart needs native reachability and two-incarnation minimization.
-    CrashRestart,
-    /// Torn granularity is inert without a generated crash selector.
-    CrashModifier,
     /// Partition endpoints must come from the guest's topology.
     Topology,
     /// The DNS host table is workload shape passed through from the spec.
@@ -199,10 +195,7 @@ impl BandPolicy {
                 claims
             }
             Self::Waived(waiver) => match waiver {
-                BandWaiver::CrashRestart
-                | BandWaiver::CrashModifier
-                | BandWaiver::Topology
-                | BandWaiver::Workload => &[],
+                BandWaiver::Topology | BandWaiver::Workload => &[],
             },
         }
     }
@@ -211,12 +204,16 @@ impl BandPolicy {
 /// Exhaustive ownership of campaign band bytes: every knob is drawn or waived.
 const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     match knob {
-        // Not drawn: crash placement is native-only (WASI/Cargo refuse
-        // --fs-crash-at by name), and a native crash band still needs a
-        // reachable crash point, classifier awareness of the named crash
-        // errors, and `minimize` on two-incarnation traces.
-        FaultKnob::FsCrashAt => BandPolicy::Waived(BandWaiver::CrashRestart),
-        FaultKnob::FsTornGranularity => BandPolicy::Waived(BandWaiver::CrashModifier),
+        // Banded only for a native spec that declares `fs_crash_reach`: an
+        // armed crash point the run never reaches fails the run, and which
+        // points every generation reaches is a fact about the guest that only
+        // its operator can state (see the crash block in `derive_flags`).
+        FaultKnob::FsCrashAt => BandPolicy::Draw(&[
+            gen_byte::FS_CRASH_OP,
+            gen_byte::FS_CRASH_ORDINAL_LO,
+            gen_byte::FS_CRASH_ORDINAL_HI,
+        ]),
+        FaultKnob::FsTornGranularity => BandPolicy::Draw(&[gen_byte::FS_TORN]),
         FaultKnob::FsErrorPermille => BandPolicy::Draw(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => BandPolicy::Draw(&[gen_byte::FS_SHORT]),
         FaultKnob::FsLatencyNanos => BandPolicy::Draw(&[gen_byte::FS_LATENCY_HI]),
@@ -312,8 +309,9 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
         | FaultKnob::NetConnectRefusePermille
         | FaultKnob::NetResetPermille
         | FaultKnob::NetPartition => Some(CampaignClass::VacuousNetFault),
-        // No rate to judge inert: a crash fires at a chosen boundary op, a
-        // torn-write granularity is a model rather than a rate, a buffer size is
+        // No rate to judge inert: a crash fires at a chosen boundary op (an
+        // unreached one is the runtime's own refusal, classed VACUOUS_CRASH,
+        // not a report plane), a torn-write granularity is a model rather than a rate, a buffer size is
         // a capacity, a delayed sleep is indistinguishable from a longer one, and
         // the host table is workload. Each of these reports nothing, which
         // `vacuity_classes_match_the_classifier` pins against the knob table.
@@ -328,6 +326,9 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
 /// The first native-only invocation flag this spec carries, if any — the name a
 /// non-native campaign's refusal quotes.
 fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
+    if !spec.fs_crash_reach.is_empty() {
+        return Some("--fs-crash-at");
+    }
     if spec.compute_watchdog_ms.is_some() {
         return Some("--compute-watchdog-ms");
     }
@@ -516,8 +517,6 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 hi: fs_latency_hi,
             },
         );
-        // Crash-restart placement is not drawn (see `campaign_policy`); explicit
-        // native crash coverage lives in the e2e suite.
         let drop = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::NetDropPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,
@@ -671,6 +670,39 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 },
             );
         }
+    }
+    // Crash restart, opted into by declaring the crash points every
+    // generation reaches (`fs_crash_reach`): one reach is picked, and a point
+    // at or before it drawn, so the selector can never go unreached. Not under
+    // `--faults` or the scale dial: it is placement, not an intensity, and a
+    // network campaign has no reason to inherit fs error bands to get it.
+    // Native only — the other families are refused by name upstream.
+    if !spec.fs_crash_reach.is_empty() && native {
+        let reach = &spec.fs_crash_reach;
+        let bound = reach[usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0)) % reach.len()];
+        let draw = u16::from_le_bytes([
+            band_byte(hash, FaultKnob::FsCrashAt, 1),
+            band_byte(hash, FaultKnob::FsCrashAt, 2),
+        ]);
+        let point = patina_dst_runtime::CrashPoint {
+            op: bound.op,
+            ordinal: 1 + u64::from(draw) % bound.ordinal,
+        };
+        push_run_flag(
+            &mut flags,
+            "--fs-crash-at",
+            RunValue::Text(point.to_string()),
+        );
+        let torn = if band_byte(hash, FaultKnob::FsTornGranularity, 0) & 1 == 0 {
+            "block"
+        } else {
+            "byte"
+        };
+        push_run_flag(
+            &mut flags,
+            "--fs-torn-granularity",
+            RunValue::Text(torn.into()),
+        );
     }
     if spec.swarm && native {
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);

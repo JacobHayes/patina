@@ -54,7 +54,7 @@ The crash models power loss, so a restarted incarnation boots as a rebooted mach
 
 The downtime is not a knob: a restart's realtime is a derived value, and replay re-derives it from the replayed handoff and the run seed. The trace layout is unchanged, since the realtime comes from replaying incarnation 0, which the replay checks against the recorded operation count and snapshot digest.
 
-An armed selector that is never reached is a named runtime error (`PATINA_FS_CRASH_SELECTOR_UNREACHED`), and a corrupt handoff is a named supervisor error (`PATINA_FS_CRASH_INVALID_HANDOFF`).
+An armed selector that is never reached is a named runtime error (`PATINA_FS_CRASH_SELECTOR_UNREACHED`, refusal class `fs_crash_unreached`, campaign class `VACUOUS_CRASH` over a guest that otherwise exited cleanly), and a corrupt handoff is a named supervisor error (`PATINA_FS_CRASH_INVALID_HANDOFF`).
 
 ### Crash reports
 

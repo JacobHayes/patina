@@ -63,11 +63,9 @@ pub(crate) const FAULT_PLANE_NAMES: &[&str] = &{
 /// selects. Exhaustive, so a new knob is a decision rather than an omission.
 const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
     match knob {
-        FaultKnob::FsCrashAt
-        | FaultKnob::FsTornGranularity
-        | FaultKnob::FsErrorPermille
-        | FaultKnob::FsShortPermille
-        | FaultKnob::FsLatencyNanos => Some(FaultPlane::Fs),
+        FaultKnob::FsErrorPermille | FaultKnob::FsShortPermille | FaultKnob::FsLatencyNanos => {
+            Some(FaultPlane::Fs)
+        }
         FaultKnob::NetLatencyNanos
         | FaultKnob::NetJitterNanos
         | FaultKnob::NetDropPermille
@@ -83,6 +81,9 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
         // Opted into by `--custom-op-faults`: only the guest knows whether its
         // custom operations declare a failure shape.
         FaultKnob::CustomOpFailPermille => None,
+        // Opted into by the spec's `fs_crash_reach`, for the same reason: only
+        // the operator knows which crash points the guest reaches.
+        FaultKnob::FsCrashAt | FaultKnob::FsTornGranularity => None,
         // The host table is workload, forwarded whichever planes are drawn.
         FaultKnob::DnsEntry => None,
     }

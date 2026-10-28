@@ -126,7 +126,8 @@ unknown option.
 - `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
-  fault plane's knobs — `fs` (error/short/latency; crash placement is not drawn),
+  fault plane's knobs — `fs` (error/short/latency; disk crash-restart is drawn only from the spec's
+  `fs_crash_reach`, native-only, unreached point = `VACUOUS_CRASH`),
   `net` (drop/latency/jitter/duplicate/connect-refuse/reset/TCP buffer), `dns`,
   `entropy`, `sleep` (sleep jitter) and `epoch` (realtime-epoch jump) — so
   successive generations explore different fault shapes. `--faults=net,sleep`
@@ -253,7 +254,7 @@ unknown option.
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,
   which restores them from the trace. Exceptions: `--fs-crash-at` and torn granularity are
-  native-only (Cargo/WASI refuse them; campaigns do not draw them), and `--dns-*` is
+  native-only (Cargo/WASI refuse them; campaigns draw them only from the spec's `fs_crash_reach`), and `--dns-*` is
   unavailable under `--target wasi` because wasip1 has no name-resolution surface.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 

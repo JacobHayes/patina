@@ -356,7 +356,7 @@ reported none.
   `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
   shape as the DNS knobs in section 9. They are seed-driven and default off. All
   are recorded for flag-free replay. Crash restart (`--fs-crash-at`) is
-  native-only: Cargo/WASI refuse it, and campaigns do not draw it.
+  native-only: Cargo/WASI refuse it, and campaigns draw it only from a spec's `fs_crash_reach`.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical

@@ -156,10 +156,22 @@ pub struct CampaignSpec {
     /// a capacity where a SMALLER value is the harsher one, so scaling it down
     /// would do the opposite of what the operator asked; and
     /// `--buggify`/`--sched-pct`/`--swarm` configure exploration of the guest's own
-    /// cooperative sites rather than injecting an environment fault. Crash/torn
-    /// generation is currently suspended altogether because campaign record/replay
-    /// cannot yet represent native crash restart lifecycle.
+    /// cooperative sites rather than injecting an environment fault; and the
+    /// crash band ([`Self::fs_crash_reach`]), which is placement.
     pub fault_scale_permille: u64,
+    /// The crash points every generation is known to reach, one per boundary
+    /// op, in the `--fs-crash-at` grammar (`write:32`, `close:3`). When set,
+    /// every native generation crashes and restarts once: it picks one of
+    /// these, draws a point at or before it, and a block or byte torn-write
+    /// granularity.
+    ///
+    /// Declared rather than guessed because an armed point the run never
+    /// reaches fails the run (`VACUOUS_CRASH`), and how many writes, syncs or
+    /// closes a guest certainly performs is a fact about the guest and its
+    /// arguments only the operator can state — the same reason the DNS band
+    /// rides on [`Self::dns_entries`]. Native only: WASI and Cargo campaigns
+    /// are refused by name, as their `run` refuses `--fs-crash-at`.
+    pub fs_crash_reach: Vec<patina_dst_runtime::CrashPoint>,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
     /// Part of the campaign's shape rather than a per-generation draw: the names
@@ -245,6 +257,7 @@ impl Default for CampaignSpec {
             faults: FaultPlanes::NONE,
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
+            fs_crash_reach: Vec::new(),
             dns_entries: Vec::new(),
             harness: false,
             allow_symbols: Vec::new(),
@@ -324,6 +337,7 @@ impl CampaignSpec {
                     }
                     self.fault_scale_permille = value;
                 }
+                "fs_crash_reach" => self.fs_crash_reach = json_crash_reach(key, val)?,
                 "dns_entries" => {
                     let array = val
                         .as_array()
@@ -411,7 +425,8 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
-                         fault_scale_permille, starve, starve_scale_permille, dns_entries, \
+                         fault_scale_permille, fs_crash_reach, starve, starve_scale_permille, \
+                         dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, address_layout, \
                          cpus, watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
@@ -467,6 +482,36 @@ fn json_fault_planes(key: &str, value: &serde_json::Value) -> Result<FaultPlanes
         .collect::<Result<Vec<_>, _>>()?;
     FaultPlanes::from_names(names)
         .map_err(|error| CliError(format!("campaign spec {key:?} {error}")))
+}
+
+/// `"fs_crash_reach"`: a non-empty array of `--fs-crash-at` points, at most
+/// one per boundary op.
+fn json_crash_reach(
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<Vec<patina_dst_runtime::CrashPoint>, CliError> {
+    let malformed = || {
+        CliError(format!(
+            "campaign spec {key:?} must be a non-empty array of crash points every generation \
+             reaches (open|write|sync|close:N, N <= 65536), at most one per op"
+        ))
+    };
+    let entries = value
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(malformed)?;
+    let mut reach: Vec<patina_dst_runtime::CrashPoint> = Vec::new();
+    for entry in entries {
+        let point = patina_dst_runtime::CrashPoint::parse(entry.as_str().ok_or_else(malformed)?)
+            .map_err(|error| CliError(format!("campaign spec {key:?}: {error}")))?;
+        // A generation draws its ordinal from two hash bytes, so a larger
+        // bound would leave its upper ordinals never drawn.
+        if reach.iter().any(|seen| seen.op == point.op) || point.ordinal > 1 << 16 {
+            return Err(malformed());
+        }
+        reach.push(point);
+    }
+    Ok(reach)
 }
 
 fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
@@ -668,6 +713,12 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
+                fs_crash_reach: ["write:32", "close:3"]
+                    .map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap())
+                    .to_vec(),
+                ..CampaignSpec::default()
+            },
+            CampaignSpec {
                 harness: true,
                 allow_symbols: vec!["dlsym".into()],
                 allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
@@ -684,6 +735,7 @@ mod tests {
             "classify",
             "verify",
             "dns_entries",
+            "fs_crash_reach",
             "harness",
             "allow_symbols",
             "allow_unsupported_symbols",
@@ -724,6 +776,10 @@ mod tests {
             r#"{"dns_entries": ["db.internal=nope"]}"#,
             r#"{"allow_symbols": [""]}"#,
             r#"{"allow_unsupported_symbols": ""}"#,
+            r#"{"fs_crash_reach": []}"#,
+            r#"{"fs_crash_reach": ["write:0"]}"#,
+            r#"{"fs_crash_reach": ["write:65537"]}"#,
+            r#"{"fs_crash_reach": ["write:3", "write:5"]}"#,
         ] {
             let json: serde_json::Value = serde_json::from_str(source).unwrap();
             assert!(

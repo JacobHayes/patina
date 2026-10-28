@@ -77,7 +77,7 @@ trace so replay reproduces them: I/O errors, short writes and latency; network d
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
 preemption and task starvation; liveness watchdogs. Native `--fs-crash-at`
 performs a real fresh-process restart and records and replays across both
-incarnations, while Cargo/WASI refuse it; campaigns do not draw it. Filesystem
+incarnations, while Cargo/WASI refuse it; campaigns draw it only from a spec's `fs_crash_reach`. Filesystem
 write tearing is therefore meaningful only with that native crash selector. A
 *swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.
