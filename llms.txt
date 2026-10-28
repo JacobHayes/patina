@@ -135,7 +135,11 @@ unknown option.
   values an every-plane campaign draws, for a guest that needs a plane always
   off; an unknown plane is a usage error. The subset is recorded in the out-dir
   spec, so `--extend`/`--resume`, the reproduce commands and
-  `minimize --generation` keep it, and `--swarm` masks within it. `--dns-entry`
+  `minimize --generation` keep it, and `--swarm` masks within it. The spec key
+  `"exclude_knobs": ["--net-reset-permille", ...]` turns single knobs of a
+  selected plane off, for a guest that models only some of its faults; a name
+  that is not a drawn `--faults` knob, or whose plane is not selected, is
+  refused, and the exclusion is recorded in the out-dir spec. `--dns-entry`
   (repeatable) is campaign SHAPE, not a per-generation draw: it records the host
   table in the out-dir spec, forwards it to every generation, and is what enables
   the DNS band (fail per-mille + resolution latency) — with no defined name every

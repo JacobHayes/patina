@@ -199,6 +199,29 @@ fn faults_selects_every_plane_bare_or_the_named_subset() {
     assert!(parse(args(&["--extend", "1", "--faults=net"])).is_err());
 }
 
+/// A spec's knob exclusion applies once the flags are merged, and is refused
+/// when the merged campaign does not draw the excluded knob's plane at all.
+#[test]
+fn an_exclusion_needs_its_plane_selected_after_the_merge() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("spec.json");
+    let spec_flag = path.display().to_string();
+    let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+    fs::write(
+        &path,
+        br#"{"faults": ["sleep"], "exclude_knobs": ["--net-reset-permille"]}"#,
+    )
+    .expect("write");
+    assert!(parse(args(&["art", "--spec", &spec_flag])).is_err());
+    let merged = parse(args(&["art", "--spec", &spec_flag, "--faults=net"]))
+        .expect("the flag selects the excluded knob's plane")
+        .spec;
+    assert_eq!(
+        merged.exclude_knobs.into_iter().collect::<Vec<_>>(),
+        [patina_dst_runtime::FaultKnob::NetResetPermille]
+    );
+}
+
 #[test]
 fn campaign_locates_the_artifact_around_options() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();

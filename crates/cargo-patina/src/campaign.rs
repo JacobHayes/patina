@@ -248,6 +248,13 @@ const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     }
 }
 
+/// Whether a spec's `exclude_knobs` may name `knob`: a knob some `--faults`
+/// plane draws a band for. A waived knob, or one with its own opt-in, is never
+/// drawn by a plane, so excluding it would exclude nothing.
+fn excludable(knob: FaultKnob) -> bool {
+    FaultPlanes::ALL.draws(knob) && matches!(campaign_policy(knob), BandPolicy::Draw(_))
+}
+
 /// The band material a generation draws every knob from: its 32-byte generation
 /// hash, followed by a domain-separated 32-byte extension block.
 ///
@@ -478,12 +485,13 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
     }
     if !spec.faults.is_empty() {
         // Every band below passes through here, so a plane the campaign did not
-        // select emits none of its knobs. The values are still drawn: each band
-        // reads its own claimed byte, so a selected plane's draws are the ones
-        // an every-plane campaign makes for the same generation.
+        // select, or a knob the spec excludes, emits nothing. The values are
+        // still drawn: each band reads its own claimed byte, so the knobs that
+        // are emitted carry the draws an every-plane campaign makes for the
+        // same generation.
         let planes = spec.faults;
         let band = |flags: &mut Vec<String>, knob: FaultKnob, value: RunValue| {
-            if planes.draws(knob) {
+            if planes.draws(knob) && !spec.exclude_knobs.contains(&knob) {
                 push_run_flag(flags, knob.meta().flag, value);
             }
         };

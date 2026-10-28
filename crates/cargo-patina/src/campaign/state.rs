@@ -550,6 +550,16 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("swarm".into(), spec.swarm.into());
     map.insert("pct".into(), spec.pct.into());
     map.insert("faults".into(), spec.faults.to_json());
+    // Default-omitted like the optional keys below, so a spec without
+    // exclusions records exactly the JSON it did before the key existed.
+    if !spec.exclude_knobs.is_empty() {
+        let flags: Vec<&str> = spec
+            .exclude_knobs
+            .iter()
+            .map(|knob| knob.meta().flag)
+            .collect();
+        map.insert("exclude_knobs".into(), flags.into());
+    }
     // Default-omitted for the same reason as the keys below: a spec that does
     // not declare custom-op faults records exactly the JSON it did before this
     // key existed, so an out-dir written by an earlier build still round-trips

@@ -63,6 +63,35 @@ fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
     assert!(!wasi.iter().any(|flag| flag.starts_with("--starve")));
 }
 
+/// A knob the spec excludes is emitted by no generation of any family, and
+/// excluding it leaves every other flag exactly as the unexcluded campaign
+/// derives it.
+#[test]
+fn an_excluded_knob_is_never_drawn_and_leaves_the_rest_alone() {
+    let net = CampaignSpec {
+        faults: FaultPlanes::from_names(["net"]).unwrap(),
+        ..CampaignSpec::default()
+    };
+    let excluded = CampaignSpec {
+        exclude_knobs: [FaultKnob::NetResetPermille].into(),
+        ..net.clone()
+    };
+    let reset = FaultKnob::NetResetPermille.meta().flag;
+    let mut drawn_when_included = false;
+    for family in ["native", "wasi", "cargo"] {
+        for generation in 0..64 {
+            let hash = generation_hash(0, generation);
+            let mut expected = derive_flags(&net, &hash, family);
+            if let Some(at) = expected.iter().position(|flag| flag == reset) {
+                drawn_when_included = true;
+                expected.drain(at..at + 2);
+            }
+            assert_eq!(derive_flags(&excluded, &hash, family), expected);
+        }
+    }
+    assert!(drawn_when_included, "the net plane never drew {reset}");
+}
+
 #[test]
 fn native_only_knobs_are_skipped_for_wasi() {
     let spec = CampaignSpec {

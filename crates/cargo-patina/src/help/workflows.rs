@@ -90,7 +90,11 @@ threshold). `--selftest` proves every classifier class and the coverage gate \
 classes. `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
 named planes, for a guest that needs one plane always off (a store that must \
 open on the simulated disk, say), and is recorded and pinned like every spec \
-flag. The `--faults` bands are tuned for an aggressive sweep (up to 100 \
+flag. The spec key `\"exclude_knobs\": [\"--net-reset-permille\"]` turns single \
+knobs of a selected plane off, for a guest that models only some of a plane's \
+faults (a client that treats a reset connection as fatal, say); a name that is \
+not a knob --faults draws, or whose plane is not selected, is refused. The \
+`--faults` bands are tuned for an aggressive sweep (up to 100 \
 per-mille of filesystem operations failed, 200 per-mille short); \
 --fault-scale-permille dampens every intensity band uniformly for a workload that \
 needs faults to be RARE enough to run to completion. It is part of the campaign's \

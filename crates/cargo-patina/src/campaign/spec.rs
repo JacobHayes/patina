@@ -1,5 +1,9 @@
 //! Campaign specification defaults and JSON grammar.
 
+use std::collections::BTreeSet;
+
+use patina_dst_runtime::FaultKnob;
+
 use super::planes::{FAULT_PLANE_NAMES, FaultPlanes};
 use super::{CampaignClass, ClassifyRules, FAULT_SCALE_FULL, STARVE_SCALE_FULL};
 use crate::{CliError, help};
@@ -117,6 +121,18 @@ pub struct CampaignSpec {
     /// real store gets nothing from fs faults but failed opens, which end the
     /// generation before it reaches the network behaviour being swept.
     pub faults: FaultPlanes,
+    /// Knobs of the selected [`Self::faults`] planes that are never drawn,
+    /// named by their `run` flag (`"exclude_knobs": ["--net-reset-permille"]`).
+    ///
+    /// For a guest that models only some of a plane's faults: a pub-sub broker
+    /// that treats a lost connection as fatal gets nothing from connection
+    /// resets but a run that ends before the fault the campaign is sweeping.
+    /// The excluded knob emits no flag in any generation; every other band
+    /// draws exactly what it draws without the exclusion, because each reads
+    /// its own claimed byte. A name that is not a `--faults` knob, or a knob
+    /// whose plane the campaign does not select, is refused rather than
+    /// recorded as an exclusion that excludes nothing.
+    pub exclude_knobs: BTreeSet<FaultKnob>,
     /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
     /// [`Self::faults`].
     ///
@@ -255,6 +271,7 @@ impl Default for CampaignSpec {
             starve: false,
             starve_scale_permille: STARVE_SCALE_FULL,
             faults: FaultPlanes::NONE,
+            exclude_knobs: BTreeSet::new(),
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
             fs_crash_reach: Vec::new(),
@@ -322,6 +339,7 @@ impl CampaignSpec {
                     self.starve_scale_permille = value;
                 }
                 "faults" => self.faults = json_fault_planes(key, val)?,
+                "exclude_knobs" => self.exclude_knobs = json_exclude_knobs(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "fault_scale_permille" => {
                     // A spec file bypasses the CLI value grammar, so hold it to
@@ -424,7 +442,8 @@ impl CampaignSpec {
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, buggify, swarm, pct, faults, custom_op_faults, \
+                         timeout_secs, guest_args, buggify, swarm, pct, faults, exclude_knobs, \
+                         custom_op_faults, \
                          fault_scale_permille, fs_crash_reach, starve, starve_scale_permille, \
                          dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, address_layout, \
@@ -482,6 +501,46 @@ fn json_fault_planes(key: &str, value: &serde_json::Value) -> Result<FaultPlanes
         .collect::<Result<Vec<_>, _>>()?;
     FaultPlanes::from_names(names)
         .map_err(|error| CliError(format!("campaign spec {key:?} {error}")))
+}
+
+/// `"exclude_knobs"`: an array of `run` flags, each a knob some `--faults`
+/// plane draws. Whether the campaign selects that plane is checked once the
+/// spec and the flags are merged (`parse.rs`).
+fn json_exclude_knobs(
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<BTreeSet<FaultKnob>, CliError> {
+    let excludable = || {
+        FaultKnob::ALL
+            .iter()
+            .filter(|knob| super::excludable(**knob))
+            .map(|knob| knob.meta().flag)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let entries = value.as_array().ok_or_else(|| {
+        CliError(format!(
+            "campaign spec {key:?} must be an array of fault knob flags ({})",
+            excludable()
+        ))
+    })?;
+    entries
+        .iter()
+        .map(|entry| {
+            let name = entry.as_str().unwrap_or_default();
+            FaultKnob::ALL
+                .iter()
+                .copied()
+                .find(|knob| knob.meta().flag == name && super::excludable(*knob))
+                .ok_or_else(|| {
+                    CliError(format!(
+                        "campaign spec {key:?} names {entry}, which is not a knob --faults draws; \
+                         expected one or more of {}",
+                        excludable()
+                    ))
+                })
+        })
+        .collect()
 }
 
 /// `"fs_crash_reach"`: a non-empty array of `--fs-crash-at` points, at most
@@ -713,6 +772,11 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
+                faults: FaultPlanes::from_names(["net"]).unwrap(),
+                exclude_knobs: [FaultKnob::NetResetPermille, FaultKnob::NetDropPermille].into(),
+                ..CampaignSpec::default()
+            },
+            CampaignSpec {
                 fs_crash_reach: ["write:32", "close:3"]
                     .map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap())
                     .to_vec(),
@@ -740,6 +804,7 @@ mod tests {
             "allow_symbols",
             "allow_unsupported_symbols",
             "address_layout",
+            "exclude_knobs",
         ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
         }
@@ -780,6 +845,14 @@ mod tests {
             r#"{"fs_crash_reach": ["write:0"]}"#,
             r#"{"fs_crash_reach": ["write:65537"]}"#,
             r#"{"fs_crash_reach": ["write:3", "write:5"]}"#,
+            r#"{"exclude_knobs": ["--net-bogus-permille"]}"#,
+            r#"{"exclude_knobs": ["net-reset-permille"]}"#,
+            r#"{"exclude_knobs": "--net-reset-permille"}"#,
+            r#"{"exclude_knobs": [7]}"#,
+            // Real knobs that no `--faults` plane draws exclude nothing.
+            r#"{"exclude_knobs": ["--net-partition"]}"#,
+            r#"{"exclude_knobs": ["--fs-crash-at"]}"#,
+            r#"{"exclude_knobs": ["--custom-op-fail-permille"]}"#,
         ] {
             let json: serde_json::Value = serde_json::from_str(source).unwrap();
             assert!(
@@ -788,9 +861,17 @@ mod tests {
             );
         }
         let mut spec = CampaignSpec::default();
-        spec.apply_json(&serde_json::json!({"generations": 12, "buggify": true}))
-            .unwrap();
+        spec.apply_json(&serde_json::json!({
+            "generations": 12,
+            "buggify": true,
+            "exclude_knobs": ["--net-connect-refuse-permille"],
+        }))
+        .unwrap();
         assert_eq!(spec.generations, 12);
         assert!(spec.buggify);
+        assert_eq!(
+            spec.exclude_knobs.into_iter().collect::<Vec<_>>(),
+            [FaultKnob::NetConnectRefusePermille]
+        );
     }
 }

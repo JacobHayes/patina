@@ -242,6 +242,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
              so no DNS fault could be drawn; add --dns-entry NAME=ADDR or leave dns out",
         ));
     }
+    validate_exclusions(&spec)?;
     Ok(CampaignInvocation {
         artifact: Some(artifact.ok_or_else(|| {
             CliError::usage(
@@ -300,3 +301,21 @@ fn reject_continuation_override(name: &str) -> CliError {
 
 #[cfg(test)]
 mod tests;
+
+/// An excluded knob must belong to a plane the merged campaign selects: an
+/// exclusion from a plane that is never drawn would record a choice that
+/// changes nothing.
+fn validate_exclusions(spec: &CampaignSpec) -> Result<(), CliError> {
+    match spec
+        .exclude_knobs
+        .iter()
+        .find(|knob| !spec.faults.draws(**knob))
+    {
+        Some(knob) => Err(CliError::usage(format!(
+            "the spec excludes {}, but the campaign does not select its fault plane, \
+             so the exclusion would change nothing; select the plane with --faults or drop the exclusion",
+            knob.meta().flag
+        ))),
+        None => Ok(()),
+    }
+}

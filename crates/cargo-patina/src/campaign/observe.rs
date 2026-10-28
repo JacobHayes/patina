@@ -170,6 +170,9 @@ fn campaign_depth_fingerprint(spec: &CampaignSpec) -> String {
         FaultPlanes::ALL => fingerprint.push_str("+faults"),
         subset => fingerprint.push_str(&format!("+faults={}", subset.cli_list())),
     }
+    for knob in &spec.exclude_knobs {
+        fingerprint.push_str(&format!("-{}", knob.meta().flag.trim_start_matches('-')));
+    }
     fingerprint
 }
 
