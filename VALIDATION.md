@@ -884,9 +884,9 @@ Before a release, run the V2 end-to-end fixture for:
 - Linux and macOS when CI is available;
 - seeds `0`, `1`, `u64::MAX`, and at least 100 generated seeds.
 
-The routine push/pull-request matrix in `.github/workflows/ci.yml` runs pinned Rust 1.99.1 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as two parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace`, which the syscall-containment pass requires. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the audit corpus, and the fuzz-sweep and campaign classifier selftests. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
+Every push and pull request in `.github/workflows/ci.yml` runs pinned Rust 1.99.1 across Linux x86_64 and aarch64. Every row executes the workspace tests (including all native acceptance tests) plus the WASI/cross-target checks and FIFO/rustix-default/cap-std testbeds; each row's workspace suite runs as four parallel `cargo nextest` partitions (plus its doctests) beside one job for the row's other gates, and every test job installs `strace`, which the syscall-containment pass requires. Both Linux rows additionally run the `workq` and `pubsub` testbeds, while Linux runs formatting, clippy, docs, the audit corpus, and the fuzz-sweep classifier selftest. Only main's runs save caches. A strict `audit` job checks RustSec advisories over the root and every testbed lockfile with no ignores.
 
-The GitHub-hosted macOS job runs as a platform safety net daily and on manual dispatch, not on every locally validated push. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux and on manual dispatch, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
+The GitHub-hosted macOS job runs on every push, pull request and the daily schedule. It executes the workspace tests (including the Darwin native legs), WASI/cross-target probes, FIFO/workq/pubsub testbeds, and the macOS audit corpus; the macros feature test runs in each Linux test row and the local full gate. The 200-generation randomized `workq` campaign runs nightly on Linux only, without a duplicate macOS campaign. (`cargo package --workspace --locked` is included in the local landing gate and is also the pre-publish packaging check.)
 
 A failure report must retain the command, seed, trace bundle when one exists, Patina version, Rust version, target triple, and compatibility fingerprint.
 
@@ -1049,8 +1049,7 @@ unit suite — it is in the handful of **structurally unpaired classes** below
 
 Closed 2026-07-28 (previously ranked here): CI-absent `strace` (now installed and
 required on every Linux job), classifier selftests absent from
-CI (fuzz-sweep + campaign selftests per-push; workq fuzz-sweep campaign nightly +
-dispatch), and the missing canonical `entropy_hash` literal in the cross-target
+CI (fuzz-sweep selftest per-push; workq fuzz-sweep campaign nightly), and the missing canonical `entropy_hash` literal in the cross-target
 smoke (now pinned).
 
 ### Registry/conformance migration acceptance

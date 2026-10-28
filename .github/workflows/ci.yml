@@ -1,28 +1,17 @@
 name: CI
 
+# Every push and pull request runs the same jobs. The schedule runs the macOS
+# job and the heavy randomized workq campaign (`nightly`).
 on:
   pull_request:
   push:
-    # ci/** lets a pushed branch run the routine Linux matrix without opening
-    # a PR (used for iterating on Linux-only behavior from macOS).
-    branches: [main, "ci/**"]
-  # The heavy randomized workq campaign runs nightly on Linux, alongside one
-  # pinned macOS safety-net run. Ordinary pushes rely on the
-  # developer's full local macOS landing gate and spend hosted-runner time on
-  # the Linux platforms unavailable locally.
   schedule:
     - cron: "17 7 * * *"
-  workflow_dispatch:
 
-# Per event as well as per ref: the scheduled run and a push to main run
-# different jobs, so neither may cancel the other. A newer push cancels a
-# branch or PR run, never a main run: main's runs save the caches every other
-# run restores.
-#
-# A push to main runs only the `cache-*` jobs. Main only fast-forwards to a
-# commit whose branch run passed, so testing it again adds no signal; but
-# GitHub scopes a cache to the ref that saved it, and only main's caches reach
-# every branch, so main still builds what the branch jobs restore.
+# Per event as well as per ref, so the scheduled run and a push never cancel
+# each other. A newer push cancels a branch or PR run, never a main run.
+# GitHub scopes a cache to the ref that saved it and main's reach every branch,
+# so only main's runs save caches.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -32,12 +21,12 @@ permissions:
   contents: read
 
 jobs:
-  # Each branch/PR/dispatch row (the pinned toolchain on both Linux
+  # Each row (the pinned toolchain on both Linux
   # architectures) is split into parallel jobs so wall time is the longest
   # slice, not the sum: `tests` runs the complete workspace suite in four
   # nextest partitions, and `gates` runs every other check of the row.
   tests:
-    if: github.event_name != 'schedule' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name != 'schedule'
     name: Rust / ${{ matrix.runner }} / tests ${{ matrix.shard }}/4
     strategy:
       fail-fast: false
@@ -52,12 +41,11 @@ jobs:
       - uses: ./.github/actions/setup-toolchain
       # The key covers the root manifest's [profile] tables (the whole root
       # Cargo.toml), which change what every crate compiles to.
-      # The partitions build identical artifacts, which `cache` saves from
-      # main under the same shared key; branch and PR runs only restore.
+      # The partitions build identical artifacts under one shared key.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: tests-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y strace && uname -r
       # The oracle host's scenario prerequisites, on record for when a need
       # goes unmet: network (IPv6 on lo, fanotify groups, non-local binds) and
@@ -72,7 +60,7 @@ jobs:
           cat /proc/sys/fs/fanotify/max_user_groups || true
           echo "lsm: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
           python3 -c 'import ctypes; r = ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1); print("landlock ABI:", r if r > 0 else "unavailable (errno %d)" % ctypes.get_errno())' || true
-      # The complete workspace suite, split across the two partitions by test
+      # The complete workspace suite, split across the four partitions by test
       # name (nextest runs every test binary; doctests run separately below).
       # Rust executes it on each Linux platform, the syscall conformance
       # scenarios (native_conformance) included; x86_64 also runs their raw
@@ -92,7 +80,7 @@ jobs:
         run: cargo test -p patina-dst --features macros --locked
 
   gates:
-    if: github.event_name != 'schedule' && !(github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name != 'schedule'
     name: Rust / ${{ matrix.runner }} / gates
     strategy:
       fail-fast: false
@@ -110,7 +98,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gates-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all -- --check
       - run: scripts/check-structure.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -143,60 +131,14 @@ jobs:
       - run: testbeds/pubsub/run-patina.sh
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
-      # expectation file. Linux x86_64 runs it here; the daily/manual
+      # expectation file. Linux x86_64 runs it here; the
       # macOS job below checks the independently recorded macOS surface.
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/audit-corpus/run.sh
 
-  # On a push to main, build what `tests` and `gates` compile and save it
-  # under their shared keys, without running them (see `concurrency` above).
-  # rust-cache keeps the dependencies and drops the workspace's own crates, so
-  # building each profile's dependencies is enough. Each job's environment
-  # matches the job that restores its cache, because rust-cache hashes the
-  # CARGO_* variables into the key.
-  cache-tests:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    name: cache / ${{ matrix.runner }} / tests
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: tests-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-      - run: cargo nextest run --profile ci --workspace --locked --no-run
-      - run: cargo test -p patina-dst --features macros --locked --no-run
-
-  cache-gates:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    name: cache / ${{ matrix.runner }} / gates
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: gates-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-      - run: cargo clippy --workspace --all-targets --locked
-      - run: cargo doc --workspace --no-deps --locked
-      - run: cargo build --release --locked -p cargo-patina
-
-  # The macOS job is a platform safety net, not a duplicate of every locally
-  # validated push. Run the pinned macOS gates daily and on explicit manual
-  # dispatch. This repo is public and takes outside pull requests, so CI never
-  # runs on a self-hosted machine.
+  # The pinned macOS gates. This repo is public and takes outside pull
+  # requests, so CI never runs on a self-hosted machine.
   macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
     name: macOS / ${{ matrix.part }}
     strategy:
       fail-fast: false
@@ -280,9 +222,9 @@ jobs:
   # nightly adds breadth by sweeping 200 randomized fault-combination
   # generations, including the schedule-fuzz tier. The campaign runs on Linux,
   # where it covers the same deterministic model without duplicating
-  # macOS campaign work; the daily macOS job runs the full deterministic gate suite.
+  # macOS campaign work; the macOS job runs the full deterministic gate suite.
   nightly:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 7 * * *'
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

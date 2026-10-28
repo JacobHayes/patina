@@ -28,7 +28,7 @@ simulator that depends on the Patina runtime crates directly.
 
 `workq` is the flagship: `workq/run-patina.sh` runs its full self-checking
 battery (determinism, record/replay, net/fs faults, crash-recovery, buggify
-sweep) on every routine Linux CI run and the daily/manual macOS run.
+sweep) on every routine Linux CI run and every macOS run.
 `workq/fuzz-sweep.sh` is the home of the randomized-but-deterministic
 fault-combination campaign (including its schedule-fuzz tier) that runs nightly
 on Linux. `liveness-campaign` and `buggify-wasi`
