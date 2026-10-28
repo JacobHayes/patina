@@ -65,12 +65,16 @@ const VISIBILITY: Duration = Duration::from_millis(200);
 
 struct Options {
     seed: u64,
+    /// The workload's size: given by flags, or drawn by [`resolve_workload`].
     jobs: u64,
     workers: u32,
     producers: u32,
+    /// The sizes the flags pinned; the rest are drawn.
+    pinned: Pinned,
     base_port: u16,
     data_dir: PathBuf,
-    timeout: Duration,
+    /// The virtual-time convergence budget; `None` scales it with `jobs`.
+    timeout: Option<Duration>,
     tick: Duration,
     segment_bytes: u64,
     /// Crash + recover the server once `completed` first reaches this (0 = never).
@@ -104,7 +108,106 @@ fn main() {
         );
         std::process::exit(2);
     });
+    let options = match resolve_workload(options) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error: workload manifest: {error}");
+            std::process::exit(2);
+        }
+    };
     std::process::exit(orchestrate(options));
+}
+
+/// Workload sizes given on the command line.
+#[derive(Default)]
+struct Pinned {
+    jobs: Option<u64>,
+    workers: Option<u32>,
+    producers: Option<u32>,
+}
+
+/// The ranges an unpinned size is drawn from.
+const JOBS: std::ops::RangeInclusive<u64> = 16..=64;
+const WORKERS: std::ops::RangeInclusive<u64> = 2..=4;
+const PRODUCERS: std::ops::RangeInclusive<u64> = 1..=2;
+
+/// Name of the file in the data dir that keeps the drawn sizes.
+const MANIFEST: &str = "workload";
+
+/// Fill in the sizes the flags left open, and print the workload.
+///
+/// An open size is drawn from `patina_dst::rng()`, so under Patina it is a pure
+/// function of the run seed, and a reproduce command re-draws it. The drawn
+/// sizes are kept in the data dir, synced before the queue writes anything:
+/// a process restarted after a disk crash draws from a different stream, and
+/// it must resume the workload the crashed process acknowledged jobs of. A
+/// manifest that is missing or torn was never synced, so nothing durable
+/// depends on it and the sizes are drawn afresh.
+fn resolve_workload(mut options: Options) -> std::io::Result<Options> {
+    let draw = |range: &std::ops::RangeInclusive<u64>| {
+        range.start() + patina_dst::rng() % (range.end() - range.start() + 1)
+    };
+    let pinned = &options.pinned;
+    let drawn = pinned.jobs.is_none() || pinned.workers.is_none() || pinned.producers.is_none();
+    let path = options.data_dir.join(MANIFEST);
+    let kept: Option<[u64; 3]> = if drawn {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| parse_manifest(&text))
+    } else {
+        None
+    };
+    let [jobs, workers, producers] =
+        kept.unwrap_or_else(|| [draw(&JOBS), draw(&WORKERS), draw(&PRODUCERS)]);
+    options.jobs = pinned.jobs.unwrap_or(jobs);
+    options.workers = pinned.workers.unwrap_or(workers as u32);
+    options.producers = pinned.producers.unwrap_or(producers as u32);
+    if drawn && kept.is_none() {
+        std::fs::create_dir_all(&options.data_dir)?;
+        let mut file = std::fs::File::create(&path)?;
+        use std::io::Write;
+        writeln!(file, "{jobs} {workers} {producers}")?;
+        file.sync_all()?;
+        std::fs::File::open(&options.data_dir)?.sync_all()?;
+    }
+    let open = |pinned: bool| if pinned { "" } else { " (drawn)" };
+    println!(
+        "WORKQ_WORKLOAD jobs={}{} workers={}{} producers={}{} timeout_secs={}",
+        options.jobs,
+        open(options.pinned.jobs.is_some()),
+        options.workers,
+        open(options.pinned.workers.is_some()),
+        options.producers,
+        open(options.pinned.producers.is_some()),
+        timeout(&options).as_secs(),
+    );
+    Ok(options)
+}
+
+/// The sizes a whole manifest line records, or `None` for a torn one.
+fn parse_manifest(text: &str) -> Option<[u64; 3]> {
+    let line = text.strip_suffix('\n')?;
+    let fields: Vec<u64> = line
+        .split(' ')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let sizes: [u64; 3] = fields.try_into().ok()?;
+    let ranges = [JOBS, WORKERS, PRODUCERS];
+    sizes
+        .iter()
+        .zip(&ranges)
+        .all(|(size, range)| range.contains(size))
+        .then_some(sizes)
+}
+
+/// The convergence budget: the given one, or 120 virtual seconds per 16 jobs
+/// (at least 60), so a drawn large workload is not cut off by a small one's
+/// budget.
+fn timeout(options: &Options) -> Duration {
+    options
+        .timeout
+        .unwrap_or_else(|| Duration::from_secs((120 * options.jobs / 16).max(60)))
 }
 
 /// In-process fail-closed-recovery self-test: a clean log recovers, a torn tail
@@ -319,7 +422,7 @@ fn drive(
     supervisor: &mut ServerSupervisor,
     observation: &ObservationHandle,
 ) -> DriveOutcome {
-    let deadline = Instant::now() + options.timeout;
+    let deadline = Instant::now() + timeout(options);
     let mut crashed = false;
     loop {
         if let Some(failure) = supervisor.failed() {
@@ -527,12 +630,13 @@ fn report(
 fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, String> {
     let mut o = Options {
         seed: 0,
-        jobs: 32,
-        workers: 3,
-        producers: 2,
+        jobs: 0,
+        workers: 0,
+        producers: 0,
+        pinned: Pinned::default(),
         base_port: 5001,
         data_dir: PathBuf::new(),
-        timeout: Duration::from_secs(60),
+        timeout: None,
         tick: Duration::from_millis(20),
         segment_bytes: 4096,
         crash_at_completed: 0,
@@ -559,12 +663,12 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         };
         match key.as_str() {
             "--seed" => o.seed = n("--seed")?,
-            "--jobs" => o.jobs = n("--jobs")?,
-            "--workers" => o.workers = n("--workers")? as u32,
-            "--producers" => o.producers = n("--producers")? as u32,
+            "--jobs" => o.pinned.jobs = Some(n("--jobs")?),
+            "--workers" => o.pinned.workers = Some(n("--workers")? as u32),
+            "--producers" => o.pinned.producers = Some(n("--producers")? as u32),
             "--base-port" => o.base_port = n("--base-port")? as u16,
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
-            "--timeout-secs" => o.timeout = Duration::from_secs(n("--timeout-secs")?),
+            "--timeout-secs" => o.timeout = Some(Duration::from_secs(n("--timeout-secs")?)),
             "--tick-ms" => o.tick = Duration::from_millis(n("--tick-ms")?),
             "--segment-bytes" => o.segment_bytes = n("--segment-bytes")?,
             "--crash-at-completed" => o.crash_at_completed = n("--crash-at-completed")?,
@@ -579,7 +683,10 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             other => return Err(format!("unknown option {other}")),
         }
     }
-    if o.jobs == 0 || o.workers == 0 || o.producers == 0 || o.tick.is_zero() {
+    let p = &o.pinned;
+    if [p.jobs, p.workers.map(u64::from), p.producers.map(u64::from)].contains(&Some(0))
+        || o.tick.is_zero()
+    {
         return Err("--jobs/--workers/--producers must be at least 1 and --tick-ms nonzero".into());
     }
     o.data_dir = data_dir
@@ -619,5 +726,13 @@ mod tests {
         let counts: Vec<u64> = (0..3).map(|id| producer_count(10, 3, id)).collect();
         assert_eq!(counts, vec![4, 3, 3]);
         assert_eq!(counts.iter().sum::<u64>(), 10);
+    }
+
+    #[test]
+    fn only_a_whole_in_range_manifest_line_is_kept() {
+        assert_eq!(parse_manifest("24 3 2\n"), Some([24, 3, 2]));
+        for torn in ["", "24 3 2", "24 3 ", "24 3\n", "24 3 x\n", "24 9 2\n"] {
+            assert_eq!(parse_manifest(torn), None, "{torn:?}");
+        }
     }
 }
