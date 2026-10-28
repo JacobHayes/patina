@@ -74,12 +74,12 @@ assembly in the Rust module, then calls a fixed Rust dispatcher; it preserves
 the guest-stack restoration path. These entries retain the registry's platform
 scope and use the existing models.
 
-Linux guests link the sealed shim below, not the archive. For an archive linked
-directly (Darwin guests, and tests) the POSIX object's unique anchor
+Guests link the sealed shim below, not the archive. For an archive linked
+directly (tests only) the POSIX object's unique anchor
 extracts the Rust member even when libc has already supplied the public name,
 and compilation uses one codegen unit to keep that anchor, the definitions and
 Linux's hidden route aliases together; no whole-archive link is needed. The
-Linux debug build the seal consumes drops that constraint: the seal links the
+debug build the seal consumes drops that constraint: the seal links the
 whole archive, roots every door itself and makes the route aliases, so the
 shim rebuilds across codegen units (about a second instead of five). C retains acting cancellation and thread-exit frames, guest callback frames, clock stores,
 host-resolution vehicles. Linux abort retains a C
@@ -88,8 +88,10 @@ guard.
 
 ### The sealed shim
 
-A Linux guest links two objects in place of the POSIX object and the archive
-(`crates/cargo-patina/src/seal.rs`). The **engine** is the archive partially
+A guest links two objects in place of the POSIX object and the archive
+(`crates/cargo-patina/src/seal.rs`), on Linux and Darwin alike: one pipeline,
+with the relocatable link, the rewrite after it and the thunks' assembly the
+object format's own. On Linux the **engine** is the archive partially
 linked (`ld -r` with section garbage collection, every door, data row, `patina_*` ABI name and
 allocator entry rooted) into one relocatable object, then rewritten in place
 (`seal/elf.rs`): each Rust door's definition is renamed `patina_impl_<name>`,
@@ -105,12 +107,31 @@ it. Nothing is rebound: every reference the engine makes still reaches the
 same definition as before, and the seal writes those references to
 `patina_engine.references` for review.
 
+On Darwin, Apple's relocatable link (`cc -r -Wl,-keep_private_externs`,
+which keeps hidden globals global as ELF's does, so the C seams still reach
+the runtime ABI the Rust side defines hidden) neither collects garbage nor
+wraps, so the whole archive links, and `seal/macho.rs` does the split itself:
+a door's definition takes the name `patina_impl_<name>`, every relocation
+naming it outside the unwind tables (`__eh_frame`, `__compact_unwind`) names
+a new undefined symbol of the door's own name instead, and every other global
+is made local, a weak one no longer weak, so it is never coalesced with a
+guest's. A localised global's debug note becomes a static's, so the final
+link still associates it. The engine is marked `subsections_via_symbols`,
+which the gate first checks every member honours (the toolchain's
+outline-atomics objects lack the flag but hold one function each), so the
+guest's final link dead-strips the engine at its symbols as it did the
+archive's members. Darwin routes no allocator and has no route aliases.
+
 The seal is also the gate. It refuses an engine whose exports differ from the
 inventory (registry rows the Rust side defines, the runtime's `patina_*` ABI,
 and toolchain glue such as `DW.ref.*` and mangled Rust names, which the
 localisation keeps out of the export set anyway), a row both the seams and the
 Rust side define or neither does, a façade export that is neither a registry
-row nor the ABI, and any raw system call or counter read in the engine's code.
+row nor the ABI, workspace code naming a host symbol (one neither the archive
+nor the seams define) that the import audit classifies as an escape, and any
+raw system call or counter read in the engine's code. The host-symbol check is
+the host-alias doctrine's static enforcement: the shim reaches the host through
+its private alias table, so its own code names no escape vehicle.
 That scan is stricter than the binary audit's: it covers every section marked
 as holding instructions, restarts decoding at every symbol, and refuses bytes
 it cannot decode. The outputs are cached in the artifact entry, keyed by the
@@ -126,19 +147,7 @@ The two-copy tests (`tests/native_workloads/two_copy.rs`) pin what must still
 hold across the copies: guest thread-local destructors reach the doors after
 the engine registered thread-locals on the same thread, guest parking and
 blocking initialisation share the futex model, and an engine panic aborts past
-the guest's hook and `catch_unwind`.
-
-Darwin does not seal yet: its guests link the POSIX object and the archive as
-before, with one `std`, so neither the gate nor the two-copy behaviour applies
-there. Apple's linker blocks the ELF recipe. The C seams call runtime ABI the
-Rust side defines as private externs (hidden), and a relocatable ld64 link either
-refuses to export a private extern or, by default, makes it local, so the
-façade's references go unresolved. `-keep_private_externs` keeps them
-linkable, but it also leaves every symbol the exported-symbols list demotes as a
-private extern rather than a local, so the engine's `std` and its dependencies
-collide with the guest's (`duplicate symbol`). A Darwin seal needs those hidden
-names exported by default visibility, or a localisation of its own after the
-link.
+the guest's hook and `catch_unwind`, on both platforms.
 
 A guest binary is never stale with respect to the shim it links. Package builds inject the shim link arguments through `CARGO_ENCODED_RUSTFLAGS`, and Cargo fingerprints that *string*, not the files it names — so the injected flags also carry a hash of the link inputs' bytes. Rebuild the shim or the runtime beneath it and the flags change, which is what makes Cargo relink; leave them alone and the flags are byte-identical, so an unchanged rebuild stays a cache hit.
 
@@ -368,7 +377,7 @@ shim panics from guest panics; owned panics report through host writes and priva
 abort. Guest panics retain the prior hook and can be caught. The hook lives in the
 sealed engine's own `std`, so a guest that replaces its hook replaces only its
 own copy's; guard-unwind and panic-time abort checks still preserve the
-private-abort policy for unsealed links. Bare prefixed-C/staticlib links have no public abort interposer and do
+private-abort policy for the archives tests link directly. Bare prefixed-C/staticlib links have no public abort interposer and do
 not install this policy or require the POSIX host aliases. Libtest retains its
 own panic handling.
 A default-fatal batch releases only its fatal signal, never another queued handler
@@ -1309,11 +1318,11 @@ The doctrine eliminates the class structurally: **shim-internal code never names
 - **Two-level namespace is what makes interposition local.** On macOS a strong definition in the main executable image interposes references only from *within that image* (the guest's own code plus the linked shim); libSystem's internal calls bind to their own libraries under the two-level namespace and are unaffected. So interposing a public name captures the guest's use without capturing libSystem internals, and — combined with `RTLD_NEXT` — the shim reaches the genuine host function underneath its own interposer.
 - **Pre-init window.** The `HostApi` table is resolved lazily, behind a race-free `OnceLock`, on first use. Every entry point that reaches it — the baton, thread creation, trace-fd I/O — runs well after the dynamic loader has mapped libSystem (the baton only exists once threads are active; trace-fd I/O only at init and shutdown), so no interposer is reached before the table can be resolved. A failed resolution of a core libSystem symbol fails the process closed rather than continuing with a null vehicle.
 
-Static enforcement makes this a standing rule rather than a convention: `crates/cargo-patina/tests/shim_host_alias.rs` scans the shim's own compiled object members and fails on any undefined external the audit would classify as an escape, holding the shim to the exact standard it enforces on guests (`shim_objects_name_no_undeclared_host_escape` in `crates/cargo-patina/tests/shim_host_alias.rs`, with a planted-leak fixture that keeps the scan non-vacuous). Red→green: the pre-doctrine shim, which named `semaphore_wait`/`read$NOCANCEL`/... directly, fails the scan; the swept shim passes with `dlsym` as the only escape-surface residue.
+Static enforcement makes this a standing rule rather than a convention: the seal (`crates/cargo-patina/src/seal.rs`) refuses, on every guest build, workspace code whose undefined externals name a host symbol the audit would classify as an escape, holding the shim to the exact standard it enforces on guests (the planted `semaphore_wait` call in `the_seal_refuses_an_unlisted_export_a_raw_system_call_and_a_host_call`, `crates/cargo-patina/tests/syscall_registry.rs`, keeps the check non-vacuous on both platforms). The pre-doctrine shim, which named `semaphore_wait`/`read$NOCANCEL`/... directly, would not seal; the swept shim seals with `dlsym` as the only escape-surface residue.
 
 A shim call of a name the shim itself defines binds to the shim's own interposer, which no undefined-symbol scan can see, and std makes such calls on its own: on Linux its futex-based locks, once-cells and thread parking wait and wake through `syscall(2)`. The shim crate's `clippy.toml` refuses the spellings that lower to one. At run time, what holds the thread decides. A held libc door (`syscall(2)` and the doors forwarded to the syscall model) entered, or a raw system call trapped, beneath a system call's dispatch (where the original defect was std's futex wait), however that dispatch was entered (the SIGSYS handler, a held door, or an entry such as `prctl` that holds nothing; the dispatch's own entry scope marks it), or under a trap handler's or a door's own hold, is the shim reaching its own boundary, or guest code that code called: a named stop before it is serviced as the guest's (`patina_door_nested_call`, `patina_trap_nested_syscall` in `crates/patina-native-shim/src/thread/signals/fault.rs`; `native_containment::shim_faults_are_named_stops_never_the_guests`). One made under a shim entry outside any dispatch is guest code that entry called (a C allocator making system calls during `pthread_create`'s TLS allocation) and nests in the entry's call (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`). The caller's address cannot tell the two apart: the shim is a static archive linked into the guest's executable, a Rust guest shares its std, and the linker groups its cold code (std's contended lock paths among it) with the guest's. So the shim's own call under a shim entry outside a dispatch nests unseen; the lint above is what keeps std's locks out of it, and a once-cell's raced first initialisation is the residual.
 
-Linux is swept onto the same table, with one wrinkle: the shim interposes `dlsym` itself there (so guest and std dynamic lookups reach the deterministic answer, not the host), so a plain `dlsym`-based table would resolve through the shim's own interposer, and glibc's flat namespace means the shim's own strong `read`/`write`/`sem_*` definitions would satisfy any reference the shim made to those names. The Linux primitive is therefore `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`. Guest and std `dlsym` references bind to the shim's `__wrap_dlsym`, which answers every name the shim defines as a libc contract (`src/posix/dlsym.rs`: the registry's `Modeled` and `Partial` Linux rows, held to it by a drift test) with the shim's own definition, through a hidden alias of it so the pointer is the definition's address in the program and can never be rebound to a public symbol, and NULL for every other name — never a host symbol; a failed lookup leaves glibc's `dlerror` message. Routing every definition exists because the `getrandom` crate resolves its Linux backend through `dlsym(RTLD_DEFAULT, "getrandom")` rather than by linking: a flat NULL there is read as "this kernel has no getrandom" and demotes every dependency RNG to the crate's `use_file` fallback, which opens and `poll()`s the unmodeled `/dev/random`. Routing to the shim's own implementation hands the caller the same code the static linker would have bound it to, so it cannot widen the guest's reach. Only the shim's `hostapi` table names `__real_dlsym`, and `dlsym(RTLD_NEXT, ...)` reaches the genuine glibc `read`/`write`/`sem_init`/`sem_wait`/`sem_post`/`pthread_create` (RTLD_NEXT searches the images after the main executable, so it skips the shim's own strong defs — verified empirically on glibc 2.39/aarch64). Thread creation is swept onto that same table: the shim interposes `pthread_create` with a plain strong def (routing guest/std threads through the scheduler) and resolves the real glibc creator through `dlsym(RTLD_NEXT, ...)`, so it needs no `-Wl,--wrap=pthread_create` — which matters because gcc ships its own `__wrap_pthread_create` in libgcc's x86 split-stack support, and a wrap flag `multiple definition`-clashes with it at link on x86_64. So `__read`/`__write`, `sem_*`, and `pthread_create` all leave the guest import table entirely, and the Linux `shim_control_plane_symbols` collapses from six vehicles to the single `dlsym` resolution primitive, matching macOS. The `shim_host_alias` static check runs on both platforms (`macho = cfg!(target_os = "macos")`), scanning the shim's ELF objects on Linux with the Linux allow set, so the doctrine is now enforced structurally on Linux too, with the planted-leak fixture keeping the scan non-vacuous. One seam in the wrap is closed in the import audit rather than the link: `-Wl,--wrap=dlsym` rewrites only *unversioned* `dlsym` references, so a `.symver`-pinned `dlsym@GLIBC_2.2.5` keeps its glibc version requirement and stays an undefined import, which the loader binds to libc's real resolver because the executable defines `__wrap_dlsym`, not `dlsym`. (A versioned reference to a strong-interposed name, `mmap@GLIBC_2.2.5`, is contained: the executable exports the shim's `mmap`, and the loader binds the reference to it first.) The version-aware audit reads each undefined dynamic symbol's `.gnu.version`/`.gnu.version_r` requirement and refuses, by versioned name, any GLIBC-versioned undefined import of the resolver or of an interposed name that the executable does not export, admitting only the shim's own vehicle, a weak `dlsym` at exactly glibc's default version `GLIBC_2.34` (`crates/patina-target/ESCAPE-CLASSES.md`, the Versioned-symbol-bypass class).
+Linux is swept onto the same table, with one wrinkle: the shim interposes `dlsym` itself there (so guest and std dynamic lookups reach the deterministic answer, not the host), so a plain `dlsym`-based table would resolve through the shim's own interposer, and glibc's flat namespace means the shim's own strong `read`/`write`/`sem_*` definitions would satisfy any reference the shim made to those names. The Linux primitive is therefore `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`. Guest and std `dlsym` references bind to the shim's `__wrap_dlsym`, which answers every name the shim defines as a libc contract (`src/posix/dlsym.rs`: the registry's `Modeled` and `Partial` Linux rows, held to it by a drift test) with the shim's own definition, through a hidden alias of it so the pointer is the definition's address in the program and can never be rebound to a public symbol, and NULL for every other name — never a host symbol; a failed lookup leaves glibc's `dlerror` message. Routing every definition exists because the `getrandom` crate resolves its Linux backend through `dlsym(RTLD_DEFAULT, "getrandom")` rather than by linking: a flat NULL there is read as "this kernel has no getrandom" and demotes every dependency RNG to the crate's `use_file` fallback, which opens and `poll()`s the unmodeled `/dev/random`. Routing to the shim's own implementation hands the caller the same code the static linker would have bound it to, so it cannot widen the guest's reach. Only the shim's `hostapi` table names `__real_dlsym`, and `dlsym(RTLD_NEXT, ...)` reaches the genuine glibc `read`/`write`/`sem_init`/`sem_wait`/`sem_post`/`pthread_create` (RTLD_NEXT searches the images after the main executable, so it skips the shim's own strong defs — verified empirically on glibc 2.39/aarch64). Thread creation is swept onto that same table: the shim interposes `pthread_create` with a plain strong def (routing guest/std threads through the scheduler) and resolves the real glibc creator through `dlsym(RTLD_NEXT, ...)`, so it needs no `-Wl,--wrap=pthread_create` — which matters because gcc ships its own `__wrap_pthread_create` in libgcc's x86 split-stack support, and a wrap flag `multiple definition`-clashes with it at link on x86_64. So `__read`/`__write`, `sem_*`, and `pthread_create` all leave the guest import table entirely, and the Linux `shim_control_plane_symbols` collapses from six vehicles to the single `dlsym` resolution primitive, matching macOS. The seal's host-symbol check runs on both platforms, over ELF objects on Linux with the Linux allow set, so the doctrine is enforced structurally on Linux too. One seam in the wrap is closed in the import audit rather than the link: `-Wl,--wrap=dlsym` rewrites only *unversioned* `dlsym` references, so a `.symver`-pinned `dlsym@GLIBC_2.2.5` keeps its glibc version requirement and stays an undefined import, which the loader binds to libc's real resolver because the executable defines `__wrap_dlsym`, not `dlsym`. (A versioned reference to a strong-interposed name, `mmap@GLIBC_2.2.5`, is contained: the executable exports the shim's `mmap`, and the loader binds the reference to it first.) The version-aware audit reads each undefined dynamic symbol's `.gnu.version`/`.gnu.version_r` requirement and refuses, by versioned name, any GLIBC-versioned undefined import of the resolver or of an interposed name that the executable does not export, admitting only the shim's own vehicle, a weak `dlsym` at exactly glibc's default version `GLIBC_2.34` (`crates/patina-target/ESCAPE-CLASSES.md`, the Versioned-symbol-bypass class).
 
 ## WASI host
 

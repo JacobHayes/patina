@@ -479,8 +479,9 @@ extracts the member holding the Rust constructor;
 Linux dlsym routes use hidden aliases, never cross-object C alias attributes.
 A successful many-codegen-unit build does not replace this extraction contract,
 especially on Darwin, where the Linux routing table is absent. The one exception
-is the Linux debug archive cargo-patina seals (`POSIX_SEALED_RUST_FLAGS`): the
-seal links it whole and turns its route aliases into door references.
+is the debug archive cargo-patina seals on either platform
+(`POSIX_SEALED_RUST_FLAGS`): the seal links it whole and, on Linux, turns its
+route aliases into door references.
 
 Read optional arguments only when the command or flags consume them, using the
 promoted C type. The open doors consume a mode for `O_CREAT` or all of

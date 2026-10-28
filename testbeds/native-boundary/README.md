@@ -178,7 +178,7 @@ exist only on x86_64 Linux; portable ABI tests, scheduler park/wake tests and
 exact virtual deadlines remain separate. No pending or whole-probe divergence
 is credited as native acceptance evidence.
 
-The class-level checks are the import/instruction gates, `shim_host_alias`,
+The class-level checks are the import/instruction gates, the seal's gate,
 `native_trace`'s planted whole-run escape, host-oracle probes and runtime
 scheduler/clock/trace invariants. Patina-specific identity/ENOSYS/auxv pins do
 not claim host equivalence.

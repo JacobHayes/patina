@@ -129,8 +129,7 @@ pub(super) struct PublishedShim {
 }
 
 /// The sealed shim a guest links (`seal.rs`): the façade and the engine, both
-/// in the published archive's entry, and the helper objects' entry. On
-/// Darwin, unsealed: the POSIX object and the archive.
+/// in the published archive's entry, and the helper objects' entry.
 pub(super) struct BuiltNativeShim {
     pub(super) facade: PathBuf,
     pub(super) engine: PathBuf,
@@ -284,8 +283,7 @@ pub(super) fn build_native_shim(
 
 /// Seal a published archive (`seal.rs`) beside it, or reuse its seal. The C
 /// seams come from the helper-object catalog, keyed by their own content, so
-/// a change to the Rust side alone recompiles no C. Darwin seals nothing yet:
-/// its guests link the seams and the archive.
+/// a change to the Rust side alone recompiles no C.
 fn seal_published(
     published: PublishedShim,
     host_target: &str,
@@ -295,16 +293,13 @@ fn seal_published(
     let objects = shim_cache::entry(&published.objects_root, &seams)?;
     let posix = stage_shim_object(&objects, &PATINA_POSIX_OBJECT, host_target, &[])?;
     let routing = crate::allocator_routing::AllocatorRouting::read(&published.staticlib)?;
-    let (facade, engine) = if cfg!(target_os = "linux") {
+    let sealed = {
         let _lock = lock_target_dir(&published.dir)?;
-        let sealed = crate::seal::seal(&published.staticlib, &posix, &routing, &published.dir)?;
-        (sealed.facade, sealed.engine)
-    } else {
-        (posix, published.staticlib.clone())
+        crate::seal::seal(&published.staticlib, &posix, &routing, &published.dir)?
     };
     Ok(BuiltNativeShim {
-        facade,
-        engine,
+        facade: sealed.facade,
+        engine: sealed.engine,
         routing,
         dir: published.dir,
         objects,
@@ -456,14 +451,11 @@ fn build_native_shim_at(
     if release {
         build.arg("--release");
     }
-    build
-        .arg("--")
-        // Darwin keeps one unit until its seal is verified on a Mac.
-        .args(if release || !cfg!(target_os = "linux") {
-            patina_dst_native_shim::POSIX_RUST_FLAGS
-        } else {
-            patina_dst_native_shim::POSIX_SEALED_RUST_FLAGS
-        });
+    build.arg("--").args(if release {
+        patina_dst_native_shim::POSIX_RUST_FLAGS
+    } else {
+        patina_dst_native_shim::POSIX_SEALED_RUST_FLAGS
+    });
     let status = build
         .status()
         .map_err(|e| CliError(format!("building shim: {e}")))?;

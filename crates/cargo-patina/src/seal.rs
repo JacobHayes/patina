@@ -1,16 +1,18 @@
-//! The sealed shim: the two link inputs a Linux guest takes in place of the
-//! POSIX object and the shim archive (ARCHITECTURE.md, "The sealed shim").
-//! Darwin guests link those two unsealed.
+//! The sealed shim: the two link inputs a guest takes in place of the POSIX
+//! object and the shim archive (ARCHITECTURE.md, "The sealed shim"). One
+//! pipeline seals ELF and Mach-O alike; only the relocatable link, the
+//! rewrite after it (`seal/elf.rs`, `seal/macho.rs`) and the thunks' assembly
+//! are the object format's.
 //!
 //! The **engine** is the archive partially linked into one relocatable object
 //! (the shim crate, the runtime crates and their own copy of `std`), garbage
-//! collected from the doors and the runtime ABI, with every definition but the
-//! inventory made local. A door's Rust definition is renamed
+//! collected from the doors and the runtime ABI (on Mach-O, by the guest's
+//! final link instead), with every definition but the inventory made local. A door's Rust definition is renamed
 //! `patina_impl_<name>`; the engine's own references to a door, its route
 //! alias included, are left undefined under the door's name, so they bind to
 //! the façade exactly as they bound to the shim's definition before. The
 //! **façade** is the C seams (the POSIX object, unchanged) and one generated
-//! thunk per Rust door, a landing pad and a tail jump to its implementation.
+//! thunk per Rust door, a tail jump to its implementation.
 //!
 //! The engine's `std` is therefore a second copy beside the guest's: its own
 //! panic hook, `thread::panicking()` and `io::stderr`. Nothing rebinds yet: the
@@ -19,8 +21,10 @@
 //!
 //! The seal refuses an engine whose exports are not the inventory (the rows of
 //! the symbol registry the Rust side defines, and the runtime's `patina_*` ABI)
-//! or whose text holds a raw system call or counter read, and writes the
-//! engine's undefined references beside it for review.
+//! or whose text holds a raw system call or counter read, and workspace code
+//! that names a host symbol the import audit classifies as an escape (the
+//! host-alias doctrine: the shim reaches the host through its private alias
+//! table). It writes the engine's undefined references beside it for review.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -30,13 +34,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use object::read::archive::ArchiveFile;
-use object::{Object, ObjectSymbol, SymbolKind};
+use object::{BinaryFormat, Object, ObjectSymbol, SymbolKind};
 use patina_dst_native_shim::registry::{Os, SYMBOLS, is_control_plane_abi};
+use patina_dst_target::{shim_control_plane_symbols, shim_host_alias_violation};
 
 use crate::CliError;
 use crate::allocator_routing::AllocatorRouting;
 
 mod elf;
+mod macho;
 
 /// The façade object's file name.
 pub(super) const FACADE: &str = "patina_facade.o";
@@ -59,13 +65,15 @@ pub(super) fn recipe_digest() -> String {
             let mut hasher = Sha256::new();
             hasher.update(include_str!("seal.rs"));
             hasher.update(include_str!("seal/elf.rs"));
+            hasher.update(include_str!("seal/macho.rs"));
             hasher.update(linker_identity());
             crate::hex(&hasher.finalize())
         })
         .clone()
 }
 
-/// The program that partially links, GNU or LLVM `ld`.
+/// The program that partially links: GNU or LLVM `ld`, or Apple's, which
+/// the C compiler's driver runs.
 const LINKER: &str = "ld";
 
 /// The relocatable linker's resolved path and version report. A linker that
@@ -77,7 +85,12 @@ fn linker_identity() -> Vec<u8> {
             .find(|candidate| candidate.is_file())
     });
     let mut identity = format!("{LINKER} at {path:?}\n").into_bytes();
-    match Command::new(LINKER).arg("--version").output() {
+    let version = if cfg!(target_os = "macos") {
+        "-v"
+    } else {
+        "--version"
+    };
+    match Command::new(LINKER).arg(version).output() {
         Ok(output) => {
             identity.extend(output.stdout);
             identity.extend(output.stderr);
@@ -119,7 +132,7 @@ pub(super) fn seal(
     let platform = Platform::of(&posix_file)?;
     let seams: BTreeSet<String> = global_definitions(&posix_file).into_keys().collect();
     let archive_bytes = read(staticlib)?;
-    let inventory = Inventory::classify(&archive_bytes, staticlib, &seams)?;
+    let inventory = Inventory::classify(&archive_bytes, staticlib, &seams, platform)?;
     let allocator = routing.entry_points();
     let scratch = tempfile::Builder::new()
         .prefix(".seal-")
@@ -142,7 +155,7 @@ pub(super) fn seal(
         .map_err(|error| refuse(format!("writing the façade thunks: {error}")))?;
     let thunks = work.join("patina_doors.o");
     run(
-        Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        Command::new(cc())
             .arg("-c")
             .arg(&doors)
             .arg("-o")
@@ -158,7 +171,7 @@ pub(super) fn seal(
             .arg(&facade),
         "linking the façade",
     )?;
-    check_facade(&parse(&read(&facade)?, &facade)?)?;
+    check_facade(&parse(&read(&facade)?, &facade)?, platform)?;
 
     for (from, to) in [
         (work.join(REFERENCES), dir.join(REFERENCES)),
@@ -194,19 +207,27 @@ struct Inventory {
 impl Inventory {
     /// Classify every unmangled global the workspace's archive members define.
     /// A name that is neither a registry row nor the runtime ABI, a row also
-    /// defined by the C seams, and a row defined by neither side, each refuse
-    /// the seal.
+    /// defined by the C seams, a row defined by neither side, and a host
+    /// symbol workspace code names that the import audit classifies as an
+    /// escape, each refuse the seal. On Mach-O, a member the merged engine
+    /// could not be split at the symbols of refuses it too.
     fn classify(
         archive_bytes: &[u8],
         staticlib: &Path,
         seams: &BTreeSet<String>,
+        platform: Platform,
     ) -> Result<Self, CliError> {
         let archive = ArchiveFile::parse(archive_bytes)
             .map_err(|error| refuse(format!("{}: {error}", staticlib.display())))?;
-        let rows = rows();
+        let rows = rows(platform);
         let mut inventory = Self::default();
         let mut unexplained = BTreeSet::new();
         let mut duplicated = BTreeSet::new();
+        let mut unsplittable = BTreeSet::new();
+        // Every global the archive or the seams define, and the names
+        // workspace code references: those defined by neither are the host's.
+        let mut defined = seams.clone();
+        let mut referenced = BTreeSet::new();
         for member in archive.members() {
             let member = member.map_err(|error| refuse(error.to_string()))?;
             let workspace = member.name().starts_with(b"patina_dst_");
@@ -217,7 +238,14 @@ impl Inventory {
             let Ok(file) = object::File::parse(data) else {
                 continue;
             };
+            if platform.macho && !macho::splits_at_symbols(data).map_err(refuse)? {
+                unsplittable.insert(String::from_utf8_lossy(member.name()).into_owned());
+            }
+            if workspace {
+                referenced.extend(undefined_references(&file).into_keys());
+            }
             for (name, kind) in global_definitions(&file) {
+                defined.insert(name.clone());
                 if is_control_plane_abi(&name) {
                     inventory.abi.insert(name);
                     continue;
@@ -255,7 +283,25 @@ impl Inventory {
                     && !inventory.data.contains(*row)
             })
             .collect();
+        let allow = shim_control_plane_symbols();
+        let escapes: BTreeSet<String> = referenced
+            .difference(&defined)
+            .filter_map(|name| {
+                shim_host_alias_violation(&platform.symbol(name), platform.macho, &allow)
+                    .map(|category| format!("{name} ({category})"))
+            })
+            .collect();
         let mut problems = Vec::new();
+        if !escapes.is_empty() {
+            problems.push(format!(
+                "host symbols workspace code names, which only the host-alias table may reach: {escapes:?}"
+            ));
+        }
+        if !unsplittable.is_empty() {
+            problems.push(format!(
+                "members whose code cannot be split at their symbols: {unsplittable:?}"
+            ));
+        }
         if !unexplained.is_empty() {
             problems.push(format!(
                 "exports that are neither a symbol-registry row nor the patina_* ABI: {unexplained:?}"
@@ -306,19 +352,24 @@ fn toolchain_glue(name: &str) -> bool {
         || name.starts_with("anon.")
 }
 
-/// The symbol registry's rows defined on Linux.
-fn rows() -> BTreeSet<&'static str> {
+/// The symbol registry's rows defined on `platform`'s OS.
+fn rows(platform: Platform) -> BTreeSet<&'static str> {
+    let os = if platform.macho {
+        Os::Darwin
+    } else {
+        Os::Linux
+    };
     SYMBOLS
         .iter()
-        .filter(|row| row.platform.defines_on(Os::Linux))
+        .filter(|row| row.platform.defines_on(os))
         .map(|row| row.name)
         .collect()
 }
 
 /// The façade exports registry rows and the runtime's ABI, whichever of the
 /// C seams or the thunks defines them, and nothing else.
-fn check_facade(facade: &object::File<'_>) -> Result<(), CliError> {
-    let rows = rows();
+fn check_facade(facade: &object::File<'_>, platform: Platform) -> Result<(), CliError> {
+    let rows = rows(platform);
     let unexpected: BTreeSet<String> = global_definitions(facade)
         .into_keys()
         .filter(|name| !rows.contains(name.as_str()) && !is_control_plane_abi(name))
@@ -385,16 +436,8 @@ fn check_opcodes(engine: &[u8]) -> Result<(), CliError> {
 /// The engine's undefined references, for review: S0 reports them, the
 /// binding stage gates them against a checked-in allowlist.
 fn references(engine: &object::File<'_>) -> String {
-    let mut names = BTreeMap::new();
-    for symbol in engine.symbols() {
-        if symbol.is_undefined()
-            && let Ok(name) = symbol.name()
-        {
-            names.insert(name.to_owned(), symbol.is_weak());
-        }
-    }
     let mut text = String::new();
-    for (name, weak) in names {
+    for (name, weak) in undefined_references(engine) {
         let strength = if weak { "weak" } else { "strong" };
         writeln!(text, "{strength} {name}").expect("writing to a string");
     }
@@ -405,57 +448,108 @@ fn references(engine: &object::File<'_>) -> String {
 fn global_definitions(file: &object::File<'_>) -> BTreeMap<String, SymbolKind> {
     file.symbols()
         .filter(|symbol| symbol.is_definition() && symbol.is_global())
-        .filter_map(|symbol| {
-            let name = symbol.name().ok()?;
-            Some((name.to_owned(), symbol.kind()))
-        })
+        .filter_map(|symbol| Some((c_name(file, symbol.name().ok()?)?, symbol.kind())))
         .collect()
 }
 
-/// The architecture the seal emits for. The seal links ELF only: Darwin
-/// guests link the POSIX object and the archive unsealed (ARCHITECTURE.md,
-/// "The sealed shim").
+/// Every undefined reference in `file`, by C name, and whether it is weak.
+fn undefined_references(file: &object::File<'_>) -> BTreeMap<String, bool> {
+    file.symbols()
+        .filter(|symbol| symbol.is_undefined())
+        .filter_map(|symbol| Some((c_name(file, symbol.name().ok()?)?, symbol.is_weak())))
+        .collect()
+}
+
+/// The C name of the symbol `name` in `file`: Mach-O prefixes an underscore.
+/// A Mach-O name without one (none today) keeps its spelling, so no
+/// expected name matches it.
+fn c_name(file: &object::File<'_>, name: &str) -> Option<String> {
+    if file.format() == BinaryFormat::MachO {
+        return Some(name.strip_prefix('_').unwrap_or(name).to_owned());
+    }
+    Some(name.to_owned())
+}
+
+/// The C compiler, which also drives Apple's linker.
+fn cc() -> OsString {
+    std::env::var_os("CC").unwrap_or_else(|| "cc".into())
+}
+
+/// The object format and architecture the seal emits for: ELF on Linux,
+/// Mach-O on Darwin, each on x86_64 or aarch64.
 #[derive(Clone, Copy, Debug)]
 struct Platform {
+    macho: bool,
     aarch64: bool,
 }
 
 impl Platform {
     fn of(file: &object::File<'_>) -> Result<Self, CliError> {
-        if file.format() != object::BinaryFormat::Elf {
-            return Err(refuse(format!("no seal for {:?} objects", file.format())));
-        }
+        let macho = match file.format() {
+            BinaryFormat::Elf => false,
+            BinaryFormat::MachO => true,
+            other => return Err(refuse(format!("no seal for {other:?} objects"))),
+        };
         let aarch64 = match file.architecture() {
             object::Architecture::X86_64 => false,
             object::Architecture::Aarch64 => true,
             other => return Err(refuse(format!("no seal for {other:?}"))),
         };
-        Ok(Self { aarch64 })
+        Ok(Self { macho, aarch64 })
     }
 
+    /// The symbol a C name is in this format's objects.
+    fn symbol(self, name: &str) -> String {
+        if self.macho {
+            format!("_{name}")
+        } else {
+            name.to_owned()
+        }
+    }
+
+    /// A relocatable link that keeps hidden globals global, as ELF's does:
+    /// Apple's otherwise makes them local, and the façade and the engine
+    /// reach each other's.
     fn relocatable_link(self) -> Command {
+        if self.macho {
+            let mut command = Command::new(cc());
+            command.args(["-r", "-nostdlib", "-Wl,-keep_private_externs"]);
+            return command;
+        }
         let mut command = Command::new(LINKER);
         command.arg("-r");
         command
     }
 
-    /// The façade's thunks: per door, a landing pad for indirect calls under
-    /// control-flow enforcement and a tail jump, which pushes and signs no
+    /// The façade's thunks: per door, a tail jump, which pushes and signs no
     /// return address, so the door is its implementation to every caller.
+    /// On ELF each also starts with a landing pad for indirect calls under
+    /// control-flow enforcement.
     fn thunks(self, doors: &BTreeSet<String>) -> String {
         let mut text = String::from("\t.text\n");
         for door in doors {
-            let (name, target) = (door, format!("{IMPL}{door}"));
-            let body = if self.aarch64 {
-                format!("\thint 34\n\tb {target}\n")
-            } else {
-                format!("\tendbr64\n\tjmp {target}\n")
+            let (name, target) = (self.symbol(door), self.symbol(&format!("{IMPL}{door}")));
+            let body = match (self.macho, self.aarch64) {
+                (false, true) => format!("\thint 34\n\tb {target}\n"),
+                (false, false) => format!("\tendbr64\n\tjmp {target}\n"),
+                (true, true) => format!("\tb {target}\n"),
+                (true, false) => format!("\tjmp {target}\n"),
             };
-            write!(
-                text,
-                "\t.globl {name}\n\t.type {name}, %function\n\t.p2align 4\n{name}:\n{body}\t.size {name}, .-{name}\n"
-            )
+            if self.macho {
+                write!(text, "\t.globl {name}\n\t.p2align 4\n{name}:\n{body}")
+            } else {
+                write!(
+                    text,
+                    "\t.globl {name}\n\t.type {name}, %function\n\t.p2align 4\n{name}:\n{body}\t.size {name}, .-{name}\n"
+                )
+            }
             .expect("writing to a string");
+        }
+        if self.macho {
+            // Each thunk its own atom, as the C seams' functions are, so the
+            // final link drops the doors nothing calls.
+            text.push_str("\t.subsections_via_symbols\n");
+            return text;
         }
         // NT_GNU_PROPERTY_TYPE_0: x86 IBT | SHSTK, or aarch64 BTI | PAC, so
         // the façade keeps the program's control-flow marking.
@@ -475,10 +569,9 @@ impl Platform {
         text
     }
 
-    /// Partially link the archive into `engine`: garbage-collect from the
-    /// inventory, wrap each door so the other members' references to it stay
-    /// undefined, then rename the definitions and the wrapped references and
-    /// localise everything but the inventory.
+    /// Partially link the archive into `engine`, then split each door into
+    /// its implementation and a reference to its public name, and localise
+    /// everything but the inventory.
     fn link_engine(
         self,
         inventory: &Inventory,
@@ -486,6 +579,27 @@ impl Platform {
         staticlib: &Path,
         work: &Path,
         engine: &Path,
+    ) -> Result<(), CliError> {
+        let merged = work.join("merged.o");
+        if self.macho {
+            self.link_macho_engine(inventory, allocator, staticlib, &merged)?;
+        } else {
+            self.link_elf_engine(inventory, allocator, staticlib, work, &merged)?;
+        }
+        fs::rename(&merged, engine)
+            .map_err(|error| refuse(format!("localising the engine: {error}")))
+    }
+
+    /// ELF: garbage-collect from the inventory and wrap each door so the
+    /// other members' references to it stay undefined, then rename the
+    /// definitions and the wrapped references.
+    fn link_elf_engine(
+        self,
+        inventory: &Inventory,
+        allocator: &[String],
+        staticlib: &Path,
+        work: &Path,
+        merged: &Path,
     ) -> Result<(), CliError> {
         let mut args = String::new();
         for door in &inventory.doors {
@@ -502,7 +616,6 @@ impl Platform {
         }
         let args_path = work.join("engine.args");
         write(&args_path, &args)?;
-        let merged = work.join("merged.o");
         run(
             self.relocatable_link()
                 .arg("--gc-sections")
@@ -513,7 +626,7 @@ impl Platform {
                 .arg(staticlib)
                 .arg("--no-whole-archive")
                 .arg("-o")
-                .arg(&merged),
+                .arg(merged),
             "partially linking the engine",
         )?;
         let renames: BTreeMap<String, String> = inventory
@@ -534,7 +647,7 @@ impl Platform {
         let keep: BTreeSet<String> = inventory.exports(allocator).collect();
         let weaken: BTreeSet<String> = allocator.iter().cloned().collect();
         elf::rewrite(
-            &merged,
+            merged,
             &elf::Plan {
                 renames: &renames,
                 keep: &keep,
@@ -542,9 +655,50 @@ impl Platform {
                 undefine: &undefine,
             },
         )
-        .map_err(|error| refuse(format!("localising the engine: {error}")))?;
-        fs::rename(&merged, engine)
-            .map_err(|error| refuse(format!("localising the engine: {error}")))
+        .map_err(|error| refuse(format!("localising the engine: {error}")))
+    }
+
+    /// Mach-O: Apple's relocatable link neither collects garbage nor wraps,
+    /// so the whole archive links, and the final link's dead stripping
+    /// collects it at the symbols; the rewrite splits the doors. Darwin
+    /// routes no allocator and has no route aliases.
+    fn link_macho_engine(
+        self,
+        inventory: &Inventory,
+        allocator: &[String],
+        staticlib: &Path,
+        merged: &Path,
+    ) -> Result<(), CliError> {
+        if !allocator.is_empty() {
+            return Err(refuse("no Mach-O seal routes the allocator".to_owned()));
+        }
+        run(
+            self.relocatable_link()
+                .arg("-Wl,-all_load")
+                .arg(staticlib)
+                .arg("-o")
+                .arg(merged),
+            "partially linking the engine",
+        )?;
+        let doors: BTreeMap<String, String> = inventory
+            .doors
+            .iter()
+            .map(|door| (self.symbol(door), self.symbol(&format!("{IMPL}{door}"))))
+            .collect();
+        let keep: BTreeSet<String> = inventory
+            .exports(allocator)
+            .map(|name| self.symbol(&name))
+            .collect();
+        macho::rewrite(
+            merged,
+            &macho::Plan {
+                doors: &doors,
+                keep: &keep,
+                // `Inventory::classify` refused any member that could not be.
+                subsections: true,
+            },
+        )
+        .map_err(|error| refuse(format!("localising the engine: {error}")))
     }
 }
 

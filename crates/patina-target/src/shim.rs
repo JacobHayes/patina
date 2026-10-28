@@ -422,9 +422,9 @@ pub fn shim_control_plane_symbols() -> BTreeSet<String> {
 /// directly and has not declared, and `None` otherwise. This is the exact
 /// per-symbol decision the guest-binary import audit uses, so the shim is held
 /// to the same standard it enforces on guests and the two can never diverge —
-/// the static `cargo-patina/tests/shim_host_alias.rs` scan feeds every
-/// undefined external of the shim's objects through here and fails on any
-/// `Some(_)`. `unknown-import` is deliberately *not* a violation here: it covers
+/// cargo-patina's seal feeds every host-bound undefined external of the
+/// workspace's objects through here and refuses any `Some(_)`.
+/// `unknown-import` is deliberately *not* a violation here: it covers
 /// Rust-mangled internal references (which resolve to other Rust objects at
 /// final link, never a host library) and any genuinely-unknown host symbol,
 /// which the guest pre-run audit denies separately if it is ever undeclared.

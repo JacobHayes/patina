@@ -130,8 +130,7 @@ pub fn shim_rustc_link_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsStrin
 
 /// The façade and engine `cargo patina build` seals from `archive`, with the
 /// POSIX object compiled under `flags`, for a guest linked by hand: sealed
-/// once per nextest run for each `variant`. Darwin seals nothing yet: the
-/// POSIX object and the archive.
+/// once per nextest run for each `variant`.
 pub fn sealed_shim(variant: &str, archive: &Path, flags: &[&str]) -> Vec<PathBuf> {
     let name = format!("sealed-{variant}");
     once_per_run(&name, || {
@@ -141,9 +140,6 @@ pub fn sealed_shim(variant: &str, archive: &Path, flags: &[&str]) -> Vec<PathBuf
         let mut posix = compile_posix_object(&seams);
         if !flags.is_empty() {
             posix = compile_staged_posix_object(&seams, flags);
-        }
-        if !cfg!(target_os = "linux") {
-            return vec![posix, archive.to_path_buf()];
         }
         cargo_patina::seal_shim(archive, &posix, &dir)
             .unwrap_or_else(|error| panic!("{error}"))

@@ -176,7 +176,7 @@ exists in the table; (c) the rows a conformance scenario covers are not
 `Absent` and the rows it asserts absent are (`patina-dst-conformance` catalog
 tests), and `mise run conformance:coverage` reports rows no scenario covers;
 (d) every `SymbolRow` names a symbol the compiled shim
-objects define (scanned with the `object` crate as `shim_host_alias.rs` does)
+objects define (scanned with the `object` crate)
 and every defined public symbol has a row; (e) the audit classification lists
 in `patina-target` agree with the registry (an interposed symbol is never in a
 deny list; a `Trap` symbol is in the deny-trap list).

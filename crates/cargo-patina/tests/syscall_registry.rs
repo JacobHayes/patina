@@ -429,11 +429,11 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
 /// The seal's gate over the engine and the façade `cargo patina build`
 /// links: the shim archive seals, and each plant is refused, naming it: an
 /// engine export that is neither a registry row nor the runtime ABI, a raw
-/// system call in the engine's text, and a C seam exporting a name that is
-/// neither.
-#[cfg(target_os = "linux")]
+/// system call in the engine's text, workspace code calling a host symbol
+/// the import audit classifies as an escape rather than its host alias, and
+/// a C seam exporting a name that is neither.
 #[test]
-fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
+fn the_seal_refuses_an_unlisted_export_a_raw_system_call_and_a_host_call() {
     let dir = tempfile::tempdir().unwrap();
     let seams = dir.path().join("seams");
     std::fs::create_dir_all(&seams).unwrap();
@@ -441,10 +441,10 @@ fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
     let archive = shim_archive();
     cargo_patina::seal_shim(&archive, &posix, &dir.path().join("pristine"))
         .unwrap_or_else(|error| panic!("the shim archive does not seal: {error}"));
-    let trap = if cfg!(target_arch = "x86_64") {
-        "syscall"
-    } else {
-        "svc #0"
+    let trap = match (cfg!(target_arch = "x86_64"), cfg!(target_os = "macos")) {
+        (true, _) => "syscall",
+        (false, false) => "svc #0",
+        (false, true) => "svc #0x80",
     };
     for (plant, source, in_seams) in [
         (
@@ -455,6 +455,14 @@ fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
         (
             "patina_planted_raw_syscall",
             format!("void patina_planted_raw_syscall(void) {{ __asm__ volatile(\"{trap}\"); }}\n"),
+            false,
+        ),
+        (
+            // A vehicle the pre-doctrine shim named directly.
+            "semaphore_wait",
+            "int semaphore_wait(unsigned);\n\
+             int patina_planted_host_call(void) { return semaphore_wait(0); }\n"
+                .to_owned(),
             false,
         ),
         (
@@ -469,14 +477,12 @@ fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
         let object = compile_plant(&work, "patina_dst_planted", &source);
         let refused = if in_seams {
             let planted = work.join("patina_posix.o");
-            run_tool(
-                std::process::Command::new("ld")
-                    .arg("-r")
-                    .arg(&posix)
-                    .arg(&object)
-                    .arg("-o")
-                    .arg(&planted),
-            );
+            let mut link = common::c_compiler();
+            link.args(["-r", "-nostdlib"]);
+            if cfg!(target_os = "macos") {
+                link.arg("-Wl,-keep_private_externs");
+            }
+            run_tool(link.arg(&posix).arg(&object).arg("-o").arg(&planted));
             cargo_patina::seal_shim(&archive, &planted, &work.join("sealed"))
         } else {
             cargo_patina::seal_shim(
@@ -490,16 +496,20 @@ fn the_seal_refuses_an_unlisted_export_and_a_raw_system_call() {
     }
 }
 
-/// A COMDAT group the engine localised is the engine's alone: a guest
-/// defining a group of the same name links beside it, and each side calls
-/// its own definition.
-#[cfg(target_os = "linux")]
+/// A shared definition the engine localised is the engine's alone: a guest
+/// defining one of the same name links beside it, and each side calls its
+/// own. On ELF the definitions are COMDAT groups, on Mach-O weak ones.
 #[test]
 fn an_engine_comdat_group_survives_a_guests_group_of_the_same_name() {
     let dir = tempfile::tempdir().unwrap();
     let posix = compile_posix_object(dir.path());
     let archive = shim_archive();
     let returns = |value: u32| {
+        if cfg!(target_os = "macos") {
+            return format!(
+                "__attribute__((weak)) int planted_comdat(void) {{ return {value}; }}\n"
+            );
+        }
         let body = if cfg!(target_arch = "x86_64") {
             format!("movl ${value}, %eax\\n ret")
         } else {
@@ -545,7 +555,6 @@ fn an_engine_comdat_group_survives_a_guests_group_of_the_same_name() {
 }
 
 /// Compile the C `source` to `<dir>/<member>.o`.
-#[cfg(target_os = "linux")]
 fn compile_plant(dir: &std::path::Path, member: &str, source: &str) -> std::path::PathBuf {
     let c = dir.join(format!("{member}.c"));
     std::fs::write(&c, source).unwrap();
@@ -561,7 +570,6 @@ fn compile_plant(dir: &std::path::Path, member: &str, source: &str) -> std::path
 }
 
 /// A copy of `archive` in `dir` with `object` added as a member.
-#[cfg(target_os = "linux")]
 fn plant_member(
     archive: &std::path::Path,
     dir: &std::path::Path,
@@ -584,7 +592,6 @@ fn plant_member(
     planted
 }
 
-#[cfg(target_os = "linux")]
 fn run_tool(command: &mut std::process::Command) {
     let output = command.output().unwrap();
     assert!(

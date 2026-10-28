@@ -196,7 +196,7 @@ fn shim_control_plane_allows_only_the_vehicle() {
 // filesystem escape) must be reported as violations against the real
 // control-plane allowance; the sanctioned `dlsym` resolution primitive and
 // effect-free / Rust-mangled internals must not. This is the pure classifier
-// half of the check that `cargo-patina/tests/shim_host_alias.rs` applies to the shim's
+// half of the check cargo-patina's seal applies to the shim's
 // compiled objects — if a future edit made `shim_host_alias_violation` go
 // silent, this fails before the object scan could pass vacuously.
 #[test]
