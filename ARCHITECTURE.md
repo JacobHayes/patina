@@ -763,6 +763,18 @@ patina-dst-wasi-host        # deterministic WASI Preview 1 host
 patina-dst-bench            # performance qualification workload and budget gates
 ```
 
+Dependency order:
+
+```text
+patina-dst-abi -> patina-dst-driver-api -> concrete drivers
+patina-dst-abi -> patina-dst-trace
+concrete drivers + patina-dst-trace -> patina-dst-runtime -> patina-dst-async
+  -> patina-dst (facade) -> cargo-patina (process configuration)
+```
+
+Target hosts and native shims depend on the runtime boundary; they do not
+redefine it.
+
 Record and replay are not separate crates: `patina-dst-trace` provides the
 `Recorder`/`Replayer` machinery and `patina-dst-runtime` drives it at the
 boundary, so recording composes around any driver stack (see

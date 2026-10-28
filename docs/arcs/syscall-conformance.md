@@ -252,16 +252,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   x86_64 and arm64) and not in `check:fast`; streams and logs
   are kept under the target dir's `conformance/<scenario>/<vehicle>/`.
 
-## 5. Foundations (serial where they touch the same code)
-
-| id | foundation | why first |
-|---|---|---|
-| F0 | registry-as-code; vendored tables; `syscalls` verb; `syscall(2)` forwarding; split `sud.rs` into per-family modules and `patina_posix.c` into per-family C files (pure moves) | every builder appends rows; per-family files let four builders land without conflicts |
-| F1 | conformance testbed skeleton + probes for today's modeled rows (clock, open/read/write/stat, dirs, pipes, sockets, epoll) — their host diffs are the first findings | detection before fixes |
-| F2 | unified guest fd table in the shim (lowest-free, holes, kind + cloexec per entry, description refcount); driver `Fd`s become internal handles; stdin as a kind (EOF default); dup/dup2/dup3/F_DUPFD/close_range; EMFILE via RLIMIT_NOFILE | select, SCM_RIGHTS, memfd, mq, timerfd, signalfd all need real numbers; today 0x4000_0000 ranges encode kind |
-| F3 | path resolver + cwd model in one Rust helper used by C and SUD (`..`, symlink walk, 40 hops, ELOOP/ENAMETOOLONG); chdir/fchdir/getcwd; umask as shim state; errno vocabulary (EPERM, ENODATA, ERANGE, E2BIG, EOPNOTSUPP, EBUSY, ESPIPE, EXDEV) | every fs row resolves through it |
-
-## 6. Families (parallel after F0–F3; each builder: probes red → model → probes green → registry rows flipped)
+## 6. Families
 
 - **fs**: chown family; utimensat/futimens/utimes/utime; truncate; fallocate;
   statfs/fstatfs/statvfs (SUD rows + one virtual volume); xattr family
@@ -380,8 +371,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   by-design difference, since the two-process tree has no process for it to
   reach. The `--host-*` knob group beyond the node name and the virtual
   `/proc`/`/sys` tree are not built.
-- **signals + threads + process** (spec and suggested order M1–M5:
-  [syscall-conformance-signals.md](syscall-conformance-signals.md)): D1 state in `ThreadRuntime` (dispositions,
+- **signals + threads + process**: D1 state in `ThreadRuntime` (dispositions,
   per-task mask, pending sets, altstack); D2 generation records a trace op and
   delivery happens only on the baton-holding task at syscall return / sched
   points / blocking-call resume; D3 kernel-built frames (`host_tgkill` to self
@@ -394,7 +384,7 @@ forwards into the same dispatcher instead of its two-number allowlist.
   named trap; wait4/waitid → ECHILD; raw CLONE_THREAD → named trap; removed
   numbers → ENOSYS; prctl option table.
 - **network + readiness**: AF_INET6; AF_UNIX stream/dgram/seqpacket (path in
-  fs-mem, abstract namespace); SCM_RIGHTS after F2; sockopt table (bookkeeping
+  fs-mem, abstract namespace); SCM_RIGHTS; sockopt table (bookkeeping
   vs SimNet-acting); MSG_PEEK/DONTWAIT/NOSIGNAL/TRUNC; sendmmsg/recvmmsg;
   pending connect (EINPROGRESS → SO_ERROR); interface table (`lo` + `eth0`/24,
   no default route → ENETUNREACH; `--net-default-route`) serving getifaddrs,
@@ -563,17 +553,6 @@ forwards into the same dispatcher instead of its two-number allowlist.
   on a file and a cancellable poll). A submission/completion ring model
   over the readiness reactor would be its own arc, not started and with no
   arc doc yet; it would turn those differences into the scenarios' targets.
-
-## 8. Sequencing and landing
-
-F0 ∥ F1 → F2 → F3 → {fs, memory+ipc, time+identity, signals, network} in
-parallel (≤4 builders, one battery lane) → io_uring arc doc → arm64 table
-rows (numbers already in `mod nr`; probes gain the `svc` vehicle) → macOS
-table parse. One targeted jj commit per builder, pushed in batches, CI as the
-confirmation layer; shim/runtime diffs also run the macOS ladder on a macOS
-arm64 host.
-Doc updates ride each commit: ARCHITECTURE native-shim list, ESCAPE-CLASSES
-residual 5, VALIDATION gate taxonomy, testbeds/README row, `llms.txt` verb map.
 
 ## Cross-platform entry inventory
 
