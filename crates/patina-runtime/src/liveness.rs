@@ -3,7 +3,9 @@
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::recording::{Execution, RecordSink};
 use crate::{Context, RuntimeError, facts};
-use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, Operation, Outcome, TaskId};
+use patina_dst_abi::{
+    ChargeClass, ChargeCounts, ClockKind, EffectClass, Operation, Outcome, TaskId,
+};
 
 /// Minimum number of consecutive non-progress operations a no-progress window must
 /// contain before the watchdog may fire, so a single long-but-legitimate sleep
@@ -43,19 +45,12 @@ pub(super) enum Progress {
 }
 
 pub(super) fn progress_of(operation: &Operation) -> Progress {
-    match operation {
-        Operation::ClockNow { .. }
-        | Operation::SleepUntil { .. }
-        | Operation::TaskYield { .. }
-        | Operation::TaskPark { .. }
-        | Operation::TaskParkTimed { .. }
-        | Operation::TaskWake { .. }
-        | Operation::SchedulerNext
-        | Operation::NetNextDelivery { .. } => Progress::Never,
-        Operation::NetRecv { .. }
-        | Operation::NetTcpRecv { .. }
-        | Operation::NetTcpAccept { .. } => Progress::ByOutcome,
-        _ => Progress::Always,
+    if operation.effect_class() == EffectClass::Schedule {
+        Progress::Never
+    } else if operation.is_poll() {
+        Progress::ByOutcome
+    } else {
+        Progress::Always
     }
 }
 
@@ -63,12 +58,7 @@ pub(super) fn progress_of(operation: &Operation) -> Progress {
 /// but an empty poll. A stream's end of file (`Some(empty)`) and every error
 /// are outcomes the guest acts on, so they count.
 pub(super) fn outcome_is_progress(operation: &Operation, outcome: &Outcome) -> bool {
-    !matches!(
-        (operation, outcome),
-        (Operation::NetRecv { .. }, Outcome::Datagram(None))
-            | (Operation::NetTcpRecv { .. }, Outcome::OptionalBytes(None))
-            | (Operation::NetTcpAccept { .. }, Outcome::TcpAccepted(None))
-    )
+    !(operation.is_poll() && outcome.is_empty_poll())
 }
 
 /// Which watchdog arm fired.

@@ -2,7 +2,7 @@
 //!
 //! A crash is a fault like any other: each crash point — a completed
 //! operation with an effect a crash could cut short
-//! ([`patina_dst_abi::Operation::is_crash_point`]) — draws from a seeded
+//! ([`patina_dst_abi::EffectClass::is_crash_point`]) — draws from a seeded
 //! stream whether the run crashes there (`--crash-permille`), and the first
 //! hit crashes. A replay never draws: where its recording crashed is the
 //! trace's own structure, the last operation of incarnation 0's segment, so
@@ -10,7 +10,7 @@
 
 use crate::recording::Execution;
 use crate::{Context, InjectedCrash, RuntimeError};
-use patina_dst_abi::{CrashKind, Fd, Outcome};
+use patina_dst_abi::{CrashKind, Fd};
 
 use patina_dst_fs_mem::FsSnapshot;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain, incarnation_seed};
@@ -174,20 +174,16 @@ impl Context {
         })
     }
 
-    /// Crash after the operation that just completed with `outcome`, when this
-    /// incarnation's [`CrashArm`] says so: a live run at a successful crash
-    /// point (`crash_point`) whose draw hits, a replay after the last
+    /// Crash after the operation that just completed, when this incarnation's
+    /// [`CrashArm`] says so: a live run at a crash point (`crash_point`,
+    /// [`patina_dst_abi::EffectClass::is_crash_point`]) whose draw hits, a replay after the last
     /// operation of its segment. The triggering guest call never returns:
     /// the crash is an internal incarnation-termination control carrying the
     /// image the next incarnation boots from, for the native
     /// shim/supervisor handoff, or [`RuntimeError::CrashFailed`] when the
     /// crash cannot be carried out. Manual [`Context::fs_crash`] keeps its
     /// explicit rollback-in-place semantics and does not route here.
-    pub(super) fn crash_after(
-        &mut self,
-        crash_point: bool,
-        outcome: &Outcome,
-    ) -> Result<(), RuntimeError> {
+    pub(super) fn crash_after(&mut self, crash_point: bool) -> Result<(), RuntimeError> {
         let segment_ended = match &self.execution {
             Execution::Replay(replayer) => replayer.consumed() as usize == replayer.total(),
             _ => false,
@@ -197,9 +193,7 @@ impl Context {
         };
         let fires = match &mut arm.trigger {
             CrashTrigger::Draw { permille, rng } => {
-                crash_point
-                    && !matches!(outcome, Outcome::Error(_))
-                    && rng.next_u64() % 1000 < u64::from(*permille)
+                crash_point && rng.next_u64() % 1000 < u64::from(*permille)
             }
             CrashTrigger::SegmentEnd => segment_ended,
         };

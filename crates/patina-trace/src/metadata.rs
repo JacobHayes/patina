@@ -15,7 +15,7 @@ use crate::NativeIdentityRecord;
 #[serde(deny_unknown_fields)]
 pub struct FaultConfigRecord {
     /// Per-mille chance that each crash point (an operation with an effect a
-    /// crash could cut short, [`patina_dst_abi::Operation::is_crash_point`])
+    /// crash could cut short, [`patina_dst_abi::EffectClass::is_crash_point`])
     /// is where the run crashes. Where a recorded run did crash is the trace's
     /// own structure, its `Crash` lifecycle marker, never a re-drawn decision.
     #[serde(default, skip_serializing_if = "is_zero_u16")]

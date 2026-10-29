@@ -40,7 +40,7 @@ mod option_bytes_base64;
 mod verdict;
 
 pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
-pub use crash::CrashKind;
+pub use crash::{CrashKind, EffectClass};
 pub use effect::{EntropyWait, Operation, Outcome};
 pub use error::{EffectError, ErrorCode};
 pub use filesystem::{

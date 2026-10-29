@@ -632,10 +632,7 @@ pub fn crash_point_index(
     let points: Vec<_> = bundle.timelines[0]
         .decisions
         .iter()
-        .filter(|event| {
-            event.operation.is_crash_point()
-                && !matches!(event.outcome, patina_dst_abi::Outcome::Error(_))
-        })
+        .filter(|event| event.operation.is_crash_point(&event.outcome))
         .collect();
     points
         .iter()

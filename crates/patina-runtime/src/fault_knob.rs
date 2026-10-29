@@ -151,7 +151,7 @@ fault_registry! {
         CrashFaultConfig as crash {
             /// Seeded per-mille chance (0..=1000) that each crash point — a
             /// completed operation with an effect a crash could cut short
-            /// ([`patina_dst_abi::Operation::is_crash_point`]) — is where the run
+            /// ([`patina_dst_abi::EffectClass::is_crash_point`]) — is where the run
             /// crashes and restarts. The first hit crashes; a run crashes at most
             /// once.
             permille: u16 => CrashPermille = 0 {

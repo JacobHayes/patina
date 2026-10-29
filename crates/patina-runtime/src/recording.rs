@@ -780,9 +780,10 @@ a recorded result or a replay fetch",
         expected: Option<(u64, Outcome)>,
         actual: Outcome,
     ) -> Result<Outcome, RuntimeError> {
-        let crash_point = operation.is_crash_point();
+        let class = operation.effect_class();
+        let poll = operation.is_poll();
         let outcome = self.settle(operation, expected, actual)?;
-        self.crash_after(crash_point, &outcome)?;
+        self.crash_after(class.is_crash_point(poll, &outcome))?;
         Ok(outcome)
     }
 
