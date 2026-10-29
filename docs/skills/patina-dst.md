@@ -60,16 +60,15 @@ novel-failure deduplication with saved traces, per-failure repro commands, and
 accumulated coverage. It runs each novel failure's repro command before reporting
 it, and a sample of passing generations twice: whatever comes out different is
 reported as nondeterminism, with both outcomes, rather than as a bug of its own. `minimize` reduces what a campaign found: pointed at a
-failing generation it shrinks the fault-knob vector first — the answer is a
-standalone reproduction command naming the one or two faults that matter, which
-is both the cheaper search and the more useful answer — and then shrinks a trace
-recorded from that reduction. That path needs no oracle from you: the campaign
+failing generation it shrinks the fault-knob vector — the answer is a
+standalone reproduction command naming the one or two faults that matter, and a
+trace recorded from that reduction replays it without flags. That path needs no oracle from you: the campaign
 already recognized the generation through the verdict channel, and preserving
 those verdicts is the question every candidate is judged on. A nondeterministic
 generation is refused: two runs disagreeing is not something a one-run oracle can
-preserve, so find the uncontrolled input first. `minimize` also
-shrinks a trace on its own, or the seed and parameters that trigger a failure,
-against an oracle you supply.
+preserve, so find the uncontrolled input first. `minimize --scenario`
+shrinks the seed and parameters that trigger a failure against an oracle you
+supply.
 
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,

@@ -1,4 +1,4 @@
-//! Failure targets and replay/external oracles.
+//! Failure targets and concurrent candidate judging.
 
 use super::*;
 
@@ -136,9 +136,7 @@ pub(super) enum Target {
 }
 
 impl Target {
-    /// Whether one candidate's outcome still shows the failure. For a replayed
-    /// candidate this is half the question: [`ReplayOracle::judge`] first
-    /// requires evidence that the replay followed the candidate at all.
+    /// Whether one candidate's outcome still shows the failure.
     pub(super) fn preserved(&self, outcome: &CandidateOutcome<'_>) -> bool {
         match self {
             Target::Marker(marker) => {
@@ -156,123 +154,6 @@ impl Target {
             Target::Marker(marker) => format!("marker[{}]", marker.alternatives.join("|")),
             Target::Verdicts(target) => format!("verdicts[{}]", target.render()),
         }
-    }
-}
-
-/// Patina's own trace oracle: replay the candidate and require the target plus a
-/// replay that followed it.
-pub(super) struct ReplayOracle {
-    pub(super) self_exe: PathBuf,
-    pub(super) artifact: PathBuf,
-    /// Flags a trace cannot carry (`--harness`, the pre-run gate surface), which
-    /// a replay of this guest still needs.
-    pub(super) invocation: Vec<String>,
-    pub(super) target: Target,
-    /// How the recording the candidates are cut from ended
-    /// ([`crate::campaign::RunFacts::exit_status`]).
-    pub(super) recorded_exit: String,
-    /// The generation's wall-clock backstop, per candidate replay.
-    pub(super) timeout_secs: u64,
-    pub(super) jobs: usize,
-    pub(super) calls: AtomicU64,
-}
-
-impl ReplayOracle {
-    pub(super) fn judge(&self, candidate: &TraceBundle) -> io::Result<bool> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        // A directory per candidate, so concurrent candidates share no path.
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("candidate.patina");
-        candidate.write_atomic(&path).map_err(io::Error::other)?;
-        // The envelope is the only channel that carries the replay's typed
-        // divergence, and the one the knob phase judged the same target on.
-        let run = crate::campaign::run_reduced_replay(
-            &self.self_exe,
-            &self.artifact,
-            &path,
-            &self.invocation,
-            self.timeout_secs,
-        )
-        .map_err(|error| io::Error::other(error.0))?;
-        if !replay_followed(run.facts(), &self.recorded_exit) {
-            return Ok(false);
-        }
-        let (stdout, stderr) = run.streams();
-        Ok(self.target.preserved(&CandidateOutcome {
-            stdout,
-            stderr,
-            verdicts: run.verdicts(),
-        }))
-    }
-}
-
-/// Whether a replay's facts show it followed its candidate: a run envelope
-/// (patina refused to replay at all otherwise), a run the wall-clock backstop
-/// did not kill, no divergence on the typed facts channel, and the exit status
-/// the recording reached. No text on a stream can stand in for that: a replay
-/// that stops before its trace does ends in an ordinary exit and prints no
-/// shim-fatal line.
-fn replay_followed(facts: &crate::campaign::RunFacts, recorded_exit: &str) -> bool {
-    facts.envelope
-        && !facts.timed_out
-        && !facts.replay_diverged
-        && facts.exit_status() == recorded_exit
-}
-
-impl FailureOracle for ReplayOracle {
-    type Error = io::Error;
-
-    fn preserves_failure(&mut self, candidate: &TraceBundle) -> io::Result<bool> {
-        self.judge(candidate)
-    }
-
-    fn batch_width(&self) -> usize {
-        self.jobs
-    }
-
-    fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> io::Result<Vec<bool>> {
-        judge_concurrently(candidates, |candidate| self.judge(candidate))
-    }
-
-    fn replays_strictly(&self) -> bool {
-        true
-    }
-}
-
-/// The caller's oracle command: write the candidate, run it, read its exit code.
-pub(super) struct ExternalOracle {
-    pub(crate) command: Vec<OsString>,
-    pub(crate) jobs: usize,
-    pub(crate) calls: AtomicU64,
-}
-
-impl ExternalOracle {
-    pub(super) fn judge(&self, candidate: &TraceBundle) -> io::Result<bool> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("candidate.patina");
-        candidate.write_atomic(&path).map_err(io::Error::other)?;
-        let status = Command::new(&self.command[0])
-            .args(&self.command[1..])
-            .env("PATINA_MINIMIZE_TRACE", &path)
-            .status()?;
-        Ok(!status.success())
-    }
-}
-
-impl FailureOracle for ExternalOracle {
-    type Error = io::Error;
-
-    fn preserves_failure(&mut self, candidate: &TraceBundle) -> io::Result<bool> {
-        self.judge(candidate)
-    }
-
-    fn batch_width(&self) -> usize {
-        self.jobs
-    }
-
-    fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> io::Result<Vec<bool>> {
-        judge_concurrently(candidates, |candidate| self.judge(candidate))
     }
 }
 

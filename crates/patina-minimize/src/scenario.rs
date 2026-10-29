@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 /// The externally varied inputs that select one deterministic run: the root
 /// seed and the key/value parameters exposed through `Context::param`. Reducing
 /// a scenario shrinks a reproduction toward the smallest inputs that still
-/// trigger the failure, complementing the trace reducers that shrink recorded
-/// decisions.
+/// trigger the failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scenario {
     pub seed: u64,

@@ -590,11 +590,6 @@ mod registry {
             .map(|_| ()),
             ("sites", _) => sites::parse(with(none, &[])).map(|_| ()),
             ("syscalls", _) => syscalls::parse(with(none, &[])).map(|_| ()),
-            ("minimize", help::Family::Sole) => {
-                let mut prefix = vec!["t.patina".to_string()];
-                prefix.extend(unless("--output", &["--output=/tmp/o"]));
-                parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
-            }
             ("minimize", help::Family::Generation) => {
                 let prefix = unless("--generation", &["--generation=1"]);
                 parse_minimize(with(prefix, &[])).map(|_| ())

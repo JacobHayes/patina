@@ -21,7 +21,11 @@ pub(crate) fn parse_minimize(
     let delimiter = arguments
         .iter()
         .position(|argument| argument == "--")
-        .ok_or_else(|| CliError::usage("minimize requires `-- <ORACLE> [ARGS]...`"))?;
+        .ok_or_else(|| {
+            CliError::usage(
+                "minimize requires --generation <N>, or --scenario with `-- <ORACLE> [ARGS]...`",
+            )
+        })?;
     let oracle = arguments.split_off(delimiter + 1);
     arguments.pop();
     if oracle.is_empty() {
@@ -32,7 +36,9 @@ pub(crate) fn parse_minimize(
     if typed_scenario || selected("--scenario", typed_generation)? {
         parse_minimize_scenario(arguments, oracle).map(minimize::MinimizeInvocation::Scenario)
     } else {
-        parse_minimize_trace(arguments, oracle).map(minimize::MinimizeInvocation::Trace)
+        Err(CliError::usage(
+            "minimize requires --generation <N>, or --scenario with `-- <ORACLE> [ARGS]...`",
+        ))
     }
 }
 
@@ -43,37 +49,6 @@ fn has_minimize_flag(arguments: &[OsString], name: &str) -> bool {
         argument
             .to_str()
             .is_some_and(|text| cli::split_name(text) == name)
-    })
-}
-
-fn parse_minimize_trace(
-    arguments: Vec<OsString>,
-    oracle: Vec<OsString>,
-) -> Result<minimize::TraceMinimize, CliError> {
-    // The trace path may follow options (`minimize --output out.patina trace`),
-    // so locate it registry-arity-aware rather than forcing it to lead.
-    let scan = locate_positionals("minimize", &arguments, 1);
-    let args = cli::parse("minimize", help::Family::Sole, scan.rest)?;
-    let (prune, timeline) = args.exclusive(
-        "--prune-branches",
-        "--timeline",
-        "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
-    )?;
-    let timeline = args.string("--timeline").filter(|_| timeline);
-    Ok(minimize::TraceMinimize {
-        trace: scan
-            .positionals
-            .into_iter()
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| CliError::usage("minimize requires a trace path"))?,
-        output: args
-            .path("--output")
-            .ok_or_else(|| CliError::usage("minimize requires --output <PATH>"))?,
-        timeline,
-        prune,
-        oracle,
-        jobs: args.usize("--jobs"),
     })
 }
 
@@ -99,7 +74,6 @@ fn parse_minimize_generation(
         // with none is refused by name rather than guessed at.
         marker: args.string("--marker"),
         output: args.path("--output"),
-        trace_phase: !args.flag("--no-trace-phase"),
         jobs: args.usize("--jobs"),
     })
 }

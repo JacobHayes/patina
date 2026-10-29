@@ -39,7 +39,6 @@ fn a_knob_candidate_is_held_to_the_refusal_class_not_the_exit_code() {
             ..Default::default()
         };
         RunEnd {
-            exit: facts.exit_status(),
             refusal: facts.refusal,
         }
     };

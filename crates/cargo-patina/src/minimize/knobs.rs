@@ -85,8 +85,6 @@ pub(super) struct KnobOracle {
 /// How a knob candidate's run ended.
 #[derive(Clone, Debug)]
 pub(super) struct RunEnd {
-    /// [`crate::campaign::RunFacts::exit_status`].
-    pub(super) exit: String,
     /// Patina's refusal class from the result envelope, when it refused.
     pub(super) refusal: Option<String>,
 }
@@ -140,10 +138,10 @@ impl KnobOracle {
         Ok(self.run_keeping(knobs, None)?.is_some())
     }
 
-    /// Run a knob subset into `trace`, the recording a trace reduction starts
-    /// from: how the run ended, when the target survived it.
-    pub(super) fn record(&self, knobs: &[Knob], trace: &Path) -> Result<Option<String>, CliError> {
-        Ok(self.run_keeping(knobs, Some(trace))?.map(|end| end.exit))
+    /// Run a knob subset into `trace`, the recording a flag-free replay
+    /// reproduces from: whether the target survived the run.
+    pub(super) fn record(&self, knobs: &[Knob], trace: &Path) -> Result<bool, CliError> {
+        Ok(self.run_keeping(knobs, Some(trace))?.is_some())
     }
 
     /// Run one candidate, optionally keeping its trace: how it ended, or
@@ -171,7 +169,6 @@ impl KnobOracle {
         )?;
         let (stdout, stderr) = run.streams();
         let end = RunEnd {
-            exit: run.exit_status(),
             refusal: run.refusal().map(str::to_string),
         };
         let shows_target = self.target.preserved(&CandidateOutcome {

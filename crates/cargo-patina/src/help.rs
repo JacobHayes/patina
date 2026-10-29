@@ -297,7 +297,7 @@ const fn only(flag: Flag, families: &'static [Family]) -> Flag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
     /// A verb with one form: `campaign`, `coverage`, `sites`, `explore`, and
-    /// `minimize`'s default trace-reduction mode.
+    /// A verb with a single argument surface.
     Sole,
     /// The Cargo package family: an in-process `cargo run`/`cargo test` that
     /// forwards every unrecognized option to Cargo verbatim.
@@ -306,10 +306,9 @@ pub enum Family {
     Native,
     /// `test <DIR|Cargo.toml>`: native libtest harness mode.
     Harness,
-    /// `minimize --scenario`: seed/parameter rather than trace reduction.
+    /// `minimize --scenario`: seed/parameter reduction.
     Scenario,
-    /// `minimize --generation N`: reduce a recorded campaign generation, knobs
-    /// first and then its trace.
+    /// `minimize --generation N`: reduce a recorded campaign generation's knobs.
     Generation,
     /// `trace info`.
     Info,

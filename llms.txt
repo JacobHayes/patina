@@ -211,15 +211,15 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   reads a campaign's `OUTDIR/sites.json` (or that file itself) and joins its
   runtime counters and link-time declared SDK rows by label or dynamic-label
   file:line.
-- `cargo patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--no-trace-phase] [--jobs N]`
-  Reduce one failing campaign generation, knobs first: delta-debug the fault-knob
+- `cargo patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--jobs N]`
+  Reduce one failing campaign generation: delta-debug the fault-knob
   vector that generation drew (each candidate a fresh seeded `run`), print and
   write the standalone reproduction command to `DIR/minimized/generation-N.repro`,
-  then delta-debug a trace recorded from that minimal-knob run. Patina's own
+  then record the minimal-knob run as a trace that replays without flags. Patina's own
   oracle needs no hand-written failure text: it targets the `verdicts` the
   campaign recorded for that generation in `campaign-state.json`
   (`patina.campaign.state/v2`), and a candidate still fails only when its replay
-  reports every one of those `(kind, label)` pairs AND did not diverge. Only
+  reports every one of those `(kind, label)` pairs. Only
   failure verdicts (`violation`, `abort_intent`) are targeted — a `pass` reports
   that a property held, which is not a failure to preserve — and `detail` is
   never matched. `--marker TEXT` (`A|B` matches either) overrides the target with
@@ -229,13 +229,10 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   that two runs disagree, which no single-run oracle can preserve.
   Because that oracle is hermetic by construction, candidates are evaluated in
   parallel by default (`--jobs`, default half the CPUs).
-- `cargo patina minimize <TRACE> --output PATH [--jobs N] -- <ORACLE>` / `minimize --scenario --seed N -- <ORACLE>`
-  Delta-debug a failing trace, or shrink the seed/params that trigger a failure.
-  The oracle is handed one candidate at a time at `$PATINA_MINIMIZE_TRACE` and a
-  NON-ZERO exit means "the failure is still present"; an oracle whose verdicts are
-  inverted is refused rather than obeyed. An external oracle is serial unless
-  `--jobs N` opts in, because only a patina-owned oracle is hermetic by
-  construction.
+- `cargo patina minimize --scenario --seed N [--param K=V]... [--seed-budget N] -- <ORACLE>`
+  Shrink the seed/params that trigger a failure. The oracle runs as a fresh
+  seeded child with the seed and params in `PATINA_RT_SEED`/`PATINA_RT_PARAMS_JSON`;
+  a NON-ZERO exit means "the failure is still present".
 - `cargo patina syscalls`
   Print a target-local kernel-entry inventory and its C symbol layer (default:
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin

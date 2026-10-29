@@ -35,11 +35,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Absolute path to the cargo-patina a `#[patina_dst::test]` launches under plain `cargo test` (default: cargo-patina on PATH).",
     },
     EnvVar {
-        name: "PATINA_MINIMIZE_TRACE",
-        scope: "user",
-        doc: "Path to the candidate trace a trace-minimize oracle must judge; a non-zero exit means the failure is still present.",
-    },
-    EnvVar {
         name: "PATINA_RT_MODE",
         scope: "protocol",
         doc: "Run mode (seeded/record/replay/branch); set by the supervisor for the guest.",

@@ -1,4 +1,4 @@
-//! Campaign-generation minimization through replay oracles.
+//! Campaign-generation minimization: knob reduction and the flag-free recorded trace.
 
 #[cfg(test)]
 mod tests {
@@ -220,6 +220,23 @@ fn main() {
             String::from_utf8_lossy(&reproduced.stderr)
         );
 
+        // The recorded minimal-knob trace is the flag-free form of the same
+        // reproduction: replaying it needs none of the knobs.
+        let flag_free = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
+                "replay",
+                guest.to_str().unwrap(),
+                serial_output.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            String::from_utf8_lossy(&flag_free.stderr).contains("GUEST_TORN"),
+            "the minimized trace no longer replays the failure:\nstderr:\n{}",
+            String::from_utf8_lossy(&flag_free.stderr)
+        );
+
         // Parallel candidate evaluation is throughput, not a different search: the
         // reduced trace must be byte-identical to the serial one.
         let parallel_output = directory.path().join("parallel.patina");
@@ -245,9 +262,10 @@ fn main() {
     }
 
     /// A campaign generation that fails an `always!` classifies VIOLATION, saves a
-    /// trace its reproduce command replays, and minimizes with and without the
-    /// trace phase: the run is finalized before the violation aborts it, so the
-    /// reducer's recording of the reduced knobs is a trace like any other.
+    /// trace its reproduce command replays, and minimizes to a knob-reduced
+    /// trace that replays flag-free: the run is finalized before the violation
+    /// aborts it, so the reducer's recording of the reduced knobs is a trace like
+    /// any other.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn minimize_generation_reduces_an_always_violation() {
@@ -291,12 +309,11 @@ fn main() {
             "the saved generation trace must replay to the violation:\n{replayed_stderr}"
         );
 
-        for (name, extra) in [
-            ("minimized.patina", &[][..]),
-            ("knobs-only.patina", &["--no-trace-phase"][..]),
-        ] {
-            let output = directory.path().join(name);
-            let mut arguments = vec![
+        let output = directory.path().join("minimized.patina");
+        let minimized = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &[
                 "minimize",
                 "--generation",
                 "0",
@@ -306,32 +323,33 @@ fn main() {
                 output.to_str().unwrap(),
                 "--jobs",
                 "1",
-            ];
-            arguments.extend_from_slice(extra);
-            let minimized =
-                invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &arguments);
-            assert!(
-                minimized.status.success(),
-                "minimize --generation {extra:?} failed on an always! violation:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&minimized.stdout),
-                String::from_utf8_lossy(&minimized.stderr)
-            );
-            patina_dst_trace::TraceBundle::load(&output)
-                .unwrap_or_else(|error| panic!("{extra:?}: no minimized trace: {error}"));
-        }
+            ],
+        );
+        assert!(
+            minimized.status.success(),
+            "minimize --generation failed on an always! violation:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&minimized.stdout),
+            String::from_utf8_lossy(&minimized.stderr)
+        );
+        // The recorded minimal-knob trace replays the violation with no flags.
+        let flag_free = invoke_unchecked(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["replay", guest.to_str().unwrap(), output.to_str().unwrap()],
+        );
+        assert!(
+            !flag_free.status.success()
+                && String::from_utf8_lossy(&flag_free.stderr)
+                    .lines()
+                    .any(|line| line.starts_with("PATINA_VERDICT ")),
+            "the minimized trace must replay to the violation without flags:\n{}",
+            String::from_utf8_lossy(&flag_free.stderr)
+        );
     }
 
-    /// A guest whose first argument picks how its custom operations end:
-    ///
-    /// * `open-op`: open an operation on both passes but close it only when
-    ///   recording, then fail an `always!`. The replay reaches the violation
-    ///   with the operation still open, and the shutdown error is a shim fatal.
-    /// * `trailing`: record a trailing operation its replay never asks for,
-    ///   then print the failure and exit 3. The leftover event surfaces at
-    ///   shutdown, with no shim-fatal line on any stream.
-    /// * `fault-or-refusal`: print the marker, exit 3 when a filesystem fault
-    ///   reaches the guest, and otherwise leave an operation open at exit,
-    ///   which the runtime refuses at shutdown on every platform.
+    /// A guest that prints the marker, exits 3 when a filesystem fault reaches
+    /// it, and otherwise leaves a custom operation open at exit, which the
+    /// runtime refuses at shutdown on every platform.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const CUSTOM_OP_SOURCE: &str = r#"
 use std::io::Write;
@@ -345,15 +363,6 @@ unsafe extern "C" {
         fault_eligible: i32,
         out_len: *mut usize,
     ) -> i32;
-    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
-    fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize;
-    fn patina_always(
-        condition: i32,
-        label: *const u8,
-        label_len: usize,
-        site: *const u8,
-        site_len: usize,
-    ) -> i32;
 }
 
 /// Begin one custom operation; whether this pass is a replay.
@@ -362,36 +371,8 @@ fn begin(label: &str) -> bool {
     unsafe { patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len) != 0 }
 }
 
-/// One custom operation answered "ok"; whether this pass is a replay.
-fn lookup(label: &str) -> bool {
-    let replay = begin(label);
-    unsafe {
-        if replay {
-            let mut answer = [0u8; 2];
-            patina_custom_op_replay_result(answer.as_mut_ptr(), answer.len());
-        } else {
-            patina_custom_op_record(b"ok".as_ptr(), 2);
-        }
-    }
-    replay
-}
-
 fn main() {
     match std::env::args().nth(1).as_deref() {
-        Some("open-op") => {
-            if !begin("lookup") {
-                unsafe { patina_custom_op_record(b"ok".as_ptr(), 2) };
-            }
-            let (invariant, site) = ("never-holds", "open_custom_op.rs");
-            unsafe { patina_always(0, invariant.as_ptr(), invariant.len(), site.as_ptr(), site.len()) };
-        }
-        Some("trailing") => {
-            if !lookup("first") {
-                lookup("trailing");
-            }
-            println!("MRE_FAILURE trailing");
-            std::process::exit(3);
-        }
         Some("fault-or-refusal") => {
             println!("FAIL_MARK");
             let faulted = match std::fs::File::create("/x") {
@@ -441,90 +422,6 @@ fn main() {
             native_workspace(),
             &arguments,
         ))
-    }
-
-    /// A replay that diverges from its recording, whether it reaches the
-    /// `always!` violation with a custom operation still open (a shim fatal) or
-    /// stops before its trace does although the guest exits on its own with its
-    /// failure printed (no shim fatal on any stream), is refused by
-    /// `minimize`'s trace phase rather than reduced on the strength of a
-    /// failure the replay never reproduced.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn minimize_refuses_a_replay_that_diverges_from_its_recording() {
-        let directory = tempdir().unwrap();
-        let guest = custom_op_guest();
-        // Reproduction verification would replay these traces too, see them
-        // diverge, and class the generation NONDETERMINISM, which `minimize`
-        // refuses before its oracle runs. The subject here is that oracle's own
-        // divergence check, so the campaigns skip verification.
-        for (mode, class, marker) in [
-            ("open-op", "VIOLATION", None),
-            ("trailing", "UNCLASSIFIED", Some("MRE_FAILURE")),
-        ] {
-            let out = directory.path().join(mode);
-            let envelope = custom_op_campaign(&guest, &out, &["--no-verify"], mode);
-            assert_eq!(envelope["classes"][class], 1, "{mode}: {envelope:#}");
-
-            let saved = out.join("failures/generation-0.patina");
-            let replay = campaign_json_stdout(&invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                native_workspace(),
-                &[
-                    "replay",
-                    guest.to_str().unwrap(),
-                    saved.to_str().unwrap(),
-                    "--format",
-                    "json",
-                ],
-            ));
-            if marker.is_some() {
-                assert!(
-                    replay["replay_divergence"].is_string(),
-                    "{mode}: {replay:#}"
-                );
-                assert_ne!(
-                    replay["refusal"]["class"], "shim_fatal",
-                    "{mode}: {replay:#}"
-                );
-            } else {
-                assert_eq!(
-                    replay["refusal"]["class"], "shim_fatal",
-                    "{mode}: {replay:#}"
-                );
-            }
-
-            let output = directory.path().join(format!("{mode}.patina"));
-            let mut arguments = vec![
-                "minimize",
-                "--generation",
-                "0",
-                "--out-dir",
-                out.to_str().unwrap(),
-                "--output",
-                output.to_str().unwrap(),
-                "--jobs",
-                "1",
-            ];
-            if let Some(marker) = marker {
-                arguments.extend(["--marker", marker]);
-            }
-            let minimized = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                native_workspace(),
-                &arguments,
-            );
-            assert!(
-                !minimized.status.success(),
-                "{mode}: minimize reduced a trace whose replay diverges:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&minimized.stdout),
-                String::from_utf8_lossy(&minimized.stderr)
-            );
-            assert!(
-                !output.exists(),
-                "{mode}: a refused reduction wrote a trace"
-            );
-        }
     }
 
     /// A knob candidate that still prints the marker but ends in a patina

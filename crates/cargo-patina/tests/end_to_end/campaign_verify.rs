@@ -228,7 +228,6 @@ mod tests {
                 out.to_str().unwrap(),
                 "--output",
                 output.to_str().unwrap(),
-                "--no-trace-phase",
                 "--jobs",
                 "1",
             ],

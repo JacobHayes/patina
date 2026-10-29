@@ -130,7 +130,7 @@ source-first native libtest harness mode for one exact test target.
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
-| `minimize` | Reduce a failing campaign generation (fault knobs first, then its trace), a failing trace, or the seed/params. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
+| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or the seed/params. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `cargo patina syscalls` |
 
 Native harness mode is the tight point-solution loop: `cargo patina test
@@ -312,7 +312,7 @@ case. Two things differ from plain `cargo test`:
 - **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
   interposed over virtual sockets, pipes, and the virtual clock.
 - **Record/replay** with byte-identical traces, branch timelines
-  (Cargo), and failure-oracle **trace minimization**.
+  (Cargo), and failure-preserving **knob and input minimization**.
 - **Default-deny audit gate**: before a native guest runs, every externally
   resolved symbol must be interposed or provably effect-free; unknown imports
   and raw syscall/clock/entropy instructions are refusals

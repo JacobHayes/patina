@@ -620,45 +620,32 @@ or --all opt into per-site drill-down rows. Results are cached per file under \
     refusals: NO_REFUSALS,
 };
 
-const MINIMIZE_TRACE_FAMILIES: &[Family] = &[Family::Sole, Family::Generation];
-
 pub(super) const MINIMIZE: Verb = Verb {
     name: "minimize",
-    summary: "Reduce a failing campaign generation, a recorded trace, or experiment inputs.",
+    summary: "Reduce a failing campaign generation or experiment inputs.",
     synopsis: &[
-        "cargo patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--no-trace-phase] [--jobs N]",
-        "cargo patina minimize <TRACE> --output <PATH> [-o <PATH>] [--timeline ID] [--prune-branches] [--jobs N] -- <ORACLE> [ARGS]...",
+        "cargo patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--jobs N]",
         "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
     ],
     prose: "\
-`minimize --generation N` reduces one failing generation of a recorded campaign, \
-knobs first: it delta-debugs the fault-knob vector that generation drew (each \
-candidate is a fresh seeded `run`, so the answer is a standalone reproduction \
-command, printed and written into the out-dir), then delta-debugs a trace recorded \
-from that minimal-knob run. --no-trace-phase stops after the knobs. The oracle is \
-patina's own and needs no hand-written failure text: it targets the verdicts the \
-campaign recorded for that generation, and a candidate still fails only when it \
-reports every one of them AND the replay did not diverge — so candidates are \
-hermetic and evaluated in parallel by default. --marker overrides the target with \
-literal failure text, for a guest that reports nothing through the verdict ABI; a \
-generation with neither is refused rather than reduced against a guess. A \
-NONDETERMINISM generation is refused, --marker or not: its failure is that two runs \
-disagree, which no single-run oracle can preserve.\n\
-\n\
-`minimize <TRACE>` shrinks a recorded trace: an unbranched main timeline or a leaf \
---timeline ID is delta-debugged directly, while a branched bundle is shrunk under a \
-branch-tree policy that never touches an inherited replay prefix. --prune-branches \
-also drops whole branch subtrees the failure does not need. The oracle runs once \
-per candidate with the candidate written to $PATINA_MINIMIZE_TRACE; a non-zero exit \
-means the failure is still present. An external oracle is run serially unless --jobs \
-opts in, because only a patina-owned oracle is hermetic by construction.\n\
+`minimize --generation N` reduces one failing generation of a recorded campaign: it \
+delta-debugs the fault-knob vector that generation drew (each candidate is a fresh \
+seeded `run`, so the answer is a standalone reproduction command, printed and \
+written into the out-dir), then records the minimal-knob run so the failure replays \
+without flags. The oracle is patina's own and needs no hand-written failure text: \
+it targets the verdicts the campaign recorded for that generation, and a candidate \
+still fails only when it reports every one of them, so candidates are hermetic and \
+evaluated in parallel by default. --marker overrides the target with literal failure \
+text, for a guest that reports nothing through the verdict ABI; a generation with \
+neither is refused rather than reduced against a guess. A NONDETERMINISM generation \
+is refused, --marker or not: its failure is that two runs disagree, which no \
+single-run oracle can preserve.\n\
 \n\
 `minimize --scenario` shrinks experiment inputs instead: it drops and shrinks \
 --param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
 candidate re-runs the oracle as a fresh seeded child through the \
 PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
     families: &[
-        fam(Family::Sole, "`minimize`", None),
         fam(
             Family::Generation,
             "minimize --generation",
@@ -669,30 +656,10 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
         fam(
             Family::Scenario,
             "minimize --scenario",
-            Some("minimize --scenario reduces experiment inputs rather than a recorded trace"),
+            Some("minimize --scenario reduces experiment inputs"),
         ),
     ],
     groups: &[
-        Group {
-            title: "Trace minimization",
-            families: SOLE,
-            flags: &[
-                f(
-                    "--timeline",
-                    None,
-                    Value::Required("ID", Kind::Str),
-                    "Minimize a specific leaf timeline.",
-                    false,
-                ),
-                f(
-                    "--prune-branches",
-                    None,
-                    Value::None,
-                    "Also drop whole branch subtrees the failure does not need.",
-                    false,
-                ),
-            ],
-        },
         Group {
             title: "Generation minimization (--generation)",
             families: &[Family::Generation],
@@ -701,7 +668,7 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
                     "--generation",
                     None,
                     Value::Required("N", Kind::U64),
-                    "Reduce this recorded campaign generation: fault knobs first, then its trace.",
+                    "Reduce this recorded campaign generation's fault knobs.",
                     false,
                 ),
                 f(
@@ -718,31 +685,24 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
                     "Override the auto-derived verdict target with failure text the built-in oracle requires on a candidate's output; `A|B` matches either.",
                     false,
                 ),
-                f(
-                    "--no-trace-phase",
-                    None,
-                    Value::None,
-                    "Stop after the fault-knob reduction instead of also shrinking a trace.",
-                    false,
-                ),
             ],
         },
         Group {
             title: "Candidate evaluation",
-            families: MINIMIZE_TRACE_FAMILIES,
+            families: &[Family::Generation],
             flags: &[
                 f(
                     "--output",
                     Some("-o"),
                     Value::Required("PATH", Kind::Path),
-                    "Write the minimized trace to PATH (required for a trace; defaults under the out-dir for --generation).",
+                    "Write the recorded minimal-knob trace to PATH (default under the out-dir).",
                     false,
                 ),
                 f(
                     "--jobs",
                     None,
                     Value::Required("N", Kind::PositiveU64),
-                    "Candidates to evaluate at once (default half the CPUs for the built-in oracle, 1 for an external one).",
+                    "Candidates to evaluate at once (default half the CPUs).",
                     false,
                 ),
             ],
@@ -755,7 +715,7 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
                     "--scenario",
                     None,
                     Value::None,
-                    "Shrink experiment inputs (seed/params) instead of a trace.",
+                    "Shrink experiment inputs (seed/params).",
                     false,
                 ),
                 f(

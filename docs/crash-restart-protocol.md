@@ -109,10 +109,6 @@ Each incarnation records and replays a linear trace of its own operations, stamp
 
 A crash-restart trace holds exactly one timeline. Branching such a trace is not modeled, and taking a branched one apart refuses it.
 
-## Minimizing a crash-restart trace
-
-`minimize` reduces each incarnation separately: the crashed one first, then the restarted one. It never deletes the decision the crash follows. Because a crash is attached to the segment boundary, a deletion elsewhere leaves the crash on the same operation. A replay of a candidate therefore rebuilds incarnation 0's image by replaying its shortened segment and crashes where the recording did. After every deletion the candidate is taken apart and joined again, which renumbers both incarnations.
-
 ## Remaining boundary
 
 The cargo family refuses both crash rates by name, and native crash restart refuses `--starve`. A failed crash's trace does not replay to its refusal (see above).

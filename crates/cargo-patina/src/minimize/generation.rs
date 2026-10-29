@@ -85,7 +85,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
         .cloned()
         .collect();
     let mut oracle = KnobOracle {
-        self_exe: self_exe.clone(),
+        self_exe,
         artifact: repro.artifact.clone(),
         seed: repro.seed,
         pinned: repro.pinned.clone(),
@@ -144,73 +144,36 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
         minimized_dir.join(format!("generation-{}.patina", invocation.generation))
     });
 
-    // Record the minimal-knob run: this is the trace the second phase shrinks,
-    // and the artifact a flag-free replay reproduces from even when there is no
-    // second phase.
+    // Record the minimal-knob run: the artifact a flag-free replay reproduces
+    // from. Recording is not a reduction; the trace is written as it ran.
     let recording = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create a recording directory: {error}")))?;
     let recorded_trace = recording.path().join("minimal.patina");
-    let Some(recorded_exit) = oracle.record(&minimal, &recorded_trace)? else {
+    if !oracle.record(&minimal, &recorded_trace)? {
         return Err(CliError(format!(
             "the reduced fault knobs stopped reproducing {} when re-run for recording; this \
              generation's failure is not a function of its seed and knobs alone, so it cannot be \
              reduced to a standalone command:\n  {command}",
             target.render()
         )));
-    };
+    }
     let recorded_bundle = TraceBundle::load(&recorded_trace).map_err(|error| {
         CliError(format!(
             "failed to load the trace recorded from the reduced knobs: {error}"
         ))
     })?;
-    let before = event_count(&recorded_bundle, None, false);
-
-    let mut after = before;
-    let mut trace_calls = 0;
-    if invocation.trace_phase {
-        let mut trace_oracle = ReplayOracle {
-            self_exe,
-            artifact: repro.artifact.clone(),
-            invocation: repro.pinned.clone(),
-            target: target.clone(),
-            recorded_exit,
-            timeout_secs: repro.timeout_secs,
-            jobs,
-            calls: AtomicU64::new(0),
-        };
-        let whole = whole_bundle(&recorded_bundle, None, false);
-        let mut trace_memo = CandidateMemo::new();
-        reject_inverted_polarity(
-            &recorded_bundle,
-            None,
-            whole,
-            &mut trace_oracle,
-            &mut trace_memo,
-        )?;
-        let minimized = minimize_to_fixed_point(
-            &recorded_bundle,
-            None,
-            whole,
-            &mut trace_oracle,
-            &mut trace_memo,
-        )
-        .map_err(|error| CliError(format!("trace minimization failed: {error}")))?;
-        after = event_count(&minimized, None, whole);
-        trace_calls = trace_oracle.calls.load(Ordering::Relaxed);
-        minimized.write_atomic(&output_path)
-    } else {
-        recorded_bundle.write_atomic(&output_path)
-    }
-    .map_err(|error| {
-        CliError(format!(
-            "failed to write {}: {error}",
-            output_path.display()
-        ))
-    })?;
+    recorded_bundle
+        .write_atomic(&output_path)
+        .map_err(|error| {
+            CliError(format!(
+                "failed to write {}: {error}",
+                output_path.display()
+            ))
+        })?;
 
     let detail = format!(
         "generation={} target={} knobs_before={} knobs_after={} knob_runs={knob_runs} \
-         before={before} after={after} oracle_runs={trace_calls} jobs={jobs} repro={} output={}",
+         jobs={jobs} repro={} output={}",
         invocation.generation,
         target.render(),
         knobs.len(),

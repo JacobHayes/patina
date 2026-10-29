@@ -32,11 +32,6 @@ impl GenerationRun {
         self.facts.facts.timed_out
     }
 
-    /// The classifier's structured facts for the run.
-    pub(crate) fn facts(&self) -> &RunFacts {
-        &self.facts.facts
-    }
-
     pub(crate) fn streams(&self) -> (&str, &str) {
         (&self.stdout, &self.stderr)
     }
@@ -44,11 +39,6 @@ impl GenerationRun {
     /// Patina's refusal class, from the result envelope, when it refused.
     pub(crate) fn refusal(&self) -> Option<&str> {
         self.facts.facts.refusal.as_deref()
-    }
-
-    /// How the run ended ([`RunFacts::exit_status`]).
-    pub(crate) fn exit_status(&self) -> String {
-        self.facts.facts.exit_status()
     }
 
     /// What the run reported through the verdict ABI. Read off the child's own

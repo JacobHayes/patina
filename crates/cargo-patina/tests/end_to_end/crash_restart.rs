@@ -1073,8 +1073,9 @@ fn main() {
 
     /// A campaign drawing the crash plane crashes and restarts generations at
     /// drawn rates: it catches log records lost to a missing fsync (red)
-    /// and passes the fixed guest (green); and `minimize` shrinks a crash
-    /// generation's two-incarnation trace, keeping the crash it needs.
+    /// and passes the fixed guest (green); and `minimize` reduces a crash
+    /// generation's fault knobs, keeping the crash it needs and recording a
+    /// two-incarnation trace.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_campaign_crash_plane_catches_an_unsynced_log() {
@@ -1167,10 +1168,10 @@ fn main() {
             ["start", "crash", "restart", "start", "end"]
         );
         let (before, after): (u64, u64) = (
-            field("before").parse().unwrap(),
-            field("after").parse().unwrap(),
+            field("knobs_before").parse().unwrap(),
+            field("knobs_after").parse().unwrap(),
         );
-        assert!(after < before, "the crash trace did not shrink:\n{stdout}");
+        assert!(after < before, "the fault knobs did not shrink:\n{stdout}");
     }
 
     /// The first generation of a campaign out-dir classed `class`.
