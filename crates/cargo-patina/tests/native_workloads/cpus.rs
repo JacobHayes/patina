@@ -52,7 +52,8 @@ fn assert_cpu_count(out: &[u8], cpus: u32) {
 /// platform's own (Linux's affinity mask and each thread's CPU, through glibc
 /// and the raw syscalls; macOS's `hw.*cpu` sysctls). The count is recorded,
 /// a flag-free replay restores it, a matching `--cpus` replays, and a
-/// different one is refused by name.
+/// different one is refused by name. The flag's range is the parser's
+/// (`registry_value_grammars_match_the_parsers`).
 #[test]
 fn every_cpu_count_surface_agrees_with_the_run() {
     let g = Guest::assert_build("cpu_probe.rs");
@@ -73,12 +74,6 @@ fn every_cpu_count_surface_agrees_with_the_run() {
     let replay = |count: &str| g.command("replay", &[trace.to_str().unwrap(), "--cpus", count]);
     assert_eq!(assert_success(replay("3")).stdout, three.stdout);
     assert_refused(replay("4"), &["--cpus"]);
-    for refused in ["0", "1025"] {
-        assert_refused(
-            g.command("run", &["--seed", "1", "--cpus", refused]),
-            &["--cpus"],
-        );
-    }
 }
 
 /// A global allocator that reads its CPU and the CPU count on every

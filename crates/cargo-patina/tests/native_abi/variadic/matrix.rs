@@ -38,17 +38,16 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments(
             (3, 0, "open"),
             (3, 1, "openat"),
         ];
+        // The Linux-only alias spellings (open64, openat64, __open, __open64,
+        // fcntl64) share their family's decoder and planted faults, and the
+        // ownership pass below inspects every exported spelling; one call per
+        // decoder is the behavioral case.
         if cfg!(target_os = "linux") {
             cases.extend([
                 (8, 0, "syscall"),
                 (4, 1, "ioctl"),
                 (6, 0, "prctl"),
-                (1, 1, "fcntl64"),
                 (2, 0, "mremap"),
-                (3, 2, "open64"),
-                (3, 3, "openat64"),
-                (3, 4, "__open"),
-                (3, 5, "__open64"),
             ]);
         }
         assert_symbol_ownership(&archive, &object, &cases, strategy);
@@ -335,8 +334,6 @@ const C_CALLS: &str = r#"
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/inotify.h>
-extern int __open(const char *, int, ...);
-extern int __open64(const char *, int, ...);
 #endif
 extern int patina_stream_printf(FILE *, const char *, ...);
 extern void patina_variadic_test_arm(unsigned family, unsigned fault);
@@ -349,10 +346,6 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
     switch (family) {
     case 1:
         patina_variadic_test_arm(family, fault);
-#ifdef __linux__
-        if (variant) { if (fcntl64(fd, F_SETFD, FD_CLOEXEC, 0)) return 10; }
-        else
-#endif
         if (fcntl(fd, F_SETFD, FD_CLOEXEC, 0)) return 10;
         return fcntl(fd, F_GETFD) == FD_CLOEXEC ? 0 : 10;
 #ifdef __linux__
@@ -373,12 +366,6 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         switch (variant) {
         case 0: created = open("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
         case 1: created = openat(AT_FDCWD, "/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
-#ifdef __linux__
-        case 2: created = open64("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
-        case 3: created = openat64(AT_FDCWD, "/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
-        case 4: created = __open("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
-        case 5: created = __open64("/fault-mode", O_CREAT | O_RDWR, 0623, 0); break;
-#endif
         default: return 99;
         }
         struct stat value;

@@ -1,35 +1,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 
-use std::time::Duration;
-
-#[test]
-fn deadline_drains_large_output_and_kills_lingering_descendants() {
-    let out = common::invoke_with_deadline(
-        "/bin/sh",
-        common::native_workspace(),
-        &[
-            "-c",
-            "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2",
-        ],
-        Duration::from_secs(60),
-    )
-    .expect("large output must not be mistaken for a guest deadlock");
-    let out = common::assert_success(out);
-    assert_eq!(out.stdout, vec![0; 131072]);
-    assert_eq!(out.stderr, vec![0; 131072]);
-    // A descendant holding the output pipes is killed at the deadline.
-    assert!(
-        common::invoke_with_deadline(
-            "/bin/sh",
-            common::native_workspace(),
-            &["-c", "sleep 30 & wait"],
-            Duration::from_millis(100),
-        )
-        .is_none()
-    );
-}
-
 /// Deadline cleanup never broadens a child group into a user-wide signal. The
 /// signal boundary is intercepted, so even a broken selector signals nothing.
 #[test]

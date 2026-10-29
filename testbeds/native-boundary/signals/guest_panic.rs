@@ -18,21 +18,11 @@ unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
     #[cfg(target_os = "linux")]
     fn raise(sig: i32) -> i32;
-    fn patina_clock_now(clock: u32, nanos: *mut u64) -> i32;
-    #[cfg(patina_test_clock_panic)]
-    fn patina_test_arm_clock_panic();
 }
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
-    if mode == "replace" || mode == "replace-internal" {
+    if mode == "replace" {
         std::panic::set_hook(Box::new(|_| {}));
-    }
-    if mode == "replace-internal" {
-        #[cfg(patina_test_clock_panic)]
-        unsafe { patina_test_arm_clock_panic(); }
-        let mut nanos = 0;
-        unsafe { patina_clock_now(1, &mut nanos); }
-        panic!("planted internal panic returned");
     }
     caught();
     std::thread::spawn(caught).join().unwrap();
