@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 /// malformed base64 string is a hard deserialization error.
 mod bytes_base64;
 mod charge;
+mod crash;
 mod effect;
 mod error;
 mod filesystem;
@@ -56,6 +57,7 @@ mod verdict;
 pub mod verdict_line;
 
 pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
+pub use crash::CrashKind;
 pub use effect::{EntropyWait, Operation, Outcome};
 pub use error::{EffectError, ErrorCode};
 pub use filesystem::{

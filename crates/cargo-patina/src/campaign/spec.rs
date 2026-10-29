@@ -173,20 +173,8 @@ pub struct CampaignSpec {
     /// would do the opposite of what the operator asked; and
     /// `--buggify`/`--sched-pct`/`--swarm` configure exploration of the guest's own
     /// cooperative sites rather than injecting an environment fault; and the
-    /// crash band ([`Self::fs_crash_reach`]), which is placement.
+    /// crash kind, which is a model.
     pub fault_scale_permille: u64,
-    /// The crash points every generation is known to reach, one per boundary
-    /// op, in the `--fs-crash-at` grammar (`write:32`, `close:3`). When set,
-    /// every native generation crashes and restarts once: it picks one of
-    /// these, draws a point at or before it, and a block or byte torn-write
-    /// granularity.
-    ///
-    /// Declared rather than guessed because an armed point the run never
-    /// reaches fails the run (`VACUOUS_CRASH`), and how many writes, syncs or
-    /// closes a guest certainly performs is a fact about the guest and its
-    /// arguments only the operator can state — the same reason the DNS band
-    /// rides on [`Self::dns_entries`].
-    pub fs_crash_reach: Vec<patina_dst_runtime::CrashPoint>,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
     /// Part of the campaign's shape rather than a per-generation draw: the names
@@ -272,7 +260,6 @@ impl Default for CampaignSpec {
             exclude_knobs: BTreeSet::new(),
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
-            fs_crash_reach: Vec::new(),
             dns_entries: Vec::new(),
             harness: false,
             allow_symbols: Vec::new(),
@@ -294,6 +281,13 @@ impl Default for CampaignSpec {
 }
 
 impl CampaignSpec {
+    /// Whether generations draw a crash: the crash plane is selected and its
+    /// rate is not excluded.
+    pub(super) fn draws_crashes(&self) -> bool {
+        self.faults.draws(FaultKnob::CrashPermille)
+            && !self.exclude_knobs.contains(&FaultKnob::CrashPermille)
+    }
+
     /// Merge a JSON spec object over the defaults. Unknown keys are rejected so a
     /// typo in a spec file fails loudly rather than being silently ignored.
     pub(super) fn apply_json(&mut self, value: &serde_json::Value) -> Result<(), CliError> {
@@ -353,7 +347,6 @@ impl CampaignSpec {
                     }
                     self.fault_scale_permille = value;
                 }
-                "fs_crash_reach" => self.fs_crash_reach = json_crash_reach(key, val)?,
                 "dns_entries" => {
                     let array = val
                         .as_array()
@@ -442,7 +435,7 @@ impl CampaignSpec {
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, faults, exclude_knobs, \
                          custom_op_faults, \
-                         fault_scale_permille, fs_crash_reach, starve, starve_scale_permille, \
+                         fault_scale_permille, starve, starve_scale_permille, \
                          dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, address_layout, \
                          cpus, watchdog_nanos, \
@@ -539,36 +532,6 @@ fn json_exclude_knobs(
                 })
         })
         .collect()
-}
-
-/// `"fs_crash_reach"`: a non-empty array of `--fs-crash-at` points, at most
-/// one per boundary op.
-fn json_crash_reach(
-    key: &str,
-    value: &serde_json::Value,
-) -> Result<Vec<patina_dst_runtime::CrashPoint>, CliError> {
-    let malformed = || {
-        CliError(format!(
-            "campaign spec {key:?} must be a non-empty array of crash points every generation \
-             reaches (open|write|sync|close:N, N <= 65536), at most one per op"
-        ))
-    };
-    let entries = value
-        .as_array()
-        .filter(|a| !a.is_empty())
-        .ok_or_else(malformed)?;
-    let mut reach: Vec<patina_dst_runtime::CrashPoint> = Vec::new();
-    for entry in entries {
-        let point = patina_dst_runtime::CrashPoint::parse(entry.as_str().ok_or_else(malformed)?)
-            .map_err(|error| CliError(format!("campaign spec {key:?}: {error}")))?;
-        // A generation draws its ordinal from two hash bytes, so a larger
-        // bound would leave its upper ordinals never drawn.
-        if reach.iter().any(|seen| seen.op == point.op) || point.ordinal > 1 << 16 {
-            return Err(malformed());
-        }
-        reach.push(point);
-    }
-    Ok(reach)
 }
 
 fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
@@ -775,9 +738,8 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                fs_crash_reach: ["write:32", "close:3"]
-                    .map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap())
-                    .to_vec(),
+                faults: FaultPlanes::from_names(["crash"]).unwrap(),
+                exclude_knobs: [FaultKnob::CrashKind].into(),
                 ..CampaignSpec::default()
             },
             CampaignSpec {
@@ -797,7 +759,6 @@ mod tests {
             "classify",
             "verify",
             "dns_entries",
-            "fs_crash_reach",
             "harness",
             "allow_symbols",
             "allow_unsupported_symbols",
@@ -839,17 +800,13 @@ mod tests {
             r#"{"dns_entries": ["db.internal=nope"]}"#,
             r#"{"allow_symbols": [""]}"#,
             r#"{"allow_unsupported_symbols": ""}"#,
-            r#"{"fs_crash_reach": []}"#,
-            r#"{"fs_crash_reach": ["write:0"]}"#,
-            r#"{"fs_crash_reach": ["write:65537"]}"#,
-            r#"{"fs_crash_reach": ["write:3", "write:5"]}"#,
+            r#"{"fs_crash_reach": ["write:3"]}"#,
             r#"{"exclude_knobs": ["--net-bogus-permille"]}"#,
             r#"{"exclude_knobs": ["net-reset-permille"]}"#,
             r#"{"exclude_knobs": "--net-reset-permille"}"#,
             r#"{"exclude_knobs": [7]}"#,
             // Real knobs that no `--faults` plane draws exclude nothing.
             r#"{"exclude_knobs": ["--net-partition"]}"#,
-            r#"{"exclude_knobs": ["--fs-crash-at"]}"#,
             r#"{"exclude_knobs": ["--custom-op-fail-permille"]}"#,
         ] {
             let json: serde_json::Value = serde_json::from_str(source).unwrap();

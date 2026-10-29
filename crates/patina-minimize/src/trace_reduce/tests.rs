@@ -284,3 +284,83 @@ fn minimize_branches_prunes_then_shrinks_surviving_suffixes() {
     );
     minimized.validate().unwrap();
 }
+
+/// A crash-restart trace shrinks in both incarnations, and the decision the
+/// crash follows survives every candidate: the oracle fails only while the
+/// crash stays on that decision, as a replay that crashes elsewhere diverges.
+#[test]
+fn a_crash_restart_trace_shrinks_each_incarnation_around_the_crash() {
+    use patina_dst_trace::{CrashRestartSegments, Sha256Digest};
+    let metadata = RunMetadata::new(1, "fixture", 0, "patina");
+    let segment = |incarnation, values: std::ops::Range<u64>| {
+        TraceBundle::linear(
+            metadata.clone(),
+            incarnation,
+            values
+                .enumerate()
+                .map(|(index, value)| clock_event(index as u64, value))
+                .collect(),
+        )
+    };
+    let join = |crashed, restarted| {
+        CrashRestartSegments {
+            crashed,
+            snapshot_digest: Sha256Digest([7; 32]),
+            restarted,
+        }
+        .join()
+        .unwrap()
+    };
+    let values_of = |bundle: &TraceBundle, incarnation| -> Vec<u64> {
+        bundle.timelines[0]
+            .decisions
+            .iter()
+            .filter(|event| event.incarnation == incarnation)
+            .map(|event| match event.outcome {
+                Outcome::U64(value) => value,
+                ref other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    // Incarnation 0 needs 3 and crashes after 9; incarnation 1 needs 15. The
+    // oracle does not ask for 9: the crash's decision survives because every
+    // entry point keeps it, not because the failure needs it.
+    let bundle = join(segment(0, 0..10), segment(1, 10..20));
+    let fails = |candidate: &TraceBundle| {
+        Ok::<_, Infallible>(
+            values_of(candidate, 0).contains(&3) && values_of(candidate, 1).contains(&15),
+        )
+    };
+    let entry_points: [(&str, TraceBundle); 4] = [
+        (
+            "main",
+            minimize_main(&bundle, &mut |c: &TraceBundle| fails(c)).unwrap(),
+        ),
+        (
+            "timeline",
+            minimize_timeline(&bundle, "main", &mut |c: &TraceBundle| fails(c)).unwrap(),
+        ),
+        (
+            "branch tree",
+            minimize_branch_tree(&bundle, &mut |c: &TraceBundle| fails(c)).unwrap(),
+        ),
+        (
+            "branches",
+            minimize_branches(&bundle, &mut |c: &TraceBundle| fails(c)).unwrap(),
+        ),
+    ];
+    for (entry, minimized) in &entry_points {
+        assert_eq!(values_of(minimized, 0), [3, 9], "{entry}");
+        assert_eq!(values_of(minimized, 1), [15], "{entry}");
+    }
+    // A lone removable decision on either side of the crash still goes.
+    let lone = join(segment(0, 2..4), segment(1, 14..15));
+    let minimized = minimize_main(&lone, &mut |candidate: &TraceBundle| {
+        Ok::<_, Infallible>(values_of(candidate, 0).last() == Some(&3))
+    })
+    .unwrap();
+    assert_eq!(values_of(&minimized, 0), [3]);
+    assert!(values_of(&minimized, 1).is_empty());
+    let segments = entry_points[0].1.crash_restart_segments().unwrap().unwrap();
+    assert_eq!(segments.snapshot_digest, Sha256Digest([7; 32]));
+}

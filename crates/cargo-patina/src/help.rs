@@ -85,8 +85,6 @@ pub enum Kind {
     OpKindList,
     /// A scheduler task id (`u64`) or the literal `main`.
     TaskSelector,
-    /// A filesystem crash spec `open|write|sync|close[:N]` (`N >= 1`).
-    CrashSpec,
     /// A `KEY=VALUE` pair with a non-empty key.
     KeyValue,
     /// An RFC 3339 UTC timestamp `YYYY-MM-DDTHH:MM:SS[.FRACTION]Z` between the
@@ -134,7 +132,6 @@ impl Kind {
             Kind::U64Range => "u64-range",
             Kind::OpKindList => "op-kind-list",
             Kind::TaskSelector => "task-selector",
-            Kind::CrashSpec => "crash-spec",
             Kind::KeyValue => "key-value",
             Kind::UtcTimestamp => "utc-timestamp",
             Kind::Hostname => "hostname",

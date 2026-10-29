@@ -2,8 +2,8 @@
 
 use crate::{DriverResult, FsFaultReport};
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsMetadata, FsNode,
-    OpenFlags, SeekWhence, XattrTarget,
+    CrashKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsMetadata,
+    FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 
 pub trait FsDriver: Send {
@@ -453,11 +453,13 @@ pub trait FsDriver: Send {
         Err(unsupported_filesystem_operation("crash"))
     }
 
-    /// Recover from a modeled storage crash and export the durable filesystem
-    /// image for a fresh incarnation. Drivers that cannot produce a canonical
-    /// restart snapshot must fail closed; the default deliberately refuses so a
-    /// custom filesystem never silently pretends to support crash restart.
-    fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
+    /// Export the image a fresh incarnation boots from after a crash of
+    /// `kind`: the live image for a process crash, whose page cache survives,
+    /// and the recovered durable image for a machine crash. Drivers that cannot
+    /// produce a canonical restart snapshot must fail closed; the default
+    /// deliberately refuses so a custom filesystem never silently pretends to
+    /// support crash restart.
+    fn crash_and_export_restart_snapshot(&mut self, _kind: CrashKind) -> DriverResult<Vec<u8>> {
         Err(unsupported_filesystem_operation(
             "crash restart snapshot export",
         ))
@@ -598,7 +600,9 @@ mod tests {
     #[test]
     fn restart_snapshot_export_fails_closed_by_default() {
         let mut filesystem = MinimalFs;
-        let error = filesystem.crash_and_export_restart_snapshot().unwrap_err();
+        let error = filesystem
+            .crash_and_export_restart_snapshot(CrashKind::Machine)
+            .unwrap_err();
         assert_eq!(error.code, patina_dst_abi::ErrorCode::Denied);
     }
 }

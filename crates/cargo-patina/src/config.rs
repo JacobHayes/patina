@@ -790,7 +790,6 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::U64Range => "u64-range",
         Kind::OpKindList => "op-kind-list",
         Kind::TaskSelector => "task-selector",
-        Kind::CrashSpec => "crash-spec",
         Kind::KeyValue => "key-value",
         Kind::UtcTimestamp => "utc-timestamp",
         Kind::Hostname => "hostname",

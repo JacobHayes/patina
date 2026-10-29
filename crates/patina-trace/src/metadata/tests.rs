@@ -23,11 +23,8 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
         "db-1",
     )
     .with_faults(Some(FaultConfigRecord {
-        crash_at: Some(CrashPointRecord {
-            op: FaultCrashOp::Write,
-            ordinal: 34,
-        }),
-        torn_granularity: TornGranularity::Byte,
+        crash_permille: 34,
+        crash_kind: patina_dst_abi::CrashKind::Process,
         fs_error_permille: 100,
         net_drop_permille: 250,
         ..FaultConfigRecord::default()

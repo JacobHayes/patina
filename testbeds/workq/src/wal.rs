@@ -194,9 +194,19 @@ pub struct Wal {
     durable_seq: u64,
     /// Records written since the last successful fsync.
     dirty: bool,
-    /// The `ignore-short-write` bug: append issues one raw `write()` and
-    /// ignores the returned count instead of looping to completion.
-    ignore_short_write: bool,
+    /// The planted append-path bug, if any.
+    bug: WalBug,
+}
+
+/// A planted bug in the WAL's append path (`--bug`), off by default.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WalBug {
+    None,
+    /// Append issues one raw `write()` and ignores the returned count instead
+    /// of looping to completion.
+    IgnoreShortWrite,
+    /// Append never fsyncs the record it reports durable.
+    SkipFsync,
 }
 
 impl Wal {
@@ -205,7 +215,7 @@ impl Wal {
     pub fn open(
         dir: &Path,
         segment_bytes: u64,
-        ignore_short_write: bool,
+        bug: WalBug,
     ) -> Result<(Self, Vec<FramedRecord>), WalError> {
         fs::create_dir_all(dir)?;
         // Creating the data directory is a namespace op in its parent: without
@@ -228,7 +238,7 @@ impl Wal {
             segment_bytes,
             durable_seq: recovered.next_seq.saturating_sub(1),
             dirty: false,
-            ignore_short_write,
+            bug,
         };
         Ok((wal, recovered.records))
     }
@@ -242,7 +252,7 @@ impl Wal {
         if self.len > 0 && self.len + frame.len() as u64 > self.segment_bytes {
             self.rotate()?;
         }
-        if self.ignore_short_write {
+        if self.bug == WalBug::IgnoreShortWrite {
             // Planted bug (`--bug ignore-short-write`): a single raw `write()`,
             // ignoring the returned count instead of looping until the whole
             // frame lands. Under `--fs-short-permille` this silently drops the
@@ -262,7 +272,12 @@ impl Wal {
         if patina_dst::buggify!("wal-fsync-skip") {
             return Ok(Durability::Deferred { seq }); // durability deferred, not lost
         }
-        self.file.sync_all()?;
+        // Planted bug (`--bug skip-wal-fsync`): the record is reported durable
+        // with no fsync behind it. Only a crash that loses the page cache can
+        // tell: the acked job is gone from the log the restart recovers.
+        if self.bug != WalBug::SkipFsync {
+            self.file.sync_all()?;
+        }
         self.durable_seq = seq;
         self.dirty = false;
         Ok(Durability::Durable { seq })
@@ -369,7 +384,7 @@ mod tests {
     #[test]
     fn append_recovers_across_rotation() {
         let dir = tempdir("rot");
-        let (mut wal, existing) = Wal::open(&dir, 32, false).unwrap(); // tiny: forces rotation
+        let (mut wal, existing) = Wal::open(&dir, 32, WalBug::None).unwrap(); // tiny: forces rotation
         assert!(existing.is_empty());
         for job in 0..20u64 {
             wal.append(&WalRecord::Complete(job)).unwrap();
@@ -379,7 +394,7 @@ mod tests {
             segment_paths(&dir).expect("probe").len() > 1,
             "expected rotation"
         );
-        let (_wal, records) = Wal::open(&dir, 32, false).unwrap();
+        let (_wal, records) = Wal::open(&dir, 32, WalBug::None).unwrap();
         assert_eq!(records.len(), 20);
         assert_eq!(records[19].record, WalRecord::Complete(19));
         let _ = fs::remove_dir_all(&dir);

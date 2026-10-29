@@ -74,10 +74,11 @@ against an oracle you supply.
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
-preemption and task starvation; liveness watchdogs. Native `--fs-crash-at`
-performs a real fresh-process restart and records and replays across both
-incarnations, while the Cargo family refuses it; campaigns draw it only from a spec's `fs_crash_reach`. Filesystem
-write tearing is therefore meaningful only with that native crash selector. A
+preemption and task starvation; liveness watchdogs. Native `--crash-permille`
+crashes at a seeded side-effecting operation and performs a real fresh-process
+restart (`--crash-kind process` keeps the page cache, `machine` loses unsynced
+data), recording and replaying across both incarnations, while the Cargo family
+refuses it; campaigns draw it from the `crash` plane. A
 *swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.
 

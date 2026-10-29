@@ -511,15 +511,6 @@ a recorded result or a replay fetch",
                 label: pending.label,
             });
         }
-        if self.require_crash_selector_reached
-            && !self.crash_fired
-            && let Some(selector) = self.crash_at
-        {
-            return Err(RuntimeError::CrashSelectorUnreached {
-                selector,
-                counts: self.crash_counts,
-            });
-        }
         // Any runtime diagnostic no embedder drained. The shim
         // drains after each SDK entry point so the lines interleave with guest
         // output; an in-process (cargo-family) guest has no embedder, and this is
@@ -762,7 +753,22 @@ a recorded result or a replay fetch",
         actual
     }
 
+    /// Settle a completed operation: compare a replayed outcome with the
+    /// recording's, or record a live one, then take the crash the operation
+    /// may be the point of ([`Context::crash_after`]).
     pub(super) fn reconcile(
+        &mut self,
+        operation: Operation,
+        expected: Option<(u64, Outcome)>,
+        actual: Outcome,
+    ) -> Result<Outcome, RuntimeError> {
+        let crash_point = operation.is_crash_point();
+        let outcome = self.settle(operation, expected, actual)?;
+        self.crash_after(crash_point, &outcome)?;
+        Ok(outcome)
+    }
+
+    fn settle(
         &mut self,
         operation: Operation,
         expected: Option<(u64, Outcome)>,

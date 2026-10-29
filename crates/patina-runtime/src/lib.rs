@@ -57,7 +57,7 @@
 //! (seed, record/replay mode, fault knobs, buggify, schedule exploration,
 //! liveness watchdogs). `cargo patina run`/`test` set exactly these variables
 //! from its CLI flags, so an in-process test picks up `--seed`, `--record`,
-//! `--fs-crash-at`, and friends with no extra plumbing. With nothing set, the
+//! `--crash-permille`, and friends with no extra plumbing. With nothing set, the
 //! default is a seeded run with seed 0. For full control, build a
 //! [`RuntimeConfig`] directly (e.g. [`RuntimeConfig::seeded`]) and hand it to a
 //! [`RuntimeBuilder`], which can also swap individual drivers.
@@ -96,9 +96,9 @@ mod builder;
 mod charge;
 mod config;
 mod config_env;
+mod crash;
 mod custom_op;
 mod filesystem;
-mod fs_crash;
 mod liveness;
 mod network;
 mod recording;
@@ -109,9 +109,9 @@ mod swarm;
 mod time;
 
 pub use config::{
-    BuggifyConfig, ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig,
-    ExecutionMode, FaultConfig, FsFaultConfig, LivenessConfig, NetFaultConfig, RuntimeConfig,
-    validate_cpus, validate_hostname,
+    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig,
+    EntropyFaultConfig, ExecutionMode, FaultConfig, FsFaultConfig, LivenessConfig, NetFaultConfig,
+    RuntimeConfig, validate_cpus, validate_hostname,
 };
 
 pub use bookkeeping::Bookkeeping;
@@ -120,10 +120,8 @@ pub use charge::CpuAlarms;
 pub use recording::TraceTransport;
 
 pub use config_env::trace_fd_from_env;
+pub use crash::{CrashAttemptSink, Incarnation, RESTART_DOWNTIME_NANOS};
 pub use filesystem::FsTime;
-pub use fs_crash::{
-    CrashAttemptSink, CrashCounts, CrashOp, CrashPoint, Incarnation, RESTART_DOWNTIME_NANOS,
-};
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
@@ -147,7 +145,7 @@ pub use reports::{
 
 pub use patina_dst_abi::VerdictKind;
 
-pub use patina_dst_fs_crash::TornGranularity;
+pub use patina_dst_abi::CrashKind;
 
 pub use patina_dst_time_virtual::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
 
@@ -205,11 +203,11 @@ pub const ENV_FACTS_FD: &str = "PATINA_FACTS_FD";
 pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
 
 /// Supervisor-owned descriptor the native shim writes a crash-restart handoff to
-/// when `--fs-crash-at` fires. Only the native supervisor sets it; ordinary
+/// when the run crashes. Only the native supervisor sets it; ordinary
 /// guest code never sees it after the startup scrub.
 pub const ENV_HANDOFF_FD: &str = "PATINA_HANDOFF_FD";
 
-/// Supervisor-owned pipe the native shim reports its selected crash on
+/// Supervisor-owned pipe the native shim reports its crash on
 /// (`patina_dst_trace::CrashReport`): that it was reached, then whether the
 /// handoff went out or why the crash failed. Only the native supervisor sets
 /// it, for the incarnation the crash fires in.
@@ -361,17 +359,16 @@ pub const ENV_NET_TCP_BUFFER_BYTES: &str = "PATINA_NET_TCP_BUFFER_BYTES";
 /// when unset.
 pub const ENV_SLEEP_JITTER: &str = "PATINA_SLEEP_JITTER_NANOS";
 
-/// Filesystem crash-injection point, e.g. `close:1`, `write:3`, `sync:2`,
-/// `open:1`. When set the default filesystem becomes a `CrashFs` and the runtime
-/// injects a crash immediately after the selected boundary operation, dropping
-/// unsynced data. Off when unset.
-pub const ENV_FS_CRASH_AT: &str = "PATINA_FS_CRASH_AT";
+/// Seeded per-mille chance (0..=1000) that each crash point — a completed
+/// operation with an effect a crash could cut short — is where a supervised
+/// native run crashes and restarts. Off (zero) when unset.
+pub const ENV_CRASH_PERMILLE: &str = "PATINA_CRASH_PERMILLE";
 
-/// Torn-write granularity for an injected crash: `block` (default, whole-block
-/// revert) or `byte` (the final unsynced write may survive partially at
-/// sub-block byte granularity, modeling a torn in-flight page). Only meaningful
-/// alongside [`ENV_FS_CRASH_AT`]. Off (block) when unset.
-pub const ENV_FS_TORN_GRANULARITY: &str = "PATINA_FS_TORN_GRANULARITY";
+/// What the crash takes down: `process` (the page cache survives, so unsynced
+/// writes are still there after the restart) or `machine` (the default: only
+/// durable state is certain to survive). Only meaningful alongside
+/// [`ENV_CRASH_PERMILLE`].
+pub const ENV_CRASH_KIND: &str = "PATINA_CRASH_KIND";
 
 /// Seeded filesystem error probability in per-mille (0..=1000), applied to
 /// eligible filesystem operations by the default `FaultFs` wrapper. Off (zero)
@@ -664,18 +661,12 @@ pub struct Context {
     /// Set inside [`Context::in_embedder_section`]: clock reads do not run the
     /// advance-on-spin rescue.
     embedder_section: bool,
-    /// Configured filesystem crash point, or `None` when crash injection is off.
-    /// Consulted after each matching boundary operation; the crash fires exactly
-    /// once. The op sequence is identical on record and replay, so the injected
-    /// `FsCrash` lands at the same position and reconciles.
-    crash_at: Option<CrashPoint>,
-    crash_counts: CrashCounts,
-    crash_fired: bool,
-    /// Told when the selected crash point is reached, before the crash is
-    /// carried out.
+    /// Where this incarnation crashes, or `None` when it cannot (or already
+    /// has): consulted after every completed operation.
+    crash: Option<crash::CrashArm>,
+    /// Told when the crash fires, before it is carried out.
     crash_attempt_sink: Option<Box<dyn CrashAttemptSink>>,
     incarnation: u64,
-    require_crash_selector_reached: bool,
     /// Inclusive `[min, max]` nanoseconds of seeded latency added to each guest
     /// sleep, or `None` when latency injection is off.
     sleep_jitter_nanos: Option<(u64, u64)>,
@@ -800,11 +791,11 @@ pub struct Context {
     recording_flushed: bool,
 }
 
-pub struct InjectedFsCrash {
+pub struct InjectedCrash {
     pub compatibility_fingerprint: String,
     pub from_incarnation: u64,
     pub to_incarnation: u64,
-    pub selector: patina_dst_trace::CrashPointRecord,
+    pub kind: CrashKind,
     pub consumed: HandoffConsumedState,
     /// The realtime the crashing incarnation's clock had reached, which the
     /// next incarnation's realtime carries on from.
@@ -812,14 +803,14 @@ pub struct InjectedFsCrash {
     pub snapshot: FsSnapshot,
 }
 
-impl fmt::Debug for InjectedFsCrash {
+impl fmt::Debug for InjectedCrash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("InjectedFsCrash")
+            .debug_struct("InjectedCrash")
             .field("compatibility_fingerprint", &self.compatibility_fingerprint)
             .field("from_incarnation", &self.from_incarnation)
             .field("to_incarnation", &self.to_incarnation)
-            .field("selector", &self.selector)
+            .field("kind", &self.kind)
             .field("consumed", &self.consumed)
             .field("realtime_nanos", &self.realtime_nanos)
             .field("snapshot", &self.snapshot)
@@ -836,25 +827,19 @@ pub enum RuntimeError {
     },
     Effect(EffectError),
     Trace(TraceError),
-    /// A configured `--fs-crash-at` boundary fired. This is an internal,
-    /// uncatchable runtime control for the native shim/supervisor: the triggering
-    /// boundary operation has already succeeded and been recorded, the durable
-    /// filesystem image has been recovered, and no value may be returned to guest
-    /// code in this incarnation.
-    InjectedFsCrash(Box<InjectedFsCrash>),
-    /// A run reached its automatic crash boundary but could not carry out the
-    /// crash: recovering or exporting the durable filesystem failed. Patina's
-    /// own failure, never the guest's: it ends the run as an infra refusal with
-    /// the crash attempted and not reached, and no embedder hands the guest an
-    /// errno for it. `reason` names the driver error.
-    FsCrashFailed {
-        selector: CrashPoint,
+    /// The run crashed after a crash point. This is an internal, uncatchable
+    /// runtime control for the native shim/supervisor: the triggering operation
+    /// has already completed and been recorded, the image the next incarnation
+    /// boots from has been exported, and no value may be returned to guest code
+    /// in this incarnation.
+    InjectedCrash(Box<InjectedCrash>),
+    /// The run crashed but patina could not carry the crash out: exporting the
+    /// restart image failed. Patina's own failure, never the guest's: it ends
+    /// the run as an infra refusal with the crash attempted and not reached,
+    /// and no embedder hands the guest an errno for it. `reason` names the
+    /// driver error.
+    CrashFailed {
         reason: String,
-    },
-    /// A run ended without reaching its requested automatic crash boundary.
-    CrashSelectorUnreached {
-        selector: CrashPoint,
-        counts: CrashCounts,
     },
     StepBudgetExceeded {
         budget: u64,
@@ -956,9 +941,8 @@ impl RuntimeError {
             Self::Config(_)
             | Self::Io { .. }
             | Self::Effect(_)
-            | Self::InjectedFsCrash(_)
-            | Self::FsCrashFailed { .. }
-            | Self::CrashSelectorUnreached { .. }
+            | Self::InjectedCrash(_)
+            | Self::CrashFailed { .. }
             | Self::StepBudgetExceeded { .. }
             | Self::Liveness { .. }
             | Self::InvalidOutcome { .. }
@@ -977,24 +961,17 @@ impl fmt::Display for RuntimeError {
             Self::Io { action, source } => write!(f, "failed to {action}: {source}"),
             Self::Effect(error) => error.fmt(f),
             Self::Trace(error) => error.fmt(f),
-            Self::InjectedFsCrash(control) => write!(
+            Self::InjectedCrash(control) => write!(
                 f,
-                "Patina injected filesystem crash at {:?}:{} after {} operations; terminate incarnation {} and restart incarnation {}",
-                control.selector.op,
-                control.selector.ordinal,
+                "Patina injected a {} crash after {} operations; terminate incarnation {} and restart incarnation {}",
+                control.kind.name(),
                 control.consumed.operations,
                 control.from_incarnation,
                 control.to_incarnation
             ),
-            Self::FsCrashFailed { selector, reason } => write!(
-                f,
-                "PATINA_INFRA fs_crash_failed selector={selector} reason={reason:?}"
-            ),
-            Self::CrashSelectorUnreached { selector, counts } => write!(
-                f,
-                "PATINA_FS_CRASH_SELECTOR_UNREACHED requested {:?}:{} but only observed open={} write={} sync={} close={} successful boundary operations",
-                selector.op, selector.ordinal, counts.open, counts.write, counts.sync, counts.close
-            ),
+            Self::CrashFailed { reason } => {
+                write!(f, "PATINA_INFRA crash_failed reason={reason:?}")
+            }
             Self::StepBudgetExceeded { budget } => {
                 write!(
                     f,

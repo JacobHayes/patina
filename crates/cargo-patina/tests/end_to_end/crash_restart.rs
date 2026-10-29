@@ -1,9 +1,13 @@
-//! Native filesystem crash/restart, torn images, and namespace durability.
+//! Native crash/restart: crash placement, crash kinds, namespace durability.
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use common::native::{Guest, assert_success};
+    use common::native::{
+        Guest, assert_success, crash_permille_for, crash_point_index, crash_seeds,
+    };
+    use patina_dst_abi::Operation;
+    use std::collections::BTreeSet;
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const NATIVE_CRASH_RESTART_CANARY_SOURCE: &str = r#"
@@ -76,20 +80,6 @@ fn main() {
     println!("CANARY after_trigger_should_not_print");
 }
 "#;
-    /// The canary's crash selector: the unsynced overwrite of `/b`, its sixth write.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const CANARY_CRASH_SELECTOR: &str = "write:6";
-
-    /// The canary's fifth write, the durable `B-stable!!`: a successful write one
-    /// before the recorded crash selector.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const CANARY_EARLIER_WRITE_ORDINAL: u64 = 5;
-
-    /// A seed whose swarm draw deselects the canary's one fault class, the crash
-    /// (the run's `PATINA_SWARM_REPORT` says `class=crash|0`, asserted below).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const SWARM_DROPS_CRASH_SEED: &str = "1";
-
     /// A well-formed digest no recovered filesystem has.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const FORGED_SNAPSHOT_DIGEST: &str =
@@ -127,6 +117,51 @@ fn main() {
         tampered
     }
 
+    /// Where to crash a guest: the rate, and `count` seeds that each crash it
+    /// right after the `nth` operation `matches` selects in a crash-free
+    /// recording of `guest_args`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn crash_after(
+        guest: &Guest,
+        guest_args: &[&str],
+        nth: usize,
+        matches: impl Fn(&Operation) -> bool,
+        count: usize,
+    ) -> (String, Vec<String>) {
+        static RECORDINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let recording = RECORDINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let trace = guest
+            .dir
+            .path()
+            .join(format!("crash-free-{recording}.patina"));
+        let mut args = vec!["--seed", "0", "--record", trace.to_str().unwrap(), "--"];
+        args.extend_from_slice(guest_args);
+        // The guest's verdict is beside the point: only its operations matter.
+        let recorded = guest.command("run", &args);
+        assert!(
+            trace.exists(),
+            "no crash-free recording:\n{}",
+            String::from_utf8_lossy(&recorded.stderr)
+        );
+        let index = crash_point_index(&trace, nth, matches);
+        let permille = crash_permille_for(index);
+        let seeds = crash_seeds(permille, index, count)
+            .into_iter()
+            .map(|seed| seed.to_string())
+            .collect();
+        (permille.to_string(), seeds)
+    }
+
+    /// Whether `operation` writes exactly `bytes`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn writes(operation: &Operation, bytes: &[u8]) -> bool {
+        matches!(
+            operation,
+            Operation::FsWrite { bytes: written, .. } | Operation::FsWriteAt { bytes: written, .. }
+                if written == bytes
+        )
+    }
+
     /// Replay `trace` against the canary, expecting a named crash-replay
     /// divergence, and return the replay's stderr.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -138,7 +173,7 @@ fn main() {
             "the divergent trace replayed:\n{stderr}"
         );
         assert!(
-            stderr.contains("PATINA_FS_CRASH_REPLAY_DIVERGENCE"),
+            stderr.contains("PATINA_CRASH_REPLAY_DIVERGENCE"),
             "missing the named divergence:\n{stderr}"
         );
         assert!(
@@ -148,25 +183,29 @@ fn main() {
         stderr
     }
 
-    /// A crash point restarts the guest as a fresh incarnation over the durable
-    /// image: synced bytes survive, the unsynced overwrite and incarnation 0's
-    /// exit handlers do not, and a held descriptor is stale. The seeded run
-    /// records and replays both incarnations, the envelope describes the
-    /// restart, an unreached selector fails, and a replay refuses a trace whose
-    /// crash point, handed-over state or restarted incarnation was altered.
+    /// A crash restarts the guest as a fresh incarnation over the image the
+    /// crash leaves: synced bytes survive, incarnation 0's exit handlers and
+    /// everything after the crash point do not, and a held descriptor is
+    /// stale. A process crash keeps the unsynced overwrite; a machine crash may
+    /// keep it or the synced bytes before it. The run records and replays both
+    /// incarnations, the envelope describes the restart, a rate whose draw
+    /// never hits runs one incarnation, and a replay refuses a trace whose
+    /// handed-over state or restarted incarnation was altered.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_fs_crash_restarts_a_fresh_incarnation_and_its_replay_refuses_divergence() {
+    fn native_crash_restarts_a_fresh_incarnation_and_its_replay_refuses_divergence() {
         let canary = build_guest("crash_restart", NATIVE_CRASH_RESTART_CANARY_SOURCE);
-        let crash = ["--fs-crash-at", CANARY_CRASH_SELECTOR];
-        let (output, trace) = canary.assert_recorded(11, &crash);
+        let (permille, seeds) = crash_after(&canary, &[], 0, |op| writes(op, b"B-volatile"), 2);
+        let crash = |kind: &'static str| ["--crash-permille", &permille, "--crash-kind", kind];
+        let seed: u64 = seeds[0].parse().unwrap();
+        let (output, trace) = canary.assert_recorded(seed, &crash("process"));
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         for expected in [
             "CANARY before_trigger",
             "CANARY incarnation=1",
             "CANARY A=\"A-synced\"",
-            "CANARY B=\"B-stable!!\"",
+            "CANARY B=\"B-volatile\"",
             "CANARY stale_fd_result=-1",
             "CANARY restart_first_fd=3",
         ] {
@@ -175,15 +214,11 @@ fn main() {
                 "missing {expected}:\n{stdout}\n{stderr}"
             );
         }
-        for absent in [
-            "after_trigger_should_not_print",
-            "atexit0_should_not_run",
-            "B-volatile",
-        ] {
+        for absent in ["after_trigger_should_not_print", "atexit0_should_not_run"] {
             assert!(!stdout.contains(absent), "unexpected {absent}:\n{stdout}");
         }
         assert_eq!(
-            stderr.matches("PATINA_FS_CRASH_RESTART").count(),
+            stderr.matches("PATINA_CRASH_RESTART").count(),
             1,
             "{stderr}"
         );
@@ -192,21 +227,35 @@ fn main() {
             ["start", "crash", "restart", "start", "end"]
         );
 
-        let json = assert_success(canary.command(
-            "run",
-            &[
-                "--seed",
-                "11",
-                "--fs-crash-at",
-                CANARY_CRASH_SELECTOR,
-                "--format",
-                "json",
-            ],
-        ));
+        // A machine crash keeps the synced bytes, and of the unsynced
+        // overwrite either all or none: never a mix within the one block.
+        for seed in &seeds {
+            let machine = assert_success(
+                canary.command("run", &[&["--seed", seed][..], &crash("machine")].concat()),
+            );
+            let stdout = String::from_utf8_lossy(&machine.stdout);
+            assert!(stdout.contains("CANARY A=\"A-synced\""), "{stdout}");
+            assert!(
+                stdout.contains("CANARY B=\"B-stable!!\"")
+                    || stdout.contains("CANARY B=\"B-volatile\""),
+                "{stdout}"
+            );
+        }
+
+        let json = assert_success(
+            canary.command(
+                "run",
+                &[
+                    &["--seed", &seeds[0]][..],
+                    &crash("process"),
+                    &["--format", "json"],
+                ]
+                .concat(),
+            ),
+        );
         let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
         let crash_restart = &envelope["crash_restart"];
-        assert_eq!(crash_restart["selector"]["op"], "write");
-        assert_eq!(crash_restart["selector"]["ordinal"], 6);
+        assert_eq!(crash_restart["crash_kind"], "process");
         assert_eq!(crash_restart["reached"], true);
         assert_eq!(crash_restart["crash_count"], 1);
         assert_eq!(crash_restart["restart_count"], 1);
@@ -235,21 +284,28 @@ fn main() {
             !json_stdout.contains("after_trigger_should_not_print"),
             "{envelope:#}"
         );
-        assert!(
-            !json_stdout.contains("atexit0_should_not_run"),
+
+        // A rate whose draw never hits in this run: one incarnation, no crash.
+        let quiet = crash_seeds(1, 4096, 1)[0].to_string();
+        let json = assert_success(canary.command(
+            "run",
+            &[
+                "--seed",
+                &quiet,
+                "--crash-permille",
+                "1",
+                "--format",
+                "json",
+            ],
+        ));
+        let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(
+            envelope["crash_restart"]["attempted"], false,
             "{envelope:#}"
         );
-
-        let unreached = canary.command("run", &["--seed", "11", "--fs-crash-at", "write:99"]);
-        assert!(
-            !unreached.status.success(),
-            "unreached selector unexpectedly passed"
-        );
-        assert!(
-            String::from_utf8_lossy(&unreached.stderr)
-                .contains("PATINA_FS_CRASH_SELECTOR_UNREACHED"),
-            "{}",
-            String::from_utf8_lossy(&unreached.stderr)
+        assert_eq!(
+            envelope["crash_restart"]["terminal_outcome"]["kind"], "exited_without_crash",
+            "{envelope:#}"
         );
 
         // Forge the digest on both the Crash and the Restart marker, so the trace
@@ -266,18 +322,6 @@ fn main() {
         });
         let stderr = replay_crash_divergence(&canary, &forged);
         assert!(stderr.contains(FORGED_SNAPSHOT_DIGEST), "{stderr}");
-
-        // Move the recorded selector one write earlier: incarnation 0's replayed
-        // operations still match, but its crash now comes before the recorded one.
-        let earlier = tamper_trace(&trace, |bundle| {
-            bundle["metadata"]["faults"]["crash_at"]["ordinal"] =
-                CANARY_EARLIER_WRITE_ORDINAL.into();
-        });
-        let stderr = replay_crash_divergence(&canary, &earlier);
-        assert!(
-            stderr.contains("the recorded crash followed operation"),
-            "{stderr}"
-        );
 
         // Alter the outcome of incarnation 1's first operation (its open of
         // `/pid0`); only a replay of incarnation 1's own segment can notice. The
@@ -300,45 +344,23 @@ fn main() {
             "a tampered incarnation 1 replayed:\n{stderr}"
         );
         assert!(
-            stderr.contains("PATINA_FS_CRASH_RESTART ") && stderr.contains("replay consumed"),
+            stderr.contains("PATINA_CRASH_RESTART ") && stderr.contains("replay consumed"),
             "incarnation 1 did not replay its segment past the restart:\n{stderr}"
-        );
-        assert!(
-            !String::from_utf8_lossy(&replayed.stdout).contains("CANARY incarnation=1"),
-            "incarnation 1 ran past its diverged operation"
-        );
-
-        // Claim a crash-free recording was made with the canary's selector: its
-        // replay crashes where the recording kept running.
-        let crash_free = canary.dir.path().join("crash-free.patina");
-        assert_success(canary.command(
-            "run",
-            &["--seed", "11", "--record", crash_free.to_str().unwrap()],
-        ));
-        let never = tamper_trace(&crash_free, |bundle| {
-            bundle["metadata"]["faults"]["crash_at"] =
-                serde_json::json!({"op": "write", "ordinal": 6});
-        });
-        let stderr = replay_crash_divergence(&canary, &never);
-        assert!(
-            stderr.contains("the recorded run never crashed"),
-            "{stderr}"
         );
 
         // A swarm draw that deselects the crash records and replays one incarnation.
         let swarm = canary.dir.path().join("swarm.patina");
-        let recorded = assert_success(canary.command(
-            "run",
-            &[
-                "--seed",
-                SWARM_DROPS_CRASH_SEED,
-                "--fs-crash-at",
-                CANARY_CRASH_SELECTOR,
-                "--swarm",
-                "--record",
-                swarm.to_str().unwrap(),
-            ],
-        ));
+        let recorded = assert_success(
+            canary.command(
+                "run",
+                &[
+                    &["--seed", "1"][..],
+                    &crash("machine"),
+                    &["--swarm", "--record", swarm.to_str().unwrap()],
+                ]
+                .concat(),
+            ),
+        );
         assert!(
             String::from_utf8_lossy(&recorded.stderr).contains("class=crash|0"),
             "the seed no longer deselects the crash class:\n{}",
@@ -388,7 +410,7 @@ fn main() {
     write!(last, "{}", now_nanos()).unwrap();
     last.sync_all().unwrap();
     File::open("/").unwrap().sync_all().unwrap();
-    // The crash selector: this second write.
+    // The crash follows this write.
     OpenOptions::new().create(true).write(true).open("/trigger").unwrap().write_all(b"x").unwrap();
 }
 "#;
@@ -414,7 +436,9 @@ fn main() {
     #[test]
     fn native_restarted_incarnation_draws_fresh_streams_and_carries_realtime_forward() {
         let guest = build_guest("incarnation_streams", NATIVE_INCARNATION_STREAMS_SOURCE);
-        let seeded = guest.assert_run_success(11, &["--fs-crash-at", "write:2"]);
+        let (permille, seeds) = crash_after(&guest, &[], 0, |op| writes(op, b"x"), 1);
+        let seed: u64 = seeds[0].parse().unwrap();
+        let seeded = guest.assert_run_success(seed, &["--crash-permille", &permille]);
         let report = streams_report(&seeded.stdout);
         let [first, previous, restarted] = report.as_slice() else {
             panic!(
@@ -437,15 +461,11 @@ fn main() {
         );
     }
 
-    // A guest that establishes a durable 16-byte baseline, then issues one UNSYNCED
-    // positional overwrite. `--fs-crash-at write:2` fires right after that pwrite,
-    // so it is the final write eligible for a sub-block (byte-granularity) tear. The
-    // guest reopens cold and prints the recovered image. Under whole-block tearing
-    // the overwrite reverts wholesale (all 'A'); under byte tearing it survives
-    // partially (an 'B' prefix, an 'A' suffix) -- an image a block model can never
-    // produce.
+    // A guest that establishes a durable 16-byte baseline, then issues one
+    // UNSYNCED positional overwrite, after which the run crashes. The guest
+    // reopens cold and prints the recovered image.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const TORN_GRANULARITY_SOURCE: &str = r#"
+    const UNSYNCED_OVERWRITE_SOURCE: &str = r#"
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::FileExt;
@@ -455,7 +475,7 @@ fn main() {
     if let Ok(mut f) = File::open(path) {
         let mut buf = Vec::new();
         let _ = f.read_to_end(&mut buf);
-        println!("recovered={buf:?}");
+        println!("recovered={}", String::from_utf8_lossy(&buf));
         return;
     }
     {
@@ -464,63 +484,110 @@ fn main() {
         f.sync_all().unwrap();
         File::open("/").unwrap().sync_all().unwrap();
     }
-    {
-        let f = OpenOptions::new().write(true).open(path).unwrap();
+    let f = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    if std::env::args().any(|arg| arg == "--mapped") {
+        // The overwrite through a shared view sits in the page cache until a
+        // write-back; the crash lands on the next file's creation.
+        unsafe extern "C" {
+            fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+        }
+        const PROT_READ_WRITE: i32 = 3;
+        const MAP_SHARED: i32 = 1;
+        use std::os::fd::AsRawFd;
+        let view = unsafe { mmap(std::ptr::null_mut(), 16, PROT_READ_WRITE, MAP_SHARED, f.as_raw_fd(), 0) };
+        assert_ne!(view as isize, -1);
+        unsafe { std::ptr::write_bytes(view, b'B', 16) };
+        let _ = OpenOptions::new().create(true).write(true).open("/g");
+    } else {
         let _ = f.write_all_at(&[b'B'; 16], 0);
     }
-    let mut buf = Vec::new();
-    if let Ok(mut f) = File::open(path) {
-        let _ = f.read_to_end(&mut buf);
-    }
-    println!("recovered={buf:?}");
+    println!("not_crashed");
 }
 "#;
-    // `--fs-torn-granularity byte` must reach the guest's crash filesystem (the
-    // runtime is the single choke point that builds the CrashFs from the fault
-    // config), and the seeded crash-decision stream must be live per `--seed`
-    // while one seed reproduces its torn image.
+    /// What survives a crash right after an unsynced overwrite is the crash
+    /// kind's to decide, through the runtime's one crash-filesystem choke
+    /// point: a process crash keeps the overwrite every time, and a machine
+    /// crash keeps it or the durable baseline, each for some seed, while one
+    /// seed reproduces its image.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_fs_torn_image_follows_the_granularity_and_the_seed() {
-        let guest = build_guest("torn", TORN_GRANULARITY_SOURCE);
-        let crash = |seed: &str, granularity: &str| {
+    fn native_crash_kind_decides_what_an_unsynced_overwrite_leaves() {
+        let guest = build_guest("overwrite", UNSYNCED_OVERWRITE_SOURCE);
+        let (permille, seeds) = crash_after(&guest, &[], 0, |op| writes(op, &[b'B'; 16]), 8);
+        let recovered = |seed: &str, kind: &str| {
             let output = assert_success(guest.command(
                 "run",
                 &[
                     "--seed",
                     seed,
-                    "--fs-crash-at",
-                    "write:2",
-                    "--fs-torn-granularity",
-                    granularity,
+                    "--crash-permille",
+                    &permille,
+                    "--crash-kind",
+                    kind,
+                ],
+            ));
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            assert!(!stdout.contains("not_crashed"), "{stdout}");
+            stdout
+        };
+        let (overwrite, baseline) = (
+            format!("recovered={}", "B".repeat(16)),
+            format!("recovered={}", "A".repeat(16)),
+        );
+        let mut machine = BTreeSet::new();
+        for seed in &seeds {
+            assert!(recovered(seed, "process").contains(&overwrite));
+            let image = recovered(seed, "machine");
+            assert_eq!(
+                image,
+                recovered(seed, "machine"),
+                "seed {seed} did not reproduce"
+            );
+            machine.insert(if image.contains(&overwrite) {
+                "overwrite"
+            } else {
+                assert!(image.contains(&baseline), "{image}");
+                "baseline"
+            });
+        }
+        assert_eq!(machine, BTreeSet::from(["baseline", "overwrite"]));
+    }
+
+    /// A process crash keeps what a store through a shared view left in the
+    /// page cache with no write-back yet, and a machine crash loses it with
+    /// the other unsynced writes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_crash_kind_decides_what_an_unwritten_mapped_store_leaves() {
+        let guest = build_guest("mapped", UNSYNCED_OVERWRITE_SOURCE);
+        let creates_g =
+            |op: &Operation| matches!(op, Operation::FsOpen { path, .. } if path == "/g");
+        let (permille, seeds) = crash_after(&guest, &["--mapped"], 0, creates_g, 1);
+        let recovered = |kind: &str| {
+            let output = assert_success(guest.command(
+                "run",
+                &[
+                    "--seed",
+                    &seeds[0],
+                    "--crash-permille",
+                    &permille,
+                    "--crash-kind",
+                    kind,
+                    "--",
+                    "--mapped",
                 ],
             ));
             String::from_utf8_lossy(&output.stdout).into_owned()
         };
-
-        // Block granularity reverts the unsynced overwrite wholesale to the durable
-        // baseline; byte granularity keeps a live prefix, so the images differ.
-        let block = crash("1", "block");
+        let process = recovered("process");
         assert!(
-            block.contains(
-                "recovered=[65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65]"
-            ),
-            "block granularity should revert wholesale to the durable baseline: {block}"
+            process.contains(&format!("recovered={}", "B".repeat(16))),
+            "{process}"
         );
-        let byte_flags = ["--fs-crash-at", "write:2", "--fs-torn-granularity", "byte"];
-        let byte =
-            String::from_utf8_lossy(&guest.assert_run_success(1, &byte_flags).stdout).into_owned();
-        assert_ne!(
-            block, byte,
-            "--fs-torn-granularity byte did not reach the guest (byte tearing == block)"
-        );
+        let machine = recovered("machine");
         assert!(
-            byte.contains("66") && byte.contains("65"),
-            "byte granularity should leave a partial live/durable mix: {byte}"
-        );
-        assert!(
-            ["2", "3"].iter().any(|seed| crash(seed, "byte") != byte),
-            "crash image did not vary across seeds (seed stream is pinned)"
+            machine.contains(&format!("recovered={}", "A".repeat(16))),
+            "{machine}"
         );
     }
 
@@ -583,50 +650,78 @@ fn main() {
     report(final_path);
 }
 "#;
+    /// Without the parent-directory fsync, a machine crash right after the
+    /// rename can lose the destination; with it, a crash right after the
+    /// directory fsync never does, under either kind, and its recording replays.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_directory_fsync_guards_namespace_durability_and_replays() {
         let guest = build_guest("namespace", NAMESPACE_DURABILITY_SOURCE);
         let stdout = |output: Output| String::from_utf8_lossy(&output.stdout).into_owned();
+        let renamed = |op: &Operation| matches!(op, Operation::FsRename { .. });
 
-        // Without the parent-directory fsync, a crash after the rename (the file
-        // close immediately after it) loses the destination.
-        let lost = stdout(assert_success(
-            guest.command("run", &["--seed", "5", "--fs-crash-at", "close:1"]),
-        ));
-        assert!(
-            lost.contains("NS_RESULT missing"),
-            "missing parent fsync should be able to lose the rename:\n{lost}"
+        let (permille, seeds) = crash_after(&guest, &[], 0, renamed, 8);
+        let lost = seeds.iter().any(|seed| {
+            stdout(assert_success(guest.command(
+                "run",
+                &["--seed", seed, "--crash-permille", &permille],
+            )))
+            .contains("NS_RESULT missing")
+        });
+        assert!(lost, "no machine crash lost the unsynced rename");
+
+        // The crash follows the directory fsync, the sync after the rename.
+        let renamed_yet = std::cell::Cell::new(false);
+        let (permille, seeds) = crash_after(
+            &guest,
+            &["--dir-fsync"],
+            0,
+            |op| {
+                renamed_yet.set(renamed_yet.get() || renamed(op));
+                renamed_yet.get() && is_sync(op)
+            },
+            4,
         );
-
-        // The same workload with the parent-dir fsync survives a crash immediately
-        // after the directory fsync, and its recording replays flag-free.
+        for seed in &seeds {
+            for kind in ["process", "machine"] {
+                let guarded = stdout(assert_success(guest.command(
+                    "run",
+                    &[
+                        "--seed",
+                        seed,
+                        "--crash-permille",
+                        &permille,
+                        "--crash-kind",
+                        kind,
+                        "--",
+                        "--dir-fsync",
+                    ],
+                )));
+                assert!(guarded.contains("dir_is_dir=true"), "{guarded}");
+                assert!(
+                    guarded.contains("NS_RESULT present stable"),
+                    "parent dir fsync should preserve the rename:\n{guarded}"
+                );
+            }
+        }
         let trace = guest.dir.path().join("namespace.patina");
-        let guarded = stdout(assert_success(guest.command(
+        let recorded = stdout(assert_success(guest.command(
             "run",
             &[
                 "--seed",
-                "5",
-                "--fs-crash-at",
-                "sync:4",
+                &seeds[0],
+                "--crash-permille",
+                &permille,
                 "--record",
                 trace.to_str().unwrap(),
                 "--",
                 "--dir-fsync",
             ],
         )));
-        assert!(
-            guarded.contains("dir_is_dir=true"),
-            "fstat did not report a directory before the modeled crash:\n{guarded}"
-        );
-        assert!(
-            guarded.contains("NS_RESULT present stable"),
-            "parent dir fsync should preserve the rename:\n{guarded}"
-        );
         let replayed = stdout(assert_success(
             guest.command("replay", &[trace.to_str().unwrap()]),
         ));
-        assert_eq!(guarded, replayed, "directory-fsync trace replay diverged");
+        assert_eq!(recorded, replayed, "directory-fsync trace replay diverged");
     }
 
     /// The `--format json` envelope of a run that may fail.
@@ -693,20 +788,23 @@ fn main() {
         }
     }
 
-    /// A crash point after a removal still fires: the run crashes at the eighth
-    /// fsync and restarts holding the eight records fsynced by then. Whether a
-    /// crash was attempted never rests on the guest's exit status: a guest that
-    /// exits before its crash point is a run that exited without a crash,
-    /// whatever status it chose.
+    /// A crash right after a sync following a removal still fires: the run
+    /// crashes at the eighth fsync and a process crash restarts holding the
+    /// eight records fsynced by then. Whether a crash was attempted never rests
+    /// on the guest's exit status: a guest that exits before any crash point is
+    /// a run that exited without a crash, whatever status it chose.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_fs_crash_after_a_removal_restarts_and_an_early_exit_attempts_none() {
+    fn native_crash_after_a_removal_restarts_and_an_early_exit_attempts_none() {
         let guest = removal_guest();
+        let (permille, seeds) = crash_after(&guest, &["remove-dir"], 7, is_sync, 1);
         let crash = [
             "--seed",
-            "1",
-            "--fs-crash-at",
-            "sync:8",
+            &seeds[0],
+            "--crash-permille",
+            &permille,
+            "--crash-kind",
+            "process",
             "--format",
             "json",
             "--",
@@ -731,14 +829,21 @@ fn main() {
         assert!(envelope["refusal"].is_null(), "{envelope:#}");
     }
 
+    /// Whether `operation` is an fsync.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn is_sync(operation: &Operation) -> bool {
+        matches!(operation, Operation::FsSync { .. })
+    }
+
     /// A crash whose handoff cannot be written at all (the supervisor's file
     /// size limit is zero) is still reported as a failed crash attempt,
     /// whether the write fails with `SIGXFSZ` ignored, or `SIGXFSZ` kills the
     /// incarnation mid-handoff or, for a record, in its trace flush.
     #[cfg(target_os = "linux")]
     #[test]
-    fn native_fs_crash_with_an_unwritable_handoff_is_an_infra_refusal() {
+    fn native_crash_with_an_unwritable_handoff_is_an_infra_refusal() {
         let guest = removal_guest();
+        let (permille, seeds) = crash_after(&guest, &[], 7, is_sync, 1);
         let trace = guest.dir.path().join("unwritable.patina");
         for (xfsz, record) in [("trap '' XFSZ;", false), ("", false), ("", true)] {
             let case = format!("{xfsz:?} record={record}");
@@ -746,9 +851,9 @@ fn main() {
                 "run",
                 guest.binary.to_str().unwrap(),
                 "--seed",
-                "1",
-                "--fs-crash-at",
-                "sync:8",
+                &seeds[0],
+                "--crash-permille",
+                &permille,
                 "--format",
                 "json",
             ];
@@ -773,7 +878,7 @@ fn main() {
                     )
                 });
             assert_eq!(
-                envelope["refusal"]["class"], "fs_crash_failed",
+                envelope["refusal"]["class"], "crash_failed",
                 "{case}: {envelope:#}"
             );
             let crash = &envelope["crash_restart"];
@@ -786,11 +891,12 @@ fn main() {
         }
     }
 
-    // A fsynced file one block past the restart snapshot's 64 MiB field limit:
-    // the crash at that fsync cannot export the recovered image. With `readv`,
-    // the crash point is instead the write-back a vectored read makes between
-    // its segments: the first segment copies into a shared view of the file
-    // the second reads.
+    // A fsynced file, its name made durable, one block past the restart
+    // snapshot's 64 MiB field limit (or, with `small`, a file of one block): a
+    // crash at that fsync cannot
+    // export the recovered image. With `readv`, the crash point is instead the
+    // write-back a vectored read makes between its segments: the first segment
+    // copies into a shared view of the file the second reads.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const UNEXPORTABLE_CRASH_SOURCE: &str = r#"
 use std::ffi::c_void;
@@ -809,9 +915,14 @@ unsafe extern "C" {
     fn readv(fd: i32, iov: *const Iov, count: i32) -> isize;
 }
 
+fn big_len() -> usize {
+    if std::env::args().any(|arg| arg == "small") { 4096 } else { (64 << 20) + 4096 }
+}
+
 fn vectored_read_through_a_shared_view() {
     let mut big = OpenOptions::new().create(true).read(true).write(true).open("/big").unwrap();
-    big.write_all(&vec![7_u8; (64 << 20) + 4096]).unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+    big.write_all(&vec![7_u8; big_len()]).unwrap();
     big.sync_all().unwrap();
     let mut file = OpenOptions::new().create(true).read(true).write(true).open("/small").unwrap();
     file.write_all(b"ABCD").unwrap();
@@ -837,34 +948,39 @@ fn main() {
         return;
     }
     let mut big = File::create("/big").unwrap();
-    big.write_all(&vec![7_u8; (64 << 20) + 4096]).unwrap();
+    File::open("/").unwrap().sync_all().unwrap();
+    big.write_all(&vec![7_u8; big_len()]).unwrap();
     let synced = big.sync_all();
     println!("SYNC_RETURNED {synced:?}");
 }
 "#;
 
-    /// A crash point reached but not carried out fails closed: the run is an
-    /// infra refusal naming the driver error, the crash is attempted and not
-    /// reached, and the guest is never handed an errno for it, even from inside
-    /// a vectored read.
+    /// A crash reached but not carried out fails closed: the run is an infra
+    /// refusal, the crash is attempted and not reached, and the guest is never
+    /// handed an errno for it, even from inside a vectored read. Where to crash
+    /// is found on the one-block variant, whose operations are the same.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_fs_crash_that_cannot_be_exported_is_an_infra_refusal() {
+    fn native_crash_that_cannot_be_exported_is_an_infra_refusal() {
         let guest = build_guest("unexportable", UNEXPORTABLE_CRASH_SOURCE);
+        // The file's fsync, after its directory's.
+        let (permille, seeds) = crash_after(&guest, &["main", "small"], 1, is_sync, 1);
         let envelope = run_envelope(
             &guest,
-            &["--seed", "1", "--fs-crash-at", "sync:1", "--format", "json"],
+            &[
+                "--seed",
+                &seeds[0],
+                "--crash-permille",
+                &permille,
+                "--format",
+                "json",
+            ],
         );
         let stdout = envelope["stdout"].as_str().unwrap();
         assert!(!stdout.contains("SYNC_RETURNED"), "{envelope:#}");
         assert!(!stdout.contains("RESTARTED"), "{envelope:#}");
         assert_eq!(envelope["result"], "infra", "{envelope:#}");
-        assert_eq!(
-            envelope["refusal"]["class"], "fs_crash_failed",
-            "{envelope:#}"
-        );
-        let refusal = envelope["refusal"]["message"].as_str().unwrap();
-        assert!(refusal.contains("sync:1"), "{refusal}");
+        assert_eq!(envelope["refusal"]["class"], "crash_failed", "{envelope:#}");
         let crash = &envelope["crash_restart"];
         assert_eq!(crash["attempted"], true, "{envelope:#}");
         assert_eq!(crash["reached"], false, "{envelope:#}");
@@ -875,13 +991,20 @@ fn main() {
 
         #[cfg(target_os = "linux")]
         {
+            let (permille, seeds) = crash_after(
+                &guest,
+                &["readv", "small"],
+                0,
+                |op| matches!(op, Operation::FsWriteBackAt { .. }),
+                1,
+            );
             let envelope = run_envelope(
                 &guest,
                 &[
                     "--seed",
-                    "1",
-                    "--fs-crash-at",
-                    "write:3",
+                    &seeds[0],
+                    "--crash-permille",
+                    &permille,
                     "--format",
                     "json",
                     "--",
@@ -890,12 +1013,7 @@ fn main() {
             );
             let stdout = envelope["stdout"].as_str().unwrap();
             assert!(!stdout.contains("READV_RETURNED"), "{envelope:#}");
-            assert_eq!(
-                envelope["refusal"]["class"], "fs_crash_failed",
-                "{envelope:#}"
-            );
-            let refusal = envelope["refusal"]["message"].as_str().unwrap();
-            assert!(refusal.contains("write:3"), "{refusal}");
+            assert_eq!(envelope["refusal"]["class"], "crash_failed", "{envelope:#}");
             assert_eq!(
                 envelope["crash_restart"]["terminal_outcome"]["kind"], "crash_failed",
                 "{envelope:#}"
@@ -907,8 +1025,10 @@ fn main() {
     /// into a ledger whose creation it makes durable first. A restarted
     /// incarnation reports `LOST` and exits 3 when the ledger holds more acks
     /// than the log holds records. Without `--fsync-data-dir` the log's directory is never made
-    /// durable, so a crash loses the whole log: the bug a crash band exists to
-    /// find, and nothing short of a crash can show.
+    /// durable, so a machine crash loses the whole log: the bug a crash plane
+    /// exists to find, and nothing short of a crash can show. Each incarnation
+    /// first draws entropy until a low byte: draws a trace reducer can delete,
+    /// since a later draw's answer ends the loop as well.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const ACKED_LOG_SOURCE: &str = r#"
 use std::fs::{self, File, OpenOptions};
@@ -922,7 +1042,22 @@ fn lines(path: &str) -> usize {
     fs::read_to_string(path).map_or(0, |text| text.matches('\n').count())
 }
 
+unsafe extern "C" {
+    fn getentropy(buf: *mut core::ffi::c_void, len: usize) -> i32;
+}
+
+fn draw_until_low() {
+    loop {
+        let mut byte = [0_u8; 1];
+        assert_eq!(unsafe { getentropy(byte.as_mut_ptr().cast(), 1) }, 0);
+        if byte[0] < 8 {
+            return;
+        }
+    }
+}
+
 fn main() {
+    draw_until_low();
     if fs::metadata("/acked").is_ok() {
         let (acked, logged) = (lines("/acked"), lines("/data/log"));
         if logged < acked {
@@ -949,29 +1084,25 @@ fn main() {
 }
 "#;
 
-    /// A campaign that declares the crash points its guest reaches crashes and
-    /// restarts every generation there: it catches a log lost to a missing
-    /// directory fsync (red) and passes the fixed guest (green); a declared
-    /// point the guest never reaches is VACUOUS_CRASH, not INFRA; and
-    /// `minimize` reduces a crash generation's knobs but refuses, before any
-    /// run, to delta-debug its two-incarnation trace.
+    /// A campaign drawing the crash plane crashes and restarts generations at
+    /// drawn rates: it catches a log lost to a missing directory fsync (red)
+    /// and passes the fixed guest (green); and `minimize` shrinks a crash
+    /// generation's two-incarnation trace, keeping the crash it needs.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_campaign_crash_band_restarts_every_generation_at_a_declared_point() {
+    fn a_campaign_crash_plane_catches_a_lost_directory_entry() {
         let guest = build_guest("acked_log", ACKED_LOG_SOURCE);
         let spec = guest.dir.path().join("spec.json");
-        let campaign = |name: &str, reach: &str, guest_args: &[&str]| {
-            fs::write(
-                &spec,
-                format!(
-                    r#"{{"fs_crash_reach": [{reach}], "classify": {{"exit_codes": {{"VIOLATION": [3]}}}}}}"#
-                ),
-            )
-            .unwrap();
+        fs::write(
+            &spec,
+            r#"{"faults": ["crash"], "classify": {"exit_codes": {"VIOLATION": [3]}}}"#,
+        )
+        .unwrap();
+        let campaign = |name: &str, guest_args: &[&str]| {
             let out = guest.dir.path().join(name);
             let mut args = vec![
                 "--gens",
-                "8",
+                "16",
                 "--spec",
                 spec.to_str().unwrap(),
                 "--out-dir",
@@ -994,8 +1125,7 @@ fn main() {
                 .collect()
         };
 
-        // The guest makes 16 writes, so every drawn point is reached.
-        let (red, envelope) = campaign("red", r#""write:16""#, &[]);
+        let (red, envelope) = campaign("red", &[]);
         let red_classes = classes(&envelope);
         assert!(red_classes.contains_key("VIOLATION"), "{envelope:#}");
         assert!(
@@ -1004,51 +1134,56 @@ fn main() {
                 .all(|class| class == "OK" || class == "VIOLATION"),
             "{envelope:#}"
         );
-        let (_, envelope) = campaign("green", r#""write:16""#, &["--fsync-data-dir"]);
+        let (_, envelope) = campaign("green", &["--fsync-data-dir"]);
         assert_eq!(
             classes(&envelope).into_keys().collect::<Vec<_>>(),
             ["OK"],
             "{envelope:#}"
         );
-        // Points past the 16th write are unreached.
-        let (_, envelope) = campaign("unreached", r#""write:64""#, &["--fsync-data-dir"]);
-        let unreached = classes(&envelope);
-        assert!(unreached.contains_key("VACUOUS_CRASH"), "{envelope:#}");
-        assert!(!unreached.contains_key("INFRA"), "{envelope:#}");
 
         let violation = envelope_generation(&red, "VIOLATION");
-        let minimize = |extra: &[&str]| {
-            let mut args = vec![
-                "minimize",
-                "--generation",
-                &violation,
-                "--out-dir",
-                red.to_str().unwrap(),
-                "--marker",
-                "LOST",
-            ];
-            args.extend_from_slice(extra);
+        let reduced = assert_success(
             invoke_with_deadline(
                 env!("CARGO_BIN_EXE_cargo-patina"),
                 native_workspace(),
-                &args,
-                Duration::from_secs(60),
+                &[
+                    "minimize",
+                    "--generation",
+                    &violation,
+                    "--out-dir",
+                    red.to_str().unwrap(),
+                    "--marker",
+                    "LOST",
+                ],
+                Duration::from_secs(120),
             )
-            .expect("minimize exceeded 60s")
+            .expect("minimize exceeded 120s"),
+        );
+        let stdout = String::from_utf8_lossy(&reduced.stdout).into_owned();
+        let complete = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("PATINA_MINIMIZE_GENERATION_COMPLETE "))
+            .unwrap_or_else(|| panic!("no completion line:\n{stdout}"));
+        let field = |key: &str| -> String {
+            complete
+                .split(' ')
+                .find_map(|field| field.strip_prefix(&format!("{key}=")))
+                .unwrap_or_else(|| panic!("no {key} in {complete}"))
+                .to_owned()
         };
-        let refused = minimize(&[]);
-        assert!(!refused.status.success());
         assert!(
-            String::from_utf8_lossy(&refused.stderr).contains("--no-trace-phase"),
-            "{}",
-            String::from_utf8_lossy(&refused.stderr)
+            stdout.contains("--crash-permille"),
+            "the reduction dropped the crash it needs:\n{stdout}"
         );
-        let reduced = assert_success(minimize(&["--no-trace-phase"]));
-        assert!(
-            String::from_utf8_lossy(&reduced.stdout).contains("--fs-crash-at"),
-            "the reduction dropped the crash it needs:\n{}",
-            String::from_utf8_lossy(&reduced.stdout)
+        assert_eq!(
+            lifecycle(Path::new(&field("output"))),
+            ["start", "crash", "restart", "start", "end"]
         );
+        let (before, after): (u64, u64) = (
+            field("before").parse().unwrap(),
+            field("after").parse().unwrap(),
+        );
+        assert!(after < before, "the crash trace did not shrink:\n{stdout}");
     }
 
     /// The first generation of a campaign out-dir classed `class`.

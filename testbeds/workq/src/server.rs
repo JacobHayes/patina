@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::wal::{Durability, FailClosed, Wal, WalError};
+use crate::wal::{Durability, FailClosed, Wal, WalBug, WalError};
 use crate::wire::{Msg, Outcome, WalRecord};
 
 /// The server's observable counts, republished each tick; the driver reads them
@@ -53,6 +53,10 @@ pub enum Bug {
     /// frame's tail is silently dropped; recovery then truncates at the torn
     /// frame and the durability invariant (acked job present in the WAL) fires.
     IgnoreShortWrite,
+    /// The WAL append path reports a record durable without fsyncing it. A
+    /// process crash leaves the page cache, so the record survives anyway; a
+    /// machine crash loses it, and the durability invariant fires.
+    SkipWalFsync,
 }
 
 impl Bug {
@@ -61,6 +65,7 @@ impl Bug {
         "skip-redelivery-commit",
         "apply-check-outside-lock",
         "ignore-short-write",
+        "skip-wal-fsync",
     ];
     pub fn parse(name: &str) -> Option<Bug> {
         match name {
@@ -68,6 +73,7 @@ impl Bug {
             "skip-redelivery-commit" => Some(Bug::SkipRedeliveryCommit),
             "apply-check-outside-lock" => Some(Bug::ApplyCheckOutsideLock),
             "ignore-short-write" => Some(Bug::IgnoreShortWrite),
+            "skip-wal-fsync" => Some(Bug::SkipWalFsync),
             _ => None,
         }
     }
@@ -142,7 +148,11 @@ impl Queue {
         let (wal, records) = Wal::open(
             &cfg.dir,
             cfg.segment_bytes,
-            cfg.bug == Bug::IgnoreShortWrite,
+            match cfg.bug {
+                Bug::IgnoreShortWrite => WalBug::IgnoreShortWrite,
+                Bug::SkipWalFsync => WalBug::SkipFsync,
+                _ => WalBug::None,
+            },
         )?;
         let mut q = Queue {
             cfg,

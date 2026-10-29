@@ -14,17 +14,20 @@ pub enum FaultPlane {
     Entropy,
     Sleep,
     Epoch,
+    /// Native only: a crash and restart at a drawn rate per crash point.
+    Crash,
 }
 
 impl FaultPlane {
     /// Every plane, in canonical order: the order a subset is recorded in.
-    pub const ALL: [FaultPlane; 6] = [
+    pub const ALL: [FaultPlane; 7] = [
         FaultPlane::Fs,
         FaultPlane::Net,
         FaultPlane::Dns,
         FaultPlane::Entropy,
         FaultPlane::Sleep,
         FaultPlane::Epoch,
+        FaultPlane::Crash,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -35,6 +38,7 @@ impl FaultPlane {
             FaultPlane::Entropy => "entropy",
             FaultPlane::Sleep => "sleep",
             FaultPlane::Epoch => "epoch",
+            FaultPlane::Crash => "crash",
         }
     }
 
@@ -81,9 +85,7 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
         // Opted into by `--custom-op-faults`: only the guest knows whether its
         // custom operations declare a failure shape.
         FaultKnob::CustomOpFailPermille => None,
-        // Opted into by the spec's `fs_crash_reach`, for the same reason: only
-        // the operator knows which crash points the guest reaches.
-        FaultKnob::FsCrashAt | FaultKnob::FsTornGranularity => None,
+        FaultKnob::CrashPermille | FaultKnob::CrashKind => Some(FaultPlane::Crash),
         // The host table is workload, forwarded whichever planes are drawn.
         FaultKnob::DnsEntry => None,
     }
@@ -188,7 +190,7 @@ mod tests {
             );
             if let Some(token) = meta.swarm_class.filter(|_| drawn) {
                 assert!(
-                    token.starts_with(&format!("{}_", plane.name())),
+                    token == plane.name() || token.starts_with(&format!("{}_", plane.name())),
                     "{knob:?} is filed under {plane:?} but its swarm class is {token}"
                 );
             }

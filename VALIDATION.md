@@ -112,8 +112,8 @@ name. Each knob emits a report, and a knob that never fired is a warning or a
 knob declaration, and vacuity tests per class.
 
 **Crash consistency.** `CrashFs` rolls back to the durable image with seeded torn
-writes, and native `--fs-crash-at` restarts a fresh incarnation whose handoff
-replays against its recorded digest (`docs/fs-crash-restart-protocol.md`).
+writes, and native `--crash-permille` restarts a fresh incarnation whose handoff
+replays against its recorded digest (`docs/crash-restart-protocol.md`).
 Oracle: the fs-crash unit suite and native crash-restart record/replay.
 
 **Liveness.** A wedged run, frozen-clock churn or call-free compute starving a

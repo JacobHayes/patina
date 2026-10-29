@@ -201,16 +201,9 @@ impl BandPolicy {
 /// Exhaustive ownership of campaign band bytes: every knob is drawn or waived.
 const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     match knob {
-        // Banded only for a spec that declares `fs_crash_reach`: an
-        // armed crash point the run never reaches fails the run, and which
-        // points every generation reaches is a fact about the guest that only
-        // its operator can state (see the crash block in `derive_flags`).
-        FaultKnob::FsCrashAt => BandPolicy::Draw(&[
-            gen_byte::FS_CRASH_OP,
-            gen_byte::FS_CRASH_ORDINAL_LO,
-            gen_byte::FS_CRASH_ORDINAL_HI,
-        ]),
-        FaultKnob::FsTornGranularity => BandPolicy::Draw(&[gen_byte::FS_TORN]),
+        // A crash and restart (see the crash block in `derive_flags`).
+        FaultKnob::CrashPermille => BandPolicy::Draw(&[gen_byte::CRASH_PERMILLE]),
+        FaultKnob::CrashKind => BandPolicy::Draw(&[gen_byte::CRASH_KIND]),
         FaultKnob::FsErrorPermille => BandPolicy::Draw(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => BandPolicy::Draw(&[gen_byte::FS_SHORT]),
         FaultKnob::FsLatencyNanos => BandPolicy::Draw(&[gen_byte::FS_LATENCY_HI]),
@@ -313,14 +306,14 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
         | FaultKnob::NetConnectRefusePermille
         | FaultKnob::NetResetPermille
         | FaultKnob::NetPartition => Some(CampaignClass::VacuousNetFault),
-        // No rate to judge inert: a crash fires at a chosen boundary op (an
-        // unreached one is the runtime's own refusal, classed VACUOUS_CRASH,
-        // not a report plane), a torn-write granularity is a model rather than a rate, a buffer size is
-        // a capacity, a delayed sleep is indistinguishable from a longer one, and
-        // the host table is workload. Each of these reports nothing, which
+        // No rate to judge inert: a crash fires at most once and says whether
+        // it did in the run's `crash_restart` record, a crash kind is a model
+        // rather than a rate, a buffer size is a capacity, a delayed sleep is
+        // indistinguishable from a longer one, and the host table is workload.
+        // Each of these reports nothing, which
         // `vacuity_classes_match_the_classifier` pins against the knob table.
-        FaultKnob::FsCrashAt
-        | FaultKnob::FsTornGranularity
+        FaultKnob::CrashPermille
+        | FaultKnob::CrashKind
         | FaultKnob::SleepJitterNanos
         | FaultKnob::NetTcpBufferBytes
         | FaultKnob::DnsEntry => None,
@@ -587,6 +580,30 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
             FaultKnob::EpochJumpNanos,
             RunValue::Int(epoch_jump_hi),
         );
+        // A crash and restart. The rate is per crash point and the first hit
+        // crashes, so where the crash lands is geometric in the run's crash
+        // points: a power-of-two sweep over [1, 128] permille puts crashes both
+        // early in a long run and anywhere in a short one, where any one rate
+        // would crowd them into one end of the guest's runs.
+        let crash_permille = scale_intensity(
+            1 << (band_byte(hash, FaultKnob::CrashPermille, 0) % 8),
+            scale,
+        );
+        band(
+            &mut flags,
+            FaultKnob::CrashPermille,
+            RunValue::Int(crash_permille),
+        );
+        let kind = if band_byte(hash, FaultKnob::CrashKind, 0) & 1 == 0 {
+            patina_dst_runtime::CrashKind::Machine
+        } else {
+            patina_dst_runtime::CrashKind::Process
+        };
+        band(
+            &mut flags,
+            FaultKnob::CrashKind,
+            RunValue::Text(kind.name().into()),
+        );
         // Opt-in, on the same reasoning as the DNS band below: whether a custom
         // operation is fault-eligible is the GUEST's declaration, and over a
         // guest that declares none the knob provably cannot fire. Every
@@ -633,38 +650,6 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
                 },
             );
         }
-    }
-    // Crash restart, opted into by declaring the crash points every
-    // generation reaches (`fs_crash_reach`): one reach is picked, and a point
-    // at or before it drawn, so the selector can never go unreached. Not under
-    // `--faults` or the scale dial: it is placement, not an intensity, and a
-    // network campaign has no reason to inherit fs error bands to get it.
-    if !spec.fs_crash_reach.is_empty() {
-        let reach = &spec.fs_crash_reach;
-        let bound = reach[usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0)) % reach.len()];
-        let draw = u16::from_le_bytes([
-            band_byte(hash, FaultKnob::FsCrashAt, 1),
-            band_byte(hash, FaultKnob::FsCrashAt, 2),
-        ]);
-        let point = patina_dst_runtime::CrashPoint {
-            op: bound.op,
-            ordinal: 1 + u64::from(draw) % bound.ordinal,
-        };
-        push_run_flag(
-            &mut flags,
-            "--fs-crash-at",
-            RunValue::Text(point.to_string()),
-        );
-        let torn = if band_byte(hash, FaultKnob::FsTornGranularity, 0) & 1 == 0 {
-            "block"
-        } else {
-            "byte"
-        };
-        push_run_flag(
-            &mut flags,
-            "--fs-torn-granularity",
-            RunValue::Text(torn.into()),
-        );
     }
     if spec.swarm {
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);

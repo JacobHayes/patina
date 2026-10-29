@@ -9,66 +9,76 @@ use patina_dst_driver_api::{
     ClockFaultReport, CustomOpFaultReport, DnsFaultReport, FsFaultReport, NetFaultReport,
 };
 use patina_dst_runtime::{
-    Context, CrashOp, DEFAULT_REALTIME_EPOCH_NANOS, RuntimeConfig, RuntimeError, TornGranularity,
+    Context, CrashKind, DEFAULT_REALTIME_EPOCH_NANOS, InjectedCrash, RuntimeConfig, RuntimeError,
 };
 use tempfile::tempdir;
 
-fn sync_directory(context: &mut Context, path: &str) {
-    // Do not close the directory fd here: several tests pin `--fs-crash-at
-    // close:1` to the subsequent file close, so adding an earlier close would
-    // move the planted crash point away from the data-durability assertion.
-    let dir = context.fs_open(path, OpenFlags::read_only()).unwrap();
-    context.fs_sync(dir).unwrap();
-}
-
 /// Append a record to a write-ahead log without syncing it, mirroring a
 /// missing-fsync commit protocol, make only its directory entry durable, and
-/// close it: a crash pinned to that close lands between append and verify.
-fn append_unsynced_record(config: RuntimeConfig) -> (Context, Result<(), RuntimeError>) {
+/// close it, under a crash rate. The crash, if one lands, ends the run there.
+fn append_unsynced_record(seed: u64, kind: CrashKind) -> Option<InjectedCrash> {
+    let config = RuntimeConfig::seeded(seed)
+        .with_crash_permille(250)
+        .with_crash_kind(kind)
+        .with_crash_supervisor();
     let mut context = Context::from_config(config).unwrap();
-    let fd = context
-        .fs_open("/commit.log", OpenFlags::create_truncate_write())
-        .unwrap();
-    context.fs_write(fd, b"durable-record-0001").unwrap();
-    sync_directory(&mut context, "/");
-    let closed = context.fs_close(fd);
-    (context, closed)
-}
-
-#[test]
-fn crash_at_close_drops_unsynced_records_but_clean_run_keeps_them() {
-    // MUST trip: an injected crash at the first close returns the restart
-    // control, whose exported image has dropped the unsynced write: the
-    // lost-durable-records failure.
-    let (_, closed) =
-        append_unsynced_record(RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 1));
-    let Err(RuntimeError::InjectedFsCrash(control)) = closed else {
-        panic!("expected injected crash control, got {closed:?}");
+    let run = |context: &mut Context| -> Result<(), RuntimeError> {
+        let fd = context.fs_open("/commit.log", OpenFlags::create_truncate_write())?;
+        context.fs_write(fd, b"durable-record-0001")?;
+        let dir = context.fs_open("/", OpenFlags::read_only())?;
+        context.fs_sync(dir)?;
+        context.fs_close(fd)
     };
-    assert_eq!(control.from_incarnation, 0);
-    assert_eq!(control.to_incarnation, 1);
-    assert_eq!(control.consumed.operations, 5);
-    assert_eq!(
-        control
-            .snapshot
-            .into_memfs()
-            .contents("/commit.log")
-            .unwrap_or_default(),
-        b""
-    );
+    match run(&mut context) {
+        Ok(()) => None,
+        Err(RuntimeError::InjectedCrash(crash)) => Some(*crash),
+        Err(error) => panic!("unexpected error {error}"),
+    }
+}
 
-    // MUST stay clean: with no crash configured the record survives intact.
-    let (mut context, closed) = append_unsynced_record(RuntimeConfig::seeded(0));
-    closed.unwrap();
-    assert_eq!(
-        context.read_file("/commit.log").unwrap(),
-        b"durable-record-0001"
-    );
-    context.finish().unwrap();
+/// The record as the restarted incarnation finds it, for each seed whose
+/// crash lands after the close, when the append is complete but unsynced.
+fn records_after_a_crash_at_close(kind: CrashKind) -> Vec<Vec<u8>> {
+    (0..256)
+        .filter_map(|seed| append_unsynced_record(seed, kind))
+        .filter(|crash| crash.consumed.operations == 5)
+        .map(|crash| {
+            crash
+                .snapshot
+                .into_memfs()
+                .contents("/commit.log")
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 #[test]
-fn replay_with_a_different_crash_point_fails_closed() {
+fn a_machine_crash_can_drop_an_unsynced_record_a_process_crash_keeps() {
+    // A process crash leaves the page cache, so the unsynced record is there
+    // after every restart.
+    let process = records_after_a_crash_at_close(CrashKind::Process);
+    assert!(!process.is_empty(), "no seed crashed at the close");
+    assert!(
+        process
+            .iter()
+            .all(|record| record == b"durable-record-0001")
+    );
+
+    // A machine crash keeps only what was synced: some restart finds the
+    // record gone (the lost-durable-records failure), and the crash rate
+    // draw is the same, so the same seeds crash at the close.
+    let machine = records_after_a_crash_at_close(CrashKind::Machine);
+    assert_eq!(machine.len(), process.len());
+    assert!(
+        machine
+            .iter()
+            .any(|record| record != b"durable-record-0001"),
+        "no machine crash lost the unsynced record"
+    );
+}
+
+#[test]
+fn replay_with_a_different_crash_rate_fails_closed() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("no-crash.patina");
     {
@@ -80,35 +90,9 @@ fn replay_with_a_different_crash_point_fails_closed() {
         context.fs_write(fd, b"durable-record-0001").unwrap();
         context.finish().unwrap();
     }
-    let conflicting = Context::from_config(
-        RuntimeConfig::replay(&path, "fault-v1").with_crash_at(CrashOp::Close, 2),
-    );
+    let conflicting =
+        Context::from_config(RuntimeConfig::replay(&path, "fault-v1").with_crash_permille(5));
     assert!(conflicting.is_err());
-}
-
-#[test]
-fn byte_granularity_crash_exports_a_torn_snapshot() {
-    let mut context = Context::from_config(
-        RuntimeConfig::seeded(7)
-            .with_crash_at(CrashOp::Write, 2)
-            .with_fs_torn_granularity(TornGranularity::Byte),
-    )
-    .unwrap();
-    let fd = context
-        .fs_open("/db", OpenFlags::create_truncate_write())
-        .unwrap();
-    context.fs_write(fd, &[b'A'; 4096]).unwrap();
-    context.fs_sync(fd).unwrap();
-    sync_directory(&mut context, "/");
-    let error = context.fs_write(fd, &[b'B'; 4096]).unwrap_err();
-    let RuntimeError::InjectedFsCrash(control) = error else {
-        panic!("expected injected crash control, got {error}");
-    };
-    let recovered = control.snapshot.into_memfs().contents("/db").unwrap();
-    assert!(recovered.contains(&b'B'), "no live prefix survived");
-    assert!(recovered.contains(&b'A'), "no durable suffix remained");
-    assert_ne!(recovered, vec![b'A'; 4096]);
-    assert_ne!(recovered, vec![b'B'; 4096]);
 }
 
 /// Sleep for `duration`, returning the virtual monotonic time afterward.

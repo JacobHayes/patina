@@ -5,8 +5,7 @@
                  "--ack-ledger", "/workq-acks"],
   "buggify": true,
   "swarm": true,
-  "faults": ["net", "sleep"],
-  "fs_crash_reach": ["write:32", "sync:32", "close:3"],
+  "faults": ["net", "sleep", "crash"],
   "allow_unmet_sometimes": true,
   "classify": {"patterns": {"LIVENESS": ["WORKQ_FAILURE not-converged"]}}
 }

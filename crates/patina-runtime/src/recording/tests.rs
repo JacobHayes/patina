@@ -3,7 +3,6 @@
 use crate::EntropyWait;
 use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
-use crate::fs_crash::CrashOp;
 use crate::recording::TraceTransport;
 use crate::reports::fs_fault_report_line;
 use crate::{
@@ -156,18 +155,22 @@ fn trace_transport_records_and_replays_without_paths() {
 fn crash_writes_the_incarnation_recording_ending_with_the_trigger() {
     let transport = SharedTransport::default();
     let mut record = RuntimeBuilder::new(
-        RuntimeConfig::record_transport(3, "fixture-v1").with_crash_at(CrashOp::Open, 1),
+        RuntimeConfig::record_transport(3, "fixture-v1")
+            .with_crash_permille(1000)
+            .with_crash_supervisor(),
     )
     .with_default_drivers()
     .with_trace_transport(transport.clone())
     .build()
     .unwrap();
     let trigger = Operation::FsOpen {
-        path: "/".into(),
-        flags: OpenFlags::read_only(),
+        path: "/f".into(),
+        flags: OpenFlags::create_truncate_write(),
     };
-    let crash = record.fs_open("/", OpenFlags::read_only()).unwrap_err();
-    assert!(matches!(crash, RuntimeError::InjectedFsCrash(_)));
+    let crash = record
+        .fs_open("/f", OpenFlags::create_truncate_write())
+        .unwrap_err();
+    assert!(matches!(crash, RuntimeError::InjectedCrash(_)));
     let recorded = TraceBundle::from_slice(&transport.stored()).unwrap();
     let last = recorded.timelines[0]
         .decisions

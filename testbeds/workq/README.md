@@ -94,7 +94,7 @@ resumes the same workload.
 
 ## The one-command bug-catch demo
 
-The queue ships with four deliberately planted bugs, off by default and enabled
+The queue ships with five deliberately planted bugs, off by default and enabled
 with `--bug NAME`. Each is a subtle mistake a real engineer could make, and each
 is caught by the queue's *own* invariants — no special test assertion.
 
@@ -111,6 +111,10 @@ is caught by the queue's *own* invariants — no special test assertion.
   applies it — a classic check-then-act race that does the work twice.
 - **`ignore-short-write`** — the log treats a short write as a whole one, so a
   record the disk only partly took is acknowledged as durable.
+- **`skip-wal-fsync`** — the log acknowledges a record as durable without
+  fsyncing it. Only a crash can show it, and only one that takes the machine
+  down: after a process crash the page cache still holds the record, after a
+  machine crash (`--crash-kind machine`, the default) it is gone.
 
 Watch Patina catch one (it fails, loudly and reproducibly):
 
@@ -130,8 +134,9 @@ reproduces byte-for-byte.
 queue. Each generation draws its schedule seed, its workload, net and sleep
 faults, cooperative buggify faults and a swarm subset of them from the
 generation number, restarts the server in-process once six jobs complete, and
-kills the whole process at a write, fsync or close it is known to reach,
-restarting it from what reached the disk. The restarted process cannot remember
+draws a crash: a per-operation crash rate and a crash kind. The first write,
+fsync, close, rename or network send the rate hits kills the whole process, or
+the whole machine, and restarts it from what the crash left on disk. The restarted process cannot remember
 what the crashed one acknowledged, so the campaign passes `--ack-ledger`:
 producers also record each ack in a file of their own, and the restarted run
 checks that every job acked before the crash is still in the log it recovered.

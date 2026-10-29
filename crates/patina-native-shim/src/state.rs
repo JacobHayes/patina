@@ -56,7 +56,7 @@ pub(crate) fn fs_handle(raw_fd: c_int) -> Result<Fd, c_int> {
 /// a guest number is free for it. The kernel takes the number first
 /// (`get_unused_fd_flags` before `do_filp_open` or `alloc_file`), so at
 /// `RLIMIT_NOFILE` the call is `EMFILE` and has made nothing: no file created
-/// or truncated, no fault drawn, no crash ordinal counted. The check runs in
+/// or truncated, no fault drawn, no crash point drawn. The check runs in
 /// the creating step's own Context closure, which takes no scheduling point,
 /// so no other task takes the number between them; the caller installs the
 /// result before its next scheduling point.

@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn flag_names_and_expansion_strings_are_mechanical() {
-        assert_eq!(flag_name("fs_crash_at"), "--fs-crash-at");
+        assert_eq!(flag_name("crash_permille"), "--crash-permille");
         assert_eq!(flag_name("yield_points"), "--yield-points");
         assert_eq!(rust_string_literal("a\\b\n\"c\""), "\"a\\\\b\\n\\\"c\\\"\"");
     }

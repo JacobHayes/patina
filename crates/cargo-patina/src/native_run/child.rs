@@ -175,7 +175,7 @@ pub(crate) fn native_child_status(status: ExitStatus) -> NativeChildStatus {
     }
 }
 
-pub(crate) const NATIVE_FS_CRASH_RESTART_EXIT: i32 = 112;
+pub(crate) const NATIVE_CRASH_RESTART_EXIT: i32 = 112;
 
 #[cfg(unix)]
 pub(super) fn wait_native_child_once(

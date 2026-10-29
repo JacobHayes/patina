@@ -3,14 +3,17 @@
 # workq under Patina: the self-checking regression gate. Exits nonzero on any
 # regression:
 #   [1] a short `cargo patina campaign` over campaign.json: guest-drawn workload
-#       sizes, net/sleep/buggify/swarm faults, a disk crash-restart and an
-#       in-process server restart per generation, with the campaign's own
-#       re-run check. Every generation must be clean;
+#       sizes, net/sleep/buggify/swarm faults, a process or machine crash and
+#       restart at a drawn per-operation rate, and an in-process server restart
+#       per generation, with the campaign's own re-run check. Every generation
+#       must be clean;
 #   [2] the in-process fail-closed-recovery self-test (mid-log corruption
 #       aborts, a torn tail truncates);
 #   [3] each planted `--bug` is caught within a bounded seed window (a bug no
 #       seed catches fails the leg), and the catching run strict-replays with
-#       an identical verdict stream and trace.
+#       an identical verdict stream and trace. `skip-wal-fsync` is caught only
+#       by a machine crash: the same run under a process crash, whose page
+#       cache survives, must pass.
 ###############################################################################
 set -uo pipefail
 
@@ -68,6 +71,7 @@ bug_leg() {
     if ! run --seed "$bseed" $pknobs --record "$tr" -- "${ARGS[@]}" $gargs >/dev/null 2>"$err" \
         && grep -Eq "$marker" "$err"; then caught=1; break; fi
   done
+  bseed_caught=""
   if [[ $caught -ne 1 ]]; then
     echo "    FAIL: not caught by seeds $first..$((first + BUG_SEED_WINDOW - 1)) (expected '$marker')"
     fail=1; stderr_tail "$err"; return
@@ -80,11 +84,20 @@ bug_leg() {
       || "$th" != "$(shasum -a256 "$tr" | cut -d' ' -f1)" ]] || ! grep -Eq "$marker" "$rerr"; then
     echo "    FAIL: the replay did not reproduce the verdict stream and trace"; fail=1
   fi
+  bseed_caught="$bseed"
 }
 bug_leg dedup-ignore-producer 1 "" "--timeout-secs 20 --bug dedup-ignore-producer" '^WORKQ_FAILURE not-converged'
 bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug skip-redelivery-commit" '^PATINA_VERDICT .*kind=violation '
 bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^PATINA_VERDICT .*kind=violation '
 bug_leg ignore-short-write 1 "--fs-short-permille 200" "--bug ignore-short-write" '^PATINA_VERDICT .*kind=violation '
+fsync_bug="--ack-ledger /workq-acks --bug skip-wal-fsync"
+bug_leg skip-wal-fsync 2 "--crash-permille 10 --crash-kind machine" "$fsync_bug" '^PATINA_VERDICT .*kind=violation '
+echo "==> [3] skip-wal-fsync survives a process crash"
+if [[ -n ${bseed_caught:-} ]] && ! run --seed "$bseed_caught" --crash-permille 10 --crash-kind process \
+    -- "${ARGS[@]}" $fsync_bug >/dev/null 2>"$work/bug.skip-wal-fsync.process.err"; then
+  echo "    FAIL: a process crash lost an unsynced record (seed $bseed_caught)"; fail=1
+  stderr_tail "$work/bug.skip-wal-fsync.process.err"
+fi
 
 if [[ "$fail" -ne 0 ]]; then
   echo "==> FAILED"; exit 1

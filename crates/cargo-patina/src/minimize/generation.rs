@@ -68,16 +68,6 @@ fn generation_target(
 pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
     let repro = crate::campaign::generation_repro(&invocation.out_dir, invocation.generation)?;
     let target = generation_target(invocation.marker.as_deref(), invocation.generation, &repro)?;
-    // Before any run: the trace phase cannot shrink a crash-restart recording
-    // (see `refuse_a_crash_restart_trace`), and finding that out after the knob
-    // phase would throw its work away.
-    if invocation.trace_phase && repro.flags.iter().any(|flag| flag == "--fs-crash-at") {
-        return Err(CliError::usage(format!(
-            "generation {} crash-restarts (--fs-crash-at), and the trace phase cannot shrink a \
-             crash-restart trace; pass --no-trace-phase to reduce its fault knobs alone",
-            invocation.generation
-        )));
-    }
     let self_exe = std::env::current_exe().map_err(|error| {
         CliError(format!(
             "failed to resolve the cargo-patina binary: {error}"

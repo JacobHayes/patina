@@ -47,6 +47,8 @@ pub mod fault_domain {
 
     /// CrashFs torn-write/crash-model stream.
     pub const FS_CRASH: &str = "patina.fs.crash";
+    /// Per-crash-point draw deciding where a crash-restart run crashes.
+    pub const CRASH_POINT: &str = "patina.crash.point";
     /// Seeded DNS resolution-fault stream (failure decision and its errno pick).
     pub const DNS_FAULT: &str = "patina.dns.fault";
     /// Context-side per-resolution DNS latency stream.
@@ -85,7 +87,7 @@ pub mod fault_domain {
     /// incarnation's boot: how far realtime moves on while the machine is down.
     pub const RESTART_DOWNTIME: &str = "patina.clock.restart_downtime";
 
-    /// Swarm per-class coin for crash/torn-write knobs.
+    /// Swarm per-class coin for the crash knobs.
     pub const SWARM_CRASH: &str = "patina.swarm.crash";
     /// Swarm per-class coin for sleep jitter.
     pub const SWARM_SLEEP_JITTER: &str = "patina.swarm.sleep_jitter";
@@ -187,7 +189,7 @@ pub fn domain_seed(root_seed: u64, domain: &'static str) -> u64 {
 /// The root seed one incarnation of a run derives every stream from.
 ///
 /// Incarnation 0, the first boot of every run, uses the run's seed itself. A
-/// later incarnation (a native `--fs-crash-at` restart) uses the run seed keyed
+/// later incarnation (a native crash restart) uses the run seed keyed
 /// by its incarnation number, so its streams are fresh (a restarted process
 /// draws new UUIDs, salts and nonces, as a rebooted host would) yet still a
 /// pure function of the run's seed, which is what lets replay re-derive them.

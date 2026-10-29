@@ -1,13 +1,12 @@
-//! Tests for filesystem crash injection and restart images.
+//! Tests for crash points, crash kinds and restart images.
 
 use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
-use crate::fs_crash::{CrashOp, Incarnation, RESTART_DOWNTIME_NANOS};
+use crate::crash::{CrashArm, Incarnation, RESTART_DOWNTIME_NANOS};
 use crate::{
     Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, EntropyWait, RuntimeError,
-    TornGranularity,
 };
-use patina_dst_abi::{ClockKind, OpenFlags, SeekWhence};
+use patina_dst_abi::{ClockKind, CrashKind, OpenFlags, SeekWhence};
 use std::num::NonZeroU64;
 
 use patina_dst_fs_crash::CrashFs;
@@ -79,25 +78,27 @@ fn crash_torn_writes_record_and_replay_reproduce_the_same_image() {
 // pre-installed filesystem bypassed the config" gap class: an explicit
 // filesystem MUST NOT coexist with config-driven crash knobs. `build` fails
 // closed instead of dropping them. (The historical bug installed a default
-// CrashFs and let `--fs-torn-granularity byte` be silently ignored.)
+// CrashFs and let a crash knob be silently ignored.)
 #[test]
 fn explicit_filesystem_with_crash_knobs_fails_closed() {
     // `Context` is not `Debug`, so assert on the Result shape directly.
-    // Explicit filesystem + a crash point -> refuse.
-    let result = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_crash_at(CrashOp::Write, 1))
-        .with_default_drivers()
-        .with_filesystem(CrashFs::default())
-        .build();
-    assert!(matches!(result, Err(RuntimeError::Config(_))));
-
-    // Explicit filesystem + a non-default torn granularity -> refuse, even
-    // with no crash point, because the granularity would be dropped.
+    // Explicit filesystem + a crash rate -> refuse.
     let result = RuntimeBuilder::new(
-        RuntimeConfig::seeded(1).with_fs_torn_granularity(TornGranularity::Byte),
+        RuntimeConfig::seeded(1)
+            .with_crash_permille(1)
+            .with_crash_supervisor(),
     )
     .with_default_drivers()
     .with_filesystem(CrashFs::default())
     .build();
+    assert!(matches!(result, Err(RuntimeError::Config(_))));
+
+    // Explicit filesystem + a non-default crash kind -> refuse, even with no
+    // crash rate, because the kind would be dropped.
+    let result = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_crash_kind(CrashKind::Process))
+        .with_default_drivers()
+        .with_filesystem(CrashFs::default())
+        .build();
     assert!(matches!(result, Err(RuntimeError::Config(_))));
 
     // An explicit filesystem with NO crash knobs is still fine (tests /
@@ -119,86 +120,92 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
     assert!(matches!(result, Err(RuntimeError::Config(_))));
 }
 
+/// A supervised run that crashes at every crash point.
+fn certain_crash(seed: u64, kind: CrashKind) -> RuntimeConfig {
+    RuntimeConfig::seeded(seed)
+        .with_crash_permille(1000)
+        .with_crash_kind(kind)
+        .with_crash_supervisor()
+}
+
+/// Only a completed crash point can be where the run crashes: a failed
+/// operation and one with no effect a crash could cut short (a read-only
+/// open) never are, and the first that is crashes.
 #[test]
-fn fs_crash_at_counts_only_successful_boundaries() {
-    let mut context = Context::from_config(
-        RuntimeConfig::seeded(1)
-            .with_crash_at(CrashOp::Open, 1)
-            .require_crash_selector_reached(),
-    )
-    .unwrap();
-    let bad = context
-        .fs_open("/missing", OpenFlags::read_only())
-        .expect_err("failed open must not trigger crash");
-    assert!(matches!(bad, RuntimeError::Effect(_)));
-    let error = context.finish().unwrap_err();
-    match error {
-        RuntimeError::CrashSelectorUnreached { counts, .. } => {
-            assert_eq!(counts.open, 0);
+fn a_crash_follows_the_first_successful_crash_point() {
+    let mut context = Context::from_config(certain_crash(1, CrashKind::Machine)).unwrap();
+    let missing = context.fs_remove_file("/missing").err();
+    assert!(
+        !matches!(missing, Some(RuntimeError::InjectedCrash(_))),
+        "a failed crash point crashed: {missing:?}"
+    );
+    context
+        .fs_open("/", OpenFlags::read_only())
+        .expect("a read-only open is no crash point");
+    match context.fs_open("/f", OpenFlags::create_truncate_write()) {
+        Err(RuntimeError::InjectedCrash(crash)) => {
+            assert_eq!(crash.kind, CrashKind::Machine);
+            assert_eq!(crash.consumed.operations, 3);
         }
-        other => panic!("expected unreached crash selector, got {other}"),
+        other => panic!("expected the crash at the creating open, got {other:?}"),
     }
 }
 
+/// A run crashes at most once, in incarnation 0: a restarted incarnation
+/// takes no crash, and a live run with a crash rate but no supervisor to boot
+/// the next incarnation is refused.
 #[test]
-fn restarted_incarnation_never_fires_the_crash_selector() {
+fn only_a_supervised_first_incarnation_crashes() {
     let mut context = Context::from_config(
-        RuntimeConfig::seeded(1)
-            .with_crash_at(CrashOp::Open, 1)
+        certain_crash(1, CrashKind::Machine)
             .with_incarnation(restarted(DEFAULT_REALTIME_EPOCH_NANOS)),
     )
     .unwrap();
     context
-        .fs_open("/", OpenFlags::read_only())
-        .expect("incarnation 1 starts after the selector fired");
+        .fs_open("/f", OpenFlags::create_truncate_write())
+        .expect("incarnation 1 boots after the run's crash");
     context.finish().unwrap();
+
+    assert!(matches!(
+        Context::from_config(RuntimeConfig::seeded(1).with_crash_permille(1000)),
+        Err(RuntimeError::Config(_))
+    ));
 }
 
-// The single choke point builds the crash filesystem from the fault config:
-// a base image + `--fs-crash-at` + `--fs-torn-granularity byte` yields a
-// sub-block partial tear, while the default (block) granularity reverts the
-// final write wholesale. This is the runtime-level guarantee the shim relies
-// on instead of constructing the CrashFs itself.
+/// The image a crash hands over: from the same pre-crash run, a process
+/// crash keeps an unsynced overwrite (the page cache survives), and a machine
+/// crash keeps the synced bytes and, block by block, either the overwrite or
+/// what was durable before it, varying across seeds.
 #[test]
-fn fs_image_choke_point_honors_configured_torn_granularity() {
-    fn recovered_image(granularity: TornGranularity) -> Vec<u8> {
-        let mut config = RuntimeConfig::seeded(1).with_crash_at(CrashOp::Write, 2);
-        if granularity == TornGranularity::Byte {
-            config = config.with_fs_torn_granularity(TornGranularity::Byte);
-        }
-        let mut context = RuntimeBuilder::new(config)
-            .with_default_drivers()
-            .with_fs_image(MemFs::new())
-            .build()
-            .unwrap();
-        // Durable baseline, then one unsynced overwrite (crash fires after
-        // this second write), then read the recovered image.
+fn the_crash_kind_decides_the_restart_image() {
+    fn restart_image(seed: u64, kind: CrashKind) -> Vec<u8> {
+        let mut context = Context::from_config(RuntimeConfig::seeded(seed)).unwrap();
         let fd = context
             .fs_open("/f", OpenFlags::create_truncate_write())
             .unwrap();
-        context.fs_write_at(fd, 0, &[b'A'; 16]).unwrap(); // write 1
+        context.fs_write_at(fd, 0, &[b'A'; 16]).unwrap();
         context.fs_sync(fd).unwrap();
         let dir = context.fs_open("/", OpenFlags::read_only()).unwrap();
         context.fs_sync(dir).unwrap();
         context.fs_close(dir).unwrap();
-        let _ = context.fs_write_at(fd, 0, &[b'B'; 16]); // write 2 -> crash
-        context.read_file("/f").unwrap_or_default()
+        // Armed now, so the overwrite is the crash point.
+        context.crash = CrashArm::arm(true, true, false, 1000, kind, seed);
+        let crash = match context.fs_write_at(fd, 0, &[b'B'; 16]) {
+            Err(RuntimeError::InjectedCrash(crash)) => crash,
+            other => panic!("expected the crash at the overwrite, got {other:?}"),
+        };
+        crash.snapshot.into_memfs().contents("/f").unwrap()
     }
 
-    let block = recovered_image(TornGranularity::Block);
-    let byte = recovered_image(TornGranularity::Byte);
+    let mut machine = std::collections::BTreeSet::new();
+    for seed in 0..16 {
+        assert_eq!(restart_image(seed, CrashKind::Process), [b'B'; 16]);
+        machine.insert(restart_image(seed, CrashKind::Machine));
+    }
     assert_eq!(
-        block,
-        vec![b'A'; 16],
-        "block granularity should revert wholesale"
-    );
-    assert_ne!(
-        byte, block,
-        "byte granularity should not match the block revert"
-    );
-    assert!(
-        byte.contains(&b'B') && byte.contains(&b'A'),
-        "byte granularity should leave a partial live/durable mix: {byte:?}"
+        machine,
+        [vec![b'A'; 16], vec![b'B'; 16]].into(),
+        "a machine crash must keep the overwrite or the durable bytes, each for some seed"
     );
 }
 
@@ -212,7 +219,7 @@ fn fs_image_choke_point_honors_configured_torn_granularity() {
 //       (errno 13) — so imperative `fs_crash()` callers broke; the base must
 //       be wrapped in a `CrashFs`.
 // This single test exercises both: a rooted directory/file op AND a manual
-// crash with no `--fs-crash-at` configured.
+// crash with no crash knob configured.
 #[test]
 fn context_from_config_filesystem_is_rooted_and_crashable() {
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
@@ -230,7 +237,7 @@ fn context_from_config_filesystem_is_rooted_and_crashable() {
     context.fs_sync(state).unwrap();
     context.fs_close(state).unwrap();
     context.fs_write_at(fd, 0, b"volatile").unwrap(); // unsynced overwrite
-    // (b) Crashable: an imperative crash with NO crash_at must succeed and
+    // (b) Crashable: an imperative crash with no crash knob must succeed and
     // drop the unsynced overwrite back to the durable bytes.
     context
         .fs_crash()
@@ -276,8 +283,7 @@ fn a_restarted_incarnation_draws_its_own_streams_from_the_run_seed() {
 fn a_restarted_incarnation_boots_after_the_crashed_one_and_replays_identically() {
     // Incarnation 0 reads realtime, runs on for a while, stamps a file, and
     // crashes after its second write.
-    let mut first =
-        Context::from_config(RuntimeConfig::seeded(5).with_crash_at(CrashOp::Write, 2)).unwrap();
+    let mut first = Context::from_config(RuntimeConfig::seeded(5)).unwrap();
     let fd = first
         .fs_open("/f", OpenFlags::create_truncate_write())
         .unwrap();
@@ -285,8 +291,9 @@ fn a_restarted_incarnation_boots_after_the_crashed_one_and_replays_identically()
     first.sleep_for(3_000_000_000).unwrap();
     let last_read = first.now(ClockKind::Realtime).unwrap();
     let stamped = first.fs_time_unrecorded().unwrap();
+    first.crash = CrashArm::arm(true, true, false, 1000, CrashKind::Machine, 5);
     let crash = match first.fs_write(fd, b"two") {
-        Err(RuntimeError::InjectedFsCrash(crash)) => crash,
+        Err(RuntimeError::InjectedCrash(crash)) => crash,
         other => panic!("expected the injected crash, got {other:?}"),
     };
     assert!(crash.realtime_nanos >= last_read.max(stamped));

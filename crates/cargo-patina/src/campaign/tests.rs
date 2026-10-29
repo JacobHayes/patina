@@ -105,60 +105,39 @@ fn spec_knobs_reach_every_generation() {
         "--net-drop-permille",
         "--net-latency-nanos",
         "--sleep-jitter-nanos",
+        "--crash-permille",
+        "--crash-kind",
     ] {
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
     }
-    // Crash restart rides on a declared reach, not on `--faults`: a spec
-    // without one never arms a crash point it cannot know the guest reaches.
-    for generation in 0..64 {
-        let flags = derive_flags(&spec, &generation_hash(0, generation));
-        assert!(
-            !flags
-                .iter()
-                .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
-            "generation {generation} emitted crash restart flags: {flags:?}"
-        );
-    }
 }
 
-/// A declared crash reach arms one crash point per generation, always at or
-/// before a declared point (so the run reaches it), and the draws actually
-/// move: across generations both declared ops, many ordinals, and both
-/// torn-write granularities appear.
+/// The crash plane draws a crash rate and a crash kind per generation, and
+/// the draws actually move: across generations several rates and both kinds
+/// appear, every rate within the per-mille range.
 #[test]
-fn a_declared_crash_reach_draws_reachable_points() {
-    let reach =
-        ["write:32", "close:3"].map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap());
+fn the_crash_plane_draws_a_moving_rate_and_both_kinds() {
     let spec = CampaignSpec {
-        fs_crash_reach: reach.to_vec(),
+        faults: FaultPlanes::from_names(["crash"]).unwrap(),
         ..CampaignSpec::default()
     };
     let value = |flags: &[String], name: &str| -> String {
         let at = flags.iter().position(|flag| flag == name);
         flags[at.unwrap_or_else(|| panic!("{name} missing from {flags:?}")) + 1].clone()
     };
-    let mut points = BTreeSet::new();
-    let mut torn = BTreeSet::new();
+    let mut rates = BTreeSet::new();
+    let mut kinds = BTreeSet::new();
     for generation in 0..128 {
         let hash = generation_hash(0, generation);
         let flags = derive_flags(&spec, &hash);
         assert_eq!(flags, derive_flags(&spec, &hash));
-        let point = patina_dst_runtime::CrashPoint::parse(&value(&flags, "--fs-crash-at")).unwrap();
-        let bound = reach.iter().find(|bound| bound.op == point.op).unwrap();
-        assert!(
-            (1..=bound.ordinal).contains(&point.ordinal),
-            "{point} lies past the declared {bound}"
-        );
-        points.insert(point.to_string());
-        torn.insert(value(&flags, "--fs-torn-granularity"));
+        let rate: u16 = value(&flags, "--crash-permille").parse().unwrap();
+        assert!((1..=1000).contains(&rate), "{rate}");
+        rates.insert(rate);
+        kinds.insert(value(&flags, "--crash-kind"));
     }
-    assert!(points.iter().any(|p| p.starts_with("write:")));
-    assert!(points.iter().any(|p| p.starts_with("close:")));
-    assert!(
-        points.len() > reach.len(),
-        "ordinals never moved: {points:?}"
-    );
-    assert_eq!(torn, BTreeSet::from(["block".into(), "byte".into()]));
+    assert!(rates.len() > 2, "the crash rate never moved: {rates:?}");
+    assert_eq!(kinds, BTreeSet::from(["machine".into(), "process".into()]));
 }
 
 /// `--faults=PLANE,...` emits exactly the selected planes' knobs, at the values

@@ -53,7 +53,7 @@ mod trace;
 /// Name prefix of the envp slots reserved for the shim's startup map.
 const ENVP_SLOT_PREFIX: &str = "_PATINA_ENVP_SLOT_";
 
-pub(super) use child::NATIVE_FS_CRASH_RESTART_EXIT;
+pub(super) use child::NATIVE_CRASH_RESTART_EXIT;
 #[cfg(unix)]
 pub(super) use child::NativeChildStatus;
 use child::encode_guest_argv;
@@ -416,13 +416,13 @@ liveness-safe."
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
         return Err(CliError::usage(
-            "native --fs-crash-at crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
+            "native --crash-permille crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
         ));
     }
 
     // Every incarnation of the run is launched from this one description; only
     // its descriptors (trace channel, base filesystem, crash handoff) differ. A
-    // run without a crash selector is the single incarnation 0. Returns the
+    // run without a crash rate is the single incarnation 0. Returns the
     // command and the descriptors it inherits: the shim reads only the ones the
     // control plane names, and they stay inheritable for the child's lifetime.
     let incarnation_command = |launch: IncarnationLaunch<'_>| -> Result<

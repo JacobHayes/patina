@@ -2,7 +2,7 @@
 //! One process runs a WAL-backed **server**, **worker** threads that poll and
 //! process jobs, and **producer** threads that enqueue a seeded workload, all over
 //! loopback UDP + append-only WAL segments on the virtual clock. The app has no
-//! fault code of its own; every drop, jitter, fs-crash, and buggify fault comes
+//! fault code of its own; every drop, jitter, crash, and buggify fault comes
 //! from Patina and the seed.
 //!
 //! Outcomes are announced through the **verdict ABI** (`patina_dst::verdict`), not
@@ -571,7 +571,10 @@ fn report(
     //      Checked at startup (before any resend) and again here.
     let mut lost = acked.prior_lost().clone();
     for (&id, &identity) in acked.prior() {
-        let recovered = audit.facts.get(&id).map(|&(producer, seq, ..)| (producer, seq));
+        let recovered = audit
+            .facts
+            .get(&id)
+            .map(|&(producer, seq, ..)| (producer, seq));
         if recovered != Some(identity) {
             lost.insert(id);
         }

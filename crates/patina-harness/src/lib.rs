@@ -54,9 +54,11 @@
 //! configuration that conflicts with the recorded trace fails closed
 //! ([`HarnessError::Config`]).
 //!
-//! Non-fingerprinted knobs (faults — filesystem crash/torn granularity,
-//! sleep/network jitter, packet drop —, liveness watchdog, network latency, step
-//! budget, and params) record and replay cleanly from the harness alone.
+//! Non-fingerprinted knobs (faults — sleep/network jitter, packet drop —,
+//! liveness watchdog, network latency, step budget, and params) record and
+//! replay cleanly from the harness alone. A crash (`--crash-permille`) is not
+//! a harness knob: the supervisor that boots the next incarnation reads it from
+//! the CLI.
 //! **Fingerprinted** knobs ([`HarnessBuilder::buggify`] and friends,
 //! [`HarnessBuilder::schedule_pct`]/[`HarnessBuilder::schedule_starvation`],
 //! [`HarnessBuilder::swarm`]) fold a fingerprint suffix that the *supervisor*
@@ -112,25 +114,6 @@ use std::error::Error;
 use std::fmt;
 
 use patina_dst_runtime as rt;
-
-/// Torn-write granularity for an injected filesystem crash. Inert without
-/// [`HarnessBuilder::fs_crash_at`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TornGranularity {
-    /// Revert the whole final unsynced block (the default).
-    Block,
-    /// Tear the final unsynced write at sub-block byte granularity.
-    Byte,
-}
-
-impl TornGranularity {
-    fn as_env(self) -> &'static str {
-        match self {
-            TornGranularity::Block => "block",
-            TornGranularity::Byte => "byte",
-        }
-    }
-}
 
 /// An error from a harness run.
 #[derive(Debug)]
@@ -283,20 +266,6 @@ impl HarnessBuilder {
     #[must_use]
     pub fn heal_after_nanos(self, nanos: u64) -> Self {
         self.set(rt::ENV_HEAL_AFTER, nanos.to_string())
-    }
-
-    /// Inject a filesystem crash at the given point, e.g. `close:1`, `write:3`,
-    /// `sync:2`, `open:1` (bare op = ordinal 1).
-    #[must_use]
-    pub fn fs_crash_at(self, spec: impl Into<String>) -> Self {
-        self.set(rt::ENV_FS_CRASH_AT, spec)
-    }
-
-    /// Select the torn-write granularity for an injected crash. Inert without
-    /// [`HarnessBuilder::fs_crash_at`].
-    #[must_use]
-    pub fn fs_torn_granularity(self, granularity: TornGranularity) -> Self {
-        self.set(rt::ENV_FS_TORN_GRANULARITY, granularity.as_env())
     }
 
     /// Add seeded extra latency to every guest sleep, drawn from `[min, max]`
@@ -603,8 +572,6 @@ mod tests {
         let overlay = HarnessBuilder::new()
             .sleep_jitter_nanos(1, 2)
             .net_drop_permille(250)
-            .fs_crash_at("close:1")
-            .fs_torn_granularity(TornGranularity::Byte)
             .buggify_fire_permille(100)
             .schedule_pct(3, 1000)
             .liveness_watchdog_nanos(5)
@@ -615,8 +582,6 @@ mod tests {
             .unwrap();
         assert_eq!(overlay[rt::ENV_SLEEP_JITTER], "1..2");
         assert_eq!(overlay[rt::ENV_NET_DROP_PERMILLE], "250");
-        assert_eq!(overlay[rt::ENV_FS_CRASH_AT], "close:1");
-        assert_eq!(overlay[rt::ENV_FS_TORN_GRANULARITY], "byte");
         assert_eq!(overlay[rt::ENV_BUGGIFY], "100");
         assert_eq!(overlay[rt::ENV_SCHED_PCT], "3");
         assert_eq!(overlay[rt::ENV_SCHED_PCT_STEPS], "1000");

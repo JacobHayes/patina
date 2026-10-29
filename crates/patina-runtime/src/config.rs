@@ -1,12 +1,12 @@
 //! Runtime configuration, fault settings, and control-plane parsing.
 
-use crate::fs_crash::{CrashOp, CrashPoint, Incarnation};
+use crate::crash::Incarnation;
 use crate::network::builtin_dns_resolution;
 use crate::reports::ReportConfig;
 use crate::{
     DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_BUGGIFY_ACTIVATION_PERMILLE, DEFAULT_BUGGIFY_CUTOFF_NANOS,
     DEFAULT_BUGGIFY_FIRE_PERMILLE, DEFAULT_REALTIME_EPOCH_NANOS, ENV_GUEST_CWD, HOSTNAME_MAX_BYTES,
-    RuntimeError, TornGranularity,
+    RuntimeError,
 };
 use patina_dst_sched_det::SchedulePolicy;
 use std::collections::BTreeMap;
@@ -41,8 +41,8 @@ pub enum ExecutionMode {
 }
 
 pub use crate::fault_knob::{
-    ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig, FaultConfig,
-    FsFaultConfig, NetFaultConfig,
+    ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig,
+    FaultConfig, FsFaultConfig, NetFaultConfig,
 };
 
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
@@ -206,7 +206,10 @@ pub struct RuntimeConfig {
     /// Which boot of a native crash-restart run this is. Direct and cargo
     /// contexts are always the first.
     pub(super) incarnation: Incarnation,
-    pub(super) require_crash_selector_reached: bool,
+    /// Whether a crash supervisor takes this incarnation's crash over: the
+    /// native supervisor, which gave it a handoff channel. Only a supervised
+    /// incarnation can crash ([`RuntimeConfig::with_crash_supervisor`]).
+    pub(super) crash_supervised: bool,
 }
 
 impl RuntimeConfig {
@@ -236,7 +239,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -266,7 +269,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -301,7 +304,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -337,7 +340,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -374,7 +377,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -417,7 +420,7 @@ impl RuntimeConfig {
             address_layout: None,
             facts_path: None,
             incarnation: Incarnation::First,
-            require_crash_selector_reached: false,
+            crash_supervised: false,
         }
     }
 
@@ -436,16 +439,18 @@ impl RuntimeConfig {
         self.faults.net.latency_nanos
     }
 
-    /// Inject a filesystem crash after the `ordinal`-th (1-based) `op` boundary.
-    pub fn with_crash_at(mut self, op: CrashOp, ordinal: u64) -> Self {
-        self.faults.fs.crash_at = Some(CrashPoint { op, ordinal });
+    /// Crash at each crash point with the given per-mille (0..=1000)
+    /// probability. Only a supervised incarnation can crash
+    /// ([`RuntimeConfig::with_crash_supervisor`]).
+    pub fn with_crash_permille(mut self, permille: u16) -> Self {
+        self.faults.crash.permille = permille;
         self
     }
 
-    /// Select whole-block or sub-block byte-granularity tearing for an injected
-    /// crash. Inert without [`RuntimeConfig::with_crash_at`].
-    pub fn with_fs_torn_granularity(mut self, granularity: TornGranularity) -> Self {
-        self.faults.fs.torn_granularity = granularity;
+    /// What the crash takes down. Inert without
+    /// [`RuntimeConfig::with_crash_permille`].
+    pub fn with_crash_kind(mut self, kind: patina_dst_abi::CrashKind) -> Self {
+        self.faults.crash.kind = kind;
         self
     }
 
@@ -581,15 +586,12 @@ impl RuntimeConfig {
         self
     }
 
-    pub const fn crash_at(&self) -> Option<CrashPoint> {
-        self.faults.fs.crash_at
+    pub const fn crash_permille(&self) -> u16 {
+        self.faults.crash.permille
     }
 
-    /// The configured torn-write granularity for `--fs-crash-at`. `Block`
-    /// (whole-block revert) unless `--fs-torn-granularity byte` selected the
-    /// sub-block model.
-    pub const fn torn_granularity(&self) -> TornGranularity {
-        self.faults.fs.torn_granularity
+    pub const fn crash_kind(&self) -> patina_dst_abi::CrashKind {
+        self.faults.crash.kind
     }
 
     /// The run's cooperative-SUT (buggify) configuration.
@@ -836,8 +838,13 @@ impl RuntimeConfig {
         self
     }
 
-    pub fn require_crash_selector_reached(mut self) -> Self {
-        self.require_crash_selector_reached = true;
+    /// Hand this incarnation's crash to a supervisor, which seals the image
+    /// it hands over and boots the next incarnation from it. A first
+    /// incarnation that runs live crashes where the seeded draw at a crash
+    /// point says to; one that replays crashes where its recording did, after
+    /// the last operation of its segment.
+    pub fn with_crash_supervisor(mut self) -> Self {
+        self.crash_supervised = true;
         self
     }
 

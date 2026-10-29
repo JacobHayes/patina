@@ -244,12 +244,10 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
         RuntimeError::ComputeStopExport
         | RuntimeError::ComputeStopOverflow
         | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
-        // The selected crash point was reached and the crash could not be
+        // The run's crash point was reached and the crash could not be
         // carried out. That is patina's failure: an errno would hand the
         // guest a fault it never had and let the run go on without its crash.
-        RuntimeError::FsCrashFailed { selector, reason } => {
-            refuse_failed_fs_crash(*selector, reason)
-        }
+        RuntimeError::CrashFailed { reason } => refuse_failed_crash(reason),
         _ if report_run_stop(error) => abort_after_flushing_output(),
         _ => error_errno(error),
     }
@@ -309,13 +307,12 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         RuntimeError::ComputeStopExport
         | RuntimeError::ComputeStopOverflow
         | RuntimeError::ComputeStopState => watchdog::report(error),
-        RuntimeError::InjectedFsCrash(_) => {}
+        RuntimeError::InjectedCrash(_) => {}
         // Mid-run, [`runtime_errno`] refuses this before it gets here; at
         // shutdown it is only named, and the supervisor reads the crash
         // report's missing outcome as the failed crash it is.
-        RuntimeError::FsCrashFailed { .. } => line(format!("patina: {error}\n")),
+        RuntimeError::CrashFailed { .. } => line(format!("patina: {error}\n")),
         RuntimeError::Effect(_)
-        | RuntimeError::CrashSelectorUnreached { .. }
         | RuntimeError::Config(_)
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
@@ -601,7 +598,7 @@ fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> R
     crate::charge::note_room(context);
     match result {
         Ok(value) => Ok(value),
-        Err(error @ RuntimeError::InjectedFsCrash(_)) => terminate_for_injected_fs_crash(error),
+        Err(RuntimeError::InjectedCrash(crash)) => terminate_for_injected_crash(*crash),
         Err(error) => Err(runtime_errno(&error)),
     }
 }
@@ -643,16 +640,15 @@ fn report_crash(report: &patina_dst_trace::CrashReport) -> bool {
     )
 }
 
-/// End a run whose selected crash could not be carried out. The reason goes
+/// End a run whose crash could not be carried out. The reason goes
 /// on the crash-report pipe, after the `Attempting` the runtime reported, for
 /// the supervisor to report the crash attempted and not reached and to name
 /// the refusal in the run's stderr. When the pipe cannot take it, the refusal
 /// goes to stderr here.
-fn refuse_failed_fs_crash(selector: patina_dst_runtime::CrashPoint, reason: &str) -> ! {
+fn refuse_failed_crash(reason: &str) -> ! {
     let _ = flush_before_refusal();
     if !report_crash(&patina_dst_trace::CrashReport::Failed(reason.to_owned())) {
-        let error = RuntimeError::FsCrashFailed {
-            selector,
+        let error = RuntimeError::CrashFailed {
             reason: reason.to_owned(),
         };
         let _ = host_write_all(2, format!("{error}\n").as_bytes());
@@ -660,20 +656,16 @@ fn refuse_failed_fs_crash(selector: patina_dst_runtime::CrashPoint, reason: &str
     crate::host_abort();
 }
 
-fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
-    let RuntimeError::InjectedFsCrash(control) = error else {
-        unreachable!("caller passes only InjectedFsCrash")
-    };
-    let patina_dst_runtime::InjectedFsCrash {
+fn terminate_for_injected_crash(crash: patina_dst_runtime::InjectedCrash) -> ! {
+    let patina_dst_runtime::InjectedCrash {
         compatibility_fingerprint,
         from_incarnation,
         to_incarnation,
-        selector,
+        kind,
         consumed,
         realtime_nanos,
         snapshot,
-    } = *control;
-    let point = patina_dst_runtime::CrashPoint::from(selector);
+    } = crash;
     let result = (|| -> Result<(), String> {
         let fd = control_handoff_fd()
             .map_err(|error| error.to_string())?
@@ -683,7 +675,7 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
             compatibility_fingerprint,
             from_incarnation,
             to_incarnation,
-            selector,
+            kind,
             consumed,
             realtime_nanos,
             snapshot,
@@ -696,16 +688,16 @@ fn terminate_for_injected_fs_crash(error: RuntimeError) -> ! {
         Ok(())
     })();
     if let Err(reason) = result {
-        refuse_failed_fs_crash(point, &reason);
+        refuse_failed_crash(&reason);
     }
     report_crash(&patina_dst_trace::CrashReport::HandedOver);
     let _ = flush_captured_stdio();
     // SAFETY: `host_immediate_exit` is libc's `_exit`, resolved by the shim
     // (never named as an import, so the guest's own `_exit` stays its own). It
     // skips guest atexit handlers and Patina's normal finalization, which is
-    // exactly the modeled power-loss boundary: no code after the triggering call
+    // exactly the modeled crash boundary: no code after the triggering call
     // runs in this incarnation.
-    unsafe { (hostapi::get().host_immediate_exit)(NATIVE_FS_CRASH_RESTART_EXIT) }
+    unsafe { (hostapi::get().host_immediate_exit)(NATIVE_CRASH_RESTART_EXIT) }
 }
 
 /// Run a scheduler closure against the installed [`Context`], preserving the
@@ -932,7 +924,7 @@ fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
-const NATIVE_FS_CRASH_RESTART_EXIT: c_int = 112;
+const NATIVE_CRASH_RESTART_EXIT: c_int = 112;
 
 fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -957,14 +949,14 @@ fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
 /// Build the deterministic filesystem for a native run. When
 /// `PATINA_FS_IMAGE_FD` is set (`native-run --mount`), rebuild the streamed
 /// read-only corpus image and wrap it in the same crash-modeling `CrashFs` used
-/// otherwise, so `--fs-crash-at` and friends compose identically with a mount.
+/// otherwise, so the crash knobs compose identically with a mount.
 /// Absent the knob, an empty `CrashFs`, exactly as before. `FsImage::decode`
 /// fails closed on a corrupt or non-canonical image, so a bad stream errors here
 /// rather than yielding a silently different filesystem.
 /// The durable base image handed to `RuntimeBuilder::with_fs_image`: an empty
 /// `MemFs`, or the decoded `--mount` corpus. The runtime — not the shim —
 /// wraps this in the config-driven `CrashFs` at its single choke point, so a
-/// parsed crash knob (`--fs-crash-at`, `--fs-torn-granularity`) can never be
+/// parsed crash knob (`--crash-permille`, `--crash-kind`) can never be
 /// dropped by a filesystem the shim pre-installed outside the fault config.
 pub(crate) fn fs_image_base() -> Result<MemFs, RuntimeError> {
     let restart_fd = control_restart_snapshot_fd()?;
@@ -1135,7 +1127,7 @@ pub(crate) fn runtime_config_from_control_plane()
     }
     config = config.with_incarnation(incarnation_from_control()?);
     if control_handoff_fd()?.is_some() {
-        config = config.require_crash_selector_reached();
+        config = config.with_crash_supervisor();
     }
     if let Some(value) = control_env(patina_dst_runtime::ENV_PARAMS_JSON) {
         let params: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {

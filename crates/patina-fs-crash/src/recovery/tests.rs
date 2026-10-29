@@ -3,7 +3,8 @@
 use crate::CrashFs;
 use crate::tests::{append_write, lossy, write};
 use patina_dst_abi::{
-    ErrorCode, FsClock, FsDirectoryEntry, FsEntryKind, FsNode, OpenFlags, SeekWhence, XattrTarget,
+    CrashKind, ErrorCode, FsClock, FsDirectoryEntry, FsEntryKind, FsNode, OpenFlags, SeekWhence,
+    XattrTarget,
 };
 use patina_dst_driver_api::FsDriver;
 use patina_dst_fs_mem::MemFs;
@@ -185,7 +186,10 @@ fn crash_restores_newly_synced_times_and_symlink_times() {
     let link = fs.metadata("/link").unwrap();
     fs.set_times(FsClock::at(60), fd, Some(5), Some(6)).unwrap();
     fs.close(fd).unwrap();
-    let mut restored = fs.crash_and_snapshot().unwrap().into_memfs();
+    let mut restored = fs
+        .crash_and_snapshot(CrashKind::Machine)
+        .unwrap()
+        .into_memfs();
     let actual = restored.metadata("/attrs").unwrap();
     assert_eq!(
         (

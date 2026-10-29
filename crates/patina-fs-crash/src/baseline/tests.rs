@@ -7,7 +7,7 @@ use patina_dst_driver_api::FsDriver;
 
 #[test]
 fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
-    // This is the `native-run --mount` composition with `--fs-crash-at`: the
+    // This is the `native-run --mount` composition with `--crash-permille`: the
     // shim builds `CrashFs::new(FsImage::into_memfs())`, so a mounted corpus
     // is the durable baseline while unsynced guest writes still drop on a
     // crash exactly as with an empty filesystem. `CrashFs::new` here uses the

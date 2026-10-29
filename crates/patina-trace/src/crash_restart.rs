@@ -25,8 +25,8 @@ use crate::{
 /// A crash-restart run's trace taken apart at its crash.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CrashRestartSegments {
-    /// Incarnation 0's own linear trace, ending with the operation that fired
-    /// the crash selector.
+    /// Incarnation 0's own linear trace, ending with the operation the crash
+    /// followed.
     pub crashed: TraceBundle,
     /// Digest of the recovered filesystem snapshot incarnation 1 started from:
     /// the handoff's domain-separated snapshot digest

@@ -595,3 +595,53 @@ pub fn sud_c_guest(name: &str) -> Option<Guest> {
     }
     Some(assert_build_c_guest(name, CLink::PosixShim))
 }
+
+/// A seed whose crash, at `permille`, follows the run's `index`th successful
+/// crash point (0-based), and the next `count - 1` such seeds after it. A
+/// crash point draws from the run's own crash stream and nothing else does,
+/// so where the crash lands is a function of the seed and the rate alone; the
+/// guest decides which operation that index is (see [`crash_point_index`]).
+pub fn crash_seeds(permille: u16, index: usize, count: usize) -> Vec<u64> {
+    use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
+    (0..)
+        .filter(|seed| {
+            let mut rng = SplitMix64::new(domain_seed(*seed, fault_domain::CRASH_POINT));
+            (0..=index)
+                .map(|_| rng.next_u64() % 1000 < u64::from(permille))
+                .position(|hit| hit)
+                == Some(index)
+        })
+        .take(count)
+        .collect()
+}
+
+/// A rate under which a crash at crash point `index` is a likely draw.
+pub fn crash_permille_for(index: usize) -> u16 {
+    (1000 / (index + 1)).max(1) as u16
+}
+
+/// The index, among a crash-free recording's successful crash points, of the
+/// `nth` (0-based) operation `matches` selects: where a crash that should
+/// follow that operation must land.
+pub fn crash_point_index(
+    trace: &Path,
+    nth: usize,
+    matches: impl Fn(&patina_dst_abi::Operation) -> bool,
+) -> usize {
+    let bundle = patina_dst_trace::TraceBundle::load(trace).unwrap();
+    let points: Vec<_> = bundle.timelines[0]
+        .decisions
+        .iter()
+        .filter(|event| {
+            event.operation.is_crash_point()
+                && !matches!(event.outcome, patina_dst_abi::Outcome::Error(_))
+        })
+        .collect();
+    points
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches(&event.operation))
+        .nth(nth)
+        .unwrap_or_else(|| panic!("the recording has no crash point number {nth} that matches"))
+        .0
+}

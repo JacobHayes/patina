@@ -123,8 +123,8 @@ unknown option.
 - `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
-  fault plane's knobs — `fs` (error/short/latency; disk crash-restart is drawn only from the spec's
-  `fs_crash_reach`, native-only, unreached point = `VACUOUS_CRASH`),
+  fault plane's knobs — `fs` (error/short/latency), `crash` (a per-operation
+  crash rate and a process or machine crash kind; native-only),
   `net` (drop/latency/jitter/duplicate/connect-refuse/reset/TCP buffer), `dns`,
   `entropy`, `sleep` (sleep jitter) and `epoch` (realtime-epoch jump) — so
   successive generations explore different fault shapes. `--faults=net,sleep`
@@ -246,13 +246,12 @@ unknown option.
 
 ## Fault + buggify knobs (seed-driven, default off)
 
-- `--fs-crash-at open|write|sync|close[:N]`, `--fs-torn-granularity block|byte`, `--fs-error-permille N`, `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
+- `--crash-permille N`, `--crash-kind process|machine`, `--fs-error-permille N`, `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
 - `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,
-  which restores them from the trace. Exceptions: `--fs-crash-at` and torn granularity are
-  native-only (the Cargo family refuses them; campaigns draw them only from the spec's
-  `fs_crash_reach`).
+  which restores them from the trace. Exception: the crash knobs are native-only (the
+  Cargo family refuses them; campaigns draw them from the `crash` plane).
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
@@ -374,7 +373,7 @@ dev-dependency use under plain `cargo test`.
 - `#[patina_dst::test]`: point-solution DST test. The plain test process finds
   `cargo-patina` via absolute `PATINA_CLI` or `cargo-patina` on `PATH`, rebuilds
   the same libtest target shim-linked, sweeps 20 seeds by default (or macro args
-  such as `seed = 7`, `seeds = 200`, `buggify`, `fs_crash_at = "write:3"`), and
+  such as `seed = 7`, `seeds = 200`, `buggify`, `net_drop_permille = 50`), and
   panics with the failing seed plus `cargo patina test` / `cargo patina replay`
   repro commands. Missing CLI discovery is a failure, never a skip.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.

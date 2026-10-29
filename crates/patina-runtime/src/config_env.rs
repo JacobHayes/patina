@@ -6,9 +6,6 @@ use crate::config::{
     validate_hostname, validate_partition,
 };
 
-use crate::ENV_FS_TORN_GRANULARITY;
-use crate::fs_crash::CrashPoint;
-
 use crate::{
     DEFAULT_CONVERGE_BUDGET_NANOS, DEFAULT_LIVENESS_BUDGET_NANOS, DEFAULT_PCT_DEPTH,
     DEFAULT_PCT_STEPS, DEFAULT_STARVE_INTERVALS, DEFAULT_STARVE_MAX_LEN, DEFAULT_STARVE_WINDOW,
@@ -19,7 +16,6 @@ use crate::{
     ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
     ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET,
     ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError,
-    TornGranularity,
 };
 use patina_dst_sched_det::{PctConfig, StarvationConfig};
 use std::collections::BTreeMap;
@@ -51,14 +47,10 @@ pub fn trace_fd_from_env() -> Result<Option<i32>, RuntimeError> {
     }
 }
 
-fn parse_torn_granularity(value: &str) -> Result<TornGranularity, RuntimeError> {
-    match value {
-        "block" => Ok(TornGranularity::Block),
-        "byte" => Ok(TornGranularity::Byte),
-        other => Err(RuntimeError::Config(format!(
-            "{ENV_FS_TORN_GRANULARITY} must be block or byte; got {other:?}"
-        ))),
-    }
+fn parse_crash_kind(name: &str, value: &str) -> Result<patina_dst_abi::CrashKind, RuntimeError> {
+    patina_dst_abi::CrashKind::parse(value).ok_or_else(|| {
+        RuntimeError::Config(format!("{name} must be process or machine; got {value:?}"))
+    })
 }
 
 /// Parse a per-mille probability, requiring an integer in [0, 1000].
@@ -177,10 +169,10 @@ impl RuntimeConfig {
     fn apply_one_knob(&mut self, knob: FaultKnob, value: &str) -> Result<(), RuntimeError> {
         let env = knob.meta().env;
         match knob {
-            FaultKnob::FsCrashAt => self.faults.fs.crash_at = Some(CrashPoint::parse(value)?),
-            FaultKnob::FsTornGranularity => {
-                self.faults.fs.torn_granularity = parse_torn_granularity(value)?;
+            FaultKnob::CrashPermille => {
+                self.faults.crash.permille = parse_permille(env, value)?;
             }
+            FaultKnob::CrashKind => self.faults.crash.kind = parse_crash_kind(env, value)?,
             FaultKnob::FsErrorPermille => {
                 self.faults.fs.error_permille = parse_permille(env, value)?;
             }

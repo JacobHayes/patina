@@ -6,24 +6,20 @@
 //! namespace operations of that directory, and `checkpoint` makes the entire
 //! live image durable. `crash` recomputes the post-crash image from the
 //! durable baseline plus seeded torn-write and lost-entry decisions, while
-//! preserving the running process's open handles. This is an in-process storage
-//! rollback model, not a whole-process power cut or restart.
+//! preserving the running process's open handles. That is an in-process storage
+//! rollback; a crash restart exports the image a fresh incarnation boots from
+//! instead ([`CrashFs::crash_and_snapshot`]).
 //!
 //! ## Models
 //!
 //! - **Torn writes**: on crash, blocks modified since their last durability
 //!   point may fail to persist and revert to the durable bytes. The tear
 //!   decision is drawn per block of `torn_write_granularity` bytes from a
-//!   seeded [`SplitMix64`] stream with `torn_write_probability`. The default
-//!   [`TornGranularity::Block`] policy tears whole blocks all-or-nothing, so a
-//!   torn block is either entirely the durable image or entirely the live one —
-//!   the model that only ever yields crash-consistent block prefixes. Under
-//!   [`TornGranularity::Byte`] the single most recent unsynced write may instead
-//!   survive *partially*: a seeded cut point inside the differing region keeps a
-//!   prefix of the write and reverts the suffix to the durable bytes, modeling a
-//!   torn in-flight page whose header and body disagree. Every other unsynced
-//!   block still tears wholesale, so a byte-granularity crash reproduces the
-//!   realistic "clean prefix plus one torn final page" geometry.
+//!   seeded [`SplitMix64`] stream with `torn_write_probability`, and a block
+//!   tears all-or-nothing: a torn block is either entirely the durable image or
+//!   entirely the live one, as a disk that writes whole sectors leaves it. The
+//!   decisions are independent, so any subset of the unsynced blocks can be
+//!   what reached the disk.
 //! - **Rename atomicity**: with `model_rename_atomicity(true)` a rename is a
 //!   single all-or-nothing namespace change across a crash. With it disabled a
 //!   crash can land between the destination link and source unlink, exposing
@@ -76,8 +72,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use patina_dst_abi::{EffectError, ErrorCode, Fd};
-use patina_dst_driver_api::{DriverResult, FsDriver};
+use patina_dst_abi::{CrashKind, EffectError, ErrorCode, Fd};
+use patina_dst_driver_api::DriverResult;
 use patina_dst_fs_mem::{FileData, FsSnapshot, MemFs};
 use patina_dst_rng_seeded::SplitMix64;
 
@@ -87,8 +83,6 @@ mod namespace;
 mod recovery;
 mod torn;
 
-pub use torn::TornGranularity;
-
 use baseline::{Baseline, DurableTimes, enumerate};
 use namespace::PendingOp;
 
@@ -97,7 +91,6 @@ use namespace::PendingOp;
 struct CrashPolicy {
     torn_write_granularity: usize,
     torn_write_probability: f64,
-    torn_granularity: TornGranularity,
     model_rename_atomicity: bool,
     model_directory_durability: bool,
     directory_loss_probability: f64,
@@ -108,7 +101,6 @@ impl Default for CrashPolicy {
         Self {
             torn_write_granularity: 4096,
             torn_write_probability: 1.0,
-            torn_granularity: TornGranularity::Block,
             model_rename_atomicity: true,
             model_directory_durability: true,
             directory_loss_probability: 1.0,
@@ -140,11 +132,6 @@ pub struct CrashFs {
     /// durability point, by inode: `cachestat`'s dirty pages. Anonymous
     /// files are no part of the durable image and have none.
     dirty: BTreeMap<u64, BTreeSet<u64>>,
-    /// The single most recent unsynced write as `(path, offset, len)`. Under
-    /// [`TornGranularity::Byte`] this is the region eligible for a sub-block
-    /// partial tear on crash; `None` before any write and after a durability
-    /// point clears the pending set.
-    last_write: Option<(String, usize, usize)>,
     policy: CrashPolicy,
     rng: SplitMix64,
     crashes: u64,
@@ -187,13 +174,6 @@ impl CrashFsBuilder {
     /// Probability in `[0, 1]` that a modified block reverts on crash.
     pub fn torn_write_probability(mut self, probability: f64) -> Self {
         self.policy.torn_write_probability = probability;
-        self
-    }
-
-    /// Select whole-block or sub-block byte-granularity tearing of the final
-    /// unsynced write. See [`TornGranularity`].
-    pub fn torn_granularity(mut self, granularity: TornGranularity) -> Self {
-        self.policy.torn_granularity = granularity;
         self
     }
 
@@ -280,7 +260,6 @@ impl CrashFs {
             pending: Vec::new(),
             open_paths: BTreeMap::new(),
             dirty: BTreeMap::new(),
-            last_write: None,
             policy,
             rng: SplitMix64::new(seed),
             crashes: 0,
@@ -294,14 +273,26 @@ impl CrashFs {
         self.staged_times.clear();
         self.pending.clear();
         self.dirty.clear();
-        self.last_write = None;
     }
 
-    /// Apply this model's crash recovery and export the reconstructed durable
-    /// image as a restart snapshot. The exported image has no open descriptors;
-    /// a fresh incarnation starts with a clean descriptor table.
-    pub fn crash_and_snapshot(&mut self) -> DriverResult<FsSnapshot> {
-        self.crash()?;
+    /// Export the image a fresh incarnation boots from after a crash of
+    /// `kind`. A process crash leaves the kernel's page cache in place, so the
+    /// image is the live one, synced or not. A machine crash applies this
+    /// model's recovery first, so the image is what the disk held. Either way
+    /// the image has no open descriptors: a fresh incarnation starts with a
+    /// clean descriptor table, and a file only a descriptor held is gone.
+    pub fn crash_and_snapshot(&mut self, kind: CrashKind) -> DriverResult<FsSnapshot> {
+        if kind == CrashKind::Machine {
+            let crashes = self.crashes.checked_add(1).ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidState,
+                    "filesystem crash counter exhausted",
+                )
+            })?;
+            // The process dies with the machine: no descriptor keeps a name.
+            self.recompute_after_crash(false)?;
+            self.crashes = crashes;
+        }
         Ok(self.live.export_snapshot())
     }
 

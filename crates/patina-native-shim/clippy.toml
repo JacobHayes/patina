@@ -1,6 +1,6 @@
 # The shim is one object that also defines the guest's libc doors, so its own
 # code must not take a guest-facing effect (an injected fault, a recorded op,
-# fs latency, a crash ordinal, a seeded draw the guest did not ask for), nor
+# fs latency, a crash point, a seeded draw the guest did not ask for), nor
 # make a call that binds to one of its own interposers. These rules refuse the
 # spellings that do. A guest funnel that really is the guest's call says so
 # with one `expect`; every other site uses the internal variant its reason

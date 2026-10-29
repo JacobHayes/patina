@@ -1,8 +1,8 @@
 //! Native crash-restart plans, incarnation supervision, and handoffs.
 
-use crate::native_run::{NATIVE_FS_CRASH_RESTART_EXIT, TRACE_CHANNEL_UNAVAILABLE};
+use crate::native_run::{NATIVE_CRASH_RESTART_EXIT, TRACE_CHANNEL_UNAVAILABLE};
 use crate::{CliError, NativeRunInvocation, NativeRunMode, hex, output};
-use patina_dst_runtime::{CrashPoint, FaultKnob, RuntimeError};
+use patina_dst_runtime::{CrashKind, FaultKnob, RuntimeError};
 use patina_dst_trace::{
     CrashReport, CrashRestartSegments, HandoffSealKey, IncarnationHandoff, Sha256Digest,
     TraceBundle, abandoned_trace_marker, resource_limit_infra_line,
@@ -11,12 +11,12 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-/// How a `--fs-crash-at` run is supervised: the one crash selector, the seed
-/// its handoff seal key derives from, and what each incarnation's trace
-/// channel carries.
+/// How a crashing run is supervised: what its crash takes down, the seed its
+/// handoff seal key derives from, and what each incarnation's trace channel
+/// carries.
 #[cfg(unix)]
 pub(super) struct CrashRestartPlan {
-    selector: CrashPoint,
+    kind: CrashKind,
     seed: u64,
     trace: CrashRestartTrace,
 }
@@ -29,17 +29,14 @@ enum CrashRestartTrace {
     /// them into the run's one crash-restart trace.
     Record,
     /// Each incarnation replays its own segment of the recorded trace.
-    /// `restarted` is `None` when the recorded run never crashed.
-    Replay {
-        crashed: Box<TraceBundle>,
-        restarted: Option<(Sha256Digest, Box<TraceBundle>)>,
-    },
+    Replay(Box<CrashRestartSegments>),
 }
 
-/// The crash-restart plan for a native run, or `None` when the run has no
-/// crash selector. Seeded and record runs take the selector from
-/// `--fs-crash-at`; a replay takes it, and the incarnations it replays, from
-/// its already-loaded trace.
+/// The crash-restart plan for a native run, or `None` when the run takes no
+/// crash. A seeded or record run is supervised when `--crash-permille` gives
+/// it a crash rate, whether or not a crash then lands; a replay is
+/// supervised when its trace records a crash, and replays that crash where
+/// the recording took it, never drawing one of its own.
 #[cfg(unix)]
 pub(super) fn crash_restart_plan(
     invocation: &NativeRunInvocation,
@@ -55,15 +52,26 @@ pub(super) fn crash_restart_plan(
         (NativeRunMode::Seeded { seed }, _) => (*seed, CrashRestartTrace::Seeded),
         (NativeRunMode::Record { seed, .. }, _) => (*seed, CrashRestartTrace::Record),
     };
-    let Some(text) = invocation.knobs.get(FaultKnob::FsCrashAt).first() else {
+    let Some(permille) = invocation.knobs.get(FaultKnob::CrashPermille).first() else {
         return Ok(None);
     };
-    let selector = CrashPoint::parse(text).map_err(|error| CliError::usage(error.to_string()))?;
-    Ok(Some(CrashRestartPlan {
-        selector,
-        seed,
-        trace,
-    }))
+    let permille: u16 = permille.parse().map_err(|_| {
+        CliError::usage(format!(
+            "--crash-permille expects 0..=1000, got {permille:?}"
+        ))
+    })?;
+    if permille == 0 {
+        return Ok(None);
+    }
+    let kind = match invocation.knobs.get(FaultKnob::CrashKind).first() {
+        None => CrashKind::default(),
+        Some(text) => CrashKind::parse(text).ok_or_else(|| {
+            CliError::usage(format!(
+                "--crash-kind expects process or machine, got {text:?}"
+            ))
+        })?,
+    };
+    Ok(Some(CrashRestartPlan { kind, seed, trace }))
 }
 
 #[cfg(unix)]
@@ -74,35 +82,19 @@ fn crash_restart_replay_plan(
     let segments = bundle
         .crash_restart_segments()
         .map_err(|error| CliError(format!("failed to load trace {}: {error}", path.display())))?;
-    let selector = bundle
+    let Some(segments) = segments else {
+        return Ok(None);
+    };
+    let kind = bundle
         .metadata
         .faults
         .as_ref()
-        .and_then(|faults| faults.crash_at);
-    let Some(selector) = selector else {
-        if segments.is_some() {
-            return Err(CliError(format!(
-                "trace {} records a crash-restart lifecycle but no --fs-crash-at selector",
-                path.display()
-            )));
-        }
-        return Ok(None);
-    };
-    let seed = bundle.metadata.root_seed;
-    let trace = match segments {
-        Some(segments) => CrashRestartTrace::Replay {
-            crashed: Box::new(segments.crashed),
-            restarted: Some((segments.snapshot_digest, Box::new(segments.restarted))),
-        },
-        None => CrashRestartTrace::Replay {
-            crashed: Box::new(bundle),
-            restarted: None,
-        },
-    };
+        .map(|faults| faults.crash_kind)
+        .unwrap_or_default();
     Ok(Some(CrashRestartPlan {
-        selector: selector.into(),
-        seed,
-        trace,
+        kind,
+        seed: bundle.metadata.root_seed,
+        trace: CrashRestartTrace::Replay(Box::new(segments)),
     }))
 }
 
@@ -147,19 +139,22 @@ pub(super) struct CrashRestartRun {
 fn crash_replay_divergence(
     mut first: output::Captured,
     first_host_pid: u32,
-    selector: CrashPoint,
+    kind: CrashKind,
     reached: bool,
     detail: &str,
 ) -> CrashRestartRun {
     append_supervisor_line(
         &mut first,
-        &format!("PATINA_FS_CRASH_REPLAY_DIVERGENCE selector={selector} {detail}"),
+        &format!(
+            "PATINA_CRASH_REPLAY_DIVERGENCE kind={} {detail}",
+            kind.name()
+        ),
     );
-    if first.exit_code == 0 || first.exit_code == NATIVE_FS_CRASH_RESTART_EXIT {
+    if first.exit_code == 0 || first.exit_code == NATIVE_CRASH_RESTART_EXIT {
         first.exit_code = 2;
     }
     let report = serde_json::json!({
-        "selector": selector_json(selector),
+        "crash_kind": kind.name(),
         "attempted": reached,
         "reached": reached,
         "crash_count": u8::from(reached),
@@ -181,12 +176,11 @@ fn crash_replay_divergence(
 fn crash_failed(
     mut first: output::Captured,
     first_host_pid: u32,
-    selector: CrashPoint,
+    kind: CrashKind,
     reason: &str,
     trace: Option<Vec<u8>>,
 ) -> CrashRestartRun {
-    let error = RuntimeError::FsCrashFailed {
-        selector,
+    let error = RuntimeError::CrashFailed {
         reason: reason.to_owned(),
     };
     append_supervisor_line(&mut first, &error.to_string());
@@ -194,7 +188,7 @@ fn crash_failed(
         first.exit_code = 2;
     }
     let report = serde_json::json!({
-        "selector": selector_json(selector),
+        "crash_kind": kind.name(),
         "attempted": true,
         "reached": false,
         "crash_count": 0,
@@ -222,7 +216,7 @@ fn read_crash_reports(mut reader: std::io::PipeReader) -> Result<Vec<u8>, CliErr
 }
 
 /// Whether incarnation 0 attempted its crash, decided from its crash reports
-/// alone: `None` when it never reached the selected point, `Some(Ok(()))`
+/// alone: `None` when no crash landed, `Some(Ok(()))`
 /// when it handed over, and `Some(Err(reason))` when the crash failed. An
 /// attempt with no outcome (the incarnation died in the handoff), and bytes
 /// that are not whole reports, are failed crashes too.
@@ -282,16 +276,16 @@ pub(super) fn supervise_crash_restart(
     plan: &CrashRestartPlan,
     mut launch: impl FnMut(IncarnationLaunch<'_>) -> Result<(output::Captured, u32), CliError>,
 ) -> Result<CrashRestartRun, CliError> {
-    let selector = plan.selector;
-    let key = crash_handoff_key(plan.seed, selector);
+    let kind = plan.kind;
+    let key = crash_handoff_key(plan.seed, kind);
     let key_hex = hex(&key);
     let handoff = scratch_file("crash-restart handoff channel", &[])?;
     let crashed_trace = match &plan.trace {
         CrashRestartTrace::Seeded => None,
         CrashRestartTrace::Record => Some(scratch_file("incarnation 0 trace channel", &[])?),
-        CrashRestartTrace::Replay { crashed, .. } => Some(scratch_file(
+        CrashRestartTrace::Replay(segments) => Some(scratch_file(
             "incarnation 0 trace channel",
-            &crashed.to_bytes().map_err(|error| {
+            &segments.crashed.to_bytes().map_err(|error| {
                 CliError(format!("failed to encode incarnation 0's trace: {error}"))
             })?,
         )?),
@@ -310,16 +304,16 @@ pub(super) fn supervise_crash_restart(
     drop(report_writer);
     let attempt = crash_attempt(read_crash_reports(report_reader)?, &first);
     let recorded_crash = match &plan.trace {
-        CrashRestartTrace::Replay { crashed, restarted } => Some((crashed, restarted.as_ref())),
+        CrashRestartTrace::Replay(segments) => Some(segments),
         CrashRestartTrace::Seeded | CrashRestartTrace::Record => None,
     };
 
     if let Some(Err(reason)) = &attempt {
         let trace = read_record_segment(&plan.trace, crashed_trace.as_ref())?;
-        return Ok(crash_failed(first, first_host_pid, selector, reason, trace));
+        return Ok(crash_failed(first, first_host_pid, kind, reason, trace));
     }
     if attempt.is_none() {
-        if let Some((_, Some(_))) = recorded_crash {
+        if recorded_crash.is_some() {
             let detail = format!(
                 "incarnation 0 exited with status {} before the recorded crash",
                 first.exit_code
@@ -327,13 +321,13 @@ pub(super) fn supervise_crash_restart(
             return Ok(crash_replay_divergence(
                 first,
                 first_host_pid,
-                selector,
+                kind,
                 false,
                 &detail,
             ));
         }
         let report = serde_json::json!({
-            "selector": selector_json(selector),
+            "crash_kind": kind.name(),
             "attempted": false,
             "reached": false,
             "crash_count": 0,
@@ -352,17 +346,18 @@ pub(super) fn supervise_crash_restart(
     let handoff_bytes = read_scratch_file(&handoff, "crash-restart handoff channel")?;
     let handoff_digest = Sha256Digest(Sha256::digest(&handoff_bytes).into());
     let verified = IncarnationHandoff::open(&handoff_bytes, &HandoffSealKey::from_bytes(key))
-        .map_err(|error| CliError(format!("PATINA_FS_CRASH_INVALID_HANDOFF {error}")))?;
+        .map_err(|error| CliError(format!("PATINA_CRASH_INVALID_HANDOFF {error}")))?;
     if verified.from_incarnation != 0 || verified.to_incarnation != 1 {
         return Err(CliError(format!(
-            "PATINA_FS_CRASH_INVALID_HANDOFF expected 0->1 restart, got {}->{}",
+            "PATINA_CRASH_INVALID_HANDOFF expected 0->1 restart, got {}->{}",
             verified.from_incarnation, verified.to_incarnation
         )));
     }
-    let handed_selector = CrashPoint::from(verified.selector);
-    if handed_selector != selector {
+    if verified.kind != kind {
         return Err(CliError(format!(
-            "PATINA_FS_CRASH_INVALID_HANDOFF selector mismatch: expected {selector}, got {handed_selector}"
+            "PATINA_CRASH_INVALID_HANDOFF crash kind mismatch: expected {}, got {}",
+            kind.name(),
+            verified.kind.name()
         )));
     }
     let snapshot_digest = Sha256Digest(verified.snapshot_digest);
@@ -372,21 +367,8 @@ pub(super) fn supervise_crash_restart(
             Some(scratch_file("incarnation 1 trace channel", &[])?)
         }
         None => None,
-        Some((_, None)) => {
-            let detail = format!(
-                "the recorded run never crashed, but the replay crashed after {} operations",
-                verified.consumed.operations
-            );
-            return Ok(crash_replay_divergence(
-                first,
-                first_host_pid,
-                selector,
-                true,
-                &detail,
-            ));
-        }
-        Some((crashed, Some((recorded_digest, restarted)))) => {
-            let recorded_operations = crashed.timelines[0].decisions.len() as u64;
+        Some(segments) => {
+            let recorded_operations = segments.crashed.timelines[0].decisions.len() as u64;
             if verified.consumed.operations != recorded_operations {
                 let detail = format!(
                     "the replay crashed after {} operations; the recorded crash followed operation {recorded_operations}",
@@ -395,26 +377,27 @@ pub(super) fn supervise_crash_restart(
                 return Ok(crash_replay_divergence(
                     first,
                     first_host_pid,
-                    selector,
+                    kind,
                     true,
                     &detail,
                 ));
             }
-            if snapshot_digest != *recorded_digest {
+            let recorded_digest = segments.snapshot_digest;
+            if snapshot_digest != recorded_digest {
                 let detail = format!(
                     "the replay handed incarnation 1 a recovered filesystem with digest {snapshot_digest}; the recording handed over {recorded_digest}"
                 );
                 return Ok(crash_replay_divergence(
                     first,
                     first_host_pid,
-                    selector,
+                    kind,
                     true,
                     &detail,
                 ));
             }
             Some(scratch_file(
                 "incarnation 1 trace channel",
-                &restarted.to_bytes().map_err(|error| {
+                &segments.restarted.to_bytes().map_err(|error| {
                     CliError(format!("failed to encode incarnation 1's trace: {error}"))
                 })?,
             )?)
@@ -439,7 +422,7 @@ pub(super) fn supervise_crash_restart(
         "restart_child_failed"
     };
     let report = serde_json::json!({
-        "selector": selector_json(selector),
+        "crash_kind": kind.name(),
         "attempted": true,
         "reached": true,
         "crash_count": 1,
@@ -462,7 +445,8 @@ pub(super) fn supervise_crash_restart(
     append_supervisor_line(
         &mut captured,
         &format!(
-            "PATINA_FS_CRASH_RESTART selector={selector} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted",
+            "PATINA_CRASH_RESTART kind={} host_pid0={first_host_pid} host_pid1={second_host_pid} incarnation0=0 incarnation1=1 operations={} result=restarted",
+            kind.name(),
             verified.consumed.operations
         ),
     );
@@ -506,7 +490,7 @@ fn join_recorded_incarnations(
     let recorded_operations = crashed_bundle.timelines[0].decisions.len() as u64;
     if recorded_operations != handoff.consumed.operations {
         return Err(CliError(format!(
-            "PATINA_FS_CRASH_INVALID_HANDOFF incarnation 0 recorded {recorded_operations} operations but its handoff consumed {}",
+            "PATINA_CRASH_INVALID_HANDOFF incarnation 0 recorded {recorded_operations} operations but its handoff consumed {}",
             handoff.consumed.operations
         )));
     }
@@ -571,24 +555,15 @@ fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
     }
 }
 
-/// The handoff seal key: a function of the run's seed and crash selector, so
-/// the record and the replay of one run derive the same key.
+/// The handoff seal key: a function of the run's seed and crash kind, so the
+/// record and the replay of one run derive the same key.
 #[cfg(unix)]
-fn crash_handoff_key(seed: u64, selector: CrashPoint) -> [u8; 32] {
+fn crash_handoff_key(seed: u64, kind: CrashKind) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"patina-native-crash-restart-handoff-key/v1");
+    hasher.update(b"patina-native-crash-restart-handoff-key/v2");
     hasher.update(seed.to_le_bytes());
-    hasher.update(selector.to_string().as_bytes());
+    hasher.update(kind.name().as_bytes());
     hasher.finalize().into()
-}
-
-#[cfg(unix)]
-fn selector_json(selector: CrashPoint) -> serde_json::Value {
-    serde_json::json!({
-        "op": selector.op.to_string(),
-        "ordinal": selector.ordinal,
-        "text": selector.to_string(),
-    })
 }
 
 /// Append the supervisor's `PATINA_INFRA native_run` marker to the run's
@@ -636,40 +611,4 @@ not be written, so this generation has no replay artifact; the guest's own verdi
         eprint!("{line}");
     }
     Some(marker)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use patina_dst_trace::{CrashRestartSegments, Sha256Digest, TraceBundle};
-    use std::path::Path;
-
-    /// A trace carrying a crash-restart lifecycle but no `--fs-crash-at`
-    /// selector cannot be replayed faithfully, so the plan refuses it.
-    #[cfg(unix)]
-    #[test]
-    fn crash_restart_replay_plan_refuses_a_crash_lifecycle_without_a_selector() {
-        let metadata = patina_dst_trace::RunMetadata::new(7, "fingerprint", 0, "patina");
-        assert!(
-            metadata.faults.is_none(),
-            "the fixture must carry no selector"
-        );
-        let joined = CrashRestartSegments {
-            crashed: TraceBundle::linear(metadata.clone(), 0, Vec::new()),
-            snapshot_digest: Sha256Digest([0; 32]),
-            restarted: TraceBundle::linear(metadata, 1, Vec::new()),
-        }
-        .join()
-        .unwrap();
-        let error = crash_restart_replay_plan(Path::new("joined.patina"), joined)
-            .err()
-            .expect("a crash lifecycle without a selector must be refused");
-        assert!(
-            error
-                .0
-                .contains("crash-restart lifecycle but no --fs-crash-at selector"),
-            "{}",
-            error.0
-        );
-    }
 }

@@ -115,10 +115,11 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
 
     // `run` refuses crash restart under starvation, so a campaign that asked
     // for both would refuse identically in every generation.
-    if !state.spec.fs_crash_reach.is_empty() && state.spec.starve {
+    if state.spec.draws_crashes() && state.spec.starve {
         return Err(CliError::usage(
-            "fs_crash_reach and --starve cannot be combined: native --fs-crash-at crash restart \
-             is not implemented under --starve, so every generation would be refused",
+            "the crash fault plane and --starve cannot be combined: native crash restart is not \
+             implemented under --starve, so every generation would be refused; drop crash from \
+             --faults or exclude --crash-permille",
         ));
     }
 

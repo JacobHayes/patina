@@ -11,12 +11,12 @@ use std::fmt;
 use patina_dst_fs_mem::{FsSnapshot, FsSnapshotError};
 use sha2::{Digest, Sha256};
 
-use crate::{CrashPointRecord, FaultCrashOp};
+use patina_dst_abi::CrashKind;
 
 /// The envelope's fixed tag. [`VERSION`] names its layout, so a handoff of
 /// another layout is refused by its version rather than as foreign bytes.
 const MAGIC: &[u8; 12] = b"PATINA-HO-v1";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"patina-incarnation-handoff-snapshot-digest/v1";
 const SEAL_DOMAIN: &[u8] = b"patina-incarnation-handoff-seal/v1";
 
@@ -142,7 +142,8 @@ pub struct IncarnationHandoff {
     pub compatibility_fingerprint: String,
     pub from_incarnation: u64,
     pub to_incarnation: u64,
-    pub selector: CrashPointRecord,
+    /// What the crash took down, which decided the image handed over.
+    pub kind: CrashKind,
     pub consumed: HandoffConsumedState,
     /// The realtime, in Unix-time nanoseconds, the crashed incarnation's clock
     /// had reached: the next incarnation's realtime carries on from it.
@@ -157,15 +158,13 @@ impl IncarnationHandoff {
             &self.compatibility_fingerprint,
             self.from_incarnation,
             self.to_incarnation,
-            self.selector,
         )?;
         let snapshot_bytes = self.snapshot.encode().map_err(HandoffError::Snapshot)?;
         let mut payload = Vec::new();
         encode_string(&mut payload, &self.compatibility_fingerprint)?;
         payload.extend_from_slice(&self.from_incarnation.to_le_bytes());
         payload.extend_from_slice(&self.to_incarnation.to_le_bytes());
-        payload.push(encode_op(self.selector.op));
-        payload.extend_from_slice(&self.selector.ordinal.to_le_bytes());
+        payload.push(encode_kind(self.kind));
         payload.extend_from_slice(&self.consumed.operations.to_le_bytes());
         payload.extend_from_slice(&self.consumed.lifecycle_order.to_le_bytes());
         payload.extend_from_slice(&self.realtime_nanos.to_le_bytes());
@@ -219,11 +218,7 @@ impl IncarnationHandoff {
         let compatibility_fingerprint = payload_reader.take_string("compatibility fingerprint")?;
         let from_incarnation = payload_reader.take_u64()?;
         let to_incarnation = payload_reader.take_u64()?;
-        let op_code = payload_reader.take_u8()?;
-        let selector = CrashPointRecord {
-            op: decode_op(op_code)?,
-            ordinal: payload_reader.take_u64()?,
-        };
+        let kind = decode_kind(payload_reader.take_u8()?)?;
         let consumed = HandoffConsumedState {
             operations: payload_reader.take_u64()?,
             lifecycle_order: payload_reader.take_u64()?,
@@ -235,12 +230,7 @@ impl IncarnationHandoff {
                 "trailing bytes inside handoff payload",
             ));
         }
-        validate_metadata(
-            &compatibility_fingerprint,
-            from_incarnation,
-            to_incarnation,
-            selector,
-        )?;
+        validate_metadata(&compatibility_fingerprint, from_incarnation, to_incarnation)?;
         let computed_digest = snapshot_digest(&snapshot_bytes);
         if recorded_digest != computed_digest {
             return Err(HandoffError::SnapshotDigestMismatch);
@@ -250,7 +240,7 @@ impl IncarnationHandoff {
             compatibility_fingerprint,
             from_incarnation,
             to_incarnation,
-            selector,
+            kind,
             consumed,
             realtime_nanos,
             snapshot_digest: recorded_digest,
@@ -266,7 +256,7 @@ pub struct VerifiedIncarnationHandoff {
     pub compatibility_fingerprint: String,
     pub from_incarnation: u64,
     pub to_incarnation: u64,
-    pub selector: CrashPointRecord,
+    pub kind: CrashKind,
     pub consumed: HandoffConsumedState,
     pub realtime_nanos: u64,
     pub snapshot_digest: [u8; 32],
@@ -329,7 +319,6 @@ fn validate_metadata(
     fingerprint: &str,
     from_incarnation: u64,
     to_incarnation: u64,
-    selector: CrashPointRecord,
 ) -> Result<(), HandoffError> {
     if fingerprint.is_empty() {
         return Err(HandoffError::Malformed(
@@ -343,9 +332,6 @@ fn validate_metadata(
         return Err(HandoffError::Malformed(
             "to incarnation must be greater than from incarnation",
         ));
-    }
-    if selector.ordinal == 0 {
-        return Err(HandoffError::Malformed("crash selector ordinal is zero"));
     }
     Ok(())
 }
@@ -364,22 +350,18 @@ fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), HandoffError> {
     Ok(())
 }
 
-fn encode_op(op: FaultCrashOp) -> u8 {
-    match op {
-        FaultCrashOp::Open => 0,
-        FaultCrashOp::Write => 1,
-        FaultCrashOp::Sync => 2,
-        FaultCrashOp::Close => 3,
+fn encode_kind(kind: CrashKind) -> u8 {
+    match kind {
+        CrashKind::Process => 0,
+        CrashKind::Machine => 1,
     }
 }
 
-fn decode_op(value: u8) -> Result<FaultCrashOp, HandoffError> {
+fn decode_kind(value: u8) -> Result<CrashKind, HandoffError> {
     match value {
-        0 => Ok(FaultCrashOp::Open),
-        1 => Ok(FaultCrashOp::Write),
-        2 => Ok(FaultCrashOp::Sync),
-        3 => Ok(FaultCrashOp::Close),
-        _ => Err(HandoffError::Malformed("unknown crash selector op")),
+        0 => Ok(CrashKind::Process),
+        1 => Ok(CrashKind::Machine),
+        _ => Err(HandoffError::Malformed("unknown crash kind")),
     }
 }
 
@@ -495,10 +477,7 @@ mod tests {
             compatibility_fingerprint: "fingerprint+crash-restart".to_string(),
             from_incarnation: 0,
             to_incarnation: 1,
-            selector: CrashPointRecord {
-                op: FaultCrashOp::Write,
-                ordinal: 3,
-            },
+            kind: CrashKind::Process,
             consumed: HandoffConsumedState {
                 operations: 8,
                 lifecycle_order: 10,
@@ -518,8 +497,7 @@ mod tests {
         );
         assert_eq!(verified.from_incarnation, 0);
         assert_eq!(verified.to_incarnation, 1);
-        assert_eq!(verified.selector.op, FaultCrashOp::Write);
-        assert_eq!(verified.selector.ordinal, 3);
+        assert_eq!(verified.kind, CrashKind::Process);
         assert_eq!(verified.consumed.operations, 8);
         assert_eq!(verified.consumed.lifecycle_order, 10);
         assert_eq!(verified.realtime_nanos, handoff().realtime_nanos);
@@ -582,8 +560,7 @@ mod tests {
         encode_string(&mut payload, "fingerprint").unwrap();
         payload.extend_from_slice(&0u64.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
-        payload.push(encode_op(FaultCrashOp::Write));
-        payload.extend_from_slice(&1u64.to_le_bytes());
+        payload.push(encode_kind(CrashKind::Machine));
         payload.extend_from_slice(&2u64.to_le_bytes());
         payload.extend_from_slice(&3u64.to_le_bytes());
         payload.extend_from_slice(&4u64.to_le_bytes());

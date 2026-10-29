@@ -77,8 +77,8 @@ pub enum Operation {
         max_len: usize,
     },
     /// Positional write at an explicit byte offset that does NOT disturb the
-    /// file cursor (`pwrite`/`write_at`). Counts toward the `write` crash
-    /// ordinal exactly like [`Operation::FsWrite`].
+    /// file cursor (`pwrite`/`write_at`). A crash point exactly like
+    /// [`Operation::FsWrite`].
     FsWriteAt {
         fd: Fd,
         offset: u64,
@@ -88,8 +88,7 @@ pub enum Operation {
     /// What a shared mapping of the descriptor's file stored, written into the
     /// file: the page cache's write-back, not a guest `write`. Write seals do
     /// not refuse it (a mapping that was writable before `F_SEAL_FUTURE_WRITE`
-    /// keeps writing); it counts toward the `write` crash ordinal like
-    /// [`Operation::FsWriteAt`].
+    /// keeps writing); a crash point like [`Operation::FsWriteAt`].
     FsWriteBackAt {
         fd: Fd,
         offset: u64,

@@ -109,14 +109,11 @@ kills is reported as STARVATION_STALL and is NOT counted as a distinct bug found
 the backstop only arms under --starve, so the wedge is patina's own injector, not a \
 verdict on the guest.\n\
 \n\
-Disk crash-restart is drawn only when the spec declares where a crash can land: \
-`\"fs_crash_reach\": [\"write:32\", \"sync:32\", \"close:3\"]` lists, per operation, \
-the highest ordinal a generation is known to reach. Every native generation then \
-crashes at one drawn operation and ordinal within that bound, with a drawn torn \
-granularity, and restarts. A drawn point the generation never reaches is \
-VACUOUS_CRASH rather than a pass. The key is refused alongside --starve. `minimize --generation` on \
-a crash generation needs --no-trace-phase: its knob phase reruns seeds, but a \
-two-incarnation trace cannot be shortened without moving the crash point.\n\
+The crash plane (`crash` in --faults) draws a per-crash-point crash rate on a \
+power-of-two sweep and a process or machine crash kind; a generation whose crash \
+lands restarts once from the image the crash leaves. It is refused alongside \
+--starve. `minimize --generation` on a crash generation shrinks the crashed and the \
+restarted incarnation separately, keeping the crash on the operation it followed.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
 generation: `--harness` for a patina-dst-harness (configure-then-run) binary, and \
@@ -261,7 +258,7 @@ refused by name.",
                     "--fault-scale-permille",
                     None,
                     Value::Required("N", Kind::Permille),
-                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Crash placement (the spec's fs_crash_reach) is not intensity and is left alone, as are shape bands such as TCP buffer size and the cooperative-SUT knobs.",
+                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the crash kind and TCP buffer size, and the cooperative-SUT knobs, are left alone.",
                     false,
                 ),
                 f(

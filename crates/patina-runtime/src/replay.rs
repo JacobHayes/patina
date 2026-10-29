@@ -1,30 +1,16 @@
 //! Trace metadata conversion and authoritative replay configuration reconciliation.
 
 use crate::config::{
-    BuggifyConfig, ClockFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig,
-    FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
+    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig,
+    EntropyFaultConfig, FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
 };
 use crate::liveness::resolve_heal_after;
-use crate::{FINGERPRINT_BUGGIFY, RuntimeError, TornGranularity};
+use crate::{FINGERPRINT_BUGGIFY, RuntimeError};
 use patina_dst_abi::ClockKind;
 use patina_dst_driver_api::ClockDriver;
 use patina_dst_sched_det::{PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_trace::AddressLayout;
 use std::collections::BTreeMap;
-
-fn torn_granularity_to_record(granularity: TornGranularity) -> patina_dst_trace::TornGranularity {
-    match granularity {
-        TornGranularity::Block => patina_dst_trace::TornGranularity::Block,
-        TornGranularity::Byte => patina_dst_trace::TornGranularity::Byte,
-    }
-}
-
-fn torn_granularity_from_record(granularity: patina_dst_trace::TornGranularity) -> TornGranularity {
-    match granularity {
-        patina_dst_trace::TornGranularity::Block => TornGranularity::Block,
-        patina_dst_trace::TornGranularity::Byte => TornGranularity::Byte,
-    }
-}
 
 /// Serialize the run's liveness-watchdog configuration into the trace metadata.
 /// Informational only — NOT a fingerprint input and NOT reconciled on replay,
@@ -60,8 +46,8 @@ pub(super) fn dns_record(config: &RuntimeConfig) -> Option<patina_dst_trace::Dns
 /// it as well.
 pub(super) fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
     patina_dst_trace::FaultConfigRecord {
-        crash_at: config.faults.fs.crash_at.map(Into::into),
-        torn_granularity: torn_granularity_to_record(config.faults.fs.torn_granularity),
+        crash_permille: config.faults.crash.permille,
+        crash_kind: config.faults.crash.kind,
         fs_error_permille: config.faults.fs.error_permille,
         fs_short_permille: config.faults.fs.short_permille,
         fs_latency_nanos: config.faults.fs.latency_nanos,
@@ -88,9 +74,11 @@ pub(super) fn fault_config_from_record(
     record: &patina_dst_trace::FaultConfigRecord,
 ) -> FaultConfig {
     FaultConfig {
+        crash: CrashFaultConfig {
+            permille: record.crash_permille,
+            kind: record.crash_kind,
+        },
         fs: FsFaultConfig {
-            crash_at: record.crash_at.map(Into::into),
-            torn_granularity: torn_granularity_from_record(record.torn_granularity),
             error_permille: record.fs_error_permille,
             short_permille: record.fs_short_permille,
             latency_nanos: record.fs_latency_nanos,
@@ -601,13 +589,12 @@ pub(super) fn reconcile_replay_dns(
 
 #[cfg(test)]
 mod tests {
+    use crate::RuntimeError;
     use crate::config::{BuggifyConfig, RuntimeConfig};
-    use crate::fs_crash::{CrashOp, CrashPoint};
     use crate::replay::{
         reconcile_replay_buggify, reconcile_replay_faults, reconcile_replay_schedule_policy,
         reconcile_replay_sud,
     };
-    use crate::{RuntimeError, TornGranularity};
 
     use patina_dst_sched_det::{PctConfig, SchedulePolicy};
 
@@ -646,14 +633,12 @@ mod tests {
 
     #[test]
     fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {
-        use patina_dst_trace::{CrashPointRecord, FaultConfigRecord, FaultCrashOp};
+        use patina_dst_abi::CrashKind;
+        use patina_dst_trace::FaultConfigRecord;
 
         let stored = FaultConfigRecord {
-            crash_at: Some(CrashPointRecord {
-                op: FaultCrashOp::Close,
-                ordinal: 1,
-            }),
-            torn_granularity: patina_dst_trace::TornGranularity::Byte,
+            crash_permille: 7,
+            crash_kind: CrashKind::Process,
             fs_error_permille: 111,
             fs_short_permille: 222,
             net_latency_nanos: 500,
@@ -662,7 +647,7 @@ mod tests {
 
         // A pre-metadata trace (None) yields no override: the operator-supplied
         // configuration is kept, preserving the historical re-supply contract.
-        let supplied = RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 2);
+        let supplied = RuntimeConfig::seeded(0).with_crash_permille(8);
         assert_eq!(reconcile_replay_faults(&supplied, None).unwrap(), None);
 
         // Flag-free replay adopts the stored configuration verbatim, so replay is
@@ -670,22 +655,16 @@ mod tests {
         let faults = reconcile_replay_faults(&RuntimeConfig::seeded(0), Some(&stored))
             .unwrap()
             .expect("stored config adopted");
-        assert_eq!(
-            faults.fs.crash_at,
-            Some(CrashPoint {
-                op: CrashOp::Close,
-                ordinal: 1
-            })
-        );
-        assert_eq!(faults.fs.torn_granularity, TornGranularity::Byte);
+        assert_eq!(faults.crash.permille, 7);
+        assert_eq!(faults.crash.kind, CrashKind::Process);
         assert_eq!(faults.fs.error_permille, 111);
         assert_eq!(faults.fs.short_permille, 222);
         assert_eq!(faults.net.latency_nanos, 500);
 
         // Explicit knobs that MATCH the recording are accepted.
         let matching = RuntimeConfig::seeded(0)
-            .with_crash_at(CrashOp::Close, 1)
-            .with_fs_torn_granularity(TornGranularity::Byte)
+            .with_crash_permille(7)
+            .with_crash_kind(CrashKind::Process)
             .with_fs_error_permille(111)
             .with_fs_short_permille(222)
             .with_net_latency_nanos(500);
@@ -694,7 +673,7 @@ mod tests {
             .expect("matching config adopted");
 
         // Explicit knobs that DIVERGE fail closed before any driver is built.
-        let mismatched = RuntimeConfig::seeded(0).with_crash_at(CrashOp::Close, 2);
+        let mismatched = RuntimeConfig::seeded(0).with_crash_permille(8);
         assert!(matches!(
             reconcile_replay_faults(&mismatched, Some(&stored)),
             Err(RuntimeError::Config(_))

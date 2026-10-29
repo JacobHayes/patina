@@ -17,8 +17,8 @@ mod tests {
     //   moves it, and `current_dir` reports the directory's current name.
     // `admin [absolute|relative]` — the working directory's handle is the shim's
     //   own, never a guest open: the configured `--cwd`, the root, and the
-    //   directories `chdir` holds and lets go draw no fs fault and count toward no
-    //   `--fs-crash-at` ordinal, so `open:1` and `close:1` are the guest's own.
+    //   directories `chdir` holds and lets go draw no fs fault and are no crash
+    //   point, so the first two crash points are the guest's own open and close.
     const ENV_CWD_SOURCE: &str = r#"
 fn errno(error: std::io::Error) -> i32 {
     error.raw_os_error().unwrap_or(-1)
@@ -227,28 +227,30 @@ fn main() {
             );
         }
 
-        // `open:1` and `close:1` are the guest's own first open and close: each
-        // incarnation reaches the call, and only the restarted one gets past it.
+        // The first crash point is the guest's own first open, the second its
+        // close: each incarnation reaches the call, and only the restarted one
+        // gets past it.
+        let at_close = common::native::crash_seeds(500, 1, 1)[0].to_string();
         for (args, before, after) in [
             (
-                &["--fs-crash-at", "open:1"][..],
+                &["--seed", "4", "--crash-permille", "1000"][..],
                 "before-open",
                 "after-open",
             ),
             (
-                &["--fs-crash-at", "open:1", "--cwd", "/tmp"][..],
+                &["--seed", "4", "--crash-permille", "1000", "--cwd", "/tmp"][..],
                 "before-open",
                 "after-open",
             ),
             (
-                &["--fs-crash-at", "close:1"][..],
+                &["--seed", &at_close, "--crash-permille", "500"][..],
                 "before-close",
                 "after-close",
             ),
         ] {
             let mut args = args.to_vec();
             args.extend(["--", "admin"]);
-            let output = run(&args);
+            let output = common::native::assert_success(guest.command("run", &args));
             let count = |line: &str| lines(&output.stdout, &format!("CWD_ADMIN {line}")).len();
             assert_eq!(
                 count(before),

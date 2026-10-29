@@ -42,7 +42,6 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             "main" => Ok(()),
             other => u64_of(name, other).map(drop),
         },
-        Kind::CrashSpec => crash_spec(name, value),
         Kind::KeyValue => match value.split_once('=') {
             Some((key, _)) if !key.is_empty() => Ok(()),
             _ => Err(format!("{name} requires KEY=VALUE")),
@@ -118,21 +117,6 @@ pub(crate) fn range_of(name: &str, value: &str, separator: &str) -> Result<(u64,
         return Err(format!("{name} requires MIN <= MAX; got {value:?}"));
     }
     Ok((min, max))
-}
-
-fn crash_spec(name: &str, value: &str) -> Result<(), String> {
-    let (op, ordinal) = value.split_once(':').unwrap_or((value, "1"));
-    if !matches!(op, "open" | "write" | "sync" | "close") {
-        return Err(format!(
-            "{name} op must be open, write, sync, or close; got {op:?}"
-        ));
-    }
-    match ordinal.parse::<u64>() {
-        Ok(0) | Err(_) => Err(format!(
-            "{name} ordinal must be a positive integer; got {value:?}"
-        )),
-        Ok(_) => Ok(()),
-    }
 }
 
 /// An RFC 3339 UTC timestamp `YYYY-MM-DDTHH:MM:SS[.FRACTION]Z` as Unix-time

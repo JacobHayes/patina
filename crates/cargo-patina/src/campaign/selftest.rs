@@ -3,8 +3,8 @@
 mod scaling;
 
 use super::classify::{
-    FS_CRASH_UNREACHED_CLASS, HOST_KILL_SHAPE, SIGABRT, SIGABRT_EXIT, STARVATION_STALL_EXIT,
-    TRACE_UNAVAILABLE_CLASS, is_runtime_diagnostic,
+    HOST_KILL_SHAPE, SIGABRT, SIGABRT_EXIT, STARVATION_STALL_EXIT, TRACE_UNAVAILABLE_CLASS,
+    is_runtime_diagnostic,
 };
 use super::generation::{SIGKILL, facts_from_envelope};
 use super::report::{CoverageGate, coverage_verdict};
@@ -388,42 +388,6 @@ pub(super) fn selftest() -> Result<i32, CliError> {
         ),
     );
 
-    // An armed crash point the run never reached is refused at shutdown, in
-    // the same SIGABRT the recorder failure above uses. Over a clean guest it
-    // is the crash plane's coverage failure, not INFRA: the generation never
-    // exercised the crash it was drawn for. Over a failing guest, the guest's
-    // failure stays the headline.
-    check(
-        "unreached-crash-point-over-a-clean-guest-is-vacuous",
-        CampaignClass::VacuousCrash,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal(FS_CRASH_UNREACHED_CLASS)
-                    .guest_exit(0),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    check(
-        "unreached-crash-point-over-a-failing-guest-keeps-the-guests-class",
-        CampaignClass::Unclassified,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal(FS_CRASH_UNREACHED_CLASS)
-                    .guest_exit(1),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-
     // Patina's own trace CHANNEL failing — the recorder's scratch file could not
     // be opened, read, or renamed — is an operational condition of the host, in
     // the same family as a timeout or an OOM kill. Before this it landed in
@@ -692,23 +656,6 @@ pub(super) fn selftest() -> Result<i32, CliError> {
         CampaignClass::Unclassified,
         classify(&planted(RunFacts::ok().exit(3), ""), &no_rules),
     );
-    // An unreached crash point is no verdict on the guest, so a declared
-    // pattern in its clean output is still a finding.
-    check(
-        "declared-pattern-outranks-an-unreached-crash-point",
-        CampaignClass::Violation,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal(FS_CRASH_UNREACHED_CLASS)
-                    .guest_exit(0),
-                "GUEST: checksum mismatch on page 7",
-            ),
-            &declared,
-        ),
-    );
     // Declared rules ADD findings; they never downgrade one the envelope made.
     check(
         "declared-rules-never-downgrade-an-envelope-finding",
@@ -964,7 +911,7 @@ fork (process)\n";
         "PATINA_LIFECYCLE_EVENT label=x",
         // The supervisor's restart summary carries both incarnations' host
         // pids, which differ on every run of one generation.
-        "PATINA_FS_CRASH_RESTART selector=write:3 host_pid0=41 host_pid1=42 result=restarted",
+        "PATINA_CRASH_RESTART kind=machine host_pid0=41 host_pid1=42 result=restarted",
         "note: 24 linked symbol(s) are deny-trap armed under patina",
         "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
         "patina: WARNING: running /tmp/guest with 2 UNSUPPORTED symbol(s) downgraded",
@@ -984,7 +931,7 @@ into the deterministic runtime via syscall-user-dispatch.",
         "PATINA_FRAMEWORK_TRAP symbol=fork",
         "PATINA_CUSTOM_OP_REFUSED name=x",
         "PATINA_BUGGIFY_DUPLICATE_LABEL label=x",
-        "PATINA_FS_CRASH_REPLAY_DIVERGENCE selector=write:3 the replay crashed after 9 operations",
+        "PATINA_CRASH_REPLAY_DIVERGENCE kind=machine the replay crashed after 9 operations",
         "patina: campaign generation exceeded timeout_secs=5",
         // Fail-closed refusals: patina's own lines, but they ARE the cause of
         // death, and `output.rs`'s `REFUSAL_CLASSES` structures only some of

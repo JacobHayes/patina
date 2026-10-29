@@ -9,6 +9,13 @@ use std::collections::BTreeSet;
 /// Candidates are structurally validated and accepted only when the oracle
 /// confirms that the selected failure remains. Use [`minimize_timeline`] for
 /// leaf suffixes in branched bundles.
+///
+/// A crash-restart trace is two incarnations joined at the crash, and the
+/// crash follows the crashed incarnation's last decision. Each incarnation is
+/// reduced on its own, the crashed one first, and the decision the crash
+/// follows is never deleted: a deletion elsewhere leaves the crash on the same
+/// operation, so a replay that rebuilds the crashed incarnation's image
+/// crashes where the recording did.
 pub fn minimize_main<O: FailureOracle>(
     bundle: &TraceBundle,
     oracle: &mut O,
@@ -34,8 +41,30 @@ pub fn minimize_main_with_memo<O: FailureOracle>(
     if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
+    if is_crash_restart(bundle)? {
+        return minimize_crash_restart(bundle, oracle, memo);
+    }
+    minimize_index(bundle, 0, Region::Suffix(0), oracle, memo)
+}
 
-    minimize_index(bundle, 0, 0, oracle, memo)
+/// Whether `bundle` is a crash-restart trace, which every entry point reduces
+/// one incarnation at a time.
+fn is_crash_restart<E>(bundle: &TraceBundle) -> Result<bool, MinimizeError<E>> {
+    Ok(bundle
+        .crash_restart_segments()
+        .map_err(MinimizeError::Trace)?
+        .is_some())
+}
+
+/// Reduce the crashed incarnation (all but the decision the crash follows),
+/// then the restarted one.
+fn minimize_crash_restart<O: FailureOracle>(
+    bundle: &TraceBundle,
+    oracle: &mut O,
+    memo: &mut CandidateMemo,
+) -> Result<TraceBundle, MinimizeError<O::Error>> {
+    let crashed = minimize_index(bundle, 0, Region::BeforeCrash, oracle, memo)?;
+    minimize_index(&crashed, 0, Region::AfterCrash, oracle, memo)
 }
 
 /// Delta-debug the recorded suffix of a leaf timeline.
@@ -85,7 +114,10 @@ pub fn minimize_timeline_with_memo<O: FailureOracle>(
     if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
-    minimize_index(bundle, index, 0, oracle, memo)
+    if is_crash_restart(bundle)? {
+        return minimize_crash_restart(bundle, oracle, memo);
+    }
+    minimize_index(bundle, index, Region::Suffix(0), oracle, memo)
 }
 
 /// Minimize every timeline in a branched bundle under the non-leaf policy.
@@ -128,10 +160,13 @@ pub fn minimize_branch_tree_with_memo<O: FailureOracle>(
     if !memo.decide(bundle, oracle)? {
         return Err(MinimizeError::OriginalDoesNotFail);
     }
+    if is_crash_restart(bundle)? {
+        return minimize_crash_restart(bundle, oracle, memo);
+    }
     let mut current = bundle.clone();
     for index in 0..current.timelines.len() {
         let protected = protected_prefix_len(&current, index);
-        current = minimize_index(&current, index, protected, oracle, memo)?;
+        current = minimize_index(&current, index, Region::Suffix(protected), oracle, memo)?;
     }
     Ok(current)
 }
@@ -282,15 +317,15 @@ pub(super) fn protected_prefix_len(bundle: &TraceBundle, timeline_index: usize) 
 fn minimize_index<O: FailureOracle>(
     bundle: &TraceBundle,
     timeline_index: usize,
-    protected: usize,
+    region: Region,
     oracle: &mut O,
     memo: &mut CandidateMemo,
 ) -> Result<TraceBundle, MinimizeError<O::Error>> {
     let mut current = bundle.clone();
     let mut granularity = 2usize;
     loop {
-        let window = reducible_window(&current, timeline_index, protected);
-        if window < 2 {
+        let (_, window) = region.window(&current, timeline_index);
+        if window < region.least_window() {
             break;
         }
         let chunk_size = window.div_ceil(granularity);
@@ -299,7 +334,7 @@ fn minimize_index<O: FailureOracle>(
         loop {
             // Recomputed every step: an accepted deletion shrinks the window
             // under the scan position.
-            let live = reducible_window(&current, timeline_index, protected);
+            let (first, live) = region.window(&current, timeline_index);
             if start >= live {
                 break;
             }
@@ -318,8 +353,10 @@ fn minimize_index<O: FailureOracle>(
                 let mut candidate = current.clone();
                 candidate.timelines[timeline_index]
                     .decisions
-                    .drain(protected + cursor..protected + end);
-                renumber(&mut candidate, timeline_index);
+                    .drain(first + cursor..first + end);
+                region
+                    .renumber(&mut candidate, timeline_index)
+                    .map_err(MinimizeError::Trace)?;
                 candidate.validate().map_err(MinimizeError::Trace)?;
                 candidates.push(candidate);
                 starts.push(cursor);
@@ -350,13 +387,65 @@ fn minimize_index<O: FailureOracle>(
     Ok(current)
 }
 
-/// The number of decisions in a timeline that may be deleted: everything past
-/// the prefix a descendant branch inherits.
-fn reducible_window(bundle: &TraceBundle, timeline_index: usize, protected: usize) -> usize {
-    bundle.timelines[timeline_index]
-        .decisions
-        .len()
-        .saturating_sub(protected)
+/// The decisions of a timeline one reduction may delete.
+#[derive(Clone, Copy)]
+enum Region {
+    /// Everything past the prefix of this many decisions a descendant branch
+    /// inherits.
+    Suffix(usize),
+    /// A crash-restart trace's crashed incarnation, but for its last decision,
+    /// the one the crash follows.
+    BeforeCrash,
+    /// A crash-restart trace's restarted incarnation.
+    AfterCrash,
+}
+
+impl Region {
+    /// The region's first decision and its length.
+    fn window(self, bundle: &TraceBundle, timeline_index: usize) -> (usize, usize) {
+        let decisions = &bundle.timelines[timeline_index].decisions;
+        let crashed = || {
+            decisions
+                .iter()
+                .filter(|event| event.incarnation == 0)
+                .count()
+        };
+        match self {
+            Region::Suffix(protected) => (protected, decisions.len().saturating_sub(protected)),
+            Region::BeforeCrash => (0, crashed().saturating_sub(1)),
+            Region::AfterCrash => {
+                let crashed = crashed();
+                (crashed, decisions.len() - crashed)
+            }
+        }
+    }
+
+    /// The smallest window worth a pass. A crash-restart region keeps the
+    /// decision the crash follows outside it, so even its one decision may
+    /// go; a suffix keeps at least one.
+    fn least_window(self) -> usize {
+        match self {
+            Region::Suffix(_) => 2,
+            Region::BeforeCrash | Region::AfterCrash => 1,
+        }
+    }
+
+    /// Restore the numbering a deletion left gaps in.
+    fn renumber(self, bundle: &mut TraceBundle, timeline_index: usize) -> Result<(), TraceError> {
+        match self {
+            Region::Suffix(_) => {
+                renumber(bundle, timeline_index);
+                Ok(())
+            }
+            Region::BeforeCrash | Region::AfterCrash => {
+                let segments = bundle.crash_restart_segments()?.ok_or_else(|| {
+                    TraceError::Invalid("a crash-restart region of a trace with no crash".into())
+                })?;
+                *bundle = segments.join()?;
+                Ok(())
+            }
+        }
+    }
 }
 
 pub(super) fn renumber(bundle: &mut TraceBundle, timeline_index: usize) {

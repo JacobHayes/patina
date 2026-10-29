@@ -75,13 +75,6 @@ pub enum CampaignClass {
     /// only because the guest declared one, so arming the knob over a guest or a
     /// path that offers none is a coverage claim with nothing behind it.
     VacuousCustomOpFault,
-    /// An armed `--fs-crash-at` point the run never reached: the runtime's
-    /// named refusal (`PATINA_FS_CRASH_SELECTOR_UNREACHED`) over a guest that
-    /// otherwise finished clean. The generation ran without the crash it was
-    /// drawn to exercise, so it is a coverage failure — the campaign's declared
-    /// `fs_crash_reach` promised a point this run did not get to — not a
-    /// harness failure to be filed under INFRA.
-    VacuousCrash,
     /// `--swarm` was requested for a generation with no swarm-maskable fault class
     /// enabled, so the draw had zero candidates: it neither kept nor dropped
     /// anything and the generation explored exactly what a non-swarm generation
@@ -140,7 +133,6 @@ impl CampaignClass {
         CampaignClass::VacuousEntropyFault,
         CampaignClass::VacuousClockFault,
         CampaignClass::VacuousCustomOpFault,
-        CampaignClass::VacuousCrash,
         CampaignClass::VacuousSwarm,
         CampaignClass::GuestAbort,
         CampaignClass::FailClosedAbort,
@@ -162,7 +154,6 @@ impl CampaignClass {
             CampaignClass::VacuousEntropyFault => "VACUOUS_ENTROPY_FAULT",
             CampaignClass::VacuousClockFault => "VACUOUS_CLOCK_FAULT",
             CampaignClass::VacuousCustomOpFault => "VACUOUS_CUSTOM_OP_FAULT",
-            CampaignClass::VacuousCrash => "VACUOUS_CRASH",
             CampaignClass::GuestAbort => "GUEST_ABORT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
@@ -262,13 +253,12 @@ const _: () = {
             CampaignClass::VacuousEntropyFault => 7,
             CampaignClass::VacuousClockFault => 8,
             CampaignClass::VacuousCustomOpFault => 9,
-            CampaignClass::VacuousCrash => 10,
-            CampaignClass::VacuousSwarm => 11,
-            CampaignClass::GuestAbort => 12,
-            CampaignClass::FailClosedAbort => 13,
-            CampaignClass::StarvationStall => 14,
-            CampaignClass::Infra => 15,
-            CampaignClass::Unclassified => 16,
+            CampaignClass::VacuousSwarm => 10,
+            CampaignClass::GuestAbort => 11,
+            CampaignClass::FailClosedAbort => 12,
+            CampaignClass::StarvationStall => 13,
+            CampaignClass::Infra => 14,
+            CampaignClass::Unclassified => 15,
         }
     }
     let all = CampaignClass::ALL;
@@ -314,13 +304,10 @@ const SHUTDOWN_FAILURE_CLASS: &str = "shutdown_failure";
 /// open, read, or rename the recorder's own scratch file. An operational
 /// condition of the host, in the same family as a timeout or an OOM kill.
 pub(super) const TRACE_UNAVAILABLE_CLASS: &str = "trace_unavailable";
-/// The refusal class for a run whose `--fs-crash-at` point was reached and
-/// whose crash patina could not carry out (recovery, snapshot export or the
-/// handoff failed). Patina's own limit, never a result about the guest.
-pub(super) const FS_CRASH_FAILED_CLASS: &str = "fs_crash_failed";
-/// The refusal class for a run whose armed `--fs-crash-at` point was never
-/// reached: the runtime refuses at shutdown, after the guest has finished.
-pub(super) const FS_CRASH_UNREACHED_CLASS: &str = "fs_crash_unreached";
+/// The refusal class for a run whose crash patina could not carry out
+/// (recovery, snapshot export or the handoff failed). Patina's own limit,
+/// never a result about the guest.
+pub(super) const CRASH_FAILED_CLASS: &str = "crash_failed";
 /// The refusal class for a run the host could not give what the virtual
 /// process granted (a stack limit past the host's hard limit). An operational
 /// condition of the host, like a timeout: never a result about the guest.
@@ -604,14 +591,10 @@ impl ClassifyRules {
 /// structured facts reached no verdict of their own (`OK`, or the loud
 /// `UNCLASSIFIED` catch-all), so a pattern can ADD a finding a level-1 guest
 /// would otherwise hide but can never downgrade one patina detected.
-/// VACUOUS_CRASH is no verdict either: the guest ran clean without crashing,
-/// so a pattern its output matched is still the guest's finding.
 pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> CampaignClass {
     let built_in = built_in_class(&generation.facts);
-    if matches!(
-        built_in,
-        CampaignClass::Ok | CampaignClass::Unclassified | CampaignClass::VacuousCrash
-    ) && let Some(declared) = rules.declared(generation)
+    if matches!(built_in, CampaignClass::Ok | CampaignClass::Unclassified)
+        && let Some(declared) = rules.declared(generation)
     {
         return declared;
     }
@@ -709,18 +692,8 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         // A crash patina could not carry out stopped the guest before it
         // could reach a verdict of its own: the harness failing, like a
         // timeout.
-        if class == FS_CRASH_FAILED_CLASS || class == HOST_LIMIT_CLASS {
+        if class == CRASH_FAILED_CLASS || class == HOST_LIMIT_CLASS {
             return CampaignClass::Infra;
-        }
-        // An unreached crash point is refused at shutdown, after the guest
-        // finished: over a clean guest it is the crash plane's coverage
-        // failure; over a guest that failed on its own, the guest's failure is
-        // the headline, as for a recorder failure below.
-        if class == FS_CRASH_UNREACHED_CLASS {
-            return match facts.refusal_guest_exit_code {
-                None | Some(0) => CampaignClass::VacuousCrash,
-                Some(_) => CampaignClass::Unclassified,
-            };
         }
         if class == TRACE_UNAVAILABLE_CLASS {
             match facts.refusal_guest_exit_code {
@@ -968,7 +941,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
 ///    outright because their line name is not their knob name:
 ///    `PATINA_SCHEDULE_POLICY` (knob `PATINA_SCHEDULE_POLICY_REPORT`) and the
 ///    `PATINA_LIFECYCLE` / `PATINA_LIFECYCLE_EVENT` progress markers, and the
-///    crash-restart supervisor's `PATINA_FS_CRASH_RESTART` summary, which names
+///    crash-restart supervisor's `PATINA_CRASH_RESTART` summary, which names
 ///    both incarnations' host pids.
 ///
 /// 2. **Supervisor pre-run advisories**, printed by the child `cargo patina run`
@@ -995,7 +968,7 @@ pub(super) fn is_runtime_diagnostic(line: &str) -> bool {
         && (name.ends_with("_REPORT")
             || matches!(
                 name,
-                "SCHEDULE_POLICY" | "LIFECYCLE" | "LIFECYCLE_EVENT" | "FS_CRASH_RESTART"
+                "SCHEDULE_POLICY" | "LIFECYCLE" | "LIFECYCLE_EVENT" | "CRASH_RESTART"
             ))
     {
         return true;
@@ -1171,8 +1144,8 @@ mod tests {
                 "PATINA_INFRA host_limit reason=\"setrlimit(RLIMIT_STACK)\"\n",
             ),
             planted(
-                RunFacts::ok().exit(113).refusal(FS_CRASH_FAILED_CLASS),
-                "PATINA_INFRA fs_crash_failed selector=sync:1 reason=\"export failed\"\n",
+                RunFacts::ok().exit(113).refusal(CRASH_FAILED_CLASS),
+                "PATINA_INFRA crash_failed reason=\"export failed\"\n",
             ),
         ] {
             let class = classify(&generation, &ClassifyRules::default());
@@ -1200,17 +1173,6 @@ mod tests {
             classify(&planted(RunFacts::ok().vacuous("entropy"), ""), &rules),
             classify(&planted(RunFacts::ok().vacuous("clock"), ""), &rules),
             classify(&planted(RunFacts::ok().vacuous("custom_op"), ""), &rules),
-            classify(
-                &planted(
-                    RunFacts::ok()
-                        .exit(SIGABRT_EXIT)
-                        .signal(SIGABRT)
-                        .refusal(FS_CRASH_UNREACHED_CLASS)
-                        .guest_exit(0),
-                    "",
-                ),
-                &rules,
-            ),
             classify(&planted(RunFacts::ok().vacuous("swarm"), ""), &rules),
             classify(
                 &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),

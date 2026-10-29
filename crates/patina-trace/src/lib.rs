@@ -39,9 +39,9 @@ pub use handoff::{
 };
 pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
 pub use metadata::{
-    AddressLayout, BuggifyConfigRecord, ComputeStop, CrashPointRecord, DnsConfigRecord,
-    FaultConfigRecord, FaultCrashOp, PctPolicyRecord, RunMetadata, SchedulePolicyRecord,
-    StarvationPolicyRecord, SwarmConfigRecord, TornGranularity, WatchdogConfigRecord,
+    AddressLayout, BuggifyConfigRecord, ComputeStop, DnsConfigRecord, FaultConfigRecord,
+    PctPolicyRecord, RunMetadata, SchedulePolicyRecord, StarvationPolicyRecord, SwarmConfigRecord,
+    WatchdogConfigRecord,
 };
 pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord};
 pub use recorder::{PrefixWriteError, Recorder};
@@ -110,7 +110,12 @@ pub use replay::Replayer;
 ///   a host-capture filesystem the embedder's unrecorded reads record the
 ///   host's answer alone, with no latency sleep. Format 21 traces would
 ///   replay with operations the replay never asks for, so they are refused.
-pub const TRACE_FORMAT_VERSION: u32 = 22;
+/// - 23: a crash is drawn per crash point (`crash_permille`, with
+///   `crash_kind`) in place of an op-ordinal selector (`crash_at`) and a
+///   torn-write granularity, and where a crash-restart trace crashed is its
+///   `Crash` marker alone. Format 22 traces are refused rather than replayed
+///   against a crash point the trace no longer names.
+pub const TRACE_FORMAT_VERSION: u32 = 23;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

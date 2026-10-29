@@ -1,7 +1,6 @@
 //! Tests for seeded fault-class selection and fingerprint component retraction.
 
 use crate::config::{BuggifyConfig, FaultConfig, RuntimeConfig};
-use crate::fs_crash::CrashOp;
 use crate::reports::swarm_report_line;
 use crate::swarm::{apply_swarm_mask, remove_fingerprint_component};
 use crate::{Context, FINGERPRINT_BUGGIFY, FaultKnob, Masks, SWARM_CLASSES};
@@ -19,7 +18,8 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     let build = |seed: u64| {
         let trace = directory.path().join(format!("swarm-{seed}.patina"));
         let config = RuntimeConfig::record(seed, &trace, "fp+swarm")
-            .with_crash_at(CrashOp::Close, 1)
+            .with_crash_permille(1)
+            .with_crash_supervisor()
             .with_fs_error_permille(100)
             .with_fs_short_permille(200)
             .with_net_drop_permille(100)
@@ -54,7 +54,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     }
     let faults = bundle.metadata.faults.expect("faults recorded");
     assert_eq!(
-        faults.crash_at.is_some(),
+        faults.crash_permille > 0,
         swarm.selected_classes.iter().any(|c| c == "crash")
     );
     assert_eq!(
@@ -166,8 +166,7 @@ fn swarm_class_table_covers_every_current_fault_field() {
 fn each_swarm_class_is_wired_to_its_own_fault_knobs() {
     for knob in FaultKnob::ALL {
         // The class that MASKS the knob, which is not always the class the
-        // knob declares: `--fs-torn-granularity` declares none and is masked
-        // by `crash`, and `--dns-entry` is masked by nothing at all.
+        // knob declares: `--dns-entry` is masked by nothing at all.
         let masking = SWARM_CLASSES
             .iter()
             .find(|class| matches!(class.masks, Masks::Knobs(knobs) if knobs.contains(knob)));
@@ -320,7 +319,8 @@ fn swarm_class_table_declares_every_fingerprint_component() {
     ];
     for seed in 0..8u64 {
         let mut config = RuntimeConfig::seeded(seed)
-            .with_crash_at(CrashOp::Close, 1)
+            .with_crash_permille(1)
+            .with_crash_supervisor()
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)
             .with_sleep_jitter_nanos(1, 2)

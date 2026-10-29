@@ -505,7 +505,7 @@ pub(crate) use hooks::written;
 pub(crate) use hooks::{allocated, syncing_all};
 pub(crate) use hooks::{
     crashed, inspecting, inspecting_ino, reading, reading_in, resized_ino, syncing,
-    written_at_cursor_in, written_in,
+    unwritten_stores, written_at_cursor_in, written_in,
 };
 #[cfg(target_os = "linux")]
 pub(crate) use locks::huge_page_size;

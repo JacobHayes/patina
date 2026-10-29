@@ -2,41 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use patina_dst_abi::TaskId;
+use patina_dst_abi::{CrashKind, TaskId};
 use serde::{Deserialize, Serialize};
 
 use crate::NativeIdentityRecord;
-
-/// The boundary-operation kind a filesystem crash is pinned to. Serialized by
-/// name (snake_case) so it round-trips independent of declaration order, mirror
-/// of the runtime's `CrashOp`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FaultCrashOp {
-    Open,
-    Write,
-    Sync,
-    Close,
-}
-
-/// Granularity at which a torn write reverts on crash, mirror of the fs-crash
-/// `TornGranularity`. Serialized by name so the default stays legible.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TornGranularity {
-    #[default]
-    Block,
-    Byte,
-}
-
-/// Where a filesystem crash is injected: after the `ordinal`-th (1-based)
-/// occurrence of `op`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CrashPointRecord {
-    pub op: FaultCrashOp,
-    pub ordinal: u64,
-}
 
 /// The full seed-driven fault-injection configuration of a recorded run. Stored
 /// in the trace metadata so replay reproduces the run's faults without any flag
@@ -45,10 +14,14 @@ pub struct CrashPointRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FaultConfigRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crash_at: Option<CrashPointRecord>,
-    #[serde(default, skip_serializing_if = "torn_granularity_is_block")]
-    pub torn_granularity: TornGranularity,
+    /// Per-mille chance that each crash point (an operation with an effect a
+    /// crash could cut short, [`patina_dst_abi::Operation::is_crash_point`])
+    /// is where the run crashes. Where a recorded run did crash is the trace's
+    /// own structure, its `Crash` lifecycle marker, never a re-drawn decision.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub crash_permille: u16,
+    #[serde(default, skip_serializing_if = "crash_kind_is_machine")]
+    pub crash_kind: CrashKind,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub fs_error_permille: u16,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
@@ -316,8 +289,8 @@ impl WatchdogConfigRecord {
     }
 }
 
-fn torn_granularity_is_block(granularity: &TornGranularity) -> bool {
-    matches!(granularity, TornGranularity::Block)
+fn crash_kind_is_machine(kind: &CrashKind) -> bool {
+    *kind == CrashKind::Machine
 }
 
 fn is_zero_u16(value: &u16) -> bool {

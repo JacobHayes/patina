@@ -347,7 +347,7 @@ fn parsed<T: std::str::FromStr>(name: &str, value: &str) -> T {
 /// forwarded whole.
 ///
 /// The family's DECLARED refusals are kept too, so `replay <pkg> <trace>
-/// --fs-crash-at close` is answered with "the trace is authoritative" rather
+/// --crash-permille 5` is answered with "the trace is authoritative" rather
 /// than handed to Cargo as an unknown flag. Sibling-family flags are NOT: they
 /// are exactly the names a legitimate Cargo argument might share (`--bin`,
 /// `--release`), and forwarding them is the passthrough's whole purpose.

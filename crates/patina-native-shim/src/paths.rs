@@ -219,8 +219,8 @@ pub(crate) fn set_umask(mask: u32) -> u32 {
 /// holds no handle for it) or until install opened a configured directory.
 /// Every open of it, and the close of the one a `chdir` replaces, is the
 /// shim's own (`fs_open_path_unrecorded`, `fs_close_unrecorded`): no guest
-/// called open or close, so none draws a fault, takes latency, counts toward
-/// an `open` or `close` crash ordinal or moves the clock.
+/// called open or close, so none draws a fault, takes latency, is
+/// a crash point or moves the clock.
 static CWD: SpinMutex<Option<Fd>> = SpinMutex::new(None);
 
 fn cwd_handle() -> Result<Fd, c_int> {
@@ -339,7 +339,7 @@ pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
 /// relative path answers `ENOENT` — is a misconfiguration the guest cannot
 /// distinguish from its own bug. The lookup and the open are the shim's own,
 /// unrecorded: replay reads the directory from the trace and opens it here
-/// again, before the guest runs, with no fault, latency, crash ordinal or
+/// again, before the guest runs, with no fault, latency, crash point or
 /// clock movement on either side.
 pub(crate) fn install_cwd(context: &mut Bookkeeping<'_>) -> Result<(), RuntimeError> {
     let Some(path) = context.guest_cwd().map(str::to_owned) else {

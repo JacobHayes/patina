@@ -1,6 +1,6 @@
 //! The context's unrecorded filesystem reads: the kernel's and the
 //! embedder's own steps inside a guest call, which record nothing, draw no
-//! fault, charge no latency and count toward no crash ordinal.
+//! fault, charge no latency and are no crash point.
 
 use patina_dst_abi::{
     EffectError, ErrorCode, Fd, FsMetadata, OpenFlags, Operation, Outcome, SeekWhence,
@@ -144,8 +144,8 @@ impl Context {
     /// for itself (the native shim's working directory: the configured one at
     /// install, the root on first use, or the one a `chdir` names), opened
     /// UNRECORDED, never faulted
-    /// ([`FsDriver::open_path_unfaulted`]), with no latency and no `open`
-    /// crash ordinal. No guest called open: the open happens at the same point
+    /// ([`FsDriver::open_path_unfaulted`]), with no latency, and it is
+    /// no crash point. No guest called open: the open happens at the same point
     /// on replay (install reads the trace's working directory; the root and a
     /// `chdir`'s directory open at the same guest call), and a path-only open
     /// changes nothing, so the driver hands back the same handle there. On a
@@ -171,7 +171,7 @@ impl Context {
     }
 
     /// Release a handle [`Self::fs_open_path_unrecorded`] opened, UNRECORDED
-    /// and with no `close` crash ordinal: the embedder lets go of its own
+    /// and with no crash point: the embedder lets go of its own
     /// handle (the native shim's working directory, replaced by a `chdir`) at
     /// the same guest call on replay, where the driver releases it again. On
     /// a host-capture filesystem it is the host's close, recorded to pair
@@ -278,7 +278,7 @@ impl Context {
     /// An unrecorded read on a host-capture filesystem, whose replay executes
     /// no driver: the host's answer to `read` is recorded as `operation` so
     /// the replay returns it, and nothing else of a guest operation happens.
-    /// No latency is drawn, no clock advances and no crash ordinal counts, so
+    /// No latency is drawn, no clock advances and no crash point is drawn, so
     /// the read stays bookkeeping on every filesystem.
     fn captured_unrecorded<T>(
         &mut self,

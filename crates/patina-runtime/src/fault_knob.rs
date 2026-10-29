@@ -2,15 +2,16 @@
 
 use patina_dst_rng_seeded::fault_domain;
 
+use patina_dst_abi::CrashKind;
+
 use crate::{
-    CrashPoint, ENV_CLOCK_FAULT_REPORT, ENV_CUSTOM_OP_FAIL_PERMILLE, ENV_CUSTOMOP_FAULT_REPORT,
-    ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT, ENV_DNS_LATENCY,
-    ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS, ENV_FS_CRASH_AT,
+    ENV_CLOCK_FAULT_REPORT, ENV_CRASH_KIND, ENV_CRASH_PERMILLE, ENV_CUSTOM_OP_FAIL_PERMILLE,
+    ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
+    ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
     ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
-    ENV_FS_TORN_GRANULARITY, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
-    ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
-    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER,
-    FINGERPRINT_BUGGIFY, TornGranularity,
+    ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE,
+    ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_NET_PARTITIONS,
+    ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY,
 };
 
 /// How a knob's value reaches a guest over the `PATINA_*` control plane.
@@ -144,34 +145,42 @@ macro_rules! fault_registry {
 
 fault_registry! {
     configs {
+        CrashFaultConfig as crash {
+            /// Seeded per-mille chance (0..=1000) that each crash point — a
+            /// completed operation with an effect a crash could cut short
+            /// ([`patina_dst_abi::Operation::is_crash_point`]) — is where the run
+            /// crashes and restarts. The first hit crashes; a run crashes at most
+            /// once.
+            permille: u16 => CrashPermille = 0 {
+                meta: KnobMeta {
+                    flag: "--crash-permille",
+                    env: ENV_CRASH_PERMILLE,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::CRASH_POINT, fault_domain::FS_CRASH],
+                    swarm_class: Some("crash"),
+                    // A crash fires at most once and ends the incarnation, so there
+                    // is no "should have fired N times" judgement to report: a run
+                    // that crashed says so in its `crash_restart` record.
+                    report: None,
+                },
+                sample: 1,
+            }
+            /// What the crash takes down: the process alone, whose page cache
+            /// survives, or the machine, which keeps only what was made durable.
+            /// Inert without `permille`; defaults to the machine.
+            kind: CrashKind => CrashKind = 1 {
+                meta: KnobMeta {
+                    flag: "--crash-kind",
+                    env: ENV_CRASH_KIND,
+                    plumbing: Plumbing::Scalar,
+                    injection_domains: &[fault_domain::FS_CRASH],
+                    swarm_class: Some("crash"),
+                    report: None,
+                },
+                sample: CrashKind::Process,
+            }
+        }
         FsFaultConfig as fs {
-            /// Inject a filesystem crash after a chosen boundary operation.
-            crash_at: Option<CrashPoint> => FsCrashAt = 0 {
-                meta: KnobMeta {
-                    flag: "--fs-crash-at",
-                    env: ENV_FS_CRASH_AT,
-                    plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FS_CRASH],
-                    swarm_class: Some("crash"),
-                    // A crash fires at a chosen boundary op, not at a rate, so there
-                    // is no "should have fired N times" judgement to report.
-                    report: None,
-                },
-                sample: Some(crate::CrashPoint { op: crate::CrashOp::Close, ordinal: 1 }),
-            }
-            /// Granularity at which the injected crash tears the final unsynced write.
-            /// Inert without `crash_at`; defaults to whole-block.
-            torn_granularity: TornGranularity => FsTornGranularity = 1 {
-                meta: KnobMeta {
-                    flag: "--fs-torn-granularity",
-                    env: ENV_FS_TORN_GRANULARITY,
-                    plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FS_CRASH],
-                    swarm_class: Some("crash"),
-                    report: None,
-                },
-                sample: TornGranularity::Byte,
-            }
             /// Seeded filesystem error probability in per-mille (0..=1000).
             error_permille: u16 => FsErrorPermille = 2 {
                 meta: KnobMeta {
@@ -446,7 +455,7 @@ fault_registry! {
 pub enum Masks {
     /// Fault knobs. The class is a candidate when ANY of them is set, and
     /// dropping it clears ALL of them — which is how one class covers a knob and
-    /// its modifier (`crash` covers `--fs-crash-at` and `--fs-torn-granularity`).
+    /// its modifier (`crash` covers `--crash-permille` and `--crash-kind`).
     Knobs(&'static [FaultKnob]),
     /// Cooperative-SUT configuration, which is not a fault knob: `--buggify` and
     /// its detail knobs configure exploration rather than injecting an effect.

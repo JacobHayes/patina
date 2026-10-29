@@ -6,9 +6,9 @@ use patina_dst_abi::{EffectError, ErrorCode, FsClock, FsEntryKind, FsMetadata, F
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::{FileData, MemFs};
 
+use crate::CrashFs;
 use crate::baseline::{DurableTimes, enumerate};
 use crate::namespace::{PendingKind, Reverted, Survivors};
-use crate::{CrashFs, TornGranularity};
 
 /// The creation modes crash reconstruction rebuilds entries at before restoring
 /// their recorded permission bits. Nothing is judged against them: every
@@ -35,7 +35,11 @@ struct NodeMetadata {
 }
 
 impl CrashFs {
-    pub(super) fn recompute_after_crash(&mut self) -> DriverResult<()> {
+    /// Rebuild the image a crash leaves. `process_survives` says whether the
+    /// process that holds descriptors lives on past it (an in-place
+    /// [`FsDriver::crash`]), so its open files keep their names; a restart's
+    /// process is gone, and with it every descriptor.
+    pub(super) fn recompute_after_crash(&mut self, process_survives: bool) -> DriverResult<()> {
         let pending = self.pending.clone();
         let mut sets = Survivors {
             dirs: self.durable.dirs.clone(),
@@ -158,7 +162,12 @@ impl CrashFs {
         // crash model must not silently resurrect lost directories to make a
         // child fit.
         let mut resurrected: BTreeSet<String> = BTreeSet::new();
-        for (path, kind) in self.live.open_entries() {
+        let open = if process_survives {
+            self.live.open_entries()
+        } else {
+            BTreeMap::new()
+        };
+        for (path, kind) in open {
             let fresh = sets.of(kind).insert(path.clone());
             if fresh && kind == FsEntryKind::File {
                 resurrected.insert(path);
@@ -179,38 +188,31 @@ impl CrashFs {
                 .or_insert_with(|| file.contents.clone());
         }
 
-        // The final unsynced write is eligible for a sub-block partial tear
-        // under the byte-granularity policy; every other block still tears
-        // wholesale. Captured before the merge loop borrows the rng.
-        let last_write = self.last_write.clone();
-        let final_write = match self.policy.torn_granularity {
-            TornGranularity::Byte => last_write.as_ref().and_then(|(path, offset, len)| {
-                self.file_source_inode(path, &reverted).map(|inode| {
-                    let (offset, len) = (*offset as u64, *len as u64);
-                    (inode, offset, offset.saturating_add(len))
-                })
-            }),
-            TornGranularity::Block => None,
-        };
         let mut file_contents_by_inode: BTreeMap<u64, FileData> = BTreeMap::new();
         let mut file_paths_by_inode: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for path in &files {
-            let source_inode = self.file_source_inode(path, &reverted).ok_or_else(|| {
-                EffectError::new(
-                    ErrorCode::InvalidState,
-                    format!("surviving file has no source inode: {path}"),
-                )
-            })?;
+            // A name only a descriptor pins holds that descriptor's node, even
+            // where a lost rename brought back the name's (absent) durable entry.
+            let pinned = resurrected
+                .contains(path)
+                .then(|| self.live.entry_metadata(path).ok())
+                .flatten()
+                .map(|metadata| metadata.ino);
+            let source_inode = self
+                .file_source_inode(path, &reverted)
+                .or(pinned)
+                .ok_or_else(|| {
+                    EffectError::new(
+                        ErrorCode::InvalidState,
+                        format!("surviving file has no source inode: {path}"),
+                    )
+                })?;
             let baseline = self
                 .staged_content
                 .get(&source_inode)
                 .or_else(|| durable_content_by_inode.get(&source_inode))
                 .cloned()
                 .unwrap_or_default();
-            let partial_region = match final_write {
-                Some((inode, start, end)) if inode == source_inode => Some((start, end)),
-                _ => None,
-            };
             let content = if resurrected.contains(path) || reverted.covers(path) {
                 // Only open-descriptor pinning put this name back: the crash
                 // decided its creation did not survive, so nothing it ever held
@@ -223,7 +225,7 @@ impl CrashFs {
                 match self.live.file_data(path) {
                     Ok(current) => {
                         let current = current.clone();
-                        self.torn_merge(&baseline, &current, partial_region)
+                        self.torn_merge(&baseline, &current)
                     }
                     Err(_) => baseline,
                 }
@@ -364,7 +366,6 @@ impl CrashFs {
         self.staged_times.clear();
         self.pending.clear();
         self.dirty.clear();
-        self.last_write = None;
         Ok(())
     }
 

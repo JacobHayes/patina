@@ -681,9 +681,9 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
 }
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
-    if !invocation.knobs.get(FaultKnob::FsCrashAt).is_empty() {
+    if !invocation.knobs.get(FaultKnob::CrashPermille).is_empty() {
         return Err(CliError::usage(
-            "cargo-family --fs-crash-at crash-restart is not implemented; refusing rather than running rollback-and-continue semantics",
+            "cargo-family --crash-permille crash-restart is not implemented; refusing rather than running a crash with no restart",
         ));
     }
     let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
@@ -758,7 +758,7 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
         .env_remove(ENV_GUEST_CPUS)
         .env_remove(ENV_PARAMS_JSON);
     // Scrub the fault-injection control plane so only the flags this invocation
-    // parsed reach the child; an ambient `PATINA_FS_CRASH_AT` (or any sibling) in
+    // parsed reach the child; an ambient `PATINA_CRASH_PERMILLE` (or any sibling) in
     // the caller's environment must never silently perturb a run that requested
     // no faults. Driven by the shared knob table, so a new knob is scrubbed the
     // day it is registered.

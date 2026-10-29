@@ -42,8 +42,7 @@ pub(super) fn native_build_invocation(values: &[&str]) -> NativeBuildInvocation 
 /// of a hand-kept list that a new knob can be left out of.
 pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
     match knob {
-        FaultKnob::FsCrashAt => "write:2",
-        FaultKnob::FsTornGranularity => "byte",
+        FaultKnob::CrashKind => "process",
         FaultKnob::NetLatencyNanos | FaultKnob::EpochJumpNanos => "500",
         FaultKnob::NetTcpBufferBytes => "4096",
         FaultKnob::NetPartition => "a,b",
@@ -60,7 +59,8 @@ pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
         | FaultKnob::NetResetPermille
         | FaultKnob::DnsFailPermille
         | FaultKnob::EntropyFailPermille
-        | FaultKnob::CustomOpFailPermille => "100",
+        | FaultKnob::CustomOpFailPermille
+        | FaultKnob::CrashPermille => "100",
     }
 }
 
@@ -324,12 +324,6 @@ mod registry {
                 vec!["unknown_op", "", "fs_write,", ",network", "NETWORK"],
             ),
             Kind::TaskSelector => (vec!["main", "0", "1", "42"], vec!["-1", "abc", ""]),
-            Kind::CrashSpec => (
-                vec![
-                    "open", "write", "sync", "close", "open:1", "write:3", "close:10",
-                ],
-                vec!["read", "", "open:0", "open:abc", "open:", ":3", "OPEN"],
-            ),
             Kind::KeyValue => (
                 vec!["k=v", "key=", "a=b=c", "x=1"],
                 vec!["=v", "novalue", "", "= "],
@@ -660,9 +654,9 @@ mod registry {
     }
 
     #[test]
-    fn cargo_refuses_fs_crash_at_without_restart_semantics() {
+    fn cargo_refuses_a_crash_without_restart_semantics() {
         let mut knobs = KnobValues::default();
-        knobs.0.insert(FaultKnob::FsCrashAt, vec!["write:1".into()]);
+        knobs.0.insert(FaultKnob::CrashPermille, vec!["1".into()]);
         let cargo = execute(Invocation {
             cargo_command: "run".into(),
             cargo_args: Vec::new(),
@@ -677,7 +671,7 @@ mod registry {
         })
         .unwrap_err()
         .to_string();
-        assert!(cargo.contains("cargo-family --fs-crash-at crash-restart is not implemented"));
+        assert!(cargo.contains("--crash-permille"), "{cargo}");
     }
 
     /// The Cargo family forwards every unrecognized token verbatim, in place,
@@ -786,7 +780,7 @@ mod registry {
         }
         // A Cargo-family replay refuses run controls by name instead of forwarding them to Cargo
         // alongside its own arguments.
-        for flag in ["--fs-crash-at", "--seed", "--buggify", "--sched-pct"] {
+        for flag in ["--crash-permille", "--seed", "--buggify", "--sched-pct"] {
             let argv = vec![
                 OsString::from(flag),
                 OsString::from("close"),

@@ -107,11 +107,6 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // system under test for a failure inside patina, whose reproduce command
     // does not even reproduce it (the abort needs the recording that the
     // reproduce command omits).
-    // An armed `--fs-crash-at` point the run never reached. The runtime names
-    // it at shutdown, inside the shutdown-failure line below, so it is listed
-    // first: the guest ran without the crash it asked for, which is a fact
-    // about the crash selector, not a recorder failure.
-    ("PATINA_FS_CRASH_SELECTOR_UNREACHED", "fs_crash_unreached"),
     ("patina: runtime shutdown failed", "shutdown_failure"),
     // The trace CHANNEL failed under a run that otherwise completed: the
     // recorder's scratch file could not be opened, read, or renamed. Unlike the
@@ -121,10 +116,10 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     // guest's status attached. That is what lets a whole campaign's worth of
     // them collapse onto one INFRA signature instead of one finding each.
     (crate::TRACE_CHANNEL_UNAVAILABLE, "trace_unavailable"),
-    // The run reached its `--fs-crash-at` point and patina could not carry out
-    // the crash (recovering or exporting the durable image failed). The
+    // The run reached its crash point and patina could not carry out the
+    // crash (recovering or exporting the durable image failed). The
     // supervisor names it; the shim's abort that follows is not the guest's.
-    ("PATINA_INFRA fs_crash_failed", "fs_crash_failed"),
+    ("PATINA_INFRA crash_failed", "crash_failed"),
     // The host could not give the guest what the virtual process granted it
     // (a stack limit above the host's hard limit, a refused host `prlimit64`):
     // the shim aborts, and the abort is the host's, not the guest's.

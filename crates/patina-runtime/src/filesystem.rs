@@ -1,6 +1,5 @@
-//! Filesystem effects, timestamps, file helpers, and crash injection.
+//! Filesystem effects, timestamps, and file helpers.
 
-use crate::fs_crash::CrashOp;
 use crate::recording::{
     Execution, FilesystemExpected, MAX_READ_FILE_BYTES, READ_CHUNK_SIZE, decode_bytes,
     decode_directory_entries, decode_handle, decode_metadata, decode_string, decode_u64,
@@ -108,7 +107,7 @@ impl Context {
     /// of the recorded sleeps, so it reproduces on replay exactly as
     /// [`Self::current_monotonic`] does, and an fs op costs no extra trace op)
     /// under the fixed relatime policy. A missing clock is a named refusal.
-    fn fs_clock(&mut self) -> Result<FsClock, RuntimeError> {
+    pub(crate) fn fs_clock(&mut self) -> Result<FsClock, RuntimeError> {
         let now_nanos = self
             .clock
             .as_mut()
@@ -152,11 +151,7 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        let decoded = decode_handle(&operation, outcome);
-        if decoded.is_ok() {
-            self.maybe_inject_crash(CrashOp::Open)?;
-        }
-        decoded
+        decode_handle(&operation, outcome)
     }
 
     pub fn fs_read(&mut self, fd: Fd, max_len: usize) -> Result<Vec<u8>, RuntimeError> {
@@ -207,16 +202,12 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        let decoded = decode_usize(&operation, outcome);
-        if decoded.is_ok() {
-            self.maybe_inject_crash(CrashOp::Write)?;
-        }
-        decoded
+        decode_usize(&operation, outcome)
     }
 
     /// Positional read (`pread`): read at an explicit offset without moving the
     /// file cursor. Recorded as [`Operation::FsReadAt`], distinct from a cursor
-    /// read, and -- like a cursor read -- fires no crash-injection boundary.
+    /// read, and -- like a cursor read -- no crash point.
     pub fn fs_read_at(
         &mut self,
         fd: Fd,
@@ -251,9 +242,8 @@ impl Context {
     }
 
     /// Positional write (`pwrite`): write at an explicit offset without moving
-    /// the file cursor. Recorded as [`Operation::FsWriteAt`] and counts toward
-    /// the `write` crash ordinal, so `--fs-crash-at write:N` fires on a guest's
-    /// positional page writes.
+    /// the file cursor. Recorded as [`Operation::FsWriteAt`]; a crash point like
+    /// a cursor write.
     pub fn fs_write_at(
         &mut self,
         fd: Fd,
@@ -284,17 +274,13 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        let decoded = decode_usize(&operation, outcome);
-        if decoded.is_ok() {
-            self.maybe_inject_crash(CrashOp::Write)?;
-        }
-        decoded
+        decode_usize(&operation, outcome)
     }
 
     /// The page cache's write-back: what a shared mapping of `fd`'s file
     /// stored, written into the file ([`Operation::FsWriteBackAt`]). Not a
     /// guest operation, so no modeled latency; it is storage traffic, so it
-    /// counts toward the `write` crash ordinal like any other write.
+    /// is a crash point like any other write.
     pub fn fs_write_back_at(
         &mut self,
         fd: Fd,
@@ -324,11 +310,7 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        let decoded = decode_usize(&operation, outcome);
-        if decoded.is_ok() {
-            self.maybe_inject_crash(CrashOp::Write)?;
-        }
-        decoded
+        decode_usize(&operation, outcome)
     }
 
     /// `memfd_create`: a nameless regular file on a new read-write handle
@@ -429,11 +411,7 @@ impl Context {
             Err(error) => Outcome::Error(error),
         };
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        let decoded = decode_unit(&operation, outcome);
-        if decoded.is_ok() {
-            self.maybe_inject_crash(CrashOp::Close)?;
-        }
-        decoded
+        decode_unit(&operation, outcome)
     }
 
     pub fn fs_dup(&mut self, fd: Fd) -> Result<Fd, RuntimeError> {
@@ -596,12 +574,7 @@ impl Context {
     }
 
     pub fn fs_sync(&mut self, fd: Fd) -> Result<(), RuntimeError> {
-        let result =
-            self.filesystem_unit(Operation::FsSync { fd }, |filesystem| filesystem.sync(fd));
-        if result.is_ok() {
-            self.maybe_inject_crash(CrashOp::Sync)?;
-        }
-        result
+        self.filesystem_unit(Operation::FsSync { fd }, |filesystem| filesystem.sync(fd))
     }
 
     pub fn fs_set_len(&mut self, fd: Fd, len: u64) -> Result<(), RuntimeError> {
@@ -879,14 +852,9 @@ impl Context {
         )
     }
 
-    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable. A sync,
-    /// so it counts toward the `sync` crash ordinal like a descriptor's.
+    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable.
     pub fn fs_sync_all(&mut self) -> Result<(), RuntimeError> {
-        let result = self.filesystem_unit(Operation::FsSyncAll, |filesystem| filesystem.sync_all());
-        if result.is_ok() {
-            self.maybe_inject_crash(CrashOp::Sync)?;
-        }
-        result
+        self.filesystem_unit(Operation::FsSyncAll, |filesystem| filesystem.sync_all())
     }
 
     /// One extended attribute's value (`getxattr` family).

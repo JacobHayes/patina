@@ -1,8 +1,8 @@
 //! Filesystem driver operations and dirty-page tracking.
 
 use patina_dst_abi::{
-    EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsEntryKind, FsMetadata,
-    FsNode, OpenFlags, SeekWhence, XattrTarget,
+    CrashKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsEntryKind,
+    FsMetadata, FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::BLOCK_SIZE;
@@ -49,15 +49,11 @@ impl FsDriver for CrashFs {
         // mode semantics. In particular, O_APPEND chooses EOF at write time, so
         // the pre-write cursor can be stale after intervening writes or crash
         // reconstruction.
-        if let (Ok(end), Some(path)) = (
-            self.live.seek(fd, 0, SeekWhence::Current),
-            self.open_paths.get(&fd).cloned(),
-        ) && let Some(start) = usize::try_from(end)
-            .ok()
-            .and_then(|end| end.checked_sub(written))
+        if let Ok(end) = self.live.seek(fd, 0, SeekWhence::Current)
+            && self.open_paths.contains_key(&fd)
+            && let Some(start) = end.checked_sub(written as u64)
         {
-            self.dirtied(fd, start as u64, written);
-            self.last_write = Some((path, start, written));
+            self.dirtied(fd, start, written);
         }
         Ok(written)
     }
@@ -70,11 +66,8 @@ impl FsDriver for CrashFs {
         bytes: &[u8],
     ) -> DriverResult<usize> {
         let written = self.live.write_at(clock, fd, offset, bytes)?;
-        if let (Ok(start), Some(path)) =
-            (usize::try_from(offset), self.open_paths.get(&fd).cloned())
-        {
+        if self.open_paths.contains_key(&fd) {
             self.dirtied(fd, offset, written);
-            self.last_write = Some((path, start, written));
         }
         Ok(written)
     }
@@ -88,11 +81,8 @@ impl FsDriver for CrashFs {
         bytes: &[u8],
     ) -> DriverResult<usize> {
         let written = self.live.write_back_at(clock, fd, offset, bytes)?;
-        if let (Ok(start), Some(path)) =
-            (usize::try_from(offset), self.open_paths.get(&fd).cloned())
-        {
+        if self.open_paths.contains_key(&fd) {
             self.dirtied(fd, offset, written);
-            self.last_write = Some((path, start, written));
         }
         Ok(written)
     }
@@ -516,13 +506,13 @@ impl FsDriver for CrashFs {
                 "filesystem crash counter exhausted",
             )
         })?;
-        self.recompute_after_crash()?;
+        self.recompute_after_crash(true)?;
         self.crashes = crashes;
         Ok(())
     }
 
-    fn crash_and_export_restart_snapshot(&mut self) -> DriverResult<Vec<u8>> {
-        Ok(self.crash_and_snapshot()?.encode()?)
+    fn crash_and_export_restart_snapshot(&mut self, kind: CrashKind) -> DriverResult<Vec<u8>> {
+        Ok(self.crash_and_snapshot(kind)?.encode()?)
     }
 }
 

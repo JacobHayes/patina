@@ -3,7 +3,7 @@ use crate::ENV_FACTS;
 
 use crate::buggify::Buggify;
 use crate::config::{BuggifyConfig, ExecutionMode, FaultConfig, RuntimeConfig, validate_guest_env};
-use crate::fs_crash::{CrashCounts, Incarnation};
+use crate::crash::{CrashArm, Incarnation};
 use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
 use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
 use crate::replay::{
@@ -17,7 +17,7 @@ use crate::replay::{
 };
 use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
-use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, TornGranularity, facts};
+use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, facts};
 use patina_dst_abi::ClockKind;
 use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
@@ -89,8 +89,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Install the channel told when the selected `--fs-crash-at` point is
-    /// reached, before the crash is carried out (see [`CrashAttemptSink`]).
+    /// Install the channel told when the run crashes, before the crash is
+    /// carried out (see [`CrashAttemptSink`]).
     pub fn with_crash_attempt_sink(mut self, sink: impl CrashAttemptSink + 'static) -> Self {
         self.crash_attempt_sink = Some(Box::new(sink));
         self
@@ -114,9 +114,8 @@ impl RuntimeBuilder {
     }
 
     /// Supply the durable base image the runtime wraps in its own
-    /// config-driven filesystem. When `--fs-crash-at` is configured, `build`
-    /// wraps this image in a [`CrashFs`] seeded and torn-write-configured from
-    /// `config.faults`; otherwise the image is used directly. This is the path
+    /// config-driven filesystem: `build` wraps this image in a [`CrashFs`]
+    /// seeded from the run, which a crash restart exports its image from. This is the path
     /// production callers (the shim) must use so no parsed fault knob can be
     /// silently dropped by a pre-installed filesystem — the crash filesystem is
     /// only ever constructed at the single choke point in `build`.
@@ -542,10 +541,9 @@ impl RuntimeBuilder {
         // `config.faults` — the single choke point that always consumes the
         // parsed crash knobs. Callers pass the durable base image via
         // `with_fs_image`; they must not pre-install the final filesystem, so a
-        // knob like `--fs-torn-granularity` can never be silently dropped by a
+        // knob like `--crash-kind` can never be silently dropped by a
         // filesystem that bypassed the fault config (the gap this replaced).
-        let fs_fault_knobs_set = self.config.faults.fs.crash_at.is_some()
-            || self.config.faults.fs.torn_granularity != TornGranularity::default()
+        let fs_fault_knobs_set = self.config.faults.crash != Default::default()
             || self.config.faults.fs.error_permille != 0
             || self.config.faults.fs.short_permille != 0;
         if self.filesystem.is_some() {
@@ -555,7 +553,7 @@ impl RuntimeBuilder {
             if fs_fault_knobs_set {
                 return Err(RuntimeError::Config(
                     "a filesystem was installed explicitly while filesystem fault \
-                     knobs (--fs-crash-at / --fs-torn-granularity / \
+                     knobs (--crash-permille / --crash-kind / \
                      --fs-error-permille / --fs-short-permille) are set; those \
                      knobs would be silently ignored. Supply the durable image via \
                      RuntimeBuilder::with_fs_image so the runtime builds the \
@@ -573,7 +571,7 @@ impl RuntimeBuilder {
         }
         if self.install_defaults {
             // The base image is ALWAYS wrapped in a config-driven `CrashFs`,
-            // whether or not `--fs-crash-at` is set. This preserves the historical
+            // whether or not `--crash-permille` is set. This preserves the historical
             // always-`CrashFs` behavior the shim relied on: a `CrashFs` is
             // crashable, so imperative callers that trigger `fs_crash()` manually
             // (the C-ABI `patina_init_crash` path)
@@ -592,10 +590,13 @@ impl RuntimeBuilder {
                 // constructors are not equivalent.
                 #[allow(clippy::unwrap_or_default)]
                 let base = self.fs_image.take().unwrap_or_else(MemFs::new);
+                // A machine crash leaves any subset of the unsynced blocks on
+                // disk, each a fair coin, and loses every namespace change no
+                // directory fsync committed.
                 let crash_fs = CrashFs::builder()
                     .filesystem(base)
                     .seed(domain_seed(root_seed, fault_domain::FS_CRASH))
-                    .torn_granularity(self.config.faults.fs.torn_granularity)
+                    .torn_write_probability(0.5)
                     .build()
                     .map_err(RuntimeError::Effect)?;
                 self.filesystem = Some(Box::new(
@@ -696,6 +697,32 @@ impl RuntimeBuilder {
                     .map_or(stop.steps, |budget| budget.min(stop.steps)),
             );
         }
+        // A crash ends the incarnation it fires in, and only a supervisor can
+        // boot the next one, so a live first incarnation with a crash rate and
+        // no supervisor would either never crash or crash into nothing.
+        let live = matches!(
+            execution,
+            Execution::Seeded | Execution::Record { .. } | Execution::Branch { .. }
+        );
+        if self.config.faults.crash.permille > 0
+            && live
+            && !self.config.crash_supervised
+            && self.config.incarnation == Incarnation::First
+        {
+            return Err(RuntimeError::Config(
+                "--crash-permille needs a crash supervisor to boot the restarted incarnation \
+                 (the native run supervisor); this run has none"
+                    .into(),
+            ));
+        }
+        let crash = CrashArm::arm(
+            self.config.crash_supervised,
+            self.config.incarnation == Incarnation::First,
+            matches!(execution, Execution::Replay(_)),
+            self.config.faults.crash.permille,
+            self.config.faults.crash.kind,
+            root_seed,
+        );
         let cpus = self.config.cpus();
         Ok(Context {
             compute_stop,
@@ -726,14 +753,11 @@ impl RuntimeBuilder {
             parked_tasks: std::collections::BTreeSet::new(),
             expired: Vec::new(),
             embedder_section: false,
-            crash_at: self.config.faults.fs.crash_at,
-            crash_counts: CrashCounts::default(),
-            // A run has one crash selector and incarnation 0 is the one it
-            // fires in; every later incarnation starts after it has fired.
-            crash_fired: self.config.incarnation != Incarnation::First,
+            // A run crashes at most once, and incarnation 0 is the one it
+            // crashes in: every later incarnation boots after it has.
+            crash,
             crash_attempt_sink: self.crash_attempt_sink.take(),
             incarnation: self.config.incarnation.id(),
-            require_crash_selector_reached: self.config.require_crash_selector_reached,
             sleep_jitter_nanos: self.config.faults.clock.sleep_jitter_nanos,
             // Domain-separated seed so sleep-jitter draws do not correlate with
             // the entropy or network-fault streams that also derive from root_seed.

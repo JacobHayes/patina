@@ -595,14 +595,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());
     }
-    if !spec.fs_crash_reach.is_empty() {
-        let reach: Vec<String> = spec
-            .fs_crash_reach
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        map.insert("fs_crash_reach".into(), reach.into());
-    }
     // Same default-omit rule as the host table above: a campaign that forwards
     // none of the native harness/gate surface records exactly the JSON it did
     // before these keys existed, so an out-dir written by an earlier build still

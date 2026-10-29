@@ -348,13 +348,13 @@ reported none.
 
 ## Where to go next
 
-- Add the other fault domains: `--fs-crash-at`, `--fs-error-permille`,
+- Add the other fault domains: `--crash-permille`, `--fs-error-permille`,
   `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`,
   `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
   shape as the DNS knobs in section 9. They are seed-driven and default off. All
-  are recorded for flag-free replay. Crash restart (`--fs-crash-at`) is
-  native-only: the Cargo family refuses it, and campaigns draw it only from a spec's
-  `fs_crash_reach`.
+  are recorded for flag-free replay. Crash restart (`--crash-permille`, with
+  `--crash-kind process|machine`) is native-only: the Cargo family refuses it,
+  and campaigns draw it from the `crash` fault plane.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical

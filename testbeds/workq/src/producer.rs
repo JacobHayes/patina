@@ -37,7 +37,7 @@ pub fn derive_job(seed: u64, producer: u32, client_seq: u64) -> (u32, u64) {
 /// crash-recovery (the durability invariant checked in `report`).
 ///
 /// In memory it survives only the in-process server restart. A process
-/// restart (Patina's `--fs-crash-at`) starts the whole program afresh, so
+/// restart (Patina's `--crash-permille`) starts the whole program afresh, so
 /// `--ack-ledger PATH` also keeps the acks on disk, the way a real client that
 /// outlives the server would remember them: each ack is appended and fsync'd,
 /// and the acks an earlier incarnation recorded come back as [`Self::prior`]
@@ -64,8 +64,10 @@ impl AckedLedger {
                 file.read_to_string(&mut text)?;
                 // Only whole lines: a crash can tear the last, unsynced one.
                 for line in text.split_inclusive('\n').filter(|l| l.ends_with('\n')) {
-                    let fields: Vec<u64> =
-                        line.split_whitespace().filter_map(|f| f.parse().ok()).collect();
+                    let fields: Vec<u64> = line
+                        .split_whitespace()
+                        .filter_map(|f| f.parse().ok())
+                        .collect();
                     if let [job_id, producer, client_seq] = fields[..] {
                         prior.insert(job_id, (producer as u32, client_seq));
                     }
@@ -103,9 +105,7 @@ impl AckedLedger {
         self.prior_lost = self
             .prior
             .iter()
-            .filter(|&(id, &(producer, seq))| {
-                recovered.get(id) != Some(&(producer, seq))
-            })
+            .filter(|&(id, &(producer, seq))| recovered.get(id) != Some(&(producer, seq)))
             .map(|(&id, _)| id)
             .collect();
     }
@@ -168,7 +168,10 @@ pub fn run(spec: ProducerSpec) {
             while let Some(reply) = Msg::recv(&socket, &mut buffer) {
                 if let Msg::EnqueueAck(producer, acked, job_id) = reply {
                     if producer == spec.id && acked == client_seq {
-                        spec.acked.lock().unwrap().record(job_id, producer, client_seq);
+                        spec.acked
+                            .lock()
+                            .unwrap()
+                            .record(job_id, producer, client_seq);
                         break 'resend;
                     }
                 }

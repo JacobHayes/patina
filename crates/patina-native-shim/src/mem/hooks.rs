@@ -226,6 +226,27 @@ pub(crate) fn allocated(
     }
 }
 
+/// What a process crash keeps of the page cache: the stores through shared
+/// views no write-back has written yet, each page with the description its
+/// write-back would name. The kernel outlives the process, so they reach the
+/// file all the same. An error when the cache is held at the crash, which
+/// would leave the stores unknown.
+pub(crate) fn unwritten_stores() -> Result<Vec<(u64, u64, Vec<u8>)>, String> {
+    let mappings = MAPPINGS
+        .try_lock()
+        .ok_or("the page cache was held when the process crashed")?;
+    let mut stores = Vec::new();
+    for (ino, cache) in &mappings.caches {
+        let Some(handle) = views::writer_among(&mappings, *ino) else {
+            continue;
+        };
+        for (offset, bytes) in cache.dirty_pages() {
+            stores.push((handle, offset, bytes));
+        }
+    }
+    Ok(stores)
+}
+
 /// After the filesystem rolled back to its durable image
 /// ([`crate::patina_crash`]): every page cache reloads what its file holds
 /// now, so a store no write-back or sync made durable is lost with the other

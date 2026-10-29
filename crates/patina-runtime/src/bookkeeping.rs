@@ -9,7 +9,7 @@ use crate::{Context, RuntimeError};
 /// Only reads that take no guest-facing effect are listed here. They record
 /// no operation (outside host capture, where a filesystem read records the
 /// host's answer for the replay, which executes no driver), draw no fault,
-/// charge no latency, count toward no crash ordinal and consume no seeded
+/// charge no latency, are no crash point and consume no seeded
 /// stream. Code that holds only this view cannot name an effectful method.
 pub struct Bookkeeping<'a> {
     context: &'a mut Context,

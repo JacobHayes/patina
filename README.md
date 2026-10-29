@@ -177,16 +177,20 @@ Replay refuses `[defaults.replay]` because traces are authoritative.
 ### Fault injection and schedule exploration
 
 Faults are seed-driven and default-off. Fault configurations are recorded
-into the trace so replay reproduces them flag-free. `--fs-crash-at` has
+into the trace so replay reproduces them flag-free. A crash has
 fresh-incarnation semantics on native runs, and its record/replay carries both
 incarnations; Cargo-family crash refuses by name until its restart path is
 wired.
 
-- **Filesystem faults**: native `--fs-crash-at open|write|sync|close[:N]`
-  terminates the current incarnation and restarts once from the recovered
-  durable image, with block- or byte-granularity torn writes
-  (`--fs-torn-granularity`). The Cargo family refuses crash restart rather than
-  emulate it with rollback-and-continue. The remaining fs
+- **Crash restart**: native `--crash-permille N` gives every successful
+  side-effecting operation (a filesystem change or a network send) an N
+  per-mille chance of being the crash point; the first hit terminates the
+  incarnation and restarts it once. `--crash-kind process` keeps the page
+  cache; `--crash-kind machine` (the default) restarts from the recovered
+  durable image, where any subset of unsynced blocks may survive and a new name
+  in an unsynced directory is lost. The Cargo family refuses crash restart
+  rather than emulate it with rollback-and-continue.
+- **Filesystem faults**: the fs
   faults are
   rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
