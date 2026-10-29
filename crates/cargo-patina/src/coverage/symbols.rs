@@ -105,7 +105,6 @@ struct EdgeAttribution {
     crate_name: String,
     module: String,
     covered: bool,
-    groups: Vec<String>,
 }
 
 impl RollupLeaf for EdgeAttribution {
@@ -115,10 +114,6 @@ impl RollupLeaf for EdgeAttribution {
 
     fn module(&self) -> &str {
         &self.module
-    }
-
-    fn groups(&self) -> &[String] {
-        &self.groups
     }
 
     fn bucket(&self) -> &str {
@@ -226,7 +221,6 @@ pub(super) fn symbolize_coverage(
             crate_name,
             module,
             covered,
-            groups: Vec::new(),
         });
     }
     let rollup = build_rollup(&edges, COVERED_BUCKETS);

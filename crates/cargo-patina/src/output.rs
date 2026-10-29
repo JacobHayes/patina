@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::help::{self, Flag};
 use crate::render::{self, FailureSummary};
-use crate::{CliError, config, exit_code};
+use crate::{CliError, exit_code};
 
 mod capture;
 mod envelope;
@@ -75,8 +75,6 @@ pub struct OutputOptions {
     /// `--report PATH`: write the timeline HTML *only when the run failed*, with a
     /// prominent failure-summary section.
     pub report: Option<PathBuf>,
-    /// `--no-config`: skip `.patina/config.toml` discovery for hermetic invocations.
-    pub no_config: bool,
 }
 
 impl OutputOptions {
@@ -120,7 +118,7 @@ pub fn options() -> &'static OutputOptions {
     OPTIONS.get_or_init(OutputOptions::default)
 }
 
-/// Strip the global output/config flags from the leading (pre-`--`) region of
+/// Strip the global output flags from the leading (pre-`--`) region of
 /// an argument list, returning the parsed options and the remaining arguments.
 /// Flags after a `--` separator are left in place — there they belong to the
 /// guest program, not Patina.
@@ -137,7 +135,6 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
     }
     options.render = crate::cli::single(&found, "--render")?.map(PathBuf::from);
     options.report = crate::cli::single(&found, "--report")?.map(PathBuf::from);
-    options.no_config = found.contains_key("--no-config");
     Ok((options, rest))
 }
 

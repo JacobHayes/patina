@@ -36,7 +36,6 @@ mod audit;
 mod aux_store;
 mod campaign;
 mod cli;
-mod config;
 mod coverage;
 #[cfg(unix)]
 mod crash_restart;
@@ -621,15 +620,14 @@ pub fn entrypoint() -> Result<i32, CliError> {
     lifeline::watch()?;
     supervisor_identity::establish()?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    // Strip the cross-cutting output/config flags (`--format`, `--render`,
-    // `--report`, `--no-config`) once, globally, before any per-verb routing —
+    // Strip the cross-cutting output flags (`--format`, `--render`,
+    // `--report`) once, globally, before any per-verb routing —
     // the same pre-pass shape as `extract_target`. They are patina-level flags,
     // so they never reach the guest (anything after `--` is left in place).
     let (options, arguments) = output::extract(arguments)?;
     let is_json = options.is_json();
-    let no_config = options.no_config;
     output::install(options);
-    let result = config::layer_arguments(arguments, no_config).and_then(dispatch);
+    let result = dispatch(arguments);
     // Under `--output json` a CLI-side failure becomes a JSON error envelope
     // rather than the bare `cargo-patina: {error}` stderr line, so an agent always
     // parses one machine-readable object.

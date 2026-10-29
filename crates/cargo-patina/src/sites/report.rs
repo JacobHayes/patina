@@ -38,10 +38,6 @@ impl RollupLeaf for JoinedSite<'_> {
         &self.site.module
     }
 
-    fn groups(&self) -> &[String] {
-        &self.site.groups
-    }
-
     fn bucket(&self) -> &str {
         &self.site.runtime
     }
@@ -216,17 +212,10 @@ pub(super) fn build_report(
     if !duplicate_labels.is_empty() {
         root.insert("duplicate_labels".to_string(), json!(duplicate_labels));
     }
-    if let Some(config) = crate::config::provenance_json() {
-        root.insert("config".to_string(), config);
-    }
     root.insert("totals".to_string(), totals);
     root.insert(
         "crates".to_string(),
         crate_rollups_json(&rollup.crates, exercised.is_some()),
-    );
-    root.insert(
-        "groups".to_string(),
-        group_rollups_json(&rollup.groups, exercised.is_some()),
     );
     root.insert(
         "unmatched_runtime_labels".to_string(),
@@ -371,11 +360,6 @@ fn site_matches(site: &SiteRecord, options: &SitesOptions) -> bool {
     {
         return false;
     }
-    if let Some(group_filter) = &options.group_filter
-        && !site.groups.iter().any(|group| group == group_filter)
-    {
-        return false;
-    }
     if let Some(site_filter) = &options.site_filter
         && &site.id != site_filter
         && site.label.as_ref() != Some(site_filter)
@@ -429,25 +413,6 @@ fn crate_rollups_json(crates: &[crate::rollup::CrateRollup], include_gaps: bool)
                 });
                 if include_gaps {
                     value["never_exercised"] = json!(krate.gaps);
-                }
-                value
-            })
-            .collect(),
-    )
-}
-
-fn group_rollups_json(groups: &[crate::rollup::GroupRollup], include_gaps: bool) -> Value {
-    Value::Array(
-        groups
-            .iter()
-            .map(|group| {
-                let mut value = json!({
-                    "name": group.name,
-                    "sites": group.total,
-                    "by_runtime": group.by_bucket,
-                });
-                if include_gaps {
-                    value["never_exercised"] = json!(group.gaps);
                 }
                 value
             })

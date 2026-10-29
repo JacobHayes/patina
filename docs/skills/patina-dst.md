@@ -252,9 +252,6 @@ learn the surface.
   thing to a worked example of your own situation.
 - `ARCHITECTURE.md`, `INTENTS.md`, `VALIDATION.md` — how it works, what it
   refuses to be, and what is actually proven versus merely claimed.
-- Repository config lives at `.patina/config.toml` and can supply per-verb
-  defaults; its keys are registry-backed flag names. Precedence and the way an
-  applied config announces itself are documented in `README.md`.
 
 ## Reading what comes back
 

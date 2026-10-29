@@ -256,7 +256,7 @@ pub(super) fn run_replay(
     collect_child(command, timeout_secs)
 }
 
-/// The child `cargo patina <verb> --no-config --format json` command every
+/// The child `cargo patina <verb> --format json` command every
 /// campaign child shares, in its own process group and tied to this campaign's
 /// life ([`crate::lifeline`]).
 fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
@@ -264,7 +264,6 @@ fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
     crate::lifeline::tie(&mut command)?;
     command
         .arg(verb)
-        .arg("--no-config")
         // The structured outcome channel: the child reports its result as a
         // `patina.result/v1` envelope rather than as diagnostics the campaign
         // would have to grep. This is the classifier's ONLY input.
@@ -276,7 +275,6 @@ fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
     // `PATINA_*_REPORT=0` must never reach a generation and turn a blind run into
     // a clean one. Pin every report on, from the same table the families forward,
     // so a report added to the runtime is protected the day it exists.
-    crate::config::scrub_child_config_env(&mut command, verb);
     for report in patina_dst_runtime::Report::ALL {
         command.env(report.env(), "1");
     }

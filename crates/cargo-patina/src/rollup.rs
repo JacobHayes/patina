@@ -1,9 +1,8 @@
 //! Shared hierarchical rollups for inventory-style reports.
 //!
 //! The rollup contract is intentionally independent of `sites`: callers provide
-//! attributed leaves (crate/module/file/groups plus a bucket name such as
-//! `driven` or `covered`) and receive deterministic crate→module and group
-//! summaries. Coverage-depth reuses this module with edge buckets rather than
+//! attributed leaves (crate/module plus a bucket name such as `driven` or
+//! `covered`) and receive deterministic crate→module summaries. Coverage-depth reuses this module with edge buckets rather than
 //! growing a parallel grouping implementation.
 
 use std::collections::BTreeMap;
@@ -14,8 +13,6 @@ pub(crate) trait RollupLeaf {
     fn crate_name(&self) -> &str;
     /// Rust module path used for drill-down (`crate::module::path`).
     fn module(&self) -> &str;
-    /// Custom groups attached by the caller (empty until the config wave lands).
-    fn groups(&self) -> &[String];
     /// Bucket name counted in every summary (for sites this is runtime class).
     fn bucket(&self) -> &str;
     /// Whether this leaf contributes to the caller's gap counter.
@@ -31,7 +28,6 @@ pub(crate) struct Rollup {
     pub(crate) by_bucket: BTreeMap<String, usize>,
     pub(crate) gaps: usize,
     pub(crate) crates: Vec<CrateRollup>,
-    pub(crate) groups: Vec<GroupRollup>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,14 +42,6 @@ pub(crate) struct CrateRollup {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ModuleRollup {
     pub(crate) module: String,
-    pub(crate) total: usize,
-    pub(crate) by_bucket: BTreeMap<String, usize>,
-    pub(crate) gaps: usize,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct GroupRollup {
-    pub(crate) name: String,
     pub(crate) total: usize,
     pub(crate) by_bucket: BTreeMap<String, usize>,
     pub(crate) gaps: usize,
@@ -83,14 +71,13 @@ impl Counts {
     }
 }
 
-/// Build the crate→module and group hierarchy. `bucket_order` names buckets that
+/// Build the crate→module hierarchy. `bucket_order` names buckets that
 /// should appear with zero counts even when absent, keeping JSON and human tables
 /// stable across small scopes.
 pub(crate) fn build_rollup<T: RollupLeaf>(leaves: &[T], bucket_order: &[&str]) -> Rollup {
     let mut totals = Counts::default();
     let mut crates: BTreeMap<String, Counts> = BTreeMap::new();
     let mut modules: BTreeMap<(String, String), Counts> = BTreeMap::new();
-    let mut groups: BTreeMap<String, Counts> = BTreeMap::new();
 
     for leaf in leaves {
         let bucket = leaf.bucket();
@@ -104,9 +91,6 @@ pub(crate) fn build_rollup<T: RollupLeaf>(leaves: &[T], bucket_order: &[&str]) -
             .entry((leaf.crate_name().to_string(), leaf.module().to_string()))
             .or_default()
             .add(bucket, gap);
-        for group in leaf.groups() {
-            groups.entry(group.clone()).or_default().add(bucket, gap);
-        }
     }
 
     let mut modules_by_crate: BTreeMap<String, Vec<ModuleRollup>> = BTreeMap::new();
@@ -139,26 +123,12 @@ pub(crate) fn build_rollup<T: RollupLeaf>(leaves: &[T], bucket_order: &[&str]) -
         })
         .collect();
 
-    let groups = groups
-        .into_iter()
-        .map(|(name, counts)| {
-            let counts = counts.with_all_buckets(bucket_order);
-            GroupRollup {
-                name,
-                total: counts.total,
-                by_bucket: counts.by_bucket,
-                gaps: counts.gaps,
-            }
-        })
-        .collect();
-
     let totals = totals.with_all_buckets(bucket_order);
     Rollup {
         total: totals.total,
         by_bucket: totals.by_bucket,
         gaps: totals.gaps,
         crates,
-        groups,
     }
 }
 
@@ -170,7 +140,6 @@ mod tests {
         crate_name: &'static str,
         module: &'static str,
         bucket: &'static str,
-        groups: Vec<String>,
         gap: bool,
     }
 
@@ -181,10 +150,6 @@ mod tests {
 
         fn module(&self) -> &str {
             self.module
-        }
-
-        fn groups(&self) -> &[String] {
-            &self.groups
         }
 
         fn bucket(&self) -> &str {
@@ -203,14 +168,12 @@ mod tests {
                 crate_name: "b",
                 module: "b::m",
                 bucket: "observed",
-                groups: vec!["g".to_string()],
                 gap: true,
             },
             Leaf {
                 crate_name: "a",
                 module: "a",
                 bucket: "driven",
-                groups: vec![],
                 gap: false,
             },
         ];
@@ -220,7 +183,5 @@ mod tests {
         assert_eq!(rollup.gaps, 1);
         assert_eq!(rollup.crates[0].name, "a");
         assert_eq!(rollup.crates[1].name, "b");
-        assert_eq!(rollup.groups[0].name, "g");
-        assert_eq!(rollup.groups[0].gaps, 1);
     }
 }

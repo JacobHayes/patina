@@ -111,7 +111,6 @@ impl<'a> FileScanner<'a> {
             crate_name: self.file.crate_name.clone(),
             module: self.current_module(),
             context: self.current_context(),
-            groups: Vec::new(),
             macro_path,
         });
     }

@@ -63,7 +63,6 @@ pub struct Envelope {
     pub(super) stdout: Option<String>,
     pub(super) stderr: Option<String>,
     pub(crate) message: Option<String>,
-    config: Option<serde_json::Value>,
 }
 
 impl Envelope {
@@ -98,7 +97,6 @@ impl Envelope {
             stdout: None,
             stderr: None,
             message: None,
-            config: config::provenance_json(),
         }
     }
 
@@ -251,9 +249,6 @@ impl Envelope {
         }
         if let Some(v) = &self.message {
             m.insert("message".into(), Value::from(v.clone()));
-        }
-        if let Some(v) = &self.config {
-            m.insert("config".into(), v.clone());
         }
         Value::Object(m)
     }

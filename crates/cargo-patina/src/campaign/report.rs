@@ -532,7 +532,7 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         Path::new(&state.artifact.path),
     );
     let sdk_sites_json = sdk_sites_summary_json(input.coverage, input.coverage_verdict);
-    let mut envelope = serde_json::json!({
+    let envelope = serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
         "verb": "campaign",
         "result": input.result,
@@ -552,11 +552,6 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         "verification": VerificationSummary::of(state).to_json(),
         "artifacts": artifacts,
     });
-    if let (Some(object), Some(config)) =
-        (envelope.as_object_mut(), crate::config::provenance_json())
-    {
-        object.insert("config".to_string(), config);
-    }
     envelope
 }
 

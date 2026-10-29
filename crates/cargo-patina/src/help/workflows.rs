@@ -521,7 +521,7 @@ pub(super) const SITES: Verb = Verb {
     name: "sites",
     summary: "Inventory static assertion/oracle sites in the current workspace.",
     synopsis: &[
-        "cargo patina sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
+        "cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
         "cargo patina sites --selftest",
     ],
     prose: "\
@@ -553,13 +553,6 @@ planted fixture and proves every recognizer class fires.",
                 None,
                 Value::Required("PATH", Kind::Str),
                 "Drill down to one Rust module path.",
-                false,
-            ),
-            f(
-                "--group",
-                None,
-                Value::Required("NAME", Kind::Str),
-                "Drill down to one configured group (groups arrive with .patina config in a later wave).",
                 false,
             ),
             f(

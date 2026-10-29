@@ -2,9 +2,7 @@
 //!
 //! Wave 4 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
 //! supplied through `--exercised FILE`, or with a campaign `<out>/sites.json`
-//! store supplied through `--exercised OUTDIR`. `.patina/config.toml` groups are
-//! applied after cache reads so grouping changes never poison the SCA cache;
-//! link-time static site enumeration is a later wave.
+//! store supplied through `--exercised OUTDIR`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -62,7 +60,6 @@ pub(crate) enum SitesInvocation {
 pub(crate) struct SitesOptions {
     crate_filter: Option<String>,
     module_filter: Option<String>,
-    group_filter: Option<String>,
     site_filter: Option<String>,
     all: bool,
     exercised: Option<PathBuf>,
@@ -76,14 +73,13 @@ impl SitesOptions {
         self.all
             || self.crate_filter.is_some()
             || self.module_filter.is_some()
-            || self.group_filter.is_some()
             || self.site_filter.is_some()
             || self.kind_filter.is_some()
             || self.runtime_filter.is_some()
     }
 }
 
-/// Parse `sites [--crate NAME] [--module PATH] [--group NAME] [--site LABEL]
+/// Parse `sites [--crate NAME] [--module PATH] [--site LABEL]
 /// [--all] [--exercised FILE] [--kind KIND]
 /// [--runtime driven|observed|invisible] [--no-cache] [--selftest]`.
 pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliError> {
@@ -96,7 +92,6 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliErro
     let options = SitesOptions {
         crate_filter: args.string("--crate"),
         module_filter: args.string("--module"),
-        group_filter: args.string("--group"),
         site_filter: args.string("--site"),
         all: args.flag("--all"),
         exercised: args.path("--exercised"),
@@ -119,7 +114,6 @@ impl PartialEq for SitesOptions {
     fn eq(&self, other: &Self) -> bool {
         self.crate_filter == other.crate_filter
             && self.module_filter == other.module_filter
-            && self.group_filter == other.group_filter
             && self.site_filter == other.site_filter
             && self.all == other.all
             && self.exercised == other.exercised
@@ -139,8 +133,7 @@ pub(crate) fn execute(invocation: SitesInvocation) -> Result<i32, CliError> {
 }
 
 fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
-    let mut scan = scan_current_workspace(!options.no_cache)?;
-    crate::config::apply_site_groups(&mut scan.sites);
+    let scan = scan_current_workspace(!options.no_cache)?;
     let duplicate_labels = find_duplicate_labels(&scan.sites);
     let exercised = options
         .exercised
@@ -181,7 +174,6 @@ pub(crate) struct SiteRecord {
     pub(crate) crate_name: String,
     pub(crate) module: String,
     pub(crate) context: String,
-    pub(crate) groups: Vec<String>,
     pub(crate) macro_path: String,
 }
 
@@ -198,10 +190,6 @@ impl RollupLeaf for SiteRecord {
 
     fn module(&self) -> &str {
         &self.module
-    }
-
-    fn groups(&self) -> &[String] {
-        &self.groups
     }
 
     fn bucket(&self) -> &str {

@@ -185,16 +185,11 @@ impl ReplayOracle {
         let mut command = Command::new(&self.self_exe);
         // The envelope is the only channel that carries the replay's typed
         // divergence, and the one the knob phase judged the same target on.
-        command
-            .arg("replay")
-            .arg("--no-config")
-            .arg("--format")
-            .arg("json");
+        command.arg("replay").arg("--format").arg("json");
         command.arg(&self.artifact).arg(&path);
         for flag in &self.invocation {
             command.arg(flag);
         }
-        crate::config::scrub_child_config_env(&mut command, "replay");
         crate::supervisor_identity::expect_this_supervisor(&mut command)
             .map_err(|error| io::Error::other(error.to_string()))?;
         crate::lifeline::tie(&mut command).map_err(|error| io::Error::other(error.to_string()))?;

@@ -30,13 +30,6 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "Like --render but only when the run fails; the HTML leads with a failure summary.",
         false,
     ),
-    f(
-        "--no-config",
-        None,
-        Value::None,
-        "Ignore .patina/config.toml for this invocation (PATINA_* environment defaults still apply).",
-        false,
-    ),
 ];
 
 pub const HELP_FLAGS: &[Flag] = &[

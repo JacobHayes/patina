@@ -12,7 +12,6 @@ fn extract_pulls_flags_and_leaves_program_args() {
         "out.html",
         "--format",
         "json",
-        "--no-config",
         "--",
         "--render",
         "guestflag",
@@ -23,7 +22,6 @@ fn extract_pulls_flags_and_leaves_program_args() {
     let (opts, rest) = extract(args).unwrap();
     assert_eq!(opts.format, OutputFormat::Json);
     assert_eq!(opts.render, Some(PathBuf::from("out.html")));
-    assert!(opts.no_config);
     // The post-`--` `--render` is a guest flag and must survive.
     let rest: Vec<String> = rest
         .iter()

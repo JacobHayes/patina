@@ -40,7 +40,6 @@ fn envelope_omits_fields_nothing_produced() {
 /// strictly ADDITIVE to `patina.result/v1`.
 const ENVELOPE_KEYS: &[&str] = &[
     "artifact",
-    "config",
     "content_hash",
     "coverage",
     "crash_restart",
@@ -118,9 +117,6 @@ fn fully_populated_envelope() -> Envelope {
     env.stdout = Some(String::new());
     env.stderr = Some(String::new());
     env.message = Some("detail".into());
-    // Set explicitly: `Envelope::new` fills it from config discovery, which
-    // finds nothing in a unit test.
-    env.config = Some(serde_json::json!({"path": ".patina/config.toml"}));
     env.trace = Some(TraceFacts {
         path: "t.patina".into(),
         format_version: 4,

@@ -504,43 +504,6 @@ fn refusal_message(spec: &FamilySpec, flag: &str) -> String {
     }
 }
 
-/// Verb-local flags that may be supplied by `.patina/config.toml` defaults or
-/// PATINA_* env defaults. Global output/help switches are intentionally excluded:
-/// they are parsed before config discovery and are invocation presentation, not
-/// verb defaults.
-pub fn configurable_flags(verb_name: &str) -> Vec<&'static Flag> {
-    verb(verb_name)
-        .into_iter()
-        .flat_map(|verb| verb.groups.iter())
-        .flat_map(|group| group.flags.iter())
-        .collect()
-}
-
-/// Lookup a configurable flag by CLI spelling.
-pub fn configurable_flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
-    configurable_flags(verb_name)
-        .into_iter()
-        .find(|flag| flag.name == name || flag.short == Some(name))
-}
-
-/// The TOML/env key for a configurable flag. Most keys are the long flag without
-/// leading dashes; `--gens` intentionally uses the readable config key
-/// `generations`, matching `.patina/config.toml`'s project-level vocabulary
-/// without adding a CLI flag alias.
-pub fn config_key(flag: &Flag) -> &'static str {
-    match flag.name {
-        "--gens" => "generations",
-        name => name.trim_start_matches('-'),
-    }
-}
-
-/// Lookup a configurable flag by its TOML/env key.
-pub fn configurable_flag_by_key(verb_name: &str, key: &str) -> Option<&'static Flag> {
-    configurable_flags(verb_name)
-        .into_iter()
-        .find(|flag| config_key(flag) == key)
-}
-
 /// The canonical `Topic` for a routed verb token. `explore run`/`explore test`
 /// all map to the `explore` overview; `test` has its own section.
 pub fn topic_for(verb_token: &str) -> Topic {

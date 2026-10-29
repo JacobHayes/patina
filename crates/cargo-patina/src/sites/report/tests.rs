@@ -22,7 +22,6 @@ fn site(
         crate_name: "pkg".to_string(),
         module: "pkg".to_string(),
         context: "src".to_string(),
-        groups: Vec::new(),
         macro_path: kind.to_string(),
     }
 }
