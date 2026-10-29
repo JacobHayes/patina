@@ -5,7 +5,7 @@ use super::*;
 pub(super) const COVERAGE_MAP_MAGIC: &[u8; 16] = b"patina.covmap/v1";
 pub(super) const COVERAGE_MAP_VERSION: u32 = 1;
 
-pub(crate) const CAMPAIGN_COVERAGE_SCHEMA: &str = "patina.coverage.campaign/v2";
+pub(crate) const CAMPAIGN_COVERAGE_SCHEMA: &str = "patina.coverage.campaign/v3";
 pub(super) const COVERAGE_ENVELOPE_SCHEMA: &str = "patina.coverage/v1";
 pub(super) const COVERED_BUCKETS: &[&str] = &["covered", "uncovered"];
 

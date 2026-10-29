@@ -140,7 +140,7 @@ pub(super) fn guided_generation(
         .active_mut()
         .expect("a guided campaign refuses to start without edge coverage");
     let (hash, decision) =
-        GuidancePlan::new(spec.seed_base, units, store.features(), store.decisions())
+        GuidancePlan::new(spec.seed_base, units, store.edge_log(), store.decisions())
             .generation_hash(generation);
     store.record_decision(generation, decision);
     (hash, decision)
@@ -193,7 +193,6 @@ pub(super) fn fold_edge_coverage_generation(
         return Ok(Some(FoldOutcome {
             generation,
             new_edges: 0,
-            new_features: 0,
             skipped_by_watermark: true,
         }));
     }

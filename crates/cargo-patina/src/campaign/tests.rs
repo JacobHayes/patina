@@ -271,11 +271,11 @@ fn a_guided_child_inherits_its_ancestors_unmutated_knobs() {
         ..CampaignSpec::default()
     };
     let units = mutation_units(&spec);
-    // A bootstrap generation, then three single-feature discoveries.
+    // A bootstrap generation, then three single-edge discoveries.
     let features =
-        [(0, 9), (2, 1), (5, 3), (5, 2)].map(|(generation, hits)| crate::coverage::FeatureRecord {
+        [(0, 9), (2, 1), (5, 3), (5, 2)].map(|(generation, hits)| crate::coverage::EdgeRecord {
             generation,
-            feature: generation * 8 + hits,
+            edge: generation * 8 + hits,
             hits,
         });
     let mut decisions = Vec::new();

@@ -6,9 +6,8 @@
 // behind all three. Under a uniform sweep each gate opens in a minority of
 // generations, so the bug needs a rare draw of all three at once. Coverage
 // gives a guided campaign a path up: each gate reached runs a stage function
-// no other path runs (new edges), and the per-fault handlers run once per
-// injected fault, so a higher rate reaches a higher hit-count bucket on an
-// already covered edge (a new feature) before the gate itself opens.
+// no other path runs (new edges), so a generation that opens a gate joins the
+// corpus and its children keep the knobs that opened it.
 use std::io::Write;
 
 // Gate thresholds on rates the guest observes, in permille.

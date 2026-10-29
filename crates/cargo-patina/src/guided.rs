@@ -10,13 +10,12 @@
 //!
 //! # Corpus and energy
 //!
-//! The corpus is every generation that reached a coverage feature (an edge at
-//! a hit-count bucket, see `coverage::hit_bucket`) first, except the bootstrap:
-//! the first novel generation opens the program's whole baseline, not a
-//! discovery. An entry's energy favours rare finds that have not been mined yet:
-//! it is inversely proportional to how many generations have reached the
-//! entry's rarest feature plus how many children it has already had. A fresh
-//! entry whose feature nothing else reaches gets the most; an entry whose finds
+//! The corpus is every generation that covered an edge first, except the
+//! bootstrap: the first novel generation opens the program's whole baseline,
+//! not a discovery. An entry's energy favours rare finds that have not been
+//! mined yet: it is inversely proportional to how many generations have covered
+//! the entry's rarest edge plus how many children it has already had. A fresh
+//! entry whose edge nothing else covers gets the most; an entry whose finds
 //! became common, or which has been picked many times, fades.
 //!
 //! The exploit share adapts: it is the novelty rate of recent exploit children
@@ -31,7 +30,7 @@
 //! # Determinism
 //!
 //! A decision is a pure function of the seed base, the generation, and the
-//! persisted store: the feature log (with per-feature hit counts) and the
+//! persisted store: the edge log (with per-edge reach counts) and the
 //! decision log. Both are written with the coverage store, which may sit one
 //! generation ahead of the campaign cursor after a checkpoint tear. A resumed
 //! campaign therefore reuses a generation's RECORDED decision when the store
@@ -41,7 +40,7 @@
 //! at `g` is `a`'s material mutated by `g`'s own mutation stream.
 
 use crate::campaign::gen_byte::{Hash, Unit, UnitOp};
-use crate::coverage::FeatureRecord;
+use crate::coverage::EdgeRecord;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -140,7 +139,7 @@ fn mutate(ancestor: &Hash, seed_base: u64, generation: u64, units: &[Unit]) -> H
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Entry {
     generation: u64,
-    /// How many generations reached the entry's rarest feature (>= 1: the
+    /// How many generations covered the entry's rarest edge (>= 1: the
     /// entry itself did).
     rarity: u64,
     /// How many generations so far exploited this entry.
@@ -153,12 +152,12 @@ impl Entry {
     }
 }
 
-/// The guidance state for one campaign invocation: the persisted feature and
+/// The guidance state for one campaign invocation: the persisted edge and
 /// decision logs plus the spec's mutation units.
 pub(crate) struct GuidancePlan<'a> {
     seed_base: u64,
     units: &'a [Unit],
-    features: &'a [FeatureRecord],
+    edges: &'a [EdgeRecord],
     decisions: &'a [GuidanceDecision],
 }
 
@@ -166,13 +165,13 @@ impl<'a> GuidancePlan<'a> {
     pub(crate) fn new(
         seed_base: u64,
         units: &'a [Unit],
-        features: &'a [FeatureRecord],
+        edges: &'a [EdgeRecord],
         decisions: &'a [GuidanceDecision],
     ) -> Self {
         Self {
             seed_base,
             units,
-            features,
+            edges,
             decisions,
         }
     }
@@ -217,7 +216,7 @@ impl<'a> GuidancePlan<'a> {
     /// the bootstrap, with its rarity and pick count.
     fn corpus(&self, generation: u64) -> Vec<Entry> {
         let mut rarest: BTreeMap<u64, u64> = BTreeMap::new();
-        for record in self.features {
+        for record in self.edges {
             if record.generation >= generation {
                 break;
             }
@@ -248,10 +247,8 @@ impl<'a> GuidancePlan<'a> {
     /// Laplace prior, so an untried arm reads as even), clamped.
     fn exploit_permille(&self, generation: u64) -> u64 {
         let novel = |g: u64| {
-            let at = self
-                .features
-                .partition_point(|record| record.generation < g);
-            self.features
+            let at = self.edges.partition_point(|record| record.generation < g);
+            self.edges
                 .get(at)
                 .is_some_and(|record| record.generation == g)
         };
@@ -348,29 +345,29 @@ mod tests {
     }
 
     /// Features as (generation first reached, generations that reached it).
-    fn features(entries: &[(u64, u64)]) -> Vec<FeatureRecord> {
+    fn edges(entries: &[(u64, u64)]) -> Vec<EdgeRecord> {
         entries
             .iter()
             .enumerate()
-            .map(|(index, &(generation, hits))| FeatureRecord {
+            .map(|(index, &(generation, hits))| EdgeRecord {
                 generation,
-                feature: index as u64,
+                edge: index as u64,
                 hits,
             })
             .collect()
     }
 
-    /// Run a campaign's guidance forward from `features`, recording every
+    /// Run a campaign's guidance forward from `edges`, recording every
     /// decision as the driver does, and return the decision log.
     fn simulate(
         seed_base: u64,
         units: &[Unit],
-        features: &[FeatureRecord],
+        edges: &[EdgeRecord],
         generations: u64,
     ) -> Vec<GuidanceDecision> {
         let mut decisions = Vec::new();
         for generation in 0..generations {
-            let visible: Vec<FeatureRecord> = features
+            let visible: Vec<EdgeRecord> = edges
                 .iter()
                 .copied()
                 .filter(|record| record.generation < generation)
@@ -386,10 +383,10 @@ mod tests {
     fn with_an_empty_corpus_guided_derivation_is_the_unguided_one() {
         let units = units();
         // Only the bootstrap generation is novel, so the corpus stays empty.
-        let features = features(&[(0, 40), (0, 40)]);
+        let edges = edges(&[(0, 40), (0, 40)]);
         let mut decisions = Vec::new();
         for generation in 0..8 {
-            let plan = GuidancePlan::new(0, &units, &features, &decisions);
+            let plan = GuidancePlan::new(0, &units, &edges, &decisions);
             let (hash, decision) = plan.generation_hash(generation);
             assert_eq!(hash, base_generation_hash(0, generation));
             assert_eq!(decision, GuidanceDecision::NoAncestors);
@@ -404,9 +401,9 @@ mod tests {
     #[test]
     fn an_exploit_child_is_its_ancestor_with_one_to_three_units_changed() {
         let units = units();
-        let features = features(&[(0, 9), (3, 2), (6, 4)]);
-        let decisions = simulate(7, &units, &features, 300);
-        let plan = GuidancePlan::new(7, &units, &features, &decisions);
+        let edges = edges(&[(0, 9), (3, 2), (6, 4)]);
+        let decisions = simulate(7, &units, &edges, 300);
+        let plan = GuidancePlan::new(7, &units, &edges, &decisions);
         let (mut exploits, mut kept_seed) = (0, 0);
         for generation in 7..300 {
             let (child, decision) = plan.generation_hash(generation);
@@ -443,9 +440,9 @@ mod tests {
             ..CampaignSpec::default()
         });
         assert_eq!(narrow.len(), 2, "the seed and the PCT depth: {narrow:?}");
-        let features = features(&[(0, 5), (2, 1)]);
-        let decisions = simulate(1, &narrow, &features, 100);
-        let plan = GuidancePlan::new(1, &narrow, &features, &decisions);
+        let edges = edges(&[(0, 5), (2, 1)]);
+        let decisions = simulate(1, &narrow, &edges, 100);
+        let plan = GuidancePlan::new(1, &narrow, &edges, &decisions);
         let everything: Vec<&Unit> = narrow.iter().collect();
         for generation in 3..100 {
             if let (child, GuidanceDecision::Exploit { ancestor }) =
@@ -462,16 +459,16 @@ mod tests {
     #[test]
     fn a_recorded_decision_rederives_identically() {
         let units = units();
-        let features = features(&[(0, 3), (4, 1), (9, 2)]);
-        let decisions = simulate(5, &units, &features, 40);
+        let edges = edges(&[(0, 3), (4, 1), (9, 2)]);
+        let decisions = simulate(5, &units, &edges, 40);
         for generation in 0..40u64 {
-            let visible: Vec<FeatureRecord> = features
+            let visible: Vec<EdgeRecord> = edges
                 .iter()
                 .copied()
                 .filter(|record| record.generation < generation)
                 .collect();
             let fresh = GuidancePlan::new(5, &units, &visible, &decisions[..generation as usize]);
-            let torn = GuidancePlan::new(5, &units, &features, &decisions[..=generation as usize]);
+            let torn = GuidancePlan::new(5, &units, &edges, &decisions[..=generation as usize]);
             assert_eq!(
                 fresh.generation_hash(generation),
                 torn.generation_hash(generation),
@@ -489,27 +486,27 @@ mod tests {
     #[test]
     fn the_bootstrap_generation_is_never_an_ancestor() {
         let units = units();
-        let features = features(&[(0, 88), (0, 88), (4, 13), (24, 1), (41, 40)]);
-        let decisions = simulate(0, &units, &features, 200);
+        let edges = edges(&[(0, 88), (0, 88), (4, 13), (24, 1), (41, 40)]);
+        let decisions = simulate(0, &units, &edges, 200);
         assert!(decisions.contains(&GuidanceDecision::Exploit { ancestor: 4 }));
         assert!(!decisions.contains(&GuidanceDecision::Exploit { ancestor: 0 }));
     }
 
     /// Energy favours the entry whose find is rare: two entries found at the
-    /// same time, one whose feature most generations since have reached and
-    /// one whose feature nothing else has, split exploitation very unevenly.
+    /// same time, one whose edge most generations since have reached and
+    /// one whose edge nothing else has, split exploitation very unevenly.
     #[test]
-    fn energy_favours_the_finder_of_a_rare_feature() {
+    fn energy_favours_the_finder_of_a_rare_edge() {
         let units = units();
-        // Bootstrap, then generations 1 and 2 each found one feature. Since
-        // then generation 1's feature was reached 60 times, generation 2's
+        // Bootstrap, then generations 1 and 2 each found one edge. Since
+        // then generation 1's edge was reached 60 times, generation 2's
         // only by generation 2 itself.
-        let features = features(&[(0, 64), (1, 60), (2, 1)]);
+        let edges = edges(&[(0, 64), (1, 60), (2, 1)]);
         let mut decisions = vec![GuidanceDecision::NoAncestors; 3];
         decisions.extend([GuidanceDecision::Explore; 61]);
         let (mut common, mut rare) = (0, 0);
         for generation in 64..400 {
-            let plan = GuidancePlan::new(9, &units, &features, &decisions[..64]);
+            let plan = GuidancePlan::new(9, &units, &edges, &decisions[..64]);
             match plan.decide(generation) {
                 GuidanceDecision::Exploit { ancestor: 1 } => common += 1,
                 GuidanceDecision::Exploit { ancestor: 2 } => rare += 1,
@@ -528,10 +525,10 @@ mod tests {
     #[test]
     fn picks_spend_energy() {
         let units = units();
-        let features = features(&[(0, 9), (1, 1), (2, 1)]);
+        let edges = edges(&[(0, 9), (1, 1), (2, 1)]);
         let mut decisions = vec![GuidanceDecision::NoAncestors; 3];
         decisions.extend([GuidanceDecision::Exploit { ancestor: 1 }; 40]);
-        let plan = GuidancePlan::new(3, &units, &features, &decisions);
+        let plan = GuidancePlan::new(3, &units, &edges, &decisions);
         let corpus = plan.corpus(43);
         let energy = |generation| {
             corpus
@@ -561,8 +558,8 @@ mod tests {
         let share = |novel: &[(u64, u64)]| {
             let mut entries = vec![(0, 9)];
             entries.extend_from_slice(novel);
-            let features = features(&entries);
-            GuidancePlan::new(0, &units, &features, &decisions).exploit_permille(121)
+            let edges = edges(&entries);
+            GuidancePlan::new(0, &units, &edges, &decisions).exploit_permille(121)
         };
         assert_eq!(share(&explore_novel), EXPLOIT_MIN_PERMILLE);
         assert_eq!(share(&exploit_novel), EXPLOIT_MAX_PERMILLE);
