@@ -75,22 +75,13 @@ A decision policy is deterministic logic that uses the seed, current simulated s
 
 A seed alone is enough when code, runtime, drivers, decision policies, and configuration are unchanged and all effects remain inside deterministic drivers. Patina still records traces as they are debuggable, shareable, minimizable, robust against decision-policy changes, and useful for exploring around an observed failure.
 
-Trace replay is tied to the build and environment that produced it. Patina traces include the seed, decision-policy metadata, decision logs, branch relationships, and compatibility fingerprints for the binary, crate graph, compiler, target, runtime, drivers, and configuration. A native trace names its build by the executable's digest, which covers everything linked into it — the guest's crate graph, the compiler's output, the target, the shim, the runtime and its drivers — and by the digest of the `cargo-patina` executable that launched it, since a package version stays the same across builds that set the guest up differently. Mismatches are errors by default, and a mismatch names the component that differs.
+Trace replay is tied to the build and environment that produced it. Patina traces include the seed, decision-policy metadata, decision logs, branch relationships, and compatibility fingerprints for the binary, crate graph, compiler, target, runtime, drivers, and configuration. Mismatches are errors by default, and a mismatch names the component that differs.
 
 Replay of real external I/O is useful, but narrower than simulation. It reproduces one observed execution. If a run replays captured host I/O and then reaches an unrecorded host effect, Patina fails by default instead of recording from a host whose state may not match the replayed prefix. Open-ended exploration requires deterministic drivers for those external resources.
 
 ## Fail-closed boundary
 
 Patina prefers explicit failure over silent nondeterminism.
-
-Native syscall identity belongs to the active compile target, not a portable
-union of foreign ABIs. Generated upstream identity is separate from runtime
-support and from conformance evidence. A modeled disposition alone does not prove
-kernel fidelity: reviewed scenarios compare the live host and Patina, preserving
-raw observations and strict replay identity. Every inventoried entry requires a
-reviewed probe or an explicit, reasoned exclusion; missing implementation is not
-a safety exclusion. Host capability limits are reported independently of what
-Patina can simulate.
 
 Unsupported effects are pre-run refusals when they can be detected statically (the default-deny import audit and instruction scan) and loud runtime errors otherwise. Examples include:
 
@@ -106,7 +97,7 @@ Raw inline syscalls follow the same rule with one deepening: where the platform 
 
 ## Code-first topology, small runtime config
 
-Patina avoids large declarative configuration languages for service topology. Runtime configuration controls experiment-level concerns: seeds, budgets, trace paths, record/replay modes, selected named profiles, and simple parameters.
+Patina avoids large declarative configuration languages for service topology. Runtime configuration controls experiment-level concerns: seeds, budgets, trace paths, record/replay modes, and simple parameters.
 
 Typed Rust code configures driver-specific behavior:
 
