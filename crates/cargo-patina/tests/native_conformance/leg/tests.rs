@@ -41,7 +41,7 @@ fn recording_changes_no_observation() {
 
 /// A native IPC run killed outright unwinds none of its guards. Each IPC
 /// scenario is SIGKILLed on entering its second creating call — strace injects
-/// the signal, so the point is exact: its first keyed object (or its queue)
+/// the signal, so the point is exact: its first keyed object
 /// exists and nothing private does yet. The object is really left behind, the
 /// sweep every native run gets removes it and nothing else is left under the
 /// run's names, and the next run on the recreated directory is an oracle
@@ -55,7 +55,6 @@ fn a_killed_native_ipc_run_is_swept() {
         ("ipc/sysv_shm", "shmget"),
         ("ipc/sysv_sem", "semget"),
         ("ipc/sysv_msg", "msgget"),
-        ("ipc/mqueue", "mq_open"),
     ];
     for (name, creator) in cases {
         let scenario = catalog::scenario(name).expect("an IPC scenario");

@@ -1,6 +1,6 @@
 //! SUD rows — signals and process control: `rt_sigaction` (SIGSYS re-registration
 //! is fatal), and `prctl`'s option table (`PR_GET_AUXV` served from the shim's
-//! scrubbed auxv, `PR_SET_SECCOMP` through the seccomp row's model).
+//! scrubbed auxv, `PR_SET_SECCOMP` a named fatal).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
@@ -95,8 +95,7 @@ static PRCTL_STATE: crate::SpinMutex<PrctlState> = crate::SpinMutex::new(PrctlSt
 static NO_NEW_PRIVS: crate::SpinMutex<std::collections::BTreeSet<c_int>> =
     crate::SpinMutex::new(std::collections::BTreeSet::new());
 
-/// The calling thread's `no_new_privs` (`task_no_new_privs`), which gates
-/// installing a seccomp filter and enforcing a Landlock ruleset.
+/// The calling thread's `no_new_privs` (`task_no_new_privs`).
 pub(super) fn no_new_privs() -> bool {
     NO_NEW_PRIVS
         .lock()
@@ -247,15 +246,12 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
         // `PRCTL_STATE`'s).
         PR_SET_NAME => return prctl_set_name(arg2),
         PR_GET_NAME => return prctl_get_name(arg2),
-        // No seccomp mode is ever entered: the model stops by name first.
+        // No seccomp mode is ever entered: setting one stops by name.
         PR_GET_SECCOMP => return 0,
-        PR_SET_SECCOMP => {
-            return super::privileged::answer(
-                Syscall::N_prctl.number() as i64,
-                super::privileged::prctl_set_seccomp,
-                [arg2, arg3, 0, 0, 0, 0],
-            );
-        }
+        PR_SET_SECCOMP => crate::trap_fatal(
+            "prctl: PR_SET_SECCOMP is not modeled (patina does not enforce a guest's seccomp \
+             mode); failing closed",
+        ),
         _ => {}
     }
 

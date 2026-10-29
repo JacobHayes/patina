@@ -288,7 +288,7 @@ the SUD rows: a door never decides by kind itself.
   for kind-dependent calls. Guest numbers are never recorded.
 - **Filesystem:** the driver (`MemFs`, `CrashFs`) behind the descriptor
   funnels; procfs (`src/procfs/`), memory devices (`src/memdev.rs`),
-  pseudoterminals (`src/thread/pty/`), nsfs (`src/nsfs.rs`) are typed virtual
+  nsfs (`src/nsfs.rs`) are typed virtual
   entries every path operation answers.
 - **Sockets** (`src/thread/net.rs`): `patina_sock_*` entries over `SimNet`
   (INET) and the shim's own AF_UNIX/netlink; guest memory goes through

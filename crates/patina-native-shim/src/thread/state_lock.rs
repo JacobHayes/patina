@@ -130,8 +130,6 @@ impl ThreadRuntime {
             signals: signals::SignalRuntime::default(),
             #[cfg(target_os = "linux")]
             ipc: ipc::Ipc::default(),
-            #[cfg(target_os = "linux")]
-            ptys: pty::Ptys::default(),
             locks: locks::Locks::default(),
             #[cfg(target_os = "linux")]
             sched: sched::SchedRuntime::default(),

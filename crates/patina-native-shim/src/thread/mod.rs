@@ -11,7 +11,6 @@ pub(crate) mod ipc;
 pub(crate) mod locks;
 pub(crate) mod net;
 #[cfg(target_os = "linux")]
-pub(crate) mod pty;
 #[cfg(target_os = "linux")]
 pub(crate) mod readiness;
 #[cfg(target_os = "linux")]
@@ -80,7 +79,7 @@ use wait_queue::{Covered, WaitQueue};
 #[cfg(target_os = "linux")]
 use epoll::EpollSlot;
 #[cfg(target_os = "linux")]
-pub(crate) use epoll::{epoll_close, epoll_target, forget_description};
+pub(crate) use epoll::{epoll_close, forget_description};
 #[cfg(target_os = "macos")]
 use kqueue::KqueueSlot;
 #[cfg(target_os = "macos")]
@@ -127,16 +126,11 @@ fn socket_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         FdKind::EventFd
         | FdKind::Epoll
         | FdKind::SignalFd
-        | FdKind::MessageQueue
         | FdKind::TimerFd
         | FdKind::Inotify
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
         | FdKind::Namespace
         | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave
         | FdKind::Proc
         | FdKind::ProcDir => Err(super::ENOTSOCK),
         #[cfg(target_os = "macos")]
@@ -162,16 +156,11 @@ fn pipe_entry(guest_fd: c_int) -> Result<(c_int, bool), c_int> {
         FdKind::EventFd
         | FdKind::Epoll
         | FdKind::SignalFd
-        | FdKind::MessageQueue
         | FdKind::TimerFd
         | FdKind::Inotify
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
         | FdKind::Namespace
         | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave
         | FdKind::Proc
         | FdKind::ProcDir => Err(super::EBADF),
         #[cfg(target_os = "macos")]
@@ -905,9 +894,6 @@ struct ThreadRuntime {
     /// System V IPC objects and their waiters.
     #[cfg(target_os = "linux")]
     ipc: ipc::Ipc,
-    /// The pseudoterminal pairs and their waiters.
-    #[cfg(target_os = "linux")]
-    ptys: pty::Ptys,
     /// Record and OFD locks, and the tasks waiting on them.
     locks: locks::Locks,
     /// Per-thread scheduling attributes and persona.

@@ -134,8 +134,7 @@ fn payload(request: c_ulong) -> PayloadKind {
                 | SIOCGIFHWADDR
                 | SIOCGIFINDEX
                 | SIOCGIFTXQLEN
-        ) || request == crate::mem::userfaultfd::UFFDIO_API
-        {
+        ) {
             return PayloadKind::Pointer;
         }
     }

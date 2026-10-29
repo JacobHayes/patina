@@ -40,25 +40,11 @@ pub(crate) const PATINA_FS_NSFS: u32 = 3;
 /// devtmpfs (0:5).
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_DEVTMPFS: u32 = 4;
-/// A pseudoterminal's slave node (`thread::pty`): its opener's and the tty
-/// group's, on devpts (0:24).
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) const PATINA_FS_DEVPTS: u32 = 5;
-/// The pseudoterminal multiplexer's node, `/dev/ptmx`: root's and the tty
-/// group's, on devtmpfs (0:5) like a memory device's, bound at its own
-/// path.
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) const PATINA_FS_PTMX: u32 = 6;
 /// 6.8's one anonymous inode (`volume::anon_inode_metadata`), which every
-/// eventfd, timerfd, signalfd, epoll, inotify, pidfd and Landlock ruleset
+/// eventfd, timerfd, signalfd, epoll, inotify and pidfd
 /// descriptor is a file on: root's, on anon_inodefs (0:15).
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) const PATINA_FS_ANON_INODE: u32 = 7;
-/// A userfaultfd's own anonymous inode (`mem::userfaultfd`, a secure inode
-/// `anon_inode_create_getfile` makes per descriptor): its creator's, on
-/// anon_inodefs like the shared one.
-#[cfg(any(target_os = "linux", patina_posix_exports))]
-pub(crate) const PATINA_FS_ANON_OWN: u32 = 8;
 /// A procfs node root owns (`crate::procfs`: its root, `self`, the
 /// machine-wide files, init's directory and files), on procfs (0:25).
 #[cfg(any(target_os = "linux", patina_posix_exports))]
@@ -78,9 +64,8 @@ pub(crate) fn fs_device(fs: u32) -> (u32, u32) {
         PATINA_FS_PIPEFS => (0, 14),
         PATINA_FS_SOCKFS => (0, 8),
         PATINA_FS_NSFS => (0, 4),
-        PATINA_FS_DEVTMPFS | PATINA_FS_PTMX => (0, 5),
-        PATINA_FS_DEVPTS => (0, 24),
-        PATINA_FS_ANON_INODE | PATINA_FS_ANON_OWN => (0, 15),
+        PATINA_FS_DEVTMPFS => (0, 5),
+        PATINA_FS_ANON_INODE => (0, 15),
         PATINA_FS_PROC | PATINA_FS_PROC_OWN => (0, 25),
         _ => (8, 1),
     }
@@ -379,7 +364,6 @@ pub(crate) unsafe fn metadata_at(
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
-        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(ENOENT),
         Ok(paths::Resolution::Virtual(entry)) => {
             return match virtual_metadata(entry, flags & paths::RESOLVE_NOFOLLOW != 0) {
                 Some(metadata) => write_patina_metadata(metadata, out),
@@ -466,10 +450,6 @@ pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
     match fs {
         #[cfg(target_os = "linux")]
         PATINA_FS_NSFS | PATINA_FS_DEVTMPFS | PATINA_FS_ANON_INODE | PATINA_FS_PROC => (0, 0),
-        #[cfg(target_os = "linux")]
-        PATINA_FS_PTMX => (0, thread::pty::TTY_GID),
-        #[cfg(target_os = "linux")]
-        PATINA_FS_DEVPTS => (caller.uid, thread::pty::TTY_GID),
         _ => (caller.uid, caller.gid),
     }
 }
@@ -529,16 +509,11 @@ fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
         #[cfg(target_os = "linux")]
         paths::Virtual::Ptmx => true,
         #[cfg(target_os = "linux")]
-        paths::Virtual::Namespace(_)
-        | paths::Virtual::Pts(_)
-        | paths::Virtual::Devpts
-        | paths::Virtual::Tty
-        | paths::Virtual::Proc(_) => false,
+        paths::Virtual::Namespace(_) | paths::Virtual::Tty | paths::Virtual::Proc(_) => false,
     };
     match entry {
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(_) => EPERM,
-        _ if !entry.exists() => ENOENT,
         _ if root_owned_device
             && operation == "chmod"
             && cfg!(target_os = "linux")
@@ -579,11 +554,7 @@ fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetad
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(index) => Some(nsfs::metadata(index)),
         #[cfg(target_os = "linux")]
-        paths::Virtual::Ptmx => Some(thread::pty::ptmx_metadata()),
-        #[cfg(target_os = "linux")]
-        paths::Virtual::Pts(index) => thread::pty::node(index),
-        #[cfg(target_os = "linux")]
-        paths::Virtual::Devpts | paths::Virtual::Tty => None,
+        paths::Virtual::Ptmx | paths::Virtual::Tty => None,
         #[cfg(target_os = "linux")]
         paths::Virtual::Proc(node) => Some(crate::procfs::metadata(node)),
     }
@@ -703,17 +674,6 @@ pub(crate) unsafe fn fd_metadata_full(
         }
         if volume::on_anon_inode(resolved.kind) {
             return write_patina_metadata(volume::anon_inode_metadata(), out);
-        }
-        if resolved.kind == FdKind::Userfaultfd {
-            return write_patina_metadata(mem::userfaultfd::metadata(resolved.handle), out);
-        }
-        // A pseudoterminal's master is the multiplexer's node; a slave, its
-        // devpts node.
-        if let Some(side) = thread::pty::Side::of(resolved.kind) {
-            return match thread::pty::fd_metadata(side, resolved.handle as u32) {
-                Some(metadata) => write_patina_metadata(metadata, out),
-                None => fail(EBADF),
-            };
         }
     }
     // An anonymous pipe end or a socket is on pipefs/sockfs: its node is the
@@ -836,21 +796,11 @@ pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
             if caller_capable(registry::Capability::Fowner) {
                 trap_fatal(
                     "fchmod: changing the mode of the anonymous inode every eventfd, timerfd, \
-                     signalfd, epoll, inotify, pidfd and Landlock ruleset shares is not modeled",
+                     signalfd, epoll, inotify and pidfd shares is not modeled",
                 );
             }
             return fail(EPERM);
         }
-    }
-    // A userfaultfd's inode is its own and the caller's
-    // (`anon_inode_create_getfile`), so the change is allowed.
-    #[cfg(target_os = "linux")]
-    if let Ok(resolved) = resolve_fd(raw_fd)
-        && resolved.kind == FdKind::Userfaultfd
-    {
-        mem::userfaultfd::set_mode(resolved.handle, mode);
-        set_errno(0);
-        return 0;
     }
     let fd = match fs_handle(raw_fd) {
         Ok(fd) => fd,
@@ -1303,10 +1253,6 @@ const FALLOC_FL_OPERATIONS: u32 = FALLOC_FL_PUNCH_HOLE
     | FALLOC_FL_INSERT_RANGE
     | FALLOC_FL_UNSHARE_RANGE;
 
-/// `MAX_NON_LFS`: the size limit `alloc_super` gives a filesystem that sets
-/// none of its own (mqueuefs).
-const MAX_NON_LFS: u64 = 0x7fff_ffff;
-
 #[unsafe(no_mangle)]
 /// `fallocate(2)`, in the kernel's order of refusals: a bad range is
 /// `EINVAL`; an unknown bit, two operation bits at once, `PUNCH_HOLE` without
@@ -1315,8 +1261,7 @@ const MAX_NON_LFS: u64 = 0x7fff_ffff;
 /// self-contradictory modes); a descriptor not open for writing (or `O_PATH`)
 /// `EBADF`, a pipe `ESPIPE`, a directory `EISDIR`, any other non-file `ENODEV`,
 /// a range past the file's filesystem's size limit `EFBIG` (the volume's
-/// ext4 limit, a memfd's or secret memory's `MAX_LFS_FILESIZE`, a message
-/// queue's `MAX_NON_LFS`). Mode `0` and
+/// ext4 limit, a memfd's or secret memory's `MAX_LFS_FILESIZE`). Mode `0` and
 /// `KEEP_SIZE` reserve (the file grows to `offset + len` unless `KEEP_SIZE`);
 /// `PUNCH_HOLE|KEEP_SIZE` and `ZERO_RANGE` zero the range; the range-shifting
 /// modes (`COLLAPSE_RANGE`, `INSERT_RANGE`) and `UNSHARE_RANGE` are
@@ -1359,26 +1304,18 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         | FdKind::TimerFd
         | FdKind::Inotify
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
         | FdKind::Namespace
-        | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave => return fail(ENODEV),
+        | FdKind::NamespacePath => return fail(ENODEV),
         // Opened read-only, refused above.
         #[cfg(target_os = "linux")]
         FdKind::Proc | FdKind::ProcDir => return fail(EBADF),
-        // A queue is a regular file (judged after the range, below).
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => {}
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => return fail(ENODEV),
     }
     // `vfs_fallocate`: a range past the file's filesystem's size limit is
     // `EFBIG` before any file's own `fallocate` judges the mode: the ext4
     // volume's `s_maxbytes`; `MAX_LFS_FILESIZE` for a memfd (tmpfs,
-    // hugetlbfs) or secret memory; for a message queue `MAX_NON_LFS`, which
-    // mqueuefs keeps from `alloc_super` (it never sets `s_maxbytes`).
+    // hugetlbfs) or secret memory.
     let (offset, length) = (offset as u64, length as u64);
     #[cfg(target_os = "linux")]
     let volume = resolved.kind == FdKind::File
@@ -1386,14 +1323,8 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
         && mem::anonymous(resolved.handle).is_none();
     #[cfg(not(target_os = "linux"))]
     let volume = resolved.kind == FdKind::File;
-    #[cfg(target_os = "linux")]
-    let queue = resolved.kind == FdKind::MessageQueue;
-    #[cfg(not(target_os = "linux"))]
-    let queue = false;
     let limit = if volume {
         patina_dst_fs_mem::VOLUME_MAX_BYTES
-    } else if queue {
-        MAX_NON_LFS
     } else {
         i64::MAX as u64
     };
@@ -1403,12 +1334,10 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     if mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE) != 0 {
         return fail(EOPNOTSUPP);
     }
-    // The file's own `fallocate`: an mqueue file has none, and a memfd
-    // (`shmem_fallocate`, `hugetlbfs_fallocate`) takes only `KEEP_SIZE` and
-    // `PUNCH_HOLE`.
+    // The file's own `fallocate`: a memfd (`shmem_fallocate`,
+    // `hugetlbfs_fallocate`) takes only `KEEP_SIZE` and `PUNCH_HOLE`.
     #[cfg(target_os = "linux")]
-    if resolved.kind == FdKind::MessageQueue
-        || mem::secret(resolved.handle)
+    if mem::secret(resolved.handle)
         || (mem::anonymous(resolved.handle).is_some()
             && mode & !(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) != 0)
     {

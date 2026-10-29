@@ -9,7 +9,7 @@
 //! description only when its last number goes. Every class the shim models —
 //! captured stdio, deterministic-filesystem files and directories, the
 //! memory devices, virtual sockets, in-process pipes, eventfds,
-//! readiness reactors, process descriptors and Landlock rulesets — is a
+//! readiness reactors and process descriptors — is a
 //! description here, and the guest number is the ONLY thing the guest sees. The
 //! class-specific tables (the net module's sockets and pipe ends, the driver's
 //! handles) are keyed by the description's `handle`, which no guest ever
@@ -72,10 +72,6 @@ pub(crate) enum FdKind {
     /// A virtual epoll instance; `handle` is the registry id.
     #[cfg(target_os = "linux")]
     Epoll,
-    /// A POSIX message queue descriptor (`mq_open`); `handle` keys the open
-    /// queue table of the IPC model.
-    #[cfg(target_os = "linux")]
-    MessageQueue,
     /// A timer descriptor (`timerfd_create`); `handle` keys the timer table.
     #[cfg(target_os = "linux")]
     TimerFd,
@@ -88,17 +84,6 @@ pub(crate) enum FdKind {
     /// guest. It has no class object: nothing is freed with it.
     #[cfg(target_os = "linux")]
     Pidfd,
-    /// A Landlock ruleset (`landlock_create_ruleset`; 6.8's anonymous
-    /// `[landlock-ruleset]` inode); `handle` packs the access rights it
-    /// handles, the filesystem ones in the low 32 bits and the network ones
-    /// above. It has no class object: nothing is freed with it.
-    #[cfg(target_os = "linux")]
-    LandlockRuleset,
-    /// A userfaultfd descriptor (`userfaultfd`; 6.8's anonymous
-    /// `[userfaultfd]` inode); `handle` keys the context table of
-    /// `mem::userfaultfd`.
-    #[cfg(target_os = "linux")]
-    Userfaultfd,
     /// A namespace file (`/proc/self/ns/<type>`; the namespace's nsfs inode,
     /// a regular file), opened read-only; `handle` is the entry's index in
     /// `nsfs::ENTRIES`.
@@ -110,16 +95,6 @@ pub(crate) enum FdKind {
     /// [`FdKind::OPath`]; `handle` is the entry's index in `nsfs::ENTRIES`.
     #[cfg(target_os = "linux")]
     NamespacePath,
-    /// A pseudoterminal master (`/dev/ptmx`; 6.8's `ptm_unix98_ops` tty on
-    /// devtmpfs's `ptmx` node); `handle` is the pair's devpts index in
-    /// `thread::pty`. One description per pair: every open of `/dev/ptmx`
-    /// makes a new pair.
-    #[cfg(target_os = "linux")]
-    PtyMaster,
-    /// A pseudoterminal slave (`/dev/pts/<index>`, or `TIOCGPTPEER` on its
-    /// master; `pty_unix98_ops`); `handle` is the pair's devpts index.
-    #[cfg(target_os = "linux")]
-    PtySlave,
     /// A procfs file (`/proc/uptime`, `/proc/<pid>/stat`, …;
     /// `crate::procfs`), opened read-only; `handle` keys procfs's open
     /// table, which holds the node, the text reads serve and the read
@@ -156,25 +131,15 @@ impl FdKind {
             #[cfg(target_os = "linux")]
             FdKind::Epoll => 10,
             #[cfg(target_os = "linux")]
-            FdKind::MessageQueue => 13,
-            #[cfg(target_os = "linux")]
             FdKind::TimerFd => 14,
             #[cfg(target_os = "linux")]
             FdKind::Pidfd => 15,
-            #[cfg(target_os = "linux")]
-            FdKind::LandlockRuleset => 16,
-            #[cfg(target_os = "linux")]
-            FdKind::Userfaultfd => 17,
             #[cfg(target_os = "linux")]
             FdKind::Namespace => 18,
             #[cfg(target_os = "linux")]
             FdKind::NamespacePath => 19,
             #[cfg(target_os = "linux")]
             FdKind::Inotify => 20,
-            #[cfg(target_os = "linux")]
-            FdKind::PtyMaster => 21,
-            #[cfg(target_os = "linux")]
-            FdKind::PtySlave => 22,
             #[cfg(target_os = "linux")]
             FdKind::Proc => 23,
             #[cfg(target_os = "linux")]
@@ -199,16 +164,11 @@ impl FdKind {
             FdKind::EventFd
             | FdKind::Epoll
             | FdKind::SignalFd
-            | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::Inotify
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd
             | FdKind::Namespace
             | FdKind::NamespacePath
-            | FdKind::PtyMaster
-            | FdKind::PtySlave
             | FdKind::Proc
             | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
@@ -239,15 +199,10 @@ impl FdKind {
             FdKind::EventFd
             | FdKind::Epoll
             | FdKind::SignalFd
-            | FdKind::MessageQueue
             | FdKind::TimerFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd
             | FdKind::Inotify
             | FdKind::Namespace
-            | FdKind::PtyMaster
-            | FdKind::PtySlave
             | FdKind::Proc
             | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
@@ -257,9 +212,9 @@ impl FdKind {
 
     /// Whether the description's `llseek` is `noop_llseek` (Linux): a seek
     /// leaves the position, always 0, where it is. The memory devices'
-    /// (`random_fops`; `null_lseek`, which resets it to 0) and the eventfd, epoll, signalfd, timerfd,
-    /// userfaultfd and inotify files' are; a pidfd, a Landlock ruleset, a
-    /// namespace file and a tty (`no_llseek`) have none (`ESPIPE`).
+    /// (`random_fops`; `null_lseek`, which resets it to 0) and the eventfd, epoll, signalfd, timerfd
+    /// and inotify files' are; a pidfd and a namespace file (`no_llseek`)
+    /// have none (`ESPIPE`).
     pub(crate) fn seeks_nowhere(self) -> bool {
         match self {
             FdKind::MemDevice => cfg!(target_os = "linux"),
@@ -268,7 +223,6 @@ impl FdKind {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::TimerFd
-            | FdKind::Userfaultfd
             | FdKind::Inotify => true,
             FdKind::Stdin
             | FdKind::Stdout
@@ -279,13 +233,9 @@ impl FdKind {
             | FdKind::Socket
             | FdKind::Pipe => false,
             #[cfg(target_os = "linux")]
-            FdKind::MessageQueue
-            | FdKind::Pidfd
-            | FdKind::LandlockRuleset
+            FdKind::Pidfd
             | FdKind::Namespace
             | FdKind::NamespacePath
-            | FdKind::PtyMaster
-            | FdKind::PtySlave
             | FdKind::Proc
             | FdKind::ProcDir => false,
             #[cfg(target_os = "macos")]
@@ -418,13 +368,6 @@ impl GuestFdTable {
             index += 1;
         }
         Err(EMFILE)
-    }
-
-    /// Whether a number is free for [`Self::install`] (`EMFILE` otherwise):
-    /// what `get_unused_fd_flags` judges before an open it precedes.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn has_free(&self) -> Result<(), c_int> {
-        self.lowest_free(0).map(|_| ())
     }
 
     fn set_slot(&mut self, index: usize, slot: Slot) {

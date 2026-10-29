@@ -45,15 +45,6 @@ unsafe fn path_unit(
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
-        // A devpts name no pair has: nothing to remove, and no room to
-        // create one (devpts's root is root's `0755`).
-        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => {
-            return fail(if virtual_answer == EEXIST {
-                EACCES
-            } else {
-                ENOENT
-            });
-        }
         Ok(paths::Resolution::Virtual(_)) => return fail(virtual_answer),
         Err(errno) => return fail(errno),
     };
@@ -171,7 +162,6 @@ pub unsafe extern "C" fn patina_mknod(
     };
     let resolved = match paths::resolve(dirfd, &spelled, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
-        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(EACCES),
         // It exists.
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
@@ -492,7 +482,6 @@ pub unsafe extern "C" fn patina_link(
     };
     let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved.path,
-        Ok(paths::Resolution::Virtual(entry)) if !entry.exists() => return fail(EACCES),
         // The new name exists (`filename_create`).
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
@@ -613,15 +602,9 @@ pub(crate) unsafe fn read_link(
                 None => Err(crate::abi::failed(EINVAL)),
             };
         }
-        // The terminal nodes and devpts's root are no links either.
+        // The terminal nodes are no links either.
         #[cfg(target_os = "linux")]
-        Ok(paths::Resolution::Virtual(entry)) => {
-            return Err(crate::abi::failed(if entry.exists() {
-                EINVAL
-            } else {
-                ENOENT
-            }));
-        }
+        Ok(paths::Resolution::Virtual(_)) => return Err(crate::abi::failed(EINVAL)),
         Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match resolved.metadata.map(|metadata| metadata.kind) {
@@ -732,18 +715,10 @@ pub unsafe extern "C" fn patina_resolve_path(
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Namespace(_))) => {
             entry.unmodeled("the canonical path")
         }
-        // The pseudoterminal nodes are character devices at their own names,
-        // devpts's root a directory.
+        // The multiplexer is a character device at its own name.
         #[cfg(target_os = "linux")]
-        Ok(paths::Resolution::Virtual(entry @ (paths::Virtual::Ptmx | paths::Virtual::Pts(_)))) => {
-            (
-                entry.path(),
-                if entry.exists() { PATINA_ENTRY_CHAR } else { 0 },
-            )
-        }
-        #[cfg(target_os = "linux")]
-        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Devpts)) => {
-            (entry.path(), PATINA_ENTRY_DIRECTORY)
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Ptmx)) => {
+            (entry.path(), PATINA_ENTRY_CHAR)
         }
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {

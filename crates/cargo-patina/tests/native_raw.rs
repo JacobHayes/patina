@@ -63,16 +63,39 @@ mod linux {
         }
     }
 
-    /// Entering seccomp strict mode, through prctl (whose filter argument
-    /// strict mode ignores) or seccomp(2), stops the run by name before the
-    /// host could enter it.
+    /// The probes libraries make of facilities patina does not model are
+    /// answered as the pinned kernel would (see the guest for each).
     #[test]
-    fn seccomp_strict_mode_stops_by_name() {
-        let Some(g) = raw_guest("raw_prctl_refusal") else {
+    fn raw_probe_rows_answer_as_the_pinned_kernel() {
+        assert_raw_output(
+            "raw_probes",
+            "RAW_PROBES landlock+seccomp+prctl+tty+stdio+mempolicy ok",
+        );
+    }
+
+    /// Every other use of a facility patina does not model stops the run by
+    /// name before the host could act on it: a seccomp mode (through prctl
+    /// or seccomp(2)), a Landlock ruleset, the privileged or unmodeled rows
+    /// the registry traps, and a pseudoterminal.
+    #[test]
+    fn unmodeled_facilities_stop_by_name() {
+        let Some(g) = raw_guest("raw_stops") else {
             return;
         };
-        for (door, row) in [("prctl-strict", "prctl"), ("seccomp-strict", "seccomp")] {
-            g.assert_internal_fatal(&[door], &[&format!("{row}: entering strict mode")]);
+        for (door, diagnostic) in [
+            ("prctl-strict", "PR_SET_SECCOMP"),
+            ("seccomp-strict", "seccomp:"),
+            ("landlock-ruleset", "landlock_create_ruleset:"),
+            ("ptrace", "unsupported syscall ptrace"),
+            ("mount", "unsupported syscall mount"),
+            ("bpf", "unsupported syscall bpf"),
+            ("perf-event-open", "unsupported syscall perf_event_open"),
+            ("userfaultfd", "unsupported syscall userfaultfd"),
+            ("unshare", "unsupported syscall unshare"),
+            ("mq-open", "unsupported syscall mq_open"),
+            ("ptmx", "/dev/ptmx"),
+        ] {
+            g.assert_internal_fatal(&[door], &[diagnostic]);
         }
     }
 }

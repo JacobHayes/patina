@@ -736,11 +736,10 @@ macro_rules! early_rows {
             Syscall::N_ptrace => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential and the declared Yama scope (1): the pid (`ESRCH`), a request needing a tracee (`ESRCH`: nothing is traced), `PTRACE_SEIZE`'s arguments (`EIO`), `PTRACE_O_SUSPEND_SECCOMP` without `CAP_SYS_ADMIN` and the caller's own thread group (`EPERM`), then init needs `CAP_SYS_PTRACE` (`EPERM`; granted, a named fatal); `PTRACE_TRACEME` is a named fatal.",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysPtrace, Capability::SysAdmin]),
+            ),
             Syscall::N_getuid => r(
                 $id,
                 Family::Identity,
@@ -751,11 +750,10 @@ macro_rules! early_rows {
             Syscall::N_syslog => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential and the declared `kernel.dmesg_restrict` (on): every action needs `CAP_SYSLOG` (or `CAP_SYS_ADMIN`) before it is looked at (`EPERM` without; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::Syslog, Capability::SysAdmin]),
+            ),
             Syscall::N_getgid => r(
                 $id,
                 Family::Identity,
@@ -1102,11 +1100,10 @@ macro_rules! early_rows {
             Syscall::N_vhangup => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_TTY_CONFIG` (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysTtyConfig]),
+            ),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_modify_ldt => r(
                 $id,
@@ -1118,18 +1115,17 @@ macro_rules! early_rows {
             Syscall::N_pivot_root => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_ADMIN` (`may_mount`) before either path is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             #[cfg(target_arch = "x86_64")]
             Syscall::N__sysctl => panic!("revived syscall requires reviewed runtime disposition"),
             Syscall::N_prctl => r(
                 $id,
                 Family::Process,
                 Disposition::Modeled,
-                "One Rust option table on libc and raw doors: name, pdeathsig, dumpable, no-new-privs, seccomp (`PR_GET_SECCOMP` reads 0, since no mode is ever entered; `PR_SET_SECCOMP` runs through the seccomp row's model), timerslack, scrubbed AUXV, an inert VMA control, and the THP-disable flag (set at start, as the shim runs the process with THP off; a guest clearing it reads it cleared, while the host stays off, so residency stays per base page); unknown options return EINVAL.",
+                "One Rust option table on libc and raw doors: name, pdeathsig, dumpable, no-new-privs, seccomp (`PR_GET_SECCOMP` reads 0, since no mode is ever entered; `PR_SET_SECCOMP` is a named fatal), timerslack, scrubbed AUXV, an inert VMA control, and the THP-disable flag (set at start, as the shim runs the process with THP off; a guest clearing it reads it cleared, while the host stays off, so residency stays per base page); unknown options return EINVAL.",
                 None,
             ),
             #[cfg(target_arch = "x86_64")]
@@ -1157,11 +1153,10 @@ macro_rules! early_rows {
             Syscall::N_chroot => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: the lookup (`EFAULT`, `ENOENT`, `ENOTDIR`, …), search permission on the directory (`EACCES`), then `CAP_SYS_CHROOT` (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysChroot]),
+            ),
             Syscall::N_sync => r(
                 $id,
                 Family::Fs,
@@ -1172,11 +1167,10 @@ macro_rules! early_rows {
             Syscall::N_acct => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_PACCT` before the path is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysPacct]),
+            ),
             Syscall::N_settimeofday => r(
                 $id,
                 Family::Time,
@@ -1187,43 +1181,38 @@ macro_rules! early_rows {
             Syscall::N_mount => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: the type, source and options are copied (`EFAULT`), the target looked up (`ENOENT`, …), `MS_NOUSER` refused (`EINVAL`), then `CAP_SYS_ADMIN` (`may_mount`: `EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             Syscall::N_umount2 => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: an unknown flag (`EINVAL`), the lookup (`ENOENT`, …), then `CAP_SYS_ADMIN` (`may_mount`: `EPERM` without it, before whether the path is a mount; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             Syscall::N_swapon => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: a flag outside `SWAP_FLAGS_VALID` (`EINVAL`), then `CAP_SYS_ADMIN` before the path is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             Syscall::N_swapoff => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_ADMIN` before the path is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             Syscall::N_reboot => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_BOOT` in the pid namespace's owner before the magic numbers and command (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysBoot]),
+            ),
             Syscall::N_sethostname => r(
                 $id,
                 Family::Privileged,
@@ -1244,38 +1233,34 @@ macro_rules! early_rows {
             Syscall::N_iopl => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: a level past 3 (`EINVAL`); the current level 0 needs nothing (0); raising it needs `CAP_SYS_RAWIO` (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysRawio]),
+            ),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_ioperm => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: a range that wraps, is empty or passes port 65535 (`EINVAL`); turning ports off needs nothing (0: no bitmap); turning them on needs `CAP_SYS_RAWIO` (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysRawio]),
+            ),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_create_module => panic!("revived syscall requires reviewed runtime disposition"),
             Syscall::N_init_module => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_MODULE` (`may_init_module`) before the image is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysModule]),
+            ),
             Syscall::N_delete_module => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "Answered from the virtual credential: `CAP_SYS_MODULE` before the name is read (`EPERM` without it; granted, a named fatal).",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysModule]),
+            ),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_get_kernel_syms => panic!("revived syscall requires reviewed runtime disposition"),
             #[cfg(target_arch = "x86_64")]
@@ -1283,11 +1268,10 @@ macro_rules! early_rows {
             Syscall::N_quotactl => r(
                 $id,
                 Family::Privileged,
-                Disposition::Modeled,
-                "A type past `MAXQUOTAS` (`EINVAL`); no device: `Q_SYNC` 0, else `ENODEV`; then the device lookup (`ENOENT`, …; `ENOTBLK`: the virtual machine has no block device), all before `CAP_SYS_ADMIN`, which no command reaches.",
+                Disposition::Trap(TRAP_PRIVILEGED),
+                "Culled: no target workload makes this call, so the model was removed. It stays a named fatal trap rather than a silent answer; a workload that needs it reopens the row.",
                 None,
-            )
-            .capabilities(&[Capability::SysAdmin]),
+            ),
             Syscall::N_nfsservctl => panic!("revived syscall requires reviewed runtime disposition"),
             #[cfg(target_arch = "x86_64")]
             Syscall::N_getpmsg => panic!("revived syscall requires reviewed runtime disposition"),

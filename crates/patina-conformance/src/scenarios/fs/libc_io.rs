@@ -10,8 +10,7 @@
 //! * `posix_fallocate` grows the file to the end of the range and returns
 //!   its error number (EINVAL for a negative offset or a zero length, EBADF
 //!   read-only, ESPIPE on a pipe);
-//! * `isatty` is 1 for a terminal (a pseudoterminal master from
-//!   `/dev/ptmx`), 0 for a file, a directory and a pipe (ENOTTY) and for a
+//! * `isatty` is 0 for a file, a directory and a pipe (ENOTTY) and for a
 //!   closed number (EBADF).
 //!
 //! libc only.
@@ -196,11 +195,8 @@ pub fn run(p: &Probe) {
     p.check("nor a directory", tty(p, dir) == neg(ENOTTY));
     p.check("nor a pipe", tty(p, rd) == neg(ENOTTY));
     p.check("a closed number is EBADF", tty(p, 4000) == neg(EBADF));
-    let pty = p.openat(AT_FDCWD, "/dev/ptmx", O_RDWR | O_NOCTTY | O_CLOEXEC, 0);
-    p.check("open a pseudoterminal master", pty >= 0);
-    p.check("a terminal is one", tty(p, pty) == 1);
 
-    for fd in [fd, reader, writer, rd, wr, dir, pty] {
+    for fd in [fd, reader, writer, rd, wr, dir] {
         p.close(fd);
     }
 }

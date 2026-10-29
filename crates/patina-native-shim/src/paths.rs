@@ -94,11 +94,6 @@ pub(crate) const RESOLVE_SCOPE_FLAGS: u32 = RESOLVE_BENEATH
 #[cfg(target_os = "linux")]
 pub(crate) const PTMX: &str = "/dev/ptmx";
 
-/// Where devpts is mounted (Linux): its root, whose entries are the live
-/// pseudoterminals' slave nodes by index, resolved the same way.
-#[cfg(target_os = "linux")]
-pub(crate) const DEVPTS: &str = "/dev/pts";
-
 /// The controlling terminal's alias, devtmpfs's `tty` node (Linux), resolved
 /// the same way.
 #[cfg(target_os = "linux")]
@@ -120,18 +115,10 @@ pub(crate) enum Virtual {
     /// `nsfs::ENTRIES`.
     #[cfg(target_os = "linux")]
     Namespace(usize),
-    /// The pseudoterminal multiplexer, [`PTMX`].
+    /// The pseudoterminal multiplexer, [`PTMX`]: pseudoterminals are not
+    /// modeled, so opening it stops the run by name.
     #[cfg(target_os = "linux")]
     Ptmx,
-    /// `/dev/pts/<index>`: a devpts name in its canonical decimal spelling,
-    /// the slave node of the pair with that index while one is live
-    /// (`thread::pty::node`), no entry otherwise.
-    #[cfg(target_os = "linux")]
-    Pts(u32),
-    /// devpts's root, [`DEVPTS`]: a directory the model does not list or
-    /// describe, answered only where the answer needs neither.
-    #[cfg(target_os = "linux")]
-    Devpts,
     /// `/dev/tty`, [`TTY`]: the caller's controlling terminal, which the
     /// virtual process never has.
     #[cfg(target_os = "linux")]
@@ -153,23 +140,9 @@ impl Virtual {
             #[cfg(target_os = "linux")]
             Virtual::Ptmx => PTMX.to_owned(),
             #[cfg(target_os = "linux")]
-            Virtual::Pts(index) => format!("{DEVPTS}/{index}"),
-            #[cfg(target_os = "linux")]
-            Virtual::Devpts => DEVPTS.to_owned(),
-            #[cfg(target_os = "linux")]
             Virtual::Tty => TTY.to_owned(),
             #[cfg(target_os = "linux")]
             Virtual::Proc(node) => node.path(),
-        }
-    }
-
-    /// Whether the entry exists: a devpts index names a node only while its
-    /// pair is live; every other entry always exists.
-    pub(crate) fn exists(self) -> bool {
-        match self {
-            #[cfg(target_os = "linux")]
-            Virtual::Pts(index) => crate::thread::pty::node(index).is_some(),
-            _ => true,
         }
     }
 
@@ -279,16 +252,10 @@ fn replace_cwd(new: Fd) -> Result<(), c_int> {
 pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved, c_int> {
     let resolved = match resolve(dirfd, path, 0)? {
         Resolution::Volume(resolved) => resolved,
-        // devpts's root is a directory, but not one the model can hold.
-        #[cfg(target_os = "linux")]
-        Resolution::Virtual(entry @ Virtual::Devpts) => {
-            entry.unmodeled("holding as the working or root directory")
-        }
         #[cfg(target_os = "linux")]
         Resolution::Virtual(entry @ Virtual::Proc(node)) if node.is_directory() => {
             entry.unmodeled("holding as the working or root directory")
         }
-        Resolution::Virtual(entry) if !entry.exists() => return Err(ENOENT),
         // The devices, the namespace files and procfs's files are no
         // directories.
         Resolution::Virtual(_) => return Err(ENOTDIR),
@@ -392,33 +359,14 @@ fn child(parent: &[String], name: &str) -> String {
     }
 }
 
-/// The terminal entries a lexical path names: the multiplexer, the
-/// controlling terminal's alias, devpts's root, and a devpts index in its
-/// canonical decimal spelling (`devpts_pty_new` names a node `%d`). Any other
-/// name under devpts (its own `ptmx` node, a name no index spells, a path
-/// through a slave node) stops the run by name.
+/// The terminal entries a lexical path names: the multiplexer and the
+/// controlling terminal's alias.
 #[cfg(target_os = "linux")]
 fn devices(path: &str) -> Option<Virtual> {
-    if path == PTMX {
-        return Some(Virtual::Ptmx);
-    }
-    if path == TTY {
-        return Some(Virtual::Tty);
-    }
-    let rest = path.strip_prefix(DEVPTS)?;
-    if rest.is_empty() {
-        return Some(Virtual::Devpts);
-    }
-    let name = rest.strip_prefix('/')?;
-    let canonical = !name.is_empty()
-        && name.bytes().all(|byte| byte.is_ascii_digit())
-        && (name == "0" || !name.starts_with('0'));
-    match name.parse::<u32>() {
-        Ok(index) if canonical => Some(Virtual::Pts(index)),
-        _ => crate::trap_fatal(&format!(
-            "{path} names no pseudoterminal devpts models (its root and /dev/pts/<index> are); \
-             failing closed"
-        )),
+    match path {
+        PTMX => Some(Virtual::Ptmx),
+        TTY => Some(Virtual::Tty),
+        _ => None,
     }
 }
 
@@ -443,12 +391,7 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         | FdKind::Inotify
         | FdKind::Epoll
         | FdKind::SignalFd
-        | FdKind::MessageQueue
-        | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
-        | FdKind::PtyMaster
-        | FdKind::PtySlave => {
+        | FdKind::Pidfd => {
             return Err(ENOTDIR);
         }
         // A namespace file's nsfs inode is a regular file, but no path
@@ -604,8 +547,8 @@ pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution
             if flags & RESOLVE_NO_XDEV != 0 {
                 return Err(EXDEV);
             }
-            if requires_directory && entry != Virtual::Devpts {
-                return Err(if entry.exists() { ENOTDIR } else { ENOENT });
+            if requires_directory {
+                return Err(ENOTDIR);
             }
             return Ok(Resolution::Virtual(entry));
         }

@@ -281,17 +281,6 @@ pub(crate) fn epoll_close(handle: u64) {
     lock_state().net.epolls.remove(&handle);
 }
 
-/// The description an epoll instance's interest in `(tfd, toff)`
-/// watches (`get_epoll_tfile_raw_ptr`, `ep_find_tfd`): the `toff`-th
-/// of the interests registered for descriptor number `tfd`, of which
-/// the model holds one at most.
-pub(crate) fn epoll_target(handle: u64, tfd: c_int, toff: u32) -> Option<DescId> {
-    let state = lock_state();
-    let slot = state.net.epolls.get(&handle)?;
-    let interest = slot.ep.interests.get(&tfd).filter(|_| toff == 0)?;
-    Some(interest.desc)
-}
-
 /// Unlink `me` from an epoll instance's waiters (the
 /// `WaiterLoc::EpollWait` registration).
 pub(in crate::thread) fn unwait(state: &mut ThreadRuntime, id: u64, me: TaskId) {
@@ -440,7 +429,6 @@ pub(crate) unsafe fn ctl_core(
         target.kind,
         FdKind::File
             | FdKind::Dir
-            | FdKind::LandlockRuleset
             | FdKind::Namespace
             | FdKind::ProcDir
     ) || (target.kind == FdKind::Proc && !crate::procfs::polls(target.handle))

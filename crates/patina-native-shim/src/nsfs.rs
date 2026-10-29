@@ -15,7 +15,7 @@
 //! `FdKind::Namespace` description, `O_PATH` a `FdKind::NamespacePath` one
 //! (which every operation that takes an opened file refuses, `EBADF`), whose
 //! handle is the entry's index in [`ENTRIES`]; what a namespace file refuses,
-//! it refuses as nsfs does. `setns` of one is `sud::privileged::setns`.
+//! it refuses as nsfs does. `setns` is a named trap.
 //!
 //! Known differences: `flock` of a namespace file is keyed by description,
 //! so two opens of one namespace both take `LOCK_EX` where the kernel's
@@ -25,10 +25,6 @@
 //! x86_64 6.8.0-139, not yet on an arm64 6.8.
 
 use crate::{PATINA_ENTRY_FILE, PATINA_FS_NSFS, PatinaMetadata, PatinaTimestamp, SpinMutex};
-use linux_raw_sys::general::{
-    CLONE_NEWCGROUP, CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWTIME,
-    CLONE_NEWUSER, CLONE_NEWUTS,
-};
 
 /// One `/proc/self/ns` entry.
 pub(crate) struct Entry {
@@ -36,8 +32,6 @@ pub(crate) struct Entry {
     pub(crate) name: &'static str,
     /// The namespace type's name, what the link's target starts with.
     pub(crate) kind: &'static str,
-    /// Its `CLONE_NEW*` type, what `setns` checks a type against.
-    pub(crate) flag: u32,
     /// The namespace's inode number.
     pub(crate) inum: u64,
 }
@@ -56,25 +50,20 @@ const UTS: u64 = 0xEFFF_FFFE;
 /// The entries, in the directory's order (fs/proc/namespaces.c `ns_entries`
 /// as `readdir` lists them).
 pub(crate) const ENTRIES: [Entry; 10] = [
-    entry("cgroup", "cgroup", CLONE_NEWCGROUP, CGROUP),
-    entry("ipc", "ipc", CLONE_NEWIPC, IPC),
-    entry("mnt", "mnt", CLONE_NEWNS, MNT),
-    entry("net", "net", CLONE_NEWNET, NET),
-    entry("pid", "pid", CLONE_NEWPID, PID),
-    entry("pid_for_children", "pid", CLONE_NEWPID, PID),
-    entry("time", "time", CLONE_NEWTIME, TIME),
-    entry("time_for_children", "time", CLONE_NEWTIME, TIME),
-    entry("user", "user", CLONE_NEWUSER, USER),
-    entry("uts", "uts", CLONE_NEWUTS, UTS),
+    entry("cgroup", "cgroup", CGROUP),
+    entry("ipc", "ipc", IPC),
+    entry("mnt", "mnt", MNT),
+    entry("net", "net", NET),
+    entry("pid", "pid", PID),
+    entry("pid_for_children", "pid", PID),
+    entry("time", "time", TIME),
+    entry("time_for_children", "time", TIME),
+    entry("user", "user", USER),
+    entry("uts", "uts", UTS),
 ];
 
-const fn entry(name: &'static str, kind: &'static str, flag: u32, inum: u64) -> Entry {
-    Entry {
-        name,
-        kind,
-        flag,
-        inum,
-    }
+const fn entry(name: &'static str, kind: &'static str, inum: u64) -> Entry {
+    Entry { name, kind, inum }
 }
 
 /// The directory the entries are in.

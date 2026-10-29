@@ -20,18 +20,6 @@
 //! kernel's `update_queue` and `pipelined_send` do, and `IPC_RMID` wakes every
 //! waiter with `EIDRM`. A wait is never restarted after a signal handler runs
 //! (`EINTR`, man 7 signal).
-//!
-//! POSIX message queues (ipc/mqueue.c) live in the same namespace: a queue is
-//! named without its leading slash (the kernel row's spelling), its
-//! descriptors are `FdKind::MessageQueue` descriptions (close-on-exec, with
-//! the access mode and `O_NONBLOCK` of the open), and it lives until it is
-//! unlinked and its last description is closed. Messages leave highest
-//! priority first; a receiver or sender that has to wait parks on the
-//! scheduler until the absolute `CLOCK_REALTIME` deadline, and is restarted
-//! after a `SA_RESTART` handler. `mq_notify` registers the process once; a
-//! message arriving on an empty queue with no receiver waiting sends its
-//! signal (`SI_MESGQ`) through the signal model and consumes the
-//! registration.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -430,12 +418,6 @@ pub(in crate::thread) enum IpcWait {
     Sem(i32),
     MsgSend(i32),
     MsgRecv(i32),
-    /// A blocked `mq_timedsend`/`mq_timedreceive` on a message queue.
-    MqSend(u64),
-    MqRecv(u64),
-    /// A readiness reactor watching a message queue.
-    MqWritable(u64),
-    MqReadable(u64),
 }
 
 struct Segment {
@@ -553,15 +535,6 @@ pub(in crate::thread) struct Ipc {
     sem: Space<SemSet>,
     msg: Space<MsgQueue>,
     outcomes: BTreeMap<TaskId, Outcome>,
-    /// POSIX message queues by name, and every queue (named or unlinked but
-    /// still open) by id.
-    mq_names: BTreeMap<Vec<u8>, u64>,
-    mqueues: BTreeMap<u64, Mqueue>,
-    /// Open queue descriptions, by the handle their descriptor names.
-    mq_opens: BTreeMap<u64, MqOpen>,
-    next_mq: u64,
-    /// The bytes the queues hold against `RLIMIT_MSGQUEUE`.
-    mq_bytes: u64,
 }
 
 impl Default for Ipc {
@@ -571,11 +544,6 @@ impl Default for Ipc {
             sem: Space::new(SEMMNI),
             msg: Space::new(MSGMNI),
             outcomes: BTreeMap::new(),
-            mq_names: BTreeMap::new(),
-            mqueues: BTreeMap::new(),
-            mq_opens: BTreeMap::new(),
-            next_mq: 1,
-            mq_bytes: 0,
         }
     }
 }
@@ -598,26 +566,6 @@ impl Ipc {
             IpcWait::MsgRecv(id) => {
                 if let Ok((_, queue)) = self.msg.get_mut(id) {
                     queue.receivers.retain(|waiter| waiter.task != task);
-                }
-            }
-            IpcWait::MqSend(queue) => {
-                if let Some(queue) = self.mqueues.get_mut(&queue) {
-                    queue.senders.retain(|sender| sender.task != task);
-                }
-            }
-            IpcWait::MqRecv(queue) => {
-                if let Some(queue) = self.mqueues.get_mut(&queue) {
-                    queue.receivers.retain(|waiter| *waiter != task);
-                }
-            }
-            IpcWait::MqWritable(queue) => {
-                if let Some(queue) = self.mqueues.get_mut(&queue) {
-                    queue.writable_watchers.retain(|waiter| *waiter != task);
-                }
-            }
-            IpcWait::MqReadable(queue) => {
-                if let Some(queue) = self.mqueues.get_mut(&queue) {
-                    queue.readable_watchers.retain(|waiter| *waiter != task);
                 }
             }
         }
@@ -726,7 +674,6 @@ fn boundary() -> Result<(), c_int> {
 }
 
 mod messages;
-mod mqueue;
 mod semaphores;
 mod shared_memory;
 
@@ -734,15 +681,9 @@ mod shared_memory;
 mod tests;
 
 pub(crate) use messages::{msgctl, msgget, msgrcv, msgsnd};
-use mqueue::{MqOpen, Mqueue};
-pub(crate) use mqueue::{
-    mq_close, mq_getsetattr, mq_mode, mq_notify, mq_open, mq_read, mq_seek, mq_timedreceive,
-    mq_timedsend, mq_unlink, mq_unread,
-};
-pub(in crate::thread) use mqueue::{mq_event_seqs, mq_readiness, mq_watch};
 #[cfg(test)]
 use semaphores::Refused;
-pub(crate) use semaphores::{exit_sem, semctl, semget, semtimedop};
 #[cfg(test)]
 use semaphores::{perform, update_queue};
+pub(crate) use semaphores::{semctl, semget, semtimedop};
 pub(crate) use shared_memory::{shm_detached, shmat, shmctl, shmdt, shmget};

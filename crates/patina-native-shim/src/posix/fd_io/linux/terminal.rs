@@ -290,17 +290,9 @@ unsafe fn ttyname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
         if crate::ioctl::patina_ioctl(fd, libc::TCGETS, kernel.as_mut_ptr().cast()) != 0 {
             return ioctl_error();
         }
-        let mut name = [0 as c_char; 30];
-        let length = crate::thread::pty::patina_pty_name(fd, name.as_mut_ptr(), name.len());
-        if length < 0 {
-            return ioctl_error();
-        }
-        if length as usize >= buflen {
-            errno(libc::ENODEV);
-            return libc::ENODEV;
-        }
-        core::ptr::copy_nonoverlapping(name.as_ptr(), buf, length as usize + 1);
-        0
+        // A descriptor that answers TCGETS names a terminal, and the virtual machine has none.
+        errno(libc::ENODEV);
+        libc::ENODEV
     }
 }
 /// # Safety

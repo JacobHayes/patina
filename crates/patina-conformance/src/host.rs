@@ -190,7 +190,6 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         Need::SysvShm => memipc::sysv_shm(),
         Need::SysvSem => memipc::sysv_sem(),
         Need::SysvMsg => memipc::sysv_msg(),
-        Need::PosixMqueue => memipc::posix_mqueue(dir),
         Need::LockedPages(pages) => memipc::locked_pages(pages),
         Need::Membarrier => memipc::membarrier(),
         Need::ProtectionKeys => memipc::protection_keys(),
@@ -200,15 +199,11 @@ pub fn need_unmet(need: Need, dir: &Path) -> Result<(), NotRun> {
         #[cfg(target_arch = "x86_64")]
         Need::NoCpuidFaulting => memipc::no_cpuid_faulting(),
         Need::SecretMemory => memipc::secret_memory(),
-        Need::OneNumaNode => memipc::one_numa_node(),
         Need::NiceZero => timeid::nice_zero(),
         Need::DefaultPersona => timeid::default_persona(),
         Need::SysfsSyscall => timeid::sysfs_syscall(),
         Need::HighResTimers => timeid::high_res_timers(),
         Need::Landlock => timeid::landlock(),
-        Need::RestrictedBpf => restricted::bpf(),
-        Need::RestrictedPerf => restricted::perf(),
-        Need::RestrictedUserfaultfd => restricted::userfaultfd(),
         Need::Aio => asyncio::aio(),
         Need::IoUring => asyncio::io_uring(),
         Need::RseqRegistered => rseq_registered(),
@@ -797,89 +792,6 @@ mod timeid {
     }
 }
 
-/// The host-configuration needs of the privileged rows: each asks for the
-/// smallest harmless object an unrestricted host would hand an unprivileged
-/// caller, and closes it if the host does.
-mod restricted {
-    use super::{Cause, NotRun, refusal};
-    use crate::vehicle::errno;
-
-    /// `syscall(2)`; the kernel convention (`-errno`).
-    fn sys(number: libc::c_long, args: [libc::c_long; 5]) -> i64 {
-        // SAFETY: every pointer passed below is owned by the caller for the
-        // duration of the call.
-        let result = unsafe { libc::syscall(number, args[0], args[1], args[2], args[3], args[4]) };
-        if result < 0 {
-            -i64::from(errno())
-        } else {
-            result
-        }
-    }
-
-    /// `refused` is the answer of a restricted host; a descriptor is closed
-    /// and reported as the host's permissive configuration.
-    fn expect(what: &str, result: i64, refused: i32, permissive: &str) -> Result<(), NotRun> {
-        if result == -i64::from(refused) {
-            Ok(())
-        } else if result >= 0 {
-            // SAFETY: the descriptor the call just opened.
-            unsafe { libc::close(result as libc::c_int) };
-            Err(NotRun {
-                cause: Cause::Absent,
-                detail: format!("{what} succeeded: {permissive}"),
-            })
-        } else {
-            Err(refusal(what, (-result) as i32))
-        }
-    }
-
-    pub(super) fn bpf() -> Result<(), NotRun> {
-        // `union bpf_attr`'s map-creation prefix: an array of one 4-byte
-        // entry under a 4-byte key.
-        let attr: [u32; 5] = [2, 4, 4, 1, 0];
-        let result = sys(libc::SYS_bpf, [0, attr.as_ptr() as libc::c_long, 20, 0, 0]);
-        expect(
-            "bpf(BPF_MAP_CREATE, array)",
-            result,
-            libc::EPERM,
-            "kernel.unprivileged_bpf_disabled is 0",
-        )
-    }
-
-    pub(super) fn perf() -> Result<(), NotRun> {
-        // `struct perf_event_attr` (PERF_ATTR_SIZE_VER0 bytes): the software
-        // task clock, disabled, excluding the kernel and hypervisor.
-        let mut attr = [0u8; 64];
-        attr[0..4].copy_from_slice(&1u32.to_ne_bytes());
-        attr[4..8].copy_from_slice(&64u32.to_ne_bytes());
-        attr[8..16].copy_from_slice(&1u64.to_ne_bytes());
-        attr[40..48].copy_from_slice(&0b110_0001u64.to_ne_bytes());
-        let result = sys(
-            libc::SYS_perf_event_open,
-            [attr.as_ptr() as libc::c_long, 0, -1, -1, 0],
-        );
-        expect(
-            "perf_event_open(user-only task clock)",
-            result,
-            libc::EACCES,
-            "kernel.perf_event_paranoid lets an unprivileged caller count its own time",
-        )
-    }
-
-    pub(super) fn userfaultfd() -> Result<(), NotRun> {
-        let result = sys(
-            libc::SYS_userfaultfd,
-            [libc::O_CLOEXEC as libc::c_long, 0, 0, 0, 0],
-        );
-        expect(
-            "userfaultfd(O_CLOEXEC)",
-            result,
-            libc::EPERM,
-            "vm.unprivileged_userfaultfd is 1",
-        )
-    }
-}
-
 /// The memory and IPC needs: each creates the smallest object of its kind
 /// the scenario would, then releases it. Refusals classify through
 /// [`refusal`]; a row whose errno names the missing capability says so where
@@ -972,7 +884,6 @@ mod memipc {
     use super::{Cause, NotRun, refusal};
     use crate::vehicle::errno;
     use patina_dst_syscalls::Syscall;
-    use std::path::Path;
 
     /// `syscall(2)` with the row's number; the kernel convention (`-errno`).
     fn sys(row: Syscall, args: [i64; 6]) -> i64 {
@@ -1063,42 +974,6 @@ mod memipc {
         check(
             "msgctl(IPC_RMID)",
             sys(Syscall::N_msgctl, [id, libc::IPC_RMID as i64, 0, 0, 0, 0]),
-        )
-        .map(drop)
-    }
-
-    /// The attributes the mqueue scenario creates its queue with.
-    const MQ_MAXMSG: i64 = 4;
-    const MQ_MSGSIZE: i64 = 16;
-
-    pub(super) fn posix_mqueue(dir: &Path) -> Result<(), NotRun> {
-        let base = dir
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let name = std::ffi::CString::new(format!("{base}-need-mq")).expect("no NUL");
-        // SAFETY: mq_attr is plain data.
-        let mut attr: libc::mq_attr = unsafe { std::mem::zeroed() };
-        attr.mq_maxmsg = MQ_MAXMSG;
-        attr.mq_msgsize = MQ_MSGSIZE;
-        let fd = check(
-            "mq_open(O_CREAT|O_EXCL, 4 x 16 bytes)",
-            sys(
-                Syscall::N_mq_open,
-                [
-                    name.as_ptr() as i64,
-                    (libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC) as i64,
-                    0o600,
-                    &attr as *const libc::mq_attr as i64,
-                    0,
-                    0,
-                ],
-            ),
-        )?;
-        sys(Syscall::N_close, [fd, 0, 0, 0, 0, 0]);
-        check(
-            "mq_unlink",
-            sys(Syscall::N_mq_unlink, [name.as_ptr() as i64, 0, 0, 0, 0, 0]),
         )
         .map(drop)
     }
@@ -1271,34 +1146,6 @@ mod memipc {
                 (-error) as i32,
             )),
         }
-    }
-
-    pub(super) fn one_numa_node() -> Result<(), NotRun> {
-        const MPOL_F_MEMS_ALLOWED: i64 = 1 << 2;
-        let mut mode: i32 = 0;
-        let mut mask = [0u64; 16];
-        check(
-            "get_mempolicy(MPOL_F_MEMS_ALLOWED)",
-            sys(
-                Syscall::N_get_mempolicy,
-                [
-                    &mut mode as *mut i32 as i64,
-                    mask.as_mut_ptr() as i64,
-                    (mask.len() * 64) as i64,
-                    0,
-                    MPOL_F_MEMS_ALLOWED,
-                    0,
-                ],
-            ),
-        )?;
-        let nodes: u32 = mask.iter().map(|word| word.count_ones()).sum();
-        if nodes != 1 {
-            return Err(unmet(
-                Cause::Absent,
-                format!("this task may allocate from {nodes} memory nodes, not one"),
-            ));
-        }
-        Ok(())
     }
 
     #[cfg(test)]

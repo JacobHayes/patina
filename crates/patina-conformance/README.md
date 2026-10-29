@@ -47,15 +47,14 @@ native oracle needs beyond those rows (`needs`: user xattrs, file handles or
 whiteouts on the run directory's filesystem, inotify or lockable pages within
 the caller's limits, an unprivileged caller, no controlling terminal, a
 hardware or kernel-configuration feature such as protection keys or SysV IPC,
-a host that restricts what the virtual kernel's declared configuration
-restricts (unprivileged BPF, perf events, kernel-fault userfaultfd) — detected
+a kernel build that answers the probes (Landlock) — detected
 live, an unmet one is reported not run and a detection that fails
 unexpectedly is a failure), the
 oldest kernel whose behaviour its checks assert (`kernel_floor`), its gaps, and
 the facts its recorded trace must show. An unmet need or a kernel below a
 scenario's floor fails the test — the runner is misconfigured — except a
 machine fact found absent (`Need::hardware`: protection keys, shadow stacks,
-secret memory, one NUMA node, 4-level paging, no CPUID faulting), which no runner is set up to provide: that
+secret memory, 4-level paging, no CPUID faulting), which no runner is set up to provide: that
 scenario is reported `NOT RUN` on the test's stderr, past libtest's capture,
 so it shows in the job log. A killed native run can leave IPC objects behind;
 the harness sweeps every name a run derives from its directory after each

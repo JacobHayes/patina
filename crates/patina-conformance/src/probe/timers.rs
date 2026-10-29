@@ -986,16 +986,6 @@ impl Probe {
             .emit();
         result
     }
-
-    /// `syslog(type, NULL, len)` (glibc's `klogctl`).
-    pub fn syslog(&self, kind: i32, len: i32) -> i64 {
-        let result = self.call(Syscall::N_syslog, [kind as i64, 0, len as i64, 0, 0, 0]);
-        self.event(Syscall::N_syslog, result)
-            .arg("type", kind)
-            .arg("len", len)
-            .emit();
-        result
-    }
 }
 
 fn timex(modes: u32, tick: i64) -> libc::timex {

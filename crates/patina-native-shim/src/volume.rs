@@ -84,9 +84,7 @@ const PIPEFS_MAGIC: i64 = 0x5049_5045;
 const SOCKFS_MAGIC: i64 = 0x534F_434B;
 const ANON_INODE_FS_MAGIC: i64 = 0x0904_1934;
 const TMPFS_MAGIC: i64 = 0x0102_1994;
-const MQUEUE_MAGIC: i64 = 0x1980_0202;
 const NSFS_MAGIC: i64 = 0x6e73_6673;
-const DEVPTS_SUPER_MAGIC: i64 = 0x1cd1;
 const PROC_SUPER_MAGIC: i64 = 0x9fa0;
 
 /// `statfs(2)` `f_flags`: the answer is valid (`ST_VALID`, set by
@@ -102,8 +100,6 @@ const NAME_MAX: i64 = 255;
 
 /// The anonymous device devtmpfs is on.
 const DEVTMPFS_DEVICE: (u32, u32) = (0, 5);
-/// The IPC namespace's internal mqueue mount, where `mq_open` descriptors live.
-const MQUEUE_DEVICE: (u32, u32) = (0, 26);
 
 /// A filesystem a node can be on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,41 +109,21 @@ enum Filesystem {
     Sockfs,
     AnonInodefs,
     Devtmpfs,
-    Mqueue,
     Nsfs,
-    Devpts,
     Proc,
 }
 
 impl Filesystem {
     #[cfg(any(target_arch = "x86_64", test))]
-    const ALL: [Filesystem; 9] = [
+    const ALL: [Filesystem; 7] = [
         Filesystem::Volume,
         Filesystem::Pipefs,
         Filesystem::Sockfs,
         Filesystem::AnonInodefs,
         Filesystem::Devtmpfs,
-        Filesystem::Mqueue,
         Filesystem::Nsfs,
-        Filesystem::Devpts,
         Filesystem::Proc,
     ];
-
-    /// The filesystem type as the kernel registers it (`register_filesystem`,
-    /// the name `/proc/filesystems` and `sysfs(2)` list), or `None` for one
-    /// that is only ever mounted internally (anon_inodefs).
-    fn registered_name(self) -> Option<&'static str> {
-        match self {
-            Filesystem::Volume => Some("ext4"),
-            Filesystem::Pipefs => Some("pipefs"),
-            Filesystem::Sockfs => Some("sockfs"),
-            Filesystem::AnonInodefs | Filesystem::Nsfs => None,
-            Filesystem::Devtmpfs => Some("devtmpfs"),
-            Filesystem::Mqueue => Some("mqueue"),
-            Filesystem::Devpts => Some("devpts"),
-            Filesystem::Proc => Some("proc"),
-        }
-    }
 
     fn device(self) -> (u32, u32) {
         match self {
@@ -156,9 +132,7 @@ impl Filesystem {
             Filesystem::Sockfs => fs_device(PATINA_FS_SOCKFS),
             Filesystem::AnonInodefs => fs_device(crate::PATINA_FS_ANON_INODE),
             Filesystem::Devtmpfs => DEVTMPFS_DEVICE,
-            Filesystem::Mqueue => MQUEUE_DEVICE,
             Filesystem::Nsfs => fs_device(crate::PATINA_FS_NSFS),
-            Filesystem::Devpts => fs_device(crate::PATINA_FS_DEVPTS),
             Filesystem::Proc => fs_device(crate::PATINA_FS_PROC),
         }
     }
@@ -204,16 +178,6 @@ impl Filesystem {
                 f_flags: ST_VALID | ST_NOSUID | ST_RELATIME,
                 f_spare: [0; 4],
             },
-            // `simple_statfs`, on a mount of the namespace.
-            Filesystem::Devpts => KernelStatfs {
-                f_type: DEVPTS_SUPER_MAGIC,
-                f_bsize: crate::PAGE_SIZE as i64,
-                f_fsid: self.fsid(),
-                f_namelen: NAME_MAX,
-                f_frsize: crate::PAGE_SIZE as i64,
-                f_flags: ST_VALID | ST_NOSUID | ST_NOEXEC | ST_RELATIME,
-                ..KernelStatfs::default()
-            },
             // `simple_statfs`, on the mount at `/proc`.
             Filesystem::Proc => KernelStatfs {
                 f_type: PROC_SUPER_MAGIC,
@@ -227,12 +191,10 @@ impl Filesystem {
             Filesystem::Pipefs
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
-            | Filesystem::Mqueue
             | Filesystem::Nsfs => KernelStatfs {
                 f_type: match self {
                     Filesystem::Pipefs => PIPEFS_MAGIC,
                     Filesystem::Sockfs => SOCKFS_MAGIC,
-                    Filesystem::Mqueue => MQUEUE_MAGIC,
                     Filesystem::Nsfs => NSFS_MAGIC,
                     _ => ANON_INODE_FS_MAGIC,
                 },
@@ -274,13 +236,11 @@ impl Filesystem {
         match self {
             Filesystem::Volume => MOUNTS[0].ids(),
             Filesystem::Devtmpfs => MOUNTS[1].ids(),
-            Filesystem::Devpts => MOUNTS[3].ids(),
-            Filesystem::Proc => MOUNTS[4].ids(),
+            Filesystem::Proc => MOUNTS[3].ids(),
             Filesystem::Nsfs => internal(3, 4),
             Filesystem::Sockfs => internal(9, 10),
             Filesystem::Pipefs => internal(15, 17),
             Filesystem::AnonInodefs => internal(16, 18),
-            Filesystem::Mqueue => internal(22, 24),
         }
     }
 
@@ -292,19 +252,17 @@ impl Filesystem {
             Filesystem::Pipefs
             | Filesystem::Sockfs
             | Filesystem::AnonInodefs
-            | Filesystem::Mqueue
             | Filesystem::Nsfs
-            | Filesystem::Devpts
             | Filesystem::Proc => false,
         }
     }
 
     /// The superblock's block size (`s_blocksize`, what `FIGETBSZ`
-    /// answers): `statfs`'s `f_bsize`, but devpts's and procfs's 1 KiB,
+    /// answers): `statfs`'s `f_bsize`, but procfs's 1 KiB,
     /// which `simple_statfs` does not report.
     fn block_size(self) -> i32 {
         match self {
-            Filesystem::Devpts | Filesystem::Proc => 1024,
+            Filesystem::Proc => 1024,
             _ => self.describe().f_bsize as i32,
         }
     }
@@ -315,9 +273,8 @@ impl Filesystem {
             PATINA_FS_PIPEFS => Filesystem::Pipefs,
             PATINA_FS_SOCKFS => Filesystem::Sockfs,
             crate::PATINA_FS_NSFS => Filesystem::Nsfs,
-            crate::PATINA_FS_DEVTMPFS | crate::PATINA_FS_PTMX => Filesystem::Devtmpfs,
-            crate::PATINA_FS_DEVPTS => Filesystem::Devpts,
-            crate::PATINA_FS_ANON_INODE | crate::PATINA_FS_ANON_OWN => Filesystem::AnonInodefs,
+            crate::PATINA_FS_DEVTMPFS => Filesystem::Devtmpfs,
+            crate::PATINA_FS_ANON_INODE => Filesystem::AnonInodefs,
             crate::PATINA_FS_PROC | crate::PATINA_FS_PROC_OWN => Filesystem::Proc,
             _ => Filesystem::Volume,
         }
@@ -332,9 +289,6 @@ const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
 /// The mount the node `ino` on the `PATINA_FS_*` filesystem `fs` is on: a
 /// devtmpfs node is bound at its own path, so its mount is its bind's.
 fn node_mount(fs: u32, ino: u64) -> MountIds {
-    if fs == crate::PATINA_FS_PTMX {
-        return MOUNTS[2].ids();
-    }
     if fs == crate::PATINA_FS_DEVTMPFS
         && let Some(device) = MemDevice::of_ino(ino)
         && let Some(bind) = MOUNTS.iter().find(|mount| mount.point == device.path())
@@ -402,13 +356,9 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         | FdKind::Inotify
         | FdKind::SignalFd
         | FdKind::Epoll
-        | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd => Ok(Filesystem::AnonInodefs),
+        | FdKind::Pidfd => Ok(Filesystem::AnonInodefs),
         FdKind::Namespace | FdKind::NamespacePath => Ok(Filesystem::Nsfs),
-        FdKind::MessageQueue => Ok(Filesystem::Mqueue),
-        FdKind::MemDevice | FdKind::PtyMaster => Ok(Filesystem::Devtmpfs),
-        FdKind::PtySlave => Ok(Filesystem::Devpts),
+        FdKind::MemDevice => Ok(Filesystem::Devtmpfs),
         FdKind::Proc | FdKind::ProcDir => Ok(Filesystem::Proc),
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
     }
@@ -472,12 +422,6 @@ pub(crate) unsafe fn statfs(
         Ok(paths::Resolution::Virtual(paths::Virtual::Ptmx)) => {
             copy_out(Filesystem::Devtmpfs.describe(), out)
         }
-        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Pts(_))) if !entry.exists() => {
-            Err(crate::abi::failed(ENOENT))
-        }
-        Ok(paths::Resolution::Virtual(paths::Virtual::Pts(_) | paths::Virtual::Devpts)) => {
-            copy_out(Filesystem::Devpts.describe(), out)
-        }
         Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Tty)) => {
             entry.unmodeled("the filesystem statistics")
         }
@@ -532,7 +476,6 @@ pub(crate) fn on_anon_inode(kind: FdKind) -> bool {
             | FdKind::Epoll
             | FdKind::Inotify
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset
     )
 }
 
@@ -558,132 +501,79 @@ pub(crate) fn anon_inode_metadata() -> crate::PatinaMetadata {
     }
 }
 
-/// A mount of the virtual machine's one mount namespace, as `statmount(2)`
-/// and `listmount(2)` describe it. Every mount is reachable from the
-/// caller's root (which never moves: `chroot` is refused), so none is
-/// hidden.
+/// A mount of the virtual machine's one mount namespace: the ids `statx`
+/// reports for a node on it, and where it is mounted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Mount {
     /// `mnt_id`, the small id `statx`'s `STATX_MNT_ID` reports.
     pub(crate) id: u32,
-    /// `mnt_id_unique`, the 64-bit id `STATX_MNT_ID_UNIQUE` reports and
-    /// `statmount`/`listmount` take.
+    /// `mnt_id_unique`, the 64-bit id `STATX_MNT_ID_UNIQUE` reports.
     pub(crate) unique: u64,
-    /// The index in [`MOUNTS`] of the mount it is mounted on; the
-    /// namespace's root is its own parent.
-    parent: usize,
     filesystem: Filesystem,
-    /// The mount's root within its filesystem (`mnt_root`).
-    pub(crate) root: &'static str,
     /// Where it is mounted, from the caller's root.
     pub(crate) point: &'static str,
-    /// `MOUNT_ATTR_*` (`relatime` is 0).
-    pub(crate) attr: u64,
 }
 
 /// 6.8's first unique mount id is one past this (`mnt_id_ctr`, `1 << 32`;
 /// 6.11 moved it to `1 << 31`).
 const MNT_UNIQUE_ID_BASE: u64 = 1 << 32;
-/// `MOUNT_ATTR_NOSUID`.
-const MOUNT_ATTR_NOSUID: u64 = 0x2;
-/// `MOUNT_ATTR_NODEV`.
-const MOUNT_ATTR_NODEV: u64 = 0x4;
-/// `MOUNT_ATTR_NOEXEC`.
-const MOUNT_ATTR_NOEXEC: u64 = 0x8;
-
-/// The virtual machine's mounts, in the order they were made (so in unique
-/// id order, the order `listmount` walks): the volume at `/`, the
+/// The virtual machine's mounts, in the order they were made: the volume at `/`, the
 /// namespace's root; `/dev/urandom`, a bind of devtmpfs's `urandom`
 /// node onto `/dev/urandom` (what `statfs` reports it on, and the crossing
 /// `RESOLVE_NO_XDEV` refuses); the pseudoterminal multiplexer, a bind of
-/// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; devpts at
-/// `/dev/pts`, mounted as the pinned host mounts it (`nosuid,noexec`);
-/// procfs at `/proc` (`nosuid,nodev,noexec`, as hosts mount it); and the
+/// devtmpfs's `ptmx` node onto `/dev/ptmx`, the same way; procfs at `/proc` (`nosuid,nodev,noexec`, as hosts mount it); and the
 /// other memory devices' binds, `/dev/null`, `/dev/zero`, `/dev/random` and
 /// (Linux has it) `/dev/full`, the same way as `/dev/urandom`'s. The
 /// kernel's internal mounts (pipefs, sockfs, anon_inodefs, the IPC
 /// namespace's mqueue) are in no namespace, as in the kernel.
-pub(crate) const MOUNTS: [Mount; 9] = [
+pub(crate) const MOUNTS: [Mount; 8] = [
     Mount {
         id: 1,
         unique: MNT_UNIQUE_ID_BASE + 1,
-        parent: 0,
         filesystem: Filesystem::Volume,
-        root: "/",
         point: "/",
-        attr: 0,
     },
     Mount {
         id: 2,
         unique: MNT_UNIQUE_ID_BASE + 2,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/urandom",
         point: MemDevice::Urandom.path(),
-        attr: MOUNT_ATTR_NOSUID,
     },
     Mount {
         id: 4,
         unique: MNT_UNIQUE_ID_BASE + 3,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/ptmx",
         point: paths::PTMX,
-        attr: MOUNT_ATTR_NOSUID,
-    },
-    Mount {
-        id: 5,
-        unique: MNT_UNIQUE_ID_BASE + 5,
-        parent: 0,
-        filesystem: Filesystem::Devpts,
-        root: "/",
-        point: paths::DEVPTS,
-        attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NOEXEC,
     },
     Mount {
         id: 6,
         unique: MNT_UNIQUE_ID_BASE + 6,
-        parent: 0,
         filesystem: Filesystem::Proc,
-        root: "/",
         point: crate::procfs::ROOT,
-        attr: MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC,
     },
     Mount {
         id: 7,
         unique: MNT_UNIQUE_ID_BASE + 7,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/null",
         point: MemDevice::Null.path(),
-        attr: MOUNT_ATTR_NOSUID,
     },
     Mount {
         id: 8,
         unique: MNT_UNIQUE_ID_BASE + 8,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/zero",
         point: MemDevice::Zero.path(),
-        attr: MOUNT_ATTR_NOSUID,
     },
     Mount {
         id: 10,
         unique: MNT_UNIQUE_ID_BASE + 9,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/random",
         point: MemDevice::Random.path(),
-        attr: MOUNT_ATTR_NOSUID,
     },
     Mount {
         id: 11,
         unique: MNT_UNIQUE_ID_BASE + 11,
-        parent: 0,
         filesystem: Filesystem::Devtmpfs,
-        root: "/full",
         point: MemDevice::Full.path(),
-        attr: MOUNT_ATTR_NOSUID,
     },
 ];
 
@@ -698,45 +588,16 @@ impl Mount {
             unique: self.unique,
         }
     }
-
-    /// The mount it is mounted on.
-    pub(crate) fn parent(&self) -> &'static Mount {
-        &MOUNTS[self.parent]
-    }
-
-    /// Its superblock's device.
-    pub(crate) fn device(&self) -> (u32, u32) {
-        self.filesystem.device()
-    }
-
-    /// Its superblock's magic (`statfs`'s `f_type`).
-    pub(crate) fn magic(&self) -> u64 {
-        self.filesystem.describe().f_type as u64
-    }
-
-    /// Its filesystem's type name.
-    pub(crate) fn fs_type(&self) -> &'static str {
-        self.filesystem
-            .registered_name()
-            .expect("a mounted filesystem has a registered type")
-    }
 }
 
 /// The filesystem types the virtual kernel registers, in the order 6.8
 /// registers them at boot (the order the pinned host's `/proc/filesystems`
-/// lists them in): each filesystem a node can be on that has a registered
-/// type, and nothing else. The kernel registers many more types than the
+/// lists them in). The kernel registers many more types than the
 /// model has (tmpfs, sysfs, cgroup, …), which a caller listing them finds
 /// missing.
 #[cfg(target_arch = "x86_64")]
-const REGISTERED: [Filesystem; 7] = [
-    Filesystem::Proc,
-    Filesystem::Devtmpfs,
-    Filesystem::Sockfs,
-    Filesystem::Pipefs,
-    Filesystem::Devpts,
-    Filesystem::Volume,
-    Filesystem::Mqueue,
+const REGISTERED: [&str; 7] = [
+    "proc", "devtmpfs", "sockfs", "pipefs", "devpts", "ext4", "mqueue",
 ];
 
 /// `sysfs(2)` (fs/filesystems.c, `CONFIG_SYSFS_SYSCALL`, which the pinned
@@ -749,11 +610,7 @@ const REGISTERED: [Filesystem; 7] = [
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn sysfs(option: u64, arg1: u64, arg2: u64) -> i64 {
     let einval = -i64::from(EINVAL);
-    let names = REGISTERED.map(|filesystem| {
-        filesystem
-            .registered_name()
-            .expect("a registered filesystem has a type name")
-    });
+    let names = REGISTERED;
     match option as i32 {
         1 => match crate::uaccess::read_name(arg1 as usize) {
             Ok(name) => names
@@ -848,23 +705,17 @@ mod tests {
         assert_eq!(volume.f_frsize, volume.f_bsize);
     }
 
-    /// Every filesystem a node can be on is registered once, but the
-    /// internal anon_inodefs, and `sysfs(2)` walks exactly that list.
+    /// `sysfs(2)` walks the registered types, by index and by name.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn sysfs_lists_each_registered_filesystem_once() {
-        for filesystem in Filesystem::ALL {
-            let listed = REGISTERED.iter().filter(|r| **r == filesystem).count();
-            let expected = usize::from(filesystem.registered_name().is_some());
-            assert_eq!(listed, expected, "{filesystem:?}");
-        }
         assert_eq!(sysfs(3, 0, 0), REGISTERED.len() as i64);
         let einval = -i64::from(EINVAL);
-        for (index, filesystem) in REGISTERED.iter().enumerate() {
+        for (index, registered) in REGISTERED.iter().enumerate() {
             let mut name = [0xffu8; 16];
             assert_eq!(sysfs(2, index as u64, name.as_mut_ptr() as u64), 0);
             let name = std::ffi::CStr::from_bytes_until_nul(&name).unwrap();
-            assert_eq!(name.to_str().ok(), filesystem.registered_name());
+            assert_eq!(name.to_str().ok(), Some(*registered));
             assert_eq!(sysfs(1, name.as_ptr() as u64, 0), index as i64);
         }
         // The index is an `unsigned int`: the upper half of the word is not read.
@@ -885,17 +736,15 @@ mod tests {
 
     /// The mount table agrees with what `statfs` says a path is on: the
     /// volume at the root, the device on devtmpfs; ids ascend in table
-    /// order, and every mount hangs off the root.
+    /// order.
     #[test]
     fn the_mounts_are_what_statfs_reports() {
-        assert_eq!(ROOT_MOUNT.parent(), &ROOT_MOUNT);
         assert_eq!(ROOT_MOUNT.point, "/");
         for pair in MOUNTS.windows(2) {
             assert!(pair[0].id < pair[1].id && pair[0].unique < pair[1].unique);
         }
         for mount in &MOUNTS {
             assert!(mount.unique > MNT_UNIQUE_ID_BASE, "{mount:?}");
-            assert_eq!(mount.parent().unique, ROOT_MOUNT.unique, "{mount:?}");
             let mut out = KernelStatfs::default();
             let point = std::ffi::CString::new(mount.point).unwrap();
             if mount.filesystem != Filesystem::Volume {
@@ -903,7 +752,6 @@ mod tests {
                 assert_eq!(unsafe { patina_statfs(point.as_ptr(), &mut out) }, 0);
                 assert_eq!(out, mount.filesystem.describe(), "{mount:?}");
             }
-            assert_eq!(mount.magic(), mount.filesystem.describe().f_type as u64);
         }
         // The entropy device is on devtmpfs (a mount crossing to
         // `openat2(RESOLVE_NO_XDEV)`), not `ENOENT`.

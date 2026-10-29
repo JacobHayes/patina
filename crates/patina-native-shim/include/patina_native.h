@@ -79,16 +79,11 @@ enum {
     PATINA_FD_EPOLL = 10,  /* an epoll instance (Linux) */
     PATINA_FD_KQUEUE = 11, /* a kqueue (Darwin) */
     PATINA_FD_SIGNALFD = 12, /* a virtual signal queue reader (Linux) */
-    PATINA_FD_MQUEUE = 13,   /* a POSIX message queue (Linux) */
     PATINA_FD_TIMERFD = 14,  /* a timer descriptor (Linux) */
     PATINA_FD_PIDFD = 15,    /* a process descriptor (Linux) */
-    PATINA_FD_LANDLOCK_RULESET = 16, /* a Landlock ruleset (Linux) */
-    PATINA_FD_USERFAULTFD = 17, /* a userfaultfd descriptor (Linux) */
     PATINA_FD_NAMESPACE = 18,   /* a namespace file, /proc/self/ns/<type> (Linux) */
     PATINA_FD_NAMESPACE_PATH = 19, /* a namespace file opened O_PATH (Linux) */
     PATINA_FD_INOTIFY = 20,  /* an inotify instance (Linux) */
-    PATINA_FD_PTY_MASTER = 21,  /* a pseudoterminal master, /dev/ptmx (Linux) */
-    PATINA_FD_PTY_SLAVE = 22,   /* a pseudoterminal slave, /dev/pts/N (Linux) */
     PATINA_FD_PROC = 23,        /* a procfs file, /proc/uptime, /proc/<pid>/stat, ... (Linux) */
     PATINA_FD_PROC_DIR = 24,    /* a procfs directory, /proc or /proc/<pid> (Linux) */
 };
@@ -530,14 +525,10 @@ enum {
     PATINA_FS_SOCKFS = 2,
     PATINA_FS_NSFS = 3, /* a namespace file (Linux): root's, on its own device */
     PATINA_FS_DEVTMPFS = 4, /* the entropy device (Linux): root's, on devtmpfs */
-    PATINA_FS_DEVPTS = 5, /* a pseudoterminal slave (Linux): the opener's, group tty, on devpts */
-    PATINA_FS_PTMX = 6, /* /dev/ptmx (Linux): root's, group tty, on devtmpfs */
     /* 6.8's one anonymous inode (Linux), which every eventfd, timerfd, signalfd,
-     * epoll, inotify, pidfd and Landlock ruleset descriptor is a file on: root's,
+     * epoll, inotify and pidfd descriptor is a file on: root's,
      * on anon_inodefs */
     PATINA_FS_ANON_INODE = 7,
-    /* A userfaultfd's own anonymous inode (Linux): its creator's, on anon_inodefs */
-    PATINA_FS_ANON_OWN = 8,
     /* A procfs node root owns (Linux): procfs's root, /proc/self, the
      * machine-wide files, init's directory and files */
     PATINA_FS_PROC = 9,

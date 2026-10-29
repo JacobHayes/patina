@@ -136,27 +136,16 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         | FdKind::SignalFd
         | FdKind::Epoll
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
         | FdKind::NamespacePath => Node::Pseudo {
             mode: ANON_INODE_MODE,
             regular: false,
             immutable: false,
         },
         FdKind::Namespace => NSFS_NODE,
-        // devtmpfs's (shmem's) and devpts's xattr handlers are not modeled.
-        FdKind::PtyMaster | FdKind::PtySlave => crate::trap_fatal(
-            "an extended attribute access of a pseudoterminal is not modeled; failing closed",
-        ),
         // As by path ([`paths::Virtual::unmodeled`]).
         FdKind::Proc | FdKind::ProcDir => crate::trap_fatal(
             "an extended attribute access of a procfs node is not modeled; failing closed",
         ),
-        FdKind::MessageQueue => Node::Pseudo {
-            mode: thread::ipc::mq_mode(resolved.handle).unwrap_or(0),
-            regular: true,
-            immutable: false,
-        },
     })
 }
 

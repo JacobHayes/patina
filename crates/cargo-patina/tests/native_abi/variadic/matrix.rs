@@ -30,9 +30,7 @@ fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
             cases.extend([
                 (8, 0, "syscall"),
                 (4, 1, "ioctl"),
-                (4, 2, "ioctl"),
                 (6, 0, "prctl"),
-                (5, 0, "ptrace"),
                 (1, 1, "fcntl64"),
                 (2, 0, "mremap"),
                 (3, 2, "open64"),
@@ -376,13 +374,6 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
     }
     case 4: {
 #ifdef __linux__
-        if (variant == 2) {
-            int master = posix_openpt(O_RDWR | O_NOCTTY);
-            if (master < 0 || grantpt(master) || unlockpt(master)) return 99;
-            patina_variadic_test_arm(family, fault);
-            int peer = ioctl(master, TIOCGPTPEER, O_RDWR, O_RDONLY);
-            return peer >= 0 && (fcntl(peer, F_GETFL) & O_ACCMODE) == O_RDWR ? 0 : 40;
-        }
         if (variant == 1) {
             int watches = (int)syscall(SYS_inotify_init1, IN_NONBLOCK);
             if (watches < 0) return 99;
@@ -396,12 +387,6 @@ int variadic_call(unsigned family, unsigned fault, unsigned variant) {
         return !ioctl(fd, FIONBIO, &enabled, (void *)0) && (fcntl(fd, F_GETFL) & O_NONBLOCK) ? 0 : 40;
     }
 #ifdef __linux__
-    case 5: {
-        pid_t pid = getpid();
-        errno = 0;
-        patina_variadic_test_arm(family, fault);
-        return ptrace(PTRACE_ATTACH, pid, (pid_t)0) == -1 && errno == EPERM ? 0 : 50;
-    }
     case 6: {
         patina_variadic_test_arm(family, fault);
         return !prctl(PR_SET_DUMPABLE, 1UL, 0UL) && prctl(PR_GET_DUMPABLE) == 1 ? 0 : 60;

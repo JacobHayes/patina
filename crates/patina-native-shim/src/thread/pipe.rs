@@ -203,17 +203,6 @@ pub(crate) struct PipeInode {
     pub(crate) ends: usize,
 }
 
-/// The next number of the kernel's one counter of pseudo-filesystem
-/// inodes (`get_next_ino`), which pipefs and sockfs nodes and a secure
-/// anonymous inode (a userfaultfd's) all draw from.
-#[cfg(target_os = "linux")]
-pub(crate) fn next_inode_number() -> u64 {
-    let mut state = lock_state();
-    let ino = state.net.next_pipe_ino;
-    state.net.next_pipe_ino = ino.wrapping_add(1);
-    ino
-}
-
 /// Mint a pipefs/sockfs node stamped with the filesystem clock's now.
 pub(super) fn mint_pipe_inode(
     state: &mut ThreadRuntime,

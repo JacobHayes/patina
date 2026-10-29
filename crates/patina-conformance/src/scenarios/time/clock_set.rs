@@ -18,9 +18,6 @@
 //! * `clock_adjtime` of `CLOCK_REALTIME` is `adjtimex`; of a clock with no
 //!   adjuster (`CLOCK_MONOTONIC`) `EOPNOTSUPP`; of an unknown one `EINVAL`;
 //! * the alarm clocks need `CAP_WAKE_ALARM`: a timerfd on one is `EPERM`;
-//! * `syslog` actions other than reading the whole log or its size are
-//!   `CAP_SYSLOG`'s whatever `dmesg_restrict` says: `EPERM` before an
-//!   unknown action is looked at.
 //!
 //! Root answers differently and a root run would really set the clock, so
 //! the scenario needs an unprivileged caller.
@@ -36,10 +33,6 @@ use patina_dst_syscalls::Syscall;
 const ADJ_ADJTIME: u32 = 0x8000;
 const ADJ_OFFSET_SS_READ: u32 = 0xa001;
 const ADJ_FREQUENCY: u32 = 0x0002;
-/// `SYSLOG_ACTION_CLOSE`, `SYSLOG_ACTION_OPEN` and one no kernel defines.
-const SYSLOG_ACTION_CLOSE: i32 = 0;
-const SYSLOG_ACTION_OPEN: i32 = 1;
-const SYSLOG_ACTION_UNKNOWN: i32 = 99;
 
 pub fn run(p: &Probe) {
     p.check(
@@ -124,17 +117,6 @@ pub fn run(p: &Probe) {
             p.timerfd_create(clock, 0) == neg(EPERM) as i32,
         );
     }
-
-    for action in [
-        SYSLOG_ACTION_CLOSE,
-        SYSLOG_ACTION_OPEN,
-        SYSLOG_ACTION_UNKNOWN,
-    ] {
-        p.check(
-            "a syslog action beyond reading is EPERM",
-            p.syslog(action, 0) == neg(EPERM),
-        );
-    }
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -148,7 +130,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_clock_settime,
         Syscall::N_adjtimex,
         Syscall::N_clock_adjtime,
-        Syscall::N_syslog,
     ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS

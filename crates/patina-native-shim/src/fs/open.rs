@@ -126,14 +126,13 @@ fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         paths::Virtual::MemDevice(device) => open_mem_device(device, flags, cloexec),
         #[cfg(target_os = "linux")]
         paths::Virtual::Namespace(index) => open_namespace(index, flags, cloexec),
+        // Pseudoterminals are not modeled.
         #[cfg(target_os = "linux")]
-        paths::Virtual::Ptmx => thread::pty::open_master(flags, cloexec),
+        paths::Virtual::Ptmx => entry.unmodeled("an open"),
+        // The virtual process has no controlling terminal
+        // (`tty_open_current_tty`), whatever the flags.
         #[cfg(target_os = "linux")]
-        paths::Virtual::Pts(index) => thread::pty::open_slave(index, flags, cloexec),
-        #[cfg(target_os = "linux")]
-        paths::Virtual::Devpts => entry.unmodeled("an open"),
-        #[cfg(target_os = "linux")]
-        paths::Virtual::Tty => thread::pty::open_tty(flags),
+        paths::Virtual::Tty => fail(ENXIO),
         #[cfg(target_os = "linux")]
         paths::Virtual::Proc(node) => crate::procfs::open(node, flags, cloexec),
     }

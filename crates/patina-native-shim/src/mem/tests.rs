@@ -25,7 +25,6 @@ fn a_write_back_goes_through_the_first_opened_writer_wherever_it_is_mapped() {
             caches: BTreeMap::new(),
             handles: BTreeMap::new(),
             descs: BTreeMap::from([(1, 41), (2, 40), (3, 39), (4, 38)]),
-            policies: Ranges::new(),
             locks: Ranges::new(),
             future: None,
         };

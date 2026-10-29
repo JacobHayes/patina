@@ -106,7 +106,6 @@ pub(super) fn take_all(from: usize, to: usize) -> Vec<(usize, usize, Object)> {
     #[cfg(target_os = "linux")]
     {
         mappings.locks.cut(from, to);
-        mappings.policies.cut(from, to);
     }
     let pieces = mappings.views.cut(from, to);
     mappings.publish();

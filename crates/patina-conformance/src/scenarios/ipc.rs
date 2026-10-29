@@ -1,4 +1,3 @@
-pub mod mqueue;
 mod owned;
 pub mod sysv_msg;
 pub mod sysv_sem;

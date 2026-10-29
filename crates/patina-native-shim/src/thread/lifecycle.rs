@@ -493,9 +493,6 @@ pub unsafe extern "C" fn patina_thread_create(
     state.signals.spawn(task, Some(current_task()));
     #[cfg(target_os = "linux")]
     state.sched.spawn(task, current_task());
-    // A new thread inherits its creator's memory policy.
-    #[cfg(target_os = "linux")]
-    crate::numa::spawned(deterministic_thread_id(), tid_of(task));
     // And its locked shadow-stack features.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     crate::sud::thread_pointer_spawned(deterministic_thread_id(), tid_of(task));

@@ -4,17 +4,12 @@ pub mod environ;
 pub mod exec;
 pub mod exit;
 pub mod ids;
-pub mod kcmp;
-pub mod namespaces;
 pub mod pidfd;
 pub mod pidfd_spawn;
 pub mod prctl;
 pub mod procfs;
-pub mod ptrace;
-pub mod seccomp;
 pub mod spawn;
 pub mod traps;
 #[cfg(target_arch = "x86_64")]
 pub mod vfork;
-pub mod vm_rw;
 pub mod wait;

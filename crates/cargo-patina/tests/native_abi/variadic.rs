@@ -25,7 +25,7 @@ fn every_variadic_door_reaches_the_model() {
     );
     let mut families = vec!["fcntl", "open", "ioctl", "printf"];
     if cfg!(target_os = "linux") {
-        families.extend(["mremap", "ptrace", "prctl", "syscall"]);
+        families.extend(["mremap", "prctl", "syscall"]);
     }
     for family in families {
         let (output, trace) = guest.record_standalone(&[family]);
@@ -41,8 +41,8 @@ fn every_variadic_door_reaches_the_model() {
         (["fcntl", "64"], "pending cancellation reaches fcntl64,"),
         (["open", "cancel"], "pending cancellation reaches __open,"),
         (["open", "64"], "pending cancellation reaches __open64,"),
-        (["ptrace", "traceme"], "PTRACE_TRACEME"),
-        (["prctl", "strict"], "entering strict mode"),
+        (["ptrace", "traceme"], "ptrace"),
+        (["prctl", "strict"], "PR_SET_SECCOMP"),
     ] {
         guest.assert_internal_fatal(&args, &[diagnostic]);
     }
@@ -161,13 +161,6 @@ static int ioctl_door(void) {
     /* The kernel truncates request to unsigned int before decoding its operand. */
     available = -1;
     if (ioctl(fd, 0x100000000UL | FIONREAD, &available) || available != 4) return 7;
-    int master = posix_openpt(O_RDWR | O_NOCTTY);
-    if (master < 0 || grantpt(master) || unlockpt(master)) return 8;
-    int slave = ioctl(master, TIOCGPTPEER, O_RDWR | O_NOCTTY | O_CLOEXEC);
-    if (slave < 0 || fcntl(slave, F_GETFD) != FD_CLOEXEC ||
-        (fcntl(slave, F_GETFL) & O_ACCMODE) != O_RDWR) return 9;
-    if (ioctl(slave, TCFLSH, TCIOFLUSH) || ioctl(slave, TCSBRK, 1)) return 10;
-    if (close(slave) || close(master)) return 11;
     /* Command-directed payload widths: SETNEXTWD validates a full unsigned
      * word, unlike the terminal int arguments. */
     int watches = (int)syscall(SYS_inotify_init1, IN_NONBLOCK);
@@ -249,20 +242,10 @@ static int mremap_door(void) {
     return munmap(fixed, page) ? 7 : 0;
 }
 
-static int ptrace_door(const char *fatal) {
-    if (fatal) { ptrace(PTRACE_TRACEME); return 10; }
-    errno = 0;
-    if (ptrace(PTRACE_ATTACH, getpid()) != -1 || errno != EPERM) return 1;
-    errno = 0;
-    if (ptrace(PTRACE_DETACH, getpid(), (void *)0, (void *)0) != -1 || errno != ESRCH) return 2;
-    errno = 0;
-    if (ptrace(PTRACE_SEIZE, getpid(), (void *)1, (void *)0) != -1 || errno != EIO) return 3;
-    errno = 0;
-    if (ptrace(PTRACE_SEIZE, getpid(), (void *)0, (void *)PTRACE_O_TRACESYSGOOD) != -1 || errno != EPERM) return 4;
-    long word = 0;
-    errno = 0;
-    if (ptrace(PTRACE_PEEKDATA, getpid(), &word) != -1 || errno != ESRCH) return 5;
-    return 0;
+static int ptrace_door(void) {
+    /* Not modeled: any request is a named stop. */
+    ptrace(PTRACE_TRACEME);
+    return 10;
 }
 
 static int prctl_door(const char *fatal) {
@@ -282,13 +265,6 @@ static int prctl_door(const char *fatal) {
     if (prctl(PR_GET_AUXV, auxv, (unsigned long)sizeof(auxv), 0UL, 0UL) <= 0) return 9;
     errno = 0;
     if (prctl(-1) != -1 || errno != EINVAL) return 10;
-    errno = 0;
-    if (prctl(PR_SET_SECCOMP, 0UL) != -1 || errno != EINVAL) return 11;
-    errno = 0;
-    if (prctl(PR_SET_SECCOMP, 2UL, (void *)0) != -1 || errno != EFAULT) return 12;
-    struct sock_fprog empty = {0};
-    errno = 0;
-    if (prctl(PR_SET_SECCOMP, 2UL, &empty) != -1 || errno != EINVAL) return 13;
     return 0;
 }
 
@@ -331,7 +307,7 @@ int main(int argc, char **argv) {
     if (!strcmp(family, "printf")) return printf_door();
 #ifdef __linux__
     if (!strcmp(family, "mremap")) return mremap_door();
-    if (!strcmp(family, "ptrace")) return ptrace_door(fatal);
+    if (!strcmp(family, "ptrace")) return ptrace_door();
     if (!strcmp(family, "prctl")) return prctl_door(fatal);
     if (!strcmp(family, "syscall")) return syscall_door();
 #endif

@@ -91,35 +91,9 @@ pub const VIRTUAL_ABI: &str = "6.8";
 /// The virtual kernel's configuration: the sysctls whose values decide what
 /// the rows answer, fixed as part of the pinned kernel ([`VIRTUAL_ABI`]) and
 /// never read from the host. The values are the defaults of Ubuntu 24.04's
-/// kernel (upstream's where Ubuntu keeps them). A conformance scenario whose answers depend on one declares
-/// a need that the host restricts the same way (`Need::RestrictedBpf`,
-/// `Need::RestrictedPerf`, `Need::RestrictedUserfaultfd`).
+/// kernel (upstream's where Ubuntu keeps them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelConfig {
-    /// `kernel.perf_event_paranoid`. At 4 or more (Ubuntu's patch) every
-    /// `perf_event_open` needs `CAP_PERFMON` or `CAP_SYS_ADMIN`, refused as
-    /// `EACCES` after the flags and before the attribute is read.
-    pub perf_event_paranoid: i32,
-    /// `kernel.unprivileged_bpf_disabled`. Nonzero refuses BPF map creation
-    /// and program loading (`EPERM`) to a caller without `CAP_BPF` or
-    /// `CAP_SYS_ADMIN`, after their argument checks.
-    pub unprivileged_bpf_disabled: u32,
-    /// `vm.unprivileged_userfaultfd`. Off, handling kernel faults needs
-    /// `CAP_SYS_PTRACE` (`EPERM`, before the flags are checked).
-    pub unprivileged_userfaultfd: bool,
-    /// `kernel.yama.ptrace_scope`. 1 lets a tracer attach only to its
-    /// descendants (the guest has none); 3 refuses every attach.
-    pub yama_ptrace_scope: u32,
-    /// `kernel.unprivileged_userns_clone` (Ubuntu's patch). Off, a new user
-    /// namespace needs `CAP_SYS_ADMIN` (`EPERM`) before `unshare`'s flags
-    /// are checked; on, the flags come first.
-    pub unprivileged_userns_clone: bool,
-    /// `user.max_user_namespaces`. 0: the virtual credential gets no user
-    /// namespace (`unshare(CLONE_NEWUSER)` is `ENOSPC`).
-    pub max_user_namespaces: u32,
-    /// `kernel.dmesg_restrict`. On, every `syslog` action needs
-    /// `CAP_SYSLOG` (`EPERM`, before the action is looked at).
-    pub dmesg_restrict: bool,
     /// `fs.nr_open`: the highest `RLIMIT_NOFILE` a hard limit may name.
     pub nr_open: u64,
     /// `fs.pipe-max-size`: the largest pipe buffer `F_SETPIPE_SZ` gives a
@@ -142,15 +116,8 @@ pub struct KernelConfig {
     pub msgmax: u32,
     pub msgmnb: u32,
     /// The Landlock ABI version `landlock_create_ruleset` reports (4 on
-    /// 6.7–6.9: network port rules), and the errata mask Ubuntu's backport
-    /// of `LANDLOCK_CREATE_RULESET_ERRATA` (6.15's) reports.
+    /// 6.7–6.9: network port rules).
     pub landlock_abi: i64,
-    pub landlock_errata: i64,
-    /// The Linux Security Modules the kernel runs, as `lsm_list_modules`
-    /// lists their ids, in the order they initialized. None of them keeps
-    /// a process attribute (`LSM_ATTR_*`): no `getselfattr` or
-    /// `setselfattr` hook.
-    pub lsm_modules: &'static [u64],
     /// `kernel.keys.maxkeys` and `kernel.keys.maxbytes`: the most keys, and
     /// bytes of descriptions, payloads and links, a user other than root
     /// may own (`EDQUOT` past them).
@@ -163,20 +130,6 @@ pub struct KernelConfig {
 
 /// The one configuration the virtual kernel runs with; see [`KernelConfig`].
 pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
-    // Ubuntu's default (upstream's is 2).
-    perf_event_paranoid: 4,
-    // `CONFIG_BPF_UNPRIV_DEFAULT_OFF`: only root may lower it, to 1.
-    unprivileged_bpf_disabled: 2,
-    unprivileged_userfaultfd: false,
-    // Ubuntu's default.
-    yama_ptrace_scope: 1,
-    // Ubuntu's default.
-    unprivileged_userns_clone: true,
-    // Ubuntu 24.04 allows single-threaded callers a user namespace (then
-    // restricts it through AppArmor); the virtual machine declares none.
-    max_user_namespaces: 0,
-    // Ubuntu's default.
-    dmesg_restrict: true,
     nr_open: 1 << 20,
     pipe_max_size: 1 << 20,
     somaxconn: 4096,
@@ -190,12 +143,6 @@ pub const KERNEL_CONFIG: KernelConfig = KernelConfig {
     msgmax: 8192,
     msgmnb: 16_384,
     landlock_abi: 4,
-    // Errata 1 and 3, as 6.8.0-139 answers.
-    landlock_errata: 5,
-    // `capability` (100) first, then `landlock` (110) and `yama` (105):
-    // Ubuntu's `lsm=` order without lockdown, integrity or AppArmor, which
-    // are host policy.
-    lsm_modules: &[100, 110, 105],
     keys_maxkeys: 200,
     keys_maxbytes: 20_000,
     keys_gc_delay: 300,

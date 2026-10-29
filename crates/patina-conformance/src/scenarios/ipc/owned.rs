@@ -29,16 +29,6 @@ impl Owned {
         }
     }
 
-    /// A POSIX message queue: `mq_unlink(name)`.
-    pub fn mqueue(name: &str) -> Owned {
-        Owned {
-            row: Syscall::N_mq_unlink,
-            args: [0; 3],
-            name: Some(CString::new(name).expect("no interior NUL")),
-            armed: Cell::new(true),
-        }
-    }
-
     /// The scenario removed it (its recorded removal answered `result`).
     /// `IPC_RMID` of a still-attached segment only marks it `SHM_DEST`; the
     /// process's exit-time detach destroys it, so a guard never detaches

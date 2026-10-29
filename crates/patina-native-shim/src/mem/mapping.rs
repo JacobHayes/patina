@@ -595,11 +595,6 @@ pub(crate) fn mremap(
         } else {
             mappings.views.cut(old, old + old_len)
         };
-        let policies = if duplicated {
-            mappings.policies.within(old, source_end)
-        } else {
-            mappings.policies.cut(old, old + old_len)
-        };
         let locks = if duplicated {
             Vec::new()
         } else {
@@ -622,11 +617,6 @@ pub(crate) fn mremap(
                 Some((from, to)) => mappings.views.set(from, to, object),
                 None if !duplicated => dropped.push((start, end, object)),
                 None => {}
-            }
-        }
-        for (start, end, policy) in policies {
-            if let Some((from, to)) = place(start, end) {
-                mappings.policies.set(from, to, policy);
             }
         }
         let mut grown = None;

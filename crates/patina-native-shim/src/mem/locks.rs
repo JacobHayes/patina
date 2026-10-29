@@ -204,7 +204,7 @@ pub(super) fn populate(start: usize, len: usize) -> Result<(), c_int> {
 /// in 5.11. On an older host no populate works, and every lock and residency
 /// answer would silently depend on the host's version: the first populate
 /// probes once and stops the run by name there. A guest that never locks,
-/// populates or asks a page's node runs on 5.11-5.13.
+/// or populates runs on 5.11-5.13.
 pub(super) fn require_populate() {
     static PROBED: AtomicBool = AtomicBool::new(false);
     static PAGE_OF_DATA: u8 = 0;

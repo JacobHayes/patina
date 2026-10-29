@@ -699,13 +699,6 @@ pub(crate) fn getsid(pid: i32) -> i64 {
     membership_of(pid).map_or_else(|errno| errno, |membership| i64::from(membership.sid))
 }
 
-/// Whether the caller leads its session (`current->signal->leader`): what
-/// decides whether opening a terminal could make it the controlling one.
-pub(crate) fn session_leader() -> bool {
-    let caller = Process::current();
-    caller.session() == caller.0
-}
-
 /// `setsid` (`ksys_setsid`): a session leader, or a process whose pid names
 /// a group (a group leader), is `EPERM`; otherwise the caller leads a new
 /// session and group, both its pid, which it answers.

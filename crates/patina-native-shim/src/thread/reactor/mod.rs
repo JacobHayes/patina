@@ -77,8 +77,8 @@ pub(super) fn fd_poll(
     fd: c_int,
     desc: Option<DescId>,
 ) -> Option<(u32, (u64, u64))> {
-    let (kind, handle, status) = resolve_source(fd, desc)?;
-    Some(poll_description(state, kind, handle, status))
+    let (kind, handle, _) = resolve_source(fd, desc)?;
+    Some(poll_description(state, kind, handle))
 }
 
 /// The kind, class handle and status flags of what a readiness source names:
@@ -102,14 +102,7 @@ fn resolve_source(fd: c_int, desc: Option<DescId>) -> Option<(FdKind, u64, u32)>
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
-fn poll_description(
-    state: &ThreadRuntime,
-    kind: FdKind,
-    handle: u64,
-    // The description's status flags: a userfaultfd's poll reads its
-    // `O_NONBLOCK`.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] status: u32,
-) -> (u32, (u64, u64)) {
+fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (u64, u64)) {
     use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
     match kind {
         FdKind::Pipe => pipe_poll(state, handle as c_int),
@@ -197,31 +190,6 @@ fn poll_description(
         // exited, which a process never sees of itself or of init.
         #[cfg(target_os = "linux")]
         FdKind::Pidfd => (0, (0, 0)),
-        // A ruleset has no poll method: `DEFAULT_POLLMASK`, and `EPERM`
-        // at `epoll_ctl`, as for a file.
-        #[cfg(target_os = "linux")]
-        FdKind::LandlockRuleset => (POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM, (0, 0)),
-        #[cfg(target_os = "linux")]
-        FdKind::Userfaultfd => (
-            crate::mem::userfaultfd::poll(handle, status & super::O_NONBLOCK != 0),
-            (0, 0),
-        ),
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => {
-            let (readable, writable) = ipc::mq_readiness(state, handle);
-            let mut mask = 0;
-            if readable {
-                mask |= POLLIN | POLLRDNORM;
-            }
-            if writable {
-                mask |= POLLOUT | POLLWRNORM;
-            }
-            (mask, ipc::mq_event_seqs(state, handle))
-        }
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster => pty::poll(state, pty::Side::Master, handle as u32),
-        #[cfg(target_os = "linux")]
-        FdKind::PtySlave => pty::poll(state, pty::Side::Slave, handle as u32),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => (0, (0, 0)),
     }
@@ -318,9 +286,6 @@ pub(super) enum WaiterLoc {
     /// Linux: parked on a timer descriptor's readers.
     #[cfg(target_os = "linux")]
     TimerFdRecv(u64),
-    /// Linux: parked on a pseudoterminal side's readers.
-    #[cfg(target_os = "linux")]
-    Pty(u32, pty::Side),
     /// Parked in `F_SETLKW` on a record or OFD lock.
     RecordLock,
     /// Linux: parked on an inotify instance's readers.
@@ -402,11 +367,6 @@ pub(super) fn register_readiness_waiters(
             continue;
         }
         #[cfg(target_os = "linux")]
-        if kind == FdKind::MessageQueue {
-            ipc::mq_watch(state, handle, me, dir == ReadyDir::Read, &mut wait);
-            continue;
-        }
-        #[cfg(target_os = "linux")]
         if kind == FdKind::TimerFd {
             if dir == ReadyDir::Read {
                 timers::timerfd_watch(state, handle, me, &mut wait);
@@ -418,13 +378,6 @@ pub(super) fn register_readiness_waiters(
             if dir == ReadyDir::Read {
                 inotify::watch(state, handle, me, &mut wait);
             }
-            continue;
-        }
-        #[cfg(target_os = "linux")]
-        // One queue per side: a pair wakes its writers too (an
-        // edge-triggered interest in output waits for that).
-        if let Some(side) = pty::Side::of(kind) {
-            pty::watch(state, side, handle as u32, me, &mut wait);
             continue;
         }
         #[cfg(target_os = "linux")]
@@ -609,8 +562,6 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
             WaiterLoc::Ipc(wait) => state.ipc.unwait(wait, me),
             #[cfg(target_os = "linux")]
             WaiterLoc::TimerFdRecv(handle) => timers::timerfd_unwatch(state, handle, me),
-            #[cfg(target_os = "linux")]
-            WaiterLoc::Pty(index, side) => pty::unwatch(state, index, side, me),
             WaiterLoc::RecordLock => locks::unwait(state, me),
             #[cfg(target_os = "linux")]
             WaiterLoc::InotifyRecv(handle) => inotify::unwatch(state, handle, me),

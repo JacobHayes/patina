@@ -96,8 +96,6 @@ mod nr {
     pub const PWRITEV2: i64 = 328;
     pub const PIDFD_OPEN: i64 = 434;
     pub const PIDFD_GETFD: i64 = 438;
-    pub const LANDLOCK_CREATE_RULESET: i64 = 444;
-    pub const USERFAULTFD: i64 = 323;
     pub const INOTIFY_INIT1: i64 = 294;
 }
 #[cfg(target_arch = "aarch64")]
@@ -105,8 +103,6 @@ mod nr {
     pub const PWRITEV2: i64 = 287;
     pub const PIDFD_OPEN: i64 = 434;
     pub const PIDFD_GETFD: i64 = 438;
-    pub const LANDLOCK_CREATE_RULESET: i64 = 444;
-    pub const USERFAULTFD: i64 = 282;
     pub const INOTIFY_INIT1: i64 = 26;
 }
 
@@ -123,7 +119,6 @@ const SA_RESTART: i32 = 0x1000_0000;
 const AF_UNIX: i32 = 1;
 const SOCK_STREAM: i32 = 1;
 const CLOCK_MONOTONIC: i32 = 1;
-const UFFD_USER_MODE_ONLY: i64 = 1;
 const THREADS: usize = 3;
 const ROUNDS: usize = 16;
 const ATTEMPTS: usize = 10_000;
@@ -429,7 +424,6 @@ fn retry() {
     let pidfd = unsafe { syscall(nr::PIDFD_OPEN, getpid(), 0) } as i32;
     assert!(pidfd >= 0);
     let mask = [0_u64; 16];
-    let ruleset = [1_u64, 0];
     let rows: Vec<(&str, usize, Box<dyn Fn() -> Result<Vec<i32>, i32>>)> = vec![
         ("open", 1, Box::new(|| std::fs::File::create("/retried").map(|file| vec![file.into_raw_fd()]).map_err(|error| error.raw_os_error().unwrap()))),
         ("pipe", 2, Box::new(|| { let mut fds = [0; 2]; pair(unsafe { pipe(fds.as_mut_ptr()) }, fds) })),
@@ -444,8 +438,6 @@ fn retry() {
         ("F_DUPFD", 1, Box::new(|| one(unsafe { fcntl(0, F_DUPFD, 0) }.into()))),
         ("pidfd_open", 1, Box::new(|| one(unsafe { syscall(nr::PIDFD_OPEN, getpid(), 0) }))),
         ("pidfd_getfd", 1, Box::new(move || one(unsafe { syscall(nr::PIDFD_GETFD, pidfd, 0, 0) }))),
-        ("landlock_create_ruleset", 1, Box::new(move || one(unsafe { syscall(nr::LANDLOCK_CREATE_RULESET, ruleset.as_ptr(), 16, 0) }))),
-        ("userfaultfd", 1, Box::new(|| one(unsafe { syscall(nr::USERFAULTFD, UFFD_USER_MODE_ONLY) }))),
     ];
     for (name, needs, create) in rows {
         // `last` is the highest open number, so the table is full but for
@@ -577,8 +569,6 @@ fn main() {
             "F_DUPFD",
             "pidfd_open",
             "pidfd_getfd",
-            "landlock_create_ruleset",
-            "userfaultfd",
         ]
         .map(|name| format!("FD_RETRY {name} at_limit=24 created=true"));
         assert_answers("retry", &[1], &creators.each_ref().map(String::as_str));

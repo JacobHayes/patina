@@ -47,16 +47,6 @@ pub(crate) fn seek(raw_fd: c_int, offset: i64, whence: u32) -> crate::abi::SysRe
                 None => Err(crate::abi::failed(EINVAL)),
             };
         }
-        #[cfg(target_os = "linux")]
-        Ok(resolved) if resolved.kind == FdKind::MessageQueue => {
-            return match thread::ipc::mq_seek(resolved.handle, offset, whence) {
-                Ok(position) => {
-                    set_errno(0);
-                    Ok(position)
-                }
-                Err(errno) => Err(crate::abi::failed(errno)),
-            };
-        }
         // Secret memory has no position (`FMODE_LSEEK`).
         #[cfg(target_os = "linux")]
         Ok(resolved) if resolved.kind == FdKind::File && mem::secret(resolved.handle) => {

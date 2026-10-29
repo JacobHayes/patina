@@ -15,10 +15,6 @@
 //!   a target descriptor not open, or a descriptor that is no pidfd,
 //!   `EBADF`, and one of init's descriptors `EPERM` (the ptrace-mode check
 //!   init does not pass);
-//! * `setns` through a pidfd refuses the caller's own user namespace
-//!   (`EINVAL`) and joining another namespace of its own without
-//!   `CAP_SYS_ADMIN` (`EPERM`), and init's namespaces at the ptrace-mode check
-//!   (`EPERM`);
 //! * `pidfd_send_signal` probes with signal 0 (0) and refuses it to init,
 //!   root's process (`EPERM`), refuses an undefined
 //!   flag, 6.9's `PIDFD_SIGNAL_THREAD` and an invalid signal (`EINVAL`) and
@@ -33,7 +29,7 @@
 //!   (`EINVAL`): nothing is ever reaped.
 //!
 //! The libc vehicle goes through glibc 2.36's `pidfd_open`, `pidfd_getfd`,
-//! `pidfd_send_signal` and `process_mrelease`, and its `setns`.
+//! `pidfd_send_signal` and `process_mrelease`.
 
 use crate::catalog::{DEFAULTS, Need, Scenario};
 use crate::observe::Norm;
@@ -193,37 +189,6 @@ pub fn run(p: &Probe) {
         "taking one of init's descriptors is EPERM (a ptrace attach init refuses)",
         getfd(p, init, "init", 0, 0) == neg(EPERM),
     );
-    for (fd, what, nstype, errno, label) in [
-        (
-            pidfd,
-            "self",
-            CLONE_NEWUSER,
-            EINVAL,
-            "setns into the caller's own user namespace is EINVAL",
-        ),
-        (
-            pidfd,
-            "self",
-            CLONE_NEWUTS,
-            EPERM,
-            "setns into a namespace through the caller's pidfd is EPERM (no CAP_SYS_ADMIN)",
-        ),
-        (
-            init,
-            "init",
-            CLONE_NEWUTS,
-            EPERM,
-            "setns into init's namespaces is EPERM (the ptrace-mode check)",
-        ),
-    ] {
-        let r = p.observed(
-            Syscall::N_setns,
-            [fd as i64, nstype as i64, 0, 0, 0, 0],
-            &[("pidfd", what.into()), ("nstype", nstype.into())],
-        );
-        p.check(label, r == neg(errno));
-    }
-
     p.check(
         "signal 0 through the pidfd probes the process",
         send_signal(p, pidfd, "self", 0, 0) == 0,
@@ -336,7 +301,6 @@ pub const SCENARIO: Scenario = Scenario {
         "pidfd_getfd",
         "pidfd_send_signal",
         "process_mrelease",
-        "setns",
     ],
     needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS

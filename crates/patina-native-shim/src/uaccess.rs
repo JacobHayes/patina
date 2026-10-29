@@ -217,42 +217,6 @@ fn raw_result(result: std::ffi::c_long) -> std::ffi::c_long {
     }
 }
 
-/// The guest's own `process_vm_readv` (`write` false) or `process_vm_writev`
-/// of its own process: the host kernel's, on this process, with the guest's
-/// vectors, counts and flags as given, so every refusal, fault and short count
-/// is the kernel's own. A guest that named the thread group's leader (`leader`)
-/// names it on the host too while the thread model has it live; once its task
-/// has exited there is no memory behind it to copy (`None`), whatever the host
-/// leader's own teardown, which a loaded host can leave unfinished long after,
-/// has reached. One that named another of its live threads names memory that
-/// is there ([`on_self`]). Raw result: `-errno` on failure.
-#[cfg(target_os = "linux")]
-pub(crate) fn guest_process_vm(write: bool, leader: bool, args: &[u64; 6]) -> Option<i64> {
-    let row = if write {
-        patina_dst_syscalls::Syscall::N_process_vm_writev
-    } else {
-        patina_dst_syscalls::Syscall::N_process_vm_readv
-    };
-    // SAFETY: the kernel judges every guest pointer; this process is the target.
-    let copy = |target| unsafe {
-        crate::sud_host_syscall(
-            row.number() as std::ffi::c_long,
-            target,
-            args[1] as std::ffi::c_long,
-            args[2] as std::ffi::c_long,
-            args[3] as std::ffi::c_long,
-            args[4] as std::ffi::c_long,
-            args[5] as std::ffi::c_long,
-        )
-    };
-    if !leader {
-        return Some(on_self(copy));
-    }
-    // The caller holds the baton, so the leader cannot exit between the
-    // model's answer and the host's copy.
-    crate::thread::live_tid(crate::patina_pid()).then(|| raw_result(copy(host_pid())))
-}
-
 /// What a `process_vm_readv`/`writev` of `len` bytes that returned `copied`
 /// means.
 #[cfg(target_os = "linux")]

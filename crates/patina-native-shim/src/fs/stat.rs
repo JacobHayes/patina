@@ -4,7 +4,7 @@
 
 use super::metadata::{
     PATINA_ENTRY_ANON, PATINA_ENTRY_CHAR, PATINA_ENTRY_DIRECTORY, PATINA_ENTRY_FIFO,
-    PATINA_ENTRY_SOCKET, PATINA_ENTRY_SYMLINK, PATINA_FS_DEVPTS, PatinaMetadata,
+    PATINA_ENTRY_SOCKET, PATINA_ENTRY_SYMLINK, PatinaMetadata,
 };
 
 /// `st_mode`: file type bits ORed with the node's permission bits.
@@ -46,9 +46,9 @@ pub(crate) const VOLUME: VolumeGeometry = VolumeGeometry {
 };
 
 /// `st_blksize`: the virtual volume's 4 KiB block, or the 1 KiB block of
-/// devpts and procfs.
+/// procfs.
 pub(crate) fn stat_blksize(values: &PatinaMetadata) -> u64 {
-    if values.fs == PATINA_FS_DEVPTS || is_proc(values.fs) {
+    if is_proc(values.fs) {
         1024
     } else {
         u64::from(VOLUME.block_size)

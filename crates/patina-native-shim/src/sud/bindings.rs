@@ -233,139 +233,18 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_setdomainname, |nr, a| {
         privileged::answer(nr, privileged::set_uts_name, a)
     }),
-    (Syscall::N_mount, |nr, a| {
-        privileged::answer(nr, privileged::mount, a)
-    }),
-    (Syscall::N_umount2, |nr, a| {
-        privileged::answer(nr, privileged::umount2, a)
-    }),
-    (Syscall::N_pivot_root, |nr, a| {
-        privileged::answer(nr, privileged::may_mount, a)
-    }),
-    (Syscall::N_open_tree, |nr, a| {
-        privileged::answer(nr, privileged::open_tree, a)
-    }),
-    (Syscall::N_move_mount, |nr, a| {
-        privileged::answer(nr, privileged::may_mount, a)
-    }),
-    (Syscall::N_fsopen, |nr, a| {
-        privileged::answer(nr, privileged::may_mount, a)
-    }),
-    (Syscall::N_fsconfig, |nr, a| {
-        privileged::answer(nr, privileged::fsconfig, a)
-    }),
-    (Syscall::N_fsmount, |nr, a| {
-        privileged::answer(nr, privileged::may_mount, a)
-    }),
-    (Syscall::N_fspick, |nr, a| {
-        privileged::answer(nr, privileged::may_mount, a)
-    }),
-    (Syscall::N_mount_setattr, |nr, a| {
-        privileged::answer(nr, privileged::mount_setattr, a)
-    }),
-    (Syscall::N_acct, |nr, a| {
-        privileged::answer(nr, privileged::acct, a)
-    }),
-    (Syscall::N_vhangup, |nr, a| {
-        privileged::answer(nr, privileged::vhangup, a)
-    }),
-    (Syscall::N_swapon, |nr, a| {
-        privileged::answer(nr, privileged::swapon, a)
-    }),
-    (Syscall::N_swapoff, |nr, a| {
-        privileged::answer(nr, privileged::swapoff, a)
-    }),
-    (Syscall::N_reboot, |nr, a| {
-        privileged::answer(nr, privileged::boot, a)
-    }),
-    (Syscall::N_kexec_load, |nr, a| {
-        privileged::answer(nr, privileged::boot, a)
-    }),
-    (Syscall::N_kexec_file_load, |nr, a| {
-        privileged::answer(nr, privileged::boot, a)
-    }),
-    (Syscall::N_init_module, |nr, a| {
-        privileged::answer(nr, privileged::module, a)
-    }),
-    (Syscall::N_finit_module, |nr, a| {
-        privileged::answer(nr, privileged::module, a)
-    }),
-    (Syscall::N_delete_module, |nr, a| {
-        privileged::answer(nr, privileged::module, a)
-    }),
-    (Syscall::N_quotactl, |nr, a| {
-        privileged::answer(nr, privileged::quotactl, a)
-    }),
-    (Syscall::N_quotactl_fd, |nr, a| {
-        privileged::answer(nr, privileged::quotactl_fd, a)
-    }),
-    (Syscall::N_chroot, |nr, a| {
-        privileged::answer(nr, privileged::chroot, a)
-    }),
-    (Syscall::N_syslog, |nr, a| {
-        privileged::answer(nr, privileged::syslog, a)
-    }),
-    (Syscall::N_perf_event_open, |nr, a| {
-        privileged::answer(nr, privileged::perf_event_open, a)
-    }),
-    (Syscall::N_bpf, |nr, a| {
-        privileged::answer(nr, privileged::bpf, a)
-    }),
-    (Syscall::N_userfaultfd, |nr, a| {
-        privileged::answer(nr, privileged::userfaultfd, a)
-    }),
-    (Syscall::N_ptrace, |nr, a| {
-        privileged::answer(nr, privileged::ptrace, a)
-    }),
-    (Syscall::N_unshare, |nr, a| {
-        privileged::answer(nr, privileged::unshare, a)
-    }),
-    (Syscall::N_setns, |nr, a| {
-        privileged::answer(nr, privileged::setns, a)
-    }),
-    (Syscall::N_seccomp, |nr, a| {
-        privileged::answer(nr, privileged::seccomp, a)
-    }),
-    (Syscall::N_landlock_create_ruleset, |nr, a| {
-        privileged::answer(nr, privileged::landlock_create_ruleset, a)
-    }),
-    (Syscall::N_landlock_add_rule, |nr, a| {
-        privileged::answer(nr, privileged::landlock_add_rule, a)
-    }),
-    (Syscall::N_landlock_restrict_self, |nr, a| {
-        privileged::answer(nr, privileged::landlock_restrict_self, a)
-    }),
-    (Syscall::N_lsm_list_modules, |nr, a| {
-        privileged::answer(nr, privileged::lsm_list_modules, a)
-    }),
-    (Syscall::N_lsm_get_self_attr, |nr, a| {
-        privileged::answer(nr, privileged::lsm_get_self_attr, a)
-    }),
-    (Syscall::N_lsm_set_self_attr, |nr, a| {
-        privileged::answer(nr, privileged::lsm_set_self_attr, a)
-    }),
     (Syscall::N_add_key, |nr, a| {
         privileged::answer(nr, privileged::add_key, a)
     }),
     (Syscall::N_request_key, |nr, a| {
         privileged::answer(nr, privileged::request_key, a)
     }),
+    (Syscall::N_landlock_create_ruleset, |_, a| {
+        probes::landlock_create_ruleset(a)
+    }),
+    (Syscall::N_seccomp, |_, a| probes::seccomp(a)),
     (Syscall::N_keyctl, |nr, a| {
         privileged::answer(nr, privileged::keyctl, a)
-    }),
-    (Syscall::N_statmount, |nr, a| {
-        privileged::answer(nr, privileged::statmount, a)
-    }),
-    (Syscall::N_listmount, |nr, a| {
-        privileged::answer(nr, privileged::listmount, a)
-    }),
-    #[cfg(target_arch = "x86_64")]
-    (Syscall::N_iopl, |nr, a| {
-        privileged::answer(nr, privileged::iopl, a)
-    }),
-    #[cfg(target_arch = "x86_64")]
-    (Syscall::N_ioperm, |nr, a| {
-        privileged::answer(nr, privileged::ioperm, a)
     }),
     // SAFETY: uname writes its guest result through uaccess.
     (Syscall::N_uname, |_, a| unsafe {
@@ -623,49 +502,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_msgctl, |_, a| unsafe {
         crate::thread::ipc::msgctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
     }),
-    // ---- POSIX message queues: the one-process model (`thread::ipc`) ----
-    // SAFETY: mq_open reads both guest inputs through uaccess.
-    (Syscall::N_mq_open, |_, a| unsafe {
-        crate::thread::ipc::mq_open(
-            a[0] as *const c_char,
-            a[1] as i32,
-            a[2] as u32,
-            a[3] as *const _,
-        )
-    }),
-    // SAFETY: mq_unlink reads the guest name through uaccess.
-    (Syscall::N_mq_unlink, |_, a| unsafe {
-        crate::thread::ipc::mq_unlink(a[0] as *const c_char)
-    }),
-    // SAFETY: mq_timedsend copies its message and timeout through uaccess.
-    (Syscall::N_mq_timedsend, |_, a| unsafe {
-        crate::thread::ipc::mq_timedsend(
-            arg_fd(a[0]) as c_int,
-            a[1] as *const u8,
-            a[2] as usize,
-            a[3] as u32,
-            a[4] as *const _,
-        )
-    }),
-    // SAFETY: mq_timedreceive copies its message, priority and timeout through uaccess.
-    (Syscall::N_mq_timedreceive, |_, a| unsafe {
-        crate::thread::ipc::mq_timedreceive(
-            arg_fd(a[0]) as c_int,
-            a[1] as *mut u8,
-            a[2] as usize,
-            a[3] as *mut u32,
-            a[4] as *const _,
-        )
-    }),
-    // SAFETY: mq_notify copies the guest notification structure through uaccess.
-    (Syscall::N_mq_notify, |_, a| unsafe {
-        crate::thread::ipc::mq_notify(arg_fd(a[0]) as c_int, a[1] as *const _)
-    }),
-    // SAFETY: mq_getsetattr copies its guest attributes through uaccess.
-    (Syscall::N_mq_getsetattr, |_, a| unsafe {
-        crate::thread::ipc::mq_getsetattr(arg_fd(a[0]) as c_int, a[1] as *const _, a[2] as *mut _)
-    }),
-    // ---- memory policy on the one memory node (`crate::numa`) ----
+    // ---- memory policy on the one memory node (`crate::numa`, constants) ----
     // SAFETY: set_mempolicy validates and copies the guest node mask through uaccess.
     (Syscall::N_set_mempolicy, |_, a| unsafe {
         crate::numa::set_mempolicy(a[0] as i32, a[1] as *const u64, a[2])
@@ -763,20 +600,11 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_process_madvise, |nr, a| {
         privileged::answer(nr, privileged::process_madvise, a)
     }),
-    (Syscall::N_process_vm_readv, |nr, a| {
-        privileged::answer(nr, privileged::process_vm_readv, a)
-    }),
-    (Syscall::N_process_vm_writev, |nr, a| {
-        privileged::answer(nr, privileged::process_vm_writev, a)
-    }),
     (Syscall::N_rseq, |_, a| {
         crate::thread::registrations::rseq(a[0] as usize, a[1] as u32, a[2] as i32, a[3] as u32)
     }),
     (Syscall::N_get_robust_list, |nr, a| {
         privileged::answer(nr, privileged::get_robust_list, a)
-    }),
-    (Syscall::N_kcmp, |nr, a| {
-        privileged::answer(nr, privileged::kcmp, a)
     }),
     // No restart block is ever pending (the registry row says why).
     (Syscall::N_restart_syscall, |_, _| -EINTR),

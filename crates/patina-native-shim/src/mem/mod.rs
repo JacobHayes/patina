@@ -42,7 +42,7 @@
 //! The address-space rows that create, move or destroy mappings keep the
 //! per-range state in step with the host's: the views (`views`; on Linux also
 //! the System V attachments, which are views of a segment's memfd), and on
-//! Linux the memory locks and the memory policies (`crate::numa`). The rows
+//! Linux the memory locks. The rows
 //! are each platform's own (`mapping` judges as Linux does, `darwin` as XNU
 //! does), over the one view table and page cache.
 //!
@@ -60,8 +60,6 @@ mod cache;
 mod memfd;
 mod ranges;
 #[cfg(target_os = "linux")]
-pub(crate) mod userfaultfd;
-
 #[cfg(target_os = "linux")]
 pub(crate) use barrier::membarrier;
 #[cfg(target_os = "linux")]
@@ -70,7 +68,6 @@ pub(crate) use memfd::{anonymous, released, secret, secret_resizable, secret_res
 use crate::SpinMutex;
 use crate::fdtable::{DescId, FdKind};
 #[cfg(target_os = "linux")]
-use crate::numa::Policy;
 #[cfg(target_os = "linux")]
 use crate::registry::Syscall;
 #[cfg(target_os = "linux")]
@@ -295,9 +292,6 @@ struct Mappings {
     handles: BTreeMap<u64, u64>,
     /// The descriptions views hold, and their driver handles.
     descs: BTreeMap<DescId, u64>,
-    /// The memory policies of address ranges (`mbind`).
-    #[cfg(target_os = "linux")]
-    policies: Ranges<Policy>,
     /// Locked ranges (`VM_LOCKED`), each with whether it locks on fault.
     #[cfg(target_os = "linux")]
     locks: Ranges<bool>,
@@ -311,8 +305,6 @@ static MAPPINGS: SpinMutex<Mappings> = SpinMutex::new(Mappings {
     caches: BTreeMap::new(),
     handles: BTreeMap::new(),
     descs: BTreeMap::new(),
-    #[cfg(target_os = "linux")]
-    policies: Ranges::new(),
     #[cfg(target_os = "linux")]
     locks: Ranges::new(),
     #[cfg(target_os = "linux")]
@@ -328,7 +320,7 @@ static CACHES: AtomicBool = AtomicBool::new(false);
 impl Mappings {
     fn publish(&self) {
         #[cfg(target_os = "linux")]
-        let ranges = !(self.policies.is_empty() && self.locks.is_empty() && self.future.is_none());
+        let ranges = !(self.locks.is_empty() && self.future.is_none());
         #[cfg(target_os = "macos")]
         let ranges = false;
         TRACKED.store(!self.views.is_empty() || ranges, Ordering::Release);
@@ -510,16 +502,11 @@ pub(crate) use hooks::{
 #[cfg(target_os = "linux")]
 pub(crate) use locks::huge_page_size;
 #[cfg(target_os = "linux")]
-use locks::{
-    lock_limit_pages, lock_range, lock_request, map_huge_pages, populate, require_populate,
-};
+use locks::{lock_limit_pages, lock_range, lock_request, map_huge_pages, populate};
 #[cfg(all(test, target_os = "linux"))]
 use mapping::judge;
 #[cfg(target_os = "linux")]
-pub(crate) use segments::{
-    Segment, attach, attachments, detach, fault_in, mapped, policies_in, policy_at, resident,
-    set_policy,
-};
+pub(crate) use segments::{Segment, attach, attachments, detach, mapped};
 #[cfg(all(test, target_os = "linux"))]
 use views::writer_among;
 use views::{

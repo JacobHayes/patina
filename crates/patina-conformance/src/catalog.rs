@@ -87,8 +87,7 @@ pub enum Need {
     /// `[::1]:0` (a kernel without IPv6 answers `EAFNOSUPPORT`, IPv6 disabled
     /// on `lo` answers `EADDRNOTAVAIL`). Both are configuration a runner is
     /// set up with — every distribution kernel builds IPv6, and `lo` carries
-    /// `::1` unless a sysctl disabled it — so, as with `Membarrier` and
-    /// `PosixMqueue`, a prerequisite, not a machine fact.
+    /// `::1` unless a sysctl disabled it — so, as with `Membarrier`, a prerequisite, not a machine fact.
     Ipv6Loopback,
     /// An unprivileged fanotify group with file-handle events on the run
     /// directory (Linux 5.13's unprivileged fanotify, `CONFIG_FANOTIFY`,
@@ -141,9 +140,6 @@ pub enum Need {
     SysvSem,
     /// A System V message queue can be created and removed (`msgmni`).
     SysvMsg,
-    /// A POSIX message queue can be created and unlinked
-    /// (`CONFIG_POSIX_MQUEUE`; `RLIMIT_MSGQUEUE`, `queues_max`).
-    PosixMqueue,
     /// This many pages can be locked (`RLIMIT_MEMLOCK`, or `CAP_IPC_LOCK`).
     LockedPages(usize),
     /// `MEMBARRIER_CMD_QUERY` answers (`CONFIG_MEMBARRIER`) and offers the
@@ -168,9 +164,6 @@ pub enum Need {
     /// A secret-memory page can be created and mapped (`memfd_secret`
     /// enabled, and one lockable page).
     SecretMemory,
-    /// The NUMA policy rows answer (`CONFIG_NUMA`) and this task may
-    /// allocate from exactly one memory node.
-    OneNumaNode,
     /// The native run starts at nice 0, as the virtual kernel's process
     /// does (the harness cannot raise a priority it inherited lowered).
     NiceZero,
@@ -185,19 +178,6 @@ pub enum Need {
     /// Landlock is built and active (`CONFIG_SECURITY_LANDLOCK`, and in the
     /// boot's LSM list): `landlock_create_ruleset`'s version query answers.
     Landlock,
-    /// The host refuses an unprivileged caller BPF maps and programs
-    /// (`kernel.unprivileged_bpf_disabled` set, the default of
-    /// `CONFIG_BPF_UNPRIV_DEFAULT_OFF`): a one-entry array map is `EPERM`.
-    RestrictedBpf,
-    /// The host refuses an unprivileged caller every perf event, even
-    /// counting its own user time (`kernel.perf_event_paranoid` at a level a
-    /// distribution patch adds: 4 on Ubuntu, above 2 on Debian): a user-only
-    /// task-clock event on the caller is `EACCES`.
-    RestrictedPerf,
-    /// The host refuses an unprivileged caller a userfaultfd that handles
-    /// kernel faults (`vm.unprivileged_userfaultfd` 0, its default):
-    /// `userfaultfd` without `UFFD_USER_MODE_ONLY` is `EPERM`.
-    RestrictedUserfaultfd,
     /// Linux AIO answers: a one-event context can be set up and destroyed
     /// (`CONFIG_AIO`, room under `fs.aio-max-nr`, no seccomp filter
     /// refusing the rows, as container runtimes' default profiles do).
@@ -226,7 +206,6 @@ impl Need {
             Need::ProtectionKeys
             | Need::ShadowStack
             | Need::SecretMemory
-            | Need::OneNumaNode
             | Need::SysfsSyscall
             | Need::HighResTimers
             | Need::Landlock
@@ -245,7 +224,6 @@ impl Need {
             | Need::SysvShm
             | Need::SysvSem
             | Need::SysvMsg
-            | Need::PosixMqueue
             | Need::LockedPages(_)
             | Need::Membarrier
             | Need::NiceZero
@@ -253,9 +231,6 @@ impl Need {
             | Need::Ipv6Loopback
             | Need::Fanotify
             | Need::LocalBindOnly
-            | Need::RestrictedBpf
-            | Need::RestrictedPerf
-            | Need::RestrictedUserfaultfd
             | Need::RseqRegistered
             | Need::Keys => false,
         }
@@ -435,8 +410,383 @@ pub enum Entry {
 /// Why zstd's tracing hooks have no scenario.
 const ZSTD_TRACE_HOOK: &str = "no native definition (a third-party weak hook): one of zstd's weak tracing hooks, which the shim defines as no-ops (begin answers 0, which disables tracing per zstd_trace.h; end is inert; c/posix/core.c) so a guest linking zstd's static library imports nothing for them. zstd calls them, never the guest, and neither glibc nor the host defines them, so there is no native oracle and no row they serve";
 
+const TRAPPED: &str = "unmodeled by design: no target workload exercises it, so the registry traps it as a named stop (`Trap(privileged|unmodeled)`) instead of a model. The stop is asserted by the raw-guest tests (cargo-patina native_raw), not compared against a native oracle, because the native side is a privileged or host-mutating call";
+const TRAPPED_SYMBOL: &str = "the libc spelling of a row the registry traps as a named stop (see the syscall exclusions); the shim forwards it to the trapped row, so there is no modeled behaviour to compare with a native oracle";
+const PTY_SPELLING: &str = "pseudo-terminal spelling: patina models no pseudo-terminals. A /dev/ptmx open is a named stop, the stdio descriptors answer ENOTTY and /dev/tty answers ENXIO (fd/dev_tty, fd/termios); there is no pty behaviour to compare with a native oracle";
+const NUMA_CONSTANTS: &str = "answered with constants: the virtual machine has one NUMA node, so get_mempolicy reports MPOL_DEFAULT with the node-0 mask, node-0 policies succeed and other nodes are EINVAL (numa.rs unit tests). A native oracle would report the host's topology";
+
 /// Registry entries excluded from conformance coverage, with their reasons.
 pub const EXCLUSIONS: &[Exclusion] = &[
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_ptrace),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_syslog),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_vhangup),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_pivot_root),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_chroot),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_acct),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mount),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_umount2),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_swapon),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_swapoff),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_reboot),
+        reason: TRAPPED,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_iopl),
+        reason: TRAPPED,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_ioperm),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_init_module),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_delete_module),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_quotactl),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mbind),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_set_mempolicy),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_get_mempolicy),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_open),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_unlink),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_timedsend),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_timedreceive),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_notify),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mq_getsetattr),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_kexec_load),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_migrate_pages),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_unshare),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_move_pages),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_perf_event_open),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_setns),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_process_vm_readv),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_process_vm_writev),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_kcmp),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_finit_module),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_kexec_file_load),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_bpf),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_userfaultfd),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_open_tree),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_move_mount),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_fsopen),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_fsconfig),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_fsmount),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_fspick),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_mount_setattr),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_quotactl_fd),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_landlock_add_rule),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_landlock_restrict_self),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_set_mempolicy_home_node),
+        reason: NUMA_CONSTANTS,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_statmount),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_listmount),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_lsm_get_self_attr),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_lsm_set_self_attr),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Syscall(Syscall::N_lsm_list_modules),
+        reason: TRAPPED,
+    },
+    Exclusion {
+        entry: Entry::Symbol("__ptsname_r_chk"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("__ttyname_r_chk"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("acct"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("chroot"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("delete_module"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("fsconfig"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("fsmount"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("fsopen"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("fspick"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("grantpt"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("init_module"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ioperm"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("iopl"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("mount"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("mount_setattr"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("move_mount"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("open_tree"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("openpty"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("pivot_root"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("posix_openpt"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("process_vm_readv"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("process_vm_writev"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ptrace"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ptsname"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ptsname_r"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("quotactl"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("reboot"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("setns"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("swapoff"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("swapon"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("tcdrain"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("tcflush"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ttyname"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("ttyname_r"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("umount2"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("unlockpt"),
+        reason: PTY_SPELLING,
+    },
+    Exclusion {
+        entry: Entry::Symbol("unshare"),
+        reason: TRAPPED_SYMBOL,
+    },
+    Exclusion {
+        entry: Entry::Symbol("vhangup"),
+        reason: TRAPPED_SYMBOL,
+    },
     Exclusion {
         entry: Entry::Syscall(Syscall::N_open_by_handle_at),
         reason: "privileged: opening by handle bypasses path permission checks, so it needs CAP_DAC_READ_SEARCH in the mount's user namespace (fs/fhandle.c may_decode_fh); an unprivileged native oracle observes only the EPERM refusal. Its unprivileged half, name_to_handle_at, is covered by fs/handles",
@@ -489,9 +839,9 @@ macro_rules! for_each_scenario {
             entropy_getentropy => entropy::getentropy,
             entropy_getentropy_fault => entropy::getentropy_fault,
             entropy_getrandom => entropy::getrandom,
+            fd_dev_tty => fd::dev_tty,
             fd_anon_inode => fd::anon_inode,
             fd_pipes => fd::pipes,
-            fd_pty => fd::pty,
             fd_stdio => fd::stdio,
             fd_table => fd::table,
             fd_termios => fd::termios,
@@ -512,11 +862,7 @@ macro_rules! for_each_scenario {
             fs_libc_times => fs::libc_times,
             fs_mem_devices => fs::mem_devices,
             fs_metadata => fs::metadata,
-            fs_mount => fs::mount,
-            fs_mount_api => fs::mount_api,
-            fs_mount_query => fs::mount_query,
             fs_names => fs::names,
-            fs_open_tree => fs::open_tree,
             fs_openat2 => fs::openat2,
             fs_owner => fs::owner,
             fs_paths => fs::paths,
@@ -534,7 +880,6 @@ macro_rules! for_each_scenario {
             fs_times => fs::times,
             fs_vectored_io => fs::vectored_io,
             fs_xattr => fs::xattr,
-            ipc_mqueue => ipc::mqueue,
             ipc_sysv_msg => ipc::sysv_msg,
             ipc_sysv_sem => ipc::sysv_sem,
             ipc_sysv_shm => ipc::sysv_shm,
@@ -547,14 +892,12 @@ macro_rules! for_each_scenario {
             mem_mmap_file => mem::mmap_file,
             mem_mremap => mem::mremap,
             mem_msync => mem::msync,
-            mem_numa => mem::numa,
             mem_pkeys => mem::pkeys,
             mem_process_madvise => mem::process_madvise,
             mem_protect => mem::protect,
             mem_remap_file_pages => mem::remap_file_pages,
             mem_secret => mem::secret,
             mem_shadow_stack => mem::shadow_stack,
-            mem_userfaultfd => mem::userfaultfd,
             net_fortify => net::fortify,
             net_getaddrinfo => net::getaddrinfo,
             net_getifaddrs => net::getifaddrs,
@@ -582,19 +925,14 @@ macro_rules! for_each_scenario {
             proc_exec => proc::exec,
             proc_exit => proc::exit,
             proc_ids => proc::ids,
-            proc_kcmp => proc::kcmp,
-            proc_namespaces => proc::namespaces,
             proc_pidfd => proc::pidfd,
             proc_pidfd_spawn => proc::pidfd_spawn,
             proc_prctl => proc::prctl,
             proc_procfs => proc::procfs,
-            proc_ptrace => proc::ptrace,
-            proc_seccomp => proc::seccomp,
             proc_spawn => proc::spawn,
             proc_traps => proc::traps,
         #[cfg(target_arch = "x86_64")]
             proc_vfork => proc::vfork,
-            proc_vm_rw => proc::vm_rw,
             proc_wait => proc::wait,
             readiness_epoll => readiness::epoll,
         #[cfg(target_arch = "aarch64")]
@@ -635,24 +973,16 @@ macro_rules! for_each_scenario {
             signal_sock_timeout_eintr => signal::sock_timeout_eintr,
             signal_wait => signal::wait,
             signal_wrappers => signal::wrappers,
-            sys_admin => sys::admin,
-            sys_bpf => sys::bpf,
             sys_hostname => sys::hostname,
-        #[cfg(target_arch = "x86_64")]
-            sys_ioport => sys::ioport,
             sys_keys => sys::keys,
             sys_keys_session => sys::keys_session,
-            sys_landlock => sys::landlock,
-            sys_lsm => sys::lsm,
             sys_nss => sys::nss,
-            sys_perf => sys::perf,
             sys_personality => sys::personality,
+            sys_probes => sys::probes,
         #[cfg(target_arch = "x86_64")]
             sys_padding => sys::padding,
-            sys_quota => sys::quota,
             sys_rlimit => sys::rlimit,
             sys_rlimit64 => sys::rlimit64,
-            sys_root => sys::root,
         #[cfg(target_arch = "x86_64")]
             sys_sysfs => sys::sysfs,
             sys_sysinfo => sys::sysinfo,

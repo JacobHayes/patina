@@ -1,4 +1,4 @@
-//! System V attachments, memory policies, and residency queries.
+//! System V attachments and residency queries.
 
 use super::*;
 
@@ -119,28 +119,6 @@ pub(crate) fn attachments(id: i32) -> usize {
         .count()
 }
 
-// ---------------------------------------------------------------- memory policies
-
-/// The policy of the range `[from, to)`: `None` is the default one.
-pub(crate) fn set_policy(from: usize, to: usize, policy: Option<Policy>) {
-    let mut mappings = MAPPINGS.lock();
-    mappings.policies.cut(from, to);
-    if let Some(policy) = policy {
-        mappings.policies.set(from, to, policy);
-    }
-    mappings.publish();
-}
-
-/// The policy `addr` has, if its range has one of its own.
-pub(crate) fn policy_at(addr: usize) -> Option<Policy> {
-    MAPPINGS.lock().policies.at(addr)
-}
-
-/// The ranges within `[from, to)` that have a policy of their own.
-pub(crate) fn policies_in(from: usize, to: usize) -> Vec<(usize, usize, Policy)> {
-    MAPPINGS.lock().policies.within(from, to)
-}
-
 /// Whether every page of `[addr, addr + len)` is mapped: host `mincore`,
 /// which answers `ENOMEM` for a range with a hole and touches nothing, over
 /// chunks a stack vector holds.
@@ -166,31 +144,4 @@ pub(crate) fn mapped(addr: usize, len: usize) -> bool {
         at += span;
     }
     true
-}
-
-/// Whether the page at `addr` is mapped and resident.
-pub(crate) fn resident(addr: usize) -> Option<bool> {
-    let mut vector = [0u8; 1];
-    let page = addr & !(PAGE - 1);
-    if in_arena(page, PAGE) {
-        return None;
-    }
-    (host(
-        Syscall::N_mincore,
-        [page, PAGE, vector.as_mut_ptr() as usize, 0, 0, 0],
-    ) == 0)
-        .then_some(vector[0] & 1 != 0)
-}
-
-/// Read-fault the page at `addr` in, as `get_user_pages` does for a lookup:
-/// `false` when no fault reaches it (unmapped, or `PROT_NONE`).
-pub(crate) fn fault_in(addr: usize) -> bool {
-    if in_arena(addr & !(PAGE - 1), PAGE) {
-        return false;
-    }
-    require_populate();
-    host(
-        Syscall::N_madvise,
-        [addr & !(PAGE - 1), PAGE, MADV_POPULATE_READ, 0, 0, 0],
-    ) == 0
 }

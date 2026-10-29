@@ -27,8 +27,7 @@
 //!   after the new one took; `timer_create` from an unreadable `sigevent`
 //!   (before the clock is judged) and into an unwritable id;
 //! * `semtimedop` from an unreadable timeout, and from unreadable operations
-//!   before the id is judged; `mq_timedsend`/`mq_timedreceive` from an
-//!   unreadable timeout before the descriptor is judged.
+//!   before the id is judged.
 //!
 //! Its own scenario, because a door that dereferences the pointer itself
 //! ends the whole run (and a crash loses the captured event stream). Raw
@@ -437,8 +436,8 @@ fn timers(p: &Probe) {
     );
 }
 
-/// The System V semaphore and POSIX message queue timeouts, copied in
-/// before anything else is judged.
+/// The System V semaphore timeouts, copied in before anything else is
+/// judged.
 fn timeouts(p: &Probe) {
     let raw = |call: Syscall, args: [i64; 6]| p.call_observed(call, args);
     let efault = |call: Syscall, args: [i64; 6]| raw(call, args) == neg(EFAULT);
@@ -464,22 +463,6 @@ fn timeouts(p: &Probe) {
         efault(Syscall::N_semtimedop, [-1, UNMAPPED, 1, 0, 0, 0]),
     );
     raw(Syscall::N_semctl, [set, 0, IPC_RMID as i64, 0, 0, 0]);
-    let byte = 0u8;
-    p.check(
-        "mq_timedsend from an unreadable timeout is EFAULT before its descriptor is judged",
-        efault(
-            Syscall::N_mq_timedsend,
-            [-1, address(&byte), 1, 0, UNMAPPED, 0],
-        ),
-    );
-    let mut buffer = [0u8; 64];
-    p.check(
-        "and mq_timedreceive",
-        efault(
-            Syscall::N_mq_timedreceive,
-            [-1, out(&mut buffer), 64, 0, UNMAPPED, 0],
-        ),
-    );
 }
 
 pub const SCENARIO: Scenario = Scenario {
@@ -514,11 +497,9 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_semget,
         Syscall::N_semtimedop,
         Syscall::N_semctl,
-        Syscall::N_mq_timedsend,
-        Syscall::N_mq_timedreceive,
         Syscall::N_close,
     ],
     vehicles: &[Vehicle::Syscall],
-    needs: &[Need::SysvSem, Need::PosixMqueue],
+    needs: &[Need::SysvSem],
     ..DEFAULTS
 };

@@ -200,34 +200,14 @@ pub(crate) fn release_description(release: Release) -> Result<(), c_int> {
             Ok(())
         }
         #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => {
-            thread::ipc::mq_close(release.handle);
-            Ok(())
-        }
-        #[cfg(target_os = "linux")]
-        FdKind::Pidfd | FdKind::LandlockRuleset => Ok(()),
+        FdKind::Pidfd => Ok(()),
         #[cfg(target_os = "linux")]
         FdKind::Proc | FdKind::ProcDir => {
             crate::procfs::released(release.handle);
             Ok(())
         }
         #[cfg(target_os = "linux")]
-        FdKind::Userfaultfd => {
-            mem::userfaultfd::released(release.handle);
-            Ok(())
-        }
-        #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => Ok(()),
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster => {
-            thread::pty::release(thread::pty::Side::Master, release.handle as u32);
-            Ok(())
-        }
-        #[cfg(target_os = "linux")]
-        FdKind::PtySlave => {
-            thread::pty::release(thread::pty::Side::Slave, release.handle as u32);
-            Ok(())
-        }
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => {
             thread::kqueue_close(release.handle);

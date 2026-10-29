@@ -93,6 +93,7 @@ impl<S: Storage> WaitQueue<S> {
 }
 
 impl<T> WaitQueue<VecDeque<T>> {
+    #[cfg(target_os = "macos")]
     pub(super) fn pop_front(&mut self) -> Option<T> {
         self.0.pop_front()
     }

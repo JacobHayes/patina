@@ -973,12 +973,6 @@ pub(crate) fn ioprio_set(which: i32, who: i32, ioprio: i32) -> SysResult<i64> {
     Ok(0)
 }
 
-/// The identity of the I/O context of thread `tid` (the pid for the main
-/// thread), `None` while it has none: what `kcmp(KCMP_IO)` compares.
-pub(crate) fn io_context(tid: i32) -> Option<u64> {
-    lock_state().sched.get(tid).io_context
-}
-
 /// `ioprio_get(which, who)`: the best (lowest) of the named threads'.
 pub(crate) fn ioprio_get(which: i32, who: i32) -> SysResult<i64> {
     let state = lock_state();

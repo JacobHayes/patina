@@ -12,10 +12,8 @@
 //! the run by name where the model ends. Everything else goes to the
 //! object: a pipe's `FIONREAD` is the bytes queued in it, a socket's
 //! (`SIOCINQ`) what a receive would take now, and a socket answers the
-//! interface requests (`SIOCGIF*`, `thread::net::iface`); a userfaultfd, a
-//! namespace file, an inotify instance and the memory devices have ioctls
-//! of their own; any
-//! other request, and `FIONREAD` on a directory or a descriptor with no such
+//! interface requests (`SIOCGIF*`, `thread::net::iface`); a namespace file, an inotify instance and the
+//! memory devices have ioctls of their own; any other request, and `FIONREAD` on a directory or a descriptor with no such
 //! answer, is `ENOTTY`.
 //!
 //! `request` is the platform's own request number: the C door passes its
@@ -149,40 +147,16 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::Pidfd
-            | FdKind::LandlockRuleset
             | FdKind::NamespacePath => fail(ENOTTY),
             // A namespace file's nsfs inode is an empty regular file.
             #[cfg(target_os = "linux")]
             FdKind::Namespace => put_int(arg, 0),
-            // Not a regular file: the request goes to the descriptor's own
-            // ioctl, which knows no `FIONREAD`.
-            #[cfg(target_os = "linux")]
-            FdKind::Userfaultfd => uffd_answer(crate::mem::userfaultfd::ioctl(
-                resolved.handle,
-                request,
-                arg as usize,
-            )),
             // `inotify_ioctl`: the bytes every queued event takes.
             #[cfg(target_os = "linux")]
             FdKind::Inotify => match thread::inotify::queued(resolved.handle) {
                 Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
                 None => fail(ENOTTY),
             },
-            // An mqueue inode is a regular file: its size less the position.
-            #[cfg(target_os = "linux")]
-            FdKind::MessageQueue => match thread::ipc::mq_unread(resolved.handle) {
-                Some(unread) => put_int(arg, unread),
-                None => fail(ENOTTY),
-            },
-            // `TIOCINQ`: what a read would take now (`n_tty_ioctl`).
-            #[cfg(target_os = "linux")]
-            FdKind::PtyMaster | FdKind::PtySlave => {
-                let side = thread::pty::Side::of(resolved.kind).expect("a pty kind");
-                match thread::pty::inq(side, resolved.handle as u32) {
-                    Ok(queued) => put_int(arg, queued),
-                    Err(errno) => fail(errno),
-                }
-            }
             #[cfg(target_os = "macos")]
             FdKind::Kqueue => fail(ENOTTY),
         },
@@ -209,14 +183,6 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 None => fail(ENOTTY),
             }
         }
-        // A pseudoterminal's own requests (`tty_ioctl`).
-        #[cfg(target_os = "linux")]
-        _ if thread::pty::Side::of(resolved.kind).is_some() => thread::pty::ioctl(
-            thread::pty::Side::of(resolved.kind).expect("a pty kind"),
-            resolved.handle as u32,
-            request,
-            arg as usize,
-        ),
         // A namespace file's own requests (`ns_ioctl`) are not modeled;
         // it answers any other `ENOTTY`.
         #[cfg(target_os = "linux")]
@@ -226,13 +192,6 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                  failing closed"
             ))
         }
-        // Every other request goes to the userfaultfd's own ioctl.
-        #[cfg(target_os = "linux")]
-        _ if resolved.kind == FdKind::Userfaultfd => uffd_answer(crate::mem::userfaultfd::ioctl(
-            resolved.handle,
-            request,
-            arg as usize,
-        )),
         _ if resolved.kind == FdKind::MemDevice => mem_device_ioctl(resolved.handle, request),
         // `inotify_ioctl`: the next watch descriptor tried, by value.
         #[cfg(target_os = "linux")]
@@ -319,10 +278,8 @@ mod vfs {
                 Inode::Regular { attributes: true }
             }
             FdKind::File => Inode::Volume { directory: false },
-            FdKind::MessageQueue | FdKind::Namespace => Inode::Regular { attributes: false },
-            FdKind::Pipe | FdKind::Socket | FdKind::PtyMaster | FdKind::PtySlave => {
-                Inode::Special { fasync: true }
-            }
+            FdKind::Namespace => Inode::Regular { attributes: false },
+            FdKind::Pipe | FdKind::Socket => Inode::Special { fasync: true },
             // `random_fasync`; `mem.c`'s devices have none.
             FdKind::MemDevice => Inode::Special {
                 fasync: crate::memdev::MemDevice::of_handle(resolved.handle).draws_entropy(),
@@ -331,9 +288,7 @@ mod vfs {
             | FdKind::Epoll
             | FdKind::SignalFd
             | FdKind::TimerFd
-            | FdKind::Pidfd
-            | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd => Inode::Special { fasync: false },
+            | FdKind::Pidfd => Inode::Special { fasync: false },
             // `inotify_fops` has `fsnotify_fasync`.
             FdKind::Inotify => Inode::Special { fasync: true },
             // `fdget` refused these before any request is looked at.
@@ -460,11 +415,10 @@ mod vfs {
     }
 
     /// The bytes an inode holds (`inode_get_bytes`): what `fstat`'s
-    /// `st_blocks` counts, in bytes; a queue's and a namespace file's inode
-    /// holds none. The kernel reads the in-memory inode, so no filesystem
+    /// `st_blocks` counts, in bytes; a namespace file's inode holds none. The kernel reads the in-memory inode, so no filesystem
     /// fault can fail it.
     fn bytes(raw_fd: c_int, resolved: &Resolved) -> Result<i64, c_int> {
-        if matches!(resolved.kind, FdKind::MessageQueue | FdKind::Namespace) {
+        if resolved.kind == FdKind::Namespace {
             return Ok(0);
         }
         let mut metadata = std::mem::MaybeUninit::<crate::PatinaMetadata>::uninit();
@@ -506,17 +460,5 @@ fn mem_device_ioctl(handle: u64, request: u64) -> c_int {
     {
         let _ = request;
         fail(ENOTTY)
-    }
-}
-
-/// A userfaultfd request's answer as the C door reports it.
-#[cfg(target_os = "linux")]
-fn uffd_answer(answer: Result<c_int, c_int>) -> c_int {
-    match answer {
-        Ok(value) => {
-            set_errno(0);
-            value
-        }
-        Err(errno) => fail(errno),
     }
 }

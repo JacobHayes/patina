@@ -62,9 +62,8 @@ fn is_fifo(resolved: &Resolved) -> bool {
 /// with a mapping `sync_file_range` writes back (the rest are `ESPIPE`).
 fn has_mapping(resolved: &Resolved) -> bool {
     match resolved.kind {
-        // An mqueue inode and a namespace file's nsfs inode are regular
-        // files.
-        FdKind::File | FdKind::Dir | FdKind::MessageQueue | FdKind::Namespace => true,
+        // A namespace file's nsfs inode is a regular file.
+        FdKind::File | FdKind::Dir | FdKind::Namespace => true,
         // So are procfs's files and directories.
         FdKind::Proc | FdKind::ProcDir => true,
         FdKind::OPath
@@ -80,11 +79,7 @@ fn has_mapping(resolved: &Resolved) -> bool {
         | FdKind::SignalFd
         | FdKind::Epoll
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
-        | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave => false,
+        | FdKind::NamespacePath => false,
     }
 }
 
@@ -304,14 +299,9 @@ pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
         | FdKind::Inotify
         | FdKind::SignalFd
         | FdKind::Epoll
-        | FdKind::MessageQueue
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
         | FdKind::Namespace
         | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave
         | FdKind::Proc
         | FdKind::ProcDir
         | FdKind::Pipe => Ok(()),

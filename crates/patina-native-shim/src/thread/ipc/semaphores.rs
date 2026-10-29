@@ -241,34 +241,6 @@ pub(crate) fn semtimedop(
     }
 }
 
-/// `exit_sem` for a process whose only thread drops its undo list
-/// (`unshare(CLONE_SYSVSEM)`): each set it holds an undo entry for gets the
-/// adjustments applied — a semaphore kept within `0..=SEMVMX`, its last
-/// process the caller where one moved it — and the entry dropped; then the
-/// set's waiters are rescanned and its `sem_otime` moves (`do_smart_update`
-/// with `otime` forced).
-pub(crate) fn exit_sem() {
-    let mut state = lock_state();
-    let Ipc { sem, outcomes, .. } = &mut state.ipc;
-    let mut woken = Vec::new();
-    for (_, set) in sem.objects.values_mut() {
-        if !set.undo {
-            continue;
-        }
-        set.undo = false;
-        for (slot, adjust) in set.sems.iter_mut().zip(set.adjust.iter_mut()) {
-            if *adjust != 0 {
-                *slot = ((slot.0 + *adjust).clamp(0, SEMVMX), pid());
-                *adjust = 0;
-            }
-        }
-        woken.extend(update_queue(set, outcomes));
-        set.otime = now();
-    }
-    drop(state);
-    wake_all(woken);
-}
-
 /// `semctl(2)`; `arg` is the fourth argument's register (`union semun`).
 ///
 /// # Safety

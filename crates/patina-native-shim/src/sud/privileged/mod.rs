@@ -1,23 +1,21 @@
-//! SUD rows — the privileged rows, answered as the pinned kernel answers the
-//! virtual credential (`crate::identity::credential`).
+//! SUD rows — the privileged rows that remain modeled, answered as the
+//! pinned kernel answers the virtual credential (`crate::identity::credential`):
+//! the key-management rows ([`keys`]), the rows that reach another process
+//! ([`process`]) and `sethostname`/`setdomainname`.
 //!
-//! Each row's answer is a function of the credential, the virtual kernel's
-//! declared configuration, its arguments and the modeled filesystem and
-//! descriptor table: the checks the kernel makes before its capability
-//! check, in the kernel's order, then the capability check itself
-//! ([`gate`]). What any caller may do goes through the model's own rows:
-//! `open_tree` without a clone opens as `openat` does, and
-//! `unshare(CLONE_SYSVSEM)` applies the semaphore adjustments as exit does. A credential without the capability gets the kernel's
-//! refusal (`EPERM`, `EACCES`, …). A credential that holds it reaches what
-//! the kernel would then do, which is not modeled: [`Unmodeled::Granted`], a
-//! named fatal. The capability a row checks is declared on its registry row
+//! Each row's answer is a function of the credential, its arguments and the
+//! modeled descriptor table: the checks the kernel makes before its
+//! capability check, in the kernel's order, then the capability check itself
+//! ([`gate`]). A credential without the capability gets the kernel's refusal
+//! (`EPERM`, `EACCES`, …). A credential that holds it reaches what the kernel
+//! would then do, which is not modeled: [`Unmodeled::Granted`], a named
+//! fatal. The capability a row checks is declared on its registry row
 //! (`SyscallRow::capabilities`); the tests hold each check to that
-//! declaration.
+//! declaration. The rest of the privileged surface (mounts, namespaces,
+//! tracing, BPF, Landlock, seccomp, …) is a named trap in the registry.
 //!
 //! No decision here is recorded: every answer follows from the credential
-//! and the declared configuration, which replay reproduces, and from the
-//! filesystem's and descriptor table's own lookups, which are recorded and
-//! replayed as every other row's are.
+//! and the declared configuration, which replay reproduces.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use crate::identity::{Credential, credential};
@@ -25,30 +23,11 @@ use crate::registry::Capability;
 #[cfg(test)]
 use crate::registry::Syscall;
 use linux_raw_sys::errno;
-use std::ffi::c_int;
 
-mod admin;
-#[cfg(target_arch = "x86_64")]
-mod ioport;
-mod kernel;
 mod keys;
-mod landlock;
-mod lsm;
-mod mount;
-mod mount_query;
 mod process;
-mod seccomp;
-pub(super) use admin::*;
-#[cfg(target_arch = "x86_64")]
-pub(super) use ioport::*;
-pub(super) use kernel::*;
 pub(super) use keys::*;
-pub(super) use landlock::*;
-pub(super) use lsm::*;
-pub(super) use mount::*;
-pub(super) use mount_query::*;
 pub(super) use process::*;
-pub(super) use seccomp::*;
 
 /// What a privileged row answers: the raw return value (`-errno` for a
 /// refusal), or the point past which the model does not go.
@@ -68,40 +47,6 @@ pub(super) enum Unmodeled {
 /// A refusal: `-errno`.
 fn refuse(code: impl Into<i64>) -> Answer {
     Ok(-code.into())
-}
-
-/// The guest's path at `address`: `EFAULT` for NULL (`getname`,
-/// [`super::guest_path`]), then the shim's one decode of a C path.
-fn guest_path(address: u64) -> Result<String, c_int> {
-    let pointer = super::guest_path(address).map_err(|code| -code as c_int)?;
-    // SAFETY: This SUD path row directly reads its non-null syscall path
-    // operand as before; invalid non-null guest pointers retain that fault path.
-    unsafe { crate::path_from_c(pointer) }
-}
-
-/// `user_path_at(AT_FDCWD, path, …)`; see [`lookup_at`].
-fn lookup(address: u64, follow: bool) -> Result<(), c_int> {
-    lookup_at(crate::paths::AT_FDCWD, address, follow)
-}
-
-/// `user_path_at(dirfd, path, …)`: whether the entry a guest path names,
-/// with or without following a final symlink, exists — the resolver's
-/// refusals, and `ENOENT` for a missing entry. The rows that look a path up
-/// refuse whatever they find (an entry the resolver answers itself too), so
-/// only its existence is answered.
-fn lookup_at(dirfd: c_int, address: u64, follow: bool) -> Result<(), c_int> {
-    let path = guest_path(address)?;
-    let flags = if follow {
-        0
-    } else {
-        crate::paths::RESOLVE_NOFOLLOW
-    };
-    match crate::paths::resolve(dirfd, &path, flags)? {
-        crate::paths::Resolution::Volume(resolved) if resolved.metadata.is_none() => {
-            Err(errno::ENOENT as c_int)
-        }
-        crate::paths::Resolution::Volume(_) | crate::paths::Resolution::Virtual(_) => Ok(()),
-    }
 }
 
 /// The capability check (`capable`, `ns_capable`, `may_mount`): `refusal`
@@ -170,40 +115,18 @@ mod tests {
 
     /// Every case, one list per group of rows.
     fn cases() -> Vec<Case> {
-        [
-            uts_cases(),
-            mount_cases(),
-            admin_cases(),
-            ioport_cases(),
-            chroot_cases(),
-            config_cases(),
-            robust_list_cases(),
-            sandbox_cases(),
-            key_cases(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [uts_cases(), robust_list_cases(), key_cases()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
-
-    /// The rows that declare a capability no caller of the model reaches:
-    /// the kernel checks it only past a refusal every descriptor or device
-    /// of the virtual machine gets, or (the mount table's readers) only for
-    /// a mount the caller's root cannot reach, which every mount can.
-    const UNREACHABLE: &[Syscall] = &[
-        Syscall::N_quotactl,
-        Syscall::N_quotactl_fd,
-        Syscall::N_statmount,
-        Syscall::N_listmount,
-    ];
 
     /// The row's answer to `case` for a credential holding `held`.
     fn outcome(case: &Case, held: u64) -> Answer {
         (case.check)(&holding(held), &case.args)
     }
 
-    /// Every row that declares capabilities has a case (or is listed in
-    /// [`UNREACHABLE`]), and every case holds its row to its declaration:
+    /// Every row that declares capabilities has a case, and every case holds its row to its declaration:
     /// a credential lacking every declared capability (holding every other
     /// one), and the guest's, get the kernel's refusal; one holding just the
     /// declared ones reaches the not-modeled end at one of them. And each
@@ -217,8 +140,8 @@ mod tests {
         for case in &cases {
             let row = crate::registry::syscall(case.row.name()).expect("a registry row");
             assert!(
-                !row.capabilities.is_empty() && !UNREACHABLE.contains(&case.row),
-                "{}: a case for a row that declares no reachable capability",
+                !row.capabilities.is_empty(),
+                "{}: a case for a row that declares no capability",
                 row.name
             );
         }
@@ -226,9 +149,6 @@ mod tests {
             .iter()
             .filter(|row| !row.capabilities.is_empty())
         {
-            if UNREACHABLE.contains(&row.id) {
-                continue;
-            }
             let declared = mask(row.capabilities);
             let mut consulted = 0;
             let mut asked = false;
@@ -293,134 +213,10 @@ mod tests {
         ]
     }
 
-    /// The mount rows: past their own argument checks (and, for `mount` and
-    /// `umount2`, a target the lookup finds), each is `may_mount`.
-    fn mount_cases() -> Vec<Case> {
-        const CLONE: u64 = 1;
-        let first = |row, check| Case {
-            row,
-            check,
-            args: [u64::MAX; 6],
-            refusal: errno::EPERM,
-        };
-        vec![
-            first(Syscall::N_fsopen, may_mount),
-            first(Syscall::N_fspick, may_mount),
-            first(Syscall::N_fsmount, may_mount),
-            first(Syscall::N_move_mount, may_mount),
-            first(Syscall::N_pivot_root, may_mount),
-            Case {
-                row: Syscall::N_mount,
-                check: |credential, a| mount_finding(credential, a, |_| Ok(())),
-                args: [0, 1, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_umount2,
-                check: |credential, a| umount2_finding(credential, a, |_, _| Ok(())),
-                args: [1, 0, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_mount_setattr,
-                check: mount_setattr,
-                args: [0, 0, 0, 0, 32, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_open_tree,
-                check: open_tree,
-                args: [0, 0, CLONE, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-        ]
-    }
-
-    /// The administration rows, each asked with every argument it checks
-    /// after its capability invalid.
-    fn admin_cases() -> Vec<Case> {
-        let first = |row, check| Case {
-            row,
-            check,
-            args: [u64::MAX; 6],
-            refusal: errno::EPERM,
-        };
-        vec![
-            first(Syscall::N_acct, acct),
-            first(Syscall::N_vhangup, vhangup),
-            first(Syscall::N_swapoff, swapoff),
-            first(Syscall::N_reboot, boot),
-            first(Syscall::N_kexec_load, boot),
-            first(Syscall::N_kexec_file_load, boot),
-            first(Syscall::N_init_module, module),
-            first(Syscall::N_finit_module, module),
-            first(Syscall::N_delete_module, module),
-            Case {
-                row: Syscall::N_swapon,
-                check: swapon,
-                args: [u64::MAX, 0, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-        ]
-    }
-
-    /// Raising the I/O privilege level or turning ports on needs
-    /// `CAP_SYS_RAWIO`.
-    #[cfg(target_arch = "x86_64")]
-    fn ioport_cases() -> Vec<Case> {
-        vec![
-            Case {
-                row: Syscall::N_iopl,
-                check: iopl,
-                args: [3, 0, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_ioperm,
-                check: ioperm,
-                args: [0x80, 1, 1, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-        ]
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn ioport_cases() -> Vec<Case> {
-        Vec::new()
-    }
-
-    /// Keeping I/O privilege level 0 or turning ports off needs nothing.
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn keeping_the_io_ports_closed_needs_no_privilege() {
-        let nothing = holding(0);
-        assert_eq!(iopl(&nothing, &[0; 6]), Ok(0));
-        assert_eq!(ioperm(&nothing, &[0x80, 1, 0, 0, 0, 0]), Ok(0));
-        assert_eq!(
-            ioperm(&nothing, &[u64::MAX, 2, 1, 0, 0, 0]),
-            refuse(errno::EINVAL)
-        );
-    }
-
-    /// `chroot` of a directory the caller may search needs
-    /// `CAP_SYS_CHROOT`.
-    /// Reading init's robust list and comparing its objects:
-    /// `ptrace_may_access`. Copying init's memory: `mm_access`, past a local
-    /// vector with a byte to copy. Taking one of init's descriptors through
-    /// its pidfd: `ptrace_may_access`. Joining init's UTS namespace through
-    /// its pidfd: `ptrace_may_access`, then `utsns_install`.
-    /// Advising a process's memory through its pidfd: init's `mm_access`,
-    /// then `CAP_SYS_NICE`, even for the guest's own.
+    /// Reading init's robust list: `ptrace_may_access`. Taking one of init's
+    /// descriptors through its pidfd: `ptrace_may_access`. Advising a process's memory
+    /// through its pidfd: init's `mm_access`, then `CAP_SYS_NICE`, even for the guest's own.
     fn robust_list_cases() -> Vec<Case> {
-        static BYTE: [u8; 1] = [0];
-        let range = Box::leak(Box::new([BYTE.as_ptr() as u64, 1]));
-        let vector = range.as_ptr() as u64;
-        let copy = |row, check| Case {
-            row,
-            check,
-            args: [1, vector, 1, vector, 1, 0],
-            refusal: errno::EPERM,
-        };
         vec![
             Case {
                 row: Syscall::N_get_robust_list,
@@ -428,8 +224,6 @@ mod tests {
                 args: [1, 0, 0, 0, 0, 0],
                 refusal: errno::EPERM,
             },
-            copy(Syscall::N_process_vm_readv, process_vm_readv),
-            copy(Syscall::N_process_vm_writev, process_vm_writev),
             Case {
                 row: Syscall::N_process_madvise,
                 check: |credential, a| {
@@ -452,157 +246,6 @@ mod tests {
                     getfd_from(credential, a, || Ok(crate::identity::Process::INIT))
                 },
                 args: [0; 6],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_setns,
-                check: |credential, a| {
-                    join_namespaces(credential, a[1], crate::identity::Process::INIT)
-                },
-                args: [
-                    0,
-                    u64::from(linux_raw_sys::general::CLONE_NEWUTS),
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-                refusal: errno::EPERM,
-            },
-            // A mount namespace's install needs `CAP_SYS_CHROOT` too.
-            Case {
-                row: Syscall::N_setns,
-                check: |credential, a| install(credential, a[1]),
-                args: [
-                    0,
-                    u64::from(linux_raw_sys::general::CLONE_NEWNS),
-                    0,
-                    0,
-                    0,
-                    0,
-                ],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_kcmp,
-                check: kcmp,
-                args: [1, 1, u64::MAX, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-        ]
-    }
-
-    fn chroot_cases() -> Vec<Case> {
-        vec![Case {
-            row: Syscall::N_chroot,
-            check: |credential, a| chroot_finding(credential, a, |_| Ok(())),
-            args: [1, 0, 0, 0, 0, 0],
-            refusal: errno::EPERM,
-        }]
-    }
-
-    /// A zeroed BPF attribute: no start id.
-    static NO_ID: [u8; 16] = [0; 16];
-    /// `BPF_MAP_CREATE`'s attribute for a one-entry array map of four-byte
-    /// keys and values.
-    static ARRAY_MAP: [u32; 4] = [2, 4, 4, 1];
-
-    /// The rows the declared configuration restricts: each refuses a
-    /// caller without the capability exactly where the configuration says,
-    /// after its argument checks.
-    fn config_cases() -> Vec<Case> {
-        const PTRACE_ATTACH: u64 = 16;
-        const PTRACE_SEIZE: u64 = 0x4206;
-        const SUSPEND_SECCOMP: u64 = 1 << 21;
-        const CLONE_NEWUTS: u64 = 0x0400_0000;
-        const BPF_MAP_CREATE: u64 = 0;
-        const BPF_PROG_GET_NEXT_ID: u64 = 11;
-        const BPF_PROG_QUERY: u64 = 16;
-        vec![
-            Case {
-                row: Syscall::N_syslog,
-                check: syslog,
-                args: [3, 0, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_perf_event_open,
-                check: perf_event_open,
-                args: [0, 0, u64::MAX, u64::MAX, 0, 0],
-                refusal: errno::EACCES,
-            },
-            Case {
-                row: Syscall::N_bpf,
-                check: bpf,
-                args: [BPF_PROG_GET_NEXT_ID, NO_ID.as_ptr() as u64, 16, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_bpf,
-                check: bpf,
-                args: [BPF_MAP_CREATE, ARRAY_MAP.as_ptr() as u64, 16, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_bpf,
-                check: bpf,
-                args: [BPF_PROG_QUERY, NO_ID.as_ptr() as u64, 16, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_userfaultfd,
-                check: userfaultfd,
-                args: [0; 6],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_ptrace,
-                check: ptrace,
-                args: [PTRACE_ATTACH, 1, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_ptrace,
-                check: ptrace,
-                args: [PTRACE_SEIZE, 1, 0, SUSPEND_SECCOMP, 0, 0],
-                refusal: errno::EPERM,
-            },
-            Case {
-                row: Syscall::N_unshare,
-                check: unshare,
-                args: [CLONE_NEWUTS, 0, 0, 0, 0, 0],
-                refusal: errno::EPERM,
-            },
-        ]
-    }
-
-    /// One instruction: a program `seccomp_prepare_filter` takes to its
-    /// privilege check.
-    static ONE_INSTRUCTION: [u64; 2] = [1, 0];
-
-    /// Without `no_new_privs`, a seccomp filter needs `CAP_SYS_ADMIN`
-    /// (`EACCES`) once its flags, copy and length pass, and enforcing a
-    /// Landlock ruleset needs it (`EPERM`) before anything else.
-    fn sandbox_cases() -> Vec<Case> {
-        const SECCOMP_SET_MODE_FILTER: u64 = 1;
-        vec![
-            Case {
-                row: Syscall::N_seccomp,
-                check: |credential, a| seccomp_as(credential, a, false),
-                args: [
-                    SECCOMP_SET_MODE_FILTER,
-                    0,
-                    ONE_INSTRUCTION.as_ptr() as u64,
-                    0,
-                    0,
-                    0,
-                ],
-                refusal: errno::EACCES,
-            },
-            Case {
-                row: Syscall::N_landlock_restrict_self,
-                check: |credential, a| restrict_self_as(credential, a, false),
-                args: [u64::MAX, u64::MAX, 0, 0, 0, 0],
                 refusal: errno::EPERM,
             },
         ]
@@ -641,29 +284,5 @@ mod tests {
                 refusal: errno::EINVAL,
             },
         ]
-    }
-
-    /// Argument checks the kernel makes before the capability hold for
-    /// every credential: swapon's flags, and past `PTRACE_O_SUSPEND_SECCOMP`
-    /// (which needs `CAP_SYS_ADMIN`) seizing the caller's own thread group.
-    #[test]
-    fn argument_checks_before_the_capability_hold_for_every_credential() {
-        let unknown_flag = [0, 1 << 30, 0, 0, 0, 0];
-        for held in [0, Capability::ALL] {
-            assert_eq!(swapon(&holding(held), &unknown_flag), refuse(errno::EINVAL));
-        }
-        const PTRACE_SEIZE: u64 = 0x4206;
-        const SUSPEND_SECCOMP: u64 = 1 << 21;
-        let own = crate::patina_pid() as u64;
-        let seize = [PTRACE_SEIZE, own, 0, SUSPEND_SECCOMP, 0, 0];
-        assert_eq!(ptrace(&holding(0), &seize), refuse(errno::EPERM));
-        assert_eq!(
-            ptrace(&holding(Capability::ALL), &seize),
-            refuse(errno::EPERM)
-        );
-        assert!(matches!(
-            ptrace(credential(), &[0; 6]),
-            Err(Unmodeled::Path(_))
-        ));
     }
 }

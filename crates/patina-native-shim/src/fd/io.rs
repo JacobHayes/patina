@@ -196,41 +196,13 @@ pub(crate) unsafe fn read_resolved(
             thread::inotify::read(resolved.handle, nonblocking, destination as usize, length)
         }
         #[cfg(target_os = "linux")]
-        FdKind::Epoll | FdKind::Pidfd | FdKind::LandlockRuleset => fail(EINVAL) as isize,
-        // `vfs_read` judges the buffer's range (`access_ok`) before the
-        // file's own read.
-        #[cfg(target_os = "linux")]
-        FdKind::Userfaultfd if !uaccess::access_ok(destination as usize, length) => {
-            fail(EFAULT) as isize
-        }
-        #[cfg(target_os = "linux")]
-        FdKind::Userfaultfd => match mem::userfaultfd::read(resolved.handle, nonblocking, length) {
-            Ok(read) => read as isize,
-            Err(errno) => fail(errno) as isize,
-        },
+        FdKind::Epoll | FdKind::Pidfd => fail(EINVAL) as isize,
         // `O_PATH` opened nothing to read (`fdget`).
         #[cfg(target_os = "linux")]
         FdKind::NamespacePath => fail(EBADF) as isize,
         // An nsfs inode has no read method (`FMODE_CAN_READ`).
         #[cfg(target_os = "linux")]
         FdKind::Namespace => fail(EINVAL) as isize,
-        // SAFETY: forwarded from this function's own contract.
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue if resolved.status & O_READ != 0 => unsafe {
-            thread::ipc::mq_read(resolved.handle, destination, length, None)
-        },
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => fail(EBADF) as isize,
-        // `vfs_read`'s `FMODE_READ`, then the tty's read.
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster | FdKind::PtySlave if resolved.status & O_READ == 0 => {
-            fail(EBADF) as isize
-        }
-        // SAFETY: forwarded from this function's own contract.
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster | FdKind::PtySlave => unsafe {
-            thread::pty::read(resolved, destination, length, nonblocking)
-        },
         #[cfg(target_os = "linux")]
         FdKind::Proc => crate::procfs::read_to(resolved.handle, destination, length, None),
         #[cfg(target_os = "linux")]
@@ -318,14 +290,7 @@ pub(crate) unsafe fn write_resolved(
         // SAFETY: forwarded from `write_resolved`'s source-buffer contract.
         FdKind::EventFd => unsafe { thread::eventfd_write(resolved.handle, source, length) },
         #[cfg(target_os = "linux")]
-        FdKind::Epoll
-        | FdKind::SignalFd
-        | FdKind::TimerFd
-        | FdKind::Pidfd
-        | FdKind::LandlockRuleset => fail(EINVAL) as isize,
-        // Opened read-only: `vfs_write`'s `FMODE_WRITE` check refuses first.
-        #[cfg(target_os = "linux")]
-        FdKind::Userfaultfd => fail(EBADF) as isize,
+        FdKind::Epoll | FdKind::SignalFd | FdKind::TimerFd | FdKind::Pidfd => fail(EINVAL) as isize,
         // Read-only (or `O_PATH`): no write access.
         #[cfg(target_os = "linux")]
         FdKind::Namespace | FdKind::NamespacePath => fail(EBADF) as isize,
@@ -335,21 +300,6 @@ pub(crate) unsafe fn write_resolved(
         // An instance is opened `O_RDONLY`.
         #[cfg(target_os = "linux")]
         FdKind::Inotify => fail(EBADF) as isize,
-        // A queue file has no write method: EBADF without write access, EINVAL
-        // with it.
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue if resolved.status & O_WRITE == 0 => fail(EBADF) as isize,
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => fail(EINVAL) as isize,
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster | FdKind::PtySlave if resolved.status & O_WRITE == 0 => {
-            fail(EBADF) as isize
-        }
-        // SAFETY: forwarded from this function's own contract.
-        #[cfg(target_os = "linux")]
-        FdKind::PtyMaster | FdKind::PtySlave => unsafe {
-            thread::pty::write(resolved, source, length, nonblocking)
-        },
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => fail(EINVAL) as isize,
     }
@@ -371,10 +321,7 @@ pub(crate) fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved,
         // Secret memory has no position (`FMODE_PREAD`/`FMODE_PWRITE`).
         #[cfg(target_os = "linux")]
         FdKind::File if mem::secret(resolved.handle) => Err(ESPIPE),
-        // An mqueue file is positioned (it reads its status line).
         FdKind::File | FdKind::Dir => Ok((resolved, offset)),
-        #[cfg(target_os = "linux")]
-        FdKind::MessageQueue => Ok((resolved, offset)),
         // An nsfs inode is a regular file: positioned, but it can neither
         // be read nor (read-only) written.
         #[cfg(target_os = "linux")]
@@ -402,11 +349,7 @@ pub(crate) fn positional_target(raw_fd: c_int, offset: i64) -> Result<(Resolved,
         | FdKind::TimerFd
         | FdKind::Inotify
         | FdKind::Pidfd
-        | FdKind::LandlockRuleset
-        | FdKind::Userfaultfd
-        | FdKind::NamespacePath
-        | FdKind::PtyMaster
-        | FdKind::PtySlave => Err(ESPIPE),
+        | FdKind::NamespacePath => Err(ESPIPE),
         #[cfg(target_os = "macos")]
         FdKind::Kqueue => Err(ESPIPE),
     }
@@ -438,11 +381,6 @@ pub(crate) unsafe fn fs_pread(
     #[cfg(target_os = "linux")]
     if resolved.kind == FdKind::Proc {
         return crate::procfs::read_to(resolved.handle, destination, length, Some(offset));
-    }
-    #[cfg(target_os = "linux")]
-    if resolved.kind == FdKind::MessageQueue {
-        // SAFETY: forwarded from this function's own contract.
-        return unsafe { thread::ipc::mq_read(resolved.handle, destination, length, Some(offset)) };
     }
     mem::reading(resolved.handle);
     match with_context(|context| context.fs_read_at(Fd(resolved.handle), offset, length)) {

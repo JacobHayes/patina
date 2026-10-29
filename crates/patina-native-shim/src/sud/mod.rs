@@ -53,6 +53,7 @@ mod mem;
 mod net;
 mod pidfd;
 mod privileged;
+mod probes;
 mod readiness;
 mod sched_identity;
 mod signal_process;
@@ -336,8 +337,6 @@ use crate::clocks::Timeval;
 use std::collections::BTreeMap;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use crate::registry::Syscall;
 
 /// Shape a raw-syscall return from a `patina_*` `int` result: on error the raw
 /// caller reads `-errno` from the return register (there is no libc `errno`
