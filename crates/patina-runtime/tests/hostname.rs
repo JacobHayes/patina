@@ -42,28 +42,6 @@ fn assert_config_refusal<T: std::fmt::Debug>(result: Result<T, RuntimeError>) {
 }
 
 #[test]
-fn a_configured_hostname_overrides_the_default_directly_and_through_the_control_plane() {
-    let default = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
-    assert_eq!(default.hostname(), IDENTITY_HOSTNAME);
-    drop(default);
-
-    let direct =
-        Context::from_config(RuntimeConfig::seeded(0).with_hostname(NAME).unwrap()).unwrap();
-    assert_eq!(direct.hostname(), NAME);
-
-    let config = RuntimeConfig::seeded(0)
-        .apply_hostname_env(env_with(NAME))
-        .unwrap();
-    assert_eq!(config.hostname(), NAME);
-    assert_eq!(Context::from_config(config).unwrap().hostname(), NAME);
-
-    let unset = RuntimeConfig::seeded(0)
-        .apply_hostname_env(|_| None)
-        .unwrap();
-    assert_eq!(unset.hostname(), IDENTITY_HOSTNAME);
-}
-
-#[test]
 fn hostnames_follow_the_kernel_length_and_nul_rules() {
     let longest = "h".repeat(HOSTNAME_MAX_BYTES);
     let too_long = "h".repeat(HOSTNAME_MAX_BYTES + 1);

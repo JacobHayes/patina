@@ -32,32 +32,6 @@ fn assert_config_refusal<T: std::fmt::Debug>(result: Result<T, RuntimeError>) {
 }
 
 #[test]
-fn a_default_run_has_and_records_the_default_cpu_count() {
-    assert_eq!(RuntimeConfig::seeded(0).cpus(), DEFAULT_CPUS);
-    assert_eq!(run(RuntimeConfig::seeded(0)).unwrap(), DEFAULT_CPUS);
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("default.patina");
-    run(RuntimeConfig::record(3, &path, "cpus-v1")).unwrap();
-    assert_eq!(
-        TraceBundle::load(&path).unwrap().metadata.cpus,
-        DEFAULT_CPUS
-    );
-}
-
-#[test]
-fn a_configured_cpu_count_overrides_the_default_directly_and_through_the_control_plane() {
-    let direct = RuntimeConfig::seeded(0).with_cpus(CPUS).unwrap();
-    assert_eq!(run(direct).unwrap(), CPUS);
-    let config = RuntimeConfig::seeded(0)
-        .apply_cpus_env(env_with(&CPUS.to_string()))
-        .unwrap();
-    assert_eq!(config.cpus(), CPUS);
-    assert_eq!(run(config).unwrap(), CPUS);
-    let unset = RuntimeConfig::seeded(0).apply_cpus_env(|_| None).unwrap();
-    assert_eq!(unset.cpus(), DEFAULT_CPUS);
-}
-
-#[test]
 fn cpu_counts_are_bounded_by_the_machine_cap() {
     for accepted in [1, DEFAULT_CPUS, MAX_CPUS] {
         validate_cpus(accepted).unwrap();

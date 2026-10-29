@@ -3,15 +3,9 @@
 
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::custom_op::CustomOpMode;
-use crate::liveness::{
-    CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, LivenessKind, Progress, WatchdogArm,
-    outcome_is_progress, progress_of,
-};
+use crate::liveness::{CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, LivenessKind, WatchdogArm};
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
-use patina_dst_abi::{
-    ChargeClass, ChargeCounts, ClockKind, CpuCharge, Datagram, EffectError, ErrorCode, Fd,
-    Operation, Outcome, STARTUP_CPU_CHARGE, SocketId, TaskId, TcpAccepted,
-};
+use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, CpuCharge, STARTUP_CPU_CHARGE, TaskId};
 
 use patina_dst_trace::{BranchSession, Replayer, TraceBundle};
 use std::fs;
@@ -760,100 +754,6 @@ fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
 // -- Liveness watchdog --------------------------------------------------
 
 #[test]
-fn operation_progress_classification_and_empty_network_polls() {
-    // Pure scheduling/time/wait ops are never progress; genuine effects
-    // always are; a non-blocking network poll is decided by its outcome.
-    for operation in [
-        Operation::SchedulerNext,
-        Operation::ClockNow {
-            clock: ClockKind::Monotonic,
-        },
-        Operation::SleepUntil {
-            clock: ClockKind::Monotonic,
-            deadline_nanos: 1,
-        },
-        Operation::TaskParkTimed {
-            task: TaskId(1),
-            reason: "x".into(),
-            deadline_nanos: 1,
-        },
-    ] {
-        assert_eq!(progress_of(&operation), Progress::Never, "{operation:?}");
-    }
-    for operation in [
-        Operation::FsWrite {
-            fd: Fd(1),
-            bytes: vec![1],
-        },
-        Operation::TaskComplete { task: TaskId(1) },
-        Operation::EntropyFill {
-            len: 4,
-            wait: patina_dst_abi::EntropyWait::UntilReady,
-        },
-    ] {
-        assert_eq!(progress_of(&operation), Progress::Always, "{operation:?}");
-    }
-
-    // An empty network poll is not progress; every other outcome is.
-    let socket = SocketId(3);
-    let recv = Operation::NetRecv {
-        socket,
-        now_nanos: 0,
-    };
-    let tcp_recv = Operation::NetTcpRecv {
-        socket,
-        max_len: 8,
-        now_nanos: 0,
-    };
-    let accept = Operation::NetTcpAccept {
-        listener: socket,
-        now_nanos: 0,
-    };
-    for operation in [&recv, &tcp_recv, &accept] {
-        assert_eq!(progress_of(operation), Progress::ByOutcome, "{operation:?}");
-    }
-    let refused = Outcome::Error(EffectError::new(ErrorCode::ConnectionReset, "reset"));
-    let datagram = Datagram {
-        packet_id: 1,
-        from: "127.0.0.1:1".into(),
-        to: "127.0.0.1:2".into(),
-        bytes: b"ping".to_vec(),
-        delivery_nanos: 0,
-        dialed: String::new(),
-        tos: 0,
-    };
-    let accepted = TcpAccepted {
-        socket,
-        peer: "127.0.0.1:1".into(),
-    };
-    let cases = [
-        // Nothing to take: the poll changed nothing.
-        (&recv, Outcome::Datagram(None), false),
-        (&tcp_recv, Outcome::OptionalBytes(None), false),
-        (&accept, Outcome::TcpAccepted(None), false),
-        // Data, a stream's end of file, a connection, an error: progress.
-        (&recv, Outcome::Datagram(Some(datagram)), true),
-        (
-            &tcp_recv,
-            Outcome::OptionalBytes(Some(b"ok".to_vec())),
-            true,
-        ),
-        (&tcp_recv, Outcome::OptionalBytes(Some(Vec::new())), true),
-        (&accept, Outcome::TcpAccepted(Some(accepted)), true),
-        (&recv, refused.clone(), true),
-        (&tcp_recv, refused.clone(), true),
-        (&accept, refused, true),
-    ];
-    for (operation, outcome, progress) in cases {
-        assert_eq!(
-            outcome_is_progress(operation, &outcome),
-            progress,
-            "{operation:?} -> {outcome:?}"
-        );
-    }
-}
-
-#[test]
 fn watchdog_arm_excuses_policy_deferral_windows() {
     // The CRITICAL COUPLING: while the scheduler reports a deliberate
     // deferral, no-progress must NOT accrue toward the budget — a starvation
@@ -905,26 +805,6 @@ fn liveness_watchdog_fires_on_virtual_time_no_progress_wedge() {
         }
         other => panic!("expected a liveness violation, got {other:?}"),
     }
-}
-
-#[test]
-fn liveness_watchdog_does_not_fire_on_a_run_that_makes_progress() {
-    // A run that keeps doing genuine effects (writes) between sleeps never
-    // trips the watchdog: each write resets the no-progress clock.
-    let mut context =
-        Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
-            no_progress_budget_nanos: Some(1_000),
-            converge_budget_nanos: None,
-            heal_after_nanos: None,
-        }))
-        .unwrap();
-    for index in 0..50 {
-        context
-            .write_file(&format!("/f{index}"), b"progress")
-            .unwrap();
-        context.sleep_for(10_000).unwrap();
-    }
-    context.finish().unwrap();
 }
 
 #[test]

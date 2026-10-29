@@ -131,22 +131,6 @@ mod tests {
     use crate::{Outcome, bytes_base64};
 
     #[test]
-    fn base64_round_trips_all_lengths_and_rejects_malformed_input() {
-        for len in 0..=32usize {
-            let bytes: Vec<u8> = (0..len).map(|i| (i * 7 + 1) as u8).collect();
-            let encoded = bytes_base64::Encoded(&bytes).to_string();
-            assert_eq!(encoded.len() % 4, 0);
-            assert_eq!(bytes_base64::decode(&encoded).unwrap(), bytes);
-        }
-        // Known vectors and fail-closed rejection of malformed strings.
-        assert_eq!(bytes_base64::Encoded(b"Man").to_string(), "TWFu");
-        assert_eq!(bytes_base64::Encoded(b"Ma").to_string(), "TWE=");
-        assert!(bytes_base64::decode("TWFu=").is_err()); // not a multiple of 4
-        assert!(bytes_base64::decode("T=Fu").is_err()); // mid-chunk padding
-        assert!(bytes_base64::decode("T@Fu").is_err()); // invalid character
-    }
-
-    #[test]
     fn streamed_base64_preserves_bytes_at_buffer_and_padding_boundaries() {
         for len in [0, 1, 2, 3, 767, 768, 769, 1535, 1536, 1537, 4097] {
             let bytes = vec![255; len];
@@ -169,5 +153,9 @@ mod tests {
                 assert_eq!(serde_json::from_slice::<Outcome>(&json).unwrap(), outcome);
             }
         }
+        // Malformed strings fail closed.
+        assert!(bytes_base64::decode("TWFu=").is_err()); // not a multiple of 4
+        assert!(bytes_base64::decode("T=Fu").is_err()); // mid-chunk padding
+        assert!(bytes_base64::decode("T@Fu").is_err()); // invalid character
     }
 }

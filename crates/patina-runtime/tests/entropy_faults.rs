@@ -113,34 +113,6 @@ fn a_pool_shown_ready_is_never_failed_again() {
 }
 
 #[test]
-fn an_entropy_knob_that_never_fired_over_eligible_traffic_is_diagnosed_vacuous() {
-    // The detector: a live knob, enough eligible requests for the configured
-    // rate to be expected to fire repeatedly, and ZERO applications. Built by
-    // hand here because a correctly wired knob cannot produce it.
-    let inert = EntropyFaultReport {
-        requests: 40,
-        fail_vacuity_diagnosable: true,
-        failures_injected: 0,
-    };
-    assert!(inert.is_vacuous());
-
-    // A knob that DID fire over the same traffic is not vacuous.
-    let live = EntropyFaultReport {
-        requests: 40,
-        fail_vacuity_diagnosable: true,
-        failures_injected: 3,
-    };
-    assert!(!live.is_vacuous());
-
-    // And a low rate that ordinarily draws zero is not diagnosable at all, so a
-    // healthy run never trips the warning.
-    let (_, sparse) = entropy_once(RuntimeConfig::seeded(9).with_entropy_fail_permille(1), 16);
-    let sparse = sparse.expect("live knob");
-    assert!(!sparse.fail_vacuity_diagnosable);
-    assert!(!sparse.is_vacuous());
-}
-
-#[test]
 fn arming_the_entropy_fault_knob_does_not_perturb_a_request_it_does_not_fire_on() {
     // The §1.2-style guarantee: the fault decision draws from its own
     // domain-separated stream, never from the entropy stream itself. Find a

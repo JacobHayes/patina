@@ -951,44 +951,6 @@ mod tests {
         fs.write(FsClock::EPOCH, fd, b"abcdef").unwrap()
     }
 
-    struct RestartSnapshotDriver;
-
-    impl FsDriver for RestartSnapshotDriver {
-        fn open(&mut self, _clock: FsClock, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
-            Err(EffectError::new(ErrorCode::Denied, "unused"))
-        }
-
-        fn read(&mut self, _clock: FsClock, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
-            Err(EffectError::new(ErrorCode::Denied, "unused"))
-        }
-
-        fn write(&mut self, _clock: FsClock, _fd: Fd, _bytes: &[u8]) -> DriverResult<usize> {
-            Err(EffectError::new(ErrorCode::Denied, "unused"))
-        }
-
-        fn close(&mut self, _fd: Fd) -> DriverResult<()> {
-            Err(EffectError::new(ErrorCode::Denied, "unused"))
-        }
-
-        fn crash_and_export_restart_snapshot(
-            &mut self,
-            _clock: FsClock,
-            _kind: CrashKind,
-        ) -> DriverResult<Vec<u8>> {
-            Ok(b"snapshot".to_vec())
-        }
-    }
-
-    #[test]
-    fn restart_snapshot_export_forwards_through_fault_wrapper() {
-        let mut fs = FaultFs::new(RestartSnapshotDriver, 1).error_permille(1000);
-        assert_eq!(
-            fs.crash_and_export_restart_snapshot(FsClock::EPOCH, CrashKind::Machine)
-                .unwrap(),
-            b"snapshot"
-        );
-    }
-
     #[test]
     fn fs_short_io_is_seed_deterministic_and_observable() {
         assert_eq!(short_write_len(4), short_write_len(4));

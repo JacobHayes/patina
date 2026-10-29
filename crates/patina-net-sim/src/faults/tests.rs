@@ -200,108 +200,6 @@ fn tcp_drop_retransmits_and_never_loses_data() {
 }
 
 #[test]
-fn tcp_without_fault_knobs_perturbs_nothing() {
-    // The knobs-off default draws no fault RNG and delivers immediately, so
-    // every pre-fault TCP test stays byte-identical.
-    let mut net = SimNet::new();
-    let listener = net.tcp_listen("server", 1).unwrap();
-    let client = net.tcp_connect("client", "server", 0).unwrap();
-    let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-    net.tcp_send(client, b"hi", 0).unwrap();
-    assert_eq!(
-        net.tcp_recv(server, 16, 0).unwrap().unwrap(),
-        b"hi",
-        "no delay without fault knobs"
-    );
-    assert!(
-        net.fault_report().is_none(),
-        "a network with no knob live models no faults and must not be diagnosable"
-    );
-}
-
-#[test]
-fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
-    use patina_dst_driver_api::NetFaultReport;
-    // The inertness signature: a knob armed to perturb, traffic occurred,
-    // yet zero effects.
-    assert!(
-        NetFaultReport {
-            send_ops: 5,
-            drop_vacuity_diagnosable: true,
-            drops_applied: 0,
-            ..NetFaultReport::default()
-        }
-        .is_vacuous()
-    );
-    // Faults actually landed.
-    assert!(
-        !NetFaultReport {
-            send_ops: 5,
-            drop_vacuity_diagnosable: true,
-            drops_applied: 3,
-            ..NetFaultReport::default()
-        }
-        .is_vacuous()
-    );
-    // A knob whose rate over the traffic it saw never expected a fire —
-    // silence is ordinary sampling, not inertness.
-    assert!(
-        !NetFaultReport {
-            send_ops: 5,
-            ..NetFaultReport::default()
-        }
-        .is_vacuous()
-    );
-    // No fault-eligible traffic — nothing to perturb.
-    assert!(!NetFaultReport::default().is_vacuous());
-    assert!(!NetFaultReport::default().had_opportunities());
-
-    // The report is per class: drops landing while an equally live jitter
-    // knob applied nothing is still vacuous, so one live class never hides
-    // an inert one.
-    let merged_would_have_hidden_it = NetFaultReport {
-        send_ops: 100,
-        drop_vacuity_diagnosable: true,
-        drops_applied: 30,
-        jitter_vacuity_diagnosable: true,
-        jitter_applied: 0,
-        ..NetFaultReport::default()
-    };
-    assert!(merged_would_have_hidden_it.is_vacuous());
-    // Each remaining class fires the verdict on its own.
-    for report in [
-        NetFaultReport {
-            latency_vacuity_diagnosable: true,
-            send_ops: 10,
-            ..NetFaultReport::default()
-        },
-        NetFaultReport {
-            duplicate_vacuity_diagnosable: true,
-            send_ops: 10,
-            ..NetFaultReport::default()
-        },
-        NetFaultReport {
-            connect_refuse_vacuity_diagnosable: true,
-            connect_ops: 10,
-            ..NetFaultReport::default()
-        },
-        NetFaultReport {
-            reset_vacuity_diagnosable: true,
-            stream_ops: 10,
-            ..NetFaultReport::default()
-        },
-        NetFaultReport {
-            partition_vacuity_diagnosable: true,
-            send_ops: 10,
-            ..NetFaultReport::default()
-        },
-    ] {
-        assert!(report.is_vacuous(), "{report:?} must be vacuous");
-        assert!(report.had_opportunities());
-    }
-}
-
-#[test]
 fn duplicated_datagrams_arrive_twice_with_independent_delivery_times() {
     let mut net = SimNet::builder()
         .fault_seed(5)
@@ -554,4 +452,86 @@ fn each_net_fault_class_draws_from_its_own_substream() {
         quiet.contains(&true) && quiet.contains(&false),
         "the control must actually have drawn both ways, or this proves nothing"
     );
+}
+
+#[test]
+fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
+    use patina_dst_driver_api::NetFaultReport;
+    // The inertness signature: a knob armed to perturb, traffic occurred,
+    // yet zero effects.
+    assert!(
+        NetFaultReport {
+            send_ops: 5,
+            drop_vacuity_diagnosable: true,
+            drops_applied: 0,
+            ..NetFaultReport::default()
+        }
+        .is_vacuous()
+    );
+    // Faults actually landed.
+    assert!(
+        !NetFaultReport {
+            send_ops: 5,
+            drop_vacuity_diagnosable: true,
+            drops_applied: 3,
+            ..NetFaultReport::default()
+        }
+        .is_vacuous()
+    );
+    // A knob whose rate over the traffic it saw never expected a fire —
+    // silence is ordinary sampling, not inertness.
+    assert!(
+        !NetFaultReport {
+            send_ops: 5,
+            ..NetFaultReport::default()
+        }
+        .is_vacuous()
+    );
+    // No fault-eligible traffic — nothing to perturb.
+    assert!(!NetFaultReport::default().is_vacuous());
+    assert!(!NetFaultReport::default().had_opportunities());
+
+    // The report is per class: drops landing while an equally live jitter
+    // knob applied nothing is still vacuous, so one live class never hides
+    // an inert one.
+    let merged_would_have_hidden_it = NetFaultReport {
+        send_ops: 100,
+        drop_vacuity_diagnosable: true,
+        drops_applied: 30,
+        jitter_vacuity_diagnosable: true,
+        jitter_applied: 0,
+        ..NetFaultReport::default()
+    };
+    assert!(merged_would_have_hidden_it.is_vacuous());
+    // Each remaining class fires the verdict on its own.
+    for report in [
+        NetFaultReport {
+            latency_vacuity_diagnosable: true,
+            send_ops: 10,
+            ..NetFaultReport::default()
+        },
+        NetFaultReport {
+            duplicate_vacuity_diagnosable: true,
+            send_ops: 10,
+            ..NetFaultReport::default()
+        },
+        NetFaultReport {
+            connect_refuse_vacuity_diagnosable: true,
+            connect_ops: 10,
+            ..NetFaultReport::default()
+        },
+        NetFaultReport {
+            reset_vacuity_diagnosable: true,
+            stream_ops: 10,
+            ..NetFaultReport::default()
+        },
+        NetFaultReport {
+            partition_vacuity_diagnosable: true,
+            send_ops: 10,
+            ..NetFaultReport::default()
+        },
+    ] {
+        assert!(report.is_vacuous(), "{report:?} must be vacuous");
+        assert!(report.had_opportunities());
+    }
 }

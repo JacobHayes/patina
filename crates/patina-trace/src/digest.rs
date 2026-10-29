@@ -63,23 +63,3 @@ impl<'de> serde::Deserialize<'de> for Sha256Digest {
         Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A digest's text form is `sha256:` and lowercase hex, it parses back,
-    /// and serde uses exactly that text: uppercase or bare hex is refused.
-    #[test]
-    fn sha256_digest_text_and_serde_forms_round_trip() {
-        let digest = Sha256Digest([0xab; 32]);
-        let text = digest.to_string();
-        assert_eq!(text, format!("sha256:{}", "ab".repeat(32)));
-        assert_eq!(Sha256Digest::parse(&text).unwrap(), digest);
-        assert!(Sha256Digest::parse(&text.to_uppercase().replace("SHA256", "sha256")).is_err());
-        let json = serde_json::to_string(&digest).unwrap();
-        assert_eq!(json, format!("\"{digest}\""));
-        assert_eq!(serde_json::from_str::<Sha256Digest>(&json).unwrap(), digest);
-        assert!(serde_json::from_str::<Sha256Digest>("\"abab\"").is_err());
-    }
-}

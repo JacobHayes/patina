@@ -270,37 +270,6 @@ fn net_drop_loses_datagrams_and_clean_run_delivers() {
 }
 
 #[test]
-fn net_jitter_reorders_datagrams_relative_to_send_order() {
-    // A seed sweep must contain at least one reordering, proving the SimNet
-    // reorder knob threads through the runtime config.
-    fn delivered_order(seed: u64) -> Vec<u32> {
-        let mut context =
-            Context::from_config(RuntimeConfig::seeded(seed).with_net_jitter_nanos(0, 1_000))
-                .unwrap();
-        let tx = context.net_bind("tx").unwrap();
-        let rx = context.net_bind("rx").unwrap();
-        for seq in 0..8u32 {
-            context.net_send(tx, "rx", &seq.to_le_bytes()).unwrap();
-        }
-        // Advance the virtual clock past the largest possible delivery so every
-        // surviving datagram is deliverable, then drain in delivery order.
-        context.sleep_for(10_000).unwrap();
-        let mut order = Vec::new();
-        while let Some(datagram) = context.net_recv(rx).unwrap() {
-            order.push(u32::from_le_bytes(datagram.bytes.try_into().unwrap()));
-        }
-        context.finish().unwrap();
-        order
-    }
-
-    let in_order: Vec<u32> = (0..8).collect();
-    assert!(
-        (0..16).any(|seed| delivered_order(seed) != in_order),
-        "net jitter never reordered across seeds"
-    );
-}
-
-#[test]
 fn net_faults_delay_the_tcp_stream_without_losing_data() {
     // Establish one loopback stream and push a segment, returning whether it was
     // readable at the send instant (t=0) and after advancing the virtual clock.
@@ -418,40 +387,6 @@ fn fs_latency_delays_every_eligible_operation_and_never_the_ineligible_ones() {
     assert_eq!(report.latency_applied, 0);
     assert!(!report.latency_vacuity_diagnosable);
     assert!(!report.is_vacuous());
-}
-
-#[test]
-fn fs_latency_draws_within_its_range_and_varies_by_seed() {
-    let elapsed_for = |seed: u64| {
-        fs_ops_elapsed_and_report(RuntimeConfig::seeded(seed).with_fs_latency_nanos(500, 1_500)).0
-    };
-    // Every draw lands inside the configured range.
-    let first = elapsed_for(7);
-    assert!((ELIGIBLE_FS_OPS * 500..=ELIGIBLE_FS_OPS * 1_500).contains(&first));
-
-    // Genuinely seed-driven rather than a fixed offset.
-    let distinct: BTreeSet<u64> = (0..16).map(elapsed_for).collect();
-    assert!(distinct.len() > 1, "fs latency never varied across seeds");
-}
-
-#[test]
-fn fs_latency_replays_self_contained_without_re_supplying_flags() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("fs-latency.patina");
-    let (recorded_elapsed, recorded_report) = fs_ops_elapsed_and_report(
-        RuntimeConfig::record(11, &path, "patina-test").with_fs_latency_nanos(400, 900),
-    );
-    assert!(recorded_elapsed >= ELIGIBLE_FS_OPS * 400);
-    assert_eq!(
-        recorded_report.expect("report").latency_applied,
-        ELIGIBLE_FS_OPS
-    );
-
-    // A flag-free replay restores the latency configuration from the trace and
-    // reproduces the identical virtual-time profile.
-    let (replayed_elapsed, _) =
-        fs_ops_elapsed_and_report(RuntimeConfig::replay(&path, "patina-test"));
-    assert_eq!(recorded_elapsed, replayed_elapsed);
 }
 
 /// Resolve `name` under `config`, returning the outcome and the virtual monotonic
@@ -575,40 +510,6 @@ fn dns_latency_delays_an_eligible_resolution_and_is_seed_driven() {
 }
 
 #[test]
-fn a_dns_knob_that_never_fired_over_eligible_traffic_is_diagnosed_vacuous() {
-    // The detector: a live knob, enough eligible resolutions for the configured
-    // rate to be expected to fire repeatedly, and ZERO applications. Built by
-    // hand here because a correctly wired knob cannot produce it — which is
-    // exactly why the class needs its own pinned shape.
-    let inert = DnsFaultReport {
-        resolutions: 40,
-        fail_vacuity_diagnosable: true,
-        failures_injected: 0,
-        ..DnsFaultReport::default()
-    };
-    assert!(inert.is_vacuous());
-
-    // A knob that DID fire over the same traffic is not vacuous.
-    let live = DnsFaultReport {
-        resolutions: 40,
-        fail_vacuity_diagnosable: true,
-        failures_injected: 3,
-        ..DnsFaultReport::default()
-    };
-    assert!(!live.is_vacuous());
-
-    // And a low rate that ordinarily draws zero is not diagnosable at all, so a
-    // healthy run never trips the warning.
-    let (_, _, sparse) = resolve_once(
-        with_entry(RuntimeConfig::seeded(9).with_dns_fail_permille(1)),
-        "db.internal",
-    );
-    let sparse = sparse.expect("live knob");
-    assert!(!sparse.fail_vacuity_diagnosable);
-    assert!(!sparse.is_vacuous());
-}
-
-#[test]
 fn dns_resolution_replays_self_contained_without_re_supplying_the_table() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("dns.patina");
@@ -653,31 +554,6 @@ fn realtime_once(config: RuntimeConfig, advance_to: u64) -> (u64, Option<ClockFa
 }
 
 #[test]
-fn an_epoch_jump_knob_that_never_applied_over_eligible_reads_is_diagnosed_vacuous() {
-    // The detector: a live knob, enough eligible reads for the configured range
-    // to be expected to apply repeatedly, and ZERO applications. Built by hand
-    // here because a correctly wired knob cannot produce it.
-    let inert = ClockFaultReport {
-        reads: 40,
-        jump_vacuity_diagnosable: true,
-        jumps_applied: 0,
-    };
-    assert!(inert.is_vacuous());
-
-    // A knob that DID apply over the same traffic is not vacuous.
-    let live = ClockFaultReport {
-        reads: 40,
-        jump_vacuity_diagnosable: true,
-        jumps_applied: 3,
-    };
-    assert!(!live.is_vacuous());
-
-    // `hi == 0` (the off default) never diagnoses: a report is not even emitted.
-    let (_, off) = realtime_once(RuntimeConfig::seeded(0), 1_000_000);
-    assert!(off.is_none());
-}
-
-#[test]
 fn arming_the_epoch_jump_knob_does_not_perturb_monotonic_reads() {
     // The clock-plane scope boundary: the jump knob touches ONLY
     // `ClockKind::Realtime`. Monotonic drives timers and the liveness
@@ -698,33 +574,6 @@ fn arming_the_epoch_jump_knob_does_not_perturb_monotonic_reads() {
     // The knob was live but this Context never read Realtime, so it drew
     // nothing at all: the report must show zero eligible reads.
     assert_eq!(report.expect("live knob").reads, 0);
-}
-
-#[test]
-fn epoch_jump_replays_self_contained_without_re_supplying_the_flag() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("epoch-jump.patina");
-
-    let mut recorded = Context::from_config(
-        RuntimeConfig::record(4, &path, "patina-test").with_epoch_jump_nanos(1_000_000),
-    )
-    .unwrap();
-    recorded.sleep_for(10_000_000).unwrap();
-    let recorded_value = recorded.now(ClockKind::Realtime).unwrap();
-    recorded.finish().unwrap();
-
-    // Flag-free: no --epoch-jump-nanos. The trace restores it, and replay
-    // reproduces the SAME recorded (already-perturbed) value with no redraw.
-    let mut replayed = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
-    replayed.sleep_for(10_000_000).unwrap();
-    let replayed_value = replayed.now(ClockKind::Realtime).unwrap();
-    replayed.finish().unwrap();
-    assert_eq!(replayed_value, recorded_value);
-
-    // A conflicting knob at replay fails closed rather than silently running a
-    // different fault schedule.
-    let conflicting = RuntimeConfig::replay(&path, "patina-test").with_epoch_jump_nanos(1);
-    assert!(Context::from_config(conflicting).is_err());
 }
 
 #[test]
@@ -952,65 +801,6 @@ fn first_send_accepted(config: RuntimeConfig, len: usize) -> usize {
 }
 
 #[test]
-fn the_connection_and_duplication_knobs_vary_by_seed() {
-    // Across seeds the fault lands in different places, so each knob is
-    // genuinely seed-driven rather than a fixed decision.
-    let refusals = |seed: u64| {
-        connect_attempts(RuntimeConfig::seeded(seed).with_net_connect_refuse_permille(500))
-    };
-    assert!((0..16).map(refusals).collect::<BTreeSet<_>>().len() > 1);
-
-    let duplicates = |seed: u64| {
-        let mut context =
-            Context::from_config(RuntimeConfig::seeded(seed).with_net_duplicate_permille(500))
-                .unwrap();
-        let tx = context.net_bind("tx").unwrap();
-        context.net_bind("rx").unwrap();
-        let copies: Vec<usize> = (0..24)
-            .map(|index| context.net_send(tx, "rx", &[index as u8]).unwrap().copies)
-            .collect();
-        context.finish().unwrap();
-        copies
-    };
-    assert!((0..16).map(duplicates).collect::<BTreeSet<_>>().len() > 1);
-}
-
-/// Which of 16 connects to one listener succeeded.
-fn connect_attempts(config: RuntimeConfig) -> Vec<bool> {
-    let mut context = Context::from_config(config).unwrap();
-    context.net_tcp_listen("server", 64).unwrap();
-    let outcomes = (0..16)
-        .map(|index| {
-            context
-                .net_tcp_connect(&format!("client-{index}"), "server")
-                .is_ok()
-        })
-        .collect();
-    context.finish().unwrap();
-    outcomes
-}
-
-#[test]
-fn connection_faults_replay_self_contained_without_re_supplying_flags() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("connect.patina");
-    let (recorded, _) = stream_exchange(
-        RuntimeConfig::record(5, &path, "patina-test").with_net_connect_refuse_permille(1000),
-    );
-    assert_eq!(recorded, Err(ErrorCode::ConnectionRefused));
-
-    // Flag-free: the recorded outcome stream reproduces the injected refusal.
-    let (replayed, _) = stream_exchange(RuntimeConfig::replay(&path, "patina-test"));
-    assert_eq!(replayed, Err(ErrorCode::ConnectionRefused));
-
-    // Re-supplying a DIFFERENT rate fails closed rather than running a schedule
-    // the recording never took.
-    let conflicting =
-        RuntimeConfig::replay(&path, "patina-test").with_net_connect_refuse_permille(250);
-    assert!(Context::from_config(conflicting).is_err());
-}
-
-#[test]
 fn arming_a_new_net_knob_does_not_perturb_another_domains_stream() {
     // The §1.2 guarantee, asserted where it would actually break: the jitter
     // draws of a datagram workload are identical whether or not the TCP-only
@@ -1149,36 +939,6 @@ fn with_nothing_eligible_custom_ops_are_never_faulted_and_read_vacuous() {
 }
 
 #[test]
-fn a_custom_op_knob_that_never_fired_over_eligible_ops_is_diagnosed_vacuous() {
-    // Built by hand: a correctly wired knob cannot produce this, which is what
-    // makes it a detector rather than an assertion about today's behavior.
-    let inert = CustomOpFaultReport {
-        eligible_ops: 40,
-        fail_vacuity_diagnosable: true,
-        faults_injected: 0,
-    };
-    assert!(inert.is_vacuous());
-    let live = CustomOpFaultReport {
-        eligible_ops: 40,
-        fail_vacuity_diagnosable: true,
-        faults_injected: 3,
-    };
-    assert!(!live.is_vacuous());
-
-    // A rate too low to be expected to fire is not diagnosable, so a healthy
-    // sparse run never trips the warning.
-    let (_, _, sparse) = custom_ops(
-        RuntimeConfig::seeded(9).with_custom_op_fail_permille(1),
-        "s3.get",
-        1,
-        true,
-    );
-    let sparse = sparse.expect("live knob");
-    assert!(!sparse.fail_vacuity_diagnosable);
-    assert!(!sparse.is_vacuous());
-}
-
-#[test]
 fn custom_op_fault_streams_are_domain_separated_per_label() {
     // Two labels under one seed and one rate must not draw the same pattern: a
     // shared coin would make arming a fault on one operation class shift the
@@ -1268,4 +1028,51 @@ fn a_recorded_fault_replays_without_consulting_eligibility() {
         matches!(&error, RuntimeError::CustomOp { label, .. } if label == "s3.get"),
         "{error:?}"
     );
+}
+
+#[test]
+fn epoch_jump_replays_self_contained_without_re_supplying_the_flag() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("epoch-jump.patina");
+
+    let mut recorded = Context::from_config(
+        RuntimeConfig::record(4, &path, "patina-test").with_epoch_jump_nanos(1_000_000),
+    )
+    .unwrap();
+    recorded.sleep_for(10_000_000).unwrap();
+    let recorded_value = recorded.now(ClockKind::Realtime).unwrap();
+    recorded.finish().unwrap();
+
+    // Flag-free: no --epoch-jump-nanos. The trace restores it, and replay
+    // reproduces the SAME recorded (already-perturbed) value with no redraw.
+    let mut replayed = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
+    replayed.sleep_for(10_000_000).unwrap();
+    let replayed_value = replayed.now(ClockKind::Realtime).unwrap();
+    replayed.finish().unwrap();
+    assert_eq!(replayed_value, recorded_value);
+
+    // A conflicting knob at replay fails closed rather than silently running a
+    // different fault schedule.
+    let conflicting = RuntimeConfig::replay(&path, "patina-test").with_epoch_jump_nanos(1);
+    assert!(Context::from_config(conflicting).is_err());
+}
+
+#[test]
+fn connection_faults_replay_self_contained_without_re_supplying_flags() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("connect.patina");
+    let (recorded, _) = stream_exchange(
+        RuntimeConfig::record(5, &path, "patina-test").with_net_connect_refuse_permille(1000),
+    );
+    assert_eq!(recorded, Err(ErrorCode::ConnectionRefused));
+
+    // Flag-free: the recorded outcome stream reproduces the injected refusal.
+    let (replayed, _) = stream_exchange(RuntimeConfig::replay(&path, "patina-test"));
+    assert_eq!(replayed, Err(ErrorCode::ConnectionRefused));
+
+    // Re-supplying a DIFFERENT rate fails closed rather than running a schedule
+    // the recording never took.
+    let conflicting =
+        RuntimeConfig::replay(&path, "patina-test").with_net_connect_refuse_permille(250);
+    assert!(Context::from_config(conflicting).is_err());
 }

@@ -1011,8 +1011,8 @@ fn validate_guest_env_entry(key: &str, value: &str) -> Result<(), RuntimeError> 
 }
 
 #[cfg(test)]
-pub(super) mod tests {
-    use crate::config::{FaultConfig, RuntimeConfig};
+mod tests {
+    use crate::config::RuntimeConfig;
     use crate::replay::{fault_config_from_record, fault_record};
     use crate::{FaultKnob, Plane};
 
@@ -1043,13 +1043,5 @@ pub(super) mod tests {
                 "{knob:?} did not survive the record round trip"
             );
         }
-    }
-
-    pub(crate) fn every_fault_knob_enabled() -> FaultConfig {
-        let mut faults = FaultConfig::default();
-        for knob in FaultKnob::ALL {
-            knob.set_sample(&mut faults);
-        }
-        faults
     }
 }

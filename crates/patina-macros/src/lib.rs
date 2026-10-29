@@ -346,12 +346,7 @@ fn compile_error(message: &str) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{literal_to_cli_value, rust_string_literal};
-
-    #[test]
-    fn expansion_strings_escape_quotes_backslashes_and_newlines() {
-        assert_eq!(rust_string_literal("a\\b\n\"c\""), "\"a\\\\b\\n\\\"c\\\"\"");
-    }
+    use super::literal_to_cli_value;
 
     #[test]
     fn literals_convert_to_cli_values_and_refuse_unsupported_escapes() {

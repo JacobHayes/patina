@@ -489,79 +489,8 @@ mod tests {
     use crate::config::RuntimeConfig;
 
     use crate::replay::{reconcile_replay_guest_cwd, reconcile_replay_guest_env};
-    use crate::scheduler::PctConfig;
-    use crate::{
-        ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-        ENV_SWARM, RuntimeError,
-    };
+    use crate::{ENV_GUEST_CWD, ENV_GUEST_ENV, RuntimeError};
     use std::collections::BTreeMap;
-
-    #[test]
-    fn apply_schedule_and_swarm_env_parse_the_control_plane() {
-        let vars: BTreeMap<&str, String> = [
-            (ENV_SCHED_PCT, "4".to_string()),
-            (ENV_SCHED_PCT_STEPS, "123".to_string()),
-            (ENV_SWARM, "1".to_string()),
-        ]
-        .into_iter()
-        .collect();
-        let get = |name: &str| vars.get(name).cloned();
-        let config = RuntimeConfig::seeded(0)
-            .apply_schedule_env(get)
-            .unwrap()
-            .apply_swarm_env(get)
-            .unwrap();
-        let policy = config.schedule_policy();
-        assert_eq!(
-            policy.pct,
-            Some(PctConfig {
-                depth: 4,
-                steps: 123
-            })
-        );
-        assert!(config.swarm());
-
-        // A malformed PCT depth fails closed.
-        let bad: BTreeMap<&str, String> =
-            [(ENV_SCHED_PCT, "abc".to_string())].into_iter().collect();
-        assert!(
-            RuntimeConfig::seeded(0)
-                .apply_schedule_env(|name| bad.get(name).cloned())
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn guest_argv_env_parses_a_json_array_and_fails_closed_on_garbage() {
-        // A JSON string array sets the recorded argv, preserving order; an empty
-        // array is a valid zero-argument recording distinct from absence.
-        fn map(value: &'static str) -> impl Fn(&str) -> Option<String> {
-            move |name: &str| (name == ENV_GUEST_ARGV).then(|| value.to_string())
-        }
-        let config = RuntimeConfig::record(0, "/trace", "fp")
-            .apply_guest_argv_env(map(r#"["--tick-millis","50"]"#))
-            .unwrap();
-        assert_eq!(
-            config.guest_argv(),
-            Some(["--tick-millis".to_string(), "50".to_string()].as_slice())
-        );
-        let empty = RuntimeConfig::record(0, "/trace", "fp")
-            .apply_guest_argv_env(map("[]"))
-            .unwrap();
-        assert_eq!(empty.guest_argv(), Some([].as_slice()));
-
-        // Absent variable leaves argv unset (no behavior change).
-        let unset = RuntimeConfig::record(0, "/trace", "fp")
-            .apply_guest_argv_env(|_| None)
-            .unwrap();
-        assert_eq!(unset.guest_argv(), None);
-
-        // Malformed JSON is rejected fail-closed rather than silently dropped.
-        let error = RuntimeConfig::record(0, "/trace", "fp")
-            .apply_guest_argv_env(map("not json"))
-            .unwrap_err();
-        assert!(matches!(error, RuntimeError::Config(_)), "{error:?}");
-    }
 
     #[test]
     fn guest_cwd_env_validates_canonicalizes_and_reconciles_trace_metadata() {

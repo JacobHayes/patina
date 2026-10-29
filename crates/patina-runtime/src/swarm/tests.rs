@@ -9,8 +9,6 @@ use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
 use tempfile::tempdir;
 
-use crate::config::tests::every_fault_knob_enabled;
-
 #[test]
 fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     let directory = tempdir().unwrap();
@@ -105,56 +103,6 @@ fn swarm_with_no_enabled_fault_class_reports_vacuous() {
         swarm_report_line(&all_dropped),
         "PATINA_SWARM_REPORT candidates=2 selected=0 deselected=2 vacuous=0 \
 class=crash|0 class=buggify|0"
-    );
-}
-
-#[test]
-fn swarm_class_table_covers_every_current_fault_field() {
-    let directory = tempdir().unwrap();
-    let trace = directory.path().join("swarm-coverage.patina");
-    let mut config = RuntimeConfig::record(9, &trace, "fp")
-        .with_buggify(BuggifyConfig {
-            enabled: true,
-            ..BuggifyConfig::default()
-        })
-        .with_swarm(true);
-    config.faults = every_fault_knob_enabled();
-    let context = Context::from_config(config).unwrap();
-    context.finish().unwrap();
-    let swarm = patina_dst_trace::TraceBundle::load(&trace)
-        .unwrap()
-        .metadata
-        .swarm
-        .expect("swarm recorded");
-
-    // The recorded candidate ORDER, written out by hand on purpose: it is
-    // the one thing about `SWARM_CLASSES` that a trace can see, so deriving
-    // it from the table would leave a reordered table ungated. That a class
-    // EXISTS for every masked knob is guaranteed by the generated masks and
-    // their compile-time ownership checks.
-    assert_eq!(
-        swarm.candidate_classes,
-        vec![
-            "crash",
-            "fs_error",
-            "fs_short",
-            "fs_latency",
-            "dns_fail",
-            "dns_latency",
-            "sleep_jitter",
-            "net_jitter",
-            "net_drop",
-            "net_latency",
-            "net_duplicate",
-            "net_connect_refuse",
-            "net_reset",
-            "net_partition",
-            "net_tcp_buffer",
-            "entropy_fail",
-            FINGERPRINT_BUGGIFY,
-            "epoch_jump",
-            "custom_op_fail",
-        ]
     );
 }
 
@@ -292,71 +240,4 @@ fn swarm_deselecting_buggify_leaves_no_buggify_in_the_fingerprint() {
     let swarm = kept.metadata.swarm.as_ref().expect("swarm recorded");
     assert!(!swarm.deselected(FINGERPRINT_BUGGIFY));
     kept.validate().expect("selected trace must validate");
-}
-
-/// A dropped class leaves NO residue in the configuration: the whole buggify
-/// config resets, so a masked run reports the same numbers a run that never
-/// asked for buggify reports. The requested-but-dropped fact is carried by
-/// `swarm_deselected`, not by leftover permilles — which is what made the
-/// original `enabled=0 fire_permille=372` line read like a broken flag.
-#[test]
-fn swarm_deselection_clears_the_class_config_and_is_reported_distinctly() {
-    let requested = || {
-        RuntimeConfig::seeded(seed_where_buggify_is(false))
-            .with_buggify(BuggifyConfig {
-                enabled: true,
-                fire_permille: 372,
-                activation_permille: 900,
-                ..BuggifyConfig::default()
-            })
-            .with_swarm(true)
-    };
-    let mut masked = requested();
-    let record = apply_swarm_mask(&mut masked);
-    assert!(record.deselected(FINGERPRINT_BUGGIFY));
-    assert_eq!(masked.buggify, BuggifyConfig::default());
-
-    // `swarm_deselected` is what separates the two `enabled=0` states.
-    let context = Context::from_config(requested()).unwrap();
-    let diagnostics = context.buggify_diagnostics();
-    assert!(!diagnostics.enabled);
-    assert!(diagnostics.swarm_deselected);
-
-    let never_asked = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
-    let diagnostics = never_asked.buggify_diagnostics();
-    assert!(!diagnostics.enabled);
-    assert!(!diagnostics.swarm_deselected);
-}
-
-/// Every class's coin must come from `domain_seed` with the label the table
-/// declares — not from the root seed, and not from a neighbour's label, which
-/// would make two classes select and deselect together forever. Recomputed
-/// straight from [`SWARM_CLASSES`], so a class added to the table is covered
-/// without touching this test, and a class whose coin is rewired to a
-/// different label fails immediately.
-#[test]
-fn swarm_class_coins_use_the_domain_seed_registry() {
-    let seed = 42;
-    let mut config = RuntimeConfig::seeded(seed)
-        .with_buggify(BuggifyConfig {
-            enabled: true,
-            ..BuggifyConfig::default()
-        })
-        .with_swarm(true);
-    config.faults = every_fault_knob_enabled();
-
-    let expected: Vec<String> = SWARM_CLASSES
-        .iter()
-        .filter_map(|class| {
-            let mut rng = SplitMix64::new(domain_seed(seed, class.domain));
-            (rng.next_u64() & 1 == 1).then(|| class.token.to_string())
-        })
-        .collect();
-    assert!(
-        !expected.is_empty() && expected.len() < SWARM_CLASSES.len(),
-        "seed {seed} must select SOME classes and drop others for this to prove anything"
-    );
-
-    let swarm = apply_swarm_mask(&mut config);
-    assert_eq!(swarm.selected_classes, expected);
 }

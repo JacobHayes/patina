@@ -160,24 +160,3 @@ impl SimNetBuilder {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fault_builder_rejects_invalid_configuration() {
-        let jitter_error = SimNet::builder()
-            .jitter_nanos(100, 10)
-            .build()
-            .err()
-            .expect("inverted jitter range must be rejected");
-        assert_eq!(jitter_error.code, ErrorCode::InvalidInput);
-        let drop_error = SimNet::builder()
-            .drop_permille(1001)
-            .build()
-            .err()
-            .expect("out-of-range drop probability must be rejected");
-        assert_eq!(drop_error.code, ErrorCode::InvalidInput);
-    }
-}

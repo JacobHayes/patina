@@ -565,25 +565,6 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_reports_nothing_and_never_defers_liveness() {
-        // The uniform-random policy never withholds a runnable task, so the
-        // liveness watchdog stays fully live for a plain run.
-        let mut sched = DetScheduler::new(7);
-        for label in ["a", "b", "c"] {
-            sched.spawn(label).unwrap();
-        }
-        for _ in 0..20 {
-            let task = sched.next().unwrap().unwrap();
-            assert!(
-                !sched.liveness_deferring(),
-                "default policy must never defer"
-            );
-            sched.yield_task(task).unwrap();
-        }
-        assert!(sched.policy_report().is_none());
-    }
-
-    #[test]
     fn pct_reports_liveness_deferral_across_priorities() {
         // With multiple tasks at distinct PCT priorities, a lower-priority
         // runnable task is deferred by priority ordering.

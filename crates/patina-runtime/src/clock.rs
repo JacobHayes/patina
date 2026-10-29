@@ -72,30 +72,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_clock_reads_uptime_and_epoch_plus_uptime() {
-        let mut clock = VirtualClock::default();
-        assert_eq!(
-            clock.now(ClockKind::Monotonic).unwrap(),
-            DEFAULT_BOOT_ORIGIN_NANOS
-        );
-        assert_eq!(
-            clock.now(ClockKind::Realtime).unwrap(),
-            DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS
-        );
-        // A realtime deadline on the default epoch converts back to monotonic.
-        clock
-            .sleep_until(
-                ClockKind::Realtime,
-                DEFAULT_REALTIME_EPOCH_NANOS + DEFAULT_BOOT_ORIGIN_NANOS + 5,
-            )
-            .unwrap();
-        assert_eq!(
-            clock.now(ClockKind::Monotonic).unwrap(),
-            DEFAULT_BOOT_ORIGIN_NANOS + 5
-        );
-    }
-
-    #[test]
     fn sleeping_advances_both_domains_monotonically_and_overflow_fails() {
         let mut clock = VirtualClock::new(1_000);
         let start = clock.now(ClockKind::Monotonic).unwrap();

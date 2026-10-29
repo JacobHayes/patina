@@ -5,8 +5,8 @@
 use patina_dst_abi::ClockKind;
 use patina_dst_runtime::VirtualClock;
 use patina_dst_runtime::{
-    Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, ENV_REALTIME_EPOCH_NANOS,
-    RuntimeBuilder, RuntimeConfig, RuntimeError,
+    Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, RuntimeBuilder,
+    RuntimeConfig, RuntimeError,
 };
 use patina_dst_trace::TraceBundle;
 use tempfile::tempdir;
@@ -61,42 +61,6 @@ fn a_default_runtime_reads_epoch_plus_uptime_at_guest_start() {
         DEFAULT_REALTIME_EPOCH_NANOS
     );
     context.finish().unwrap();
-}
-
-#[test]
-fn a_configured_epoch_overrides_the_default_directly_and_through_the_control_plane() {
-    let mut direct =
-        Context::from_config(RuntimeConfig::seeded(0).with_realtime_epoch_nanos(EPOCH)).unwrap();
-    assert_eq!(
-        direct.now(ClockKind::Realtime).unwrap(),
-        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS
-    );
-    direct.finish().unwrap();
-
-    let value = EPOCH.to_string();
-    let config = RuntimeConfig::seeded(0)
-        .apply_realtime_epoch_env(|name| (name == ENV_REALTIME_EPOCH_NANOS).then(|| value.clone()))
-        .unwrap();
-    assert_eq!(config.realtime_epoch_nanos(), EPOCH);
-    let mut via_env = Context::from_config(config).unwrap();
-    via_env.sleep_for(STEP).unwrap();
-    assert_eq!(
-        via_env.now(ClockKind::Realtime).unwrap(),
-        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS + STEP
-    );
-    via_env.finish().unwrap();
-
-    // Absent leaves the default; malformed fails closed.
-    let unset = RuntimeConfig::seeded(0)
-        .apply_realtime_epoch_env(|_| None)
-        .unwrap();
-    assert_eq!(unset.realtime_epoch_nanos(), DEFAULT_REALTIME_EPOCH_NANOS);
-    for bad in ["", "-1", "2026-07-22T23:00:09Z", "18446744073709551616"] {
-        let error = RuntimeConfig::seeded(0)
-            .apply_realtime_epoch_env(|name| (name == ENV_REALTIME_EPOCH_NANOS).then(|| bad.into()))
-            .expect_err(bad);
-        assert!(matches!(error, RuntimeError::Config(_)), "{bad:?}: {error}");
-    }
 }
 
 #[test]

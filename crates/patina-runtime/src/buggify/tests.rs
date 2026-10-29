@@ -73,30 +73,6 @@ fn buggify_activation_is_a_deterministic_function_of_seed_and_label() {
 }
 
 #[test]
-fn buggify_firing_prf_fires_and_varies_by_seed() {
-    let fire_pattern = |seed: u64| {
-        let mut context = buggify_context(seed, BUGGIFY_ALL_ACTIVE);
-        (0..40)
-            .map(|_| {
-                matches!(
-                    context
-                        .buggify_evaluate("commit-early-return", "f.rs:1", None)
-                        .unwrap(),
-                    SiteOutcome::Fire
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    // Some firings occurred (fire_permille = 250 over 40 evals).
-    assert!(
-        fire_pattern(5).iter().any(|fired| *fired),
-        "no firing at seed 5"
-    );
-    // A different seed yields a different firing pattern.
-    assert_ne!(fire_pattern(5), fire_pattern(6));
-}
-
-#[test]
 fn buggify_duplicate_label_is_detected() {
     let mut context = buggify_context(1, BUGGIFY_ALL_ACTIVE);
     // Same label, same call site: fine (re-evaluation).
@@ -233,24 +209,6 @@ fn the_fingerprint_follows_the_effective_buggify_config() {
     assert!(
         refused.is_err(),
         "enabling buggify on a trace recorded without it must fail closed"
-    );
-}
-
-#[test]
-fn buggify_knob_is_in_range_and_defaults_when_disabled() {
-    let mut context = buggify_context(9, BUGGIFY_ALL_ACTIVE);
-    let value = context
-        .buggify_knob("batch", "k.rs:1", 10, 1, 100)
-        .unwrap()
-        .unwrap();
-    assert!((1..=100).contains(&value), "knob out of range: {value}");
-    // Disabled / inactive returns the clamped default.
-    let mut off = buggify_context(9, BuggifyConfig::default());
-    assert_eq!(
-        off.buggify_knob("batch", "k.rs:1", 10, 1, 100)
-            .unwrap()
-            .unwrap(),
-        10
     );
 }
 

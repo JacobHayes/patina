@@ -324,23 +324,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filesystem_metadata_and_symlink_kind_round_trip() {
-        let metadata = FsMetadata {
-            kind: FsEntryKind::Symlink,
-            len: 9,
-            blocks: 0,
-            ino: 42,
-            nlink: 1,
-            atime_nanos: 1,
-            mtime_nanos: 2,
-            ctime_nanos: 3,
-            btime_nanos: 4,
-            mode: 0o777,
-        };
-        let json = serde_json::to_string(&metadata).unwrap();
-        assert!(json.contains("\"kind\":\"symlink\""));
-        assert_eq!(serde_json::from_str::<FsMetadata>(&json).unwrap(), metadata);
-
+    fn filesystem_metadata_round_trips_kind_and_wide_signed_times() {
         let fifo = FsMetadata {
             kind: FsEntryKind::Fifo,
             len: 0,

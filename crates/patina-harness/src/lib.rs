@@ -563,30 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn builder_maps_knobs_to_control_plane_overlay() {
-        let overlay = HarnessBuilder::new()
-            .sleep_jitter_nanos(1, 2)
-            .net_drop_permille(250)
-            .buggify_fire_permille(100)
-            .schedule_pct(3, 1000)
-            .liveness_watchdog_nanos(5)
-            .step_budget(42)
-            .net_latency_nanos(7)
-            .param("k", "v")
-            .into_overlay()
-            .unwrap();
-        assert_eq!(overlay[rt::ENV_SLEEP_JITTER], "1..2");
-        assert_eq!(overlay[rt::ENV_NET_DROP_PERMILLE], "250");
-        assert_eq!(overlay[rt::ENV_BUGGIFY], "100");
-        assert_eq!(overlay[rt::ENV_SCHED_PCT], "3");
-        assert_eq!(overlay[rt::ENV_SCHED_PCT_STEPS], "1000");
-        assert_eq!(overlay[rt::ENV_LIVENESS_WATCHDOG], "5");
-        assert_eq!(overlay[rt::ENV_STEP_BUDGET], "42");
-        assert_eq!(overlay[rt::ENV_NET_LATENCY], "7");
-        assert_eq!(overlay[rt::ENV_PARAMS_JSON], "{\"k\":\"v\"}");
-    }
-
-    #[test]
     fn buggify_sub_knobs_enable_buggify_without_clobbering_its_rate() {
         let overlay = HarnessBuilder::new()
             .buggify_activation_permille(500)

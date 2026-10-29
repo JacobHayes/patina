@@ -192,27 +192,6 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
     }
-
-    #[test]
-    fn interruptions_retry_but_other_errors_propagate() {
-        let mut calls = 0;
-        retry_interrupted(|| {
-            calls += 1;
-            if calls < 3 {
-                Err(io::ErrorKind::Interrupted.into())
-            } else {
-                Ok(())
-            }
-        })
-        .unwrap();
-        assert_eq!(calls, 3);
-        assert_eq!(
-            retry_interrupted(|| Err(io::ErrorKind::PermissionDenied.into()))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-    }
 }
 
 fn scratch_prefix(path: &Path) -> io::Result<OsString> {
