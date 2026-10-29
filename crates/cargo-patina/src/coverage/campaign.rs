@@ -1,6 +1,8 @@
 //! Campaign coverage accumulation and persistence.
 
 use super::*;
+use crate::guided::GuidanceDecision;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CoverageArtifact {
@@ -279,13 +281,15 @@ pub(crate) fn hit_bucket(count: u32) -> Option<u8> {
 /// The buckets per edge, and so the stride of a feature id (`edge * 8 + bucket`).
 const BUCKETS: u64 = 8;
 
-/// A feature and the generation that first reached it. The store keeps these
-/// in generation order, so the coverage state as of any generation boundary
-/// is a prefix: that is what keeps guidance rewindable.
+/// A feature, the generation that first reached it, and how many generations
+/// have reached it since (that one included). The store keeps these in
+/// first-reached order, so which features existed at any generation boundary
+/// is a prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FeatureRecord {
     pub(crate) generation: u64,
     pub(crate) feature: u64,
+    pub(crate) hits: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -301,6 +305,13 @@ pub(crate) struct CampaignCoverageStore {
     reached: Vec<u8>,
     /// Every feature ever reached, in first-reached order.
     features: Vec<FeatureRecord>,
+    /// Feature id to its index in `features`.
+    feature_index: HashMap<u64, usize>,
+    /// The guidance decision of every generation, for a guided campaign (empty
+    /// otherwise). Persisted with the folds it was made from, so a resumed tear
+    /// reuses a decision rather than re-deciding it from a store that already
+    /// holds the generation's own fold.
+    decisions: Vec<GuidanceDecision>,
     pub(super) hits: Vec<u64>,
     sites: Vec<i64>,
     /// Watermark floor contributed by generations that produced NO coverage map
@@ -327,6 +338,8 @@ impl CampaignCoverageStore {
             union_bits: Vec::new(),
             reached: Vec::new(),
             features: Vec::new(),
+            feature_index: HashMap::new(),
+            decisions: Vec::new(),
             hits: Vec::new(),
             sites: Vec::new(),
             skipped_watermark: 0,
@@ -425,6 +438,17 @@ impl CampaignCoverageStore {
                     features_path.display()
                 ))
             })?;
+        let feature_index = index_features(&features);
+        let decisions_path = dir.join("guidance.u64le");
+        let decisions = fs::read(&decisions_path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| decode_decisions(&bytes, &meta, &features))
+            .map_err(|error| {
+                CliError(format!(
+                    "coverage guidance log {} is unusable: {error}; refusing corrupt out-dir",
+                    decisions_path.display()
+                ))
+            })?;
         Ok(Self {
             dir,
             artifact,
@@ -434,6 +458,8 @@ impl CampaignCoverageStore {
             union_bits,
             reached,
             features,
+            feature_index,
+            decisions,
             hits,
             sites,
             skipped_watermark: 0,
@@ -448,20 +474,30 @@ impl CampaignCoverageStore {
         self.meta.as_ref()
     }
 
-    /// The novelty log as guidance ancestors: each generation that reached at
-    /// least one feature first, weighted by how many it reached.
-    pub(crate) fn novelty_log(&self) -> Vec<crate::guided::NoveltyEntry> {
-        let mut log: Vec<crate::guided::NoveltyEntry> = Vec::new();
-        for record in &self.features {
-            match log.last_mut() {
-                Some(entry) if entry.generation == record.generation => entry.weight += 1,
-                _ => log.push(crate::guided::NoveltyEntry {
-                    generation: record.generation,
-                    weight: 1,
-                }),
-            }
+    /// Every feature reached so far, in first-reached order.
+    pub(crate) fn features(&self) -> &[FeatureRecord] {
+        &self.features
+    }
+
+    /// The recorded guidance decisions, indexed by generation.
+    pub(crate) fn decisions(&self) -> &[GuidanceDecision] {
+        &self.decisions
+    }
+
+    /// Record `generation`'s guidance decision. A generation the log already
+    /// holds (a resumed tear) keeps its recorded decision; generations the
+    /// store never saw (killed before any map existed) had an empty corpus and
+    /// are recorded as such.
+    pub(crate) fn record_decision(&mut self, generation: u64, decision: GuidanceDecision) {
+        let Ok(index) = usize::try_from(generation) else {
+            return;
+        };
+        if index < self.decisions.len() {
+            debug_assert_eq!(self.decisions[index], decision);
+            return;
         }
-        log
+        self.decisions.resize(index, GuidanceDecision::NoAncestors);
+        self.decisions.push(decision);
     }
 
     /// The features first reached by generations below `generation`: the
@@ -534,14 +570,20 @@ impl CampaignCoverageStore {
                 set_bit(&mut self.union_bits, index);
                 new_edges += 1;
             }
+            let feature = index as u64 * BUCKETS + u64::from(bucket);
             let mask = 1u8 << bucket;
             if self.reached[index] & mask == 0 {
                 self.reached[index] |= mask;
+                self.feature_index.insert(feature, self.features.len());
                 self.features.push(FeatureRecord {
                     generation,
-                    feature: index as u64 * BUCKETS + u64::from(bucket),
+                    feature,
+                    hits: 1,
                 });
                 new_features += 1;
+            } else {
+                let at = self.feature_index[&feature];
+                self.features[at].hits += 1;
             }
         }
         if new_edges > 0 {
@@ -573,8 +615,13 @@ impl CampaignCoverageStore {
         )?;
         atomic_write(
             &self.dir.join("features.u64le"),
-            &encode_features(&self.features),
+            &encode_features(meta.generations_applied, &self.features),
             "coverage feature log",
+        )?;
+        atomic_write(
+            &self.dir.join("guidance.u64le"),
+            &encode_decisions(meta.generations_applied, &self.decisions),
+            "coverage guidance log",
         )?;
         atomic_write(
             &self.dir.join("hits.u64le"),
@@ -636,6 +683,7 @@ impl CampaignCoverageStore {
         self.union_bits = vec![0; bit_len(edge_count)];
         self.reached = vec![0; edge_count];
         self.features = Vec::new();
+        self.feature_index = HashMap::new();
         self.hits = vec![0; edge_count];
         self.sites = covmap.deltas.clone();
         Ok(())
@@ -712,13 +760,101 @@ pub(super) fn read_campaign_meta(path: &Path) -> Result<CampaignCoverageMeta, Cl
     })
 }
 
-fn encode_features(features: &[FeatureRecord]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(features.len() * 16);
-    for record in features {
-        bytes.extend_from_slice(&record.generation.to_le_bytes());
-        bytes.extend_from_slice(&record.feature.to_le_bytes());
+/// One feature record's width on disk: generation, feature id, hits.
+const FEATURE_RECORD_WORDS: usize = 3;
+
+/// The feature and guidance logs each lead with the store watermark they were
+/// written at. The store's files are replaced one by one, so a crash part way
+/// through a checkpoint can leave logs from different generations; a stamp
+/// that disagrees with `meta.json` refuses that mixture rather than steering
+/// a resumed campaign from it.
+fn stamped(watermark: u64, words: impl IntoIterator<Item = u64>) -> Vec<u8> {
+    let words: Vec<u64> = std::iter::once(watermark).chain(words).collect();
+    encode_u64_vec(&words)
+}
+
+/// The words after a log's stamp, refusing a stamp from another checkpoint.
+fn unstamped(bytes: &[u8], meta: &CampaignCoverageMeta) -> Result<Vec<u64>, String> {
+    if bytes.len() < 8 || !bytes.len().is_multiple_of(8) {
+        return Err(format!("{} bytes is not a stamped word log", bytes.len()));
     }
-    bytes
+    let mut words = decode_u64_vec(bytes);
+    let stamp = words.remove(0);
+    if stamp != meta.generations_applied {
+        return Err(format!(
+            "it was written at generation {stamp} but meta.json records generations_applied={}; \
+             a checkpoint was torn",
+            meta.generations_applied
+        ));
+    }
+    Ok(words)
+}
+
+fn encode_features(watermark: u64, features: &[FeatureRecord]) -> Vec<u8> {
+    stamped(
+        watermark,
+        features
+            .iter()
+            .flat_map(|record| [record.generation, record.feature, record.hits]),
+    )
+}
+
+fn index_features(features: &[FeatureRecord]) -> HashMap<u64, usize> {
+    features
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.feature, index))
+        .collect()
+}
+
+/// A decision as one word: the ancestor generation, or a reserved value.
+const DECISION_NO_ANCESTORS: u64 = u64::MAX;
+const DECISION_EXPLORE: u64 = u64::MAX - 1;
+
+fn encode_decisions(watermark: u64, decisions: &[GuidanceDecision]) -> Vec<u8> {
+    stamped(
+        watermark,
+        decisions.iter().map(|decision| match decision {
+            GuidanceDecision::NoAncestors => DECISION_NO_ANCESTORS,
+            GuidanceDecision::Explore => DECISION_EXPLORE,
+            GuidanceDecision::Exploit { ancestor } => *ancestor,
+        }),
+    )
+}
+
+/// Decode the decision log: empty for an unguided campaign, else exactly one
+/// decision per applied generation, each exploit naming an earlier generation
+/// that was novel.
+fn decode_decisions(
+    bytes: &[u8],
+    meta: &CampaignCoverageMeta,
+    features: &[FeatureRecord],
+) -> Result<Vec<GuidanceDecision>, String> {
+    let words = unstamped(bytes, meta)?;
+    if !words.is_empty() && words.len() as u64 != meta.generations_applied {
+        return Err(format!(
+            "{} decisions for generations_applied={}",
+            words.len(),
+            meta.generations_applied
+        ));
+    }
+    words
+        .into_iter()
+        .enumerate()
+        .map(|(generation, word)| match word {
+            DECISION_NO_ANCESTORS => Ok(GuidanceDecision::NoAncestors),
+            DECISION_EXPLORE => Ok(GuidanceDecision::Explore),
+            ancestor
+                if ancestor < generation as u64
+                    && features.iter().any(|record| record.generation == ancestor) =>
+            {
+                Ok(GuidanceDecision::Exploit { ancestor })
+            }
+            ancestor => Err(format!(
+                "generation {generation} exploits {ancestor}, which is not an earlier novel generation"
+            )),
+        })
+        .collect()
 }
 
 /// Decode the feature log and rebuild the per-edge reached masks, checking it
@@ -731,20 +867,21 @@ fn decode_features(
     union_bits: &[u8],
     edge_count: usize,
 ) -> Result<(Vec<FeatureRecord>, Vec<u8>), String> {
-    if bytes.len() % 16 != 0 {
+    let words = unstamped(bytes, meta)?;
+    if !words.len().is_multiple_of(FEATURE_RECORD_WORDS) {
         return Err(format!(
-            "{} bytes is not a whole number of records",
-            bytes.len()
+            "{} words is not a whole number of records",
+            words.len()
         ));
     }
-    let words = decode_u64_vec(bytes);
     let mut reached = vec![0u8; edge_count];
-    let mut features = Vec::with_capacity(words.len() / 2);
+    let mut features = Vec::with_capacity(words.len() / FEATURE_RECORD_WORDS);
     let mut first_reach: BTreeMap<u64, u64> = BTreeMap::new();
-    for pair in words.chunks_exact(2) {
+    for triple in words.as_chunks::<FEATURE_RECORD_WORDS>().0 {
         let record = FeatureRecord {
-            generation: pair[0],
-            feature: pair[1],
+            generation: triple[0],
+            feature: triple[1],
+            hits: triple[2],
         };
         if features
             .last()
@@ -756,6 +893,12 @@ fn decode_features(
             return Err(format!(
                 "generation {} is beyond generations_applied={}",
                 record.generation, meta.generations_applied
+            ));
+        }
+        if record.hits == 0 || record.hits > meta.generations_applied - record.generation {
+            return Err(format!(
+                "feature {} records {} hits since generation {}",
+                record.feature, record.hits, record.generation
             ));
         }
         let edge = usize::try_from(record.feature / BUCKETS)

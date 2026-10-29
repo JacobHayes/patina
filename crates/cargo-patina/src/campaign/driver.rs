@@ -3,7 +3,7 @@
 use super::generation::{GenerationFiles, run_generation};
 use super::observe::{
     fold_edge_coverage_generation, fold_sites_generation, generation_reached_shutdown,
-    guidance_plan, guidance_source_or_refuse, initialize_edge_coverage,
+    guidance_source_or_refuse, guided_generation, initialize_edge_coverage,
 };
 use super::parse::CampaignMode;
 use super::report::{
@@ -221,8 +221,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         // ONE value feeds both the seed and every knob, so guidance needs no
         // per-knob special case and the derivation stays a pure function.
         let (hash, decision) = if state.spec.guided {
-            let plan = guidance_plan(&state.spec, &units, &edge_coverage);
-            plan.generation_hash(generation)
+            guided_generation(&state.spec, &units, &mut edge_coverage, generation)
         } else {
             (
                 generation_hash(state.spec.seed_base, generation),

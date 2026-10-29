@@ -57,7 +57,7 @@ fn main() {
         binary
     }
 
-    /// The campaign's persisted edge-coverage meta (its novelty log).
+    /// The campaign's persisted edge-coverage meta (its new-edge log).
     fn campaign_coverage_meta(out_dir: &Path) -> serde_json::Value {
         let path = out_dir.join("coverage").join("meta.json");
         serde_json::from_str(
@@ -71,15 +71,15 @@ fn main() {
     // Guidance must satisfy two claims at once, and each one is the other's trap: it
     // has to CHANGE the generation stream (or the mode is an inert knob, and a clean
     // guided campaign would say nothing about guidance), and it has to stay a pure
-    // function of (seed base, persisted novelty log) so a guided campaign is still
+    // function of (seed base, persisted coverage store) so a guided campaign is still
     // reproducible. Asserting only the first would pass for a nondeterministic
     // scheduler; asserting only the second would pass for a no-op.
     //
     // The repeat is a campaign that runs the first generations fresh, survives a
     // checkpoint tear, and runs the rest through `--extend`. An extended guided
-    // campaign re-derives generation k from the PERSISTED novelty log rather than
-    // from loop-carried state, so matching the fresh stream also proves the log is
-    // a sufficient and faithful record of the guidance input.
+    // campaign re-derives generation k from the PERSISTED feature and decision logs
+    // rather than from loop-carried state, so matching the fresh stream also proves
+    // they are a sufficient and faithful record of the guidance input.
     //
     // The tear: the coverage store is written BEFORE `campaign-state.json`, so a crash
     // between the two leaves the store one generation ahead of the cursor, and a

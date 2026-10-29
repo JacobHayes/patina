@@ -1,12 +1,12 @@
 //! Campaign coverage, SDK-site folds, and guidance inputs.
 
-use super::gen_byte::Unit;
+use super::gen_byte::{Hash, Unit};
 use super::state::CampaignState;
 use super::{CampaignSpec, RunFacts};
 use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision};
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome};
-use crate::guided::{GuidancePlan, NoveltyEntry};
+use crate::guided::{GuidanceDecision, GuidancePlan};
 use crate::sdk_report::CoverageTally;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -124,20 +124,23 @@ cargo patina build --instrument so generations have edge coverage to steer by"
     ))
 }
 
-/// Resolve the guidance plan from the edge-coverage novelty log. Built per
-/// generation rather than cached: the log is sparse, so the forward pass is a
-/// handful of hashes, and rebuilding keeps the derivation an obvious pure
-/// function of the persisted state rather than of loop-carried state.
-pub(super) fn guidance_plan(
+/// Decide a guided generation's material from the persisted coverage store and
+/// record the decision in it, so the store carries every decision alongside
+/// the folds it was made from.
+pub(super) fn guided_generation(
     spec: &CampaignSpec,
     units: &[Unit],
-    edge_coverage: &EdgeCoverageState,
-) -> GuidancePlan {
-    let log: Vec<NoveltyEntry> = edge_coverage
-        .active()
-        .map(CampaignCoverageStore::novelty_log)
-        .unwrap_or_default();
-    GuidancePlan::new(spec.seed_base, spec.plateau_after, units.to_vec(), &log)
+    edge_coverage: &mut EdgeCoverageState,
+    generation: u64,
+) -> (Hash, GuidanceDecision) {
+    let store = edge_coverage
+        .active_mut()
+        .expect("a guided campaign refuses to start without edge coverage");
+    let (hash, decision) =
+        GuidancePlan::new(spec.seed_base, units, store.features(), store.decisions())
+            .generation_hash(generation);
+    store.record_decision(generation, decision);
+    (hash, decision)
 }
 
 pub(super) fn fold_sites_generation(

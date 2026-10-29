@@ -200,11 +200,13 @@ fn a_hit_count_bucket_change_is_novel_and_rewindable() {
     assert_eq!(again.new_features, 0, "6 is in the same bucket as 5");
 
     let novel = |store: &CampaignCoverageStore| -> Vec<u64> {
-        store
-            .novelty_log()
+        let mut generations: Vec<u64> = store
+            .features()
             .iter()
-            .map(|entry| entry.generation)
-            .collect()
+            .map(|record| record.generation)
+            .collect();
+        generations.dedup();
+        generations
     };
     assert_eq!(novel(&store), [0, 2]);
     assert_eq!(
@@ -226,7 +228,72 @@ fn a_hit_count_bucket_change_is_novel_and_rewindable() {
     // Edge 1 was never covered, so no generation can have reached a bucket of it.
     bytes.extend_from_slice(&3u64.to_le_bytes());
     bytes.extend_from_slice(&8u64.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes());
     fs::write(&features, &bytes).unwrap();
     let error = CampaignCoverageStore::load(dir, artifact, fingerprint(), 0, 4).unwrap_err();
     assert!(error.0.contains("feature log"), "unexpected error: {error}");
+}
+
+/// Each feature counts the generations that reached it, and the decision log
+/// round-trips with the store; a decision naming a generation that was never
+/// novel is refused.
+#[test]
+fn feature_hits_and_decisions_round_trip() {
+    use crate::guided::GuidanceDecision;
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("coverage");
+    let artifact = CoverageArtifact {
+        path: "guest".into(),
+        sha256: "abc".into(),
+    };
+    let map = |counters: &[u32]| {
+        parse_covmap_bytes(&covmap_bytes(counters, &[10, 20]), Path::new("m")).unwrap()
+    };
+    let fingerprint = || "patina-native+instrumented".to_string();
+    let mut store = CampaignCoverageStore::fresh(dir.clone(), artifact.clone(), fingerprint(), 0);
+    let decisions = [
+        GuidanceDecision::NoAncestors,
+        GuidanceDecision::NoAncestors,
+        GuidanceDecision::Explore,
+        GuidanceDecision::Exploit { ancestor: 1 },
+    ];
+    for (generation, counters) in [[1, 0], [1, 1], [1, 0], [1, 1]].iter().enumerate() {
+        store.record_decision(generation as u64, decisions[generation]);
+        store
+            .fold_covmap(generation as u64, &map(counters))
+            .unwrap();
+    }
+    let hits: Vec<(u64, u64)> = store
+        .features()
+        .iter()
+        .map(|record| (record.generation, record.hits))
+        .collect();
+    assert_eq!(hits, [(0, 4), (1, 2)]);
+    store.write_checkpoint().unwrap();
+    let loaded = CampaignCoverageStore::load(dir.clone(), artifact.clone(), fingerprint(), 0, 4)
+        .expect("round trip");
+    assert_eq!(loaded.decisions(), decisions);
+    assert_eq!(loaded.features(), store.features());
+
+    // Generation 2 found nothing, so nothing can have exploited it.
+    let guidance = dir.join("guidance.u64le");
+    let mut bytes = fs::read(&guidance).unwrap();
+    bytes[32..40].copy_from_slice(&2u64.to_le_bytes());
+    fs::write(&guidance, &bytes).unwrap();
+    let error = CampaignCoverageStore::load(dir.clone(), artifact.clone(), fingerprint(), 0, 4)
+        .unwrap_err();
+    assert!(
+        error.0.contains("guidance log"),
+        "unexpected error: {error}"
+    );
+
+    // A guidance log from an earlier checkpoint than the rest of the store
+    // (a crash part way through a checkpoint) is refused, not steered from.
+    let mut stale = 3u64.to_le_bytes().to_vec();
+    for word in [u64::MAX, u64::MAX, u64::MAX - 1] {
+        stale.extend_from_slice(&word.to_le_bytes());
+    }
+    fs::write(&guidance, &stale).unwrap();
+    let error = CampaignCoverageStore::load(dir, artifact, fingerprint(), 0, 4).unwrap_err();
+    assert!(error.0.contains("torn"), "unexpected error: {error}");
 }

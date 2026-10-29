@@ -1,95 +1,72 @@
-//! Coverage-guided generation scheduling — the coverage-depth arc's Wave E.
+//! Coverage-guided generation scheduling (`campaign --guided`).
 //!
-//! Under `campaign --guided` a generation's derivation material (its seed and
-//! every knob byte, see `campaign/hash.rs`) is no longer always the bare
-//! per-generation hash: with some probability it is a LOCAL mutation of the
-//! material of a generation that previously found something new. The child
-//! keeps its ancestor's seed and every knob except one to three mutated units,
-//! where a unit is the seed or one knob the spec actually reads. Because seed
-//! AND every knob are read out of that one material (`derive_flags`), steering
-//! it steers the whole configuration without touching a knob derivation.
+//! A guided generation's derivation material (its seed and every knob byte, see
+//! `campaign/hash.rs`) is either the bare per-generation material (explore) or
+//! a LOCAL mutation of the material of a corpus entry (exploit). The child keeps
+//! its ancestor's seed and every knob except one to three mutated units, where a
+//! unit is the seed or one knob the spec actually reads. Because seed AND every
+//! knob are read out of that one material (`derive_flags`), steering it steers
+//! the whole configuration without touching a knob derivation.
+//!
+//! # Corpus and energy
+//!
+//! The corpus is every generation that reached a coverage feature (an edge at
+//! a hit-count bucket, see `coverage::hit_bucket`) first, except the bootstrap:
+//! the first novel generation opens the program's whole baseline, not a
+//! discovery. An entry's energy favours rare finds that have not been mined yet:
+//! it is inversely proportional to how many generations have reached the
+//! entry's rarest feature plus how many children it has already had. A fresh
+//! entry whose feature nothing else reaches gets the most; an entry whose finds
+//! became common, or which has been picked many times, fades.
+//!
+//! The exploit share adapts: it is the novelty rate of recent exploit children
+//! relative to that of recent explore generations, clamped so neither arm ever
+//! starves.
 //!
 //! The choices guidance makes (explore or exploit, which ancestor, which units,
-//! how) come from their own keyed stream ([`Draws`]), never from the material:
+//! how) come from their own keyed streams ([`Draws`]), never from the material:
 //! reading them from knob bytes would correlate the decision with the knob
 //! values it is choosing between.
 //!
-//! # The determinism argument
+//! # Determinism
 //!
-//! The arc's carried-forward constraint is that guided selection stays a pure
-//! function of (seed, persisted coverage state), so an extended guided campaign
-//! is still reproducible. Two properties deliver that:
-//!
-//! * **Purity.** Every input is either the campaign seed base, the generation
-//!   index, the plateau window, or the persisted novelty log. No wall clock, no
-//!   host state, no in-guest computation.
-//! * **Prefix-determinism (tear safety).** Generation `g` is derived from novelty
-//!   entries with generation **strictly below `g`** only. The campaign-steering
-//!   crash model allows an aux store to sit one generation ahead of the cursor,
-//!   so a resumed campaign re-deriving generation `g` sees a log that may already
-//!   contain `g`'s own entry; truncating below `g` makes the re-derivation
-//!   bit-identical to the original. This is why the selection function reads the
-//!   *log* rather than `union.bits` directly — a cumulative bitset cannot be
-//!   rewound to a generation boundary, and the covered-edge count the selector
-//!   actually wants is recoverable from the log by summation anyway.
-//!
-//! Ancestors may themselves have been guided, so an ancestor's effective hash is
-//! defined by the same rule applied to *its* prefix. [`GuidancePlan::new`]
-//! resolves that with one forward pass over the sparse log rather than recursion.
+//! A decision is a pure function of the seed base, the generation, and the
+//! persisted store: the feature log (with per-feature hit counts) and the
+//! decision log. Both are written with the coverage store, which may sit one
+//! generation ahead of the campaign cursor after a checkpoint tear. A resumed
+//! campaign therefore reuses a generation's RECORDED decision when the store
+//! already holds one, and only decides afresh for a generation the store has
+//! not seen, when the store holds exactly the generations below it. An
+//! ancestor's material is re-derived from the decision log: the child of `a`
+//! at `g` is `a`'s material mutated by `g`'s own mutation stream.
 
 use crate::campaign::gen_byte::{Hash, Unit, UnitOp};
+use crate::coverage::FeatureRecord;
 use sha2::{Digest, Sha256};
-
-/// One generation that opened new edge coverage, with how much it opened.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NoveltyEntry {
-    pub(crate) generation: u64,
-    /// Fitness weight, always >= 1 so every novel generation stays selectable.
-    pub(crate) weight: u64,
-}
+use std::collections::BTreeMap;
 
 /// Why a generation got the derivation input it did — reported so the mode can
 /// be shown to have actually done something (an inert knob is a bug).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GuidanceDecision {
-    /// Nothing novel had happened yet, so there was nothing to steer toward.
-    /// Identical to the unguided derivation, deliberately and visibly.
+    /// The corpus was empty, so there was nothing to steer toward. Identical
+    /// to the unguided derivation, deliberately and visibly.
     NoAncestors,
     /// The exploration roll won: derive fresh, exactly as an unguided campaign.
     Explore,
-    /// Mutate the derivation input of a previously productive generation.
+    /// Mutate the derivation input of a corpus entry.
     Exploit { ancestor: u64 },
 }
 
-/// Exploitation share at zero drought, in permille.
-const EXPLOIT_BASE_PERMILLE: u64 = 700;
-/// Floor the exploitation share decays to once a campaign has gone a full
-/// plateau window without novelty. It never reaches zero: a productive ancestor
-/// stays worth revisiting, and a hard floor keeps the mode from silently
-/// degenerating into the unguided scheme.
-const EXPLOIT_FLOOR_PERMILLE: u64 = 200;
-/// Drought denominator when the plateau window is disabled (`--plateau-after 0`),
-/// so the decay schedule stays defined rather than dividing by zero.
-const DEFAULT_DROUGHT_WINDOW: u64 = 200;
-
-/// How much of the next generation should exploit rather than explore.
-///
-/// Exploitation decays with the novelty drought: while ancestors keep paying out
-/// the campaign concentrates on them, and the longer nothing new is found the
-/// more it broadens, so a guided campaign cannot wedge itself in a corner of the
-/// space that has stopped producing.
-pub(crate) fn exploit_permille(drought: u64, plateau_window: u64) -> u64 {
-    let window = if plateau_window == 0 {
-        DEFAULT_DROUGHT_WINDOW
-    } else {
-        plateau_window
-    };
-    let span = EXPLOIT_BASE_PERMILLE - EXPLOIT_FLOOR_PERMILLE;
-    let decay = drought.saturating_mul(span) / window;
-    EXPLOIT_BASE_PERMILLE
-        .saturating_sub(decay)
-        .max(EXPLOIT_FLOOR_PERMILLE)
-}
+/// Exploit share bounds, in permille. Neither arm ever drops below a fifth of
+/// the generations: exploration keeps finding what no mutation of the corpus
+/// reaches, and exploitation keeps a productive corpus worth having.
+const EXPLOIT_MIN_PERMILLE: u64 = 200;
+const EXPLOIT_MAX_PERMILLE: u64 = 800;
+/// How many recent steered generations the adaptive exploit share looks at.
+const SHARE_WINDOW: usize = 100;
+/// Energy numerator; an entry's energy is this over (rarity + picks).
+const ENERGY_SCALE: u64 = 1 << 20;
 
 /// The unguided derivation input: the pure per-generation hash every campaign has
 /// always used. Guided mode starts from this and may replace it.
@@ -97,15 +74,15 @@ pub(crate) fn base_generation_hash(seed_base: u64, generation: u64) -> Hash {
     Hash::derive(seed_base, generation)
 }
 
-/// Guidance's own random stream for one generation: splitmix64 seeded from a
-/// hash keyed apart from the generation material, so no selection ever reads a
-/// knob byte.
+/// One keyed random stream of guidance: splitmix64 seeded from a hash keyed
+/// apart from the generation material, so no selection ever reads a knob byte.
 pub(crate) struct Draws(u64);
 
 impl Draws {
-    pub(crate) fn new(seed_base: u64, generation: u64) -> Self {
+    fn new(purpose: &[u8], seed_base: u64, generation: u64) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"patina-campaign-guidance/v1");
+        hasher.update(b"patina-campaign-guidance/v2/");
+        hasher.update(purpose);
         hasher.update(seed_base.to_le_bytes());
         hasher.update(generation.to_le_bytes());
         let digest: [u8; 32] = hasher.finalize().into();
@@ -121,7 +98,7 @@ impl Draws {
     }
 
     /// A draw in `0..bound`; `bound` must be nonzero.
-    pub(crate) fn below(&mut self, bound: u64) -> u64 {
+    fn below(&mut self, bound: u64) -> u64 {
         self.next() % bound
     }
 }
@@ -132,12 +109,17 @@ const MAX_MUTATED_UNITS: u64 = 3;
 /// Largest nudge step, in band-byte units.
 const MAX_NUDGE: u64 = 16;
 
-/// The child of `ancestor`: its material with one to three distinct units
-/// changed. A changed unit is replaced with `fresh`'s value, or, for a knob,
-/// half the time nudged a small step so threshold-shaped behaviour can be
-/// approached gradually. Everything else, the seed included unless the seed is
-/// one of the picks, is inherited.
-fn mutate(ancestor: &Hash, fresh: &Hash, units: &[Unit], draws: &mut Draws) -> Hash {
+/// The child of `ancestor` at `generation`: its material with one to three
+/// distinct units changed. A changed unit is replaced with the unguided
+/// material's value, or, for a knob, half the time nudged a small step so
+/// threshold-shaped behaviour can be approached gradually. Everything else,
+/// the seed included unless the seed is one of the picks, is inherited.
+///
+/// Keyed on the generation alone (not on the selection draws before it), so
+/// the decision log is enough to re-derive any ancestor's material.
+fn mutate(ancestor: &Hash, seed_base: u64, generation: u64, units: &[Unit]) -> Hash {
+    let fresh = base_generation_hash(seed_base, generation);
+    let mut draws = Draws::new(b"mutate", seed_base, generation);
     let mut pool: Vec<&Unit> = units.iter().collect();
     let picks = (1 + draws.below(MAX_MUTATED_UNITS)).min(pool.len() as u64);
     let mut child = *ancestor;
@@ -149,140 +131,174 @@ fn mutate(ancestor: &Hash, fresh: &Hash, units: &[Unit], draws: &mut Draws) -> H
             let step = 1 + draws.below(MAX_NUDGE) as i8;
             UnitOp::Nudge(if draws.below(2) == 0 { step } else { -step })
         };
-        child = child.with_unit(unit, op, fresh);
+        child = child.with_unit(unit, op, &fresh);
     }
     child
 }
 
-/// The resolved guidance state for one campaign invocation.
-#[derive(Clone, Debug)]
-pub(crate) struct GuidancePlan {
-    seed_base: u64,
-    plateau_window: u64,
-    /// The units a child may mutate: the seed and every live knob claim.
-    units: Vec<Unit>,
-    ancestors: Vec<NoveltyEntry>,
-    /// `hashes[i]` is the effective derivation input of `ancestors[i]`, resolved
-    /// against that ancestor's own prefix.
-    hashes: Vec<Hash>,
+/// A corpus entry as of the generation being decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Entry {
+    generation: u64,
+    /// How many generations reached the entry's rarest feature (>= 1: the
+    /// entry itself did).
+    rarity: u64,
+    /// How many generations so far exploited this entry.
+    picks: u64,
 }
 
-impl GuidancePlan {
-    /// Resolve a plan from a persisted novelty log. Entries must be strictly
-    /// increasing by generation (both stores validate that on load); any weight
-    /// below 1 is lifted to 1 so a novel generation is never unselectable.
-    ///
-    /// The FIRST entry is dropped. A campaign's first generation is novel by
-    /// construction — it opens the program's whole baseline (`main`, startup,
-    /// every path the workload always takes), not a discovery — and weighting by
-    /// raw novelty count therefore made it permanently dominate the pool.
-    /// Measured before this exclusion: over a 60-generation guided run the log
-    /// was `[[0, 88], [4, 13], [24, 1], [41, 40]]` and the bootstrap generation
-    /// was chosen as the ancestor 34 times out of 42 exploits, so ~81% of the
-    /// exploitation budget resampled around one arbitrary configuration —
-    /// strictly worse than sampling independently. The pool holds only
-    /// generations that found something the baseline did not.
-    ///
-    /// Dropping the first entry is prefix-stable, so the tear-safety argument in
-    /// the module docs is unaffected: truncation only ever removes from the END of
-    /// the log, so "the earliest entry" is the same entry at every generation.
-    /// A campaign whose only novelty is that bootstrap generation therefore has an
-    /// EMPTY pool and derives exactly like an unguided one — reported honestly as
-    /// vacuous rather than dressed up as steering.
+impl Entry {
+    fn energy(self) -> u64 {
+        (ENERGY_SCALE / (self.rarity.max(1) + self.picks)).max(1)
+    }
+}
+
+/// The guidance state for one campaign invocation: the persisted feature and
+/// decision logs plus the spec's mutation units.
+pub(crate) struct GuidancePlan<'a> {
+    seed_base: u64,
+    units: &'a [Unit],
+    features: &'a [FeatureRecord],
+    decisions: &'a [GuidanceDecision],
+}
+
+impl<'a> GuidancePlan<'a> {
     pub(crate) fn new(
         seed_base: u64,
-        plateau_window: u64,
-        units: Vec<Unit>,
-        log: &[NoveltyEntry],
+        units: &'a [Unit],
+        features: &'a [FeatureRecord],
+        decisions: &'a [GuidanceDecision],
     ) -> Self {
-        let ancestors: Vec<NoveltyEntry> = log
-            .iter()
-            .skip(1)
-            .map(|entry| NoveltyEntry {
-                generation: entry.generation,
-                weight: entry.weight.max(1),
-            })
-            .collect();
-        // Forward pass: ancestor i is derived from ancestors strictly below it,
-        // which — the log being strictly increasing — is exactly the prefix `..i`.
-        let mut hashes: Vec<Hash> = Vec::with_capacity(ancestors.len());
-        for index in 0..ancestors.len() {
-            let (hash, _) = derive(
-                seed_base,
-                plateau_window,
-                &units,
-                ancestors[index].generation,
-                &ancestors[..index],
-                &hashes[..index],
-            );
-            hashes.push(hash);
-        }
         Self {
             seed_base,
-            plateau_window,
             units,
-            ancestors,
-            hashes,
+            features,
+            decisions,
         }
     }
 
-    /// The derivation input for `generation`, plus why it was chosen.
+    /// The derivation input for `generation`, plus why it was chosen: the
+    /// recorded decision when the store already holds one (a resumed tear),
+    /// else a fresh decision from the generations below it.
     pub(crate) fn generation_hash(&self, generation: u64) -> (Hash, GuidanceDecision) {
-        // Truncate below the generation being derived: this is the tear-safety
-        // property described in the module docs.
-        let cut = self
-            .ancestors
-            .partition_point(|entry| entry.generation < generation);
-        derive(
-            self.seed_base,
-            self.plateau_window,
-            &self.units,
-            generation,
-            &self.ancestors[..cut],
-            &self.hashes[..cut],
-        )
+        let decision = match self.decisions.get(generation as usize) {
+            Some(recorded) => *recorded,
+            None => self.decide(generation),
+        };
+        (self.material(generation, decision), decision)
     }
-}
 
-fn derive(
-    seed_base: u64,
-    plateau_window: u64,
-    units: &[Unit],
-    generation: u64,
-    ancestors: &[NoveltyEntry],
-    ancestor_hashes: &[Hash],
-) -> (Hash, GuidanceDecision) {
-    debug_assert_eq!(ancestors.len(), ancestor_hashes.len());
-    let base = base_generation_hash(seed_base, generation);
-    let Some(last) = ancestors.last() else {
-        return (base, GuidanceDecision::NoAncestors);
-    };
-    let drought = generation.saturating_sub(1).saturating_sub(last.generation);
-    let mut draws = Draws::new(seed_base, generation);
-    if draws.below(1000) >= exploit_permille(drought, plateau_window) {
-        return (base, GuidanceDecision::Explore);
-    }
-    // Fitness-proportionate choice over the novelty weights: a generation that
-    // opened many edges at once is a better thing to mutate than one that opened
-    // a single edge, and every novel generation stays reachable.
-    let total: u64 = ancestors
-        .iter()
-        .fold(0u64, |sum, entry| sum.saturating_add(entry.weight));
-    let mut ticket = draws.below(total);
-    let mut chosen = ancestors.len() - 1;
-    for (index, entry) in ancestors.iter().enumerate() {
-        if ticket < entry.weight {
-            chosen = index;
-            break;
+    /// The material a generation ran with `decision`.
+    fn material(&self, generation: u64, decision: GuidanceDecision) -> Hash {
+        // Resolve the ancestor chain iteratively; every link is a strictly
+        // smaller generation, so it terminates at an explored root.
+        let mut chain = vec![generation];
+        let mut link = decision;
+        while let GuidanceDecision::Exploit { ancestor } = link {
+            chain.push(ancestor);
+            link = self.recorded(ancestor);
         }
-        ticket -= entry.weight;
+        let root = chain.pop().expect("chain holds the generation");
+        let mut material = base_generation_hash(self.seed_base, root);
+        while let Some(child) = chain.pop() {
+            material = mutate(&material, self.seed_base, child, self.units);
+        }
+        material
     }
-    (
-        mutate(&ancestor_hashes[chosen], &base, units, &mut draws),
-        GuidanceDecision::Exploit {
-            ancestor: ancestors[chosen].generation,
-        },
-    )
+
+    fn recorded(&self, generation: u64) -> GuidanceDecision {
+        self.decisions
+            .get(generation as usize)
+            .copied()
+            .unwrap_or(GuidanceDecision::NoAncestors)
+    }
+
+    /// The corpus as of `generation`: every novel generation below it except
+    /// the bootstrap, with its rarity and pick count.
+    fn corpus(&self, generation: u64) -> Vec<Entry> {
+        let mut rarest: BTreeMap<u64, u64> = BTreeMap::new();
+        for record in self.features {
+            if record.generation >= generation {
+                break;
+            }
+            let rarity = rarest.entry(record.generation).or_insert(u64::MAX);
+            *rarity = (*rarity).min(record.hits);
+        }
+        // The bootstrap generation opens the baseline, not a discovery.
+        let bootstrap = rarest.keys().next().copied();
+        let mut picks: BTreeMap<u64, u64> = BTreeMap::new();
+        for decision in &self.decisions[..self.decisions.len().min(generation as usize)] {
+            if let GuidanceDecision::Exploit { ancestor } = decision {
+                *picks.entry(*ancestor).or_default() += 1;
+            }
+        }
+        rarest
+            .into_iter()
+            .filter(|(entry, _)| Some(*entry) != bootstrap)
+            .map(|(entry, rarity)| Entry {
+                generation: entry,
+                rarity,
+                picks: picks.get(&entry).copied().unwrap_or(0),
+            })
+            .collect()
+    }
+
+    /// The exploit share for `generation`, in permille: the recent novelty
+    /// rate of exploit children over that of explore generations (each with a
+    /// Laplace prior, so an untried arm reads as even), clamped.
+    fn exploit_permille(&self, generation: u64) -> u64 {
+        let novel = |g: u64| {
+            let at = self
+                .features
+                .partition_point(|record| record.generation < g);
+            self.features
+                .get(at)
+                .is_some_and(|record| record.generation == g)
+        };
+        let decided = &self.decisions[..self.decisions.len().min(generation as usize)];
+        let (mut exploit, mut explore) = ([1u64, 2], [1u64, 2]);
+        let recent = decided
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, decision)| **decision != GuidanceDecision::NoAncestors)
+            .take(SHARE_WINDOW);
+        for (g, decision) in recent {
+            let arm = match decision {
+                GuidanceDecision::Exploit { .. } => &mut exploit,
+                _ => &mut explore,
+            };
+            arm[0] += u64::from(novel(g as u64));
+            arm[1] += 1;
+        }
+        // rate = hits / trials, compared without division by cross-multiplying.
+        let exploit_rate = exploit[0] * explore[1];
+        let explore_rate = explore[0] * exploit[1];
+        (1000 * exploit_rate / (exploit_rate + explore_rate))
+            .clamp(EXPLOIT_MIN_PERMILLE, EXPLOIT_MAX_PERMILLE)
+    }
+
+    fn decide(&self, generation: u64) -> GuidanceDecision {
+        let corpus = self.corpus(generation);
+        if corpus.is_empty() {
+            return GuidanceDecision::NoAncestors;
+        }
+        let mut draws = Draws::new(b"select", self.seed_base, generation);
+        if draws.below(1000) >= self.exploit_permille(generation) {
+            return GuidanceDecision::Explore;
+        }
+        let total: u64 = corpus.iter().map(|entry| entry.energy()).sum();
+        let mut ticket = draws.below(total);
+        for entry in &corpus {
+            if ticket < entry.energy() {
+                return GuidanceDecision::Exploit {
+                    ancestor: entry.generation,
+                };
+            }
+            ticket -= entry.energy();
+        }
+        unreachable!("the ticket is below the total energy")
+    }
 }
 
 /// Running tally of what the mode actually did, so a guided campaign can be shown
@@ -319,16 +335,6 @@ mod tests {
     use super::*;
     use crate::campaign::{CampaignSpec, FaultPlanes, mutation_units};
 
-    fn log(entries: &[(u64, u64)]) -> Vec<NoveltyEntry> {
-        entries
-            .iter()
-            .map(|(generation, weight)| NoveltyEntry {
-                generation: *generation,
-                weight: *weight,
-            })
-            .collect()
-    }
-
     /// Units for a spec that reads many knobs: every fault plane, buggify, PCT
     /// and the yield stride.
     fn units() -> Vec<Unit> {
@@ -341,32 +347,66 @@ mod tests {
         })
     }
 
-    fn plan(seed_base: u64, entries: &[(u64, u64)]) -> GuidancePlan {
-        GuidancePlan::new(seed_base, 200, units(), &log(entries))
+    /// Features as (generation first reached, generations that reached it).
+    fn features(entries: &[(u64, u64)]) -> Vec<FeatureRecord> {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, &(generation, hits))| FeatureRecord {
+                generation,
+                feature: index as u64,
+                hits,
+            })
+            .collect()
+    }
+
+    /// Run a campaign's guidance forward from `features`, recording every
+    /// decision as the driver does, and return the decision log.
+    fn simulate(
+        seed_base: u64,
+        units: &[Unit],
+        features: &[FeatureRecord],
+        generations: u64,
+    ) -> Vec<GuidanceDecision> {
+        let mut decisions = Vec::new();
+        for generation in 0..generations {
+            let visible: Vec<FeatureRecord> = features
+                .iter()
+                .copied()
+                .filter(|record| record.generation < generation)
+                .collect();
+            let plan = GuidancePlan::new(seed_base, units, &visible, &decisions);
+            let (_, decision) = plan.generation_hash(generation);
+            decisions.push(decision);
+        }
+        decisions
     }
 
     #[test]
-    fn with_no_ancestors_guided_derivation_is_the_unguided_one() {
-        let plan = plan(0, &[]);
+    fn with_an_empty_corpus_guided_derivation_is_the_unguided_one() {
+        let units = units();
+        // Only the bootstrap generation is novel, so the corpus stays empty.
+        let features = features(&[(0, 40), (0, 40)]);
+        let mut decisions = Vec::new();
         for generation in 0..8 {
-            assert_eq!(
-                plan.generation_hash(generation),
-                (
-                    base_generation_hash(0, generation),
-                    GuidanceDecision::NoAncestors
-                )
-            );
+            let plan = GuidancePlan::new(0, &units, &features, &decisions);
+            let (hash, decision) = plan.generation_hash(generation);
+            assert_eq!(hash, base_generation_hash(0, generation));
+            assert_eq!(decision, GuidanceDecision::NoAncestors);
+            decisions.push(decision);
         }
     }
 
     /// The core of local mutation: an exploit child is its ancestor with one to
     /// three units changed, so it keeps the ancestor's seed (unless the seed is
     /// one of the changed units) and every other knob byte, the extension's
-    /// crash and starvation draws included.
+    /// crash draws included.
     #[test]
     fn an_exploit_child_is_its_ancestor_with_one_to_three_units_changed() {
         let units = units();
-        let plan = plan(7, &[(0, 5), (3, 2), (6, 4)]);
+        let features = features(&[(0, 9), (3, 2), (6, 4)]);
+        let decisions = simulate(7, &units, &features, 300);
+        let plan = GuidancePlan::new(7, &units, &features, &decisions);
         let (mut exploits, mut kept_seed) = (0, 0);
         for generation in 7..300 {
             let (child, decision) = plan.generation_hash(generation);
@@ -403,148 +443,141 @@ mod tests {
             ..CampaignSpec::default()
         });
         assert_eq!(narrow.len(), 2, "the seed and the PCT depth: {narrow:?}");
-        assert!(narrow.iter().filter(|unit| unit.is_seed()).count() == 1);
-        let plan = GuidancePlan::new(1, 200, narrow.clone(), &log(&[(0, 1), (2, 1)]));
+        let features = features(&[(0, 5), (2, 1)]);
+        let decisions = simulate(1, &narrow, &features, 100);
+        let plan = GuidancePlan::new(1, &narrow, &features, &decisions);
+        let everything: Vec<&Unit> = narrow.iter().collect();
         for generation in 3..100 {
             if let (child, GuidanceDecision::Exploit { ancestor }) =
                 plan.generation_hash(generation)
             {
                 let (parent, _) = plan.generation_hash(ancestor);
-                assert!(child.agrees_outside(parent, &narrow.iter().collect::<Vec<_>>()));
+                assert!(child.agrees_outside(parent, &everything));
             }
         }
     }
 
+    /// A resumed campaign whose store is a generation ahead reuses the recorded
+    /// decision, and one whose store is not derives the same decision afresh.
     #[test]
-    fn prefix_determinism_survives_a_checkpoint_tear() {
-        // A resumed campaign re-deriving generation N may see a log that already
-        // holds N's own entry; it must derive what the original run derived.
-        let untorn = plan(0, &[(0, 3), (4, 1)]);
-        let torn = plan(0, &[(0, 3), (4, 1), (9, 2)]);
-        for generation in 0..=9 {
+    fn a_recorded_decision_rederives_identically() {
+        let units = units();
+        let features = features(&[(0, 3), (4, 1), (9, 2)]);
+        let decisions = simulate(5, &units, &features, 40);
+        for generation in 0..40u64 {
+            let visible: Vec<FeatureRecord> = features
+                .iter()
+                .copied()
+                .filter(|record| record.generation < generation)
+                .collect();
+            let fresh = GuidancePlan::new(5, &units, &visible, &decisions[..generation as usize]);
+            let torn = GuidancePlan::new(5, &units, &features, &decisions[..=generation as usize]);
             assert_eq!(
-                untorn.generation_hash(generation),
-                torn.generation_hash(generation)
+                fresh.generation_hash(generation),
+                torn.generation_hash(generation),
+                "generation {generation}"
             );
         }
-        assert!((10..40).any(|g| untorn.generation_hash(g) != torn.generation_hash(g)));
+        assert!(
+            decisions
+                .iter()
+                .any(|decision| matches!(decision, GuidanceDecision::Exploit { .. })),
+            "the fixture must steer for the check to mean anything"
+        );
     }
 
     #[test]
     fn the_bootstrap_generation_is_never_an_ancestor() {
-        let plan = plan(0, &[(0, 88), (4, 13), (24, 1), (41, 40)]);
-        let mut others = 0;
-        for generation in 0..200 {
-            if let (_, GuidanceDecision::Exploit { ancestor }) = plan.generation_hash(generation) {
-                assert_ne!(ancestor, 0, "generation {generation} picked the bootstrap");
-                others += 1;
+        let units = units();
+        let features = features(&[(0, 88), (0, 88), (4, 13), (24, 1), (41, 40)]);
+        let decisions = simulate(0, &units, &features, 200);
+        assert!(decisions.contains(&GuidanceDecision::Exploit { ancestor: 4 }));
+        assert!(!decisions.contains(&GuidanceDecision::Exploit { ancestor: 0 }));
+    }
+
+    /// Energy favours the entry whose find is rare: two entries found at the
+    /// same time, one whose feature most generations since have reached and
+    /// one whose feature nothing else has, split exploitation very unevenly.
+    #[test]
+    fn energy_favours_the_finder_of_a_rare_feature() {
+        let units = units();
+        // Bootstrap, then generations 1 and 2 each found one feature. Since
+        // then generation 1's feature was reached 60 times, generation 2's
+        // only by generation 2 itself.
+        let features = features(&[(0, 64), (1, 60), (2, 1)]);
+        let mut decisions = vec![GuidanceDecision::NoAncestors; 3];
+        decisions.extend([GuidanceDecision::Explore; 61]);
+        let (mut common, mut rare) = (0, 0);
+        for generation in 64..400 {
+            let plan = GuidancePlan::new(9, &units, &features, &decisions[..64]);
+            match plan.decide(generation) {
+                GuidanceDecision::Exploit { ancestor: 1 } => common += 1,
+                GuidanceDecision::Exploit { ancestor: 2 } => rare += 1,
+                _ => {}
             }
         }
-        assert!(others > 0);
-    }
-
-    #[test]
-    fn a_drought_broadens_exploration_to_a_floor() {
-        let fresh = exploit_permille(0, 200);
-        assert!(exploit_permille(100, 200) < fresh);
-        assert_eq!(exploit_permille(10_000, 200), EXPLOIT_FLOOR_PERMILLE);
-        assert_eq!(exploit_permille(0, 0), fresh);
-    }
-
-    /// A plan is a pure function of its inputs, and the novelty log is one of
-    /// them: a different log steers a different stream.
-    #[test]
-    fn a_plan_is_a_pure_function_of_its_inputs() {
-        let entries = log(&[(0, 2), (5, 4), (11, 1)]);
-        let first = GuidancePlan::new(42, 50, units(), &entries);
-        let second = GuidancePlan::new(42, 50, units(), &entries);
-        for generation in 0..64 {
-            assert_eq!(
-                first.generation_hash(generation),
-                second.generation_hash(generation),
-                "generation {generation} must derive identically"
-            );
-        }
-        let one = GuidancePlan::new(42, 50, units(), &log(&[(0, 2)]));
-        let other = GuidancePlan::new(42, 50, units(), &log(&[(0, 2), (3, 9)]));
+        assert!(rare > 0, "the rare finder must be picked");
         assert!(
-            (4..64).any(|g| one.generation_hash(g) != other.generation_hash(g)),
-            "the novelty log must actually influence the stream"
+            rare > 10 * common.max(1),
+            "rare finder picked {rare}x, common finder {common}x"
         );
     }
 
+    /// Picks spend an entry's energy: once one entry has had many children, a
+    /// fresh entry of equal rarity is preferred.
     #[test]
-    fn ancestors_are_chosen_proportionally_to_their_novelty() {
-        // A heavily weighted ancestor must win most selections; an equal-weight
-        // pair must split. This pins that the ticket walk reads weights at all.
-        // The leading entry is the bootstrap generation and is excluded from the
-        // pool, so the two competing ancestors come after it.
-        let plan = GuidancePlan::new(3, 200, units(), &log(&[(0, 50), (1, 1), (2, 99)]));
-        let mut heavy = 0;
-        let mut light = 0;
-        for generation in 3..400 {
-            if let (_, GuidanceDecision::Exploit { ancestor }) = plan.generation_hash(generation) {
-                if ancestor == 2 {
-                    heavy += 1;
-                } else {
-                    light += 1;
-                }
-            }
-        }
-        assert!(heavy > 0 && light > 0, "both ancestors must be reachable");
-        assert!(
-            heavy > light * 5,
-            "the 99:1 weight must dominate: heavy={heavy} light={light}"
-        );
-        // A weight below one is lifted, so every novel generation stays
-        // selectable. Entry 0 is the excluded bootstrap; entry 1 weighs zero.
-        let plan = GuidancePlan::new(1, 200, units(), &log(&[(0, 7), (1, 0)]));
-        let reached = (2..64).any(|g| {
-            matches!(
-                plan.generation_hash(g),
-                (_, GuidanceDecision::Exploit { ancestor: 1 })
-            )
-        });
-        assert!(reached, "a zero-weight entry must still be selectable");
+    fn picks_spend_energy() {
+        let units = units();
+        let features = features(&[(0, 9), (1, 1), (2, 1)]);
+        let mut decisions = vec![GuidanceDecision::NoAncestors; 3];
+        decisions.extend([GuidanceDecision::Exploit { ancestor: 1 }; 40]);
+        let plan = GuidancePlan::new(3, &units, &features, &decisions);
+        let corpus = plan.corpus(43);
+        let energy = |generation| {
+            corpus
+                .iter()
+                .find(|entry| entry.generation == generation)
+                .unwrap()
+                .energy()
+        };
+        assert!(energy(2) > 10 * energy(1));
+    }
+
+    /// The exploit share follows which arm has recently been finding novelty,
+    /// within its bounds.
+    #[test]
+    fn the_exploit_share_follows_the_productive_arm() {
+        let units = units();
+        let explore_novel: Vec<(u64, u64)> = (0..60).map(|g| (g * 2 + 1, 1)).collect();
+        let exploit_novel: Vec<(u64, u64)> = (0..60).map(|g| (g * 2 + 2, 1)).collect();
+        // Odd generations explore, even ones exploit generation 1.
+        let decisions: Vec<GuidanceDecision> = (0..121)
+            .map(|g| match g {
+                0 => GuidanceDecision::NoAncestors,
+                g if g % 2 == 1 => GuidanceDecision::Explore,
+                _ => GuidanceDecision::Exploit { ancestor: 1 },
+            })
+            .collect();
+        let share = |novel: &[(u64, u64)]| {
+            let mut entries = vec![(0, 9)];
+            entries.extend_from_slice(novel);
+            let features = features(&entries);
+            GuidancePlan::new(0, &units, &features, &decisions).exploit_permille(121)
+        };
+        assert_eq!(share(&explore_novel), EXPLOIT_MIN_PERMILLE);
+        assert_eq!(share(&exploit_novel), EXPLOIT_MAX_PERMILLE);
+        let untried = GuidancePlan::new(0, &units, &[], &[]).exploit_permille(0);
+        assert!((EXPLOIT_MIN_PERMILLE..=EXPLOIT_MAX_PERMILLE).contains(&untried));
     }
 
     #[test]
-    fn a_bootstrap_only_log_leaves_nothing_to_steer_and_reports_vacuous() {
-        // The bootstrap generation is excluded from the pool, so a campaign whose
-        // ONLY novelty was that first generation has no ancestors at all. It must
-        // then derive exactly like an unguided campaign AND report itself vacuous —
-        // never present resampling around the baseline as if it were steering.
-        let plan = GuidancePlan::new(4, 200, units(), &log(&[(0, 88)]));
+    fn a_bootstrap_only_campaign_reports_vacuous() {
         let mut tally = GuidanceTally::default();
-        for generation in 0..40 {
-            let (hash, decision) = plan.generation_hash(generation);
-            assert_eq!(
-                hash,
-                base_generation_hash(4, generation),
-                "generation {generation} must derive exactly as unguided"
-            );
-            assert_eq!(decision, GuidanceDecision::NoAncestors);
-            tally.record(decision);
-        }
-        assert!(
-            tally.is_vacuous(),
-            "a campaign that never steered must report vacuous: {tally:?}"
-        );
-        assert_eq!(tally.exploited, 0);
-        assert_eq!(tally.no_ancestors, 40);
-        // A tally is vacuous only when something was decided and nothing was exploited.
-        {
-            let mut tally = GuidanceTally::default();
-            assert!(!tally.is_vacuous(), "an empty tally is not vacuous");
-            tally.record(GuidanceDecision::NoAncestors);
-            tally.record(GuidanceDecision::Explore);
-            assert!(tally.is_vacuous(), "no exploit means the mode did nothing");
-            tally.record(GuidanceDecision::Exploit { ancestor: 0 });
-            assert!(!tally.is_vacuous());
-            assert_eq!(tally.generations, 3);
-            assert_eq!(tally.exploited, 1);
-            assert_eq!(tally.explored, 1);
-            assert_eq!(tally.no_ancestors, 1);
-        }
+        assert!(!tally.is_vacuous(), "an empty tally is not vacuous");
+        tally.record(GuidanceDecision::NoAncestors);
+        tally.record(GuidanceDecision::Explore);
+        assert!(tally.is_vacuous(), "no exploit means the mode did nothing");
+        tally.record(GuidanceDecision::Exploit { ancestor: 0 });
+        assert!(!tally.is_vacuous());
     }
 }

@@ -324,9 +324,19 @@ fn a_guided_child_inherits_its_ancestors_unmutated_knobs() {
         ..CampaignSpec::default()
     };
     let units = mutation_units(&spec);
-    let entries = [(0, 3), (2, 1), (5, 2)]
-        .map(|(generation, weight)| crate::guided::NoveltyEntry { generation, weight });
-    let plan = crate::guided::GuidancePlan::new(11, 200, units, &entries);
+    // A bootstrap generation, then three single-feature discoveries.
+    let features =
+        [(0, 9), (2, 1), (5, 3), (5, 2)].map(|(generation, hits)| crate::coverage::FeatureRecord {
+            generation,
+            feature: generation * 8 + hits,
+            hits,
+        });
+    let mut decisions = Vec::new();
+    for generation in 0..400 {
+        let plan = crate::guided::GuidancePlan::new(11, &units, &features, &decisions);
+        decisions.push(plan.generation_hash(generation).1);
+    }
+    let plan = crate::guided::GuidancePlan::new(11, &units, &features, &decisions);
     let value = |flags: &[String], name: &str| {
         let at = flags
             .iter()
