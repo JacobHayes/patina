@@ -203,40 +203,40 @@ impl NativeEscape {
 
 #[derive(Debug)]
 pub enum TargetError {
-    NativeParse(object::Error),
-    NativeUnwind(gimli::Error),
-    InvalidNativeCodeRanges(String),
-    UnsupportedNativeFormat(BinaryFormat),
-    RelocatableNativeElf,
+    Parse(object::Error),
+    Unwind(gimli::Error),
+    InvalidCodeRanges(String),
+    UnsupportedFormat(BinaryFormat),
+    RelocatableElf,
     /// A linked ELF whose section headers, dynamic symbol table, or the
     /// symbol-version section its dynamic table names are gone: the import
     /// audit and the instruction scan read them, so nothing could be certified.
-    UnauditableNativeElf,
-    UnsupportedNativeArchitecture(Architecture),
-    UnsupportedNativeImports(Vec<NativeEscape>),
+    UnauditableElf,
+    UnsupportedArchitecture(Architecture),
+    UnsupportedImports(Vec<NativeEscape>),
 }
 
 impl fmt::Display for TargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NativeParse(error) => write!(f, "failed to parse native object: {error}"),
-            Self::NativeUnwind(error) => write!(f, "failed to parse native unwind ranges: {error}"),
-            Self::InvalidNativeCodeRanges(reason) => {
+            Self::Parse(error) => write!(f, "failed to parse native object: {error}"),
+            Self::Unwind(error) => write!(f, "failed to parse native unwind ranges: {error}"),
+            Self::InvalidCodeRanges(reason) => {
                 write!(f, "invalid native code ranges: {reason}")
             }
-            Self::UnsupportedNativeFormat(format) => {
+            Self::UnsupportedFormat(format) => {
                 write!(
                     f,
                     "unsupported native binary format {format:?}; expected Mach-O or ELF"
                 )
             }
-            Self::RelocatableNativeElf => f.write_str(
+            Self::RelocatableElf => f.write_str(
                 "refusing relocatable ELF (ET_REL): an object file is not a runnable guest; link an executable before audit/run",
             ),
-            Self::UnauditableNativeElf => f.write_str(
+            Self::UnauditableElf => f.write_str(
                 "refusing an ELF without section headers, a dynamic symbol table, or the symbol-version section its dynamic table names: the import audit and the instruction scan read them, so the binary cannot be certified; link it without stripping its section headers",
             ),
-            Self::UnsupportedNativeArchitecture(architecture) => {
+            Self::UnsupportedArchitecture(architecture) => {
                 write!(
                     f,
                     "refusing to certify native binary: the forbidden-instruction \
@@ -245,7 +245,7 @@ and X86_64. Passing it would leave every instruction unexamined (a vacuous gate)
 fails closed"
                 )
             }
-            Self::UnsupportedNativeImports(imports) => {
+            Self::UnsupportedImports(imports) => {
                 f.write_str(&render_native_escapes_grouped(imports))
             }
         }
@@ -255,14 +255,14 @@ fails closed"
 impl std::error::Error for TargetError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NativeParse(error) => Some(error),
-            Self::NativeUnwind(error) => Some(error),
-            Self::InvalidNativeCodeRanges(_)
-            | Self::UnsupportedNativeFormat(_)
-            | Self::RelocatableNativeElf
-            | Self::UnauditableNativeElf
-            | Self::UnsupportedNativeArchitecture(_)
-            | Self::UnsupportedNativeImports(_) => None,
+            Self::Parse(error) => Some(error),
+            Self::Unwind(error) => Some(error),
+            Self::InvalidCodeRanges(_)
+            | Self::UnsupportedFormat(_)
+            | Self::RelocatableElf
+            | Self::UnauditableElf
+            | Self::UnsupportedArchitecture(_)
+            | Self::UnsupportedImports(_) => None,
         }
     }
 }

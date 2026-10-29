@@ -40,7 +40,7 @@ unknown option.
   reachability). The stride is compiled in, recovered from the binary at run
   time, and folded into the compatibility fingerprint (`+covpoints:N`), so a
   trace never cross-replays across modes or strides. The two flags are mutually
-  exclusive. Prints `PATINA_NATIVE_BUILD output=...`.
+  exclusive. Prints `PATINA_BUILD output=...`.
 - `cargo patina build <GO PACKAGE DIR> --go --output PATH [--release] [-- GO BUILD OPTIONS]`
   Build a Go main package as a native guest (Linux): `go build` in cgo mode
   (`CGO_ENABLED=1`), linked externally with the shim, so goroutine threads

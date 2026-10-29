@@ -45,7 +45,7 @@ impl CodeRanges {
         // Reject object files before any architecture-specific range policy:
         // even no-CFI objects without .rela.eh_frame are not runnable guests.
         if file.format() == BinaryFormat::Elf && file.kind() == object::ObjectKind::Relocatable {
-            return Err(TargetError::RelocatableNativeElf);
+            return Err(TargetError::RelocatableElf);
         }
         let mut result = Self::default();
         if file.format() != BinaryFormat::Elf || file.architecture() != Architecture::X86_64 {
@@ -53,7 +53,7 @@ impl CodeRanges {
         }
         let mut sections = Vec::new();
         for section in file.sections().filter(|s| s.kind() == SectionKind::Text) {
-            let size = section.data().map_err(TargetError::NativeParse)?.len() as u64;
+            let size = section.data().map_err(TargetError::Parse)?.len() as u64;
             let end = section
                 .address()
                 .checked_add(size)
@@ -91,9 +91,7 @@ impl CodeRanges {
             let index = symbol
                 .section_index()
                 .ok_or_else(|| invalid("defined code entry has no resolved section index"))?;
-            let declared_section = file
-                .section_by_index(index)
-                .map_err(TargetError::NativeParse)?;
+            let declared_section = file.section_by_index(index).map_err(TargetError::Parse)?;
             if declared_section.kind() != SectionKind::Text {
                 continue;
             }
@@ -121,7 +119,7 @@ impl CodeRanges {
         }
         if let Some(section) = file.section_by_name(".eh_frame") {
             validate_frame_relocations(file, section.index(), section.address(), section.size())?;
-            let data = section.data().map_err(TargetError::NativeParse)?;
+            let data = section.data().map_err(TargetError::Parse)?;
             let endian = if file.is_little_endian() {
                 RunTimeEndian::Little
             } else {
@@ -137,13 +135,13 @@ impl CodeRanges {
                 bases = bases.set_got(got.address());
             }
             let mut entries = frame.entries(&bases);
-            while let Some(entry) = entries.next().map_err(TargetError::NativeUnwind)? {
+            while let Some(entry) = entries.next().map_err(TargetError::Unwind)? {
                 let CieOrFde::Fde(partial) = entry else {
                     continue;
                 };
                 let fde = partial
                     .parse(EhFrame::cie_from_offset)
-                    .map_err(TargetError::NativeUnwind)?;
+                    .map_err(TargetError::Unwind)?;
                 // Gimli returns the encoded slot address without dereferencing
                 // DW_EH_PE_indirect. Scanning that slot would omit the real code.
                 if fde
@@ -284,13 +282,13 @@ fn validate_frame_relocations(
         let affects = if kind == object::elf::SHT_REL {
             let (entries, _) = header
                 .rel(endian, elf.data())
-                .map_err(TargetError::NativeParse)?
+                .map_err(TargetError::Parse)?
                 .expect("SHT_REL reader");
             entries.iter().any(|r| affects_frame(r.r_offset(endian)))
         } else {
             let (entries, _) = header
                 .rela(endian, elf.data())
-                .map_err(TargetError::NativeParse)?
+                .map_err(TargetError::Parse)?
                 .expect("SHT_RELA reader");
             entries.iter().any(|r| affects_frame(r.r_offset(endian)))
         };
@@ -304,7 +302,7 @@ fn validate_frame_relocations(
 }
 
 fn invalid(reason: &str) -> TargetError {
-    TargetError::InvalidNativeCodeRanges(reason.to_owned())
+    TargetError::InvalidCodeRanges(reason.to_owned())
 }
 
 #[cfg(test)]
@@ -413,10 +411,7 @@ mod tests {
                 assert_eq!(parsed.kind(), object::ObjectKind::Relocatable);
                 let error = crate::NativeAudit::audit(&bytes, &BTreeSet::new())
                     .expect_err("a relocatable object is not a runnable guest");
-                assert!(
-                    matches!(error, TargetError::RelocatableNativeElf),
-                    "{error}"
-                );
+                assert!(matches!(error, TargetError::RelocatableElf), "{error}");
                 assert!(error.to_string().contains("ET_REL"), "{error}");
                 assert!(scan(&bytes).unwrap_err().to_string().contains("ET_REL"));
             }
@@ -468,7 +463,7 @@ mod tests {
                 );
                 assert!(matches!(
                     crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
-                    Err(TargetError::UnsupportedNativeImports(_))
+                    Err(TargetError::UnsupportedImports(_))
                 ));
             }
         }
@@ -485,7 +480,7 @@ mod tests {
         assert_eq!(found[0].category, "undecodable-instruction");
         assert!(matches!(
             crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
-            Err(TargetError::UnsupportedNativeImports(_))
+            Err(TargetError::UnsupportedImports(_))
         ));
         // Neither symbol nor FDE may shrink the other's declared code extent.
         for (symbols, fdes) in [(&enclosing[..], &short[..]), (&short[..], &enclosing[..])] {
@@ -499,7 +494,7 @@ mod tests {
             assert!(found.iter().any(|e| e.mnemonic == Some("rdrand")));
             assert!(matches!(
                 crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
-                Err(TargetError::UnsupportedNativeImports(_))
+                Err(TargetError::UnsupportedImports(_))
             ));
         }
     }
@@ -704,7 +699,7 @@ mod tests {
             let file = object::File::parse(&*bytes).unwrap();
             assert!(matches!(
                 CodeRanges::new(&file),
-                Err(TargetError::InvalidNativeCodeRanges(_))
+                Err(TargetError::InvalidCodeRanges(_))
             ));
             let bytes = elf(
                 Architecture::X86_64,
@@ -724,12 +719,12 @@ mod tests {
         let file = object::File::parse(&*bytes).unwrap();
         assert!(matches!(
             CodeRanges::new(&file),
-            Err(TargetError::NativeUnwind(_))
+            Err(TargetError::Unwind(_))
         ));
-        assert!(matches!(scan(&bytes), Err(TargetError::NativeUnwind(_))));
+        assert!(matches!(scan(&bytes), Err(TargetError::Unwind(_))));
         assert!(matches!(
             crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
-            Err(TargetError::NativeUnwind(_))
+            Err(TargetError::Unwind(_))
         ));
     }
 
@@ -795,7 +790,7 @@ mod tests {
         let bytes = elf(Architecture::X86_64, &text, &[], Some(&unwind));
         assert!(matches!(
             scan(&bytes),
-            Err(TargetError::InvalidNativeCodeRanges(_))
+            Err(TargetError::InvalidCodeRanges(_))
         ));
     }
 
@@ -873,7 +868,7 @@ mod tests {
     fn unrelocated_fde_addresses_cannot_select_code_ranges() {
         assert!(matches!(
             scan(&elf_with_unwind_relocation()),
-            Err(TargetError::InvalidNativeCodeRanges(_))
+            Err(TargetError::InvalidCodeRanges(_))
         ));
     }
 
@@ -889,7 +884,7 @@ mod tests {
             .copy_from_slice(&u64::from(object::elf::SHF_ALLOC).to_le_bytes());
         assert!(matches!(
             scan(&bytes),
-            Err(TargetError::InvalidNativeCodeRanges(_))
+            Err(TargetError::InvalidCodeRanges(_))
         ));
 
         // A dynamic relocation elsewhere must not disable FDE coverage or

@@ -95,7 +95,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     }
     let audit = match NativeAudit::audit(&bytes, &effective) {
         Ok(audit) => audit,
-        Err(TargetError::UnsupportedNativeImports(denied)) => {
+        Err(TargetError::UnsupportedImports(denied)) => {
             let sud_marker = native_binary_has_sud_marker(&bytes)
                 .map_err(|error| CliError(error.to_string()))?;
             // The timestamp-counter trap is the same shape as the SUD downgrade,
@@ -137,7 +137,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
                     Some("TSC-trap-managed"),
                 ));
                 details.extend(host_identity_details(&host_identity));
-                output::emit_audit_with_details(
+                output::emit_audit(
                     "audit",
                     "native",
                     &resolved.path.display().to_string(),
@@ -185,7 +185,7 @@ named frozen-clock-churn abort.",
     };
     let findings: Vec<String> = audit.imports.iter().map(ToString::to_string).collect();
     if output::options().is_json() {
-        output::emit_audit_with_details(
+        output::emit_audit(
             "audit",
             "native",
             &resolved.path.display().to_string(),
@@ -249,7 +249,7 @@ fn emit_native_audit_violation(
         // binary was refused, and dropping them here would make the class visible
         // on some outcomes and silent on others.
         details.extend(host_identity_details(host_identity));
-        output::emit_audit_with_details(
+        output::emit_audit(
             "audit",
             "native",
             &path.display().to_string(),

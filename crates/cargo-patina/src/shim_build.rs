@@ -1047,7 +1047,7 @@ pub(super) fn stage_instrumentation_object(
         "none"
     };
     let note = format!(
-        "PATINA_NATIVE_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
+        "PATINA_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
 mode={} scheduler-hook={scheduler_hook} fingerprint-suffix={} -- {}",
         instrumentation.mode_tag(),
         instrumentation.fingerprint_suffix(),

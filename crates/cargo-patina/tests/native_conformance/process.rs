@@ -85,7 +85,7 @@ fn build_probes() -> Vec<PathBuf> {
     );
     let patina = PathBuf::from(common::native::assert_unique_line_payload(
         &built.stdout,
-        "PATINA_NATIVE_BUILD output=",
+        "PATINA_BUILD output=",
     ));
     vec![
         named_like_the_guest(

@@ -55,7 +55,7 @@ pub fn native_escape_is_go_build_marker(escape: &NativeEscape) -> bool {
 /// The Go build-marker sites in a native binary, with provenance; see
 /// [`native_host_identity_sites`], whose contract this shares.
 pub fn native_go_build_marker_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     NativeFormat::from_binary(file.format())?;
     let provenance = NativeProvenanceIndex::new(&file);
     Ok(scan_instruction_classes(&file, &provenance)?
@@ -83,7 +83,7 @@ pub fn native_escape_is_host_identity(escape: &NativeEscape) -> bool {
 /// instruction scan cannot decode: a binary that cannot be scanned must never be
 /// reported as carrying no host-identity reads.
 pub fn native_host_identity_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     NativeFormat::from_binary(file.format())?;
     let provenance = NativeProvenanceIndex::new(&file);
     Ok(scan_instruction_classes(&file, &provenance)?
@@ -105,10 +105,10 @@ pub fn native_host_identity_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, Tar
 /// an instruction running over the next symbol is itself a finding. Fails
 /// closed on a parse error or an architecture the scan cannot decode.
 pub fn relocatable_raw_opcode_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     let architecture = file.architecture();
     if !matches!(architecture, Architecture::Aarch64 | Architecture::X86_64) {
-        return Err(TargetError::UnsupportedNativeArchitecture(architecture));
+        return Err(TargetError::UnsupportedArchitecture(architecture));
     }
     let provenance = NativeProvenanceIndex::new(&file);
     let mut entries: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
@@ -124,7 +124,7 @@ pub fn relocatable_raw_opcode_sites(bytes: &[u8]) -> Result<Vec<NativeEscape>, T
     }
     let mut escapes = Vec::new();
     for section in file.sections().filter(holds_instructions) {
-        let data = section.data().map_err(TargetError::NativeParse)?;
+        let data = section.data().map_err(TargetError::Parse)?;
         let name = section.name().unwrap_or("<text>");
         let address = section.address();
         let mut starts = BTreeSet::from([0]);
@@ -277,14 +277,14 @@ pub(super) fn scan_instruction_ranges(
     let architecture = file.architecture();
     match architecture {
         Architecture::Aarch64 | Architecture::X86_64 => {}
-        _ => return Err(TargetError::UnsupportedNativeArchitecture(architecture)),
+        _ => return Err(TargetError::UnsupportedArchitecture(architecture)),
     }
     let mut escapes = Vec::new();
     for section in file.sections() {
         if section.kind() != SectionKind::Text {
             continue;
         }
-        let data = section.data().map_err(TargetError::NativeParse)?;
+        let data = section.data().map_err(TargetError::Parse)?;
         let name = section.name().unwrap_or("<text>");
         match architecture {
             Architecture::Aarch64 => {

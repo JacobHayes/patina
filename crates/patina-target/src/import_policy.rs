@@ -18,7 +18,7 @@ impl NativeFormat {
         match format {
             BinaryFormat::MachO => Ok(Self::MachO),
             BinaryFormat::Elf => Ok(Self::Elf),
-            _ => Err(TargetError::UnsupportedNativeFormat(format)),
+            _ => Err(TargetError::UnsupportedFormat(format)),
         }
     }
 }

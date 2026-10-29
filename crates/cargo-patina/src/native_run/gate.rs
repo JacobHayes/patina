@@ -231,7 +231,7 @@ fn judge(
             }
             return Ok(Vec::new());
         }
-        Err(TargetError::UnsupportedNativeImports(denied)) => denied,
+        Err(TargetError::UnsupportedImports(denied)) => denied,
         // A binary we cannot even parse/format-check must never run.
         Err(other) => {
             return Err(CliError(format!(

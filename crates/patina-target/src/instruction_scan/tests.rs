@@ -148,7 +148,7 @@ fn refuses_binaries_of_undecodable_architectures() {
         let provenance = NativeProvenanceIndex::new(&parsed);
         let scan = scan_instruction_classes(&parsed, &provenance);
         assert!(
-            matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
+            matches!(scan, Err(TargetError::UnsupportedArchitecture(_))),
             "{label}: scan must refuse an undecodable arch, got {scan:?}"
         );
 
@@ -156,8 +156,8 @@ fn refuses_binaries_of_undecodable_architectures() {
         let err = NativeAudit::audit(&elf, &BTreeSet::new())
             .expect_err("audit must fail closed on an undecodable arch");
         assert!(
-            matches!(err, TargetError::UnsupportedNativeArchitecture(_)),
-            "{label}: audit error must be UnsupportedNativeArchitecture, got {err:?}"
+            matches!(err, TargetError::UnsupportedArchitecture(_)),
+            "{label}: audit error must be UnsupportedArchitecture, got {err:?}"
         );
         let message = err.to_string();
         assert!(
@@ -187,7 +187,7 @@ fn scans_supported_arch_binary_without_arch_refusal() {
         let provenance = NativeProvenanceIndex::new(&parsed);
         let scan = scan_instruction_classes(&parsed, &provenance);
         assert!(
-            !matches!(scan, Err(TargetError::UnsupportedNativeArchitecture(_))),
+            !matches!(scan, Err(TargetError::UnsupportedArchitecture(_))),
             "{label}: a supported arch must not be refused by the arch guard, got {scan:?}"
         );
         // The .text here is all-zero, which decodes to no forbidden opcode on
@@ -254,7 +254,7 @@ fn cpuid_sites_are_reported_without_refusing_the_binary() {
         minimal_executable_elf64(EM_X86_64, &[0x0f, 0xa2, 0x0f, 0x31, 0xc3, 0x90, 0x90, 0x90]);
     let error = NativeAudit::audit(&with_rdtsc, &BTreeSet::new())
         .expect_err("an rdtsc site still fails closed");
-    let TargetError::UnsupportedNativeImports(denied) = error else {
+    let TargetError::UnsupportedImports(denied) = error else {
         panic!("expected an unsupported-imports refusal, got {error:?}");
     };
     assert_eq!(
@@ -353,8 +353,7 @@ fn aarch64_thread_pointer_write_is_refused_by_name() {
         0xd51b_d0bf, // msr tpidr2_el0, xzr
     ]);
     let elf = minimal_executable_elf64(EM_AARCH64, &text);
-    let Err(TargetError::UnsupportedNativeImports(denied)) =
-        NativeAudit::audit(&elf, &BTreeSet::new())
+    let Err(TargetError::UnsupportedImports(denied)) = NativeAudit::audit(&elf, &BTreeSet::new())
     else {
         panic!("a thread-pointer write must refuse the binary");
     };

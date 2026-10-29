@@ -153,7 +153,7 @@ fn parse_format(value: &str) -> Result<OutputFormat, CliError> {
 
 /// Emit a verb's envelope for the audit path: the findings are the flagged
 /// imports.
-pub fn emit_audit_with_details(
+pub fn emit_audit(
     verb: &str,
     family: &str,
     artifact: &str,

@@ -48,7 +48,7 @@ mod tests {
             ],
         );
         assert!(
-            String::from_utf8_lossy(&built.stdout).contains("PATINA_NATIVE_BUILD"),
+            String::from_utf8_lossy(&built.stdout).contains("PATINA_BUILD output="),
             "missing build marker:\n{}",
             String::from_utf8_lossy(&built.stdout)
         );
@@ -270,7 +270,7 @@ exit "$status"
             ],
         );
         assert!(
-            String::from_utf8_lossy(&built.stdout).contains("PATINA_NATIVE_BUILD"),
+            String::from_utf8_lossy(&built.stdout).contains("PATINA_BUILD output="),
             "missing build marker:\n{}",
             String::from_utf8_lossy(&built.stdout)
         );

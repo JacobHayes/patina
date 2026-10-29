@@ -183,7 +183,7 @@ fn a_defined_weak_symbol_keeps_the_full_classification_path() {
     );
     let error = NativeAudit::audit(&bytes, &BTreeSet::new())
         .expect_err("a weak symbol the closure DEFINES must not be treated as inert");
-    let TargetError::UnsupportedNativeImports(denied) = error else {
+    let TargetError::UnsupportedImports(denied) = error else {
         panic!("expected an unsupported-import refusal, got {error:?}");
     };
     assert_eq!(denied.len(), 1);
@@ -195,7 +195,7 @@ fn a_defined_weak_symbol_keeps_the_full_classification_path() {
     let bytes = elf_with_symbol_bindings(&[("host_side_door", false, false)], &[]);
     let error = NativeAudit::audit(&bytes, &BTreeSet::new())
         .expect_err("a strong undefined import must still refuse");
-    let TargetError::UnsupportedNativeImports(denied) = error else {
+    let TargetError::UnsupportedImports(denied) = error else {
         panic!("expected an unsupported-import refusal, got {error:?}");
     };
     assert_eq!(denied[0].symbol, "host_side_door");
@@ -223,7 +223,7 @@ fn a_weak_undefined_import_of_a_classified_escape_still_refuses() {
         let error = NativeAudit::audit(&bytes, &BTreeSet::new()).expect_err(
             "a weak reference to a symbol the loaded libraries define must still refuse",
         );
-        let TargetError::UnsupportedNativeImports(denied) = error else {
+        let TargetError::UnsupportedImports(denied) = error else {
             panic!("expected an unsupported-import refusal, got {error:?}");
         };
         assert_eq!(denied[0].symbol, symbol);
@@ -586,7 +586,7 @@ fn a_versioned_import_the_executable_exports_binds_to_its_definition() {
     );
     let error = NativeAudit::audit(&not_exported, &BTreeSet::new())
         .expect_err("with no definition of its own the import reaches glibc");
-    let TargetError::UnsupportedNativeImports(denied) = error else {
+    let TargetError::UnsupportedImports(denied) = error else {
         panic!("{error:?}");
     };
     assert!(
@@ -611,10 +611,7 @@ fn a_dynamic_version_table_without_its_section_is_unauditable() {
     retype_section(&mut bytes, 4, SHT_PROGBITS);
     let error = NativeAudit::audit(&bytes, &BTreeSet::new())
         .expect_err("a version table hidden from the audit must refuse");
-    assert!(
-        matches!(error, TargetError::UnauditableNativeElf),
-        "{error:?}"
-    );
+    assert!(matches!(error, TargetError::UnauditableElf), "{error:?}");
 }
 
 // An exact `--allow name@version` clears one specific finding, leaving the

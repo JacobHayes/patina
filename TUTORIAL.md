@@ -71,7 +71,7 @@ the program behaves normally and ships with the instrumentation inert.
 
 ```
 $ cargo patina build ./ledger --output ./ledger/ledger
-PATINA_NATIVE_BUILD output=./ledger/ledger
+PATINA_BUILD output=./ledger/ledger
 ```
 
 `build` links the deterministic shim below your program and injects the cfgs that
@@ -266,7 +266,7 @@ deterministically:
 
 ```
 $ cargo patina build ./resolver.rs --output ./resolver
-PATINA_NATIVE_BUILD output=./resolver
+PATINA_BUILD output=./resolver
 
 $ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5
 PATINA_RESULT ok=1 db.internal=10.0.0.5

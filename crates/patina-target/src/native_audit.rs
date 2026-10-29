@@ -32,14 +32,14 @@ impl NativeAudit {
     /// Audit native imports and reject every symbol that is not explicitly
     /// caller-allowed or classified as safe for the binary's native format.
     pub fn audit(bytes: &[u8], allow: &BTreeSet<String>) -> Result<Self, TargetError> {
-        let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+        let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
         let format = NativeFormat::from_binary(file.format())?;
         if unauditable_elf(&file) {
-            return Err(TargetError::UnauditableNativeElf);
+            return Err(TargetError::UnauditableElf);
         }
         let mut imports = file
             .imports()
-            .map_err(TargetError::NativeParse)?
+            .map_err(TargetError::Parse)?
             .into_iter()
             .map(|import| String::from_utf8_lossy(import.name()).into_owned())
             .collect::<Vec<_>>();
@@ -106,7 +106,7 @@ impl NativeAudit {
             denied.extend(versioned_bypass_escapes(&file, allow, &provenance_of));
         }
         if !denied.is_empty() {
-            return Err(TargetError::UnsupportedNativeImports(denied));
+            return Err(TargetError::UnsupportedImports(denied));
         }
         Ok(Self {
             imports,

@@ -206,7 +206,7 @@ pub(super) fn execute_native_build(invocation: NativeBuildInvocation) -> Result<
     if output::options().is_json() {
         output::emit_build("native", &path);
     } else {
-        println!("PATINA_NATIVE_BUILD output={}", path.display());
+        println!("PATINA_BUILD output={}", path.display());
     }
     Ok(0)
 }

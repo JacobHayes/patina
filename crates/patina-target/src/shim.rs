@@ -29,7 +29,7 @@ const SHIM_CONTROL_PLANE_MARKER: &str = "patina_init_from_env";
 /// Fails closed on a parse error or an unsupported binary format so a
 /// malformed/foreign input is never silently treated as shim-linked.
 pub fn native_binary_is_shim_linked(bytes: &[u8]) -> Result<bool, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     // Reject non-native formats up front; the marker only means anything for a
     // Mach-O/ELF native binary.
     NativeFormat::from_binary(file.format())?;
@@ -58,7 +58,7 @@ const SUD_DISPATCH_MARKER: &str = "patina_sud_dispatch";
 /// is the second condition; see `cargo-patina`). Fails closed on a parse error
 /// or unsupported format, so a malformed input is never treated as SUD-capable.
 pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     NativeFormat::from_binary(file.format())?;
     Ok(file.symbols().chain(file.dynamic_symbols()).any(|symbol| {
         symbol.is_definition()
@@ -103,7 +103,7 @@ const TSC_TRAP_MARKER: &str = "patina_tsc_dispatch";
 /// condition; see `cargo-patina`). Fails closed on a parse error or unsupported
 /// format, so a malformed input is never treated as trap-capable.
 pub fn native_binary_has_tsc_marker(bytes: &[u8]) -> Result<bool, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     NativeFormat::from_binary(file.format())?;
     Ok(file.symbols().chain(file.dynamic_symbols()).any(|symbol| {
         symbol.is_definition()
@@ -271,7 +271,7 @@ pub struct NativeDenyTrap {
 /// platform-correct subset falls out for free. Fails closed on a parse error or a
 /// non-native format (a foreign input is never reported as clean).
 pub fn native_deny_trap_armed(bytes: &[u8]) -> Result<Vec<NativeDenyTrap>, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     // Only a native (Mach-O/ELF) binary carries these; refuse a foreign format so
     // it is never silently treated as carrying no armed surface.
     NativeFormat::from_binary(file.format())?;
@@ -337,7 +337,7 @@ pub fn native_missing_live_interposers(
     bytes: &[u8],
     required: &[&str],
 ) -> Result<Vec<String>, TargetError> {
-    let file = object::File::parse(bytes).map_err(TargetError::NativeParse)?;
+    let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
     NativeFormat::from_binary(file.format())?;
     let defined: BTreeSet<String> = file
         .symbols()

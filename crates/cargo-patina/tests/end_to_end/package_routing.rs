@@ -173,7 +173,7 @@ mod tests {
         let built = directory.path().join("built-in-place");
         let build = invoke(&pkg, &["build", ".", "--output", built.to_str().unwrap()]);
         assert!(
-            String::from_utf8_lossy(&build.stdout).contains("PATINA_NATIVE_BUILD")
+            String::from_utf8_lossy(&build.stdout).contains("PATINA_BUILD output=")
                 && built.is_file(),
             "`build .` from the package CWD failed:\nstderr:\n{}",
             String::from_utf8_lossy(&build.stderr)
