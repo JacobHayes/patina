@@ -11,12 +11,14 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
-/// How a crashing run is supervised: what its crash takes down, the seed its
-/// handoff seal key derives from, and what each incarnation's trace channel
-/// carries.
+/// How a crashing run is supervised: the crash kinds it may take, the seed
+/// its handoff seal key derives from, and what each incarnation's trace
+/// channel carries.
 #[cfg(unix)]
 pub(super) struct CrashRestartPlan {
-    kind: CrashKind,
+    /// The kinds a crash may be: those whose rate is live, or a replay's
+    /// recorded one.
+    kinds: Vec<CrashKind>,
     seed: u64,
     trace: CrashRestartTrace,
 }
@@ -33,10 +35,11 @@ enum CrashRestartTrace {
 }
 
 /// The crash-restart plan for a native run, or `None` when the run takes no
-/// crash. A seeded or record run is supervised when `--crash-permille` gives
-/// it a crash rate, whether or not a crash then lands; a replay is
-/// supervised when its trace records a crash, and replays that crash where
-/// the recording took it, never drawing one of its own.
+/// crash. A seeded or record run is supervised when either crash rate
+/// (`--machine-crash-permille`, `--process-crash-permille`) is live, whether
+/// or not a crash then lands; a replay is supervised when its trace records a
+/// crash, and replays that crash where the recording took it, never drawing
+/// one of its own.
 #[cfg(unix)]
 pub(super) fn crash_restart_plan(
     invocation: &NativeRunInvocation,
@@ -52,26 +55,28 @@ pub(super) fn crash_restart_plan(
         (NativeRunMode::Seeded { seed }, _) => (*seed, CrashRestartTrace::Seeded),
         (NativeRunMode::Record { seed, .. }, _) => (*seed, CrashRestartTrace::Record),
     };
-    let Some(permille) = invocation.knobs.get(FaultKnob::CrashPermille).first() else {
-        return Ok(None);
-    };
-    let permille: u16 = permille.parse().map_err(|_| {
-        CliError::usage(format!(
-            "--crash-permille expects 0..=1000, got {permille:?}"
-        ))
-    })?;
-    if permille == 0 {
+    let mut kinds = Vec::new();
+    for (knob, kind) in [
+        (FaultKnob::MachineCrashPermille, CrashKind::Machine),
+        (FaultKnob::ProcessCrashPermille, CrashKind::Process),
+    ] {
+        let Some(permille) = invocation.knobs.get(knob).first() else {
+            continue;
+        };
+        let permille: u16 = permille.parse().map_err(|_| {
+            CliError::usage(format!(
+                "{} expects 0..=1000, got {permille:?}",
+                knob.meta().flag
+            ))
+        })?;
+        if permille > 0 {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
         return Ok(None);
     }
-    let kind = match invocation.knobs.get(FaultKnob::CrashKind).first() {
-        None => CrashKind::default(),
-        Some(text) => CrashKind::parse(text).ok_or_else(|| {
-            CliError::usage(format!(
-                "--crash-kind expects process or machine, got {text:?}"
-            ))
-        })?,
-    };
-    Ok(Some(CrashRestartPlan { kind, seed, trace }))
+    Ok(Some(CrashRestartPlan { kinds, seed, trace }))
 }
 
 #[cfg(unix)]
@@ -85,9 +90,8 @@ fn crash_restart_replay_plan(
     let Some(segments) = segments else {
         return Ok(None);
     };
-    let kind = bundle.metadata.faults.crash_kind;
     Ok(Some(CrashRestartPlan {
-        kind,
+        kinds: vec![segments.kind],
         seed: bundle.metadata.root_seed,
         trace: CrashRestartTrace::Replay(Box::new(segments)),
     }))
@@ -102,6 +106,9 @@ pub(super) struct IncarnationLaunch<'a> {
     pub(super) trace: Option<&'a fs::File>,
     /// Incarnation 0's crash handoff channel and its seal key (hex).
     pub(super) handoff: Option<(&'a fs::File, &'a str)>,
+    /// The kind of the crash a replayed incarnation 0 ends in
+    /// (`ENV_REPLAY_CRASH_KIND`).
+    pub(super) replayed_crash: Option<CrashKind>,
     /// Incarnation 0's crash-report pipe (`ENV_CRASH_REPORT_FD`).
     pub(super) crash_report: Option<&'a std::io::PipeWriter>,
     /// What a restarted incarnation boots from, from the crashed one's handoff.
@@ -171,7 +178,7 @@ fn crash_replay_divergence(
 fn crash_failed(
     mut first: output::Captured,
     first_host_pid: u32,
-    kind: CrashKind,
+    kind: Option<CrashKind>,
     reason: &str,
     trace: Option<Vec<u8>>,
 ) -> CrashRestartRun {
@@ -183,7 +190,7 @@ fn crash_failed(
         first.exit_code = 2;
     }
     let report = serde_json::json!({
-        "crash_kind": kind.name(),
+        "crash_kind": kind.map(CrashKind::name),
         "attempted": true,
         "reached": false,
         "crash_count": 0,
@@ -271,8 +278,11 @@ pub(super) fn supervise_crash_restart(
     plan: &CrashRestartPlan,
     mut launch: impl FnMut(IncarnationLaunch<'_>) -> Result<(output::Captured, u32), CliError>,
 ) -> Result<CrashRestartRun, CliError> {
-    let kind = plan.kind;
-    let key = crash_handoff_key(plan.seed, kind);
+    let key = crash_handoff_key(plan.seed);
+    let recorded_kind = match &plan.trace {
+        CrashRestartTrace::Replay(segments) => Some(segments.kind),
+        CrashRestartTrace::Seeded | CrashRestartTrace::Record => None,
+    };
     let key_hex = hex(&key);
     let handoff = scratch_file("crash-restart handoff channel", &[])?;
     let crashed_trace = match &plan.trace {
@@ -291,6 +301,7 @@ pub(super) fn supervise_crash_restart(
         incarnation: 0,
         trace: crashed_trace.as_ref(),
         handoff: Some((&handoff, &key_hex)),
+        replayed_crash: recorded_kind,
         crash_report: Some(&report_writer),
         restart: None,
     })?;
@@ -305,10 +316,16 @@ pub(super) fn supervise_crash_restart(
 
     if let Some(Err(reason)) = &attempt {
         let trace = read_record_segment(&plan.trace, crashed_trace.as_ref())?;
-        return Ok(crash_failed(first, first_host_pid, kind, reason, trace));
+        return Ok(crash_failed(
+            first,
+            first_host_pid,
+            recorded_kind,
+            reason,
+            trace,
+        ));
     }
     if attempt.is_none() {
-        if recorded_crash.is_some() {
+        if let Some(segments) = recorded_crash {
             let detail = format!(
                 "incarnation 0 exited with status {} before the recorded crash",
                 first.exit_code
@@ -316,13 +333,12 @@ pub(super) fn supervise_crash_restart(
             return Ok(crash_replay_divergence(
                 first,
                 first_host_pid,
-                kind,
+                segments.kind,
                 false,
                 &detail,
             ));
         }
         let report = serde_json::json!({
-            "crash_kind": kind.name(),
             "attempted": false,
             "reached": false,
             "crash_count": 0,
@@ -348,11 +364,13 @@ pub(super) fn supervise_crash_restart(
             verified.from_incarnation, verified.to_incarnation
         )));
     }
-    if verified.kind != kind {
+    let kind = verified.kind;
+    if !plan.kinds.contains(&kind) {
+        let expected: Vec<&str> = plan.kinds.iter().map(|kind| kind.name()).collect();
         return Err(CliError(format!(
             "PATINA_CRASH_INVALID_HANDOFF crash kind mismatch: expected {}, got {}",
-            kind.name(),
-            verified.kind.name()
+            expected.join(" or "),
+            kind.name()
         )));
     }
     let snapshot_digest = Sha256Digest(verified.snapshot_digest);
@@ -404,6 +422,7 @@ pub(super) fn supervise_crash_restart(
         incarnation: 1,
         trace: restarted_trace.as_ref(),
         handoff: None,
+        replayed_crash: None,
         crash_report: None,
         restart: Some(RestartBoot {
             snapshot: &snapshot,
@@ -494,6 +513,7 @@ fn join_recorded_incarnations(
     };
     let joined = CrashRestartSegments {
         crashed: crashed_bundle,
+        kind: handoff.kind,
         snapshot_digest: Sha256Digest(handoff.snapshot_digest),
         restarted: restarted_bundle,
     }
@@ -550,14 +570,13 @@ fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
     }
 }
 
-/// The handoff seal key: a function of the run's seed and crash kind, so the
-/// record and the replay of one run derive the same key.
+/// The handoff seal key: a function of the run's seed, so the record and the
+/// replay of one run derive the same key.
 #[cfg(unix)]
-fn crash_handoff_key(seed: u64, kind: CrashKind) -> [u8; 32] {
+fn crash_handoff_key(seed: u64) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"patina-native-crash-restart-handoff-key/v2");
+    hasher.update(b"patina-native-crash-restart-handoff-key/v3");
     hasher.update(seed.to_le_bytes());
-    hasher.update(kind.name().as_bytes());
     hasher.finalize().into()
 }
 

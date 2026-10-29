@@ -122,14 +122,14 @@ fn cargo_family_parses_fault_knobs_and_explore_run_native() {
     // The Cargo family accepts the seed-driven fault knobs on run/test.
     let parsed = invocation(&[
         "run",
-        "--crash-permille",
+        "--process-crash-permille",
         "2",
         "--net-drop-permille",
         "300",
         "--",
         "app-arg",
     ]);
-    assert_eq!(parsed.knobs.get(FaultKnob::CrashPermille), ["2"]);
+    assert_eq!(parsed.knobs.get(FaultKnob::ProcessCrashPermille), ["2"]);
     assert_eq!(parsed.knobs.get(FaultKnob::NetDropPermille), ["300"]);
     // The `--` tail is forwarded to Cargo, unaffected by fault parsing.
     assert_eq!(parsed.cargo_args, strings(&["--", "app-arg"]));

@@ -115,7 +115,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         return Err(CliError::usage(
             "the crash fault plane and --starve cannot be combined: native crash restart is not \
              implemented under --starve, so every generation would be refused; drop crash from \
-             --faults or exclude --crash-permille",
+             --faults or exclude both crash rates",
         ));
     }
 

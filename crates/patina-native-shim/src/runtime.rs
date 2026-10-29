@@ -955,7 +955,7 @@ fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
 /// The durable base image handed to `RuntimeBuilder::with_fs_image`: an empty
 /// `MemFs`, or the decoded `--mount` corpus. The runtime — not the shim —
 /// wraps this in the config-driven `CrashFs` at its single choke point, so a
-/// parsed crash knob (`--crash-permille`, `--crash-kind`) can never be
+/// parsed crash knob (`--machine-crash-permille`, `--process-crash-permille`) can never be
 /// dropped by a filesystem the shim pre-installed outside the fault config.
 pub(crate) fn fs_image_base() -> Result<MemFs, RuntimeError> {
     let restart_fd = control_restart_snapshot_fd()?;
@@ -1127,6 +1127,15 @@ pub(crate) fn runtime_config_from_control_plane()
     config = config.with_incarnation(incarnation_from_control()?);
     if control_handoff_fd()?.is_some() {
         config = config.with_crash_supervisor();
+    }
+    if let Some(kind) = control_env(patina_dst_runtime::ENV_REPLAY_CRASH_KIND) {
+        let kind = patina_dst_runtime::CrashKind::parse(&kind).ok_or_else(|| {
+            RuntimeError::Config(format!(
+                "{} must be machine or process; got {kind:?}",
+                patina_dst_runtime::ENV_REPLAY_CRASH_KIND
+            ))
+        })?;
+        config = config.with_replayed_crash_kind(kind);
     }
     if let Some(value) = control_env(patina_dst_runtime::ENV_PARAMS_JSON) {
         let params: BTreeMap<String, String> = serde_json::from_str(&value).map_err(|error| {

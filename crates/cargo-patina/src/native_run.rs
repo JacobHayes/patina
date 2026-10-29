@@ -413,7 +413,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
         return Err(CliError::usage(
-            "native --crash-permille crash-restart with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
+            "native crash-restart (--machine-crash-permille, --process-crash-permille) with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
         ));
     }
 
@@ -558,6 +558,9 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
                 .env(patina_dst_runtime::ENV_HANDOFF_KEY, key);
             fds.push(file.as_raw_fd());
         }
+        if let Some(kind) = launch.replayed_crash {
+            command.env(patina_dst_runtime::ENV_REPLAY_CRASH_KIND, kind.name());
+        }
         if let Some(pipe) = launch.crash_report {
             command.env(
                 patina_dst_runtime::ENV_CRASH_REPORT_FD,
@@ -626,6 +629,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
             incarnation: 0,
             trace,
             handoff: None,
+            replayed_crash: None,
             crash_report: None,
             restart: None,
         })?;

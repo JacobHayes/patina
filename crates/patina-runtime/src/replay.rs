@@ -46,8 +46,8 @@ pub(super) fn dns_record(config: &RuntimeConfig) -> Option<patina_dst_trace::Dns
 /// it as well.
 pub(super) fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultConfigRecord {
     patina_dst_trace::FaultConfigRecord {
-        crash_permille: config.faults.crash.permille,
-        crash_kind: config.faults.crash.kind,
+        machine_crash_permille: config.faults.crash.machine_permille,
+        process_crash_permille: config.faults.crash.process_permille,
         fs_error_permille: config.faults.fs.error_permille,
         fs_error_at: config
             .faults
@@ -91,8 +91,8 @@ pub(super) fn fault_config_from_record(
         .collect::<Result<_, _>>()?;
     Ok(FaultConfig {
         crash: CrashFaultConfig {
-            permille: record.crash_permille,
-            kind: record.crash_kind,
+            machine_permille: record.machine_crash_permille,
+            process_permille: record.process_crash_permille,
         },
         fs: FsFaultConfig {
             error_permille: record.fs_error_permille,
@@ -655,12 +655,11 @@ mod tests {
 
     #[test]
     fn reconcile_replay_faults_enforces_the_authoritative_trace_contract() {
-        use patina_dst_abi::CrashKind;
         use patina_dst_trace::FaultConfigRecord;
 
         let stored = FaultConfigRecord {
-            crash_permille: 7,
-            crash_kind: CrashKind::Process,
+            machine_crash_permille: 7,
+            process_crash_permille: 3,
             fs_error_permille: 111,
             fs_short_permille: 222,
             net_latency_nanos: 500,
@@ -670,23 +669,23 @@ mod tests {
         // Flag-free replay adopts the stored configuration verbatim, so replay is
         // byte-identical without any knobs.
         let faults = reconcile_replay_faults(&RuntimeConfig::seeded(0), &stored).unwrap();
-        assert_eq!(faults.crash.permille, 7);
-        assert_eq!(faults.crash.kind, CrashKind::Process);
+        assert_eq!(faults.crash.machine_permille, 7);
+        assert_eq!(faults.crash.process_permille, 3);
         assert_eq!(faults.fs.error_permille, 111);
         assert_eq!(faults.fs.short_permille, 222);
         assert_eq!(faults.net.latency_nanos, 500);
 
         // Explicit knobs that MATCH the recording are accepted.
         let matching = RuntimeConfig::seeded(0)
-            .with_crash_permille(7)
-            .with_crash_kind(CrashKind::Process)
+            .with_machine_crash_permille(7)
+            .with_process_crash_permille(3)
             .with_fs_error_permille(111)
             .with_fs_short_permille(222)
             .with_net_latency_nanos(500);
         reconcile_replay_faults(&matching, &stored).unwrap();
 
         // Explicit knobs that DIVERGE fail closed before any driver is built.
-        let mismatched = RuntimeConfig::seeded(0).with_crash_permille(8);
+        let mismatched = RuntimeConfig::seeded(0).with_process_crash_permille(8);
         assert!(matches!(
             reconcile_replay_faults(&mismatched, &stored),
             Err(RuntimeError::Config(_))

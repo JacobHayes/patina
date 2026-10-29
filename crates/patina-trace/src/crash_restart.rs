@@ -17,6 +17,8 @@
 
 use std::collections::BTreeSet;
 
+use patina_dst_abi::CrashKind;
+
 use crate::{
     BuggifyConfigRecord, LifecycleEvent, LifecycleEventKind, MAIN_TIMELINE, RunMetadata,
     Sha256Digest, Timeline, TraceBundle, TraceError, TraceEvent,
@@ -28,6 +30,8 @@ pub struct CrashRestartSegments {
     /// Incarnation 0's own linear trace, ending with the operation the crash
     /// followed.
     pub crashed: TraceBundle,
+    /// What the crash took down.
+    pub kind: CrashKind,
     /// Digest of the recovered filesystem snapshot incarnation 1 started from:
     /// the handoff's domain-separated snapshot digest
     /// ([`crate::VerifiedIncarnationHandoff::snapshot_digest`]).
@@ -83,6 +87,7 @@ impl CrashRestartSegments {
                 order: crash_order,
                 kind: LifecycleEventKind::Crash {
                     incarnation: 0,
+                    crash_kind: self.kind,
                     snapshot_digest: digest.clone(),
                 },
             },
@@ -142,7 +147,7 @@ impl TraceBundle {
                     .into(),
             ));
         };
-        let digest = match main.lifecycle.as_slice() {
+        let (kind, digest) = match main.lifecycle.as_slice() {
             [
                 LifecycleEvent {
                     kind: LifecycleEventKind::Start { incarnation: 0 },
@@ -152,6 +157,7 @@ impl TraceBundle {
                     kind:
                         LifecycleEventKind::Crash {
                             incarnation: 0,
+                            crash_kind,
                             snapshot_digest,
                         },
                     ..
@@ -173,7 +179,7 @@ impl TraceBundle {
                     kind: LifecycleEventKind::End { incarnation: 1 },
                     ..
                 },
-            ] => Sha256Digest::parse(snapshot_digest)?,
+            ] => (*crash_kind, Sha256Digest::parse(snapshot_digest)?),
             _ => {
                 return Err(TraceError::Invalid(
                     "a crash-restart trace must record exactly Start(0), Crash(0), \
@@ -196,6 +202,7 @@ impl TraceBundle {
         };
         Ok(Some(CrashRestartSegments {
             crashed: segment(0),
+            kind,
             snapshot_digest: digest,
             restarted: segment(1),
         }))
@@ -328,6 +335,7 @@ mod tests {
         let metadata = RunMetadata::new(7, "fingerprint", 0, "patina");
         CrashRestartSegments {
             crashed: segment(&metadata, 0, &[b"before", b"trigger"]),
+            kind: CrashKind::Process,
             snapshot_digest: DIGEST,
             restarted: segment(&metadata, 1, &[b"after"]),
         }
@@ -363,6 +371,7 @@ mod tests {
                     order: 3,
                     kind: LifecycleEventKind::Crash {
                         incarnation: 0,
+                        crash_kind: CrashKind::Process,
                         snapshot_digest: digest.clone(),
                     },
                 },

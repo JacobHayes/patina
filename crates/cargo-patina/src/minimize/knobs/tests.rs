@@ -8,8 +8,8 @@ fn knobs_split_on_the_run_registry_arity_not_on_leading_dashes() {
         "--swarm".to_string(),
         "--fs-short-permille".to_string(),
         "122".to_string(),
-        "--crash-kind".to_string(),
-        "process".to_string(),
+        "--machine-crash-permille".to_string(),
+        "5".to_string(),
         "--dns-entry".to_string(),
         "workq-server=127.0.0.1".to_string(),
     ];
@@ -19,7 +19,7 @@ fn knobs_split_on_the_run_registry_arity_not_on_leading_dashes() {
         vec![
             "--swarm",
             "--fs-short-permille 122",
-            "--crash-kind process",
+            "--machine-crash-permille 5",
             "--dns-entry workq-server=127.0.0.1",
         ]
     );

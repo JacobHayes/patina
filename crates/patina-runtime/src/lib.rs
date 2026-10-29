@@ -57,7 +57,7 @@
 //! (seed, record/replay mode, fault knobs, buggify, schedule exploration,
 //! liveness watchdogs). `cargo patina run`/`test` set exactly these variables
 //! from its CLI flags, so an in-process test picks up `--seed`, `--record`,
-//! `--crash-permille`, and friends with no extra plumbing. With nothing set, the
+//! `--machine-crash-permille`, and friends with no extra plumbing. With nothing set, the
 //! default is a seeded run with seed 0. For full control, build a
 //! [`RuntimeConfig`] directly (e.g. [`RuntimeConfig::seeded`]) and hand it to a
 //! [`RuntimeBuilder`], which can also swap individual drivers.
@@ -373,14 +373,18 @@ pub const ENV_SLEEP_JITTER: &str = "PATINA_RT_SLEEP_JITTER_NANOS";
 
 /// Seeded per-mille chance (0..=1000) that each crash point — a completed
 /// operation with an effect a crash could cut short — is where a supervised
-/// native run crashes and restarts. Off (zero) when unset.
-pub const ENV_CRASH_PERMILLE: &str = "PATINA_RT_CRASH_PERMILLE";
+/// native run's machine goes down and restarts. Off (zero) when unset.
+pub const ENV_MACHINE_CRASH_PERMILLE: &str = "PATINA_RT_MACHINE_CRASH_PERMILLE";
 
-/// What the crash takes down: `process` (the page cache survives, so unsynced
-/// writes are still there after the restart) or `machine` (the default: only
-/// durable state is certain to survive). Only meaningful alongside
-/// [`ENV_CRASH_PERMILLE`].
-pub const ENV_CRASH_KIND: &str = "PATINA_RT_CRASH_KIND";
+/// Seeded per-mille chance (0..=1000) that a crash point the machine survived
+/// is where the process dies and restarts, its page cache intact. Off (zero)
+/// when unset.
+pub const ENV_PROCESS_CRASH_PERMILLE: &str = "PATINA_RT_PROCESS_CRASH_PERMILLE";
+
+/// The kind of the crash a replayed first incarnation ends in, as the trace's
+/// `Crash` marker recorded it (`machine` or `process`). Only the native
+/// supervisor sets it, for the incarnation that replays up to the crash.
+pub const ENV_REPLAY_CRASH_KIND: &str = "PATINA_RT_REPLAY_CRASH_KIND";
 
 /// Seeded filesystem error probability in per-mille (0..=1000), applied to
 /// eligible filesystem operations by the default `FaultFs` wrapper. Off (zero)

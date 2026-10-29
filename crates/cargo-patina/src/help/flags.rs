@@ -77,14 +77,14 @@ enum KnobGroup {
 // Every new runtime knob must declare its CLI grammar, prose and group here.
 const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
     let (value, doc, group) = match knob {
-        FaultKnob::CrashPermille => (
+        FaultKnob::MachineCrashPermille => (
             Value::Required("N", Kind::Permille),
-            "Native only: crash at N per-mille after each successful side-effecting op (fs write, sync, close, rename, unlink, ..., net send); the first hit terminates the process and restarts it once from the image the crash leaves. Records and replays across both incarnations.",
+            "Native only: take the machine down at N per-mille after each successful op a peer or the disk sees (fs write, sync, close, rename, unlink, ..., net send, TCP connect/accept/close). Only what the disk holds survives; the run restarts once from that image. Drawn before --process-crash-permille; records and replays across both incarnations.",
             KnobGroup::Fault,
         ),
-        FaultKnob::CrashKind => (
-            Value::Required("process|machine", Kind::Enum(&["process", "machine"])),
-            "What --crash-permille's crash takes down: process (the page cache survives, so unsynced writes are kept) or machine (default: each unsynced block may be lost, and every name change whose directory was not fsynced is).",
+        FaultKnob::ProcessCrashPermille => (
+            Value::Required("N", Kind::Permille),
+            "Native only: kill the process at N per-mille at each such op the machine survived. The page cache survives, so every completed write is kept; the run restarts once.",
             KnobGroup::Fault,
         ),
         FaultKnob::FsErrorPermille => (

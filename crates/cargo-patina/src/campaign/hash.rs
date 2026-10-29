@@ -74,10 +74,10 @@ claims! {
     /// the gate is unconditionally open, which is what keeps the default sweep
     /// unchanged.
     STARVE_FIRE = 32,
-    /// The per-crash-point crash rate, as a power of two.
-    CRASH_PERMILLE = 33,
-    /// Whether the crash takes down the process or the machine.
-    CRASH_KIND = 34,
+    /// The per-crash-point machine-crash rate, as a power of two.
+    MACHINE_CRASH = 33,
+    /// The per-crash-point process-crash rate, as a power of two.
+    PROCESS_CRASH = 34,
 }
 pub(super) use Claim::*;
 

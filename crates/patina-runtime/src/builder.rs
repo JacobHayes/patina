@@ -547,7 +547,7 @@ impl RuntimeBuilder {
         // `config.faults` — the single choke point that always consumes the
         // parsed crash knobs. Callers pass the durable base image via
         // `with_fs_image`; they must not pre-install the final filesystem, so a
-        // knob like `--crash-kind` can never be silently dropped by a
+        // knob like `--machine-crash-permille` can never be silently dropped by a
         // filesystem that bypassed the fault config (the gap this replaced).
         let fs_fault_knobs_set = self.config.faults.crash != Default::default()
             || self.config.faults.fs.error_permille != 0
@@ -560,7 +560,7 @@ impl RuntimeBuilder {
             if fs_fault_knobs_set {
                 return Err(RuntimeError::Config(
                     "a filesystem was installed explicitly while filesystem fault \
-                     knobs (--crash-permille / --crash-kind / --fs-error-permille / \
+                     knobs (--machine-crash-permille / --process-crash-permille / --fs-error-permille / \
                      --fs-error-at / --fs-short-permille) are set; those \
                      knobs would be silently ignored. Supply the durable image via \
                      RuntimeBuilder::with_fs_image so the runtime builds the \
@@ -577,7 +577,7 @@ impl RuntimeBuilder {
             }
         }
         // The base image is ALWAYS wrapped in a config-driven `CrashFs`,
-        // whether or not `--crash-permille` is set: a `CrashFs` is crashable,
+        // whether or not a crash rate is set: a `CrashFs` is crashable,
         // so imperative callers that trigger `fs_crash()` manually (the C-ABI
         // `patina_init_crash` path) work, while a bare `MemFs` cannot crash.
         // An un-crashed `CrashFs` reads/writes identically to its inner `MemFs`
@@ -687,23 +687,34 @@ impl RuntimeBuilder {
             execution,
             Execution::Seeded | Execution::Record { .. } | Execution::Branch { .. }
         );
-        if self.config.faults.crash.permille > 0
+        if self.config.draws_crashes()
             && live
             && !self.config.crash_supervised
             && self.config.incarnation == Incarnation::First
         {
             return Err(RuntimeError::Config(
-                "--crash-permille needs a crash supervisor to boot the restarted incarnation \
+                "a crash rate needs a crash supervisor to boot the restarted incarnation \
                  (the native run supervisor); this run has none"
+                    .into(),
+            ));
+        }
+        let replay = matches!(execution, Execution::Replay(_));
+        if replay
+            && self.config.crash_supervised
+            && self.config.incarnation == Incarnation::First
+            && self.config.replayed_crash_kind.is_none()
+        {
+            return Err(RuntimeError::Config(
+                "a supervised replay of a crashed incarnation needs the kind of the crash its \
+                 recording took"
                     .into(),
             ));
         }
         let crash = CrashArm::arm(
             self.config.crash_supervised,
             self.config.incarnation == Incarnation::First,
-            matches!(execution, Execution::Replay(_)),
-            self.config.faults.crash.permille,
-            self.config.faults.crash.kind,
+            replay.then_some(self.config.replayed_crash_kind),
+            &self.config.faults.crash,
             root_seed,
         );
         let cpus = self.config.cpus();

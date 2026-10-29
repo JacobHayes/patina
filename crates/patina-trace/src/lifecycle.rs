@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use patina_dst_abi::CrashKind;
 use serde::{Deserialize, Serialize};
 
 use crate::{Sha256Digest, Timeline, TraceError, TraceEvent};
@@ -27,6 +28,9 @@ pub enum LifecycleEventKind {
     },
     Crash {
         incarnation: u64,
+        /// What the crash took down, which decides the image the next
+        /// incarnation booted from.
+        crash_kind: CrashKind,
         snapshot_digest: String,
     },
     Restart {
@@ -98,6 +102,7 @@ pub(super) fn validate_lifecycle_events(
             LifecycleEventKind::Crash {
                 incarnation,
                 snapshot_digest,
+                ..
             } => {
                 Sha256Digest::parse(snapshot_digest)?;
                 if active != Some(*incarnation) {

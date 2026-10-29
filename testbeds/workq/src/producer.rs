@@ -37,7 +37,8 @@ pub fn derive_job(seed: u64, producer: u32, client_seq: u64) -> (u32, u64) {
 /// crash-recovery (the durability invariant checked in `report`).
 ///
 /// In memory it survives only the in-process server restart. A process
-/// restart (Patina's `--crash-permille`) starts the whole program afresh, so
+/// restart (Patina's `--machine-crash-permille` or `--process-crash-permille`)
+/// starts the whole program afresh, so
 /// `--ack-ledger PATH` also keeps the acks on disk, the way a real client that
 /// outlives the server would remember them: each ack is appended and fsync'd,
 /// and the acks an earlier incarnation recorded come back as [`Self::prior`]

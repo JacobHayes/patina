@@ -4,7 +4,8 @@ use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
 use crate::crash::{CrashArm, Incarnation, RESTART_DOWNTIME_NANOS};
 use crate::{
-    Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, EntropyWait, RuntimeError,
+    Context, CrashFaultConfig, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS,
+    EntropyWait, RuntimeError,
 };
 use patina_dst_abi::{ClockKind, CrashKind, OpenFlags, SeekWhence};
 use std::num::NonZeroU64;
@@ -83,18 +84,21 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
     // Explicit filesystem + a crash rate -> refuse.
     let result = RuntimeBuilder::new(
         RuntimeConfig::seeded(1)
-            .with_crash_permille(1)
+            .with_machine_crash_permille(1)
             .with_crash_supervisor(),
     )
     .with_filesystem(CrashFs::default())
     .build();
     assert!(matches!(result, Err(RuntimeError::Config(_))));
 
-    // Explicit filesystem + a non-default crash kind -> refuse, even with no
-    // crash rate, because the kind would be dropped.
-    let result = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_crash_kind(CrashKind::Process))
-        .with_filesystem(CrashFs::default())
-        .build();
+    // Explicit filesystem + a process-crash rate alone -> refuse too.
+    let result = RuntimeBuilder::new(
+        RuntimeConfig::seeded(1)
+            .with_process_crash_permille(1)
+            .with_crash_supervisor(),
+    )
+    .with_filesystem(CrashFs::default())
+    .build();
     assert!(matches!(result, Err(RuntimeError::Config(_))));
 
     // An explicit filesystem with NO crash knobs is still fine (tests /
@@ -114,12 +118,57 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
     assert!(matches!(result, Err(RuntimeError::Config(_))));
 }
 
+/// The crash rates under which every crash point crashes with `kind`.
+fn certain(kind: CrashKind) -> CrashFaultConfig {
+    match kind {
+        CrashKind::Machine => CrashFaultConfig {
+            machine_permille: 1000,
+            process_permille: 0,
+        },
+        CrashKind::Process => CrashFaultConfig {
+            machine_permille: 0,
+            process_permille: 1000,
+        },
+    }
+}
+
 /// A supervised run that crashes at every crash point.
 fn certain_crash(seed: u64, kind: CrashKind) -> RuntimeConfig {
+    let rates = certain(kind);
     RuntimeConfig::seeded(seed)
-        .with_crash_permille(1000)
-        .with_crash_kind(kind)
+        .with_machine_crash_permille(rates.machine_permille)
+        .with_process_crash_permille(rates.process_permille)
         .with_crash_supervisor()
+}
+
+/// At each crash point the machine is drawn first and the process only where
+/// the machine survived: with both rates certain the machine always goes
+/// down, and with both live each kind lands for some seed.
+#[test]
+fn the_machine_is_drawn_before_the_process() {
+    let kind_at_first_point = |seed: u64, machine: u16, process: u16| {
+        let config = RuntimeConfig::seeded(seed)
+            .with_machine_crash_permille(machine)
+            .with_process_crash_permille(process)
+            .with_crash_supervisor();
+        let mut context = Context::from_config(config).unwrap();
+        match context.fs_open("/f", OpenFlags::create_truncate_write()) {
+            Err(RuntimeError::InjectedCrash(crash)) => Some(crash.kind),
+            Ok(_) => None,
+            Err(other) => panic!("unexpected error {other}"),
+        }
+    };
+    for seed in 0..8 {
+        assert_eq!(
+            kind_at_first_point(seed, 1000, 1000),
+            Some(CrashKind::Machine)
+        );
+        assert_eq!(kind_at_first_point(seed, 0, 1000), Some(CrashKind::Process));
+    }
+    let kinds: std::collections::HashSet<_> = (0..64)
+        .filter_map(|seed| kind_at_first_point(seed, 500, 1000))
+        .collect();
+    assert_eq!(kinds, [CrashKind::Machine, CrashKind::Process].into());
 }
 
 /// Only a completed crash point can be where the run crashes: a failed
@@ -161,7 +210,7 @@ fn only_a_supervised_first_incarnation_crashes() {
     context.finish().unwrap();
 
     assert!(matches!(
-        Context::from_config(RuntimeConfig::seeded(1).with_crash_permille(1000)),
+        Context::from_config(RuntimeConfig::seeded(1).with_process_crash_permille(1000)),
         Err(RuntimeError::Config(_))
     ));
 }
@@ -183,7 +232,7 @@ fn the_crash_kind_decides_the_restart_image() {
         context.fs_sync(dir).unwrap();
         context.fs_close(dir).unwrap();
         // Armed now, so the overwrite is the crash point.
-        context.crash = CrashArm::arm(true, true, false, 1000, kind, seed);
+        context.crash = CrashArm::arm(true, true, None, &certain(kind), seed);
         let crash = match context.fs_write_at(fd, 0, &[b'B'; 16]) {
             Err(RuntimeError::InjectedCrash(crash)) => crash,
             other => panic!("expected the crash at the overwrite, got {other:?}"),
@@ -285,7 +334,7 @@ fn a_restarted_incarnation_boots_after_the_crashed_one_and_replays_identically()
     first.sleep_for(3_000_000_000).unwrap();
     let last_read = first.now(ClockKind::Realtime).unwrap();
     let stamped = first.fs_time_unrecorded().unwrap();
-    first.crash = CrashArm::arm(true, true, false, 1000, CrashKind::Machine, 5);
+    first.crash = CrashArm::arm(true, true, None, &certain(CrashKind::Machine), 5);
     let crash = match first.fs_write(fd, b"two") {
         Err(RuntimeError::InjectedCrash(crash)) => crash,
         other => panic!("expected the injected crash, got {other:?}"),

@@ -48,12 +48,6 @@ pub fn trace_fd_from_env() -> Result<Option<i32>, RuntimeError> {
     }
 }
 
-fn parse_crash_kind(name: &str, value: &str) -> Result<patina_dst_abi::CrashKind, RuntimeError> {
-    patina_dst_abi::CrashKind::parse(value).ok_or_else(|| {
-        RuntimeError::Config(format!("{name} must be process or machine; got {value:?}"))
-    })
-}
-
 /// Parse a per-mille probability, requiring an integer in [0, 1000].
 fn parse_permille(name: &str, value: &str) -> Result<u16, RuntimeError> {
     let permille: u16 = value
@@ -170,10 +164,12 @@ impl RuntimeConfig {
     fn apply_one_knob(&mut self, knob: FaultKnob, value: &str) -> Result<(), RuntimeError> {
         let env = knob.meta().env;
         match knob {
-            FaultKnob::CrashPermille => {
-                self.faults.crash.permille = parse_permille(env, value)?;
+            FaultKnob::MachineCrashPermille => {
+                self.faults.crash.machine_permille = parse_permille(env, value)?;
             }
-            FaultKnob::CrashKind => self.faults.crash.kind = parse_crash_kind(env, value)?,
+            FaultKnob::ProcessCrashPermille => {
+                self.faults.crash.process_permille = parse_permille(env, value)?;
+            }
             FaultKnob::FsErrorPermille => {
                 self.faults.fs.error_permille = parse_permille(env, value)?;
             }

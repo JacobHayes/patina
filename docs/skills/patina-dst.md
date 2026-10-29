@@ -74,10 +74,10 @@ against an oracle you supply.
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
-preemption and task starvation; liveness watchdogs. Native `--crash-permille`
-crashes at a seeded side-effecting operation and performs a real fresh-process
-restart (`--crash-kind process` keeps the page cache, `machine` loses unsynced
-data), recording and replaying across both incarnations, while the Cargo family
+preemption and task starvation; liveness watchdogs. Native
+`--machine-crash-permille` and `--process-crash-permille` crash at a seeded
+side-effecting operation and perform a real fresh-process restart (a process
+crash keeps the page cache, a machine crash keeps only what the disk holds), recording and replaying across both incarnations, while the Cargo family
 refuses it; campaigns draw it from the `crash` plane. A
 *swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.

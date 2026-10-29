@@ -117,7 +117,7 @@ the dirty pages from writeback and reports once per open description per check,
 as Linux's `errseq` does (`fsync` and a `WAIT`ing `sync_file_range` the file's,
 `syncfs` the volume's), and `posix_fadvise(DONTNEED)` drops clean pages so a
 re-read sees the disk;
-and native `--crash-permille` restarts a fresh incarnation whose handoff
+and native `--machine-crash-permille`/`--process-crash-permille` restart a fresh incarnation whose handoff
 replays against its recorded digest (`docs/crash-restart-protocol.md`).
 Oracle: the fs-crash unit suite, native crash-restart record/replay, and a
 native store that fails closed after a targeted (`--fs-error-at`) writeback
@@ -173,7 +173,7 @@ versions, target triple and fingerprint.
   page of a file cached (a page `DONTNEED` dropped, or one over a hole never
   read, included), and `DONTNEED` leaves every page of a mapped file. A failed
   writeback loses all the dirty pages it covers, and a failed `sync`/`syncfs`
-  still commits the metadata. A `--crash-kind process` restart boots from the
+  still commits the metadata. A process-crash restart boots from the
   page cache as its disk, so pages a failed writeback dropped, and writeback
   errors nobody saw, do not reach the restarted incarnation. `CrashFs` renames are always atomic, and
   directory-durability loss covers explicitly created entries only.

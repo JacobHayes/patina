@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// What a modeled crash takes down, and so what the restarted incarnation
 /// finds on disk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrashKind {
     /// The process dies (`SIGKILL`, the OOM killer) and the kernel lives on:
@@ -19,7 +19,6 @@ pub enum CrashKind {
     /// reached the disk, independently of every other, and a namespace change
     /// (a new, removed or renamed name) whose parent directory was never
     /// fsynced is lost.
-    #[default]
     Machine,
 }
 
@@ -193,7 +192,9 @@ impl Operation {
     pub fn is_poll(&self) -> bool {
         matches!(
             self,
-            Operation::NetRecv { .. } | Operation::NetTcpRecv { .. } | Operation::NetTcpAccept { .. }
+            Operation::NetRecv { .. }
+                | Operation::NetTcpRecv { .. }
+                | Operation::NetTcpAccept { .. }
         )
     }
 

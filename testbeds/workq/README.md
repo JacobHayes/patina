@@ -107,7 +107,7 @@ is caught by the queue's *own* invariants — no special test assertion.
 - **`skip-wal-fsync`** — the log acknowledges a record as durable without
   fsyncing it. Only a crash can show it, and only one that takes the machine
   down: after a process crash the page cache still holds the record, after a
-  machine crash (`--crash-kind machine`, the default) it is gone.
+  machine crash (`--machine-crash-permille`) it is gone.
 
 Watch Patina catch one (it fails, loudly and reproducibly):
 

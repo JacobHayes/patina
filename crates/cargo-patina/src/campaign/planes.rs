@@ -2,10 +2,10 @@
 
 use patina_dst_runtime::FaultKnob;
 
-/// One fault plane: the run knobs that share a flag prefix (`--fs-*`,
-/// `--net-*`, ...), which is also the leading component of the swarm class
-/// tokens of the knobs a campaign draws (`fs_error`, `net_drop`, ...). The name
-/// is that prefix.
+/// One fault plane: the run knobs whose flags share a word (`--fs-*`,
+/// `--net-*`, `--*-crash-permille`, ...), which is also the leading component
+/// of the swarm class tokens of the knobs a campaign draws (`fs_error`,
+/// `net_drop`, ...). The name is that word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultPlane {
     Fs,
@@ -14,7 +14,8 @@ pub enum FaultPlane {
     Entropy,
     Sleep,
     Epoch,
-    /// Native only: a crash and restart at a drawn rate per crash point.
+    /// Native only: a crash and restart at two drawn rates per crash point,
+    /// the machine's and the process's.
     Crash,
 }
 
@@ -85,7 +86,9 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
         // Opted into by `--custom-op-faults`: only the guest knows whether its
         // custom operations declare a failure shape.
         FaultKnob::CustomOpFailPermille => None,
-        FaultKnob::CrashPermille | FaultKnob::CrashKind => Some(FaultPlane::Crash),
+        FaultKnob::MachineCrashPermille | FaultKnob::ProcessCrashPermille => {
+            Some(FaultPlane::Crash)
+        }
         // The host table is workload, forwarded whichever planes are drawn.
         FaultKnob::DnsEntry => None,
         // A target names one operation of one guest's sequence: no plane can
@@ -172,18 +175,21 @@ impl FaultPlanes {
 mod tests {
     use super::*;
 
-    /// A plane's name is the shared prefix of its knobs' run flags and its drawn
-    /// knobs' swarm tokens, so `--faults=net` selects exactly the knobs an operator reads as
-    /// the net plane in `run --help` and in a swarm report.
+    /// A plane's name is a word of its knobs' run flags and the prefix of its
+    /// drawn knobs' swarm tokens, so `--faults=net` selects exactly the knobs an
+    /// operator reads as the net plane in `run --help` and in a swarm report.
     #[test]
-    fn a_plane_names_the_prefix_its_knobs_share() {
+    fn a_plane_names_the_word_its_knobs_share() {
         for knob in FaultKnob::ALL {
             let Some(plane) = knob_plane(*knob) else {
                 continue;
             };
             let meta = knob.meta();
             assert!(
-                meta.flag.starts_with(&format!("--{}-", plane.name())),
+                meta.flag
+                    .trim_start_matches("--")
+                    .split('-')
+                    .any(|word| word == plane.name()),
                 "{knob:?} is filed under {plane:?} but is spelled {}",
                 meta.flag
             );

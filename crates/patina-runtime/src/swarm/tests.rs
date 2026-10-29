@@ -18,7 +18,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     let build = |seed: u64| {
         let trace = directory.path().join(format!("swarm-{seed}.patina"));
         let config = RuntimeConfig::record(seed, &trace, "fp+swarm")
-            .with_crash_permille(1)
+            .with_machine_crash_permille(1)
             .with_crash_supervisor()
             .with_fs_error_permille(100)
             .with_fs_short_permille(200)
@@ -54,7 +54,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     }
     let faults = bundle.metadata.faults;
     assert_eq!(
-        faults.crash_permille > 0,
+        faults.machine_crash_permille > 0,
         swarm.selected_classes.iter().any(|c| c == "crash")
     );
     assert_eq!(
@@ -318,7 +318,7 @@ fn swarm_class_table_declares_every_fingerprint_component() {
     ];
     for seed in 0..8u64 {
         let mut config = RuntimeConfig::seeded(seed)
-            .with_crash_permille(1)
+            .with_machine_crash_permille(1)
             .with_crash_supervisor()
             .with_fs_error_permille(1)
             .with_fs_short_permille(1)

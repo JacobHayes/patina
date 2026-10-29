@@ -4,7 +4,7 @@
 mod tests {
     use super::super::*;
     use common::native::{
-        Guest, assert_success, crash_permille_for, crash_point_index, crash_seeds,
+        Guest, assert_success, crash_flag, crash_permille_for, crash_point_index, crash_seeds,
     };
     use patina_dst_abi::Operation;
     use std::collections::BTreeSet;
@@ -196,7 +196,7 @@ fn main() {
     fn native_crash_restarts_a_fresh_incarnation_and_its_replay_refuses_divergence() {
         let canary = build_guest("crash_restart", NATIVE_CRASH_RESTART_CANARY_SOURCE);
         let (permille, seeds) = crash_after(&canary, &[], 0, |op| writes(op, b"B-volatile"), 2);
-        let crash = |kind: &'static str| ["--crash-permille", &permille, "--crash-kind", kind];
+        let crash = |kind: &'static str| [crash_flag(kind), &permille];
         let seed: u64 = seeds[0].parse().unwrap();
         let (output, trace) = canary.assert_recorded(seed, &crash("process"));
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -292,7 +292,7 @@ fn main() {
             &[
                 "--seed",
                 &quiet,
-                "--crash-permille",
+                "--machine-crash-permille",
                 "1",
                 "--format",
                 "json",
@@ -438,7 +438,7 @@ fn main() {
         let guest = build_guest("incarnation_streams", NATIVE_INCARNATION_STREAMS_SOURCE);
         let (permille, seeds) = crash_after(&guest, &[], 0, |op| writes(op, b"x"), 1);
         let seed: u64 = seeds[0].parse().unwrap();
-        let seeded = guest.assert_run_success(seed, &["--crash-permille", &permille]);
+        let seeded = guest.assert_run_success(seed, &["--machine-crash-permille", &permille]);
         let report = streams_report(&seeded.stdout);
         let [first, previous, restarted] = report.as_slice() else {
             panic!(
@@ -515,17 +515,9 @@ fn main() {
         let guest = build_guest("overwrite", UNSYNCED_OVERWRITE_SOURCE);
         let (permille, seeds) = crash_after(&guest, &[], 0, |op| writes(op, &[b'B'; 16]), 8);
         let recovered = |seed: &str, kind: &str| {
-            let output = assert_success(guest.command(
-                "run",
-                &[
-                    "--seed",
-                    seed,
-                    "--crash-permille",
-                    &permille,
-                    "--crash-kind",
-                    kind,
-                ],
-            ));
+            let output = assert_success(
+                guest.command("run", &["--seed", seed, crash_flag(kind), &permille]),
+            );
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             assert!(!stdout.contains("not_crashed"), "{stdout}");
             stdout
@@ -569,10 +561,8 @@ fn main() {
                 &[
                     "--seed",
                     &seeds[0],
-                    "--crash-permille",
+                    crash_flag(kind),
                     &permille,
-                    "--crash-kind",
-                    kind,
                     "--",
                     "--mapped",
                 ],
@@ -664,7 +654,7 @@ fn main() {
         let lost = seeds.iter().any(|seed| {
             stdout(assert_success(guest.command(
                 "run",
-                &["--seed", seed, "--crash-permille", &permille],
+                &["--seed", seed, "--machine-crash-permille", &permille],
             )))
             .contains("NS_RESULT missing")
         });
@@ -689,10 +679,8 @@ fn main() {
                     &[
                         "--seed",
                         seed,
-                        "--crash-permille",
+                        crash_flag(kind),
                         &permille,
-                        "--crash-kind",
-                        kind,
                         "--",
                         "--dir-fsync",
                     ],
@@ -710,7 +698,7 @@ fn main() {
             &[
                 "--seed",
                 &seeds[0],
-                "--crash-permille",
+                "--machine-crash-permille",
                 &permille,
                 "--record",
                 trace.to_str().unwrap(),
@@ -801,10 +789,8 @@ fn main() {
         let crash = [
             "--seed",
             &seeds[0],
-            "--crash-permille",
+            "--process-crash-permille",
             &permille,
-            "--crash-kind",
-            "process",
             "--format",
             "json",
             "--",
@@ -852,7 +838,7 @@ fn main() {
                 guest.binary.to_str().unwrap(),
                 "--seed",
                 &seeds[0],
-                "--crash-permille",
+                "--machine-crash-permille",
                 &permille,
                 "--format",
                 "json",
@@ -970,7 +956,7 @@ fn main() {
             &[
                 "--seed",
                 &seeds[0],
-                "--crash-permille",
+                "--machine-crash-permille",
                 &permille,
                 "--format",
                 "json",
@@ -1003,7 +989,7 @@ fn main() {
                 &[
                     "--seed",
                     &seeds[0],
-                    "--crash-permille",
+                    "--machine-crash-permille",
                     &permille,
                     "--format",
                     "json",
@@ -1172,7 +1158,7 @@ fn main() {
                 .to_owned()
         };
         assert!(
-            stdout.contains("--crash-permille"),
+            stdout.contains("--machine-crash-permille"),
             "the reduction dropped the crash it needs:\n{stdout}"
         );
         assert_eq!(

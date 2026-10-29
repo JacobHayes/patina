@@ -1,21 +1,21 @@
 # Crash-restart protocol
 
-This note pins the crash-restart protocol surface for `--crash-permille` and `--crash-kind`. Native runs use it for seeded runs, `--record`, and `replay`. The cargo family refuses `--crash-permille` by name.
+This note pins the crash-restart protocol surface for `--machine-crash-permille` and `--process-crash-permille`. Native runs use it for seeded runs, `--record`, and `replay`. The cargo family refuses both by name.
 
 ## Where a crash lands
 
 A crash point is a completed operation whose effect already left the process, so the restarted process must cope with it. Each operation has one effect class (`EffectClass` in `patina-abi`, an exhaustive match, so a new operation needs an explicit decision): `emit` (seen by a peer: sends, a TCP connect, accept or close), `persist` (a change to storage: data, metadata, namespace or durability, including a creating or truncating open), `observe` (reads), `local` (process bookkeeping) and `schedule` (time and scheduling). Emit and persist operations are crash points. An operation that failed is not, and neither is a poll that found nothing to take (an empty accept or receive). The liveness watchdog derives its no-progress set from the same class: schedule operations, and empty polls, are not progress.
 
-`--crash-permille N` gives each successful crash point an N per-mille chance of being the run's crash. Each chance is drawn from the run's crash-point stream (`fault_domain::CRASH_POINT`), and the first hit crashes. A run crashes at most once, always in incarnation 0. A restarted incarnation takes no crash, and swarm masks the `crash` class by clearing the rate. Nothing else draws from the crash-point stream, so where the crash lands depends only on the seed, the rate and the guest's sequence of crash points. The check sits at the runtime's one settle path for recorded operations (`Context::reconcile`), so no syscall family needs code of its own to be crashable.
+Two independent rates decide the crash. At each crash point, `--machine-crash-permille N` takes the machine down with N per-mille odds; where it does not, `--process-crash-permille M` kills the process with M per-mille odds. Both draws come from the run's crash-point stream (`fault_domain::CRASH_POINT`), and a rate of zero draws nothing, so a run with one rate set draws exactly as if the other did not exist. The first hit crashes. A run crashes at most once, always in incarnation 0. A restarted incarnation takes no crash, and swarm masks the `crash` class by clearing both rates. Nothing else draws from the crash-point stream, so where the crash lands, and its kind, depend only on the seed, the rates and the guest's sequence of crash points. Campaigns draw the two rates independently per generation from the `crash` plane; `exclude_knobs` can drop either. The check sits at the runtime's one settle path for recorded operations (`Context::reconcile`), so no syscall family needs code of its own to be crashable.
 
 A live run with a crash rate is refused unless a supervisor will boot the next incarnation. The native shim declares one (`with_crash_supervisor`) when it is handed a handoff channel.
 
 ## What a crash takes down
 
-`--crash-kind` picks what the restarted incarnation finds on disk:
+The kind of the crash decides what the restarted incarnation finds on disk:
 
 - **`process`**: the process dies and the kernel lives on. The page cache survives, so every completed write is visible after the restart, synced or not, and so is a store through a shared mapping that no write-back has written yet. Only process state is lost: descriptors, anonymous files, and bytes in flight through a pipe.
-- **`machine`** (the default): the machine goes down, and the crash filesystem's recovery model decides what reached the disk. Synced data survives. Each unsynced block survives or reverts to its durable bytes on its own seeded coin, so any subset of unsynced writes can persist, in whole blocks. A namespace change (a new, removed or renamed name) whose parent directory was never fsynced is lost. No descriptor keeps a name alive, because the process that held it is gone.
+- **`machine`**: the machine goes down, and the crash filesystem's recovery model decides what reached the disk. Synced data survives. Each unsynced block survives or reverts to its durable bytes on its own seeded coin, so any subset of unsynced writes can persist, in whole blocks. A namespace change (a new, removed or renamed name) whose parent directory was never fsynced is lost. No descriptor keeps a name alive, because the process that held it is gone.
 
 ## Trace contract
 
@@ -31,14 +31,14 @@ The crash-restart shape is:
 Start(0)
 ...
 <the crash point in incarnation 0>
-Crash(0, snapshot_digest)
+Crash(0, crash_kind, snapshot_digest)
 Restart(0 -> 1, snapshot_digest)
 Start(1)
 ...
 End(1)
 ```
 
-The crash follows incarnation 0's last decision, whatever operation that is. The trace has no selector and no ordinal; the crash's position is the segment boundary itself. Operation `sequence` numbers run contiguously across both incarnations, so incarnation 1's first operation follows incarnation 0's last. `order` also gives each lifecycle marker a slot, so it skips the `Crash`, `Restart` and `Start(1)` slots between the incarnations. The recorded fault configuration carries the rate (`crash_permille`) and the kind (`crash_kind`).
+The crash follows incarnation 0's last decision, whatever operation that is. The trace has no selector and no ordinal; the crash's position is the segment boundary itself. Operation `sequence` numbers run contiguously across both incarnations, so incarnation 1's first operation follows incarnation 0's last. `order` also gives each lifecycle marker a slot, so it skips the `Crash`, `Restart` and `Start(1)` slots between the incarnations. The recorded fault configuration carries both rates (`machine_crash_permille`, `process_crash_permille`), and the `Crash` marker carries the kind of the crash that landed (`crash_kind`).
 
 ## Handoff contract
 
@@ -57,9 +57,9 @@ The seal is deliberately exposed as a `seal` / `open` API with a `HandoffSealKey
 
 ## Native supervision
 
-The supervisor runs a seeded or record run whenever `--crash-permille` is above zero, and runs a replay whenever its trace records a crash. In either case it launches incarnation 0 with a handoff channel, a crash-report pipe and a seal key derived from the run seed and the crash kind.
+The supervisor runs a seeded or record run whenever either crash rate is above zero, and runs a replay whenever its trace records a crash. In either case it launches incarnation 0 with a handoff channel, a crash-report pipe and a seal key derived from the run seed. A replay's incarnation 0 is also told the recorded crash's kind (`PATINA_RT_REPLAY_CRASH_KIND`), since a replay never draws.
 
-When the crash lands, the runtime turns it into an internal termination control the guest cannot catch. The control follows the operation that completed at the crash point. The shim seals the handoff and terminates with `_exit`. The supervisor validates the handoff, including that its kind is the run's, then starts exactly one fresh incarnation. That incarnation gets the snapshot as its base image, clean descriptor state, and the handoff's realtime (`PATINA_RT_RESTART_REALTIME_NANOS`).
+When the crash lands, the runtime turns it into an internal termination control the guest cannot catch. The control follows the operation that completed at the crash point. The shim seals the handoff and terminates with `_exit`. The supervisor validates the handoff, including that its kind is one the run could take (a kind whose rate is live, or a replay's recorded kind), then starts exactly one fresh incarnation. That incarnation gets the snapshot as its base image, clean descriptor state, and the handoff's realtime (`PATINA_RT_RESTART_REALTIME_NANOS`).
 
 Both incarnations get the same configuration and run seed. A run whose rate never hits is an ordinary single-incarnation run that the supervisor watched, reported as `crash_restart.terminal_outcome.kind = "exited_without_crash"`.
 
@@ -115,4 +115,4 @@ A crash-restart trace holds exactly one timeline. Branching such a trace is not 
 
 ## Remaining boundary
 
-The cargo family refuses `--crash-permille` by name, and native crash restart refuses `--starve`. A failed crash's trace does not replay to its refusal (see above).
+The cargo family refuses both crash rates by name, and native crash restart refuses `--starve`. A failed crash's trace does not replay to its refusal (see above).

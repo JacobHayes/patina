@@ -2,17 +2,15 @@
 
 use patina_dst_rng_seeded::fault_domain;
 
-use patina_dst_abi::CrashKind;
-
 use crate::{
-    ENV_CLOCK_FAULT_REPORT, ENV_CRASH_KIND, ENV_CRASH_PERMILLE, ENV_CUSTOM_OP_FAIL_PERMILLE,
-    ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
-    ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
-    ENV_FS_ERROR_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY,
-    ENV_FS_SHORT_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
+    ENV_CLOCK_FAULT_REPORT, ENV_CUSTOM_OP_FAIL_PERMILLE, ENV_CUSTOMOP_FAULT_REPORT,
+    ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT, ENV_DNS_LATENCY,
+    ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS, ENV_FS_ERROR_AT,
+    ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
+    ENV_MACHINE_CRASH_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
     ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
-    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER,
-    FINGERPRINT_BUGGIFY,
+    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
+    ENV_PROCESS_CRASH_PERMILLE, ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY,
 };
 
 /// How a knob's value reaches a guest over the `PATINA_*` control plane.
@@ -151,13 +149,14 @@ fault_registry! {
         CrashFaultConfig as crash {
             /// Seeded per-mille chance (0..=1000) that each crash point — a
             /// completed operation with an effect a crash could cut short
-            /// ([`patina_dst_abi::EffectClass::is_crash_point`]) — is where the run
-            /// crashes and restarts. The first hit crashes; a run crashes at most
-            /// once.
-            permille: u16 => CrashPermille = 0 {
+            /// ([`patina_dst_abi::EffectClass::is_crash_point`]) — is where the
+            /// machine goes down: only what the disk holds survives. Drawn
+            /// before [`CrashFaultConfig::process_permille`]; the first hit
+            /// crashes, and a run crashes at most once.
+            machine_permille: u16 => MachineCrashPermille = 0 {
                 meta: KnobMeta {
-                    flag: "--crash-permille",
-                    env: ENV_CRASH_PERMILLE,
+                    flag: "--machine-crash-permille",
+                    env: ENV_MACHINE_CRASH_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     injection_domains: &[fault_domain::CRASH_POINT, fault_domain::FS_CRASH],
                     swarm_class: Some("crash"),
@@ -168,19 +167,20 @@ fault_registry! {
                 },
                 sample: 1,
             }
-            /// What the crash takes down: the process alone, whose page cache
-            /// survives, or the machine, which keeps only what was made durable.
-            /// Inert without `permille`; defaults to the machine.
-            kind: CrashKind => CrashKind = 1 {
+            /// Seeded per-mille chance (0..=1000) that a crash point where the
+            /// machine did not go down is where the process dies instead: the
+            /// kernel and its page cache live on, so every completed write
+            /// survives, synced or not.
+            process_permille: u16 => ProcessCrashPermille = 1 {
                 meta: KnobMeta {
-                    flag: "--crash-kind",
-                    env: ENV_CRASH_KIND,
+                    flag: "--process-crash-permille",
+                    env: ENV_PROCESS_CRASH_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FS_CRASH],
+                    injection_domains: &[fault_domain::CRASH_POINT],
                     swarm_class: Some("crash"),
                     report: None,
                 },
-                sample: CrashKind::Process,
+                sample: 1,
             }
         }
         FsFaultConfig as fs {
@@ -475,7 +475,8 @@ fault_registry! {
 pub enum Masks {
     /// Fault knobs. The class is a candidate when ANY of them is set, and
     /// dropping it clears ALL of them — which is how one class covers a knob and
-    /// its modifier (`crash` covers `--crash-permille` and `--crash-kind`).
+    /// its modifier (`crash` covers `--machine-crash-permille` and
+    /// `--process-crash-permille`).
     Knobs(&'static [FaultKnob]),
     /// Cooperative-SUT configuration, which is not a fault knob: `--buggify` and
     /// its detail knobs configure exploration rather than injecting an effect.
@@ -561,7 +562,7 @@ macro_rules! swarm_class {
 /// any decision, only the record.
 ///
 /// Deliberately not [`FaultKnob::ALL`]'s order, and not one row per knob:
-/// `crash` covers two knobs, `--dns-entry` has no class, and `buggify` masks
+/// `crash` covers both crash rates, `--dns-entry` has no class, and `buggify` masks
 /// configuration no fault knob owns. Masks derive from knob metadata; const
 /// checks reject unknown class tokens, empty masks and duplicate draw domains.
 pub const SWARM_CLASSES: &[SwarmClass] = &[

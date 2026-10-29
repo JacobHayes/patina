@@ -169,13 +169,15 @@ and `--render out.html` writes a self-contained HTML timeline of any traced run.
 Faults are seed-driven and default-off. Fault configurations are recorded
 into the trace so replay reproduces them flag-free.
 
-- **Crash restart**: native `--crash-permille N` gives every successful
-  side-effecting operation (a filesystem change or a network send) an N
-  per-mille chance of being the crash point; the first hit terminates the
-  incarnation and restarts it once. `--crash-kind process` keeps the page
-  cache; `--crash-kind machine` (the default) restarts from the recovered
-  durable image, where any subset of unsynced blocks may survive and a new name
-  in an unsynced directory is lost. The Cargo family refuses crash restart.
+- **Crash restart**: at every successful operation a peer or the disk sees (a
+  filesystem change, a network send, a TCP connect, accept or close), native
+  `--machine-crash-permille N` takes the machine down with N per-mille odds,
+  else `--process-crash-permille M` kills the process with M per-mille odds;
+  the first hit terminates the incarnation and restarts it once. A process
+  crash keeps the page cache. A machine crash restarts from the recovered
+  durable image, where any subset of unsynced blocks may survive and a new
+  name in an unsynced directory is lost. The Cargo family refuses crash
+  restart.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
   (seeded delay before every eligible fs op, so slow I/O reorders against timers

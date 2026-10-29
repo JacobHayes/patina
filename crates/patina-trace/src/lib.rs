@@ -116,7 +116,12 @@ pub use replay::Replayer;
 ///   `Crash` marker alone. Format 22 traces are refused rather than replayed
 ///   against a crash point the trace no longer names.
 /// - 24: no `decision_policy` in the metadata; it only ever held one value.
-pub const TRACE_FORMAT_VERSION: u32 = 24;
+/// - 25: a crash is drawn per crash point at two rates, the machine's
+///   (`machine_crash_permille`) and then the process's
+///   (`process_crash_permille`), in place of one rate and a kind
+///   (`crash_permille`, `crash_kind`), and the `Crash` marker records what
+///   the crash took down (`crash_kind`).
+pub const TRACE_FORMAT_VERSION: u32 = 25;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

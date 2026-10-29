@@ -68,7 +68,7 @@ trace format.
 - **Cargo package, in process** (usage mode 3). Code performs effects through
   an explicit `patina_dst_runtime::Context` (`run`, `run_with`).
   `patina-dst-async` is a deterministic single-threaded executor over that
-  boundary. Cargo-family runs refuse `--crash-permille`.
+  boundary. Cargo-family runs refuse crash restart.
 
 ## Crate layout
 
@@ -351,7 +351,8 @@ boundary, not in drivers, so they compose with any driver stack. Every
 `Context` has every driver: a slot the builder is not handed gets the
 standard one.
 
-Crash restart (`--crash-permille`, native only): a crash point exports the
+Crash restart (`--machine-crash-permille`, `--process-crash-permille`, native
+only): a crash point exports the
 `FsSnapshot`, the shim hands it to the supervisor, and a fresh incarnation
 boots from it; see [docs/crash-restart-protocol.md](docs/crash-restart-protocol.md).
 

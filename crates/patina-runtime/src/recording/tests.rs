@@ -152,7 +152,7 @@ fn crash_writes_the_incarnation_recording_ending_with_the_trigger() {
     let transport = SharedTransport::default();
     let mut record = RuntimeBuilder::new(
         RuntimeConfig::record_transport(3, "fixture-v1")
-            .with_crash_permille(1000)
+            .with_machine_crash_permille(1000)
             .with_crash_supervisor(),
     )
     .with_trace_transport(transport.clone())

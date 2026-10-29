@@ -17,10 +17,11 @@ use tempfile::tempdir;
 /// missing-fsync commit protocol, make only its directory entry durable, and
 /// close it, under a crash rate. The crash, if one lands, ends the run there.
 fn append_unsynced_record(seed: u64, kind: CrashKind) -> Option<InjectedCrash> {
-    let config = RuntimeConfig::seeded(seed)
-        .with_crash_permille(250)
-        .with_crash_kind(kind)
-        .with_crash_supervisor();
+    let config = match kind {
+        CrashKind::Machine => RuntimeConfig::seeded(seed).with_machine_crash_permille(250),
+        CrashKind::Process => RuntimeConfig::seeded(seed).with_process_crash_permille(250),
+    }
+    .with_crash_supervisor();
     let mut context = Context::from_config(config).unwrap();
     let run = |context: &mut Context| -> Result<(), RuntimeError> {
         let fd = context.fs_open("/commit.log", OpenFlags::create_truncate_write())?;
@@ -94,8 +95,7 @@ struct RetriedCommit {
 fn commit_retrying_fsync(seed: u64) -> Option<RetriedCommit> {
     let config = RuntimeConfig::seeded(seed)
         .with_fs_error_permille(300)
-        .with_crash_permille(150)
-        .with_crash_kind(CrashKind::Machine)
+        .with_machine_crash_permille(150)
         .with_crash_supervisor();
     let mut context = Context::from_config(config).unwrap();
     let mut retried = false;
@@ -195,8 +195,9 @@ fn replay_with_a_different_crash_rate_fails_closed() {
         context.fs_write(fd, b"durable-record-0001").unwrap();
         context.finish().unwrap();
     }
-    let conflicting =
-        Context::from_config(RuntimeConfig::replay(&path, "fault-v1").with_crash_permille(5));
+    let conflicting = Context::from_config(
+        RuntimeConfig::replay(&path, "fault-v1").with_machine_crash_permille(5),
+    );
     assert!(conflicting.is_err());
 }
 

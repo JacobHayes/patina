@@ -202,8 +202,8 @@ impl BandPolicy {
 const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     match knob {
         // A crash and restart (see the crash block in `derive_flags`).
-        FaultKnob::CrashPermille => BandPolicy::Draw(&[gen_byte::CRASH_PERMILLE]),
-        FaultKnob::CrashKind => BandPolicy::Draw(&[gen_byte::CRASH_KIND]),
+        FaultKnob::MachineCrashPermille => BandPolicy::Draw(&[gen_byte::MACHINE_CRASH]),
+        FaultKnob::ProcessCrashPermille => BandPolicy::Draw(&[gen_byte::PROCESS_CRASH]),
         FaultKnob::FsErrorPermille => BandPolicy::Draw(&[gen_byte::FS_ERROR]),
         FaultKnob::FsShortPermille => BandPolicy::Draw(&[gen_byte::FS_SHORT]),
         FaultKnob::FsLatencyNanos => BandPolicy::Draw(&[gen_byte::FS_LATENCY_HI]),
@@ -305,13 +305,12 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
         | FaultKnob::NetResetPermille
         | FaultKnob::NetPartition => Some("net"),
         // No rate to judge inert: a crash fires at most once and says whether
-        // it did in the run's `crash_restart` record, a crash kind is a model
-        // rather than a rate, a buffer size is a capacity, a delayed sleep is
+        // it did in the run's `crash_restart` record, a buffer size is a capacity, a delayed sleep is
         // indistinguishable from a longer one, and the host table is workload.
         // Each of these reports nothing, which
         // `vacuity_planes_match_the_classifier` pins against the knob table.
-        FaultKnob::CrashPermille
-        | FaultKnob::CrashKind
+        FaultKnob::MachineCrashPermille
+        | FaultKnob::ProcessCrashPermille
         | FaultKnob::SleepJitterNanos
         | FaultKnob::NetTcpBufferBytes
         | FaultKnob::DnsEntry => None,
@@ -578,30 +577,20 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
             FaultKnob::EpochJumpNanos,
             RunValue::Int(epoch_jump_hi),
         );
-        // A crash and restart. The rate is per crash point and the first hit
-        // crashes, so where the crash lands is geometric in the run's crash
-        // points: a power-of-two sweep over [1, 128] permille puts crashes both
-        // early in a long run and anywhere in a short one, where any one rate
-        // would crowd them into one end of the guest's runs.
-        let crash_permille = scale_intensity(
-            1 << (band_byte(hash, FaultKnob::CrashPermille, 0) % 8),
-            scale,
-        );
-        band(
-            &mut flags,
-            FaultKnob::CrashPermille,
-            RunValue::Int(crash_permille),
-        );
-        let kind = if band_byte(hash, FaultKnob::CrashKind, 0) & 1 == 0 {
-            patina_dst_runtime::CrashKind::Machine
-        } else {
-            patina_dst_runtime::CrashKind::Process
-        };
-        band(
-            &mut flags,
-            FaultKnob::CrashKind,
-            RunValue::Text(kind.name().into()),
-        );
+        // A crash and restart, at two independent rates: the machine's, drawn
+        // first at each crash point, then the process's. Each rate is per
+        // crash point and the first hit crashes, so where the crash lands is
+        // geometric in the run's crash points: a power-of-two sweep over
+        // [1, 128] permille puts crashes both early in a long run and anywhere
+        // in a short one, where any one rate would crowd them into one end of
+        // the guest's runs, and the two sweeps mix the kinds in every ratio.
+        for knob in [
+            FaultKnob::MachineCrashPermille,
+            FaultKnob::ProcessCrashPermille,
+        ] {
+            let permille = scale_intensity(1 << (band_byte(hash, knob, 0) % 8), scale);
+            band(&mut flags, knob, RunValue::Int(permille));
+        }
         // Opt-in, on the same reasoning as the DNS band below: whether a custom
         // operation is fault-eligible is the GUEST's declaration, and over a
         // guest that declares none the knob provably cannot fire. Every

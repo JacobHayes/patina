@@ -42,7 +42,6 @@ pub(super) fn native_build_invocation(values: &[&str]) -> NativeBuildInvocation 
 /// of a hand-kept list that a new knob can be left out of.
 pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
     match knob {
-        FaultKnob::CrashKind => "process",
         FaultKnob::NetLatencyNanos | FaultKnob::EpochJumpNanos => "500",
         FaultKnob::NetTcpBufferBytes => "4096",
         FaultKnob::NetPartition => "a,b",
@@ -61,7 +60,8 @@ pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
         | FaultKnob::DnsFailPermille
         | FaultKnob::EntropyFailPermille
         | FaultKnob::CustomOpFailPermille
-        | FaultKnob::CrashPermille => "100",
+        | FaultKnob::MachineCrashPermille
+        | FaultKnob::ProcessCrashPermille => "100",
     }
 }
 
@@ -672,7 +672,9 @@ mod registry {
     #[test]
     fn cargo_refuses_a_crash_without_restart_semantics() {
         let mut knobs = KnobValues::default();
-        knobs.0.insert(FaultKnob::CrashPermille, vec!["1".into()]);
+        knobs
+            .0
+            .insert(FaultKnob::ProcessCrashPermille, vec!["1".into()]);
         let cargo = execute(Invocation {
             cargo_command: "run".into(),
             cargo_args: Vec::new(),
@@ -687,7 +689,7 @@ mod registry {
         })
         .unwrap_err()
         .to_string();
-        assert!(cargo.contains("--crash-permille"), "{cargo}");
+        assert!(cargo.contains("--process-crash-permille"), "{cargo}");
     }
 
     /// The Cargo family forwards every unrecognized token verbatim, in place,
@@ -796,7 +798,12 @@ mod registry {
         }
         // A Cargo-family replay refuses run controls by name instead of forwarding them to Cargo
         // alongside its own arguments.
-        for flag in ["--crash-permille", "--seed", "--buggify", "--sched-pct"] {
+        for flag in [
+            "--machine-crash-permille",
+            "--seed",
+            "--buggify",
+            "--sched-pct",
+        ] {
             let argv = vec![
                 OsString::from(flag),
                 OsString::from("close"),

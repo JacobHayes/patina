@@ -305,6 +305,7 @@ fn a_crash_restart_trace_shrinks_each_incarnation_around_the_crash() {
     let join = |crashed, restarted| {
         CrashRestartSegments {
             crashed,
+            kind: patina_dst_abi::CrashKind::Machine,
             snapshot_digest: Sha256Digest([7; 32]),
             restarted,
         }
@@ -460,6 +461,7 @@ fn a_strict_replay_oracle_skips_candidates_that_cannot_be_followed() {
     let metadata = RunMetadata::new(1, "fixture", 0, "patina");
     let bundle = CrashRestartSegments {
         crashed: TraceBundle::linear(metadata.clone(), 0, StrictProgram::recording(120, 999, 60)),
+        kind: patina_dst_abi::CrashKind::Machine,
         snapshot_digest: Sha256Digest([7; 32]),
         restarted: TraceBundle::linear(metadata, 1, StrictProgram::recording(140, 777, 139)),
     }

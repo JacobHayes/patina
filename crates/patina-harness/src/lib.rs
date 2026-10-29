@@ -56,7 +56,7 @@
 //!
 //! Non-fingerprinted knobs (faults — sleep/network jitter, packet drop —,
 //! liveness watchdog, network latency, step budget, and params) record and
-//! replay cleanly from the harness alone. A crash (`--crash-permille`) is not
+//! replay cleanly from the harness alone. A crash (`--machine-crash-permille`, `--process-crash-permille`) is not
 //! a harness knob: the supervisor that boots the next incarnation reads it from
 //! the CLI.
 //! **Fingerprinted** knobs ([`HarnessBuilder::buggify`] and friends,

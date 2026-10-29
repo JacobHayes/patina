@@ -233,17 +233,24 @@ fn main() {
         let at_close = common::native::crash_seeds(500, 1, 1)[0].to_string();
         for (args, before, after) in [
             (
-                &["--seed", "4", "--crash-permille", "1000"][..],
+                &["--seed", "4", "--machine-crash-permille", "1000"][..],
                 "before-open",
                 "after-open",
             ),
             (
-                &["--seed", "4", "--crash-permille", "1000", "--cwd", "/tmp"][..],
+                &[
+                    "--seed",
+                    "4",
+                    "--machine-crash-permille",
+                    "1000",
+                    "--cwd",
+                    "/tmp",
+                ][..],
                 "before-open",
                 "after-open",
             ),
             (
-                &["--seed", &at_close, "--crash-permille", "500"][..],
+                &["--seed", &at_close, "--machine-crash-permille", "500"][..],
                 "before-close",
                 "after-close",
             ),

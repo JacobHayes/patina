@@ -615,6 +615,16 @@ pub fn crash_seeds(permille: u16, index: usize, count: usize) -> Vec<u64> {
         .collect()
 }
 
+/// The rate flag of the crash kind `kind` (`machine` or `process`). Either
+/// rate alone draws the crash-point stream exactly as [`crash_seeds`] does.
+pub fn crash_flag(kind: &str) -> &'static str {
+    match kind {
+        "machine" => "--machine-crash-permille",
+        "process" => "--process-crash-permille",
+        other => panic!("no crash kind {other:?}"),
+    }
+}
+
 /// A rate under which a crash at crash point `index` is a likely draw.
 pub fn crash_permille_for(index: usize) -> u16 {
     (1000 / (index + 1)).max(1) as u16

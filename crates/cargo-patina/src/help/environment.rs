@@ -130,9 +130,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "The guest's virtual CPU count (mirrors native --cpus, default 4); recorded, supplied by replay from the trace, and refused when it disagrees.",
     },
     EnvVar {
-        name: "PATINA_RT_CRASH_PERMILLE / PATINA_RT_CRASH_KIND / PATINA_RT_FS_ERROR_PERMILLE / PATINA_RT_FS_ERROR_AT / PATINA_RT_FS_SHORT_PERMILLE",
+        name: "PATINA_RT_MACHINE_CRASH_PERMILLE / PATINA_RT_PROCESS_CRASH_PERMILLE / PATINA_RT_FS_ERROR_PERMILLE / PATINA_RT_FS_ERROR_AT / PATINA_RT_FS_SHORT_PERMILLE",
         scope: "protocol",
-        doc: "Crash, filesystem error, targeted error, and short-I/O fault knobs (mirror --crash-permille, --crash-kind and the --fs-* flags).",
+        doc: "Crash, filesystem error, targeted error, and short-I/O fault knobs (mirror --machine-crash-permille, --process-crash-permille and the --fs-* flags).",
     },
     EnvVar {
         name: "PATINA_RT_SLEEP_JITTER_NANOS / PATINA_RT_NET_JITTER_NANOS / PATINA_RT_NET_DROP_PERMILLE / PATINA_RT_NET_LATENCY_NANOS",

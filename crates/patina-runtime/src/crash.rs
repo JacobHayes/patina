@@ -3,7 +3,8 @@
 //! A crash is a fault like any other: each crash point — a completed
 //! operation with an effect a crash could cut short
 //! ([`patina_dst_abi::EffectClass::is_crash_point`]) — draws from a seeded
-//! stream whether the run crashes there (`--crash-permille`), and the first
+//! stream whether the machine goes down there (`--machine-crash-permille`),
+//! else whether the process dies (`--process-crash-permille`), and the first
 //! hit crashes. A replay never draws: where its recording crashed is the
 //! trace's own structure, the last operation of incarnation 0's segment, so
 //! deleting other operations from a trace never moves the crash.
@@ -122,49 +123,55 @@ pub trait CrashAttemptSink: Send {
 }
 
 /// Where an incarnation crashes, and what the crash takes down.
-pub(crate) struct CrashArm {
-    kind: CrashKind,
-    trigger: CrashTrigger,
-}
-
-enum CrashTrigger {
-    /// A live run: each completed crash point crashes with `permille`/1000
-    /// odds, drawn from the run's crash-point stream.
-    Draw { permille: u16, rng: SplitMix64 },
-    /// A replay of the segment a recorded crash ended: the crash follows its
-    /// last operation, whatever operation that is.
-    SegmentEnd,
+pub(crate) enum CrashArm {
+    /// A live run: at each completed crash point the machine goes down with
+    /// `machine`/1000 odds, else the process dies with `process`/1000 odds,
+    /// each drawn from the run's crash-point stream only when its rate is
+    /// live. The first hit crashes.
+    Draw {
+        machine: u16,
+        process: u16,
+        rng: SplitMix64,
+    },
+    /// A replay of the segment a recorded crash ended: the crash, of the kind
+    /// the recording's took, follows its last operation, whatever operation
+    /// that is.
+    SegmentEnd(CrashKind),
 }
 
 impl CrashArm {
     /// The crash a supervised first incarnation is armed with: a live run
     /// draws at each crash point, a replay crashes where its segment ends.
     /// `None` for a run with no crash to take: unsupervised, a restarted
-    /// incarnation (a run crashes at most once), or a live run whose crash
-    /// rate is zero, as swarm leaves a run that deselected the crash class.
+    /// incarnation (a run crashes at most once), a live run whose crash rates
+    /// are both zero, as swarm leaves a run that deselected the crash class,
+    /// or a replay that was not told of a crash.
     pub(crate) fn arm(
         supervised: bool,
         first: bool,
-        replay: bool,
-        permille: u16,
-        kind: CrashKind,
+        replay: Option<Option<CrashKind>>,
+        crash: &crate::CrashFaultConfig,
         stream_root: u64,
     ) -> Option<Self> {
         if !supervised || !first {
             return None;
         }
-        let trigger = if replay {
-            CrashTrigger::SegmentEnd
-        } else if permille == 0 {
-            return None;
-        } else {
-            CrashTrigger::Draw {
-                permille,
+        match replay {
+            Some(kind) => kind.map(Self::SegmentEnd),
+            None if crash.machine_permille == 0 && crash.process_permille == 0 => None,
+            None => Some(Self::Draw {
+                machine: crash.machine_permille,
+                process: crash.process_permille,
                 rng: SplitMix64::new(domain_seed(stream_root, fault_domain::CRASH_POINT)),
-            }
-        };
-        Some(Self { kind, trigger })
+            }),
+        }
     }
+}
+
+/// One seeded per-mille draw; a zero rate draws nothing, so a run with one
+/// crash kind off consumes the stream exactly as if that kind did not exist.
+fn hits(rng: &mut SplitMix64, permille: u16) -> bool {
+    permille > 0 && rng.next_u64() % 1000 < u64::from(permille)
 }
 
 impl Context {
@@ -191,16 +198,26 @@ impl Context {
         let Some(arm) = self.crash.as_mut() else {
             return Ok(());
         };
-        let fires = match &mut arm.trigger {
-            CrashTrigger::Draw { permille, rng } => {
-                crash_point && rng.next_u64() % 1000 < u64::from(*permille)
+        let fires = match arm {
+            CrashArm::Draw { .. } if !crash_point => None,
+            CrashArm::Draw {
+                machine,
+                process,
+                rng,
+            } => {
+                if hits(rng, *machine) {
+                    Some(CrashKind::Machine)
+                } else if hits(rng, *process) {
+                    Some(CrashKind::Process)
+                } else {
+                    None
+                }
             }
-            CrashTrigger::SegmentEnd => segment_ended,
+            CrashArm::SegmentEnd(kind) => segment_ended.then_some(*kind),
         };
-        if !fires {
+        let Some(kind) = fires else {
             return Ok(());
-        }
-        let kind = arm.kind;
+        };
         // The crash is spent whether or not it can be carried out: a failed
         // one ends the run as `CrashFailed`.
         self.crash = None;

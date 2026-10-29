@@ -685,10 +685,16 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
 }
 
 fn execute(invocation: Invocation) -> Result<i32, CliError> {
-    if !invocation.knobs.get(FaultKnob::CrashPermille).is_empty() {
-        return Err(CliError::usage(
-            "cargo-family --crash-permille crash-restart is not implemented; refusing rather than running a crash with no restart",
-        ));
+    for knob in [
+        FaultKnob::MachineCrashPermille,
+        FaultKnob::ProcessCrashPermille,
+    ] {
+        if !invocation.knobs.get(knob).is_empty() {
+            return Err(CliError::usage(format!(
+                "cargo-family {} crash-restart is not implemented; refusing rather than running a crash with no restart",
+                knob.meta().flag
+            )));
+        }
     }
     let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
 

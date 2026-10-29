@@ -140,6 +140,7 @@ fn crash_restart_bundle(digest: &str) -> TraceBundle {
                     order: 2,
                     kind: LifecycleEventKind::Crash {
                         incarnation: 0,
+                        crash_kind: patina_dst_abi::CrashKind::Machine,
                         snapshot_digest: digest.into(),
                     },
                 },

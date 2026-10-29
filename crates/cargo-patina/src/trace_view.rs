@@ -391,11 +391,15 @@ fn lifecycle_summary(marker: &LifecycleEvent) -> (String, Option<u64>, String, O
         ),
         LifecycleEventKind::Crash {
             incarnation,
+            crash_kind,
             snapshot_digest,
         } => (
             "lifecycle_crash".to_string(),
             Some(*incarnation),
-            format!("incarnation={incarnation} snapshot={snapshot_digest}"),
+            format!(
+                "incarnation={incarnation} kind={} snapshot={snapshot_digest}",
+                crash_kind.name()
+            ),
             Some(Notable::Crash),
         ),
         LifecycleEventKind::Restart {

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use patina_dst_abi::{CrashKind, TaskId};
+use patina_dst_abi::TaskId;
 use serde::{Deserialize, Serialize};
 
 use crate::NativeIdentityRecord;
@@ -16,12 +16,15 @@ use crate::NativeIdentityRecord;
 pub struct FaultConfigRecord {
     /// Per-mille chance that each crash point (an operation with an effect a
     /// crash could cut short, [`patina_dst_abi::EffectClass::is_crash_point`])
-    /// is where the run crashes. Where a recorded run did crash is the trace's
-    /// own structure, its `Crash` lifecycle marker, never a re-drawn decision.
+    /// is where the machine goes down. Where a recorded run did crash, and
+    /// what the crash took down, is the trace's own structure, its `Crash`
+    /// lifecycle marker, never a re-drawn decision.
     #[serde(default, skip_serializing_if = "is_zero_u16")]
-    pub crash_permille: u16,
-    #[serde(default, skip_serializing_if = "crash_kind_is_machine")]
-    pub crash_kind: CrashKind,
+    pub machine_crash_permille: u16,
+    /// Per-mille chance that a crash point the machine survived is where the
+    /// process dies.
+    #[serde(default, skip_serializing_if = "is_zero_u16")]
+    pub process_crash_permille: u16,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub fs_error_permille: u16,
     /// Targeted filesystem errors, each as its canonical `KIND:N:ERRNO`
@@ -293,10 +296,6 @@ impl WatchdogConfigRecord {
     pub fn is_active(&self) -> bool {
         self.no_progress_budget_nanos.is_some() || self.converge_budget_nanos.is_some()
     }
-}
-
-fn crash_kind_is_machine(kind: &CrashKind) -> bool {
-    *kind == CrashKind::Machine
 }
 
 fn is_zero_u16(value: &u16) -> bool {

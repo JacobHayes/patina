@@ -105,18 +105,19 @@ fn spec_knobs_reach_every_generation() {
         "--net-drop-permille",
         "--net-latency-nanos",
         "--sleep-jitter-nanos",
-        "--crash-permille",
-        "--crash-kind",
+        "--machine-crash-permille",
+        "--process-crash-permille",
     ] {
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
     }
 }
 
-/// The crash plane draws a crash rate and a crash kind per generation, and
-/// the draws actually move: across generations several rates and both kinds
-/// appear, every rate within the per-mille range.
+/// The crash plane draws a machine-crash and a process-crash rate per
+/// generation, independently: across generations each rate takes several
+/// values within the per-mille range, and they do not move in lockstep.
+/// Excluding one leaves the other.
 #[test]
-fn the_crash_plane_draws_a_moving_rate_and_both_kinds() {
+fn the_crash_plane_draws_two_independent_moving_rates() {
     let spec = CampaignSpec {
         faults: FaultPlanes::from_names(["crash"]).unwrap(),
         ..CampaignSpec::default()
@@ -125,19 +126,35 @@ fn the_crash_plane_draws_a_moving_rate_and_both_kinds() {
         let at = flags.iter().position(|flag| flag == name);
         flags[at.unwrap_or_else(|| panic!("{name} missing from {flags:?}")) + 1].clone()
     };
-    let mut rates = BTreeSet::new();
-    let mut kinds = BTreeSet::new();
+    let mut machine_rates = BTreeSet::new();
+    let mut process_rates = BTreeSet::new();
+    let mut pairs = BTreeSet::new();
     for generation in 0..128 {
         let hash = generation_hash(0, generation);
         let flags = derive_flags(&spec, &hash);
         assert_eq!(flags, derive_flags(&spec, &hash));
-        let rate: u16 = value(&flags, "--crash-permille").parse().unwrap();
-        assert!((1..=1000).contains(&rate), "{rate}");
-        rates.insert(rate);
-        kinds.insert(value(&flags, "--crash-kind"));
+        let machine: u16 = value(&flags, "--machine-crash-permille").parse().unwrap();
+        let process: u16 = value(&flags, "--process-crash-permille").parse().unwrap();
+        for rate in [machine, process] {
+            assert!((1..=1000).contains(&rate), "{rate}");
+        }
+        machine_rates.insert(machine);
+        process_rates.insert(process);
+        pairs.insert((machine, process));
     }
-    assert!(rates.len() > 2, "the crash rate never moved: {rates:?}");
-    assert_eq!(kinds, BTreeSet::from(["machine".into(), "process".into()]));
+    assert!(machine_rates.len() > 2, "the machine rate never moved");
+    assert!(process_rates.len() > 2, "the process rate never moved");
+    assert!(
+        pairs.len() > machine_rates.len(),
+        "the two rates moved in lockstep: {pairs:?}"
+    );
+    let machine_only = CampaignSpec {
+        exclude_knobs: [FaultKnob::ProcessCrashPermille].into(),
+        ..spec
+    };
+    let flags = derive_flags(&machine_only, &generation_hash(0, 0));
+    assert!(flags.iter().any(|flag| flag == "--machine-crash-permille"));
+    assert!(!flags.iter().any(|flag| flag == "--process-crash-permille"));
 }
 
 /// `--faults=PLANE,...` emits exactly the selected planes' knobs, at the values
@@ -159,12 +176,14 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
             .copied()
             .find(|knob| knob.meta().flag == name)
     };
-    // A plane is its knobs' flag prefix: the oracle, independent of the
+    // A plane is a word of its knobs' flags: the oracle, independent of the
     // selection logic under test.
     let in_plane = |knob: FaultKnob, plane: FaultPlane| {
         knob.meta()
             .flag
-            .starts_with(&format!("--{}-", plane.name()))
+            .trim_start_matches("--")
+            .split('-')
+            .any(|word| word == plane.name())
     };
     // The every-plane flags with the unselected planes' knobs (and any space-form
     // value after one) removed. The host table is workload, not a plane's knob.

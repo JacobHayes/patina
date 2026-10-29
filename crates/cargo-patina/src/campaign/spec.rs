@@ -286,11 +286,15 @@ impl Default for CampaignSpec {
 }
 
 impl CampaignSpec {
-    /// Whether generations draw a crash: the crash plane is selected and its
-    /// rate is not excluded.
+    /// Whether generations draw a crash: the crash plane is selected and at
+    /// least one of its rates is not excluded.
     pub(super) fn draws_crashes(&self) -> bool {
-        self.faults.draws(FaultKnob::CrashPermille)
-            && !self.exclude_knobs.contains(&FaultKnob::CrashPermille)
+        [
+            FaultKnob::MachineCrashPermille,
+            FaultKnob::ProcessCrashPermille,
+        ]
+        .into_iter()
+        .any(|knob| self.faults.draws(knob) && !self.exclude_knobs.contains(&knob))
     }
 
     /// Merge a JSON spec object over the defaults. Unknown keys are rejected so a
@@ -744,7 +748,7 @@ mod tests {
             },
             CampaignSpec {
                 faults: FaultPlanes::from_names(["crash"]).unwrap(),
-                exclude_knobs: [FaultKnob::CrashKind].into(),
+                exclude_knobs: [FaultKnob::ProcessCrashPermille].into(),
                 ..CampaignSpec::default()
             },
             CampaignSpec {

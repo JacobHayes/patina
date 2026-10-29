@@ -215,6 +215,9 @@ pub struct RuntimeConfig {
     /// native supervisor, which gave it a handoff channel. Only a supervised
     /// incarnation can crash ([`RuntimeConfig::with_crash_supervisor`]).
     pub(super) crash_supervised: bool,
+    /// What a replayed crash takes down
+    /// ([`RuntimeConfig::with_replayed_crash_kind`]).
+    pub(super) replayed_crash_kind: Option<patina_dst_abi::CrashKind>,
 }
 
 impl RuntimeConfig {
@@ -246,6 +249,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -277,6 +281,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -313,6 +318,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -350,6 +356,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -388,6 +395,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -432,6 +440,7 @@ impl RuntimeConfig {
             facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
+            replayed_crash_kind: None,
         }
     }
 
@@ -450,18 +459,19 @@ impl RuntimeConfig {
         self.faults.net.latency_nanos
     }
 
-    /// Crash at each crash point with the given per-mille (0..=1000)
-    /// probability. Only a supervised incarnation can crash
+    /// Take the machine down at each crash point with the given per-mille
+    /// (0..=1000) probability. Only a supervised incarnation can crash
     /// ([`RuntimeConfig::with_crash_supervisor`]).
-    pub fn with_crash_permille(mut self, permille: u16) -> Self {
-        self.faults.crash.permille = permille;
+    pub fn with_machine_crash_permille(mut self, permille: u16) -> Self {
+        self.faults.crash.machine_permille = permille;
         self
     }
 
-    /// What the crash takes down. Inert without
-    /// [`RuntimeConfig::with_crash_permille`].
-    pub fn with_crash_kind(mut self, kind: patina_dst_abi::CrashKind) -> Self {
-        self.faults.crash.kind = kind;
+    /// Kill the process at each crash point the machine survived with the
+    /// given per-mille (0..=1000) probability. Only a supervised incarnation
+    /// can crash ([`RuntimeConfig::with_crash_supervisor`]).
+    pub fn with_process_crash_permille(mut self, permille: u16) -> Self {
+        self.faults.crash.process_permille = permille;
         self
     }
 
@@ -597,12 +607,9 @@ impl RuntimeConfig {
         self
     }
 
-    pub const fn crash_permille(&self) -> u16 {
-        self.faults.crash.permille
-    }
-
-    pub const fn crash_kind(&self) -> patina_dst_abi::CrashKind {
-        self.faults.crash.kind
+    /// Whether this configuration draws a crash at all.
+    pub const fn draws_crashes(&self) -> bool {
+        self.faults.crash.machine_permille > 0 || self.faults.crash.process_permille > 0
     }
 
     /// The run's cooperative-SUT (buggify) configuration.
@@ -868,6 +875,14 @@ impl RuntimeConfig {
     /// the last operation of its segment.
     pub fn with_crash_supervisor(mut self) -> Self {
         self.crash_supervised = true;
+        self
+    }
+
+    /// The kind of the crash a replayed first incarnation ends in, as the
+    /// trace's `Crash` marker recorded it: a replay never draws, so it is
+    /// told what its recording's crash took down.
+    pub fn with_replayed_crash_kind(mut self, kind: patina_dst_abi::CrashKind) -> Self {
+        self.replayed_crash_kind = Some(kind);
         self
     }
 

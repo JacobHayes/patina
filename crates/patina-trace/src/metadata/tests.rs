@@ -23,8 +23,8 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
         "db-1",
     )
     .with_faults(FaultConfigRecord {
-        crash_permille: 34,
-        crash_kind: patina_dst_abi::CrashKind::Process,
+        machine_crash_permille: 34,
+        process_crash_permille: 12,
         fs_error_permille: 100,
         net_drop_permille: 250,
         ..FaultConfigRecord::default()

@@ -93,9 +93,9 @@ bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug sk
 bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^violation '
 bug_leg ignore-short-write 1 "--fs-short-permille 200" "--bug ignore-short-write" '^violation '
 fsync_bug="--ack-ledger /workq-acks --bug skip-wal-fsync"
-bug_leg skip-wal-fsync 2 "--crash-permille 10 --crash-kind machine" "$fsync_bug" '^violation '
+bug_leg skip-wal-fsync 2 "--machine-crash-permille 10" "$fsync_bug" '^violation '
 echo "==> [3] skip-wal-fsync survives a process crash"
-if [[ -n ${bseed_caught:-} ]] && ! run --seed "$bseed_caught" --crash-permille 10 --crash-kind process \
+if [[ -n ${bseed_caught:-} ]] && ! run --seed "$bseed_caught" --process-crash-permille 10 \
     -- "${ARGS[@]}" $fsync_bug >/dev/null 2>"$work/bug.skip-wal-fsync.process.err"; then
   echo "    FAIL: a process crash lost an unsynced record (seed $bseed_caught)"; fail=1
   stderr_tail "$work/bug.skip-wal-fsync.process.err"
