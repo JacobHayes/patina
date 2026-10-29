@@ -1,8 +1,8 @@
 //! Embedded shim sources, toolchain agreement, builds, and object staging.
 
 use crate::native_build::{
-    GuestInstrumentation, PATINA_COV_C, PATINA_GO_METER_C, PATINA_SANCOV_STUB_C, PATINA_YIELD_C,
-    hash_file_contents, host_target_triple,
+    PATINA_GO_METER_C, PATINA_SANCOV_C, PATINA_SANCOV_STUB_C, hash_file_contents,
+    host_target_triple,
 };
 use crate::{CliError, hash_bytes, hash_os, hex, output, shim_cache};
 use patina_dst_trace::lock_exclusive;
@@ -270,14 +270,12 @@ pub(super) fn build_native_shim(
     release: bool,
     rustc: &RustcInvocation,
     shim: &ShimSources,
-    instrumentation: GuestInstrumentation,
 ) -> Result<BuiltNativeShim, CliError> {
     let explicit = shim_target_base(
         env::var_os("PATINA_SHIM_TARGET_DIR"),
         env::var_os("CARGO_TARGET_DIR"),
     );
-    let published =
-        build_native_shim_at(release, rustc, shim, explicit.as_deref(), instrumentation)?;
+    let published = build_native_shim_at(release, rustc, shim, explicit.as_deref())?;
     seal_published(published, &host_target_triple(rustc)?)
 }
 
@@ -323,7 +321,6 @@ fn build_native_shim_at(
     rustc: &RustcInvocation,
     shim: &ShimSources,
     explicit: Option<&OsStr>,
-    instrumentation: GuestInstrumentation,
 ) -> Result<PublishedShim, CliError> {
     let base = native_shim_cache_base(&shim.cache_root, explicit)?;
     let profile = if release { "release" } else { "debug" };
@@ -465,15 +462,12 @@ fn build_native_shim_at(
         ));
     }
     let staticlib = target_dir.join(profile).join(NATIVE_SHIM_STATICLIB);
-    // C compiler and instrumentation variants get entries of their own.
+    // C compiler variants get entries of their own.
     let cc = env::var_os("CC").unwrap_or_else(|| "cc".into());
     let c_identity = shim_object_hash(&cc, &PATINA_POSIX_OBJECT, &host_target_triple(rustc)?, &[])?;
     // The seal's own source names its outputs too: a cargo-patina that seals
     // differently never reuses another's seal of the same archive.
-    let recipe = format!(
-        "{profile}:{c_identity}:{instrumentation:?}:{}",
-        crate::seal::recipe_digest()
-    );
+    let recipe = format!("{profile}:{c_identity}:{}", crate::seal::recipe_digest());
     publish_native_shim(
         &staticlib,
         &base,
@@ -814,7 +808,7 @@ fn indent_lines(text: &str, indent: &str) -> String {
 
 /// A shim helper object compiled below the guest and linked into every native
 /// build. Both variants are content-addressed by [`stage_shim_object`]: the POSIX
-/// layer always, the `--yield-points` hook only under that flag.
+/// layer always, the SanitizerCoverage hook only under `--instrument`.
 pub(super) struct ShimObject {
     /// Final object file name, e.g. `patina_posix.o`.
     object_name: &'static str,
@@ -857,13 +851,14 @@ const PATINA_ALLOCATOR_ROUTING_OBJECT: ShimObject = ShimObject {
     what: "the Patina allocator routing",
 };
 
-/// The `--yield-points` hook object. Compiled without the SanitizerCoverage flags
-/// themselves, so the hook (and thus `patina_yield_point` it calls) is never
-/// itself instrumented and cannot recurse.
-const PATINA_YIELD_OBJECT: ShimObject = ShimObject {
-    object_name: "patina_yield.o",
-    source_name: "patina_yield.c",
-    source: PATINA_YIELD_C,
+/// The `--instrument` hook object (`patina_sancov.c`). Compiled without the
+/// SanitizerCoverage flags themselves, so the hook (and thus the
+/// `patina_yield_point` it calls) is never itself instrumented and cannot
+/// recurse.
+const PATINA_SANCOV_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_sancov.o",
+    source_name: "patina_sancov.c",
+    source: PATINA_SANCOV_C,
     header: None,
     companion_sources: &[],
     cc_flags: &[
@@ -873,29 +868,7 @@ const PATINA_YIELD_OBJECT: ShimObject = ShimObject {
         "-Wextra",
         "-Werror",
     ],
-    what: "the Patina yield-point hook",
-};
-
-/// The `--coverage-points` hook object: the same SanitizerCoverage entry points
-/// as [`PATINA_YIELD_OBJECT`] with the scheduler call made optional and sampled.
-/// Its sampling stride arrives as a `-DPATINA_YIELD_STRIDE=N` define, which
-/// [`shim_object_hash`] folds in, so each stride gets its own content-addressed
-/// object and two strides can never share one. Compiled without the
-/// SanitizerCoverage flags themselves, so the hook is never itself instrumented.
-const PATINA_COV_OBJECT: ShimObject = ShimObject {
-    object_name: "patina_cov.o",
-    source_name: "patina_cov.c",
-    source: PATINA_COV_C,
-    header: None,
-    companion_sources: &[],
-    cc_flags: &[
-        "-std=c11",
-        "-fno-stack-protector",
-        "-Wall",
-        "-Wextra",
-        "-Werror",
-    ],
-    what: "the Patina coverage-point hook",
+    what: "the Patina SanitizerCoverage hook",
 };
 
 /// A Go guest's compute meter (`patina_go_meter.c`), linked by every
@@ -1022,43 +995,23 @@ fn shim_object_hash_in(
 /// it was before any instrumentation existed.
 pub(super) fn stage_instrumentation_object(
     shim: &BuiltNativeShim,
-    instrumentation: GuestInstrumentation,
+    instrumented: bool,
     host_target: &str,
 ) -> Result<Option<PathBuf>, CliError> {
-    let (object, defines) = match instrumentation {
-        GuestInstrumentation::None => return Ok(None),
-        GuestInstrumentation::YieldPoints => (&PATINA_YIELD_OBJECT, Vec::new()),
-        GuestInstrumentation::CoveragePoints { stride } => (
-            &PATINA_COV_OBJECT,
-            // Baked in at compile time, not read from the environment: the
-            // sampling rate is part of the schedule policy, so it must be a
-            // property of the BINARY (which the run side reads back out of the
-            // marker) rather than something a later run could change under a
-            // recorded trace.
-            vec![format!("-DPATINA_YIELD_STRIDE={stride}")],
-        ),
-    };
+    if !instrumented {
+        return Ok(None);
+    }
     // Surface the instrumentation prominently: this binary is not a plain build —
-    // it carries LLVM SanitizerCoverage, and `native-run` schedules it under a
-    // distinct policy recorded in its compatibility fingerprint.
-    let scheduler_hook = if instrumentation.preempts_inside_atomics() {
-        "patina_yield_point"
-    } else {
-        "none"
-    };
-    let note = format!(
-        "PATINA_BUILD_YIELD_POINTS instrumentation=llvm-sancov-trace-pc-guard \
-mode={} scheduler-hook={scheduler_hook} fingerprint-suffix={} -- {}",
-        instrumentation.mode_tag(),
-        instrumentation.fingerprint_suffix(),
-        instrumentation.describe()
-    );
+    // it carries LLVM SanitizerCoverage, and `run` fingerprints it apart.
+    let note = "PATINA_BUILD_INSTRUMENTED instrumentation=llvm-sancov-trace-pc-guard \
+fingerprint-suffix=+instrumented -- edge counters at every edge; `run --yield-stride N` adds a \
+scheduling point every N edges";
     if output::options().is_json() {
         eprintln!("{note}");
     } else {
         println!("{note}");
     }
-    stage_shim_object(&shim.objects, object, host_target, &defines).map(Some)
+    stage_shim_object(&shim.objects, &PATINA_SANCOV_OBJECT, host_target, &[]).map(Some)
 }
 
 /// Compile `object` to a stable, content-addressed path under `base` and return

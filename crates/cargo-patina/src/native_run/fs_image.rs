@@ -233,7 +233,6 @@ fn collect_fs_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_build::GuestInstrumentation;
 
     #[test]
     fn a_mismatch_names_the_half_that_moved() {
@@ -269,32 +268,16 @@ mod tests {
         let policy = SchedulePolicyFingerprint::default();
         for label in ["label+fsimg:custom", "a+fsimg:b+fsimg:c", "base"] {
             for buggify in [false, true] {
-                let fingerprint = |hash| {
-                    native_run_fingerprint(
-                        label,
-                        GuestInstrumentation::None,
-                        Some(hash),
-                        buggify,
-                        &policy,
-                    )
-                };
-                let (head, tail) = native_run_fingerprint_around(
-                    label,
-                    GuestInstrumentation::None,
-                    buggify,
-                    &policy,
-                );
+                let fingerprint =
+                    |hash| native_run_fingerprint(label, false, Some(hash), buggify, &policy);
+                let (head, tail) = native_run_fingerprint_around(label, false, buggify, &policy);
                 assert_eq!(
                     recorded_image_hash(&fingerprint("aa.bb"), &head, &tail),
                     Some("aa.bb"),
                     "{label} buggify={buggify}"
                 );
-                let (other_head, _) = native_run_fingerprint_around(
-                    "other",
-                    GuestInstrumentation::None,
-                    buggify,
-                    &policy,
-                );
+                let (other_head, _) =
+                    native_run_fingerprint_around("other", false, buggify, &policy);
                 assert_eq!(
                     recorded_image_hash(&fingerprint("aa.bb"), &other_head, &tail),
                     None

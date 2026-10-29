@@ -18,125 +18,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
-/// Build-time deterministic-preemption hook, linked only under `--yield-points`.
-pub(super) const PATINA_YIELD_C: &str = include_str!("../c/patina_yield.c");
-/// Edge-coverage instrumentation with optional SAMPLED preemption, linked only
-/// under `--coverage-points[=<STRIDE>]` and mutually exclusive with
-/// `PATINA_YIELD_C` (they define the same SanitizerCoverage entry points).
-pub(super) const PATINA_COV_C: &str = include_str!("../c/patina_cov.c");
+/// The SanitizerCoverage hooks of an instrumented build (`--instrument`): edge
+/// counters at every edge, and a scheduling point every `--yield-stride`th one.
+pub(super) const PATINA_SANCOV_C: &str = include_str!("../c/patina_sancov.c");
 /// A Go guest's compute meter: the libFuzzer comparison hooks its
 /// instrumentation calls, linked only by `cargo patina build --go`.
 pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c");
 /// Weak, inert SanitizerCoverage entry points so an instrumented artifact that
 /// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
-/// under `--yield-points`/`--coverage-points`, alongside (and overridden by)
-/// `PATINA_YIELD_C`/`PATINA_COV_C`.
+/// under `--instrument`, alongside (and overridden by) `PATINA_SANCOV_C`.
 pub(super) const PATINA_SANCOV_STUB_C: &str = include_str!("../c/patina_sancov_stub.c");
-/// Marker string the `--yield-points` hook embeds; `native-run` looks for it in
-/// the binary to fold yield-point scheduling into the compatibility fingerprint.
-/// Unchanged, so a binary built before `--coverage-points` existed classifies and
-/// fingerprints exactly as it always did.
-const PATINA_YIELD_MARKER: &[u8] = b"PATINA_YIELD_POINTS_V1";
-/// Marker PREFIX the `--coverage-points` hook embeds, immediately followed by the
-/// baked-in sampling stride in decimal and a `;`. `native-run` recovers the
-/// stride from the binary's bytes — there is no flag to re-pass — and folds it
-/// into the compatibility fingerprint, so two strides never cross-replay.
-const PATINA_COV_MARKER_PREFIX: &[u8] = b"PATINA_COVERAGE_POINTS_V1 stride=";
-/// Fingerprint suffix distinguishing a yield-point binary's schedule policy from
-/// a plain one, so their recorded traces never cross-replay.
-const PATINA_YIELD_FINGERPRINT_SUFFIX: &str = "+yieldpoints";
-/// Fingerprint suffix stem for a `--coverage-points` binary. The stride is
-/// appended (`+covpoints:0`, `+covpoints:1024`) so the sampling rate — which is
-/// part of the schedule policy — is part of the compatibility fingerprint.
-const PATINA_COV_FINGERPRINT_SUFFIX: &str = "+covpoints";
-/// How a native build instruments the guest, and therefore which schedule policy
-/// its recorded traces belong to.
-///
-/// Edge coverage and scheduler preemption are two different needs that shared one
-/// flag until `--coverage-points` split them. `--yield-points` buys both at once
-/// and pays a scheduler round trip per basic block; `--coverage-points` buys the
-/// counters alone, and `--coverage-points=N` adds preemption back at a chosen,
-/// bounded rate. Every variant is a pure function of the build flags and is
-/// recoverable from the built binary's own bytes ([`binary_instrumentation`]), so
-/// `run`/`replay` never need the flag re-passed and a cross-mode replay fails
-/// closed on the fingerprint.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) enum GuestInstrumentation {
-    /// A plain build: no SanitizerCoverage, no edge counters, and preemption only
-    /// at the boundaries Patina interposes.
-    #[default]
-    None,
-    /// `--yield-points`: edge counters AND a scheduling point at every
-    /// instrumented basic block.
-    YieldPoints,
-    /// `--coverage-points[=STRIDE]`: edge counters at every instrumented basic
-    /// block, plus a scheduling point every `stride` blocks a thread executes.
-    /// `stride == 0` is counters only — the guest keeps exactly the preemption
-    /// boundaries a plain build has.
-    CoveragePoints { stride: u32 },
-}
-
-impl GuestInstrumentation {
-    /// Whether the guest carries SanitizerCoverage edge counters, i.e. whether
-    /// `--coverage-out` and `campaign --guided` have anything to read.
-    pub(super) fn has_coverage(self) -> bool {
-        !matches!(self, GuestInstrumentation::None)
-    }
-
-    /// Whether EVERY basic block is a scheduling boundary. This is what makes
-    /// `--starve` liveness-safe against a guest holding an invisible atomic
-    /// spinlock: only a boundary inside that spin loop lets aging force the
-    /// starved holder to run. A sampled stride bounds the blocks between
-    /// boundaries by `stride`, which is the same guarantee at 1/stride the cost,
-    /// so it counts too; counters-only does not.
-    pub(super) fn preempts_inside_atomics(self) -> bool {
-        match self {
-            GuestInstrumentation::None => false,
-            GuestInstrumentation::YieldPoints => true,
-            GuestInstrumentation::CoveragePoints { stride } => stride > 0,
-        }
-    }
-
-    /// The compatibility-fingerprint suffix for this instrumentation. A plain
-    /// build contributes nothing, so its fingerprint is byte-for-byte what it was
-    /// before any of this existed.
-    pub(super) fn fingerprint_suffix(self) -> String {
-        match self {
-            GuestInstrumentation::None => String::new(),
-            GuestInstrumentation::YieldPoints => PATINA_YIELD_FINGERPRINT_SUFFIX.to_string(),
-            GuestInstrumentation::CoveragePoints { stride } => {
-                format!("{PATINA_COV_FINGERPRINT_SUFFIX}:{stride}")
-            }
-        }
-    }
-
-    /// A single whitespace-free tag naming the mode AND its parameter, for the
-    /// machine-readable build note. Keeping the stride in the tag means a log
-    /// line records exactly which policy a binary was built under.
-    pub(super) fn mode_tag(self) -> String {
-        match self {
-            GuestInstrumentation::None => "none".to_string(),
-            GuestInstrumentation::YieldPoints => "yield-points".to_string(),
-            GuestInstrumentation::CoveragePoints { stride } => {
-                format!("coverage-points:{stride}")
-            }
-        }
-    }
-
-    /// A one-line human description for the build note and for diagnostics.
-    pub(super) fn describe(self) -> String {
-        match self {
-            GuestInstrumentation::None => "none".to_string(),
-            GuestInstrumentation::YieldPoints => "yield-points (every basic block)".to_string(),
-            GuestInstrumentation::CoveragePoints { stride: 0 } => {
-                "coverage-points (edge counters only; no added scheduling points)".to_string()
-            }
-            GuestInstrumentation::CoveragePoints { stride } => format!(
-                "coverage-points (edge counters; a scheduling point every {stride} basic blocks per thread)"
-            ),
-        }
-    }
-}
+/// Marker string the instrumented build's hook embeds; `run` looks for it in the
+/// binary to know it carries edge counters and honours `--yield-stride`, and to
+/// fold that into the compatibility fingerprint.
+const PATINA_INSTRUMENTED_MARKER: &[u8] = b"PATINA_INSTRUMENTED_V1";
+/// Fingerprint suffix distinguishing an instrumented binary from a plain one, so
+/// their recorded traces never cross-replay.
+const PATINA_INSTRUMENTED_FINGERPRINT_SUFFIX: &str = "+instrumented";
 pub(super) const DEFAULT_NATIVE_EDITION: &str = "2024";
 
 /// A resolved run/audit/replay artifact: the concrete path to consume, a display
@@ -220,22 +118,16 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
     }
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
-    let built_shim = build_native_shim(
-        invocation.release,
-        &rustc,
-        &shim,
-        invocation.instrumentation,
-    )?;
+    let built_shim = build_native_shim(invocation.release, &rustc, &shim)?;
     let host_target = host_target_triple(&rustc)?;
 
     // Stable immutable paths keep Cargo's link fingerprints warm. The owning
     // handle pins every input through compilation and the guest's final link.
     let object = built_shim.facade.clone();
     // The SanitizerCoverage hook object is compiled and linked only under
-    // `--yield-points`/`--coverage-points`; a plain build never references
-    // SanitizerCoverage symbols.
+    // `--instrument`; a plain build never references SanitizerCoverage symbols.
     let yield_object =
-        stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
+        stage_instrumentation_object(&built_shim, invocation.instrument, &host_target)?;
     let allocator = built_shim.allocator_link_args(&host_target)?;
 
     match invocation.target {
@@ -300,8 +192,8 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
 
 /// The rustc flags that turn on LLVM SanitizerCoverage trace-pc-guard
 /// instrumentation at basic-block granularity (level 3 reaches loop backedges),
-/// so `__sanitizer_cov_trace_pc_guard` — routed to `patina_yield_point` by the
-/// linked hook — fires inside hot loops, not only at function entry. `-Cpasses`
+/// so `__sanitizer_cov_trace_pc_guard` — the linked hook's edge counter and
+/// stride-sampled `patina_yield_point` — fires inside hot loops, not only at function entry. `-Cpasses`
 /// and `-Cllvm-args` are stable rustc codegen flags, so this needs no nightly
 /// toolchain and no `RUSTC_BOOTSTRAP`. The only version coupling is to LLVM's
 /// internal pass name (`sancov-module`) and coverage cl::opts, which are stable
@@ -410,7 +302,7 @@ fn build_native_source(
         // out `debug_assert!`/overflow checks (which turns those free failure
         // oracles into no-ops — see the debug-vs-release note). These are stable
         // `-C` codegen flags, so no nightly/`RUSTC_BOOTSTRAP`, and they compose
-        // with the sancov yield-point flags above. Emitted before `rustc_args` so
+        // with the sancov flags above. Emitted before `rustc_args` so
         // an explicit trailing `-C opt-level=…` from the user still wins (rustc
         // takes the last value for a repeated `-C` option).
         command.args([
@@ -532,7 +424,7 @@ fn build_native_package(
     // `-C` codegen options, so no `RUSTC_BOOTSTRAP` is needed. They apply to every
     // crate Cargo compiles from source in this invocation (guest + its
     // path/registry deps); the precompiled std is untouched, so only guest code
-    // gains yield points.
+    // gains edge hooks.
     if release {
         command.arg("--release");
     }
@@ -742,7 +634,7 @@ pub(super) fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliE
 }
 
 /// Build the `CARGO_ENCODED_RUSTFLAGS` value for a package build: the
-/// cfg(patina)/cfg(dst) family plus, under `--yield-points`, the
+/// cfg(patina)/cfg(dst) family plus, under `--instrument`, the
 /// SanitizerCoverage codegen flags. Encoded with the `0x1f` unit separator so values containing
 /// spaces survive intact. Any pre-existing `RUSTFLAGS` are preserved ahead of
 /// the injected flags, matching how `cargo patina run` layers its cfgs onto the
@@ -750,7 +642,7 @@ pub(super) fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliE
 ///
 /// Everything here is deliberately whole-graph: Cargo forwards `RUSTFLAGS` to
 /// every crate it compiles from source in the invocation, which is exactly what
-/// `cfg(patina)`-gated guest/dependency code and yield-point instrumentation
+/// `cfg(patina)`-gated guest/dependency code and edge instrumentation
 /// need. The shim's *link* arguments must not be whole-graph and live in
 /// [`native_package_link_args`] instead — with one exception, `sancov_stub`,
 /// which is a link argument precisely because the instrumentation above is
@@ -837,14 +729,14 @@ pub(super) fn hash_file_contents(hasher: &mut Sha256, path: &Path) -> Result<(),
 }
 
 /// Stage [`PATINA_SANCOV_STUB_OBJECT`] when the build is instrumented. The stubs
-/// exist only to answer the instrumentation, so a build without `--yield-points`
+/// exist only to answer the instrumentation, so a build without `--instrument`
 /// stages nothing and no Patina object reaches a dependency's link at all.
 pub(super) fn stage_sancov_stub(
     shim: &BuiltNativeShim,
-    yield_points: bool,
+    instrumented: bool,
     target: &str,
 ) -> Result<Option<PathBuf>, CliError> {
-    if !yield_points {
+    if !instrumented {
         return Ok(None);
     }
     stage_shim_object(&shim.objects, &PATINA_SANCOV_STUB_OBJECT, target, &[]).map(Some)
@@ -901,70 +793,30 @@ pub(super) fn native_package_link_args(
     args
 }
 
-/// Which instrumentation the program whose bytes are `image` was built with,
-/// recovered from the linked hook's embedded marker; `binary` names it in an
-/// error.
+/// Whether the program whose bytes are `image` was built with `--instrument`,
+/// recovered from the linked hook's embedded marker.
 ///
 /// This classification is load-bearing: it selects the compatibility-fingerprint
-/// suffix, so a false negative silently records under — or cross-replays against
-/// — the wrong schedule policy. The `--coverage-points` marker therefore carries
-/// its sampling STRIDE as well as its mode, because the stride is part of that
-/// policy: the run side reads it out of the bytes it is about to execute rather
-/// than trusting a flag to be re-passed. Those bytes are the run's mapping of the
-/// executable, so a read failure stops the run before this is asked, and never
-/// reads as "not instrumented".
-pub(super) fn binary_instrumentation(
-    image: &[u8],
-    binary: &Path,
-) -> Result<GuestInstrumentation, CliError> {
-    // The yield-point marker wins wherever it sits: the two hook objects are
-    // mutually exclusive at link, so at most one can be present, and a binary
-    // carrying both bytes could only be a doctored artifact — classify it under
-    // the DENSER policy rather than the cheaper one.
-    if memchr::memmem::find(image, PATINA_YIELD_MARKER).is_some() {
-        return Ok(GuestInstrumentation::YieldPoints);
-    }
-    // The first coverage-points marker names the stride.
-    let Some(at) = memchr::memmem::find(image, PATINA_COV_MARKER_PREFIX) else {
-        return Ok(GuestInstrumentation::None);
-    };
-    let tail = &image[at + PATINA_COV_MARKER_PREFIX.len()..];
-    let digits: Vec<u8> = tail
-        .iter()
-        .copied()
-        .take(PATINA_COV_MARKER_TRAILING)
-        .take_while(|byte| *byte != b';')
-        .collect();
-    let stride = std::str::from_utf8(&digits)
-        .ok()
-        .and_then(|text| text.parse::<u32>().ok())
-        .ok_or_else(|| {
-            CliError(format!(
-                "{} carries a malformed Patina coverage-points marker; rebuild it with \
-`cargo patina build --coverage-points`",
-                binary.display()
-            ))
-        })?;
-    Ok(GuestInstrumentation::CoveragePoints { stride })
+/// suffix and decides whether `--coverage-out` and `--yield-stride` have a hook
+/// to act on, so it reads the bytes the run is about to execute rather than
+/// trusting a flag to be re-passed.
+pub(super) fn binary_instrumented(image: &[u8]) -> bool {
+    memchr::memmem::find(image, PATINA_INSTRUMENTED_MARKER).is_some()
 }
 
-/// The decimal digits (a `u32`: at most 10) plus the `;` terminator that follow
-/// the coverage-points marker prefix.
-const PATINA_COV_MARKER_TRAILING: usize = 11;
-
-/// Append the instrumentation policy suffix to a base fingerprint, leaving a
-/// plain binary's fingerprint untouched (the suffix is empty). A `--yield-points`
-/// binary and a `--coverage-points=N` binary therefore never cross-replay, and
-/// neither does one stride against another.
-pub(super) fn instrumentation_fingerprint(
-    base: &str,
-    instrumentation: GuestInstrumentation,
-) -> String {
-    format!("{base}{}", instrumentation.fingerprint_suffix())
+/// Append the instrumentation suffix to a base fingerprint, leaving a plain
+/// binary's fingerprint untouched, so an instrumented binary and a plain one
+/// never cross-replay.
+pub(super) fn instrumentation_fingerprint(base: &str, instrumented: bool) -> String {
+    if instrumented {
+        format!("{base}{PATINA_INSTRUMENTED_FINGERPRINT_SUFFIX}")
+    } else {
+        base.to_string()
+    }
 }
 
 /// The compatibility fingerprint for a native run: the base fingerprint, then
-/// the yield-point policy suffix, the mounted-corpus suffix, and the
+/// the instrumentation suffix, the mounted-corpus suffix, and the
 /// cooperative-SUT (buggify) suffix. Folding the filesystem image hash in means
 /// a trace recorded against one corpus fails closed on replay against a
 /// different one, exactly like a schedule-policy mismatch. The `+buggify`
@@ -979,12 +831,12 @@ pub(super) fn instrumentation_fingerprint(
 /// [`native_policy_from_trace`]) and therefore recomputes the same string.
 pub(super) fn native_run_fingerprint(
     base: &str,
-    instrumentation: GuestInstrumentation,
+    instrumented: bool,
     image_hash: Option<&str>,
     buggify: bool,
     policy: &SchedulePolicyFingerprint,
 ) -> String {
-    let (head, tail) = native_run_fingerprint_around(base, instrumentation, buggify, policy);
+    let (head, tail) = native_run_fingerprint_around(base, instrumented, buggify, policy);
     match image_hash {
         Some(hash) => format!("{head}{IMAGE_FINGERPRINT_COMPONENT}{hash}{tail}"),
         None => head + &tail,
@@ -1002,11 +854,11 @@ pub(super) const IMAGE_FINGERPRINT_COMPONENT: &str = "+fsimg:";
 /// text.
 pub(super) fn native_run_fingerprint_around(
     base: &str,
-    instrumentation: GuestInstrumentation,
+    instrumented: bool,
     buggify: bool,
     policy: &SchedulePolicyFingerprint,
 ) -> (String, String) {
-    let head = instrumentation_fingerprint(base, instrumentation);
+    let head = instrumentation_fingerprint(base, instrumented);
     let mut fingerprint = String::new();
     if buggify {
         fingerprint.push('+');
@@ -1024,6 +876,9 @@ pub(super) fn native_run_fingerprint_around(
     if policy.swarm {
         fingerprint.push_str("+swarm");
     }
+    if policy.yield_stride {
+        fingerprint.push_str("+yieldstride");
+    }
     (head, fingerprint)
 }
 
@@ -1036,6 +891,7 @@ pub(super) struct SchedulePolicyFingerprint {
     pct: bool,
     starvation: bool,
     swarm: bool,
+    yield_stride: bool,
 }
 
 impl SchedulePolicyFingerprint {
@@ -1044,6 +900,7 @@ impl SchedulePolicyFingerprint {
             pct: schedule.pct.is_some(),
             starvation: schedule.starve.is_some(),
             swarm: schedule.swarm,
+            yield_stride: schedule.yield_stride != 0,
         }
     }
 }
@@ -1057,7 +914,7 @@ pub(super) fn trace_has_buggify(bundle: &TraceBundle) -> bool {
 
 /// Reconstruct the exploration-policy fingerprint components from a recorded
 /// trace's metadata, so a flag-free replay recomputes the same fingerprint the
-/// record run folded (`+pct`/`+starve`/`+swarm`) and a cross-policy replay fails
+/// record run folded (`+pct`/`+starve`/`+swarm`/`+yieldstride`) and a cross-policy replay fails
 /// closed.
 pub(super) fn native_policy_from_trace(bundle: &TraceBundle) -> SchedulePolicyFingerprint {
     let policy = bundle.metadata.schedule_policy.as_ref();
@@ -1065,6 +922,7 @@ pub(super) fn native_policy_from_trace(bundle: &TraceBundle) -> SchedulePolicyFi
         pct: policy.is_some_and(|policy| policy.pct.is_some()),
         starvation: policy.is_some_and(|policy| policy.starvation.is_some()),
         swarm: bundle.metadata.swarm.is_some(),
+        yield_stride: policy.is_some_and(|policy| policy.yield_stride != 0),
     }
 }
 
@@ -1073,8 +931,7 @@ mod tests {
     use super::*;
     use crate::DEFAULT_NATIVE_FINGERPRINT;
     use crate::native_run::target_has_sud;
-    use crate::parse::parse_native_build;
-    use crate::tests::{native_build_invocation, strings};
+    use crate::tests::native_build_invocation;
     use std::path::Path;
 
     #[test]
@@ -1108,15 +965,15 @@ mod tests {
         let directory = Path::new("/shim");
         let object = directory.join("patina_posix.o");
         let staticlib = directory.join("libpatina_dst_native_shim.a");
-        let yield_object = directory.join("patina_yield.o");
+        let yield_object = directory.join("patina_sancov.o");
         let sancov_stub = directory.join("patina_sancov_stub.o");
 
         for stub in [None, Some(sancov_stub.as_path())] {
             let rustflags = native_package_rustflags(stub, "x86_64-unknown-linux-gnu");
             let rustflags = rustflags.to_string_lossy().into_owned();
             assert!(rustflags.contains("patina_shim"));
-            // Yield-point instrumentation is codegen, not linking: it must stay
-            // whole-graph so dependency code gains yield points too.
+            // Edge instrumentation is codegen, not linking: it must stay
+            // whole-graph so dependency code gains edge hooks too.
             assert_eq!(
                 rustflags.contains("sanitizer-coverage-trace-pc-guard"),
                 stub.is_some()
@@ -1149,7 +1006,7 @@ mod tests {
                 .iter()
                 .any(|arg| arg.ends_with("libpatina_dst_native_shim.a"))
         );
-        assert!(rendered.iter().any(|arg| arg.ends_with("patina_yield.o")));
+        assert!(rendered.iter().any(|arg| arg.ends_with("patina_sancov.o")));
         for arg in &rendered {
             assert!(
                 arg == "-C" || arg.starts_with("link-arg="),
@@ -1159,161 +1016,39 @@ mod tests {
         assert!(
             native_package_link_args(&object, &staticlib, &allocator, None)
                 .iter()
-                .all(|arg| !arg.to_string_lossy().ends_with("patina_yield.o"))
+                .all(|arg| !arg.to_string_lossy().ends_with("patina_sancov.o"))
         );
     }
 
     #[test]
-    fn yield_points_flag_and_fingerprint_suffix() {
-        // Off by default on both target shapes.
-        assert_eq!(
-            native_build_invocation(&["native-build", "probe.rs", "--output", "p"]).instrumentation,
-            GuestInstrumentation::None
-        );
-        assert_eq!(
-            native_build_invocation(&["native-build", "pkg", "--output", "p"]).instrumentation,
-            GuestInstrumentation::None
-        );
-        // `--yield-points` sets it on a single source and on a package.
-        assert_eq!(
-            native_build_invocation(&[
-                "native-build",
-                "probe.rs",
-                "--output",
-                "p",
-                "--yield-points",
-            ])
-            .instrumentation,
-            GuestInstrumentation::YieldPoints
-        );
-        assert_eq!(
-            native_build_invocation(&["native-build", "pkg", "--output", "p", "--yield-points"])
-                .instrumentation,
-            GuestInstrumentation::YieldPoints
-        );
-        // `--coverage-points` bare is counters only; `=N` is the sampled stride.
-        assert_eq!(
-            native_build_invocation(&["native-build", "pkg", "--output", "p", "--coverage-points"])
-                .instrumentation,
-            GuestInstrumentation::CoveragePoints { stride: 0 }
-        );
-        assert_eq!(
-            native_build_invocation(&[
-                "native-build",
-                "pkg",
-                "--output",
-                "p",
-                "--coverage-points=1024",
-            ])
-            .instrumentation,
-            GuestInstrumentation::CoveragePoints { stride: 1024 }
-        );
-        // The two modes are mutually exclusive: they define the same
-        // SanitizerCoverage entry points, so linking both is not representable.
-        let clash = parse_native_build(strings(&[
-            "pkg",
-            "--output",
-            "p",
-            "--yield-points",
-            "--coverage-points=8",
-        ]))
-        .unwrap_err();
-        assert!(
-            clash.to_string().contains("mutually exclusive"),
-            "expected a mutual-exclusion usage error, got: {clash}"
-        );
-
-        // The fingerprint gains a policy suffix only for an instrumented binary,
-        // so a plain binary's traces stay compatible and cross-config replay is
-        // rejected. The stride is PART of the suffix: two strides are two
-        // different schedule policies and must not cross-replay.
-        assert_eq!(
-            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, GuestInstrumentation::None),
-            DEFAULT_NATIVE_FINGERPRINT
-        );
-        assert_eq!(
-            instrumentation_fingerprint(
-                DEFAULT_NATIVE_FINGERPRINT,
-                GuestInstrumentation::YieldPoints
-            ),
-            format!("{DEFAULT_NATIVE_FINGERPRINT}{PATINA_YIELD_FINGERPRINT_SUFFIX}")
-        );
-        assert_eq!(
-            instrumentation_fingerprint(
-                DEFAULT_NATIVE_FINGERPRINT,
-                GuestInstrumentation::CoveragePoints { stride: 0 }
-            ),
-            format!("{DEFAULT_NATIVE_FINGERPRINT}{PATINA_COV_FINGERPRINT_SUFFIX}:0")
-        );
-        assert_ne!(
-            instrumentation_fingerprint(
-                DEFAULT_NATIVE_FINGERPRINT,
-                GuestInstrumentation::CoveragePoints { stride: 512 }
-            ),
-            instrumentation_fingerprint(
-                DEFAULT_NATIVE_FINGERPRINT,
-                GuestInstrumentation::CoveragePoints { stride: 1024 }
-            )
-        );
-        // Only a mode that actually preempts inside an atomics-only loop makes
-        // `--starve` liveness-safe; counters alone do not.
-        assert!(GuestInstrumentation::YieldPoints.preempts_inside_atomics());
-        assert!(GuestInstrumentation::CoveragePoints { stride: 1 }.preempts_inside_atomics());
-        assert!(!GuestInstrumentation::CoveragePoints { stride: 0 }.preempts_inside_atomics());
-        assert!(!GuestInstrumentation::None.preempts_inside_atomics());
-        // Both instrumented modes carry edge counters, so `--coverage-out` and
-        // `campaign --guided` are available under either.
-        assert!(GuestInstrumentation::CoveragePoints { stride: 0 }.has_coverage());
-        assert!(GuestInstrumentation::YieldPoints.has_coverage());
-        assert!(!GuestInstrumentation::None.has_coverage());
-    }
-
-    // The instrumentation classification is load-bearing for the compatibility
-    // fingerprint, so its detector must report a clean absence as `None`, find
-    // either marker anywhere in the image, and recover the coverage-point stride
-    // from the binary's own bytes, since no flag re-states it at run time.
-    #[test]
-    fn instrumentation_is_read_from_the_image_bytes() {
-        let classify = |image: &[u8]| binary_instrumentation(image, Path::new("guest")).ok();
-        assert_eq!(
-            classify(&vec![0u8; 200_000]),
-            Some(GuestInstrumentation::None)
-        );
-
-        let mut image = vec![0u8; 200_000];
-        let at = 64 * 1024 - (PATINA_YIELD_MARKER.len() / 2);
-        image[at..at + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
-        assert_eq!(classify(&image), Some(GuestInstrumentation::YieldPoints));
-
-        let cov = |stride: u32| {
-            format!(
-                "{}{stride};",
-                std::str::from_utf8(PATINA_COV_MARKER_PREFIX).unwrap()
-            )
-        };
-        for stride in [0u32, 7, 4_294_967_295] {
-            let mut image = vec![0u8; 200_000];
-            image[1000..1000 + cov(stride).len()].copy_from_slice(cov(stride).as_bytes());
-            assert_eq!(
-                classify(&image),
-                Some(GuestInstrumentation::CoveragePoints { stride }),
-                "stride {stride}"
+    fn instrument_flag_marker_and_fingerprint_suffix() {
+        // Off by default on both target shapes; `--instrument` sets it on both.
+        for target in ["probe.rs", "pkg"] {
+            assert!(
+                !native_build_invocation(&["native-build", target, "--output", "p"]).instrument
+            );
+            assert!(
+                native_build_invocation(&["native-build", target, "--output", "p", "--instrument"])
+                    .instrument
             );
         }
-
-        // A yield-point marker wins even when a coverage prefix precedes it, and
-        // among coverage prefixes the FIRST names the stride.
+        // The run side reads the build from the binary's own bytes, wherever the
+        // marker sits, since no flag re-states it at run time.
         let mut image = vec![0u8; 200_000];
-        image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
-        let late = 150_000;
-        image[late..late + PATINA_YIELD_MARKER.len()].copy_from_slice(PATINA_YIELD_MARKER);
-        assert_eq!(classify(&image), Some(GuestInstrumentation::YieldPoints));
-        let mut image = vec![0u8; 200_000];
-        image[100..100 + cov(9).len()].copy_from_slice(cov(9).as_bytes());
-        image[late..late + cov(4).len()].copy_from_slice(cov(4).as_bytes());
+        assert!(!binary_instrumented(&image));
+        let at = 64 * 1024 - (PATINA_INSTRUMENTED_MARKER.len() / 2);
+        image[at..at + PATINA_INSTRUMENTED_MARKER.len()]
+            .copy_from_slice(PATINA_INSTRUMENTED_MARKER);
+        assert!(binary_instrumented(&image));
+        // Only an instrumented binary's fingerprint changes, so a plain binary's
+        // traces never cross-replay against an instrumented one.
         assert_eq!(
-            classify(&image),
-            Some(GuestInstrumentation::CoveragePoints { stride: 9 })
+            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, false),
+            DEFAULT_NATIVE_FINGERPRINT
+        );
+        assert_ne!(
+            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, true),
+            DEFAULT_NATIVE_FINGERPRINT
         );
     }
 }

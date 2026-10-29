@@ -647,6 +647,13 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         let depth = 1 + u32::from(hash.read(gen_byte::SCHED_PCT_DEPTH) % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
+    if spec.yield_stride {
+        // A log sweep: the window an atomics-only race needs is a handful of
+        // edges, and the cost falls as 1/stride, so every octave from a point at
+        // every edge to one per 1024 gets an equal share of the generations.
+        let stride = 1u64 << (hash.read(gen_byte::YIELD_STRIDE) % 11); // 1..=1024
+        push_run_flag(&mut flags, "--yield-stride", RunValue::Int(stride));
+    }
     if spec.starve {
         // One byte, three fields. The low three bits pick the interval count; the
         // next three pick the START WINDOW as a power of two; the top two pick the

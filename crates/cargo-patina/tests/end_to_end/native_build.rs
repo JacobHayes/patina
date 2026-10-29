@@ -184,7 +184,7 @@ exit "$status"
             "--bin",
             "patina-native-pkg-fixture",
             "--release",
-            "--yield-points",
+            "--instrument",
         ];
         for flags in [&plain[..], &yielded[..]] {
             invoke_in_with_env(workspace, flags, &envs);
@@ -249,7 +249,7 @@ exit "$status"
     // and is deliberately NOT claimed as the duplicate-symbol discriminator: a
     // dependency like this still links clean under `-fPIC`, so that rung of the
     // original report remains unreproduced synthetically. Exercised under
-    // `--yield-points`, whose extra object travels the same path.
+    // `--instrument`, whose extra object travels the same path.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
@@ -264,7 +264,7 @@ exit "$status"
             &[
                 "build",
                 package.to_str().unwrap(),
-                "--yield-points",
+                "--instrument",
                 "--output",
                 output.to_str().unwrap(),
             ],
@@ -319,7 +319,7 @@ exit "$status"
 
     /// Symbols that exist only because the shim's C object and staticlib were on a
     /// link line: the POSIX layer's constructor-retained `environ` accessor and the
-    /// `--yield-points` hook.
+    /// `--instrument` hook's scheduling point.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_install", b"patina_yield_point"];
 

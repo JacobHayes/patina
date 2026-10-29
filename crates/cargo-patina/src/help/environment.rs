@@ -145,9 +145,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Cooperative-SUT (buggify) knobs (mirror the --buggify* flags).",
     },
     EnvVar {
-        name: "PATINA_SCHED_PCT / PATINA_SCHED_PCT_STEPS / PATINA_SCHED_STARVE / PATINA_SCHED_STARVE_MAX_LEN / PATINA_SCHED_STARVE_WINDOW",
+        name: "PATINA_SCHED_PCT / PATINA_SCHED_PCT_STEPS / PATINA_SCHED_STARVE / PATINA_SCHED_STARVE_MAX_LEN / PATINA_SCHED_STARVE_WINDOW / PATINA_SCHED_YIELD_STRIDE",
         scope: "protocol",
-        doc: "Native scheduling exploration knobs (mirror --sched-pct/--starve*). A wedged run is killed by the starvation stall backstop (exit 111).",
+        doc: "Native scheduling exploration knobs (mirror --sched-pct/--starve*/--yield-stride). A wedged run is killed by the starvation stall backstop (exit 111).",
     },
     EnvVar {
         name: "PATINA_SWARM",

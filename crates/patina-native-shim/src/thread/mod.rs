@@ -292,7 +292,7 @@ thread_local! {
     static CURRENT_TASK: Cell<Option<TaskId>> = const { Cell::new(None) };
     /// Set once this host thread's task has completed (`thread_finish`), so
     /// any instrumented teardown it runs afterward — pthread TLS destructors
-    /// under `--yield-points` execute std generic code monomorphized into the
+    /// under `--yield-stride` execute std generic code monomorphized into the
     /// guest crate, which carries the yield hook — takes no scheduling point
     /// instead of rescheduling a task the scheduler has already removed. This
     /// is deliberately a *distinct* state from "never registered": a foreign
@@ -300,7 +300,7 @@ thread_local! {
     /// loudly through the unchanged `reschedule` path, never silently proceeds
     /// unscheduled.
     static TASK_COMPLETED: Cell<bool> = const { Cell::new(false) };
-    /// The guest pc of the in-flight `--yield-points` guard hit, captured by
+    /// The guest pc of the in-flight `--yield-stride` guard hit, captured by
     /// [`yield_point_from`] so a replay divergence can name the instrumented
     /// site that took the extra scheduling point; 0 outside a guard hit.
     static YIELD_SITE: Cell<usize> = const { Cell::new(0) };
@@ -328,7 +328,7 @@ fn task_completed() -> bool {
 /// this is process-wide and covers the ROOT (main) task, which never runs
 /// `thread_finish` and so has no completion sentinel of its own. glibc drives
 /// the guest's thread-local destructors from inside `exit()` — under
-/// `--yield-points` those are instrumented std code that hits the yield hook —
+/// `--yield-stride` those are instrumented std code that hits the yield hook —
 /// BEFORE the atexit-registered `patina_shutdown` runs `deactivate()`. Those
 /// teardown yields sit outside the deterministic body, and whether a given
 /// yield-guard edge fires before or after the runtime detaches is governed by
@@ -1286,7 +1286,7 @@ pub(crate) fn yield_site_context() -> String {
     let site = YIELD_SITE.with(Cell::get);
     if site == 0 {
         return "; the divergent scheduling point came from an interposed boundary call, not a \
---yield-points guard"
+edge-hook yield point"
             .into();
     }
     let anchor = crate::patina_yield_point as *const () as usize;
@@ -1371,7 +1371,7 @@ pub(crate) fn sched_point() -> Result<(), c_int> {
     // `main_returned()` extends the identical treatment to the ROOT (main)
     // task once the process is unwinding through the `exit` interposer: the
     // main task never runs `thread_finish`, so without this its instrumented
-    // thread-local destructors (under `--yield-points`) would record trailing,
+    // thread-local destructors (under `--yield-stride`) would record trailing,
     // host-teardown-ordering-dependent `TaskYield`s and diverge record from
     // replay. The deterministic contract: the root task records exactly ZERO
     // teardown yields on every platform. This is a silence (no op recorded or

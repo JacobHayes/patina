@@ -111,6 +111,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.buggify |= args.flag("--buggify");
     spec.swarm |= args.flag("--swarm");
     spec.pct |= args.flag("--sched-pct");
+    spec.yield_stride |= args.flag("--yield-stride");
     spec.starve |= args.flag("--starve");
     // Bare `--faults` is every plane; `--faults=PLANE,...` the named subset.
     if let Some(planes) = args.text("--faults") {

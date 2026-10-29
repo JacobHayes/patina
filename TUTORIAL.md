@@ -113,18 +113,18 @@ $ cargo patina sites --no-cache --site batch-commit --exercised ./sdk.stderr
 src/main.rs:9 fault driven id=batch-commit label=batch-commit ... exercised(reg=1 evals=8 fires=2 ...)
 ```
 
-For native edge coverage, build with yield points, write a covmap, then use the
+For native edge coverage, build with `--instrument`, write a covmap, then use the
 read-only coverage report to symbolize and roll it up by crate/module/function:
 
 ```
-$ cargo patina build ./ledger --yield-points --output ./ledger/ledger-yp
-$ cargo patina run ./ledger/ledger-yp --seed 5 --buggify --coverage-out ./ledger/run.covmap
-$ cargo patina coverage ./ledger/ledger-yp ./ledger/run.covmap --focus ledger --top 10
+$ cargo patina build ./ledger --instrument --output ./ledger/ledger-inst
+$ cargo patina run ./ledger/ledger-inst --seed 5 --buggify --coverage-out ./ledger/run.covmap
+$ cargo patina coverage ./ledger/ledger-inst ./ledger/run.covmap --focus ledger --top 10
 ```
 
-A longer `campaign` over a yield-point binary automatically accumulates the union
+A longer `campaign` over an instrumented binary automatically accumulates the union
 under `<out-dir>/coverage/`; inspect it with
-`cargo patina coverage ./ledger/ledger-yp <out-dir>`. The campaign report is tied
+`cargo patina coverage ./ledger/ledger-inst <out-dir>`. The campaign report is tied
 to the recorded artifact hash, so passing a different binary fails closed instead
 of producing a mismatched symbol rollup.
 
@@ -365,10 +365,11 @@ reported none.
   provides, e.g. `rand`) instead of argv.
   That way every generation is still reproducible from its patina seed alone,
   and replay needs no extra flags.
-- Make atomics-only race windows schedulable: `cargo patina build --yield-points`
-  (a scheduling point at every basic block) or `cargo patina build
-  --coverage-points=N` (one every N basic blocks, at 1/N of the cost; bare
-  `--coverage-points` is edge counters only, for `--coverage-out`/`--guided`).
+- Make atomics-only race windows schedulable: `cargo patina build --instrument`,
+  then `cargo patina run --yield-stride N` (a scheduling point every N edges a
+  thread executes; 1 is every edge, the densest and slowest). At the default
+  stride 0 the same binary only keeps edge counters, for
+  `--coverage-out`/`--guided`.
 - Reduce a campaign failure to a one-line reproduction: `cargo patina minimize
   --generation 14 --out-dir out/` delta-debugs that generation's fault knobs
   first (usually 17-18 down to 1-2, in about twenty seeded re-runs), prints the

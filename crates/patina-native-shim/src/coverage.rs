@@ -298,7 +298,7 @@ pub(crate) fn prepare_coverage_output(
     let guard_count = coverage_count(guard_ranges)?;
     if requested && guard_count == 0 {
         return Err(
-            "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --yield-points`"
+            "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --instrument`"
                 .to_string(),
         );
     }

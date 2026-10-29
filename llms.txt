@@ -31,16 +31,16 @@ unknown option.
 
 ## CLI verbs
 
-- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--yield-points | --coverage-points[=STRIDE]]`
-  Build a deterministic shim-linked artifact. `--yield-points`
-  instruments basic blocks (LLVM SanitizerCoverage) and takes a scheduling point
-  at every one, so atomics-only race windows become schedulable; the densest and most expensive mode. `--coverage-points` emits the SAME edge
-  counters with NO scheduler hook; `--coverage-points=N` adds a scheduling point
-  every N basic blocks a thread executes (1/N of the yield cost, same bounded
-  reachability). The stride is compiled in, recovered from the binary at run
-  time, and folded into the compatibility fingerprint (`+covpoints:N`), so a
-  trace never cross-replays across modes or strides. The two flags are mutually
-  exclusive. Prints `PATINA_BUILD output=...`.
+- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--instrument]`
+  Build a deterministic shim-linked artifact. `--instrument` adds an LLVM
+  SanitizerCoverage hook at every edge: it keeps edge counters (`--coverage-out`,
+  `coverage`, `campaign --guided`) and takes the scheduling points a run's
+  `--yield-stride N` asks for, one every N edges a thread executes, so
+  atomics-only race windows become schedulable (1 = every edge, the densest and
+  most expensive; the default 0 adds none). The stride is recorded in the trace
+  and a replay takes it from there; an instrumented binary folds `+instrumented`
+  into the compatibility fingerprint and a non-zero stride `+yieldstride`.
+  Prints `PATINA_BUILD output=...`.
 - `cargo patina build <GO PACKAGE DIR> --go --output PATH [--release] [-- GO BUILD OPTIONS]`
   Build a Go main package as a native guest (Linux): `go build` in cgo mode
   (`CGO_ENABLED=1`), linked externally with the shim, so goroutine threads
@@ -61,10 +61,11 @@ unknown option.
   `--hostname NAME` sets the node name `uname`/`gethostname` report (default
   `patina`, at most 64 bytes); both are recorded and restored flag-free on
   replay.
-  Native yield-point binaries emit
+  Native `--instrument` binaries emit
   `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
   edge-counter map and refuses plain native binaries with a
-  `build --yield-points`/`--coverage-points` hint.
+  `build --instrument` hint; `--yield-stride N` on a plain binary is refused
+  the same way.
   Native runs execute with address-space randomization off; a host that
   forbids it (Docker's default seccomp profile) refuses the run unless
   `--allow-randomized-address-layout` is passed (also on native `test`,
@@ -81,7 +82,7 @@ unknown option.
   cannot apply stops the run with the `host_limit` refusal.
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
-- `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+- `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
   stages it under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, runs the exact libtest
   filter with one libtest thread, and records the first failing seed unless it is
@@ -120,7 +121,7 @@ unknown option.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
   fault plane's knobs — `fs` (error/short/latency), `crash` (a per-operation
@@ -171,7 +172,7 @@ unknown option.
   extra runs. Novel failure
   signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
-  `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
+  `patina.campaign.sites/v1`), and native `--instrument` edge coverage is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
   plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
@@ -187,7 +188,7 @@ unknown option.
   consistent measured advantage over the default sweep, so prefer the default
   sweep unless you are experimenting with the policy.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
-  Read-only offline symbolization for native yield-point coverage. Resolves
+  Read-only offline symbolization for native `--instrument` coverage. Resolves
   covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges
   up by crate/module/function, refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
@@ -396,9 +397,9 @@ dev-dependency use under plain `cargo test`.
   build failure, refused replay) exits 2.
 - `PATINA_SCHEDULE_REPORT` (stderr) reports per-task scheduling boundaries and
   warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
-  its interleavings were not actually explored (use `build --coverage-points=N`,
-  or `--yield-points` for the dense mode).
-- `PATINA_COVERAGE_REPORT` (stderr) reports native yield-point edge coverage
+  its interleavings were not actually explored (use `build --instrument` and
+  `run --yield-stride N`).
+- `PATINA_COVERAGE_REPORT` (stderr) reports native `--instrument` edge coverage
   (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
   `PATINA_COVERAGE_REPORT=0`.
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing (the envelope's `sdk` is the machine copy); each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.

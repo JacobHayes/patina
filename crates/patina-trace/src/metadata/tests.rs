@@ -47,6 +47,7 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
             max_len: 64,
             window: 256,
         }),
+        yield_stride: 16,
     }))
     .with_swarm(Some(SwarmConfigRecord {
         candidate_classes: vec!["crash".to_string(), "net_drop".to_string()],

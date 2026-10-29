@@ -46,7 +46,7 @@ pub(crate) fn parse_native_harness_from(
         features: HarnessFeatures {
             features: args.string("--features"),
         },
-        instrumentation: instrumentation_of(&args)?,
+        instrument: args.flag("--instrument"),
         step_budget: args.u64("--budget"),
         realtime_epoch: args.string("--realtime-epoch"),
         hostname: args.string("--hostname"),
@@ -108,10 +108,10 @@ pub(crate) fn parse_native_build(
         .ok_or_else(|| CliError::usage("build requires a Rust source path or a Cargo package"))?;
     let output = args.path("--output");
     let release = args.flag("--release");
-    let instrumentation = instrumentation_of(&args)?;
+    let instrument = args.flag("--instrument");
 
     if args.flag("--go") {
-        return parse_go_build(&args, path, output, release, instrumentation, rustc_args);
+        return parse_go_build(&args, path, output, release, instrument, rustc_args);
     }
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
@@ -132,7 +132,7 @@ pub(crate) fn parse_native_build(
             },
             output,
             release,
-            instrumentation,
+            instrument,
         })
     } else {
         if args.string("--package").is_some() || args.string("--bin").is_some() {
@@ -151,7 +151,7 @@ pub(crate) fn parse_native_build(
             },
             output: Some(output),
             release,
-            instrumentation,
+            instrument,
         })
     }
 }
@@ -165,7 +165,7 @@ fn parse_go_build(
     path: PathBuf,
     output: Option<PathBuf>,
     release: bool,
-    instrumentation: GuestInstrumentation,
+    instrument: bool,
     go_args: Vec<OsString>,
 ) -> Result<NativeBuildInvocation, CliError> {
     for (flag, given) in [
@@ -179,9 +179,9 @@ fn parse_go_build(
             )));
         }
     }
-    if instrumentation != GuestInstrumentation::None {
+    if instrument {
         return Err(CliError::usage(
-            "--yield-points and --coverage-points instrument Rust code through LLVM; a Go package (--go) takes neither",
+            "--instrument instruments Rust code through LLVM; a Go package (--go) takes no --instrument",
         ));
     }
     crate::go_build::check_go_args(&go_args)?;
@@ -193,7 +193,7 @@ fn parse_go_build(
         },
         output: Some(output),
         release,
-        instrumentation,
+        instrument,
     })
 }
 

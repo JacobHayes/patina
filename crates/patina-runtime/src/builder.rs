@@ -14,8 +14,8 @@ use crate::replay::{
     reconcile_replay_cpus, reconcile_replay_dns, reconcile_replay_faults,
     reconcile_replay_guest_cwd, reconcile_replay_guest_env, reconcile_replay_hostname,
     reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy, reconcile_replay_sud,
-    reconcile_replay_tsc, schedule_policy_record, validate_buggify_fingerprint_contract,
-    watchdog_record,
+    reconcile_replay_tsc, reconcile_replay_yield_stride, schedule_policy_record,
+    validate_buggify_fingerprint_contract, watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
@@ -255,6 +255,7 @@ impl RuntimeBuilder {
         let mut replay_dns_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
+        let mut replay_yield_stride: Option<u32> = None;
         let (execution, root_seed) = match &self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
             ExecutionMode::Record { path } => (
@@ -350,6 +351,10 @@ impl RuntimeBuilder {
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
+                replay_yield_stride = Some(reconcile_replay_yield_stride(
+                    &self.config,
+                    replayer.schedule_policy(),
+                )?);
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
@@ -395,6 +400,10 @@ impl RuntimeBuilder {
                 replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
+                replay_yield_stride = Some(reconcile_replay_yield_stride(
+                    &self.config,
+                    replayer.schedule_policy(),
+                )?);
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
@@ -443,6 +452,10 @@ impl RuntimeBuilder {
                 replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
                 replay_schedule_override =
                     reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
+                replay_yield_stride = Some(reconcile_replay_yield_stride(
+                    &self.config,
+                    session.schedule_policy(),
+                )?);
                 // A branch inherits the parent's swarm decision along with its
                 // fault configuration; it does not re-draw the mask.
                 swarm_record = session.swarm_config().cloned();
@@ -525,6 +538,9 @@ impl RuntimeBuilder {
         // consistent and the reconcile above provides the fail-closed guard.
         if let Some(policy) = replay_schedule_override {
             self.config.schedule_policy = policy;
+        }
+        if let Some(stride) = replay_yield_stride {
+            self.config.yield_stride = stride;
         }
         validate_buggify_fingerprint_contract(&self.config)?;
 
@@ -722,6 +738,7 @@ impl RuntimeBuilder {
             guest_env: self.config.guest_env,
             guest_cwd: self.config.guest_cwd,
             cpus,
+            yield_stride: self.config.yield_stride,
             hostname: self
                 .config
                 .hostname

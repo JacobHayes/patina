@@ -23,6 +23,10 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             .parse::<usize>()
             .map(drop)
             .map_err(|_| format!("{name} must be a non-negative integer")),
+        Kind::U32 => value
+            .parse::<u32>()
+            .map(drop)
+            .map_err(|_| format!("{name} must be an unsigned 32-bit integer")),
         Kind::PositiveU64 => match u64_of(name, value)? {
             0 => Err(format!("{name} must be >= 1")),
             _ => Ok(()),

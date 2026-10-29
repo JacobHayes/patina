@@ -83,7 +83,7 @@ extern "C" fn finalize_atexit() {
     // destructors on every exit-chain path that reaches it, so on Linux the
     // teardown flag must already be set (natural return via the
     // __libc_start_main wrapper, explicit exit via the `exit` interposer). If
-    // not, the root task's --yield-points teardown yields were not silenced:
+    // not, the root task's --yield-stride teardown yields were not silenced:
     // fail loudly before finalizing the trace rather than let the miss surface
     // later as an op-count divergence. `_exit`/`_Exit`/`abort` skip atexit.
     #[cfg(target_os = "linux")]

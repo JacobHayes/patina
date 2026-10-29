@@ -37,7 +37,7 @@ fn main() {
     // so only the bootstrap generation is ever novel.
     const CONSTANT_GUEST: &str = "fn main() { println!(\"constant\"); }\n";
 
-    /// `source` built with `--coverage-points`, so a campaign has edge coverage
+    /// `source` built with `--instrument`, so a campaign has edge coverage
     /// to steer by.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn coverage_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
@@ -49,7 +49,7 @@ fn main() {
             &[
                 "build",
                 path.to_str().unwrap(),
-                "--coverage-points",
+                "--instrument",
                 "--output",
                 binary.to_str().unwrap(),
             ],

@@ -1,7 +1,7 @@
 //! Native test harnesses and bounded seed exploration.
 
 use crate::native_build::{
-    GuestInstrumentation, NATIVE_AUDIT_METADATA_ARGS, host_target_triple, native_package_link_args,
+    NATIVE_AUDIT_METADATA_ARGS, host_target_triple, native_package_link_args,
     native_package_rustflags, resolve_artifact, stage_sancov_stub,
 };
 use crate::native_run::execute_native_run;
@@ -193,15 +193,10 @@ fn build_native_harness(
     }
     let shim = prepare_shim_sources()?;
     let rustc = check_native_toolchain_agreement(&shim.dir)?;
-    let built_shim = build_native_shim(
-        invocation.release,
-        &rustc,
-        &shim,
-        invocation.instrumentation,
-    )?;
+    let built_shim = build_native_shim(invocation.release, &rustc, &shim)?;
     let host_target = host_target_triple(&rustc)?;
     let yield_object =
-        stage_instrumentation_object(&built_shim, invocation.instrumentation, &host_target)?;
+        stage_instrumentation_object(&built_shim, invocation.instrument, &host_target)?;
     let sancov_stub = stage_sancov_stub(&built_shim, yield_object.is_some(), &host_target)?;
     let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
     let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
@@ -749,6 +744,10 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
     if invocation.schedule.swarm {
         args.push(OsString::from("--swarm"));
     }
+    if invocation.schedule.yield_stride != 0 {
+        args.push(OsString::from("--yield-stride"));
+        args.push(OsString::from(invocation.schedule.yield_stride.to_string()));
+    }
     push_optional_arg(
         args,
         "--compute-watchdog-ms",
@@ -871,15 +870,8 @@ fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> Stri
         args.push(OsString::from("--release"));
     }
     args.extend(invocation.features.cargo_args());
-    match invocation.instrumentation {
-        GuestInstrumentation::None => {}
-        GuestInstrumentation::YieldPoints => args.push(OsString::from("--yield-points")),
-        GuestInstrumentation::CoveragePoints { stride: 0 } => {
-            args.push(OsString::from("--coverage-points"));
-        }
-        GuestInstrumentation::CoveragePoints { stride } => {
-            args.push(OsString::from(format!("--coverage-points={stride}")));
-        }
+    if invocation.instrument {
+        args.push(OsString::from("--instrument"));
     }
     append_native_harness_run_flags(&mut args, invocation);
     command_line("cargo patina", &args)
@@ -971,7 +963,6 @@ pub(super) fn execute_explore(exploration: ExploreInvocation) -> Result<i32, Cli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_build::GuestInstrumentation;
     use crate::{
         HarnessFeatures, HarnessSeeds, NativeHarnessInvocation, NativeLiveness, NativeSchedule, cli,
     };
@@ -1131,7 +1122,7 @@ mod tests {
             seeds: HarnessSeeds::One(0),
             release: false,
             features: HarnessFeatures::default(),
-            instrumentation: GuestInstrumentation::None,
+            instrument: false,
             step_budget: Some(9),
             realtime_epoch: args.string("--realtime-epoch"),
             hostname: args.string("--hostname"),

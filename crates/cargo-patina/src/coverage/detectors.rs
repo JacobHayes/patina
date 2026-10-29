@@ -37,7 +37,7 @@ fn detector_fingerprint_mismatch() -> (&'static str, bool, String) {
         let mut store = CampaignCoverageStore::fresh(
             dir.clone(),
             artifact.clone(),
-            "patina-native+yieldpoints".into(),
+            "patina-native+instrumented".into(),
             200,
         );
         store.fold_covmap(0, &synthetic_covmap(&[1], &[10]))?;
@@ -55,7 +55,7 @@ fn detector_fingerprint_mismatch() -> (&'static str, bool, String) {
         )
         .map_err(|error| CliError(format!("failed to rewrite meta: {error}")))?;
         let error =
-            CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
+            CampaignCoverageStore::load(dir, artifact, "patina-native+instrumented".into(), 200, 1)
                 .unwrap_err();
         Ok(error.0)
     })();
@@ -88,7 +88,7 @@ fn detector_plateau_exactness() -> (&'static str, bool, String) {
     let mut store = CampaignCoverageStore::fresh(
         PathBuf::from("out/coverage"),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         2,
     );
     let ok = store.fold_covmap(0, &first).is_ok()
@@ -100,7 +100,7 @@ fn detector_plateau_exactness() -> (&'static str, bool, String) {
     let mut disabled = CampaignCoverageStore::fresh(
         PathBuf::from("out/coverage"),
         artifact,
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         0,
     );
     let disabled_ok = disabled.fold_covmap(0, &first).is_ok()
@@ -121,7 +121,7 @@ fn detector_watermark_idempotency() -> (&'static str, bool, String) {
             path: "guest".into(),
             sha256: "abc".into(),
         },
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
     );
     let covmap = synthetic_covmap(&[1, 2], &[10, 20]);

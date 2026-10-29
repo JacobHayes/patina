@@ -1,12 +1,12 @@
-//! Native yield points, coverage, teardown, and report controls.
+//! Native edge hooks (coverage and yield stride), teardown, and report controls.
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
 
-    // A `--yield-points` guest whose MAIN thread owns a thread-local with an
-    // instrumented `Drop`, plus a worker thread that recreates the joined-task /
-    // still-exiting-host-thread teardown window. Under `--yield-points` the main
+    // An `--instrument` guest, run at `--yield-stride 1`, whose MAIN thread owns a
+    // thread-local with an instrumented `Drop`, plus a worker thread that recreates
+    // the joined-task / still-exiting-host-thread teardown window. At stride 1 the main
     // thread's thread-local destructor runs instrumented code AFTER `main` returns —
     // inside the C runtime's `exit()`, which (on glibc) drives `__call_tls_dtors`
     // BEFORE the atexit-registered `patina_shutdown`. Before the `exit`-interposer
@@ -32,7 +32,7 @@ use std::time::Duration;
 struct Noisy(Cell<u64>);
 impl Drop for Noisy {
     fn drop(&mut self) {
-        // Instrumented teardown work: enough edges that the --yield-points hook
+        // Instrumented teardown work: enough edges that the edge hook
         // fires while the main thread destroys its thread-local, at process exit.
         let mut acc = self.0.get();
         for i in 0..128u64 {
@@ -63,8 +63,8 @@ fn main() {
 }
 "#;
 
-    // One `--yield-points` build of the teardown guest carries the instrumented
-    // binary's contracts:
+    // One `--instrument` build of the teardown guest, run at `--yield-stride 1`,
+    // carries the instrumented binary's contracts:
     //
     // * the root task records zero teardown yields and a worker's thread-local
     //   teardown runs no hook after its task finished, so the run completes and
@@ -81,7 +81,7 @@ fn main() {
     //   so this proves the detector without needing the race to fire.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn native_yield_points_tear_down_cover_and_classify_divergence() {
+    fn native_yield_stride_tears_down_covers_and_classifies_divergence() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("main_tls.rs");
         fs::write(&source, MAIN_TLS_TEARDOWN_SOURCE).unwrap();
@@ -94,11 +94,11 @@ fn main() {
                 source.to_str().unwrap(),
                 "--output",
                 binary.to_str().unwrap(),
-                "--yield-points",
+                "--instrument",
             ],
         );
         let guest = common::native::Guest { dir, binary };
-        let (output, trace) = guest.assert_recorded(1, &[]);
+        let (output, trace) = guest.assert_recorded(1, &["--yield-stride", "1"]);
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("MAIN_TLS_ok"),
             "main-thread TLS teardown run did not complete:\nstderr:\n{}",
@@ -119,12 +119,23 @@ fn main() {
         let cov_trace = directory.join("covered.patina");
         let recorded = covered(
             "run",
-            &["--seed", "3", "--record", cov_trace.to_str().unwrap()],
+            &[
+                "--seed",
+                "3",
+                "--yield-stride",
+                "1",
+                "--record",
+                cov_trace.to_str().unwrap(),
+            ],
             "record.covmap",
         );
         assert_eq!(
             recorded,
-            covered("run", &["--seed", "3"], "repeat.covmap"),
+            covered(
+                "run",
+                &["--seed", "3", "--yield-stride", "1"],
+                "repeat.covmap"
+            ),
             "same-seed coverage maps must be byte-identical"
         );
         assert_eq!(
@@ -330,7 +341,7 @@ fn main() {
             String::from_utf8_lossy(&replayed.stdout)
         );
 
-        // `--coverage-out` is legal only on a `--yield-points` build: the plain
+        // `--coverage-out` is legal only on an `--instrument` build: the plain
         // binary fails closed with the build hint.
         let refused_map = directory.path().join("plain.covmap");
         let refused = invoke_unchecked(
@@ -349,8 +360,8 @@ fn main() {
         assert!(
             !refused.status.success()
                 && refused_stderr.contains("--coverage-out requires")
-                && refused_stderr.contains("cargo patina build --yield-points"),
-            "plain-binary coverage request should fail closed with the yield-points hint:\n{refused_stderr}"
+                && refused_stderr.contains("cargo patina build --instrument"),
+            "plain-binary coverage request should fail closed with the build hint:\n{refused_stderr}"
         );
     }
 
@@ -377,5 +388,105 @@ fn main() {
             "expected a trailing task_yield decision before the final scheduler_next"
         );
         fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    // A lost update in atomics-only code: each worker reads the counter, passes
+    // the value through a function (an instrumented edge, so a scheduling point
+    // can fall between the read and the write), and writes it back plus one. No
+    // interposed call sits in the window, so it is reachable only through the
+    // edge hook's scheduling points.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const ATOMICS_RACE_SOURCE: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+
+static COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[inline(never)]
+fn carry(value: u64) -> u64 {
+    std::hint::black_box(value)
+}
+
+fn main() {
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            thread::spawn(|| {
+                for _ in 0..50 {
+                    let seen = carry(COUNT.load(Ordering::Relaxed));
+                    COUNT.store(seen + 1, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let total = COUNT.load(Ordering::Relaxed);
+    if total != 100 {
+        println!("LOST_UPDATE total={total}");
+        std::process::exit(3);
+    }
+    println!("RACE_CLEAN");
+}
+"#;
+
+    // One instrumented binary, two strides: at stride 0 the window is
+    // unreachable at every seed, at stride 1 some seed loses an update, and
+    // that seed's recording replays to the same failure from the trace alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_yield_stride_reaches_an_atomics_only_race_that_stride_zero_cannot() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("race.rs");
+        fs::write(&source, ATOMICS_RACE_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let binary = dir.path().join("race");
+        let bin = binary.to_str().unwrap();
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin,
+                "--instrument",
+            ],
+        );
+        let run =
+            |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);
+        let lost =
+            |output: &Output| String::from_utf8_lossy(&output.stdout).contains("LOST_UPDATE");
+        let seeds: Vec<String> = (0..8).map(|seed| seed.to_string()).collect();
+        for seed in &seeds {
+            let output = run(&["run", bin, "--seed", seed]);
+            assert!(
+                output.status.success() && !lost(&output),
+                "stride 0 must leave the window unreachable (seed {seed}):\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        let failing = seeds
+            .iter()
+            .find(|seed| lost(&run(&["run", bin, "--seed", seed, "--yield-stride", "1"])))
+            .expect("stride 1 must reach the lost update at some seed");
+        let trace = dir.path().join("lost.patina");
+        let recorded = run(&[
+            "run",
+            bin,
+            "--seed",
+            failing,
+            "--yield-stride",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+        ]);
+        assert!(lost(&recorded));
+        let replayed = run(&["replay", bin, trace.to_str().unwrap()]);
+        assert_eq!(
+            String::from_utf8_lossy(&replayed.stdout),
+            String::from_utf8_lossy(&recorded.stdout),
+            "the replay takes the recorded stride and loses the same update:\n{}",
+            String::from_utf8_lossy(&replayed.stderr)
+        );
     }
 }

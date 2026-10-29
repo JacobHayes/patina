@@ -103,8 +103,9 @@ Patina so adopters pay nothing in production builds:
 **Visibility into whether the search actually searched.** Inert knobs are treated
 as bugs here. `sites` is a static inventory of every assertion/oracle site in the
 workspace, and can be joined against what a run or campaign actually exercised.
-Native binaries can be built with yield-point instrumentation so atomics-only
-race windows become schedulable, and `coverage` symbolizes their edge coverage
+Native binaries built with `--instrument` take a scheduling point every
+`--yield-stride` edges, so atomics-only race windows become schedulable, and
+`coverage` symbolizes their edge coverage
 and rolls it up by crate/module/function. The scheduler
 warns when a spawned thread ran zero interposed operations — that is, when its
 interleavings were never actually explored.
@@ -158,7 +159,7 @@ When the finding should keep guarding the tree, graduate it to
 it runs under plain `cargo test`, rebuilds the same libtest target shim-linked,
 sweeps seeds, and panics with the failing seed and copy-paste repro commands.
 Build **debug**, not release — `debug_assert!` and overflow checks are free
-oracles, and yield-point windows are denser.
+oracles, and a yield stride's windows are denser.
 
 **Whole system — a real program, minutes to overnight.** Build the binary
 shim-linked and read its audit residual before trusting any result. Instrument

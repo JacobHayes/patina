@@ -20,9 +20,18 @@ pub extern "C" fn patina_sched_yield() -> c_int {
     0
 }
 
+/// The yield stride an instrumented guest's edge hook (`patina_sancov.c`) reads
+/// at every edge: 0 takes no scheduling point, N one every Nth edge a thread
+/// executes. Written once, by [`crate::runtime::install`], from the installed
+/// runtime's stride (the run's `--yield-stride`, or the trace's on replay);
+/// nothing reads it in a plain build.
 #[unsafe(no_mangle)]
-/// The `--yield-points` guard hook: `patina_yield.c` forwards every
-/// SanitizerCoverage guard hit here with the instrumented call site, so a
+pub static PATINA_YIELD_STRIDE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+#[unsafe(no_mangle)]
+/// The edge hook's scheduling point: `patina_sancov.c` calls it every
+/// `PATINA_YIELD_STRIDE`th edge with the instrumented call site, so a
 /// record/replay yield divergence can name the exact guest location that took
 /// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
 pub extern "C" fn patina_yield_point(site: *const c_void) {
@@ -50,7 +59,7 @@ pub extern "C" fn patina_compute_point(units: u64) {
 /// executes on the exiting thread AFTER its managed body but BEFORE the C runtime
 /// drives the guest's thread-local destructors. Marking teardown here makes the
 /// root task's post-`main` yield hooks take no scheduling point (see
-/// `thread::sched_point`), so a `--yield-points` guest's host-teardown-ordering-
+/// `thread::sched_point`), so a `--yield-stride` guest's host-teardown-ordering-
 /// dependent trailing yields can never diverge record from replay. `atexit`
 /// cannot serve: glibc runs the TLS destructors BEFORE the atexit list, so the
 /// packaged `patina_shutdown` atexit hook is too late. `_exit`/`_Exit` skip the
@@ -148,7 +157,7 @@ pub extern "C" fn patina_abort() -> ! {
 /// [`patina_exit`]: glibc's `__libc_start_main` calls `exit` through a hidden
 /// internal alias (bound at libc build time, not via the PLT), so an `exit`
 /// strong-def only catches EXPLICIT `exit(3)`/`std::process::exit`. Setting the
-/// flag here silences the root task's `--yield-points` teardown yields on that
+/// flag here silences the root task's `--yield-stride` teardown yields on that
 /// natural path (see `thread::sched_point`).
 pub extern "C" fn patina_note_main_returned() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
@@ -176,7 +185,7 @@ pub extern "C" fn patina_in_teardown() -> c_int {
 /// so they never reach this. If the flag is UNSET here, the teardown interposer
 /// did not engage on this platform/toolchain (e.g. an unversioned strong def
 /// failing to interpose a versioned crt reference), which means the root task's
-/// `--yield-points` teardown yields were NOT silenced and record/replay would
+/// `--yield-stride` teardown yields were NOT silenced and record/replay would
 /// diverge. Fail LOUDLY and named rather than let that miss surface hours later as
 /// an unexplained op-count divergence. Darwin is excluded by design: its natural
 /// path keeps libSystem's own `exit` (two-level namespace), so the flag is not set
@@ -191,7 +200,7 @@ pub extern "C" fn patina_assert_teardown_engaged() {
             2,
             b"patina native shim fatal: teardown interposer did not engage -- main-return \
 silencing is not active on this platform/toolchain (neither the __libc_start_main wrapper nor the \
-exit interposer set the teardown flag before atexit); --yield-points teardown determinism is not \
+exit interposer set the teardown flag before atexit); --yield-stride teardown determinism is not \
 guaranteed\n",
         );
         crate::host_abort();

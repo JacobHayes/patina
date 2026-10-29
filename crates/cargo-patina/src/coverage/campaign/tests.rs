@@ -14,7 +14,7 @@ fn campaign_fold_is_watermark_idempotent() {
             path: "guest".into(),
             sha256: "abc".into(),
         },
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
     );
     let first = store.fold_covmap(0, &covmap).expect("first fold");
@@ -40,7 +40,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     let mut store = CampaignCoverageStore::fresh(
         dir.clone(),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
     );
     store.fold_covmap(0, &covmap).unwrap();
@@ -49,7 +49,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     CampaignCoverageStore::load(
         dir.clone(),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
         0,
     )
@@ -57,7 +57,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     let behind = CampaignCoverageStore::load(
         dir.clone(),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
         2,
     )
@@ -78,7 +78,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     let ahead = CampaignCoverageStore::load(
         dir.clone(),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         200,
         1,
     )
@@ -95,7 +95,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
         meta["fingerprint"] = "other".into();
     });
     let error =
-        CampaignCoverageStore::load(dir, artifact, "patina-native+yieldpoints".into(), 200, 1)
+        CampaignCoverageStore::load(dir, artifact, "patina-native+instrumented".into(), 200, 1)
             .unwrap_err();
     assert!(
         error.0.contains("fingerprint mismatch"),
@@ -110,7 +110,7 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
                 path: "guest".into(),
                 sha256: "abc".into(),
             },
-            "patina-native+yieldpoints".into(),
+            "patina-native+instrumented".into(),
             &covmap,
             200,
         )
@@ -147,7 +147,7 @@ fn plateau_rule_is_exact_and_zero_disables() {
     let mut store = CampaignCoverageStore::fresh(
         PathBuf::from("out/coverage"),
         artifact.clone(),
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         2,
     );
     store.fold_covmap(0, &covmap).unwrap();
@@ -160,7 +160,7 @@ fn plateau_rule_is_exact_and_zero_disables() {
     let mut disabled = CampaignCoverageStore::fresh(
         PathBuf::from("out/coverage"),
         artifact,
-        "patina-native+yieldpoints".into(),
+        "patina-native+instrumented".into(),
         0,
     );
     disabled.fold_covmap(0, &covmap).unwrap();

@@ -124,7 +124,7 @@ struct CompletedTask {
 /// completely invisible to the runtime. Yields are the stable signal — blocking
 /// parks vary by seed, but the scaffolding yield count is invariant to the body's
 /// iteration count. A worker at or below it is unexplorable; one real interposed
-/// op lifts it above, a `--yield-points` build to tens, an interposed sync loop
+/// op lifts it above, a `--yield-stride 1` run to tens, an interposed sync loop
 /// (contended mutexes) to hundreds.
 ///
 /// The baseline is platform-specific and measured with the do-nothing-thread
@@ -138,7 +138,7 @@ struct CompletedTask {
 ///   parks the *main* thread, not the worker; a do-nothing worker reaches
 ///   completion with zero worker-side boundaries. Measured on glibc 2.39/aarch64:
 ///   an empty-body worker reports `0y+0p`, an uncontended-`Mutex` worker likewise
-///   `0y+0p` (uncontended locks are pure userspace atomics), and a `--yield-points`
+///   `0y+0p` (uncontended locks are pure userspace atomics), and a `--yield-stride`
 ///   worker reports tens — so a floor of 0 flags exactly the atomics-only workers
 ///   (an atomics-only lost-update race) while one interposed boundary clears it.
 #[cfg(target_os = "macos")]

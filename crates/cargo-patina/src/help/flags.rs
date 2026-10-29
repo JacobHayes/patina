@@ -339,6 +339,13 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         "Seed-derived swarm selection of a fault-class subset.",
         false,
     ),
+    f(
+        "--yield-stride",
+        None,
+        Value::Required("N", Kind::U32),
+        "On an --instrument build, a scheduling point every N edges a thread executes (default 0: none; 1 = every edge).",
+        false,
+    ),
 ];
 
 pub(super) const REPLAY_TIMELINE_FLAGS: &[Flag] = &[

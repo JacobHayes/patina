@@ -168,7 +168,7 @@ int patina_thread_getname(uintptr_t thread, char *name, size_t len);
 int patina_thread_setname(uintptr_t thread, const char *name);
 /*
  * The runtime side of the packaged `exit` interposer. Marks the process as
- * having entered post-`main` teardown (so the root task's --yield-points hooks
+ * having entered post-`main` teardown (so the root task's --yield-stride hooks
  * take no scheduling point) and then terminates through the real libc `exit`
  * resolved via the shim host-alias table, so the atexit chain (trace
  * finalization) and the thread-local destructors still run. Does not return.
@@ -178,7 +178,7 @@ _Noreturn void patina_exit(int32_t status);
  * Mark the process as having entered post-`main` teardown without terminating.
  * Called by the Linux `__libc_start_main` interposer from its wrapper `main`, the
  * instant the guest's real `main` returns and before the exit code re-enters
- * glibc's `exit()` path — so the root task's --yield-points thread-local
+ * glibc's `exit()` path — so the root task's --yield-stride thread-local
  * destructor yields are silenced on the natural-return path that a plain `exit`
  * interposer cannot see (glibc calls `exit` through a hidden internal alias).
  */
@@ -822,7 +822,7 @@ _Noreturn void patina_abort(void);
 #endif
 int32_t patina_sched_yield(void);
 /*
- * --yield-points guard hook (patina_yield.c): a deterministic scheduling point
+ * edge hook (patina_sancov.c, every --yield-stride-th edge): a deterministic scheduling point
  * carrying the instrumented guest site for divergence diagnostics.
  */
 void patina_yield_point(const void *site);

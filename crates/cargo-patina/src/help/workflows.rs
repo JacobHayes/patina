@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -196,7 +196,7 @@ refused by name.",
                     None,
                     Value::None,
                     "Bias each generation's seed and knobs toward configurations that previously \
-                 found new edge coverage (a --yield-points or --coverage-points build); refused \
+                 found new edge coverage (an --instrument build); refused \
                  when there is none.",
                     false,
                 ),
@@ -233,6 +233,13 @@ refused by name.",
                     None,
                     Value::None,
                     "Randomize a bounded starvation-interval policy (count, start window, max length) per generation.",
+                    false,
+                ),
+                f(
+                    "--yield-stride",
+                    None,
+                    Value::None,
+                    "Randomize the yield stride (1 to 1024 edges) per generation; needs an --instrument artifact.",
                     false,
                 ),
                 f(
@@ -351,7 +358,7 @@ pub(super) const COVERAGE: Verb = Verb {
         "cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]",
     ],
     prose: "\
-`coverage` is a read-only offline report over native `--yield-points` coverage. \
+`coverage` is a read-only offline report over native `--instrument` coverage. \
 Pass the same binary that produced a `patina.covmap/v1` map (from run/replay \
 --coverage-out) or a campaign out-dir with `<out-dir>/coverage/`. The report \
 uses the map's anchor-relative PCs, resolves them against the binary's \

@@ -109,7 +109,7 @@ pub(super) fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
 }
 
 /// Build spec for a single-source native build on the fly (defaults: current
-/// edition, debug, no yield points, no extra rustc args).
+/// edition, debug, uninstrumented, no extra rustc args).
 fn native_source_spec(source: PathBuf) -> BuildSpec {
     BuildSpec {
         origin: source.clone(),
@@ -121,7 +121,7 @@ fn native_source_spec(source: PathBuf) -> BuildSpec {
             },
             output: None,
             release: false,
-            instrumentation: GuestInstrumentation::None,
+            instrument: false,
         },
     }
 }
@@ -139,7 +139,7 @@ fn native_package_spec(origin: PathBuf, manifest: PathBuf) -> BuildSpec {
             },
             output: None,
             release: false,
-            instrumentation: GuestInstrumentation::None,
+            instrument: false,
         },
     }
 }

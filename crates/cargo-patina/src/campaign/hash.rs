@@ -1,7 +1,7 @@
 //! Opaque campaign derivation material and its declared byte claims.
 //!
 //! Bytes 0..8 carry the child seed; every band reads through a named claim.
-//! Unclaimed original indices are 10, 17, 18, and 19; extension indices 35
+//! Unclaimed original indices are 10, 17, and 19; extension indices 35
 //! through 63 are free. Claim a free byte for a new independent knob rather than
 //! correlating unrelated knobs by reusing an existing claim.
 //!
@@ -37,6 +37,9 @@ claims! {
     FS_ERROR = 14,
     FS_SHORT = 15,
     FS_LATENCY_HI = 16,
+    /// The edge-hook yield stride, as a power of two. An original byte, so a
+    /// guided child inherits it with the rest of its ancestor's configuration.
+    YIELD_STRIDE = 18,
     NET_LATENCY = 20,
     DNS_FAIL = 21,
     DNS_LATENCY_HI = 22,
@@ -99,6 +102,7 @@ pub(super) const EXPLORATION_CLAIMS: &[Claim] = &[
     BUGGIFY_ACTIVATION,
     BUGGIFY_FIRE,
     SCHED_PCT_DEPTH,
+    YIELD_STRIDE,
     SCHED_STARVE,
     STARVE_FIRE,
 ];

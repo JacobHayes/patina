@@ -71,6 +71,8 @@ pub enum Kind {
     U64,
     /// A non-negative machine integer (`parse_usize`).
     Usize,
+    /// An unsigned 32-bit integer.
+    U32,
     /// An unsigned integer required to be `>= 1` (a positive count).
     PositiveU64,
     /// Native host-time watchdog, in milliseconds: 1..=86400000.
@@ -125,6 +127,7 @@ impl Kind {
         match self {
             Kind::U64 => "u64",
             Kind::Usize => "usize",
+            Kind::U32 => "u32",
             Kind::PositiveU64 => "positive-u64",
             Kind::WatchdogMillis => "watchdog-millis",
             Kind::Permille => "permille",

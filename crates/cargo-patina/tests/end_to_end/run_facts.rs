@@ -277,7 +277,7 @@ mod tests {
             ],
         );
         let recorded = fs::read_to_string(&trace).unwrap();
-        let tampered = recorded.replace("\"patina-native\"", "\"patina-native+yieldpoints\"");
+        let tampered = recorded.replace("\"patina-native\"", "\"patina-native+instrumented\"");
         assert_ne!(
             recorded, tampered,
             "the trace fingerprint was not rewritten"

@@ -24,7 +24,7 @@ fn endpoint_handles_wrap_and_skip_live_keys() {
     assert_eq!(next, 3);
 }
 
-// The `--yield-points` teardown fix must keep "task completed" a state
+// The `--yield-stride` teardown fix must keep "task completed" a state
 // distinct from "thread never registered": a completed thread's
 // post-finish scheduling points are silently skipped, but a foreign or
 // pre-registration thread must still fail loudly. Run on a fresh host
@@ -54,7 +54,7 @@ fn completed_sentinel_is_distinct_from_never_registered() {
 // teardown window (the `exit` interposer calls `note_main_returned`), the
 // ROOT task — which never runs `thread_finish` and so has no per-thread
 // completion sentinel — takes NO scheduling point, exactly like a
-// completed worker's post-teardown, so its `--yield-points` thread-local
+// completed worker's post-teardown, so its `--yield-stride` thread-local
 // destructors record zero trailing yields. `MAIN_RETURNED` is process-wide
 // (no other test sets it, and none relies on the global `sched_point`
 // taking its reschedule path); this test restores it so the teardown state

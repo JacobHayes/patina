@@ -468,6 +468,12 @@ pub const ENV_SCHED_STARVE_MAX_LEN: &str = "PATINA_SCHED_STARVE_MAX_LEN";
 /// [`DEFAULT_STARVE_WINDOW`]. Inert without [`ENV_SCHED_STARVE`].
 pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_SCHED_STARVE_WINDOW";
 
+/// The yield stride of an instrumented guest's edge hook: an unsigned 32-bit
+/// count, 0 (the default) for no added scheduling points, N for one every Nth
+/// edge a thread executes. A non-zero stride is recorded in the schedule policy
+/// and folds a `+yieldstride` fingerprint component.
+pub const ENV_SCHED_YIELD_STRIDE: &str = "PATINA_SCHED_YIELD_STRIDE";
+
 /// Enable swarm fault-class selection: a seed-derived subset of the enabled fault
 /// classes is applied this generation instead of all of them. A false-y value
 /// (or absence) keeps the existing always-all behavior. Folds a `+swarm`
@@ -636,6 +642,7 @@ pub struct Context {
     guest_cwd: Option<String>,
     hostname: String,
     cpus: u32,
+    yield_stride: u32,
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -1101,6 +1108,12 @@ impl Context {
     /// count, else [`patina_dst_abi::DEFAULT_CPUS`].
     pub fn cpus(&self) -> u32 {
         self.cpus
+    }
+
+    /// The edge-hook yield stride an instrumented guest runs with: the run's
+    /// configured stride, or the recorded one on replay (0 = no added points).
+    pub fn yield_stride(&self) -> u32 {
+        self.yield_stride
     }
 
     /// The machine's uptime when the guest started: the run's initial

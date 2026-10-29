@@ -137,43 +137,6 @@ pub(super) fn buggify_of(args: &cli::Args) -> Option<NativeBuggify> {
     })
 }
 
-/// Read the guest instrumentation a native `build`/`test` invocation asked for.
-///
-/// The two instrumentation flags are mutually exclusive by construction, not by
-/// convention: `patina_yield.c` and `patina_cov.c` define the same
-/// SanitizerCoverage entry points, so linking both would be a duplicate-symbol
-/// error at best and a coin flip at worst. Refuse the combination here, where the
-/// message can say which one to keep.
-pub(super) fn instrumentation_of(args: &cli::Args) -> Result<GuestInstrumentation, CliError> {
-    let yield_points = args.flag("--yield-points");
-    let coverage_points = args.string("--coverage-points");
-    match (yield_points, coverage_points) {
-        (true, Some(_)) => Err(CliError::usage(
-            "--yield-points and --coverage-points are mutually exclusive: both instrument every \
-basic block, and they differ only in what happens there. Use --yield-points for a scheduling point \
-at EVERY block (densest, slowest), --coverage-points=N for one every N blocks, or bare \
---coverage-points for edge counters with no added scheduling points.",
-        )),
-        (true, None) => Ok(GuestInstrumentation::YieldPoints),
-        (false, None) => Ok(GuestInstrumentation::None),
-        // A bare `--coverage-points` arrives as the empty string: counters only.
-        (false, Some(value)) if value.is_empty() => {
-            Ok(GuestInstrumentation::CoveragePoints { stride: 0 })
-        }
-        (false, Some(value)) => {
-            // The registry grammar already proved a positive integer; only the
-            // u32 ceiling (the C counter's width) is left to check.
-            let stride: u32 = value.parse().map_err(|_| {
-                CliError::usage(format!(
-                    "--coverage-points={value} is out of range; the sampling stride must fit in 32 \
-bits"
-                ))
-            })?;
-            Ok(GuestInstrumentation::CoveragePoints { stride })
-        }
-    }
-}
-
 /// The exploration scheduling knobs. The inert-knob rule (`--sched-pct-steps`
 /// without `--sched-pct`, and so on) is declared in the registry and enforced
 /// generically by the parser, so it is not repeated here.
@@ -185,6 +148,7 @@ pub(super) fn schedule_of(args: &cli::Args) -> NativeSchedule {
         starve_max_len: args.string("--starve-max-len"),
         starve_window: args.string("--starve-window"),
         swarm: args.flag("--swarm"),
+        yield_stride: args.u32("--yield-stride").unwrap_or(0),
     }
 }
 
@@ -300,6 +264,9 @@ pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str
     }
     if schedule.swarm {
         pairs.push((ENV_SWARM, "1".to_string()));
+    }
+    if schedule.yield_stride != 0 {
+        pairs.push((ENV_SCHED_YIELD_STRIDE, schedule.yield_stride.to_string()));
     }
     pairs
 }

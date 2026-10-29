@@ -1,6 +1,6 @@
 //! Argument parsing, artifact classification, and control-plane encoding.
 
-use crate::native_build::{DEFAULT_NATIVE_EDITION, GuestInstrumentation};
+use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::{
     ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, DEFAULT_SEED_BUDGET,
     ExploreInvocation, ExploreTarget, HarnessFeatures, HarnessSeeds, Invocation, KnobValues, Mode,
@@ -12,8 +12,8 @@ use crate::{
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
     ENV_CONVERGE_WITHIN, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SWARM, FaultKnob,
-    Plumbing,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SCHED_YIELD_STRIDE,
+    ENV_SWARM, FaultKnob, Plumbing,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};

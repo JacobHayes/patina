@@ -133,7 +133,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "--coverage-out",
                     None,
                     Value::Required("PATH", Kind::Path),
-                    "Write a patina.covmap/v1 edge-counter map (requires a --yield-points or --coverage-points build).",
+                    "Write a patina.covmap/v1 edge-counter map (requires an --instrument build).",
                     false,
                 ),
                 f(
@@ -202,7 +202,7 @@ pub(super) const TEST: Verb = Verb {
     summary: "Run tests under Patina: Cargo-family by default, or a shim-linked native libtest harness for a source package.",
     synopsis: &[
         "cargo patina test [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
+        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
     ],
     prose: "\
 With no source positional, `test` is the Cargo package family: the seed/record \
@@ -328,17 +328,10 @@ child's readable-trace receipt.",
                     false,
                 ),
                 f(
-                    "--yield-points",
+                    "--instrument",
                     None,
                     Value::None,
-                    "Instrument the native libtest harness with deterministic yield points.",
-                    false,
-                ),
-                f(
-                    "--coverage-points",
-                    None,
-                    Value::Optional("STRIDE", Kind::PositiveU64),
-                    "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
+                    "Build the native libtest harness with edge hooks: edge counters, and the scheduling points --yield-stride asks for.",
                     false,
                 ),
             ],
@@ -397,8 +390,8 @@ pub(super) const BUILD: Verb = Verb {
     name: "build",
     summary: "Build a guest linked against the native shim.",
     synopsis: &[
-        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points | --coverage-points[=STRIDE]] [-- RUSTC OPTIONS]",
-        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points | --coverage-points[=STRIDE]]",
+        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
+        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
         "cargo patina build <GO PACKAGE DIR> --go --output <PATH> [--release] [-- GO BUILD OPTIONS]",
     ],
     prose: "\
@@ -409,27 +402,21 @@ path builds a single source directly; a directory or Cargo.toml drives the \
 package's own cargo build under Patina control. Select the member with --package \
 and the binary with --bin; --output copies the built binary out.\n\
 \n\
-`--yield-points` instruments the native guest with deterministic cooperative \
-preemption (a hook at every basic block routes into the scheduler), making \
-atomics-only race windows schedulable. It is the densest and by far the most \
-expensive mode: every basic block pays a scheduler round trip.\n\
-\n\
-`--coverage-points` splits the two things --yield-points bundles. Bare, it emits \
-the SAME edge counters (so --coverage-out, `cargo patina coverage`, and `campaign \
---guided` all work) with NO scheduler hook, at counter cost. `--coverage-points=N` \
-adds a scheduling point every N basic blocks a thread executes, bounding the \
-blocks between preemption opportunities by N at 1/N of the --yield-points cost. \
-The stride is compiled into the binary and recovered from it at run time, so it \
-is part of the compatibility fingerprint (`+covpoints:N`) and a trace never \
-cross-replays against a different stride or against --yield-points. The sampling \
-countdown is per-thread, so the sampled sites are a pure function of the seed. \
-The two flags are mutually exclusive.\n\
+`--instrument` adds a SanitizerCoverage hook at every edge of every crate \
+compiled from source. The hook keeps edge counters, so --coverage-out, `cargo \
+patina coverage` and `campaign --guided` work, and it takes the scheduling \
+points the run asks for: `run --yield-stride N` puts one every N edges a thread \
+executes (1 = every edge, the densest), which makes atomics-only race windows \
+schedulable. The default stride, 0, adds none and costs only the counters. The \
+stride is a run setting recorded in the trace, so one binary serves both and a \
+replay takes the recorded stride. An instrumented binary's traces carry \
+`+instrumented` in their fingerprint and never cross-replay with a plain one.\n\
 \n\
 `--go` builds the Go main package in DIR (Linux): `go build` in cgo mode, linked \
 externally with the shim, so goroutine threads start through the shim's \
 pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
 and -o; other `go build` options follow `--`. `--release` builds the shim in \
-release mode; the yield/coverage instrumentation is Rust-only.",
+release mode; --instrument is Rust-only.",
     families: &[fam(Family::Sole, "`build`", None)],
     groups: &[Group {
         title: "Build options",
@@ -457,17 +444,10 @@ release mode; the yield/coverage instrumentation is Rust-only.",
                 false,
             ),
             f(
-                "--yield-points",
+                "--instrument",
                 None,
                 Value::None,
-                "Instrument deterministic cooperative preemption.",
-                false,
-            ),
-            f(
-                "--coverage-points",
-                None,
-                Value::Optional("STRIDE", Kind::PositiveU64),
-                "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
+                "Edge hooks at every edge: edge counters, and the scheduling points run --yield-stride asks for.",
                 false,
             ),
             f(

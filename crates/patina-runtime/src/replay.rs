@@ -392,7 +392,7 @@ pub(super) fn schedule_policy_record(
     config: &RuntimeConfig,
 ) -> Option<patina_dst_trace::SchedulePolicyRecord> {
     let policy = config.schedule_policy;
-    if policy.is_default() {
+    if policy.is_default() && config.yield_stride == 0 {
         return None;
     }
     Some(patina_dst_trace::SchedulePolicyRecord {
@@ -407,6 +407,7 @@ pub(super) fn schedule_policy_record(
                 max_len: starve.max_len,
                 window: starve.window,
             }),
+        yield_stride: config.yield_stride,
     })
 }
 
@@ -450,6 +451,26 @@ pub(super) fn reconcile_replay_schedule_policy(
         ));
     }
     Ok(Some(stored))
+}
+
+/// Reconcile the recorded edge-hook yield stride with one the operator also
+/// supplied at replay, as [`reconcile_replay_schedule_policy`] does the rest of
+/// the policy: the trace is authoritative, a supplied stride that differs
+/// fails closed, and the recorded stride (0 when the trace records none) is
+/// what the replay runs with, so the guest takes the same scheduling points.
+pub(super) fn reconcile_replay_yield_stride(
+    config: &RuntimeConfig,
+    recorded: Option<&patina_dst_trace::SchedulePolicyRecord>,
+) -> Result<u32, RuntimeError> {
+    let stored = recorded.map_or(0, |record| record.yield_stride);
+    if config.yield_stride != 0 && config.yield_stride != stored {
+        return Err(RuntimeError::Config(format!(
+            "replay yield stride {} conflicts with the trace's recorded stride {stored}; the \
+             trace is authoritative, so omit it (or supply the recorded value)",
+            config.yield_stride
+        )));
+    }
+    Ok(stored)
 }
 
 /// Reconcile the trace's recorded syscall-user-dispatch state against this
@@ -696,6 +717,7 @@ mod tests {
                 steps: 100,
             }),
             starvation: None,
+            yield_stride: 0,
         };
         let conflicting = RuntimeConfig::seeded(0).with_schedule_policy(SchedulePolicy {
             pct: Some(PctConfig {

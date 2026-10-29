@@ -157,12 +157,20 @@ pub struct SchedulePolicyRecord {
     pub pct: Option<PctPolicyRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starvation: Option<StarvationPolicyRecord>,
+    /// The instrumented guest's edge-hook yield stride: a scheduling point every
+    /// this many edges a thread executes. Absent means 0, no added points.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub yield_stride: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl SchedulePolicyRecord {
     /// Whether this record describes any non-default policy.
     pub fn is_active(&self) -> bool {
-        self.pct.is_some() || self.starvation.is_some()
+        self.pct.is_some() || self.starvation.is_some() || self.yield_stride != 0
     }
 }
 

@@ -46,9 +46,8 @@ pub(super) fn initialize_edge_coverage(
     campaign_generations_done: u64,
 ) -> Result<EdgeCoverageState, CliError> {
     let artifact_path = PathBuf::from(&state.artifact.path);
-    // Edge coverage rides the SanitizerCoverage counters, which BOTH instrumented
-    // build modes emit. `--coverage-points` emits them without the per-block
-    // scheduler hook, so a guided campaign no longer has to pay --yield-points'
+    // Edge coverage rides the SanitizerCoverage counters an `--instrument` build
+    // keeps at every stride, 0 included, so a guided campaign pays no
     // preemption cost just to see coverage.
     let image = fs::File::open(&artifact_path)
         .and_then(|file| crate::run_cache::Image::map(&file))
@@ -58,11 +57,18 @@ pub(super) fn initialize_edge_coverage(
                 artifact_path.display()
             ))
         })?;
-    let instrumentation = crate::binary_instrumentation(image.bytes(), &artifact_path)?;
-    if !instrumentation.has_coverage() {
+    let instrumented = crate::binary_instrumented(image.bytes());
+    if state.spec.yield_stride && !instrumented {
+        return Err(CliError(format!(
+            "--yield-stride draws a scheduling-point stride per generation, but {} was not built \
+with cargo patina build --instrument, so it has no edge hook to take them",
+            artifact_path.display()
+        )));
+    }
+    if !instrumented {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",
-            Some("rebuild with cargo patina build --coverage-points (or --yield-points)"),
+            Some("rebuild with cargo patina build --instrument"),
         ));
     }
     let coverage_dir = out_dir.join("coverage");
@@ -76,7 +82,7 @@ pub(super) fn initialize_edge_coverage(
         path: state.artifact.path.clone(),
         sha256: state.artifact.sha256.clone(),
     };
-    let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumentation);
+    let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumented);
     let store = CampaignCoverageStore::load(
         coverage_dir,
         artifact,
@@ -87,12 +93,9 @@ pub(super) fn initialize_edge_coverage(
     Ok(EdgeCoverageState::Active(Box::new(store)))
 }
 
-pub(super) fn campaign_coverage_fingerprint(
-    spec: &CampaignSpec,
-    instrumentation: crate::GuestInstrumentation,
-) -> String {
+pub(super) fn campaign_coverage_fingerprint(spec: &CampaignSpec, instrumented: bool) -> String {
     let mut fingerprint =
-        crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumentation);
+        crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumented);
     if spec.buggify {
         fingerprint.push_str("+buggify");
     }
@@ -105,6 +108,9 @@ pub(super) fn campaign_coverage_fingerprint(
     if spec.swarm {
         fingerprint.push_str("+swarm");
     }
+    if spec.yield_stride {
+        fingerprint.push_str("+yieldstride");
+    }
     fingerprint
 }
 
@@ -116,7 +122,7 @@ pub(super) fn guidance_source_or_refuse(edge_coverage: &EdgeCoverageState) -> Re
     }
     Err(CliError(
         "--guided needs a novelty signal but this campaign has no edge coverage; rebuild with \
-cargo patina build --coverage-points (or --yield-points) so generations have edge coverage to steer by"
+cargo patina build --instrument so generations have edge coverage to steer by"
             .to_string(),
     ))
 }

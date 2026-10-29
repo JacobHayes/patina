@@ -126,6 +126,11 @@ pub struct RuntimeConfig {
     /// The exploration scheduling policy (PCT / starvation). Default is the
     /// uniform-random policy, byte-for-byte the historical scheduler.
     pub(super) schedule_policy: SchedulePolicy,
+    /// The yield stride an instrumented guest's edge hook reads: 0 takes no
+    /// scheduling point at an edge, N takes one every Nth edge a thread
+    /// executes. Part of the recorded schedule policy, so replay takes the
+    /// recorded stride. Inert in a plain build, which has no edge hook.
+    pub(super) yield_stride: u32,
     /// Whether swarm fault-class selection is enabled: a seed-derived subset of
     /// the enabled fault classes is applied this run instead of all of them.
     pub(super) swarm: bool,
@@ -224,6 +229,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -254,6 +260,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -289,6 +296,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -325,6 +333,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -362,6 +371,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -405,6 +415,7 @@ impl RuntimeConfig {
             faults: FaultConfig::default(),
             buggify: BuggifyConfig::default(),
             schedule_policy: SchedulePolicy::default(),
+            yield_stride: 0,
             swarm: false,
             guest_argv: None,
             guest_env: BTreeMap::new(),
@@ -756,6 +767,18 @@ impl RuntimeConfig {
     #[must_use]
     pub fn with_schedule_policy(mut self, policy: SchedulePolicy) -> Self {
         self.schedule_policy = policy;
+        self
+    }
+
+    /// The run's edge-hook yield stride (0 = no added scheduling points).
+    pub const fn yield_stride(&self) -> u32 {
+        self.yield_stride
+    }
+
+    /// Set the edge-hook yield stride directly (tests, explicit embedders).
+    #[must_use]
+    pub fn with_yield_stride(mut self, stride: u32) -> Self {
+        self.yield_stride = stride;
         self
     }
 

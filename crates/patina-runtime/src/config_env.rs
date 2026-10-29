@@ -14,8 +14,9 @@ use crate::{
     ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV,
     ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON,
     ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SEED, ENV_STEP_BUDGET,
-    ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError,
+    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SCHED_YIELD_STRIDE,
+    ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane,
+    RuntimeError,
 };
 use patina_dst_sched_det::{PctConfig, StarvationConfig};
 use std::collections::BTreeMap;
@@ -489,6 +490,13 @@ impl RuntimeConfig {
                 max_len,
                 window,
             });
+        }
+        if let Some(value) = get(ENV_SCHED_YIELD_STRIDE) {
+            self.yield_stride = value.trim().parse().map_err(|_| {
+                RuntimeError::Config(format!(
+                    "{ENV_SCHED_YIELD_STRIDE} must be an unsigned 32-bit integer"
+                ))
+            })?;
         }
         Ok(self)
     }

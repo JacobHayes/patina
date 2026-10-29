@@ -183,8 +183,7 @@ fn parses_a_go_build_with_its_go_build_options() {
         &["pkg", "--go", "--output", "o", "--edition", "2021"],
         &["pkg", "--go", "--output", "o", "--package", "p"],
         &["pkg", "--go", "--output", "o", "--bin", "b"],
-        &["pkg", "--go", "--output", "o", "--yield-points"],
-        &["pkg", "--go", "--output", "o", "--coverage-points"],
+        &["pkg", "--go", "--output", "o", "--instrument"],
         &["pkg", "--go", "--output", "o", "--", "-ldflags=-s"],
         &["pkg", "--go", "--output", "o", "--", "-o", "elsewhere"],
     ] {

@@ -1,5 +1,4 @@
 use super::*;
-use crate::native_build::GuestInstrumentation;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,7 +11,7 @@ fn a_shim_object_is_keyed_by_the_sdk_the_compiler_reads() {
     let hash = |sdk: Option<&str>| {
         shim_object_hash_in(
             OsStr::new("cc"),
-            &PATINA_YIELD_OBJECT,
+            &PATINA_SANCOV_OBJECT,
             "x86_64-unknown-linux-gnu",
             &[],
             |name| {
@@ -256,14 +255,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
                 scope.spawn(move || {
                     barrier.wait();
                     (
-                        build_native_shim_at(
-                            false,
-                            rustc,
-                            bundle,
-                            None,
-                            GuestInstrumentation::None,
-                        )
-                        .unwrap(),
+                        build_native_shim_at(false, rustc, bundle, None).unwrap(),
                         expected,
                     )
                 })
@@ -323,8 +315,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
     fs::write(history_marker(), "").unwrap();
     // Force A -> B -> A even if the concurrent scheduling chose B -> A.
     for (bundle, expected) in [(&a, 17), (&b, 29), (&a, 17)] {
-        let built =
-            build_native_shim_at(false, &rustc, bundle, None, GuestInstrumentation::None).unwrap();
+        let built = build_native_shim_at(false, &rustc, bundle, None).unwrap();
         link(&built, expected);
     }
     // Each switch replaced only the package whose bytes differ: the
@@ -346,8 +337,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
          source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
          checksum = \"4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c\"\n",
     );
-    let built =
-        build_native_shim_at(false, &rustc, &relocked, None, GuestInstrumentation::None).unwrap();
+    let built = build_native_shim_at(false, &rustc, &relocked, None).unwrap();
     link(&built, 17);
 
     let builds = native_shim_cache_base(cache.path(), None)
@@ -358,7 +348,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         .map(|e| e.unwrap().path())
         .find(|p| p.is_dir())
         .unwrap();
-    let release = build_native_shim_at(true, &rustc, &a, None, GuestInstrumentation::None).unwrap();
+    let release = build_native_shim_at(true, &rustc, &a, None).unwrap();
     link(&release, 17);
     // A debug build never waits for a release build: while another builder
     // holds every release work dir's build lock, a debug build completes.
@@ -380,7 +370,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let (rustc, a) = (&rustc, &a);
         let builder = scope.spawn(move || {
-            let built = build_native_shim_at(false, rustc, a, None, GuestInstrumentation::None);
+            let built = build_native_shim_at(false, rustc, a, None);
             tx.send(()).unwrap();
             built
         });
@@ -410,8 +400,7 @@ fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
         "compile_error!(\"incomplete source switch\");",
     )
     .unwrap();
-    let restored =
-        build_native_shim_at(false, &rustc, &a, None, GuestInstrumentation::None).unwrap();
+    let restored = build_native_shim_at(false, &rustc, &a, None).unwrap();
     link(&restored, 17);
 }
 

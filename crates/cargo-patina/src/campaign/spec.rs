@@ -48,6 +48,13 @@ pub struct CampaignSpec {
     pub swarm: bool,
     /// Randomize a PCT bug depth per generation.
     pub pct: bool,
+    /// Randomize the edge-hook yield stride (`run --yield-stride`) per
+    /// generation, over powers of two from 1 (every edge) to 1024, so a sweep of
+    /// an `--instrument` artifact varies how densely atomics-only code is
+    /// preempted. Opt-in like [`Self::starve`]: a dense stride multiplies a
+    /// generation's cost, and an artifact without the hook has no stride to
+    /// honour.
+    pub yield_stride: bool,
     /// Randomize a bounded starvation-interval policy per generation: how many
     /// intervals, how deep into the schedule they may start, and how long they
     /// may last.
@@ -254,6 +261,7 @@ impl Default for CampaignSpec {
             buggify: false,
             swarm: false,
             pct: false,
+            yield_stride: false,
             starve: false,
             starve_scale_permille: STARVE_SCALE_FULL,
             faults: FaultPlanes::NONE,
@@ -315,6 +323,7 @@ impl CampaignSpec {
                 "buggify" => self.buggify = json_bool(key, val)?,
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
+                "yield_stride" => self.yield_stride = json_bool(key, val)?,
                 "starve" => self.starve = json_bool(key, val)?,
                 "starve_scale_permille" => {
                     // A spec file bypasses the CLI value grammar, so hold it to
@@ -433,7 +442,7 @@ impl CampaignSpec {
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, buggify, swarm, pct, faults, exclude_knobs, \
+                         timeout_secs, guest_args, buggify, swarm, pct, yield_stride, faults, exclude_knobs, \
                          custom_op_faults, \
                          fault_scale_permille, starve, starve_scale_permille, \
                          dns_entries, \
@@ -783,11 +792,8 @@ mod tests {
             ..CampaignSpec::default()
         };
         assert_ne!(
-            campaign_coverage_fingerprint(&starving, crate::GuestInstrumentation::YieldPoints),
-            campaign_coverage_fingerprint(
-                &CampaignSpec::default(),
-                crate::GuestInstrumentation::YieldPoints
-            )
+            campaign_coverage_fingerprint(&starving, true),
+            campaign_coverage_fingerprint(&CampaignSpec::default(), true)
         );
     }
 

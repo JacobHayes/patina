@@ -66,8 +66,7 @@ mod values;
 use audit::execute_native_audit;
 use harness::{execute_explore, execute_native_harness};
 use native_build::{
-    GuestInstrumentation, binary_instrumentation, execute_native_build,
-    instrumentation_fingerprint, resolve_artifact,
+    binary_instrumented, execute_native_build, instrumentation_fingerprint, resolve_artifact,
 };
 use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
 use parse::{
@@ -225,9 +224,9 @@ struct NativeHarnessInvocation {
     release: bool,
     /// Cargo features (`--features`) forwarded verbatim to the harness build.
     features: HarnessFeatures,
-    /// How the native libtest harness is instrumented (see
-    /// [`GuestInstrumentation`]). Off by default.
-    instrumentation: GuestInstrumentation,
+    /// `--instrument`: build the native libtest harness with edge hooks (edge
+    /// counters, and the scheduling points `--yield-stride` asks for).
+    instrument: bool,
     /// Boundary-operation budget forwarded to each seed's child `run`.
     step_budget: Option<u64>,
     /// The `--realtime-epoch` timestamp, re-emitted verbatim onto each seed's
@@ -300,12 +299,11 @@ struct NativeBuildInvocation {
     target: NativeBuildTarget,
     output: Option<PathBuf>,
     release: bool,
-    /// How the guest is instrumented: not at all (default), with a scheduling
-    /// point at every basic block (`--yield-points`), or with edge counters and
-    /// an optional sampled scheduling point (`--coverage-points[=N]`). See
-    /// [`GuestInstrumentation`]. Off by default; plain native builds are
+    /// `--instrument`: SanitizerCoverage edge hooks in every crate compiled
+    /// from source, which keep edge counters and take the scheduling points a
+    /// run's `--yield-stride` asks for. Off by default; plain native builds are
     /// unchanged.
-    instrumentation: GuestInstrumentation,
+    instrument: bool,
 }
 
 /// What `build` compiles for the native target: a single Rust source linked
@@ -410,8 +408,8 @@ struct NativeRunInvocation {
     /// fingerprint.
     buggify: Option<NativeBuggify>,
     /// Exploration scheduling-policy (PCT / starvation) and swarm knobs. Enabling
-    /// a non-default policy or swarm folds `+pct`/`+starve`/`+swarm` into the run
-    /// fingerprint.
+    /// a non-default policy, swarm or a yield stride folds
+    /// `+pct`/`+starve`/`+swarm`/`+yieldstride` into the run fingerprint.
     schedule: NativeSchedule,
     /// Liveness-watchdog knobs forwarded to the guest through the control plane.
     /// Schedule-invariant: recorded (informational) but NOT fingerprinted.
@@ -510,6 +508,9 @@ struct NativeSchedule {
     starve_window: Option<String>,
     /// `--swarm`: apply a seed-derived subset of the enabled fault classes.
     swarm: bool,
+    /// `--yield-stride N`: an instrumented guest takes a scheduling point every
+    /// Nth edge a thread executes; 0 (the default) takes none.
+    yield_stride: u32,
 }
 
 /// Liveness-watchdog knobs, forwarded to the guest/runtime as validated raw

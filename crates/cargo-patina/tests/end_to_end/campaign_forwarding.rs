@@ -198,8 +198,7 @@ mod tests {
             String::from_utf8_lossy(&refused.stderr)
         );
         assert!(
-            refusal.contains("--guided needs a novelty signal")
-                && refusal.contains("--yield-points"),
+            refusal.contains("--guided needs a novelty signal") && refusal.contains("--instrument"),
             "the refusal must name the cause and the fix:\n{refusal}"
         );
     }

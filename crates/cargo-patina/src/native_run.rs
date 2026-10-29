@@ -6,7 +6,7 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    IMAGE_FINGERPRINT_COMPONENT, SchedulePolicyFingerprint, binary_instrumentation,
+    IMAGE_FINGERPRINT_COMPONENT, SchedulePolicyFingerprint, binary_instrumented,
     native_policy_from_trace, native_run_fingerprint, native_run_fingerprint_around,
     resolve_artifact, trace_has_buggify,
 };
@@ -192,18 +192,25 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
     }
 
-    // A binary built with `--yield-points` schedules under a different (denser)
-    // policy, so its recorded traces must not cross-replay with a plain binary.
-    // Detect the linked hook's marker and fold it into the compatibility
-    // fingerprint; the same binary is inspected on record and replay, so the
-    // suffix is applied consistently and a policy mismatch is rejected.
-    let instrumentation = image.remember("instrumentation", || {
-        binary_instrumentation(image.bytes(), &binary)
+    // An `--instrument` binary carries the edge hooks. Detect the linked hook's
+    // marker: it decides whether there are counters to write and a stride to
+    // honour, and it folds into the compatibility fingerprint, so a trace never
+    // cross-replays between an instrumented binary and a plain one.
+    let instrumented = image.remember("instrumented", || {
+        Ok::<_, CliError>(binary_instrumented(image.bytes()))
     })?;
-    if invocation.coverage_out.is_some() && !instrumentation.has_coverage() {
+    if invocation.coverage_out.is_some() && !instrumented {
         return Err(CliError::usage(
-            "--coverage-out requires a native binary built with `cargo patina build --yield-points` or `--coverage-points`; coverage rides the SanitizerCoverage edge counters",
+            "--coverage-out requires a native binary built with `cargo patina build --instrument`; coverage rides the SanitizerCoverage edge counters",
         ));
+    }
+    if invocation.schedule.yield_stride != 0 && !instrumented {
+        return Err(CliError::usage(format!(
+            "--yield-stride {} takes its scheduling points at the edge hooks of a binary built with \
+`cargo patina build --instrument`; {} has none, so the stride would be inert",
+            invocation.schedule.yield_stride,
+            binary.display()
+        )));
     }
 
     // Starvation intervals reorder real thread execution adversarially. A guest
@@ -214,22 +221,18 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // deferral schedules the spinner while the lock holder is starved, and the
     // spinner's atomics-only loop offers no boundary for aging to force the holder
     // — the exact cooperative-scheduling limitation the vacuous-schedule warning
-    // flags. `--yield-points` closes it (loop backedges become boundaries), so
-    // starvation there is always liveness-safe; `--coverage-points=N` closes it
-    // too, one boundary every N basic blocks, which bounds the aging delay by N
-    // blocks rather than eliminating it. Warn loudly when starvation is enabled
-    // on a binary with neither rather than risk a silent hang.
-    if invocation.schedule.starve.is_some() && !instrumentation.preempts_inside_atomics() {
+    // flags. A yield stride closes it, one boundary every N edges, which bounds
+    // the aging delay by N edges. Warn loudly when starvation runs without one
+    // rather than risk a silent hang.
+    if invocation.schedule.starve.is_some() && invocation.schedule.yield_stride == 0 {
         eprintln!(
-            "PATINA WARNING: starvation intervals (--starve) are enabled on a binary built \
-WITHOUT a mode that makes an atomics-only window schedulable (`--yield-points`, or \
-`--coverage-points=N`). Starvation is liveness-safe for guests whose synchronization is \
-interposed (mutex/condvar/futex), but a guest with an invisible atomic spinlock (e.g. std's queue \
-RwLock/Parker fast path) held across a boundary can WEDGE under adversarial deferral — the same \
-atomics-only window the vacuous-schedule diagnostic flags as unreachable. Rebuild with \
-`cargo patina build --yield-points` (a boundary at every basic block) or `--coverage-points=N` \
-(one every N basic blocks, far cheaper) to make those windows schedulable so starvation stays \
-liveness-safe."
+            "PATINA WARNING: starvation intervals (--starve) are enabled WITHOUT a yield stride, so \
+an atomics-only window is not schedulable. Starvation is liveness-safe for guests whose \
+synchronization is interposed (mutex/condvar/futex), but a guest with an invisible atomic spinlock \
+(e.g. std's queue RwLock/Parker fast path) held across a boundary can WEDGE under adversarial \
+deferral — the same atomics-only window the vacuous-schedule diagnostic flags as unreachable. \
+Build with `cargo patina build --instrument` and run with `--yield-stride N` (a scheduling point \
+every N edges) to make those windows schedulable so starvation stays liveness-safe."
         );
     }
 
@@ -265,7 +268,7 @@ liveness-safe."
     ) {
         let (head, tail) = native_run_fingerprint_around(
             fingerprint,
-            instrumentation,
+            instrumented,
             replay_buggify(bundle),
             &native_policy_from_trace(bundle),
         );
@@ -339,7 +342,7 @@ liveness-safe."
                 ENV_FINGERPRINT,
                 native_run_fingerprint(
                     fingerprint,
-                    instrumentation,
+                    instrumented,
                     image_hash.as_deref(),
                     invocation.buggify.is_some(),
                     &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
@@ -354,7 +357,7 @@ liveness-safe."
             (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
         ],
         NativeRunMode::Replay { fingerprint, .. } => {
-            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm`
+            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm`/`+yieldstride`
             // fingerprint components from the trace so replay is self-contained;
             // a policy trace replayed against a plain build still fails closed on
             // the fingerprint.
@@ -372,7 +375,7 @@ liveness-safe."
                     ENV_FINGERPRINT,
                     native_run_fingerprint(
                         fingerprint,
-                        instrumentation,
+                        instrumented,
                         image_hash.as_deref(),
                         buggify,
                         &policy,

@@ -59,7 +59,7 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
     }
     let anchor = anchor.ok_or_else(|| {
         CliError(format!(
-            "coverage symbolization could not find nm anchor symbol patina_yield_point in {}; is this a native --yield-points binary?",
+            "coverage symbolization could not find nm anchor symbol patina_yield_point in {}; is this a native --instrument binary?",
             binary.display()
         ))
     })?;

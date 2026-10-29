@@ -579,6 +579,9 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if spec.starve {
         map.insert("starve".into(), true.into());
     }
+    if spec.yield_stride {
+        map.insert("yield_stride".into(), true.into());
+    }
     // Default-omitted for the same reason as every optional key around it: the
     // canonical-form gate `--resume` reloads through demands `spec_to_json`
     // reproduce the recorded file exactly, so an unconditional key would break

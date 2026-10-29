@@ -455,7 +455,7 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
             return Ok(());
         }
         // The protocol was present but initialization failed closed — a
-        // fingerprint mismatch (including plain-vs-`--yield-points` cross-replay),
+        // fingerprint mismatch (including plain-vs-instrumented cross-replay),
         // a `--mount` corpus that does not match the recorded image hash, a
         // replay-fault-config conflict, and so on. Surface the runtime's specific
         // diagnostic instead of the generic "no runtime installed" line.
@@ -471,7 +471,7 @@ run under `cargo patina run` (or with the PATINA_MODE protocol set); no determin
 
 /// Emit the runtime's own init-failure diagnostic and abort the process. The
 /// `message` is the runtime's error text — a fingerprint mismatch (incl.
-/// plain-vs-`--yield-points` cross-replay), a `--mount` corpus whose hash does
+/// plain-vs-instrumented cross-replay), a `--mount` corpus whose hash does
 /// not match the recording, a replay-fault-config conflict, and so on. The write
 /// goes through the host-alias descriptor I/O (never the interposed `write`);
 /// captured guest stdio is flushed first so the diagnostic lands after any
@@ -1317,6 +1317,8 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     if guard.is_some() {
         return fail(EALREADY);
     }
+    // From here an instrumented guest's edges take the run's scheduling points.
+    crate::PATINA_YIELD_STRIDE.store(context.yield_stride(), Ordering::Relaxed);
     *guard = Some(context);
     // Publish `environ` from the freshly installed startup env map. The startup
     // constructor also publishes, but a deferred harness install (or a direct

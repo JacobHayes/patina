@@ -127,7 +127,7 @@ source-first native libtest harness mode for one exact test target.
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for yield-point binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
 | `minimize` | Reduce a failing campaign generation (fault knobs first, then its trace), a failing trace, or the seed/params. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
@@ -196,13 +196,13 @@ into the trace so replay reproduces them flag-free.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
   `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class
   subsets). `campaign --sched-pct` and `campaign --starve` sweep those policies
-  per generation. Pair with a build that makes atomics-only race windows
-  schedulable: `cargo patina build --yield-points` puts a scheduling point at
-  EVERY basic block (densest, and by far the most expensive), while
-  `--coverage-points=N` puts one every N basic blocks a thread executes — the
-  same reachability guarantee bounded by N, at 1/N of the cost. Bare
-  `--coverage-points` emits the edge counters alone, so `--coverage-out` and
-  `campaign --guided` work without paying for preemption at all.
+  per generation. To make atomics-only race windows schedulable, build with
+  `cargo patina build --instrument` and run with `--yield-stride N`: a
+  scheduling point every N edges a thread executes, 1 being every edge (densest,
+  and by far the most expensive). The stride is a run setting recorded in the
+  trace; at the default 0 the same binary keeps only its edge counters, so
+  `--coverage-out` and `campaign --guided` work without paying for preemption.
+  `campaign --yield-stride` sweeps strides from 1 to 1024 per generation.
 - **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
   detector) and `--converge-within` (heal-then-converge budget).
   Native call-free compute that starves another managed thread stops by name
@@ -260,10 +260,10 @@ different seeded suffix from that moment
 
 Guests build **debug by default**: `debug_assert!` and overflow checks in the
 guest and every dependency are extra oracles, frames stay exact for triage,
-and `--yield-points`/`--coverage-points=N` see more basic blocks to preempt.
+and `--yield-stride` sees more edges to preempt.
 Use `--release` (on `run`, or `build --release` then `run`) for performance
 measurement, long campaigns once the hunt is over, and release-only codegen
-paths. Yield-point binaries also emit edge coverage (`--coverage-out`,
+paths. `--instrument` binaries emit edge coverage (`--coverage-out`,
 `cargo patina coverage`), which campaigns accumulate and `campaign --guided`
 uses to bias generations toward new coverage.
 

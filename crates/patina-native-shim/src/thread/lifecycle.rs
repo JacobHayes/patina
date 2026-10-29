@@ -409,7 +409,7 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
         state.handles.retain(|_, owner| *owner != task);
     }
     // The task is gone from the scheduler; mark this host thread completed so
-    // instrumented teardown (TLS destructors under `--yield-points`) takes no
+    // instrumented teardown (TLS destructors under `--yield-stride`) takes no
     // scheduling point rather than rescheduling a task that no longer exists.
     mark_task_completed();
     let next = match state.next_task() {
@@ -613,7 +613,7 @@ pub unsafe extern "C" fn patina_thread_join(
     // races the joiner's own `Arc<Inner>` drop (std's `JoinInner` cleanup,
     // which runs right after this returns), whichever is the LAST reference
     // takes the acquire-fence + destructor slow path — so under
-    // `--yield-points` the joiner records a host-timing-dependent number of
+    // `--yield-stride` the joiner records a host-timing-dependent number of
     // scheduling points (the op-742/12623 x86 divergence on Linux; the
     // ±2-yield main-tls record/replay divergence under load on Darwin).
     // Joining here forces the worker to drop its reference first, so the

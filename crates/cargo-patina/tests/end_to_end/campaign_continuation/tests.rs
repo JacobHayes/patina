@@ -131,7 +131,7 @@ fn campaign_extend_equals_fresh_campaign() {
             source.to_str().unwrap(),
             "--output",
             guest.to_str().unwrap(),
-            "--yield-points",
+            "--instrument",
         ],
         &[("CARGO_TARGET_DIR", target.to_str().unwrap())],
     );
