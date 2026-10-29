@@ -100,10 +100,9 @@ impl BranchSession {
     }
 
     /// The parent trace's recorded fault-injection configuration, inherited by
-    /// the branch so its replayed prefix uses the same fault drivers. `None` for
-    /// a pre-format-4 parent trace.
-    pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
-        self.bundle.metadata.faults.as_ref()
+    /// the branch so its replayed prefix uses the same fault drivers.
+    pub const fn fault_config(&self) -> &FaultConfigRecord {
+        &self.bundle.metadata.faults
     }
 
     /// The parent trace's recorded cooperative-SUT (buggify) configuration,

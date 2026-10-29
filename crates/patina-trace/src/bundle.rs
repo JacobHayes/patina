@@ -202,7 +202,7 @@ impl TraceBundle {
     /// Validate and serialize this bundle to the canonical byte encoding.
     ///
     /// The canonical form is compact (single-line) JSON with base64 byte
-    /// payloads - the format 3 encoding. It stays valid JSON, so a bundle can be
+    /// payloads. It stays valid JSON, so a bundle can be
     /// inspected with any JSON tool (`jq . run.patina`,
     /// `python3 -m json.tool run.patina`) when a human-readable view is wanted;
     /// nothing here is a bespoke binary framing that would need a dedicated

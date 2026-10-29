@@ -735,6 +735,7 @@ mod tests {
                 generations,
                 ..CampaignSpec::default()
             },
+            "sha256:supervisor".to_string(),
         )
     }
 

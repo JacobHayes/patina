@@ -39,8 +39,7 @@ pub(super) fn native_identity_refusal(
         return Some(format!(
             "native fingerprint mismatch: trace {} carries no native build identity, so nothing \
              says which build it replays against. Only `cargo patina run --record` of a native \
-             binary records one; this trace was recorded some other way, by a patina that \
-             predates build identities, or by another family. Re-record it.",
+             binary records one; this trace was recorded some other way. Re-record it.",
             trace.display()
         ));
     };
@@ -73,16 +72,6 @@ pub(super) fn native_identity_refusal(
     ))
 }
 
-/// The trace a replaying guest reads: the recording with its build identity
-/// withheld. The supervisor has already checked the identity, and the
-/// recorder linked into the guest refuses fields it does not know, so a guest
-/// linked against a shim that predates the field would refuse its own
-/// recording.
-pub(super) fn withhold_native_identity(mut bundle: TraceBundle) -> TraceBundle {
-    bundle.metadata.native = None;
-    bundle
-}
-
 /// An anonymous file holding `bundle`, the trace channel a replaying guest
 /// reads.
 #[cfg(unix)]
@@ -91,35 +80,4 @@ pub(super) fn guest_trace_channel(bundle: &TraceBundle) -> Result<fs::File, CliE
         .to_bytes()
         .map_err(|error| CliError(format!("failed to encode the replay trace: {error}")))?;
     crate::crash_restart::scratch_file("replay trace channel", &bytes)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use patina_dst_trace::RunMetadata;
-    use std::io::Read;
-
-    #[test]
-    fn the_guest_reads_the_trace_without_its_build_identity() {
-        let mut recorded =
-            TraceBundle::new(RunMetadata::new(7, "fp-test", 0, "patina"), Vec::new());
-        recorded.metadata.native = Some(NativeIdentityRecord {
-            executable_sha256: Sha256Digest([1; 32]),
-            supervisor_sha256: Sha256Digest([2; 32]),
-            patina_version: "1.0.0".into(),
-            shim_bundle_sha256: Sha256Digest([3; 32]),
-            target: "x86_64-unknown-linux-gnu".into(),
-        });
-        let mut channel = guest_trace_channel(&withhold_native_identity(recorded.clone())).unwrap();
-        let mut bytes = Vec::new();
-        channel.read_to_end(&mut bytes).unwrap();
-        let handed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            handed["metadata"].get("native").is_none(),
-            "a guest whose recorder predates the field must not be handed it"
-        );
-        let mut expected = recorded;
-        expected.metadata.native = None;
-        assert_eq!(TraceBundle::from_slice(&bytes).unwrap(), expected);
-    }
 }

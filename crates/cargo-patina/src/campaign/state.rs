@@ -314,13 +314,15 @@ pub(super) struct CampaignState {
     /// The `sha256:` digest of the `cargo-patina` executable that started the
     /// campaign. Every generation is a run that supervisor built, so a
     /// continuation or a reduction by another supervisor build is refused.
-    /// `None` only on an out-dir written before the key existed, which is
-    /// refused by name.
-    pub(super) supervisor_sha256: Option<String>,
+    pub(super) supervisor_sha256: String,
 }
 
 impl CampaignState {
-    pub(super) fn fresh(artifact: ArtifactIdentity, spec: CampaignSpec) -> Self {
+    pub(super) fn fresh(
+        artifact: ArtifactIdentity,
+        spec: CampaignSpec,
+        supervisor_sha256: String,
+    ) -> Self {
         Self {
             artifact,
             spec,
@@ -330,7 +332,7 @@ impl CampaignState {
             notable_runs: Vec::new(),
             invocations: Vec::new(),
             clean_reruns: CleanReruns::default(),
-            supervisor_sha256: None,
+            supervisor_sha256,
         }
     }
 
@@ -344,9 +346,10 @@ impl CampaignState {
             "signatures": signatures_to_json(&self.signatures),
             "notable_runs": self.notable_runs.iter().map(GenerationOutcome::to_json).collect::<Vec<_>>(),
             "invocations": self.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
+            "supervisor_sha256": self.supervisor_sha256,
         });
-        // Default-omit, so a campaign that never re-ran a clean generation — and
-        // an out-dir written before the key existed — records no key at all.
+        // Default-omit, so a campaign that never re-ran a clean generation
+        // records no key at all.
         if self.clean_reruns != CleanReruns::default()
             && let Some(object) = value.as_object_mut()
         {
@@ -357,11 +360,6 @@ impl CampaignState {
                     "infra": self.clean_reruns.infra,
                 }),
             );
-        }
-        if let Some(supervisor) = &self.supervisor_sha256
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert("supervisor_sha256".into(), supervisor.clone().into());
         }
         value
     }
@@ -417,15 +415,7 @@ impl CampaignState {
                 }
             }
         };
-        let supervisor_sha256 = match object.get("supervisor_sha256") {
-            None => None,
-            Some(value) => Some(
-                value
-                    .as_str()
-                    .ok_or_else(|| "supervisor_sha256 must be a string".to_string())?
-                    .to_string(),
-            ),
-        };
+        let supervisor_sha256 = json_required_str(object, "supervisor_sha256")?.to_string();
         let state = CampaignState {
             artifact,
             spec,
@@ -544,8 +534,9 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("swarm".into(), spec.swarm.into());
     map.insert("pct".into(), spec.pct.into());
     map.insert("faults".into(), spec.faults.to_json());
-    // Default-omitted like the optional keys below, so a spec without
-    // exclusions records exactly the JSON it did before the key existed.
+    // Every key below is default-omitted: `spec_from_state_json` rebuilds from
+    // `CampaignSpec::default()` and demands `spec_to_json` reproduce the file
+    // byte for byte, so a key is written only when it differs from the default.
     if !spec.exclude_knobs.is_empty() {
         let flags: Vec<&str> = spec
             .exclude_knobs
@@ -554,15 +545,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
             .collect();
         map.insert("exclude_knobs".into(), flags.into());
     }
-    // Default-omitted for the same reason as the keys below: a spec that does
-    // not declare custom-op faults records exactly the JSON it did before this
-    // key existed, so an out-dir written by an earlier build still round-trips
-    // on `--resume`.
-    // Written only when it differs from the default, exactly like the optional
-    // keys around it: `spec_from_state_json` rebuilds from `CampaignSpec::default()`
-    // and then demands `spec_to_json` reproduce the file byte for byte, so an
-    // unconditional key would make every out-dir recorded before this flag
-    // existed fail its canonical-form check on `--resume`.
     if spec.fault_scale_permille != FAULT_SCALE_FULL {
         map.insert(
             "fault_scale_permille".into(),
@@ -572,36 +554,21 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if spec.custom_op_faults {
         map.insert("custom_op_faults".into(), true.into());
     }
-    // Default-omitted for the same round-trip reason as the keys around it: a
-    // campaign that does not explore starvation records exactly the JSON it did
-    // before this key existed, so an out-dir written by an earlier build still
-    // passes the canonical-form check on `--resume`.
     if spec.starve {
         map.insert("starve".into(), true.into());
     }
     if spec.yield_stride {
         map.insert("yield_stride".into(), true.into());
     }
-    // Default-omitted for the same reason as every optional key around it: the
-    // canonical-form gate `--resume` reloads through demands `spec_to_json`
-    // reproduce the recorded file exactly, so an unconditional key would break
-    // every out-dir written before this flag existed.
     if spec.starve_scale_permille != STARVE_SCALE_FULL {
         map.insert(
             "starve_scale_permille".into(),
             spec.starve_scale_permille.into(),
         );
     }
-    // Emitted only when the campaign HAS a host table, so a DNS-free spec's
-    // recorded JSON is byte-identical to what it was before the key existed and
-    // an out-dir written by an earlier build still round-trips on `--resume`.
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());
     }
-    // Same default-omit rule as the host table above: a campaign that forwards
-    // none of the native harness/gate surface records exactly the JSON it did
-    // before these keys existed, so an out-dir written by an earlier build still
-    // round-trips through the canonical-form check on `--resume`.
     if spec.harness {
         map.insert("harness".into(), true.into());
     }
@@ -639,14 +606,10 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if let Some(value) = spec.allow_unmet_sometimes {
         map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
     }
-    // Default-omit, like the host table above: a spec with no declared rules
-    // records exactly the JSON it did before this key existed, so an out-dir
-    // written by an earlier build still round-trips on `--resume`.
     if !spec.classify.is_empty() {
         map.insert("classify".into(), classify_rules_to_json(&spec.classify));
     }
-    // Default-omit: verification is on by default, so only the opt-out is
-    // recorded and an out-dir written before the key existed still round-trips.
+    // Verification is on by default, so only the opt-out is recorded.
     if !spec.verify {
         map.insert("verify".into(), false.into());
     }
@@ -773,19 +736,13 @@ pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliErro
     verify_artifact_identity(&state.artifact)?;
     let current = crate::supervisor_identity::supervisor_sha256()?.to_string();
     match &state.supervisor_sha256 {
-        None => Err(CliError(
-            "campaign out-dir records no supervisor build identity: it was written by a \
-             cargo-patina that predates them, so nothing says which supervisor ran its \
-             generations. Start a new campaign in a new --out-dir."
-                .to_string(),
-        )),
-        Some(recorded) if *recorded != current => Err(CliError(format!(
+        recorded if *recorded != current => Err(CliError(format!(
             "campaign out-dir was run by supervisor (cargo-patina executable) {recorded} but this \
              cargo-patina is {current}; the supervisor builds every generation's run, so results \
              from different supervisor builds are not comparable. Finish it with the \
              cargo-patina that started it, or start a new out-dir."
         ))),
-        Some(_) => Ok(()),
+        _ => Ok(()),
     }
 }
 
@@ -1137,6 +1094,7 @@ mod tests {
                 watchdog_nanos: Some(5),
                 ..CampaignSpec::default()
             },
+            "sha256:supervisor".to_string(),
         );
         state.generations_done = 2;
         state.classes.insert("OK".to_string(), 1);
@@ -1201,20 +1159,6 @@ mod tests {
         let mut bad_schema = parsed_json.clone();
         bad_schema["schema"] = "patina.campaign.state/v999".into();
         assert!(CampaignState::from_json(&bad_schema).is_err());
-        // A v1 out-dir has no `verdicts` on its notable runs. It is refused by
-        // name rather than read as "this generation reported nothing", which
-        // would make an auto-target minimize refuse for the wrong reason.
-        let mut v1 = parsed_json.clone();
-        v1["schema"] = "patina.campaign.state/v1".into();
-        v1["notable_runs"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("verdicts");
-        let error = CampaignState::from_json(&v1).unwrap_err();
-        assert!(
-            error.starts_with("unsupported schema"),
-            "unexpected error: {error}"
-        );
         let mut missing_verdicts = parsed_json.clone();
         missing_verdicts["notable_runs"][0]
             .as_object_mut()

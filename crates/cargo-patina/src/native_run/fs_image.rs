@@ -37,9 +37,7 @@ impl FsImageHash {
         };
         Some(match (contents(recorded), contents(current)) {
             (Some(recorded), Some(current)) if recorded == current => MountMismatch::Metadata,
-            (Some(_), Some(_)) => MountMismatch::Contents,
-            // A trace from before the image hashed in halves.
-            _ => MountMismatch::Unknown,
+            _ => MountMismatch::Contents,
         })
     }
 }
@@ -51,8 +49,6 @@ pub(crate) enum MountMismatch {
     Contents,
     /// Only its file modes or modification times: the contents match.
     Metadata,
-    /// The recorded hash is not in halves, so only that the image differs.
-    Unknown,
 }
 
 impl MountMismatch {
@@ -61,7 +57,6 @@ impl MountMismatch {
         match self {
             MountMismatch::Contents => "mount_contents",
             MountMismatch::Metadata => "mount_metadata",
-            MountMismatch::Unknown => "mount_image",
         }
     }
 
@@ -74,7 +69,6 @@ impl MountMismatch {
                 "its contents match but its metadata differs (a mode or a modification time; a fresh \
                  checkout or copy restamps mtimes)"
             }
-            MountMismatch::Unknown => "its image differs",
         }
     }
 }
@@ -253,10 +247,6 @@ mod tests {
         assert_eq!(
             FsImageHash::mismatch(&hash, &FsImageHash::of(&edited)),
             Some(MountMismatch::Contents)
-        );
-        assert_eq!(
-            FsImageHash::mismatch("0123456789abcdef", &hash),
-            Some(MountMismatch::Unknown)
         );
     }
 

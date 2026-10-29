@@ -69,9 +69,7 @@ pub(super) use gate::effective_native_allow;
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
 pub(super) use gate::target_has_sud;
-use identity::{
-    guest_trace_channel, native_identity, native_identity_refusal, withhold_native_identity,
-};
+use identity::{guest_trace_channel, native_identity, native_identity_refusal};
 use trace::NativeTraceSink;
 pub(crate) use trace::TRACE_CHANNEL_UNAVAILABLE;
 use trace::TraceCommitFailure;
@@ -163,8 +161,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         }
         _ => invocation.cpus,
     };
-    let replay_trace = replay_trace.map(withhold_native_identity);
-
     // Pre-run default-deny gate. Before the guest executes, enumerate every
     // externally-resolved symbol it can reach and hard-error, listing names, if
     // any on the blocking/time/scheduling/effect surface is neither interposed
@@ -351,9 +347,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
             // Record the guest arguments into the trace metadata so a later
             // `replay` restores them without the `--` section being re-passed.
             // Always forwarded (even when empty) so a zero-argument run records
-            // `[]` — distinct from an old trace's absent field, so replaying it
-            // reproduces zero arguments rather than inheriting whatever the
-            // command line supplies.
+            // `[]`, and replaying it reproduces zero arguments.
             (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
         ],
         NativeRunMode::Replay { fingerprint, .. } => {

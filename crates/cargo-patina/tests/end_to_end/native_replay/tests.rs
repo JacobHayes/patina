@@ -358,15 +358,6 @@ fn guest_argv_is_restored_on_replay(guest: &common::native::Guest) {
             && mismatch_stderr.contains("mismatch"),
         "a mismatched `--` section must be refused naming both argv lists:\n{mismatch_stderr}"
     );
-
-    let old_trace = guest.dir.path().join("old-argv.patina");
-    strip_guest_argv(&trace, &old_trace);
-    let old_replay = invoke_with(exe, workspace, &replay_args(bin, &old_trace, &args));
-    assert_eq!(
-        String::from_utf8_lossy(&old_replay.stdout),
-        recorded_out,
-        "a trace without recorded argv must replay with explicit arguments"
-    );
 }
 
 /// The supervisor stamps the build identity into the trace, naming the

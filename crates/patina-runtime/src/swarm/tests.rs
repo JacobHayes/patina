@@ -52,7 +52,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     for class in &swarm.selected_classes {
         assert!(swarm.candidate_classes.contains(class));
     }
-    let faults = bundle.metadata.faults.expect("faults recorded");
+    let faults = bundle.metadata.faults;
     assert_eq!(
         faults.crash_permille > 0,
         swarm.selected_classes.iter().any(|c| c == "crash")

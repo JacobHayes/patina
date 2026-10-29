@@ -154,24 +154,6 @@ const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
     "unfair-lock",
 ];
 
-// Rewrite `source` into `dest` with the additive `metadata.guest_argv` field
-// removed, synthesizing a trace as a pre-argv-capture recorder would have
-// written it. Traces are compact, greppable JSON, so this is a faithful stand-in
-// for an old on-disk bundle.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn strip_guest_argv(source: &Path, dest: &Path) {
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
-    let removed = value["metadata"]
-        .as_object_mut()
-        .unwrap()
-        .remove("guest_argv");
-    assert!(
-        removed.is_some(),
-        "the recorded trace was expected to carry guest_argv before stripping"
-    );
-    fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
-}
-
 /// The inert tag in [`PROBE_SOURCE`], found in the built executable.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const IDENTITY_PROBE_TAG: &[u8] = b"PATINA-IDENTITY-PROBE0";

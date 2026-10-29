@@ -29,18 +29,19 @@ arguments so they round-trip through the trace metadata"
 /// operation mismatch. If a `--` section IS supplied it must match the recording
 /// byte-for-byte, otherwise the replay is refused UPFRONT naming both the
 /// recorded and the passed arguments (a parse-time error, never a mid-run
-/// divergence). A trace recorded before argv capture carries no recorded argv, so
-/// the arguments are taken from the command line exactly as before — no new error
-/// for old traces.
+/// divergence). Every native recording carries its argv; a trace without one
+/// was not recorded by the native supervisor and is refused.
 pub(super) fn reconcile_replay_argv(
     trace: &Path,
     bundle: &TraceBundle,
     passed: &[OsString],
 ) -> Result<Vec<OsString>, CliError> {
     let Some(recorded) = &bundle.metadata.guest_argv else {
-        // Pre-argv trace: honor the historical contract (arguments from the
-        // command line, and their absence behaves exactly as today).
-        return Ok(passed.to_vec());
+        return Err(CliError(format!(
+            "trace {} records no guest arguments, so it was not recorded by \
+`cargo patina run --record` of a native binary. Re-record it.",
+            trace.display()
+        )));
     };
     let recorded_os: Vec<OsString> = recorded.iter().map(OsString::from).collect();
     if passed.is_empty() || passed == recorded_os.as_slice() {

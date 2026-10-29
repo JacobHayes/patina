@@ -205,16 +205,13 @@ pub struct CampaignSpec {
     /// The address layout every generation runs, and every reproduce command
     /// replays, with. `Randomized` (`--allow-randomized-address-layout`) keeps
     /// the host's randomization and qualifies each generation's determinism.
-    /// Invocation shape like [`Self::harness`]. A native campaign's state
-    /// always records it; `None` before the campaign starts means fixed, and a
-    /// native state without it predates layout control and cannot continue.
+    /// Invocation shape like [`Self::harness`]. A campaign's state always
+    /// records it; `None` before the campaign starts means fixed.
     pub address_layout: Option<patina_dst_trace::AddressLayout>,
     /// The CPU count every generation's guest sees (`--cpus`), forwarded to
     /// every child `run` and every reproduce command. Invocation shape like
-    /// [`Self::address_layout`]: a native campaign's state always records it
-    /// (the default unless the operator chose one), and a native state without
-    /// it ran its generations on one virtual CPU and cannot continue. Native
-    /// only.
+    /// [`Self::address_layout`]: a campaign's state always records it (the
+    /// default unless the operator chose one).
     pub cpus: Option<u32>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
@@ -712,8 +709,7 @@ mod tests {
 
     /// Every opt-in part of a spec rides the recorded spec, so `--resume` and
     /// `--extend` continue the campaign the fresh run started, and is
-    /// default-omitted from the JSON, so an out-dir written before its key
-    /// existed still passes the canonical-form check.
+    /// default-omitted from the JSON.
     #[test]
     fn opt_in_spec_fields_round_trip_and_are_omitted_by_default() {
         let mut classified = CampaignSpec::default();
@@ -776,12 +772,11 @@ mod tests {
         ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
         }
-        // Every plane still records as the `true` an out-dir written before
-        // subsets existed holds.
-        let mut legacy = bare.clone();
-        legacy["faults"] = serde_json::json!(true);
+        // Every plane records as `true`.
+        let mut every = bare.clone();
+        every["faults"] = serde_json::json!(true);
         assert_eq!(
-            spec_from_state_json(&legacy).unwrap().faults,
+            spec_from_state_json(&every).unwrap().faults,
             FaultPlanes::ALL
         );
         // The exploration policy is part of the coverage store's compatibility

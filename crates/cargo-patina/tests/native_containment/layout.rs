@@ -16,6 +16,7 @@ fn address_layout(output: &[u8]) -> std::collections::BTreeMap<&str, &str> {
 /// the checks about the layout policy rather than about the layout itself.
 const NO_CHURN: &str = "no-churn";
 
+#[cfg(target_os = "linux")]
 const FLAG: &str = "--allow-randomized-address-layout";
 
 /// `cargo patina run` of `g` at seed 1 recording to `trace` in the no-churn
@@ -70,12 +71,8 @@ fn replay_standalone(
 /// without it. A launch without the supervisor keeps the host's
 /// randomization, so it may replay only a trace that ran randomized too: a
 /// fixed recording is refused and pointed at `cargo patina replay`, while a
-/// standalone recording, which records no layout, replays standalone. A trace
-/// with no layout was recorded before Patina controlled it, with the host's
-/// randomization on: replay accepts it only as randomized, and says why. A
-/// native campaign records its layout policy from its first generation; a
-/// state without one predates layout control, so continuing it is refused
-/// rather than mixing layouts.
+/// standalone recording, which records no layout, replays standalone. A
+/// native campaign records its layout policy from its first generation.
 #[test]
 fn address_layout_is_the_same_in_every_run_of_a_seed() {
     let g = Guest::assert_build("address_layout_probe.rs");
@@ -167,20 +164,6 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     ));
     assert!(text(&replayed.stdout).contains("code="), "{replayed:?}");
 
-    let mut bundle = patina_dst_trace::TraceBundle::load(&fixed).unwrap();
-    assert_eq!(
-        bundle.metadata.address_layout,
-        Some(patina_dst_trace::AddressLayout::Fixed)
-    );
-    bundle.metadata.address_layout = None;
-    let legacy = g.dir.path().join("legacy.patina");
-    bundle.write_atomic(&legacy).unwrap();
-    let legacy = legacy.to_str().unwrap();
-    let refused = assert_refused(g.command("replay", &[legacy]), &[FLAG]);
-    assert!(!text(&refused.stdout).contains("code="), "{refused:?}");
-    let replayed = assert_success(g.command("replay", &[legacy, FLAG]));
-    assert!(text(&replayed.stdout).contains("code="), "{replayed:?}");
-
     let out = g.dir.path().join("campaign");
     let campaign = |args: &[&str]| {
         let mut argv = vec!["campaign"];
@@ -204,22 +187,12 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
         "--",
         NO_CHURN,
     ]));
-    // The continuation itself works on the state as written.
-    assert_success(campaign(&["--extend", "1", "--out-dir", out_dir]));
+    // The state records the layout, and the continuation runs under it.
     let state_path = out.join("campaign-state.json");
-    let mut state: serde_json::Value =
+    let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(state["spec"]["address_layout"], "fixed", "{state}");
-    state["spec"]
-        .as_object_mut()
-        .unwrap()
-        .remove("address_layout");
-    let legacy = serde_json::to_vec(&state).unwrap();
-    std::fs::write(&state_path, &legacy).unwrap();
-    let refused = campaign(&["--extend", "1", "--out-dir", out_dir]);
-    assert!(!refused.status.success(), "{refused:?}");
-    assert!(text(&refused.stderr).contains("--out-dir"), "{refused:?}");
-    assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
+    assert_success(campaign(&["--extend", "1", "--out-dir", out_dir]));
 }
 
 /// `cargo patina run` of `g` at seed 1, with `args`, from a parent whose soft

@@ -49,9 +49,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
 
     // (2) THE DEFAULT IS UNCHANGED. The identity is arithmetic, not a special
     // case: `scale_intensity` at full scale is `v` for every `v`, and an explicit
-    // full-scale spec derives byte-for-byte what the default spec derives — which
-    // is what makes every campaign recorded before this flag existed still
-    // reproduce.
+    // full-scale spec derives byte-for-byte what the default spec derives.
     let identity = (0..=2000u64)
         .chain([10_000, 2_550_000, 255_000_000_000])
         .all(|value| scale_intensity(value, FAULT_SCALE_FULL) == value);
@@ -99,8 +97,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
 
     // (4) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
     // canonical-form gate `--resume`/`--extend` reload through. The default is
-    // recorded by ABSENCE, so an out-dir written before this flag existed still
-    // passes that gate.
+    // recorded by ABSENCE.
     let json = spec_to_json(&spec);
     let recorded = json.get("fault_scale_permille") == Some(&serde_json::Value::from(LOW));
     let round_trip = spec_from_state_json(&json).map(|back| back.fault_scale_permille);
@@ -329,8 +326,7 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
 
     // (5) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
     // canonical-form gate `--resume`/`--extend` reload through. The default is
-    // recorded by ABSENCE, so an out-dir written before this flag existed still
-    // passes that gate.
+    // recorded by ABSENCE.
     let json = spec_to_json(&spec);
     let recorded = json.get("starve_scale_permille") == Some(&serde_json::Value::from(LOW));
     let round_trip = spec_from_state_json(&json).map(|back| back.starve_scale_permille);

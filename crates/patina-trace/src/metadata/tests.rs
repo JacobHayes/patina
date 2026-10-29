@@ -11,9 +11,9 @@ fn reload(metadata: RunMetadata) -> (String, RunMetadata) {
 }
 
 /// Every recorded configuration round-trips exactly, and a run that sets none
-/// of it writes none of those fields, so it reloads as `None` everywhere.
-/// Empty-but-present values (`faults: {}`, `guest_argv: []`) stay distinct
-/// from absent ones: a zero-argument run must replay zero arguments.
+/// of the optional ones writes none of those fields, so it reloads as `None`
+/// everywhere. An empty-but-present `guest_argv: []` stays distinct from an
+/// absent one: a zero-argument run must replay zero arguments.
 #[test]
 fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
     let full = RunMetadata::new(
@@ -22,13 +22,13 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
         1_000_000_000,
         "db-1",
     )
-    .with_faults(Some(FaultConfigRecord {
+    .with_faults(FaultConfigRecord {
         crash_permille: 34,
         crash_kind: patina_dst_abi::CrashKind::Process,
         fs_error_permille: 100,
         net_drop_permille: 250,
         ..FaultConfigRecord::default()
-    }))
+    })
     .with_buggify(Some(BuggifyConfigRecord {
         fire_permille: 250,
         activation_permille: 250,
@@ -76,7 +76,6 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
     let (text, reloaded) = reload(plain.clone());
     assert_eq!(reloaded, plain);
     for field in [
-        "faults",
         "buggify",
         "schedule_policy",
         "swarm",
@@ -89,9 +88,7 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
         assert!(!text.contains(field), "{field} written when unset: {text}");
     }
 
-    let empty = plain
-        .with_faults(Some(FaultConfigRecord::default()))
-        .with_guest_argv(Some(Vec::new()));
+    let empty = plain.with_guest_argv(Some(Vec::new()));
     let (_, reloaded) = reload(empty.clone());
     assert_eq!(reloaded, empty);
 }

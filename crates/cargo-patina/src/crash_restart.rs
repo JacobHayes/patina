@@ -85,12 +85,7 @@ fn crash_restart_replay_plan(
     let Some(segments) = segments else {
         return Ok(None);
     };
-    let kind = bundle
-        .metadata
-        .faults
-        .as_ref()
-        .map(|faults| faults.crash_kind)
-        .unwrap_or_default();
+    let kind = bundle.metadata.faults.crash_kind;
     Ok(Some(CrashRestartPlan {
         kind,
         seed: bundle.metadata.root_seed,

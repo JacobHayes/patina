@@ -830,7 +830,8 @@ mod tests {
         }
 
         // The trace is authoritative: adopted flag-free, matched when supplied,
-        // refused when the supplied value differs; a pre-cwd trace adopts nothing.
+        // refused when the supplied value differs; a trace without one started
+        // at `/`, so only `/` matches it.
         let adopted = reconcile_replay_guest_cwd(&RuntimeConfig::seeded(0), Some("/work")).unwrap();
         assert_eq!(adopted.as_deref(), Some("/work"));
         let matching = RuntimeConfig::seeded(0)
@@ -849,10 +850,9 @@ mod tests {
             reconcile_replay_guest_cwd(&conflicting, Some("/work")),
             Err(RuntimeError::Config(_))
         ));
-        assert_eq!(
-            reconcile_replay_guest_cwd(&conflicting, None).unwrap(),
-            None
-        );
+        assert!(reconcile_replay_guest_cwd(&conflicting, None).is_err());
+        let root = RuntimeConfig::seeded(0).with_guest_cwd(Some("/")).unwrap();
+        assert_eq!(reconcile_replay_guest_cwd(&root, None).unwrap(), None);
     }
 
     #[test]
@@ -878,9 +878,7 @@ mod tests {
         assert!(matches!(invalid, RuntimeError::Config(_)), "{invalid:?}");
 
         let stored = BTreeMap::from([("RUST_LOG".to_string(), "debug".to_string())]);
-        let adopted = reconcile_replay_guest_env(&RuntimeConfig::seeded(0), Some(&stored))
-            .unwrap()
-            .unwrap();
+        let adopted = reconcile_replay_guest_env(&RuntimeConfig::seeded(0), Some(&stored)).unwrap();
         assert_eq!(adopted, stored);
         reconcile_replay_guest_env(
             &RuntimeConfig::seeded(0).with_guest_env(stored.clone()),
@@ -892,5 +890,12 @@ mod tests {
             "trace".to_string(),
         )]));
         assert!(reconcile_replay_guest_env(&conflict, Some(&stored)).is_err());
+        // A trace without an environment ran with none: supplying one conflicts.
+        assert!(reconcile_replay_guest_env(&conflict, None).is_err());
+        assert!(
+            reconcile_replay_guest_env(&RuntimeConfig::seeded(0), None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

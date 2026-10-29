@@ -91,8 +91,7 @@ pub struct DnsConfigRecord {
 /// trace), so replay re-derives them from this config. The `active_sites` and
 /// `knobs` fields are the run's realized activation/knob picks: authoritative on
 /// replay and surfaced in the run's `sdk` facts, they also make a trace
-/// self-describing. This field is absent (`None`) in traces recorded before
-/// buggify shipped, which the runtime treats as buggify-disabled.
+/// self-describing. Absent (`None`) when buggify was disabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuggifyConfigRecord {
@@ -149,11 +148,7 @@ pub struct StarvationPolicyRecord {
 /// starvation intervals) of a recorded run. Stored in the trace metadata so a
 /// replay knows the policy that produced the recorded schedule, and enabling a
 /// non-default policy folds a fingerprint component so a cross-policy replay
-/// fails closed. Absent (`None`) in traces recorded under the default uniform
-/// policy or before this field existed — either way the runtime treats a missing
-/// field as the default policy, and `deny_unknown_fields` means an older runtime
-/// reading a newer trace rejects the unknown field rather than silently ignoring
-/// the policy.
+/// fails closed. Absent (`None`) under the default uniform policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulePolicyRecord {
@@ -275,8 +270,7 @@ pub enum AddressLayout {
     Randomized,
 }
 
-/// Absent (`None`) in traces recorded with the watchdog disabled or before this
-/// field existed, which the runtime treats as "no watchdog".
+/// Absent (`None`) when the watchdog was disabled.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WatchdogConfigRecord {
@@ -323,10 +317,7 @@ pub struct RunMetadata {
     pub root_seed: u64,
     pub fingerprint: String,
     /// The run's fault-injection configuration, authoritative on replay.
-    /// Absent (`None`) in traces recorded before format 4, which the runtime
-    /// treats as the pre-metadata re-supply contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub faults: Option<FaultConfigRecord>,
+    pub faults: FaultConfigRecord,
     /// The run's cooperative-SUT (buggify) configuration, authoritative on
     /// replay. Additive: absent (`None`) in traces recorded without buggify,
     /// which the runtime treats as buggify-disabled. A native trace whose textual
@@ -343,15 +334,10 @@ pub struct RunMetadata {
     pub dns: Option<DnsConfigRecord>,
     /// The guest program arguments (everything after `--`, i.e. `argv[1..]`) the
     /// run was executed with, recorded so a `replay` reproduces them without the
-    /// operator re-passing the `--` section. Additive exactly like
-    /// [`RunMetadata::faults`] and [`RunMetadata::buggify`]: absent (`None`) in
-    /// traces recorded before argv was captured,
-    /// which the replay path treats as "no recorded argv" and falls back to the
-    /// historical contract of taking the arguments from the command line. A run
-    /// with no guest arguments records an empty vector (`Some([])`), which is
-    /// distinct from an old trace's absent field (`None`) — so replaying a
-    /// zero-argument run reproduces zero arguments rather than silently accepting
-    /// whatever the command line supplies. [`RunMetadata::root_seed`] is not a
+    /// operator re-passing the `--` section. Every native run records it, a run
+    /// with no guest arguments as `Some([])`; a native replay refuses a trace
+    /// without it. Absent only where there is no guest argv (the explicit
+    /// context). [`RunMetadata::root_seed`] is not a
     /// fingerprint input and neither is this: the recorded op-stream already
     /// reflects any argv-dependent guest behavior.
     ///
@@ -361,18 +347,16 @@ pub struct RunMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_argv: Option<Vec<String>>,
     /// Deterministic guest environment values supplied by the supervisor (native
-    /// `run --env KEY=VALUE`). Additive exactly like [`guest_argv`](RunMetadata::guest_argv):
-    /// absent (`None`) in traces recorded before env capture or when no values
-    /// were supplied; present values are authoritative on replay so a flag-free
-    /// replay reproduces environment-dependent guest behavior.
+    /// `run --env KEY=VALUE`), authoritative on replay so a flag-free replay
+    /// reproduces environment-dependent guest behavior. Absent (`None`) when
+    /// no values were supplied, which replays as an empty environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_env: Option<BTreeMap<String, String>>,
     /// The guest's initial working directory (native `run --cwd PATH`), the
-    /// canonical absolute virtual path the run's `getcwd` starts at. Additive
-    /// exactly like [`guest_env`](RunMetadata::guest_env): absent (`None`) when
-    /// the run started at `/` (the default) or predates cwd capture; present
-    /// values are authoritative on replay so a flag-free replay resolves the
-    /// same relative paths. `chdir` is guest-driven and unrecorded.
+    /// canonical absolute virtual path the run's `getcwd` starts at,
+    /// authoritative on replay so a flag-free replay resolves the same
+    /// relative paths. Absent (`None`) when the run started at `/` (the
+    /// default). `chdir` is guest-driven and unrecorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_cwd: Option<String>,
     /// The run's exploration scheduling policy (PCT / starvation), authoritative
@@ -399,8 +383,7 @@ pub struct RunMetadata {
     pub compute_stop: Option<ComputeStop>,
     /// Whether syscall-user-dispatch (SUD) was armed for this run — recorded only
     /// when it was (`Some(true)`); absent (`None`) on every other run (macOS,
-    /// a non-SUD kernel, a standalone binary, and all pre-SUD traces). Additive
-    /// exactly like [`faults`](RunMetadata::faults). It exists so a cross-kernel
+    /// a non-SUD kernel, a standalone binary). It exists so a cross-kernel
     /// replay is refused UP FRONT rather than diverging mid-run: a binary with
     /// raw inline syscalls can only run armed, so replaying its `sud:true` trace
     /// on a kernel without SUD (or vice versa) is reconciled fail-closed before
@@ -410,8 +393,7 @@ pub struct RunMetadata {
     /// Whether the timestamp-counter trap (`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`)
     /// was armed for this run — recorded only when it was (`Some(true)`); absent
     /// (`None`) on every other run (macOS, arm64, a kernel without `PR_SET_TSC`,
-    /// a standalone binary, and all traces predating the trap). Additive exactly
-    /// like [`sud`](RunMetadata::sud), and reconciled the same way: a guest whose
+    /// a standalone binary). Reconciled like [`sud`](RunMetadata::sud): a guest whose
     /// `rdtsc`/`rdtscp` were answered from the virtual clock records `tsc:true`,
     /// and replaying that trace on a run that leaves the counter readable would
     /// read the HOST counter — so the mismatch is refused before the first op is
@@ -420,10 +402,8 @@ pub struct RunMetadata {
     pub tsc: Option<bool>,
     /// The address layout the native supervisor exec'd the guest with, written
     /// on every supervised native run. Absent (`None`) means no supervisor
-    /// controlled the layout: a trace recorded before Patina pinned it, a
-    /// standalone native binary, or another family. A native guest in such a
-    /// trace ran with the host's randomization on, so a supervised replay
-    /// treats an absent layout as randomized. Reconciled on replay like
+    /// controlled the layout: a standalone native binary, or another family.
+    /// Reconciled on replay like
     /// [`sud`](RunMetadata::sud): a trace whose addresses no seed decided is
     /// never replayed as though they had been, nor the other way round.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -488,7 +468,7 @@ impl RunMetadata {
         Self {
             root_seed,
             fingerprint: fingerprint.into(),
-            faults: None,
+            faults: FaultConfigRecord::default(),
             buggify: None,
             dns: None,
             guest_argv: None,
@@ -527,7 +507,7 @@ impl RunMetadata {
 
     /// Attach the run's fault-injection configuration recorded into the trace.
     #[must_use]
-    pub fn with_faults(mut self, faults: Option<FaultConfigRecord>) -> Self {
+    pub fn with_faults(mut self, faults: FaultConfigRecord) -> Self {
         self.faults = faults;
         self
     }
@@ -542,8 +522,8 @@ impl RunMetadata {
 
     /// Attach the guest program arguments (`argv[1..]`) recorded into the trace,
     /// so a `replay` reproduces them without the operator re-passing the `--`
-    /// section. `None` records nothing (an old-style trace); `Some(vec)` — even
-    /// an empty vector — records the exact argument list.
+    /// section. `Some(vec)` — even an empty vector — records the exact argument
+    /// list; `None` records nothing.
     #[must_use]
     pub fn with_guest_argv(mut self, guest_argv: Option<Vec<String>>) -> Self {
         self.guest_argv = guest_argv;

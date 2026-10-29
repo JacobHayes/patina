@@ -137,15 +137,11 @@ pub(super) fn fault_config_from_record(
 /// no knobs are supplied (the default), the stored configuration is adopted
 /// verbatim so replay is byte-identical; when knobs ARE supplied they must match
 /// the recording exactly or replay fails closed rather than silently running a
-/// different fault schedule. A pre-metadata trace (`None`) keeps the historical
-/// re-supply behavior.
+/// different fault schedule.
 pub(super) fn reconcile_replay_faults(
     config: &RuntimeConfig,
-    recorded: Option<&patina_dst_trace::FaultConfigRecord>,
-) -> Result<Option<FaultConfig>, RuntimeError> {
-    let Some(record) = recorded else {
-        return Ok(None);
-    };
+    record: &patina_dst_trace::FaultConfigRecord,
+) -> Result<FaultConfig, RuntimeError> {
     let stored_faults = fault_config_from_record(record)?;
     let supplied_any = config.faults != FaultConfig::default();
     if supplied_any && config.faults != stored_faults {
@@ -155,13 +151,13 @@ pub(super) fn reconcile_replay_faults(
                 .into(),
         ));
     }
-    Ok(Some(stored_faults))
+    Ok(stored_faults)
 }
 
 /// The buggify configuration recorded into a trace at build time. `active_sites`
 /// and `knobs` are filled in at finalization from the run's realized picks; here
 /// they start empty. `None` when buggify is disabled, so a disabled run records
-/// no buggify metadata at all and is indistinguishable from an old trace.
+/// no buggify metadata at all.
 pub(super) fn buggify_record(
     config: &RuntimeConfig,
 ) -> Option<patina_dst_trace::BuggifyConfigRecord> {
@@ -242,19 +238,15 @@ pub(super) fn reconcile_replay_buggify(
 /// Reconcile a recorded trace's authoritative initial working directory with
 /// any value supplied to the replaying process. The trace is authoritative: with
 /// no value supplied the stored one is adopted; a supplied value must match
-/// exactly or replay fails closed. A pre-cwd trace (`None`) keeps the supplied
-/// value for embedders.
+/// exactly or replay fails closed. A trace without one started at `/`.
 pub(super) fn reconcile_replay_guest_cwd(
     config: &RuntimeConfig,
     recorded: Option<&str>,
 ) -> Result<Option<String>, RuntimeError> {
-    let Some(stored) = recorded else {
-        return Ok(None);
-    };
     if config
         .guest_cwd
         .as_deref()
-        .is_some_and(|supplied| supplied != stored)
+        .is_some_and(|supplied| supplied != recorded.unwrap_or("/"))
     {
         return Err(RuntimeError::Config(
             "replay --cwd conflicts with the trace's recorded guest working directory; \
@@ -262,7 +254,7 @@ pub(super) fn reconcile_replay_guest_cwd(
                 .into(),
         ));
     }
-    Ok(Some(stored.to_owned()))
+    Ok(recorded.map(str::to_owned))
 }
 
 /// The realtime epoch an installed clock driver runs on: its realtime reading
@@ -383,28 +375,25 @@ pub(super) fn guest_env_record(config: &RuntimeConfig) -> Option<BTreeMap<String
 /// Reconcile a recorded trace's authoritative guest environment with any values
 /// supplied to the replaying process. The trace is authoritative: with no values
 /// supplied the stored map is adopted verbatim; if values are supplied they must
-/// match exactly or replay fails closed. A pre-env trace (`None`) keeps the
-/// historical re-supply behavior for embedders.
+/// match exactly or replay fails closed. A trace without one ran with none.
 pub(super) fn reconcile_replay_guest_env(
     config: &RuntimeConfig,
     recorded: Option<&BTreeMap<String, String>>,
-) -> Result<Option<BTreeMap<String, String>>, RuntimeError> {
-    let Some(stored) = recorded else {
-        return Ok(None);
-    };
-    if !config.guest_env.is_empty() && &config.guest_env != stored {
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    let stored = recorded.cloned().unwrap_or_default();
+    if !config.guest_env.is_empty() && config.guest_env != stored {
         return Err(RuntimeError::Config(
             "replay --env values conflict with the trace's recorded guest environment; \
              the trace is authoritative, so omit the flags (or supply matching values)"
                 .into(),
         ));
     }
-    Ok(Some(stored.clone()))
+    Ok(stored)
 }
 
 /// The exploration scheduling policy recorded into a trace at build time. `None`
 /// under the default uniform policy, so a default run records no policy metadata
-/// at all and is indistinguishable from an old trace.
+/// at all.
 pub(super) fn schedule_policy_record(
     config: &RuntimeConfig,
 ) -> Option<patina_dst_trace::SchedulePolicyRecord> {
@@ -496,8 +485,7 @@ pub(super) fn reconcile_replay_yield_stride(
 /// can only run armed, so replaying its `sud:true` trace on a kernel without SUD
 /// (or replaying a non-SUD trace on a run that armed SUD) cannot reproduce the
 /// recorded op-stream — the message names the real situation. `Some(true)` means
-/// armed; `None` (absent) means not armed (macOS / non-SUD kernel / standalone /
-/// pre-SUD trace). SUD-DESIGN.md §7.3.
+/// armed; `None` (absent) means not armed (macOS / non-SUD kernel / standalone).
 pub(super) fn reconcile_replay_sud(
     config: &RuntimeConfig,
     recorded: Option<bool>,
@@ -532,7 +520,7 @@ pub(super) fn reconcile_replay_sud(
 /// recorded op. Neither direction can reproduce the other's op-stream, and the
 /// unarmed direction is a silent host escape, so both refuse. `Some(true)` means
 /// armed; `None` (absent) means not armed (macOS / arm64 / no `PR_SET_TSC` /
-/// standalone / a trace predating the trap).
+/// standalone).
 pub(super) fn reconcile_replay_tsc(
     config: &RuntimeConfig,
     recorded: Option<bool>,
@@ -564,19 +552,17 @@ pub(super) fn reconcile_replay_tsc(
 /// Reconcile the trace's address layout against this replay run's, and REFUSE
 /// a mismatch up front. An absent layout, on either side, means no supervisor
 /// laid the guest out, so it ran with the host's randomization: a trace with
-/// none was recorded before Patina controlled the layout (or standalone), and
-/// a replay with none is a standalone launch (or another family, whose traces
-/// record none either). Only a fixed replay matches a fixed recording;
-/// everything else that runs randomized matches a recording that did too.
+/// none was recorded standalone, and a replay with none is a standalone launch
+/// (or another family, whose traces record none either). A supervised replay
+/// matches only a supervised recording with the same layout.
 pub(super) fn reconcile_replay_address_layout(
     config: &RuntimeConfig,
     recorded: Option<AddressLayout>,
 ) -> Result<(), RuntimeError> {
     match (recorded, config.address_layout) {
         (Some(AddressLayout::Fixed), Some(AddressLayout::Fixed))
-        | (Some(AddressLayout::Randomized) | None, Some(AddressLayout::Randomized) | None) => {
-            Ok(())
-        }
+        | (Some(AddressLayout::Randomized), Some(AddressLayout::Randomized))
+        | (Some(AddressLayout::Randomized) | None, None) => Ok(()),
         (Some(AddressLayout::Fixed), None) => Err(RuntimeError::Config(
             "this trace was recorded with a fixed address layout, but this replay was launched \
              without the supervisor, so the host randomized the guest's addresses. Replay it \
@@ -590,12 +576,10 @@ pub(super) fn reconcile_replay_address_layout(
              qualified determinism."
                 .into(),
         )),
-        (None, Some(AddressLayout::Fixed)) => Err(RuntimeError::Config(
-            "this trace records no address layout: it was recorded before Patina controlled the \
-             native guest's layout (or by a binary launched without the supervisor), so the guest \
-             ran with the host's address-space randomization on and its addresses were not a \
-             function of the seed. Replay it with --allow-randomized-address-layout to accept \
-             that qualified determinism, or record it again."
+        (None, Some(_)) => Err(RuntimeError::Config(
+            "this trace records no address layout, so it was recorded by a binary launched \
+             without the supervisor. Replay it the same way, or record it again through \
+             `cargo patina run --record`."
                 .into(),
         )),
         (Some(AddressLayout::Fixed), Some(AddressLayout::Randomized)) => Err(RuntimeError::Config(
@@ -641,7 +625,7 @@ mod tests {
     #[test]
     fn reconcile_replay_sud_refuses_a_mismatch_in_both_directions() {
         // Matching states reconcile clean: armed↔armed, and not-armed↔not-armed
-        // (the latter covers macOS, non-SUD kernels, and every pre-SUD trace).
+        // (the latter covers macOS and non-SUD kernels).
         let armed = RuntimeConfig::seeded(0).with_sud(Some(true));
         let unarmed = RuntimeConfig::seeded(0).with_sud(None);
         assert!(reconcile_replay_sud(&armed, Some(true)).is_ok());
@@ -683,16 +667,9 @@ mod tests {
             ..FaultConfigRecord::default()
         };
 
-        // A pre-metadata trace (None) yields no override: the operator-supplied
-        // configuration is kept, preserving the historical re-supply contract.
-        let supplied = RuntimeConfig::seeded(0).with_crash_permille(8);
-        assert_eq!(reconcile_replay_faults(&supplied, None).unwrap(), None);
-
         // Flag-free replay adopts the stored configuration verbatim, so replay is
         // byte-identical without any knobs.
-        let faults = reconcile_replay_faults(&RuntimeConfig::seeded(0), Some(&stored))
-            .unwrap()
-            .expect("stored config adopted");
+        let faults = reconcile_replay_faults(&RuntimeConfig::seeded(0), &stored).unwrap();
         assert_eq!(faults.crash.permille, 7);
         assert_eq!(faults.crash.kind, CrashKind::Process);
         assert_eq!(faults.fs.error_permille, 111);
@@ -706,14 +683,12 @@ mod tests {
             .with_fs_error_permille(111)
             .with_fs_short_permille(222)
             .with_net_latency_nanos(500);
-        reconcile_replay_faults(&matching, Some(&stored))
-            .unwrap()
-            .expect("matching config adopted");
+        reconcile_replay_faults(&matching, &stored).unwrap();
 
         // Explicit knobs that DIVERGE fail closed before any driver is built.
         let mismatched = RuntimeConfig::seeded(0).with_crash_permille(8);
         assert!(matches!(
-            reconcile_replay_faults(&mismatched, Some(&stored)),
+            reconcile_replay_faults(&mismatched, &stored),
             Err(RuntimeError::Config(_))
         ));
     }

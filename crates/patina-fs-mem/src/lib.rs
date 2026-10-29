@@ -30,8 +30,7 @@ type DescriptionId = u64;
 pub const MODE_MASK: u32 = 0o7777;
 
 /// The mode a regular file in the initial image carries (`0o666` under the
-/// default `0o022` umask), and the mode a legacy snapshot without per-entry
-/// modes reloads a file at. Not applied to any creating call: the umask is
+/// default `0o022` umask). Not applied to any creating call: the umask is
 /// process state the layer above the driver applies.
 pub const FILE_MODE: u32 = 0o644;
 

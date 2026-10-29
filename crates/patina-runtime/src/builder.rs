@@ -256,7 +256,7 @@ impl RuntimeBuilder {
                         )
                         .with_boot_origin_nanos(recorded_boot_origin)
                         .with_cpus(self.config.cpus())
-                        .with_faults(Some(fault_record(&self.config)))
+                        .with_faults(fault_record(&self.config))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
                         .with_swarm(swarm_record.clone())
@@ -288,7 +288,7 @@ impl RuntimeBuilder {
                         )
                         .with_boot_origin_nanos(recorded_boot_origin)
                         .with_cpus(self.config.cpus())
-                        .with_faults(Some(fault_record(&self.config)))
+                        .with_faults(fault_record(&self.config))
                         .with_buggify(buggify_record(&self.config))
                         .with_schedule_policy(schedule_policy_record(&self.config))
                         .with_swarm(swarm_record.clone())
@@ -317,12 +317,16 @@ impl RuntimeBuilder {
                     replayer.boot_origin_nanos(),
                 )?);
                 // The trace's fault configuration is authoritative on replay.
-                replay_fault_override =
-                    reconcile_replay_faults(&self.config, replayer.fault_config())?;
+                replay_fault_override = Some(reconcile_replay_faults(
+                    &self.config,
+                    replayer.fault_config(),
+                )?);
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
-                replay_guest_env_override =
-                    reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_guest_env_override = Some(reconcile_replay_guest_env(
+                    &self.config,
+                    replayer.guest_env(),
+                )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
@@ -366,12 +370,16 @@ impl RuntimeBuilder {
                     installed_boot_origin,
                     replayer.boot_origin_nanos(),
                 )?);
-                replay_fault_override =
-                    reconcile_replay_faults(&self.config, replayer.fault_config())?;
+                replay_fault_override = Some(reconcile_replay_faults(
+                    &self.config,
+                    replayer.fault_config(),
+                )?);
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
-                replay_guest_env_override =
-                    reconcile_replay_guest_env(&self.config, replayer.guest_env())?;
+                replay_guest_env_override = Some(reconcile_replay_guest_env(
+                    &self.config,
+                    replayer.guest_env(),
+                )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
@@ -420,12 +428,16 @@ impl RuntimeBuilder {
                 )?);
                 // A branch replays the parent prefix, so it inherits the parent
                 // trace's fault configuration for the replayed drivers.
-                replay_fault_override =
-                    reconcile_replay_faults(&self.config, session.fault_config())?;
+                replay_fault_override = Some(reconcile_replay_faults(
+                    &self.config,
+                    session.fault_config(),
+                )?);
                 replay_buggify_override =
                     reconcile_replay_buggify(&self.config, session.buggify_config())?;
-                replay_guest_env_override =
-                    reconcile_replay_guest_env(&self.config, session.guest_env())?;
+                replay_guest_env_override = Some(reconcile_replay_guest_env(
+                    &self.config,
+                    session.guest_env(),
+                )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(

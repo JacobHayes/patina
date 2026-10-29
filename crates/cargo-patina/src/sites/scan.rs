@@ -81,7 +81,6 @@ impl CacheState {
 struct SitesCache {
     schema: String,
     recognizer_version: String,
-    #[serde(default)]
     sdk_signature: String,
     files: BTreeMap<String, CachedFile>,
 }

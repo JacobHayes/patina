@@ -88,6 +88,7 @@ fn buggify_fingerprint_requires_buggify_metadata() {
         "metadata": {
             "root_seed": 7,
             "fingerprint": "fingerprint+buggify",
+            "faults": {},
             "realtime_epoch_nanos": 0,
             "boot_origin_nanos": 1000,
             "hostname": "patina",

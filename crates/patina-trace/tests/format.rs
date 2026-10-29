@@ -19,9 +19,10 @@ fn current_format_fixtures_parse_validate_and_are_canonically_encoded() {
     let bundle = TraceBundle::load(fixture("current.patina")).unwrap();
     assert_eq!(bundle.format_version, TRACE_FORMAT_VERSION);
     bundle.validate().unwrap();
-    // A run recorded with no fault configuration omits the field from the
-    // canonical form rather than writing an explicit empty object.
-    assert_eq!(bundle.metadata.faults, None);
+    assert_eq!(
+        bundle.metadata.faults,
+        patina_dst_trace::FaultConfigRecord::default()
+    );
     let main = bundle.resolved_timeline("main").unwrap();
     assert_eq!(main.len(), 2);
     assert_eq!(main[0].outcome, Outcome::U64(1000));

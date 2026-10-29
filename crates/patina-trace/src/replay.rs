@@ -69,9 +69,8 @@ impl Replayer {
     }
 
     /// The recorded fault-injection configuration, authoritative on replay.
-    /// `None` for a pre-format-4 trace that carried no such metadata.
-    pub const fn fault_config(&self) -> Option<&FaultConfigRecord> {
-        self.metadata.faults.as_ref()
+    pub const fn fault_config(&self) -> &FaultConfigRecord {
+        &self.metadata.faults
     }
 
     /// The recorded cooperative-SUT (buggify) configuration, authoritative on
