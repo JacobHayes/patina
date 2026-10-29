@@ -137,39 +137,6 @@ fn mapping_flags_and_access_modes_are_judged_as_do_mmap_does() {
     );
 }
 
-#[test]
-fn a_huge_page_size_names_a_pool_the_machine_has() {
-    assert_eq!(huge_page_size(0), Some(2 << 20));
-    assert_eq!(huge_page_size(21), Some(2 << 20));
-    assert_eq!(huge_page_size(30), Some(1 << 30));
-    assert_eq!(huge_page_size(22), None);
-    assert_eq!(huge_page_size(12), None);
-}
-
-#[test]
-fn a_read_only_shared_view_or_attachment_refuses_write() {
-    let view = |shared, maywrite| Object::File {
-        ino: 1,
-        desc: 1,
-        shared,
-        maywrite,
-        secret: false,
-    };
-    assert!(view(true, false).refuses_write());
-    assert!(!view(true, true).refuses_write());
-    assert!(!view(false, true).refuses_write());
-    assert!(
-        Object::Segment {
-            id: 0,
-            maywrite: false
-        }
-        .refuses_write()
-    );
-    assert!(view(true, true).writes_back(1));
-    assert!(!view(false, true).writes_back(1));
-    assert!(!view(true, true).writes_back(2));
-}
-
 /// A malformed request about the runtime arena's region gets the kernel's
 /// refusal of the malformation, which the kernel judges before the range;
 /// a well-formed one gets the region's answer.

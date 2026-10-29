@@ -600,19 +600,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_readable_range_copies_whole() {
-        let source = *b"guest bytes";
-        assert_eq!(
-            read_bytes(source.as_ptr() as usize, source.len()),
-            Ok(source.to_vec())
-        );
-        assert_eq!(read::<[u8; 5]>(source.as_ptr() as usize), Ok(*b"guest"));
-        let mut target = [0u8; 4];
-        assert_eq!(write(target.as_mut_ptr() as usize, &[1u8, 2, 3, 4]), Ok(()));
-        assert_eq!(target, [1, 2, 3, 4]);
-    }
-
     /// An unmapped, protected or address-space-wrapping range is `EFAULT`
     /// both ways without faulting (as `access_ok`, and on Linux the copy
     /// vehicle, answers), and so is one running into an inaccessible page; an

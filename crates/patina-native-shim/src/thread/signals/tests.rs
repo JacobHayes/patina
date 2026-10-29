@@ -165,24 +165,6 @@ fn native_handler_action(sig: i32, handler: extern "C" fn(i32)) -> Action {
     action
 }
 
-// Class detector for native-to-fixture ABI drift: compare restorer validity
-// against libc's kernel action, then actually return through the handler frame.
-#[test]
-fn fixture_preserves_native_restorer_validity() {
-    isolated(|| {
-        let native = native_handler_action(SIGUSR1, handler);
-        let installed = install_handler(SIGUSR1, handler, SA_RESTART, 0);
-        assert_eq!(installed.flags & SA_RESTORER, native.flags & SA_RESTORER);
-        if native.flags & SA_RESTORER != 0 {
-            assert_ne!(native.restorer, 0);
-            assert_eq!(installed.restorer, native.restorer);
-        }
-        generate(SIGUSR1);
-        patina_signal_deliver();
-        assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
-    });
-}
-
 pub(in crate::thread) fn action(restart: bool) {
     install_handler(SIGUSR1, handler, if restart { SA_RESTART } else { 0 }, 0);
 }

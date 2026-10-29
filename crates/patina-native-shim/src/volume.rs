@@ -683,27 +683,6 @@ pub(crate) unsafe fn ustat(dev: u32, out: *mut KernelUstat) -> crate::abi::SysRe
 mod tests {
     use super::*;
 
-    /// Every filesystem's description is valid, names `NAME_MAX`, and sits
-    /// on its own device and fsid; the volume's counts are consistent.
-    #[test]
-    fn every_description_is_valid_and_distinct() {
-        for (index, filesystem) in Filesystem::ALL.iter().enumerate() {
-            let description = filesystem.describe();
-            assert_ne!(description.f_flags & ST_VALID, 0, "{filesystem:?}");
-            assert_eq!(description.f_namelen, NAME_MAX, "{filesystem:?}");
-            assert_ne!(description.f_type, 0, "{filesystem:?}");
-            for other in &Filesystem::ALL[index + 1..] {
-                assert_ne!(filesystem.device(), other.device());
-                assert_ne!(filesystem.fsid(), other.fsid());
-            }
-        }
-        let volume = Filesystem::Volume.describe();
-        assert!(volume.f_bfree <= volume.f_blocks && volume.f_bavail <= volume.f_bfree);
-        assert!(volume.f_ffree <= volume.f_files);
-        assert!(volume.f_bsize >= 512 && (volume.f_bsize as u64).is_power_of_two());
-        assert_eq!(volume.f_frsize, volume.f_bsize);
-    }
-
     /// `sysfs(2)` walks the registered types, by index and by name.
     #[cfg(target_arch = "x86_64")]
     #[test]

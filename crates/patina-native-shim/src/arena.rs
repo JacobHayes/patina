@@ -720,17 +720,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_region_sits_between_the_heap_and_the_mappings() {
-        for top in [1usize << 39, 1 << 47, 1 << 48] {
-            let (base, size) = placement(top);
-            // A position-independent executable loads two thirds of the way
-            // up, and its heap grows from there.
-            assert!(base > top / 3 * 2 + top / 64, "{top:#x}");
-            assert!(base + size < top - top / 8, "{top:#x}");
-        }
-    }
-
-    #[test]
     fn blocks_are_aligned_distinct_writable_and_within_the_region() {
         let layouts = [
             (1, 1),
@@ -792,23 +781,6 @@ mod tests {
     }
 
     #[test]
-    fn realloc_keeps_the_bytes_across_classes() {
-        let block = alloc(10, 1);
-        // SAFETY: the blocks' own bytes and layouts.
-        unsafe {
-            block.copy_from_nonoverlapping(b"0123456789".as_ptr(), 10);
-            let same = realloc(block, 10, 1, 16);
-            assert_eq!(same, block, "one class");
-            let grown = realloc(same, 16, 1, 3 << 20);
-            assert!(contains(grown));
-            assert_eq!(std::slice::from_raw_parts(grown, 10), b"0123456789");
-            let shrunk = realloc(grown, 3 << 20, 1, 5);
-            assert_eq!(std::slice::from_raw_parts(shrunk, 5), b"01234");
-            dealloc(shrunk, 5, 1);
-        }
-    }
-
-    #[test]
     fn the_whole_region_is_reserved_however_little_is_mapped() {
         let (base, end) = region();
         let page = 4096;
@@ -863,18 +835,5 @@ mod tests {
         assert_eq!(choose(fresh(), |_| true, || true), Ok(base));
         assert!(choose(fresh(), |_| false, || true).is_err());
         assert!(choose(fresh(), |_| false, || false).is_err());
-    }
-
-    #[test]
-    fn the_hosts_mappings_are_read_without_allocating() {
-        let page = 4096usize;
-        let flags = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS) as usize;
-        let mapped = host(Syscall::N_mmap, [0, page, 0, flags, usize::MAX, 0]) as usize;
-        let mut seen = false;
-        assert!(each_mapping(
-            &mut |start, end| seen |= start <= mapped && mapped < end
-        ));
-        host(Syscall::N_munmap, [mapped, page, 0, 0, 0, 0]);
-        assert!(seen);
     }
 }

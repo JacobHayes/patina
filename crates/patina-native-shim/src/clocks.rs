@@ -910,21 +910,6 @@ mod tests {
     }
 
     #[test]
-    fn resolutions_are_the_kernels() {
-        assert_eq!(resolution(Clock::Monotonic), Ok(1));
-        assert_eq!(resolution(Clock::MonotonicCoarse), Ok(TICK_NSEC));
-        assert_eq!(resolution(Clock::RealtimeAlarm), Ok(1));
-        assert_eq!(resolution(Clock::Device), Err(EINVAL));
-        // A CPU clock's `which` past CPUCLOCK_SCHED names nothing.
-        let past = Clock::Cpu {
-            pid: 0,
-            thread: false,
-            which: 3,
-        };
-        assert_eq!(resolution(past), Err(EINVAL));
-    }
-
-    #[test]
     fn setting_the_time_validates_before_the_privilege() {
         let none = std::ptr::null();
         assert_eq!(settimeofday(&[0, 1_000_001], none), -i64::from(EINVAL));

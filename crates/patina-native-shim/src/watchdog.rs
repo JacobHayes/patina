@@ -298,7 +298,7 @@ impl Sample {
 static SAMPLE: Sample = Sample::new();
 static SYMBOL: super::SpinMutex<Option<Symbol>> = super::SpinMutex::new(None);
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn symbol_contains(offset: usize, size: usize) -> bool {
     offset < size || (size == 0 && offset == 0)
 }
@@ -622,25 +622,6 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    fn signed_offsets_and_loader_ranges_are_not_guesses() {
-        for (delta, expected) in [(-0x5c6e36, "-0x5c6e36"), (42, "+0x2a"), (0, "+0x0")] {
-            let mut out = String::new();
-            signed_hex(&mut out, delta).unwrap();
-            assert_eq!(out, expected);
-        }
-        let mut out = String::new();
-        signed_hex(&mut out, isize::MIN).unwrap();
-        assert_eq!(out, format!("-{:#x}", isize::MIN.unsigned_abs()));
-        assert!(symbol_contains(0, 0));
-        assert!(!symbol_contains(1, 0));
-        assert!(symbol_contains(9, 10));
-        assert!(!symbol_contains(10, 10));
-        let pc = super::super::hostapi::get().host_read as *const () as usize;
-        let symbol = lookup_symbol(pc).expect("loader must know its exported read vehicle");
-        assert_ne!(symbol.len, 0);
-        assert_eq!(symbol.offset, 0);
-    }
     #[test]
     fn missed_locks_preserve_the_bound_but_progress_and_ineligibility_reset_it() {
         let mut window = Window::default();

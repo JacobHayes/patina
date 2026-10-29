@@ -50,6 +50,17 @@ pub(crate) struct EpollEvent {
     data: u64,
 }
 
+const _: () = {
+    assert!(std::mem::offset_of!(EpollEvent, events) == 0);
+    let (size, data) = if cfg!(target_arch = "x86_64") {
+        (12, 4)
+    } else {
+        (16, 8)
+    };
+    assert!(std::mem::size_of::<EpollEvent>() == size);
+    assert!(std::mem::offset_of!(EpollEvent, data) == data);
+};
+
 #[cfg(not(target_arch = "x86_64"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -682,23 +693,8 @@ pub(crate) unsafe fn wait_core(
 #[cfg(test)]
 mod tests {
     use super::{
-        BTreeMap, EPOLLERR, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT, EPOLLOUT, Epoll, EpollEvent,
-        Interest,
+        BTreeMap, EPOLLERR, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT, EPOLLOUT, Epoll, Interest,
     };
-
-    /// The Rust struct is written straight into the guest's buffer, so
-    /// its layout must be the kernel ABI.
-    #[test]
-    fn epoll_event_layout_matches_kernel_abi() {
-        assert_eq!(std::mem::offset_of!(EpollEvent, events), 0);
-        if cfg!(target_arch = "x86_64") {
-            assert_eq!(std::mem::size_of::<EpollEvent>(), 12);
-            assert_eq!(std::mem::offset_of!(EpollEvent, data), 4);
-        } else {
-            assert_eq!(std::mem::size_of::<EpollEvent>(), 16);
-            assert_eq!(std::mem::offset_of!(EpollEvent, data), 8);
-        }
-    }
 
     fn interest(events: u32) -> Interest {
         Interest {

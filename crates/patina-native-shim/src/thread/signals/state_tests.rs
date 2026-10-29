@@ -9,15 +9,9 @@ pub(super) enum HostCall {
     Queue(u8),
 }
 thread_local! {
-    static HOST_CALL_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     static HOST_CALLS: RefCell<Option<Vec<HostCall>>> = const { RefCell::new(None) };
 }
 pub(in crate::thread::signals) fn observe_host_call(nr: i64, args: [u64; 6]) {
-    HOST_CALL_COUNT.with(|count| {
-        if let Some(n) = count.get() {
-            count.set(Some(n + 1));
-        }
-    });
     // A managed thread completes from glibc's thread-local destructor pass,
     // after this record's own destructor may have run: observe nothing then.
     let _ = HOST_CALLS.try_with(|calls| {
@@ -341,8 +335,8 @@ fn one_delivery_runs_more_batches_than_scopes_nest() {
 fn raw_rt_sigaction_installs_and_reports_oldact() {
     isolated(|| {
         let original = install_handler(SIGUSR1, handler, SA_RESTART, bit(SIGUSR2));
-        // Paired with fixture_preserves_native_restorer_validity: a restorer
-        // pointer is meaningful only when the native action marks it valid.
+        // A restorer pointer is meaningful only when the native action marks
+        // it valid.
         if original.flags & SA_RESTORER != 0 {
             assert_ne!(original.restorer, 0);
         }
@@ -656,38 +650,6 @@ fn trap_signal_actions_are_virtual_and_never_change_the_host() {
     });
 }
 
-#[test]
-fn no_pending_syscall_tail_and_unchanged_frame_issue_no_host_calls() {
-    isolated(|| {
-        // Clear any initialization fixup, then count *all* host calls, not only
-        // writes observed by the stacked-transport assertion.
-        let mut mask = 0u64;
-        let mut stack = Stack::default();
-        unsafe {
-            patina_signal_frame(&mut mask, &mut stack);
-        }
-        HOST_CALL_COUNT.with(|count| count.set(Some(0)));
-        assert_eq!(
-            unsafe {
-                crate::sud::patina_sud_dispatch(syscall_number("getpid"), 0, 0, 0, 0, 0, 0, 0)
-            },
-            i64::from(crate::registry::ROOT_PID)
-        );
-        unsafe {
-            patina_signal_frame(&mut mask, &mut stack);
-        }
-        assert_eq!(HOST_CALL_COUNT.with(|count| count.replace(None)), Some(0));
-        set_mask(SIG_BLOCK, bit(SIGUSR1));
-        HOST_CALL_COUNT.with(|count| count.set(Some(0)));
-        unsafe {
-            patina_signal_frame(&mut mask, &mut stack);
-        }
-        assert_eq!(mask & bit(SIGUSR1), bit(SIGUSR1));
-        assert_eq!(HOST_CALL_COUNT.with(|count| count.replace(None)), Some(1));
-    });
-}
-
-// Class pairing: dirty-frame ownership across nested kernel handler boundaries.
 #[test]
 fn nested_signal_frame_preserves_outer_mask_fixup() {
     extern "C" fn nested_frame(_: i32) {

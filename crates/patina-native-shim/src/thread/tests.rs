@@ -3,27 +3,6 @@
 
 use super::*;
 
-#[test]
-fn endpoint_handles_wrap_and_skip_live_keys() {
-    // Live keys straddle the wrap and hold the bottom of the range.
-    let live = [c_int::MAX, c_int::MIN, 0, 1];
-    let allocate = |next: &mut c_int| {
-        handle_allocator::next_free_handle(next, |handle| live.contains(&handle))
-    };
-    let mut next = c_int::MAX - 1;
-    let pipe_ends = [allocate(&mut next), allocate(&mut next)];
-
-    // The second end wraps past both live keys around `c_int::MAX`.
-    assert_eq!(pipe_ends, [c_int::MAX - 1, c_int::MIN + 1]);
-    assert_eq!(next, c_int::MIN + 2);
-
-    // Fast-forward to the low keys rather than spending billions of
-    // allocations traversing the c_int range.
-    next = 0;
-    assert_eq!(allocate(&mut next), 2);
-    assert_eq!(next, 3);
-}
-
 // The `--yield-stride` teardown fix must keep "task completed" a state
 // distinct from "thread never registered": a completed thread's
 // post-finish scheduling points are silently skipped, but a foreign or

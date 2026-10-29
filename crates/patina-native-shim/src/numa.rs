@@ -360,45 +360,35 @@ pub(crate) fn set_mempolicy_home_node(_start: usize, _len: usize, home: u64, fla
 mod tests {
     use super::*;
 
+    /// `mpol_new`'s answers over modes, mode flags and node masks.
     #[test]
-    fn a_policy_names_node_zero_or_nothing() {
+    fn a_policy_names_node_zero_or_nothing_and_flags_agree_with_the_mode() {
+        let bind = MPOL_BIND as i32;
+        let flagged_preferred = (MPOL_PREFERRED | MPOL_F_STATIC_NODES) as i32;
+        let both = (MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES) as i32;
+        let balancing = |mode: u32| (mode | MPOL_F_NUMA_BALANCING) as i32;
+        for (mode, nodes) in [
+            (0, Nodes::Zero),
+            (bind, Nodes::None),
+            (bind, Nodes::Other),
+            (MPOL_LOCAL as i32, Nodes::Zero),
+            (MPOL_MAX as i32, Nodes::Zero),
+            (flagged_preferred, Nodes::None),
+            (both, Nodes::Zero),
+            (balancing(MPOL_INTERLEAVE), Nodes::Zero),
+            (balancing(MPOL_PREFERRED_MANY), Nodes::Zero),
+        ] {
+            assert_eq!(policy_for(mode, nodes), Err(EINVAL), "{mode:#x} {nodes:?}");
+        }
         assert_eq!(policy_for(0, Nodes::None), Ok(Policy::DEFAULT));
-        assert_eq!(policy_for(0, Nodes::Zero), Err(EINVAL));
-        assert_eq!(
-            policy_for(MPOL_BIND as i32, Nodes::Zero).map(Policy::nodes),
-            Ok(NODE0)
-        );
-        assert_eq!(policy_for(MPOL_BIND as i32, Nodes::None), Err(EINVAL));
-        assert_eq!(policy_for(MPOL_BIND as i32, Nodes::Other), Err(EINVAL));
-        assert_eq!(policy_for(MPOL_LOCAL as i32, Nodes::Zero), Err(EINVAL));
-        assert_eq!(policy_for(MPOL_MAX as i32, Nodes::Zero), Err(EINVAL));
-    }
-
-    #[test]
-    fn a_preferred_policy_without_a_node_is_the_local_one() {
+        assert_eq!(policy_for(bind, Nodes::Zero).map(Policy::nodes), Ok(NODE0));
+        assert!(policy_for(balancing(MPOL_BIND), Nodes::Zero).is_ok());
+        // A preferred policy without a node is the local one.
         let local = policy_for(MPOL_PREFERRED as i32, Nodes::None).unwrap();
         assert_eq!((local.mode, local.nodes()), (MPOL_LOCAL, 0));
-        let flagged = (MPOL_PREFERRED | MPOL_F_STATIC_NODES) as i32;
-        assert_eq!(policy_for(flagged, Nodes::None), Err(EINVAL));
         assert_eq!(
-            policy_for(flagged, Nodes::Zero).unwrap().flags,
+            policy_for(flagged_preferred, Nodes::Zero).unwrap().flags,
             MPOL_F_STATIC_NODES
-        );
-    }
-
-    #[test]
-    fn mode_flags_must_agree_with_the_mode() {
-        let both = (MPOL_BIND | MPOL_F_STATIC_NODES | MPOL_F_RELATIVE_NODES) as i32;
-        assert_eq!(policy_for(both, Nodes::Zero), Err(EINVAL));
-        let balancing = |mode: u32| (mode | MPOL_F_NUMA_BALANCING) as i32;
-        assert!(policy_for(balancing(MPOL_BIND), Nodes::Zero).is_ok());
-        assert_eq!(
-            policy_for(balancing(MPOL_INTERLEAVE), Nodes::Zero),
-            Err(EINVAL)
-        );
-        assert_eq!(
-            policy_for(balancing(MPOL_PREFERRED_MANY), Nodes::Zero),
-            Err(EINVAL)
         );
     }
 
@@ -426,18 +416,6 @@ mod tests {
     }
 
     #[test]
-    fn move_pages_without_a_status_buffer_is_efault() {
-        let page = 0usize;
-        // SAFETY: one readable page address; the status is NULL.
-        unsafe {
-            assert_eq!(
-                move_pages(0, 1, &page, std::ptr::null(), std::ptr::null_mut(), 0),
-                fail(EFAULT)
-            );
-        }
-    }
-
-    #[test]
     fn pages_live_on_node_zero() {
         let pages = [0usize, 4096];
         let mut status = [5i32; 2];
@@ -455,6 +433,17 @@ mod tests {
                 0
             );
             assert_eq!(status, [0, 0]);
+            assert_eq!(
+                move_pages(
+                    0,
+                    1,
+                    pages.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    0
+                ),
+                fail(EFAULT)
+            );
             assert_eq!(
                 move_pages(
                     0,

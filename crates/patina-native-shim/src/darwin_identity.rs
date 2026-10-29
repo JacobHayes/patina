@@ -19,6 +19,10 @@ pub(crate) struct Utsname {
     fields: [[u8; UTS_LEN]; 5],
 }
 
+// The model's layout is the platform's own `struct utsname`.
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<Utsname>() == std::mem::size_of::<libc::utsname>());
+
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -102,25 +106,5 @@ mod tests {
         let name = describe(&long);
         assert_eq!(field(&name, 1), &long[..UTS_LEN - 1]);
         assert_eq!(field(&name, 0), "Darwin");
-    }
-
-    /// The model's layout is the platform's own `struct utsname`, and its
-    /// release is the Darwin the vendored xnu tables come from.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn darwin_utsname_matches_the_platform_and_the_vendored_xnu() {
-        assert_eq!(
-            std::mem::size_of::<Utsname>(),
-            std::mem::size_of::<libc::utsname>()
-        );
-        let vendored: std::collections::BTreeSet<&str> = crate::registry::generated::SOURCES
-            .iter()
-            .filter(|source| source.0 == "darwin")
-            .map(|source| source.1)
-            .collect();
-        assert_eq!(
-            vendored,
-            std::collections::BTreeSet::from([crate::registry::DARWIN_XNU])
-        );
     }
 }

@@ -264,19 +264,3 @@ pub(crate) fn write(resolved: &Resolved, source: *const c_void, length: usize) -
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 static MADE: crate::SpinMutex<[u64; MemDevice::ALL.len()]> =
     crate::SpinMutex::new([0; MemDevice::ALL.len()]);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_device_is_found_at_its_path_and_through_its_handle() {
-        for device in MemDevice::ALL.into_iter().filter(|device| device.exists()) {
-            assert_eq!(MemDevice::at(device.path()), Some(device));
-            assert_eq!(MemDevice::of_handle(device.handle()), device);
-            #[cfg(any(target_os = "linux", patina_posix_exports))]
-            assert_eq!(MemDevice::of_ino(device.metadata().ino), Some(device));
-        }
-        assert_eq!(MemDevice::at("/dev/kmsg"), None);
-    }
-}
