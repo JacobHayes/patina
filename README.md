@@ -258,7 +258,7 @@ with `registered_gens=0`. Each row carries `@file:line`. `cargo patina
 campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
 when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
-is the source of truth for which sites the build declares.
+is the source of truth for which sites the build declares. A declared `always!` that no generation evaluates is listed as `UNEVALUATED` (and under `always_unevaluated` in the JSON); it is reported, not gated.
 
 ### Record and replay
 

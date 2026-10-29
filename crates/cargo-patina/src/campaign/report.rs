@@ -50,6 +50,9 @@ pub(super) struct CoverageSummary<'a> {
     sometimes_unsatisfied: u64,
     reachable_unreached: u64,
     always_violated: u64,
+    /// Declared `always!` sites no generation ever evaluated: a vacuous pass,
+    /// reported but never gating.
+    pub(super) always_unevaluated: Vec<&'a ExercisedSite>,
     pub(super) unmet: Vec<&'a ExercisedSite>,
 }
 
@@ -68,11 +71,15 @@ fn coverage_summary(coverage: &CoverageTally) -> CoverageSummary<'_> {
         sometimes_unsatisfied: 0,
         reachable_unreached: 0,
         always_violated: 0,
+        always_unevaluated: Vec::new(),
         unmet: Vec::new(),
     };
     for site in coverage.sites.values() {
         if site.kind == "always" && site.always_violated_runs > 0 {
             summary.always_violated += 1;
+        }
+        if site.is_unevaluated_always() {
+            summary.always_unevaluated.push(site);
         }
         if !site.is_oracle() {
             continue;
@@ -397,7 +404,7 @@ fn print_coverage_summary(
     sites_path: &Path,
 ) {
     let summary = &coverage_verdict.summary;
-    println!("-- coverage (sometimes!/reachable!) --");
+    println!("-- coverage (sometimes!/reachable!/always!) --");
     if summary.oracle_sites == 0 {
         println!("coverage: no sometimes!/reachable! sites registered");
     } else {
@@ -423,6 +430,12 @@ fn print_coverage_summary(
                 waived
             );
         }
+    }
+    for site in &summary.always_unevaluated {
+        println!(
+            "  UNEVALUATED always '{}' site={} registered_gens=0",
+            site.label, site.site
+        );
     }
     println!("coverage store: {}", sites_path.display());
     println!(
@@ -577,6 +590,12 @@ fn coverage_envelope_json(
             })
         })
         .collect::<Vec<_>>();
+    let always_unevaluated = verdict
+        .summary
+        .always_unevaluated
+        .iter()
+        .map(|site| serde_json::json!({"label": &site.label, "site": &site.site}))
+        .collect::<Vec<_>>();
     let edge = edge_coverage_json(edge_coverage, artifact_path);
     serde_json::json!({
         "oracle_sites": verdict.summary.oracle_sites,
@@ -584,6 +603,7 @@ fn coverage_envelope_json(
         "gate": verdict.gate.as_str(),
         "waiver": waiver_json(verdict.waiver),
         "unmet": unmet,
+        "always_unevaluated": always_unevaluated,
         "edge": edge,
     })
 }
@@ -650,6 +670,7 @@ fn sdk_sites_summary_json(
         "sometimes_unsatisfied": verdict.summary.sometimes_unsatisfied,
         "reachable_unreached": verdict.summary.reachable_unreached,
         "always_violated": verdict.summary.always_violated,
+        "always_unevaluated": verdict.summary.always_unevaluated.len(),
     })
 }
 
@@ -769,5 +790,46 @@ mod tests {
         assert_eq!(envelope["failures"], 0);
         assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
         assert!(envelope["artifacts"].get("failures_dir").is_none());
+    }
+
+    /// A declared `always!` that never registered is listed in the coverage
+    /// summary and the envelope, and does not turn the gate red.
+    #[test]
+    fn never_evaluated_always_is_reported_but_does_not_gate() {
+        let site =
+            |label: &str, kind: &str, registered_gens: u64| crate::sdk_report::ExercisedSite {
+                label: label.to_string(),
+                kind: kind.to_string(),
+                site: "src/main.rs:1".to_string(),
+                registered_gens,
+                ..Default::default()
+            };
+        let mut coverage = CoverageTally::default();
+        for site in [
+            site("dormant", "always", 0),
+            site("exercised", "always", 3),
+            site("dormant-fault", "fault", 0),
+        ] {
+            coverage.sites.insert(site.label.clone(), site);
+        }
+        let verdict = coverage_verdict(&coverage, None);
+        assert_eq!(verdict.gate, CoverageGate::Pass);
+        let envelope = coverage_envelope_json(
+            &coverage,
+            &verdict,
+            &EdgeCoverageState::unavailable("not-instrumented", None),
+            Path::new("guest"),
+        );
+        let labels: Vec<&str> = envelope["always_unevaluated"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(labels, ["dormant"]);
+        assert_eq!(
+            sdk_sites_summary_json(&coverage, &verdict)["always_unevaluated"],
+            1
+        );
     }
 }

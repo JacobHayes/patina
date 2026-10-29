@@ -450,10 +450,7 @@ pub(super) fn write_sdk_fixture(root: &Path, main: &str) {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn assert_campaign_sites_carry_identities(
-    binary: &Path,
-    expected_labels: &[&str],
-) {
+pub(super) fn assert_campaign_sites_carry_identities(binary: &Path, expected_labels: &[&str]) {
     let directory = tempdir().unwrap();
     let out = directory.path().join("campaign");
     // The guest's unreached `reachable!` fails the campaign's coverage gate;
@@ -481,7 +478,9 @@ pub(super) fn assert_campaign_sites_carry_identities(
             .find(|site| site["label"].as_str() == Some(label))
             .unwrap_or_else(|| panic!("missing site for label {label}: {sites:#}"));
         assert!(
-            row["site"].as_str().is_some_and(|site| site.contains(".rs:")),
+            row["site"]
+                .as_str()
+                .is_some_and(|site| site.contains(".rs:")),
             "label {label} has no file:line identity: {sites:#}"
         );
     }

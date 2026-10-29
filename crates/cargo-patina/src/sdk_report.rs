@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-
 pub(crate) const CAMPAIGN_SITES_SCHEMA: &str = "patina.campaign.sites/v1";
 
 /// One run's `sdk` facts object: the fields the tally folds.
@@ -196,6 +195,11 @@ impl ExercisedSite {
             self.knob_max = Some(self.knob_max.map_or(knob, |old| old.max(knob)));
         }
         Ok(())
+    }
+
+    /// An `always!` that was declared but never evaluated: it proves nothing.
+    pub(crate) fn is_unevaluated_always(&self) -> bool {
+        self.kind == "always" && self.registered_gens == 0
     }
 
     pub(crate) fn is_oracle(&self) -> bool {

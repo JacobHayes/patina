@@ -24,6 +24,54 @@ mod tests {
         super::super::run_facts::shared_sdk_guest(&format!("sometimes-{label}"), &main)
     }
 
+    /// A declared `always!` no generation evaluates is reported, never gated: the
+    /// campaign stays green and the store lists it as unregistered.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn campaign_reports_a_never_evaluated_always_without_gating() {
+        let main = "fn main() {\n    patina_dst::lifecycle::setup_complete();\n    patina_dst::always!(true, \"evaluated-always\");\n    if std::hint::black_box(false) {\n        patina_dst::always!(true, \"dormant-always\");\n    }\n}\n";
+        let guest = super::super::run_facts::shared_sdk_guest("dormant-always", main);
+        let directory = tempdir().unwrap();
+        let out = directory.path().join("campaign");
+        let run = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+            .current_dir(native_workspace())
+            .args([
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "3",
+                "--out-dir",
+            ])
+            .arg(&out)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(
+            run.status.success(),
+            "an unevaluated always! must not gate\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(
+            stdout.contains("UNEVALUATED always 'dormant-always'")
+                && !stdout.contains("UNEVALUATED always 'evaluated-always'"),
+            "campaign output must name only the dormant always!:\n{stdout}"
+        );
+        let sites: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("sites.json")).unwrap()).unwrap();
+        let registered = |label: &str| {
+            sites["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| site["label"] == label)
+                .unwrap_or_else(|| panic!("missing {label}: {sites:#}"))["registered_gens"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(registered("dormant-always"), 0);
+        assert!(registered("evaluated-always") > 0);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
