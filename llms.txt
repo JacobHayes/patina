@@ -399,6 +399,17 @@ dev-dependency use under plain `cargo test`.
   `run_with`, `Context`, `RuntimeBuilder`. Deterministic async lives in
   `patina-dst-async` (`block_on`, `spawn`, TCP/UDP futures) over that `Context`.
 
+## proptest
+
+- Stock `proptest` works unmodified under the native shim (`run`, `test`
+  harness mode): case generation AND shrinking draw from the run seed, so a
+  failing seed shrinks to the same minimal case on every run and on replay.
+- Failure persistence is inert: the guest filesystem is in-memory and fresh per
+  run, with no host directory visible unless `--mount` (read-only) is given, so
+  `proptest-regressions/` is never read or written. Keep the failing seed or
+  its trace as the regression record.
+- For stateful/model-based tests use `proptest-state-machine`.
+
 ## Interpreting results
 
 - Exit 0 = clean. A nonzero exit is the guest's own code; a `violation`

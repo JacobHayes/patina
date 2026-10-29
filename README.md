@@ -281,6 +281,22 @@ paths. `--instrument` binaries emit edge coverage (`--coverage-out`,
 `cargo patina coverage`), which campaigns accumulate and `campaign --guided`
 uses to bias generations toward new coverage.
 
+### proptest
+
+Stock `proptest` needs no adapter under the native shim (`run`, or `test`
+harness mode): its RNG seed comes from the run seed, so the cases a property
+draws, the failure it hits and what its shrinker reduces that failure to are
+all a function of the seed, and a recorded failure replays to the same minimal
+case. Two things differ from plain `cargo test`:
+
+- **Failure persistence does nothing.** The guest filesystem is in-memory and
+  fresh for every run, and no host directory is visible unless you pass
+  `--mount` (read-only), so `proptest-regressions/` files are neither read nor
+  written. The seed is the regression record: keep the failing seed (or its
+  trace) instead.
+- **Stateful tests:** use `proptest-state-machine` for model-based tests of a
+  stateful system; it runs on the same seeded runner.
+
 ## Supported today
 
 - **Seeded determinism** for ordinary `std`: filesystem (including directories,
