@@ -159,11 +159,6 @@ impl Drop for RecordReservation {
     }
 }
 
-pub(super) enum FilesystemExpected {
-    Execute(Option<(u64, Outcome)>),
-    Captured(Outcome),
-}
-
 fn record_lock_path(trace_path: &Path) -> Result<PathBuf, RuntimeError> {
     let file_name = trace_path.file_name().ok_or_else(|| {
         RuntimeError::Config(format!(

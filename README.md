@@ -369,7 +369,7 @@ silently:
   reading clocks/entropy, and direct host APIs are refused, not virtualized.
   Patina makes *mostly-Rust* programs deterministic; it does not promise to run
   arbitrary native code.
-- Host-facing escape hatches (allowlisted host file capture, `--mount`) are
+- Host-facing escape hatches (allowlisted host files via `--mount`) are
   explicit, read-only, and fingerprinted — never ambient.
 
 ## Going deeper

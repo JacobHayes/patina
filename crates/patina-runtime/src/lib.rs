@@ -636,7 +636,6 @@ pub struct Context {
     yield_stride: u32,
     execution: Execution,
     filesystem: Box<dyn FsDriver>,
-    filesystem_is_capture: bool,
     clock: VirtualClock,
     entropy: entropy::SeededEntropy,
     scheduler: DetScheduler,

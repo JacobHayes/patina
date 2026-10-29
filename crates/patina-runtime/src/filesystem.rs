@@ -1,9 +1,8 @@
 //! Filesystem effects, timestamps, and file helpers.
 
 use crate::recording::{
-    Execution, FilesystemExpected, MAX_READ_FILE_BYTES, READ_CHUNK_SIZE, decode_bytes,
-    decode_directory_entries, decode_handle, decode_metadata, decode_string, decode_u64,
-    decode_unit, decode_usize,
+    MAX_READ_FILE_BYTES, READ_CHUNK_SIZE, decode_bytes, decode_directory_entries, decode_handle,
+    decode_metadata, decode_string, decode_u64, decode_unit, decode_usize,
 };
 use crate::{Context, RuntimeError};
 use patina_dst_abi::{
@@ -129,10 +128,7 @@ impl Context {
             path: path.into(),
             flags,
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.open(clock, path, flags);
         let actual = match result {
@@ -146,10 +142,7 @@ impl Context {
     pub fn fs_read(&mut self, fd: Fd, max_len: usize) -> Result<Vec<u8>, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsRead { fd, max_len };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.read(clock, fd, max_len);
         let actual = match result {
@@ -166,10 +159,7 @@ impl Context {
             fd,
             bytes: bytes.to_vec(),
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.write(clock, fd, bytes);
         let actual = match result {
@@ -195,10 +185,7 @@ impl Context {
             offset,
             max_len,
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.read_at(clock, fd, offset, max_len);
         let actual = match result {
@@ -224,10 +211,7 @@ impl Context {
             offset,
             bytes: bytes.to_vec(),
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.write_at(clock, fd, offset, bytes);
         let actual = match result {
@@ -253,10 +237,7 @@ impl Context {
             offset,
             bytes: bytes.to_vec(),
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.write_back_at(clock, fd, offset, bytes);
         let actual = match result {
@@ -283,10 +264,7 @@ impl Context {
             seals,
             huge_page,
         };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self
             .filesystem
@@ -302,12 +280,7 @@ impl Context {
     /// `F_GET_SEALS` ([`Operation::FsSeals`]).
     pub fn fs_seals(&mut self, fd: Fd) -> Result<u32, RuntimeError> {
         let operation = Operation::FsSeals { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => {
-                return decode_u64(&operation, outcome).map(|seals| seals as u32);
-            }
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.seals(fd);
         let actual = match result {
             Ok(seals) => Outcome::U64(u64::from(seals)),
@@ -336,10 +309,7 @@ impl Context {
 
     pub fn fs_close(&mut self, fd: Fd) -> Result<(), RuntimeError> {
         let operation = Operation::FsClose { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_unit(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.close(fd);
         let actual = match result {
             Ok(()) => Outcome::Unit,
@@ -351,10 +321,7 @@ impl Context {
 
     pub fn fs_dup(&mut self, fd: Fd) -> Result<Fd, RuntimeError> {
         let operation = Operation::FsDup { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.dup(fd);
         let actual = match result {
             Ok(fd) => Outcome::Handle(fd),
@@ -371,10 +338,7 @@ impl Context {
         whence: SeekWhence,
     ) -> Result<u64, RuntimeError> {
         let operation = Operation::FsSeek { fd, offset, whence };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_u64(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.seek(fd, offset, whence);
         let actual = match result {
             Ok(position) => Outcome::U64(position),
@@ -387,10 +351,7 @@ impl Context {
     pub fn fs_metadata(&mut self, path: &str) -> Result<FsMetadata, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsMetadata { path: path.into() };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.metadata(path);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
@@ -403,10 +364,7 @@ impl Context {
     pub fn fs_fd_metadata(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsFdMetadata { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.fd_metadata(fd);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
@@ -429,10 +387,7 @@ impl Context {
     pub fn fs_inode_metadata(&mut self, ino: u64) -> Result<FsMetadata, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsInodeMetadata { ino };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.inode_metadata(ino);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
@@ -605,12 +560,7 @@ impl Context {
     pub fn fs_read_directory(&mut self, path: &str) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsReadDirectory { path: path.into() };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => {
-                return decode_directory_entries(&operation, outcome);
-            }
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.read_directory(clock, path);
         let actual = match result {
@@ -628,12 +578,7 @@ impl Context {
     pub fn fs_read_directory_fd(&mut self, fd: Fd) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsReadDirectoryFd { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => {
-                return decode_directory_entries(&operation, outcome);
-            }
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.read_directory_fd(clock, fd);
         let actual = match result {
@@ -835,10 +780,7 @@ impl Context {
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<Vec<u8>, EffectError>,
     ) -> Result<Vec<u8>, RuntimeError> {
         self.apply_fs_latency()?;
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = invoke(self.filesystem.as_mut());
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
@@ -903,10 +845,7 @@ impl Context {
     /// `EIO` here would be a failure mode no real `openat` has.
     pub fn fs_fd_path(&mut self, fd: Fd) -> Result<String, RuntimeError> {
         let operation = Operation::FsFdPath { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.fd_path(fd);
         let actual = match result {
             Ok(path) => Outcome::Bytes(path.into_bytes()),
@@ -923,10 +862,7 @@ impl Context {
     /// an injected `EIO`.
     pub fn fs_fd_ino(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
         let operation = Operation::FsFdIno { fd };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_u64(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = self.filesystem.fd_ino(fd);
         let actual = match result {
             Ok(ino) => Outcome::U64(ino),
@@ -939,10 +875,7 @@ impl Context {
     pub fn fs_read_link(&mut self, path: &str) -> Result<String, RuntimeError> {
         self.apply_fs_latency()?;
         let operation = Operation::FsReadLink { path: path.into() };
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let clock = self.fs_clock()?;
         let result = self.filesystem.read_link(clock, path);
         let actual = match result {
@@ -994,29 +927,6 @@ impl Context {
         Ok(contents)
     }
 
-    fn filesystem_expected(
-        &mut self,
-        operation: &Operation,
-    ) -> Result<FilesystemExpected, RuntimeError> {
-        let expected = self.replay_expected(operation)?;
-        if !self.filesystem_is_capture {
-            return Ok(FilesystemExpected::Execute(expected));
-        }
-        if let Some((_, outcome)) = expected {
-            return Ok(FilesystemExpected::Captured(outcome));
-        }
-        if matches!(self.execution, Execution::Branch { .. }) {
-            return Err(EffectError::new(
-                ErrorCode::Denied,
-                format!(
-                    "host-capture replay reached unrecorded filesystem operation {operation:?}"
-                ),
-            )
-            .into());
-        }
-        Ok(FilesystemExpected::Execute(None))
-    }
-
     fn filesystem_unit_clocked(
         &mut self,
         operation: Operation,
@@ -1045,10 +955,7 @@ impl Context {
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<(), EffectError>,
     ) -> Result<(), RuntimeError> {
-        let expected = match self.filesystem_expected(&operation)? {
-            FilesystemExpected::Execute(expected) => expected,
-            FilesystemExpected::Captured(outcome) => return decode_unit(&operation, outcome),
-        };
+        let expected = self.replay_expected(&operation)?;
         let result = invoke(self.filesystem.as_mut());
         let actual = match result {
             Ok(()) => Outcome::Unit,

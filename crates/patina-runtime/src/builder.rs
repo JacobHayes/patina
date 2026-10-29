@@ -42,7 +42,6 @@ pub struct RuntimeBuilder {
     config: RuntimeConfig,
     trace_transport: Option<Box<dyn TraceTransport>>,
     filesystem: Option<Box<dyn FsDriver>>,
-    filesystem_is_capture: bool,
     /// Durable base image for the runtime-built crash/mem filesystem. Callers
     /// that want config-driven crash-consistency (the shim, and any operator
     /// path) supply the image here rather than pre-installing a filesystem, so
@@ -64,7 +63,6 @@ impl RuntimeBuilder {
             config,
             trace_transport: None,
             filesystem: None,
-            filesystem_is_capture: false,
             fs_image: None,
             clock: None,
             network: None,
@@ -96,7 +94,6 @@ impl RuntimeBuilder {
 
     pub fn with_filesystem(mut self, driver: impl FsDriver + 'static) -> Self {
         self.filesystem = Some(Box::new(driver));
-        self.filesystem_is_capture = false;
         self
     }
 
@@ -108,16 +105,6 @@ impl RuntimeBuilder {
     /// only ever constructed at the single choke point in `build`.
     pub fn with_fs_image(mut self, image: MemFs) -> Self {
         self.fs_image = Some(image);
-        self
-    }
-
-    /// Install an explicitly allowlisted host-capture filesystem.
-    ///
-    /// Replay returns recorded filesystem outcomes without contacting the
-    /// host. A branch that reaches an unrecorded filesystem operation fails.
-    pub fn with_captured_filesystem(mut self, driver: impl FsDriver + 'static) -> Self {
-        self.filesystem = Some(Box::new(driver));
-        self.filesystem_is_capture = true;
         self
     }
 
@@ -756,7 +743,6 @@ impl RuntimeBuilder {
                 .unwrap_or_else(|| patina_dst_syscalls::IDENTITY_HOSTNAME.to_owned()),
             execution,
             filesystem,
-            filesystem_is_capture: self.filesystem_is_capture,
             clock,
             entropy,
             scheduler,

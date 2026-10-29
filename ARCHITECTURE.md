@@ -92,7 +92,6 @@ patina-dst-conformance      # host-oracle syscall scenarios (unpublished)
 patina-dst-driver-api       # driver traits
 patina-dst-fs-mem           # in-memory filesystem
 patina-dst-fs-crash         # crash-consistency filesystem model
-patina-dst-fs-host          # read-only host capture (runtime test fixture)
 patina-dst-net-sim          # virtual network (datagrams + TCP)
 patina-dst-rng-seeded       # SplitMix64 and seed derivation
 patina-dst-wrapper-fault    # fault-injection wrapper drivers

@@ -7,7 +7,6 @@ members = [
     "crates/patina-conformance",
     "crates/patina-driver-api",
     "crates/patina-fs-crash",
-    "crates/patina-fs-host",
     "crates/patina-fs-mem",
     "crates/patina-harness",
     "crates/patina-macros",
@@ -85,7 +84,6 @@ patina-dst-abi = { path = "crates/patina-abi", version = "0.1.0" }
 patina-dst-async = { path = "crates/patina-async", version = "0.1.0" }
 patina-dst-driver-api = { path = "crates/patina-driver-api", version = "0.1.0" }
 patina-dst-fs-crash = { path = "crates/patina-fs-crash", version = "0.1.0" }
-patina-dst-fs-host = { path = "crates/patina-fs-host", version = "0.1.0" }
 patina-dst-fs-mem = { path = "crates/patina-fs-mem", version = "0.1.0" }
 patina-dst-harness = { path = "crates/patina-harness", version = "0.1.0" }
 patina-dst-macros = { path = "crates/patina-macros", version = "0.1.0" }
