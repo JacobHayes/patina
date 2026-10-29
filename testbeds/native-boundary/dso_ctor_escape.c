@@ -8,7 +8,9 @@
  *   rdtsc    an inline timestamp-counter read (x86_64)
  *   rseq     the cpu_id glibc's restartable-sequence area holds
  *
- * dso_ctor_probe.c prints what it saw. */
+ * dso_ctor_probe.c prints what it saw. Built with -DDSO_CTOR_RSEQ_ONLY it
+ * carries only the rseq read: the pre-run audit scans a library's code and
+ * refuses the inline syscall and counter read before anything runs. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,6 +27,7 @@ static int same(const char *a, const char *b) {
     return *a == *b;
 }
 
+#ifndef DSO_CTOR_RSEQ_ONLY
 static long raw_getppid(void) {
 #if defined(__x86_64__)
     long ret;
@@ -48,6 +51,8 @@ static long counter(void) {
 #endif
 }
 
+#endif
+
 static long rseq_cpu(void) {
     const char *area = (const char *)__builtin_thread_pointer() + __rseq_offset;
     return (long)*(const volatile uint32_t *)(area + 4);
@@ -57,7 +62,9 @@ __attribute__((constructor)) static void patina_dso_ctor(int argc, char **argv, 
     (void)envp;
     patina_dso_ctor_ran = 1;
     if (argc < 2) return;
+#ifndef DSO_CTOR_RSEQ_ONLY
     if (same(argv[1], "syscall")) patina_dso_ctor_value = raw_getppid();
     else if (same(argv[1], "rdtsc")) patina_dso_ctor_value = counter();
-    else if (same(argv[1], "rseq")) patina_dso_ctor_value = rseq_cpu();
+#endif
+    if (same(argv[1], "rseq")) patina_dso_ctor_value = rseq_cpu();
 }

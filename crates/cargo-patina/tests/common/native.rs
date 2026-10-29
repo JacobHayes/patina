@@ -384,9 +384,10 @@ pub fn assert_build_cxx_guest(name: &str) -> Guest {
     build_native_guest(cxx, name, CLink::PosixShim, &[])
 }
 
-/// Compile a native-boundary C source as a shared library in `dir`, for a
-/// guest to link against; returns its path.
-pub fn assert_build_c_library(name: &str, dir: &Path) -> PathBuf {
+/// Compile a native-boundary C source as a shared library `lib<stem>.so` in
+/// `dir`, with `flags` after the source (libraries it links, linker options),
+/// for a guest to link against; returns its path.
+pub fn assert_build_c_library(name: &str, dir: &Path, flags: &[&str]) -> PathBuf {
     let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
     let library = dir.join(format!("lib{stem}.so"));
     assert_success(
@@ -395,6 +396,7 @@ pub fn assert_build_c_library(name: &str, dir: &Path) -> PathBuf {
                 "-std=c11", "-O2", "-fPIC", "-shared", "-Wall", "-Wextra", "-Werror",
             ])
             .arg(guest_source(name))
+            .args(flags)
             .arg("-o")
             .arg(&library)
             .output()

@@ -53,18 +53,24 @@ fn raw_audit_refuses_each_unlinked_escape_class() {
 }
 
 /// glibc's aliases of names the shim interposes (`__mmap`, `__munmap`) are
-/// different linker symbols the shim does not define: the gate refuses them
-/// by name instead of letting libc's own text map past the mapping model.
-/// A `.symver`-pinned `dlsym@GLIBC_…` reference reaches around the shim's
-/// `-Wl,--wrap=dlsym`, which rewrites only unversioned references. The probe's
-/// reference is weak, as the shim's own `dlsym` import is, so only its version
-/// tells it apart. The version-aware audit refuses the binary by its versioned
-/// name before it can resolve a host symbol through libc's own resolver.
+/// different linker symbols the shim does not define: they bind into libc and
+/// are refused by name instead of letting libc's own text map past the mapping
+/// model. A `.symver`-pinned `dlsym@GLIBC_…` reference reaches around the
+/// shim's `-Wl,--wrap=dlsym`, which rewrites only unversioned references. The
+/// probe's reference is weak, as the shim's own `dlsym` import is, so only its
+/// version tells it apart: the binding audit resolves it by that version into
+/// libc's own resolver and refuses it before it can resolve a host symbol.
 #[cfg(target_os = "linux")]
 #[test]
 fn prerun_refuses_interposer_aliases_and_a_versioned_dlsym_bypass() {
     let g = Guest::assert_build("versioned_dlsym_probe.rs");
-    let diagnostics = ["__mmap", "__munmap", "dlsym@GLIBC_", "versioned-bypass"];
+    let diagnostics = [
+        "__mmap",
+        "__munmap",
+        "dlsym@GLIBC_",
+        "dynamic-loading",
+        "libc.so.6",
+    ];
     let out = g.assert_run_refused(1, &diagnostics);
     assert!(!text(&out.stdout).contains("VERSIONED_DLSYM_ESCAPED"));
     assert_refused(g.command("audit", &[]), &diagnostics);
@@ -112,6 +118,39 @@ fn prerun_refuses_shm_open_and_hatch_warns() {
     ));
     assert_eq!(text(&hatch.stdout), "GATE_REFUSAL_RAN\n");
     assert!(text(&hatch.stderr).contains("WARNING"));
+}
+
+/// An undefined weak reference is NULL only when no library the loader
+/// searches defines it. One to a libc export Patina neither interposes nor
+/// classifies binds to the host's code at load, so it is refused by name, with
+/// the library it binds to, before it runs; one to a hook no loaded library
+/// defines stays inert, is listed as such, and runs its fallback.
+#[test]
+fn a_weak_reference_is_inert_only_when_no_loaded_library_defines_it() {
+    let bound = assert_build_c_guest_with_flags(
+        "weak_import_probe.c",
+        CLink::PosixShim,
+        &["-DWEAK_LIBC_EXPORT"],
+    );
+    let host = if cfg!(target_os = "linux") {
+        "libc.so.6"
+    } else {
+        "getloadavg"
+    };
+    let out = bound.assert_run_refused(1, &["getloadavg", host]);
+    assert!(!text(&out.stdout).contains("WEAK_HOOK"));
+    assert_refused(bound.command("audit", &[]), &["getloadavg", host]);
+
+    // ld64 refuses to link a weak reference no dylib defines, so the inert
+    // half is ELF's.
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let inert = assert_build_c_guest("weak_import_probe.c", CLink::PosixShim);
+    let audit = inert.assert_audit_clean();
+    assert!(text(&audit.stderr).contains("patina_probe_absent_hook"));
+    let out = inert.assert_run_success(1, &[]);
+    assert_exact_line(&out.stdout, "WEAK_HOOK absent");
 }
 
 // A guest that writes the thread pointer itself is refused before it runs, by
@@ -852,6 +891,136 @@ mod linux {
     }
 }
 
+/// Every reference in the program's load set is judged by the image it binds
+/// to: application libraries are audited as the executable is, and what the
+/// loader would run before the shim's containment is refused before it can.
+#[cfg(target_os = "linux")]
+mod load_set {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// `lib<stem>.so` in `dir`, named by that soname and finding its own
+    /// dependencies in `dir`.
+    fn library(name: &str, dir: &Path, flags: &[&str]) -> PathBuf {
+        let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
+        let soname = format!("-Wl,-soname,lib{stem}.so");
+        let rpath = format!("-Wl,-rpath,{}", dir.display());
+        let mut all = vec![soname.as_str(), rpath.as_str()];
+        all.extend_from_slice(flags);
+        assert_build_c_library(name, dir, &all)
+    }
+
+    /// `main` over the POSIX layer, linked against `library`, plus `flags`.
+    fn guest_over(main: &str, library: &Path, flags: &[&str]) -> Guest {
+        let rpath = format!("-Wl,-rpath,{}", library.parent().unwrap().display());
+        let mut all = vec![library.to_str().unwrap(), rpath.as_str()];
+        all.extend_from_slice(flags);
+        assert_build_c_guest_with_flags(main, CLink::PosixShim, &all)
+    }
+
+    fn assert_refused_before_running(g: &Guest, diagnostics: &[&str], marker: &str) {
+        let out = g.assert_run_refused(1, diagnostics);
+        let seen = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(!seen.contains(marker), "{marker} ran:\n{seen}");
+        assert!(!seen.contains("LOAD_SET_MAIN"), "{seen}");
+        let out = assert_refused(g.command("audit", &[]), diagnostics);
+        let seen = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(!seen.contains(marker), "{marker} ran:\n{seen}");
+    }
+
+    /// A library two links from the executable that calls a libc export is
+    /// refused naming that library and libc.
+    #[test]
+    fn a_transitive_library_binding_into_libc_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = library("load_set_chain_b.c", dir.path(), &[]);
+        let a = library("load_set_chain_a.c", dir.path(), &[b.to_str().unwrap()]);
+        let g = guest_over("load_set_main.c", &a, &[]);
+        assert_refused_before_running(
+            &g,
+            &["libload_set_chain_b.so", "getloadavg", "libc.so.6"],
+            "LOAD_SET_MAIN",
+        );
+    }
+
+    /// A library's `write` binds to the shim's definition the executable
+    /// exports, so it runs and replays deterministically; with the
+    /// executable's exports hidden by a version script it binds to libc's
+    /// instead, around the shim, and is refused.
+    #[test]
+    fn a_librarys_modeled_io_runs_through_the_shim_and_is_refused_around_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = library("load_set_io.c", dir.path(), &[]);
+        let contained = guest_over("load_set_main.c", &io, &[]);
+        contained.assert_audit_clean();
+        let out = contained.assert_run_success(1, &[]);
+        assert_exact_line(&out.stdout, "LOAD_SET_IO");
+        let script = dir.path().join("hide.map");
+        std::fs::write(&script, "{ global: main; local: *; };\n").unwrap();
+        let version_script = format!("-Wl,--version-script={}", script.display());
+        let hidden = guest_over("load_set_main.c", &io, &[version_script.as_str()]);
+        assert_refused_before_running(
+            &hidden,
+            &["libload_set_io.so", "write", "libc.so.6"],
+            "LOAD_SET_IO",
+        );
+    }
+
+    /// A library's weak `dlsym` is a guest resolver: the executable's own
+    /// vehicle admits only the executable's reference.
+    #[test]
+    fn a_librarys_weak_resolver_reference_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = library("load_set_weak_dlsym.c", dir.path(), &[]);
+        let g = guest_over("load_set_main.c", &lib, &[]);
+        assert_refused_before_running(
+            &g,
+            &["libload_set_weak_dlsym.so", "dlsym", "dynamic-loading"],
+            "LOAD_SET_MAIN",
+        );
+    }
+
+    /// A weak reference libc defines binds there, so it is judged by the
+    /// effect policy rather than listed as inert.
+    #[test]
+    fn a_weak_reference_libc_defines_is_host_bound_not_inert() {
+        let g = assert_build_c_guest("weak_thread_atexit_probe.c", CLink::PosixShim);
+        let audit = g.assert_audit_clean();
+        assert!(
+            !text(&audit.stderr).contains("__cxa_thread_atexit_impl"),
+            "{}",
+            text(&audit.stderr)
+        );
+        let out = g.assert_run_success(1, &[]);
+        assert_exact_line(&out.stdout, "THREAD_ATEXIT bound");
+    }
+
+    /// What the loader runs before the shim's preinit entry is refused before
+    /// the loader runs at all: an rtld-audit module (it would run even while
+    /// the load set is listed), a library initialized first, and an IFUNC
+    /// resolver the executable's relocation calls.
+    #[test]
+    fn code_the_loader_runs_before_containment_is_refused_before_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = assert_build_c_library("load_set_audit_module.c", dir.path(), &[]);
+        let audit = format!("-Wl,--audit={}", module.display());
+        let audited =
+            assert_build_c_guest_with_flags("weak_import_probe.c", CLink::PosixShim, &[&audit]);
+        assert_refused_before_running(&audited, &["DT_AUDIT"], "AUDIT_MODULE_RAN");
+
+        let first = library("load_set_initfirst.c", dir.path(), &["-Wl,-z,initfirst"]);
+        let g = guest_over("load_set_main.c", &first, &[]);
+        assert_refused_before_running(
+            &g,
+            &["libload_set_initfirst.so", "DF_1_INITFIRST"],
+            "INITFIRST_RAN",
+        );
+
+        let g = assert_build_c_guest("load_set_ifunc.c", CLink::PosixShim);
+        assert_refused_before_running(&g, &["ifunc-resolver"], "IFUNC_RESOLVER_RAN");
+    }
+}
+
 // Code that runs before `__libc_start_main`: a shared library's constructor
 // (from `_dl_init`, before the executable's own constructors) and a guest's
 // own `.preinit_array` entry. Containment is armed from the shim's preinit
@@ -875,17 +1044,36 @@ mod early_init {
         (1..libc::CPU_SETSIZE as usize).find(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) })
     }
 
-    /// An inline syscall or counter read in a library constructor lies
-    /// outside the main executable's text: a named stop, never a host
-    /// effect. A library constructor already reads the virtual CPU from
-    /// glibc's rseq area, even on a host CPU other than 0.
+    /// An inline syscall or counter read in a library constructor is refused
+    /// by the pre-run audit, which scans the library's code; run without the
+    /// gate, it lies outside the main executable's text: a named stop, never
+    /// a host effect. A library constructor already reads the virtual CPU
+    /// from glibc's rseq area, even on a host CPU other than 0, and a library
+    /// doing only that audits clean.
     #[test]
     fn library_constructor_escapes_stop_by_name() {
         let libs = tempfile::tempdir().unwrap();
-        let library = assert_build_c_library("dso_ctor_escape.c", libs.path());
+        let library = assert_build_c_library("dso_ctor_escape.c", libs.path(), &[]);
         let rpath = format!("-Wl,-rpath,{}", libs.path().display());
         let flags = [library.to_str().unwrap(), rpath.as_str()];
         let g = assert_build_c_guest_with_flags("dso_ctor_probe.c", CLink::PosixShim, &flags);
+        assert_refused(
+            g.command("audit", &[]),
+            &["libdso_ctor_escape.so", "direct-syscall"],
+        );
+        let rseq_libs = tempfile::tempdir().unwrap();
+        let rseq_library = assert_build_c_library(
+            "dso_ctor_escape.c",
+            rseq_libs.path(),
+            &["-DDSO_CTOR_RSEQ_ONLY"],
+        );
+        let rseq_rpath = format!("-Wl,-rpath,{}", rseq_libs.path().display());
+        let rseq = assert_build_c_guest_with_flags(
+            "dso_ctor_probe.c",
+            CLink::PosixShim,
+            &[rseq_library.to_str().unwrap(), rseq_rpath.as_str()],
+        );
+        rseq.assert_audit_clean();
         if kernel_supports(KernelFeature::Sud) {
             g.assert_internal_fatal(
                 &["syscall"],
@@ -907,7 +1095,7 @@ mod early_init {
             .env_clear()
             .arg("-c")
             .arg(cpu.to_string())
-            .arg(&g.binary)
+            .arg(&rseq.binary)
             .arg("rseq")
             .envs([("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")]);
         let out = common::output_with_deadline(&mut command, Duration::from_secs(20))
