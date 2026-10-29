@@ -10,11 +10,11 @@ mod tests {
     /// a replay refuses config defaults (the trace is authoritative), and a bad
     /// config is a loud error naming its line that blocks neither help nor
     /// `--no-config`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn run_config_defaults_are_provenanced_loud_and_stay_out_of_traces_and_replays() {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        write_noop_wasm(&module);
+        let module = build_facts_guest(directory.path(), "noop", NOOP_GUEST);
         let config = directory.path().join(".patina/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         fs::write(&config, "[defaults.run]\nseed = 3\n").unwrap();
@@ -112,14 +112,14 @@ mod tests {
 
     // A campaign's child `run` processes are driven entirely by the derived flags, so
     // `[defaults.run]` and the `PATINA_*` run env defaults must never reach them. Both
-    // probes are run-only surfaces the CAMPAIGN verb does not register — `PATINA_FUEL`
-    // deliberately, since a leaked `--fuel 1` would exhaust the guest and turn the
-    // sweep red, which is what makes this assertion able to fail.
+    // probes are run-only surfaces the CAMPAIGN verb does not register — `PATINA_BUDGET`
+    // deliberately, since a leaked `--budget 1` would exhaust the guest's step budget
+    // and turn the sweep red, which is what makes this assertion able to fail.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_children_scrub_run_config_and_env_defaults() {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        write_noop_wasm(&module);
+        let module = build_facts_guest(directory.path(), "noop", NOOP_GUEST);
         fs::create_dir_all(directory.path().join(".patina")).unwrap();
         fs::write(
             directory.path().join(".patina/config.toml"),
@@ -139,7 +139,7 @@ mod tests {
                 "--format",
                 "json",
             ],
-            &[("PATINA_FUEL", "1")],
+            &[("PATINA_BUDGET", "1")],
         );
         assert!(
             output.status.success(),
@@ -207,14 +207,9 @@ mod tests {
         );
     }
 
-    fn write_noop_wasm(path: &Path) {
-        fs::write(
-            path,
-            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
-                .unwrap(),
-        )
-        .unwrap();
-    }
+    /// A guest whose one file write gives a leaked `--budget 1` something to bound.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const NOOP_GUEST: &str = "fn main() { let _ = std::fs::write(\"/budget\", b\"x\"); }";
 
     fn json_output(output: &Output) -> serde_json::Value {
         assert!(

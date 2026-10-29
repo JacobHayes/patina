@@ -115,9 +115,8 @@ mod tests {
             "a knob-free run must not delay fs ops: {charged}"
         );
 
-        // The same fixed 1 ms latency the WASI leg asserts, seen by the native
-        // guest as virtual elapsed time: the two families share the one
-        // Context-side application site, so neither doubles it nor misses it.
+        // A fixed 1 ms latency, seen by the guest as virtual elapsed time: the
+        // Context-side application site charges it exactly once.
         let latency_trace = guest.dir.path().join("fs-latency.patina");
         let delayed = invoke(
             workspace,

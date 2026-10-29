@@ -19,7 +19,6 @@ pub struct Envelope {
     pub(super) seed: Option<u64>,
     pub(crate) trace: Option<TraceFacts>,
     pub(super) coverage: Option<CoverageReport>,
-    pub(super) depth: Option<DepthReport>,
     pub(super) render: Option<String>,
     /// audit findings / build outputs / mismatch detail — a list of strings.
     pub(crate) findings: Vec<String>,
@@ -79,7 +78,6 @@ impl Envelope {
             seed: None,
             trace: None,
             coverage: None,
-            depth: None,
             render: None,
             findings: Vec::new(),
             finding_details: Vec::new(),
@@ -147,18 +145,6 @@ impl Envelope {
                 );
             }
             m.insert("coverage".into(), Value::Object(cm));
-        }
-        if let Some(d) = &self.depth {
-            let mut dm = Map::new();
-            dm.insert("family".into(), Value::from(d.family.clone()));
-            dm.insert("fuel_consumed".into(), Value::from(d.fuel_consumed));
-            dm.insert("hostcalls_total".into(), Value::from(d.hostcalls_total()));
-            let mut hm = Map::new();
-            for (name, count) in &d.hostcalls {
-                hm.insert(name.clone(), Value::from(*count));
-            }
-            dm.insert("hostcalls".into(), Value::Object(hm));
-            m.insert("depth".into(), Value::Object(dm));
         }
         if let Some(v) = &self.render {
             m.insert("render".into(), Value::from(v.clone()));

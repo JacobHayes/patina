@@ -1,6 +1,6 @@
 [package]
 name = "patina-dst-target"
-description = "Patina target metadata and WebAssembly import auditing"
+description = "Patina native binary auditing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,6 @@ repository.workspace = true
 gimli.workspace = true
 object.workspace = true
 rustc-demangle.workspace = true
-wasmparser.workspace = true
 
 # The ELF provenance tests synthesize the images they audit: what they pin is the
 # symbol-table *ordering* a linker produces, and a macOS host cannot link an ELF

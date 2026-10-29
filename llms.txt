@@ -16,10 +16,11 @@ carries its seed, fault config, and buggify config, so `replay` is flag-free.
 
 ## Targets (families)
 
-The verb infers the target from the artifact's magic bytes: `\0asm` -> WASI
-(`wasm32-wasip1`); Mach-O/ELF -> native (linked shim); a directory / `Cargo.toml`
-with no `--target` -> the Cargo package family (in-process boundary API), except
-`test <DIR|Cargo.toml>` which selects native libtest harness mode. A
+The verb infers the family from the argument: a Mach-O/ELF binary (by its magic
+bytes) -> native (linked shim); no artifact, or a directory / `Cargo.toml` whose
+package depends on the Patina runtime -> the Cargo package family (in-process
+boundary API), except `test <DIR|Cargo.toml>` which selects native libtest
+harness mode. A
 `.rs`/dir/`Cargo.toml` source argument is built on the fly, then run.
 
 A verb's families are also machine-readable: `cargo patina <verb> --help --format
@@ -30,18 +31,16 @@ unknown option.
 
 ## CLI verbs
 
-- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--target native|wasi] [--release] [--yield-points | --coverage-points[=STRIDE]]`
-  Build a deterministic artifact. Default `--target native`. `--yield-points`
+- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--yield-points | --coverage-points[=STRIDE]]`
+  Build a deterministic shim-linked artifact. `--yield-points`
   instruments basic blocks (LLVM SanitizerCoverage) and takes a scheduling point
-  at every one, so atomics-only race windows become schedulable; native-only, and
-  the densest and most expensive mode. `--coverage-points` emits the SAME edge
+  at every one, so atomics-only race windows become schedulable; the densest and most expensive mode. `--coverage-points` emits the SAME edge
   counters with NO scheduler hook; `--coverage-points=N` adds a scheduling point
   every N basic blocks a thread executes (1/N of the yield cost, same bounded
   reachability). The stride is compiled in, recovered from the binary at run
   time, and folded into the compatibility fingerprint (`+covpoints:N`), so a
   trace never cross-replays across modes or strides. The two flags are mutually
-  exclusive. Prints `PATINA_NATIVE_BUILD output=...` /
-  `PATINA_WASI_BUILD output=...`.
+  exclusive. Prints `PATINA_NATIVE_BUILD output=...`.
 - `cargo patina build <GO PACKAGE DIR> --go --output PATH [--release] [-- GO BUILD OPTIONS]`
   Build a Go main package as a native guest (Linux): `go build` in cgo mode
   (`CGO_ENABLED=1`), linked externally with the shim, so goroutine threads
@@ -59,8 +58,7 @@ unknown option.
   guest-start wall time. The default boot origin is 12345.678901234s of uptime;
   realtime = epoch + uptime, so default guest start is 2026-07-23T02:25:54.678901234Z.
   RuntimeConfig can override the nonzero origin; traces record and restore it.
-  `--hostname NAME` (native and Cargo; wasip1 has no
-  hostname) sets the node name `uname`/`gethostname` report (default
+  `--hostname NAME` sets the node name `uname`/`gethostname` report (default
   `patina`, at most 64 bytes); both are recorded and restored flag-free on
   replay.
   Native yield-point binaries emit
@@ -81,7 +79,6 @@ unknown option.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run with the `host_limit` refusal.
-  WASI runs emit `PATINA_DEPTH_REPORT` (fuel + per-import hostcall counts).
 - `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
   The Cargo package family under Patina.
 - `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--yield-points] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
@@ -144,8 +141,7 @@ unknown option.
   table in the out-dir spec, forwards it to every generation, and is what enables
   the DNS band (fail per-mille + resolution latency) — with no defined name every
   lookup is NXDOMAIN by semantics and the knobs could not fire, so the band is not
-  emitted at all. A WASI campaign carrying a host table is refused (no wasip1
-  resolution surface). `--harness` (a `patina-dst-harness` binary), `--allow
+  emitted at all. `--harness` (a `patina-dst-harness` binary), `--allow
   SYMBOL` (repeatable), and `--allow-unsupported-symbols` are campaign SHAPE in
   the same sense: the native `run` invocation is forwarded verbatim to every
   generation, so a guest that needs the harness deferral or the pre-run gate
@@ -180,15 +176,12 @@ unknown option.
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native yield-point edge coverage is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
-  plateau report controlled by `--plateau-after`. A WASI campaign accumulates
-  depth instead of edges into `<out-dir>/depth/meta.json` (schema
-  `patina.depth.campaign/v1`): fuel high-water mark, per-import hostcall sums, and
-  a `depth_plateaued` flag from the same `--plateau-after` window. Unsatisfied `sometimes!`/
+  plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
   `registered_gens=0`, fail the campaign by default unless explicitly waived.
   `--guided` steers generations instead of deriving them independently: a
   generation may inherit most of the derivation bytes of an earlier generation
-  that found new coverage/depth, so the sweep concentrates near productive
+  that found new coverage, so the sweep concentrates near productive
   configurations. It stays deterministic (a pure function of seed base,
   generation, and the persisted novelty log, truncated below the generation being
   derived so a resumed campaign re-derives identically), records the per-generation
@@ -258,8 +251,8 @@ unknown option.
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,
   which restores them from the trace. Exceptions: `--fs-crash-at` and torn granularity are
-  native-only (Cargo/WASI refuse them; campaigns draw them only from the spec's `fs_crash_reach`), and `--dns-*` is
-  unavailable under `--target wasi` because wasip1 has no name-resolution surface.
+  native-only (the Cargo family refuses them; campaigns draw them only from the spec's
+  `fs_crash_reach`).
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
@@ -302,7 +295,7 @@ unknown option.
 
 One line of JSON on stdout. Always: `schema`, `verb`, `result`
 (`ok|violation|failure|error`), `exit_code`. When applicable: `family`
-(`native|wasi|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
+(`native|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
 (audit import/finding strings), `finding_details` (structured audit symbol,
 category, provenance), `output_path` + `content_hash` (build), `markers` (extracted
 `PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `verdicts` (every verdict the guest
@@ -310,8 +303,7 @@ reported through the verdict ABI, in call order: `{seq, kind, label, detail}`;
 omitted when the run reported none), `result_line`, `stdout`, `stderr`,
 `message`, optional `config` provenance, optional native `coverage` =
 `{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,
-map_path?}`, optional WASI `depth` =
-`{family, fuel_consumed, hostcalls_total, hostcalls{name: count}}`, and `trace` =
+map_path?}`, and `trace` =
 `{path, format_version, timelines[], event_count, metadata}` where `metadata` is
 the raw trace metadata (seed, faults, buggify, guest_argv, and any future fields,
 rendered generically). `trace info --format
@@ -341,10 +333,7 @@ ABSENT means "did not fire", never zero.
   `outcome_mismatch`, `unconsumed_events`) or the runtime's own cross-checks
   (`time_model_mismatch`, `schedule_divergence`, `compute_stop_state`,
   `custom_op_fault_shape`). Carried on the `patina.runfacts/v1` channel, which
-  the guest cannot write, so no guest output can claim one; a WASI replay whose
-  divergence surfaces as a finalization error still gets a run envelope with it,
-  keeping the guest's output, verdicts and `guest_exit` while `exit_code` stays
-  patina's failure.
+  the guest cannot write, so no guest output can claim one.
 - `native_run_marker` — the `PATINA_INFRA native_run` line the native
   supervisor appended to `stderr`, verbatim, so a consumer can tell patina's
   marker from a guest line written to look like it.
@@ -374,8 +363,6 @@ ABSENT means "did not fire", never zero.
   `core` is the observed wait-status core flag, present only on signal death.
   `code` is the shell-style `128 + signal` on a signal death, which cannot be
   told apart from a deliberate `exit(134)`; `signal` is what tells them apart.
-  A WASI `code` is the full `proc_exit` status, which the process exit status
-  truncates to eight bits.
 
 ## SDK macros (crate `patina-dst`, default features = dependency-light SDK)
 
@@ -423,12 +410,6 @@ dev-dependency use under plain `cargo test`.
 - `PATINA_COVERAGE_REPORT` (stderr) reports native yield-point edge coverage
   (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
   `PATINA_COVERAGE_REPORT=0`.
-- `PATINA_DEPTH_REPORT` (stderr) reports WASI depth — `fuel_consumed`,
-  `hostcalls_total`, and one `name=count` row per imported function actually
-  called. Depth is not coverage: it measures how far a guest ran and which host
-  surface it touched. Deterministic per seed; suppress with
-  `PATINA_DEPTH_REPORT=0` (a campaign pins it on, since it is that campaign's
-  measurement channel).
 - `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
 - `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K vacuous=<0|1>` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. `vacuous=1` means `--swarm` was requested with NO fault class enabled, so the draw had nothing to select and the run explored the plain configuration; the runtime warns and a campaign classifies that generation `VACUOUS_SWARM`. Dropping every candidate of a non-empty set is a legitimate draw (`vacuous=0`). Suppress with `PATINA_SWARM_REPORT=0`.
 - `PATINA_FS_FAULT_REPORT` (stderr) reports the filesystem fault plane per class: `eligible_ops=N`, then for each of the error/short/latency classes a `*_vacuity_diagnosable=<0|1>` bit and its applied count, then `vacuous=<0|1>`. The error and short classes each also carry a per-operation-kind breakdown of where their effects landed — `errors_by_op=open:1,read:2`, `shorts_by_op=write:3` — listing only the kinds that absorbed an effect, in a fixed order, and `-` when none did. The breakdown is what the scalar count cannot say: a knob that fired plenty but only ever on `open` left every post-open failure path untested. `vacuous=1` means a class was live over enough opportunities to expect several firings yet applied zero effects (it is silently inert on the exercised I/O path); the runtime warns and a campaign classifies that generation `VACUOUS_FS_FAULT`. Suppress with `PATINA_FS_FAULT_REPORT=0`.
@@ -444,7 +425,7 @@ dev-dependency use under plain `cargo test`.
   `PATINA_SCHEDULE_POLICY` line), `PATINA_SWARM_REPORT`,
   `PATINA_LIVENESS_REPORT`, `PATINA_SDK_REPORT`, `PATINA_FS_FAULT_REPORT`,
   `PATINA_DNS_FAULT_REPORT`, `PATINA_NET_FAULT_REPORT`,
-  `PATINA_COVERAGE_REPORT`, `PATINA_DEPTH_REPORT`. Suppression is presentation
+  `PATINA_COVERAGE_REPORT`. Suppression is presentation
   only: it changes no recorded byte and no fingerprint, so a quietly recorded
   trace and a loud one replay against each other. `campaign` pins them all on for
   its generations, because there they are classifier inputs rather than

@@ -412,11 +412,9 @@ fn main() {
 fn campaign_continuation_refusals_are_loud() {
     let directory = tempdir().unwrap();
     let cwd = directory.path();
-    let noop = || {
-        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#).unwrap()
-    };
-    let module = cwd.join("noop.wasm");
-    fs::write(&module, noop()).unwrap();
+    let pristine = build_facts_guest(cwd, "noop-built", "fn main() {}");
+    let module = cwd.join("noop");
+    fs::copy(&pristine, &module).unwrap();
     let module_arg = module.to_str().unwrap();
     let patina = env!("CARGO_BIN_EXE_cargo-patina");
     let run = |args: &[&str]| invoke_unchecked(patina, cwd, args);
@@ -621,12 +619,12 @@ fn campaign_continuation_refusals_are_loud() {
         "extension summary should be cumulative:\n{extended_stdout}"
     );
 
-    fs::write(
-        &module,
-        wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start") (nop)))"#)
-            .unwrap(),
-    )
-    .unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&module)
+        .unwrap()
+        .write_all(b"\0")
+        .unwrap();
     assert_refuses(
         run(extend),
         "the artifact changed since this campaign started",
@@ -634,7 +632,7 @@ fn campaign_continuation_refusals_are_loud() {
     fs::remove_file(&module).unwrap();
     assert_refuses(run(extend), "cannot be read");
 
-    fs::write(&module, noop()).unwrap();
+    fs::copy(&pristine, &module).unwrap();
     let run_expecting = |digest: &str| {
         Command::new(patina)
             .current_dir(cwd)

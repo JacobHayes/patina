@@ -2,8 +2,6 @@
 
 #[cfg(patina_shim)]
 use crate::ffi;
-#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-use crate::wasm_ffi;
 
 /// Whether execution is under Patina's deterministic simulator.
 ///
@@ -23,14 +21,7 @@ pub fn is_simulated() -> bool {
         // Authoritative: ask the linked shim whether the runtime is installed.
         unsafe { ffi::patina_is_simulated() != 0 }
     }
-    #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-    {
-        // Authoritative: ask the WASI host through the `patina_sdk` import. Under
-        // a foreign (non-Patina) wasip1 runtime this import is unresolved and the
-        // module cannot instantiate, so a `true` here always reflects a real host.
-        unsafe { wasm_ffi::is_simulated() != 0 }
-    }
-    #[cfg(all(patina, not(patina_shim), not(target_arch = "wasm32")))]
+    #[cfg(all(patina, not(patina_shim)))]
     {
         true
     }
@@ -41,8 +32,7 @@ pub fn is_simulated() -> bool {
 }
 
 /// A deterministic 64-bit draw. Under Patina it is bridged to the run's root
-/// seed (through the native shim, or the WASI `patina_sdk` host import), so the
-/// stream — and everything derived from it — is a pure function of `--seed`.
+/// seed through the native shim, so the stream — and everything derived from it — is a pure function of `--seed`.
 /// Outside Patina it is a plainly-seeded per-thread fallback stream, so callers
 /// still get reproducible values without touching OS entropy.
 ///
@@ -61,20 +51,15 @@ pub fn rng() -> u64 {
     {
         unsafe { ffi::patina_rng() }
     }
-    #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-    {
-        unsafe { wasm_ffi::rng() }
-    }
-    #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+    #[cfg(not(patina_shim))]
     {
         fallback::next()
     }
 }
 
-/// Plainly-seeded fallback entropy for [`rng`] outside a Patina build (and for a
-/// non-wasm Patina build without the shim). A process-local SplitMix64 with a
+/// Plainly-seeded fallback entropy for [`rng`] outside a shim-linked build. A process-local SplitMix64 with a
 /// fixed seed, so it is reproducible without contacting any host source.
-#[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+#[cfg(not(patina_shim))]
 mod fallback {
     use std::cell::Cell;
 

@@ -31,11 +31,10 @@ description = "Targetable native ABI feedback, without the full landing battery"
 run = "cargo test -p cargo-patina --test native_abi --locked"
 
 [tasks.smoke]
-description = "Run core Patina native, WASI, and cross-target checks"
+description = "Run core Patina native smoke checks"
 run = [
-  "scripts/validate-wasi.sh",
   "cargo test -p cargo-patina --test native_abi --test native_containment --test native_raw --test native_signals --test native_trace --test native_workloads --locked",
-  "scripts/smoke-cross-target.sh",
+  "scripts/smoke-native.sh",
 ]
 
 [tasks.bench]

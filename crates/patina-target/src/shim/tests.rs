@@ -6,8 +6,7 @@ use crate::import_policy::{NativeFormat, NativeImportDecision, native_import_dec
 use crate::instruction_scan::FAR_TRANSFER_CATEGORY;
 use crate::provenance::NativeProvenance;
 use crate::report::render_compat_mode_note;
-use crate::tests::{instruction_finding, module_importing};
-use crate::wasi::WASI_PREVIEW1_MODULE;
+use crate::tests::instruction_finding;
 
 #[test]
 fn sud_manageability_is_instruction_direct_syscall_only() {
@@ -108,9 +107,11 @@ fn tsc_manageability_is_the_timestamp_counter_only() {
 fn capability_probes_fail_closed_on_unparseable_or_foreign_input() {
     assert!(native_binary_has_tsc_marker(b"not an object file").is_err());
     assert!(native_binary_has_sud_marker(b"not an object file").is_err());
-    let wasm = module_importing(WASI_PREVIEW1_MODULE, "random_get");
-    assert!(native_deny_trap_armed(&wasm).is_err());
-    assert!(native_missing_live_interposers(&wasm, NATIVE_LINUX_LIVE_INTERPOSERS).is_err());
+    assert!(native_deny_trap_armed(b"not an object file").is_err());
+    assert!(
+        native_missing_live_interposers(b"not an object file", NATIVE_LINUX_LIVE_INTERPOSERS)
+            .is_err()
+    );
 }
 
 #[test]

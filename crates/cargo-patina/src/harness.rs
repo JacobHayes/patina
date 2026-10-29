@@ -10,7 +10,6 @@ use crate::shim_build::{
     RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
     lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
 };
-use crate::wasi_exec::execute_wasi_run;
 use crate::{
     ArtifactRef, CliError, ExploreInvocation, ExploreTarget, Mode, NativeHarnessInvocation,
     NativeRunMode, execute, exit_code, output,
@@ -906,14 +905,13 @@ pub(super) fn execute_explore(exploration: ExploreInvocation) -> Result<i32, Cli
     output::suppress_run_finalize();
     let start = exploration.start_seed;
     let count = exploration.seed_count;
-    // The native and WASI families build the artifact once, then run that SAME
+    // The native family builds the artifact once, then runs that SAME
     // built artifact across every seed — a source/package is never rebuilt per
     // seed. The resolved artifact (and its build workspace) is held for the whole
     // sweep so the built file outlives every run. The Cargo family instead re-runs
     // the whole command per seed (cargo caches the build).
     let prebuilt = match &exploration.target {
         ExploreTarget::Cargo(_) => None,
-        ExploreTarget::Wasi(invocation) => Some(resolve_artifact(invocation.module.clone())?),
         ExploreTarget::Native(invocation) => Some(resolve_artifact(invocation.binary.clone())?),
     };
     let seed_at = |offset: u64| {
@@ -925,24 +923,12 @@ pub(super) fn execute_explore(exploration: ExploreInvocation) -> Result<i32, Cli
         let seed = seed_at(offset);
         let exit = match &exploration.target {
             ExploreTarget::Cargo(invocation) => {
-                let mut invocation = invocation.clone();
+                let mut invocation = (**invocation).clone();
                 invocation.mode = Mode::Seeded { seed };
                 execute(invocation)?
             }
-            ExploreTarget::Wasi(invocation) => {
-                let mut invocation = invocation.clone();
-                invocation.module = ArtifactRef::Prebuilt(
-                    prebuilt
-                        .as_ref()
-                        .expect("wasi explore resolved")
-                        .path
-                        .clone(),
-                );
-                invocation.mode = Mode::Seeded { seed };
-                execute_wasi_run(invocation)?
-            }
             ExploreTarget::Native(invocation) => {
-                let mut invocation = invocation.clone();
+                let mut invocation = (**invocation).clone();
                 invocation.binary = ArtifactRef::Prebuilt(
                     prebuilt
                         .as_ref()

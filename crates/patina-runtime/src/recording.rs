@@ -520,8 +520,8 @@ a recorded result or a replay fetch",
                 counts: self.crash_counts,
             });
         }
-        // Any runtime diagnostic no embedder drained. The shim and the WASI host
-        // drain after each SDK entry point so the lines interleave with guest
+        // Any runtime diagnostic no embedder drained. The shim
+        // drains after each SDK entry point so the lines interleave with guest
         // output; an in-process (cargo-family) guest has no embedder, and this is
         // where its verdicts reach stderr. Drained, so nothing can print twice.
         // Deliberately not gated by `ReportConfig`: a verdict is the run's

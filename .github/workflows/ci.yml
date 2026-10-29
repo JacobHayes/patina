@@ -103,7 +103,6 @@ jobs:
       - run: scripts/check-structure.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
-      - run: scripts/validate-wasi.sh
       - run: testbeds/fifo-ipc/run-patina.sh
       # The SUD-only testbeds, and Go (whose runtime issues raw syscalls): x86_64.
       - if: matrix.runner == 'ubuntu-latest'
@@ -113,7 +112,7 @@ jobs:
           mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- testbeds/go-guest/run-patina.sh
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/multiproc/run-patina.sh
-      - run: scripts/smoke-cross-target.sh
+      - run: scripts/smoke-native.sh
       # Fast, build-free classifier selftest (pure functions over canned tuples).
       - run: testbeds/multiproc/run-patina.sh --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
@@ -178,11 +177,9 @@ jobs:
       - if: matrix.part == 'suite'
         run: cargo test --workspace --doc --locked
       - if: matrix.part == 'testbeds'
-        run: scripts/validate-wasi.sh
-      - if: matrix.part == 'testbeds'
         run: testbeds/fifo-ipc/run-patina.sh
       - if: matrix.part == 'testbeds'
-        run: scripts/smoke-cross-target.sh
+        run: scripts/smoke-native.sh
       - if: matrix.part == 'testbeds'
         run: testbeds/workq/run-patina.sh
       - if: matrix.part == 'testbeds'
@@ -209,7 +206,7 @@ jobs:
         run: |
           # Testbeds are standalone workspaces (publish=false) with their own
           # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in buggify-wasi liveness-campaign pubsub workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
+          for tb in liveness-campaign pubsub workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
             echo "== audit testbeds/$tb =="
             cargo audit --file "testbeds/$tb/Cargo.lock"
           done

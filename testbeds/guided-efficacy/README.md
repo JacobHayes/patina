@@ -47,19 +47,6 @@ Slower on **two** of six, tied on four, never faster. The exclusion is right on
 principle and improved the aggregate (three slower became two), but it does not
 earn efficacy: `run.sh` still exits 1.
 
-**WASI depth shape, same fixture compiled to `wasm32-wasip1`** (block 5, budget
-150; the depth signal is hostcall kinds + fuel high-water rather than edges):
-
-| seed base | 0 | 1 | 2 | 3 | 4 | 5 |
-|---|---|---|---|---|---|---|
-| unguided | 40 | 15 | 5 | 15 | >150 | 5 |
-| guided | 115 | 15 | 15 | 15 | **50** | 5 |
-
-Slower on two, tied on three, and **faster on one** — seed 4, where the unguided
-sweep never reached the target inside the budget at all and guidance found it at
-generation 50. The bootstrap fix improved this shape too (three slower became
-two).
-
 A recency-decayed weighting was then composed on top (older discoveries decay so
 the pool follows the frontier). It changed the outcome on **zero** seed bases, so
 it was not kept — unproven machinery is cruft. Rarity weighting (prefer ancestors
@@ -71,21 +58,18 @@ worth taking.
 
 ### Verdict
 
-`--guided` has **no consistent measured advantage** over the default sweep. The
-honest summary across both signals is high variance rather than uniform loss: it
-is usually a tie, it sometimes costs a lot (native seed 0, WASI seed 0), and it
-occasionally wins the hard case outright (WASI seed 4, where the unguided sweep
-never reached the target and guidance did). It is correct — deterministic,
-resume-reproducible, and honest about what it steered — but on this evidence it
-does not reliably pay for itself, so the default sweep remains the recommendation.
+`--guided` has **no consistent measured advantage** over the default sweep: it
+is usually a tie and sometimes costs a lot (seed bases 0 and 4). It is correct —
+deterministic, resume-reproducible, and honest about what it steered — but on
+this evidence it does not reliably pay for itself, so the default sweep remains
+the recommendation.
 
 The leading hypothesis is that the novelty signal is only weakly correlated with
 progress toward any particular target: most new edges here come from incidental
 fault-injection variety rather than from climbing the staircase, so concentrating
 the budget near past discoveries usually starves the exploration that actually
-finds the target — and pays off only when uniform exploration happens to be
-stuck. Testing that properly needs a fixture whose coverage growth *is* the
-search target.
+finds the target. Testing that properly needs a fixture whose coverage growth
+*is* the search target.
 
 ## What the first measurement found
 
@@ -102,14 +86,6 @@ resampled around one arbitrary configuration. That is fixed — the bootstrap is
 excluded from the pool, pinned by the `guided-bootstrap-excluded-from-pool`
 selftest class — and the same run now picks only genuine discoveries (19x gen 9,
 17x gen 4, 1x gen 17).
-
-### Excluded data
-
-One unguided WASI-depth data point was discarded: its campaign children were
-killed by the host under memory pressure (several batteries running
-concurrently), leaving that run truncated rather than complete. Excluding it was
-a judgement call, and it is recorded here because excluded data is part of the
-record. It affected only the WASI shape, not the native tables above.
 
 ### A measurement trap worth knowing
 

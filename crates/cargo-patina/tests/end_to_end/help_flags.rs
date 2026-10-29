@@ -4,90 +4,6 @@
 mod tests {
     use super::super::*;
 
-    // Options and the artifact may appear in any order (the `cargo run` ergonomic):
-    // a registered flag before the module runs identically to the module-leading
-    // spelling; a real artifact stranded behind an UNKNOWN flag is a loud routing
-    // error; and a nonexistent path-like artifact fails closed with a usage error
-    // rather than falling through to a confusing `cargo run`. A `--help` after `--`
-    // is guest argv and runs the guest; before `--` it is Patina help.
-    #[test]
-    fn run_routes_options_and_literal_arguments_around_the_wasi_artifact() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("noop.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
-                .unwrap(),
-        )
-        .unwrap();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
-        let module = module.to_str().unwrap();
-        let run = |args: &[&str]| invoke_unchecked(patina, directory.path(), args);
-
-        // Artifact leads.
-        let leading = run(&["run", module, "--seed", "7"]);
-        assert!(
-            leading.status.success(),
-            "module-leading run failed: {}",
-            String::from_utf8_lossy(&leading.stderr)
-        );
-        // A registered flag leads the artifact: identical success.
-        let flag_first = run(&["run", "--seed", "7", module]);
-        assert!(
-            flag_first.status.success(),
-            "flag-leading run failed: {}",
-            String::from_utf8_lossy(&flag_first.stderr)
-        );
-
-        // A real artifact stranded behind an unknown flag is a loud routing error
-        // naming the flag, never a silent Cargo fallthrough.
-        let stranded = run(&["run", "--frob", module]);
-        assert!(!stranded.status.success());
-        assert!(
-            String::from_utf8_lossy(&stranded.stderr).contains("--frob"),
-            "stranded-artifact error should name the unknown flag: {}",
-            String::from_utf8_lossy(&stranded.stderr)
-        );
-
-        for missing in [
-            &["run", "definitely-missing.wasm"][..],
-            &["run", "--seed", "1", "does-not-exist.wasm"][..],
-        ] {
-            let output = run(missing);
-            assert_eq!(
-                output.status.code(),
-                Some(2),
-                "{missing:?}: expected a usage-error exit"
-            );
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("no such file"),
-                "{missing:?}: nonexistent artifact should fail closed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // After `--`: the guest runs and exits 0; Patina help is NOT shown.
-        let guest = run(&["run", module, "--", "--help"]);
-        assert!(
-            guest.status.success(),
-            "run -- --help failed: {}\n{}",
-            guest.status,
-            String::from_utf8_lossy(&guest.stderr)
-        );
-        assert!(
-            !String::from_utf8_lossy(&guest.stdout).contains("cargo patina run"),
-            "a --help after -- wrongly triggered Patina help"
-        );
-        // Before `--`: the bare `--help` is intercepted and prints run help (exit 0).
-        let help = run(&["run", module, "--help"]);
-        assert!(help.status.success(), "run --help should exit 0");
-        assert!(
-            String::from_utf8_lossy(&help.stdout).contains("cargo patina run"),
-            "--help should show run help:\n{}",
-            String::from_utf8_lossy(&help.stdout)
-        );
-    }
-
     #[test]
     fn the_cargo_family_accepts_buggify_flags_and_scrubs_an_ambient_control_plane() {
         // Buggify was reachable from the Cargo family only through PATINA_BUGGIFY* in
@@ -152,94 +68,23 @@ mod tests {
         );
     }
 
-    // `run` and `audit` infer the target family from the artifact's leading magic
-    // bytes, and a capability used on the wrong family is refused up front, naming
-    // the flag and the target. A capability every family has reaches each of them:
-    // `--budget` bounds recorded boundary operations, which every family performs
-    // (wasip1's `--fuel` bounds wasm execution, a different thing), and one
+    // `run` and `audit` recognize a native binary by its leading magic bytes.
+    // Options and the artifact may appear in any order (the `cargo run`
+    // ergonomic): a registered flag before the binary runs identically to the
+    // binary-leading spelling; a real artifact stranded behind an UNKNOWN flag is
+    // a loud routing error; and a nonexistent path-like artifact fails closed with
+    // a usage error rather than falling through to a confusing `cargo run`. A
+    // `--help` after `--` is guest argv and runs the guest; before `--` it is
+    // Patina help. `--budget` bounds recorded boundary operations, and one
     // operation is below any real guest's needs, so an honored budget shows up as
     // the explicit StepBudgetExceeded failure.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn run_and_audit_infer_target_and_reject_cross_target_flags() {
+    fn run_and_audit_route_a_native_artifact() {
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
+        let patina = env!("CARGO_BIN_EXE_cargo-patina");
 
-        // A hand-written WASI module (magic `\0asm`): `audit` lists its imports and
-        // `run` executes it, both inferred from the magic bytes with no `--target`.
-        let module = directory.path().join("noop.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(r#"(module (memory (export "memory") 1) (func (export "_start")))"#)
-                .unwrap(),
-        )
-        .unwrap();
-        invoke(workspace, &["audit", module.to_str().unwrap()]);
-        invoke(workspace, &["run", module.to_str().unwrap(), "--seed", "1"]);
-
-        // `--allow` is native-only, so auditing a WASI module with it is refused.
-        let allow_on_wasm = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "audit",
-                module.to_str().unwrap(),
-                "--allow",
-                "clock_gettime",
-            ],
-        );
-        assert!(!allow_on_wasm.status.success());
-        let allow_stderr = String::from_utf8_lossy(&allow_on_wasm.stderr);
-        assert!(
-            allow_stderr.contains("--allow") && allow_stderr.contains("WASI"),
-            "missing --allow-on-wasm diagnostic:\n{allow_stderr}"
-        );
-
-        // Native crash-restart lifecycle is not wired through WASI yet. Refuse the
-        // selector by name instead of preserving the old rollback-and-continue
-        // hybrid, even for a no-op guest that would never reach the selector.
-        let crash_on_wasm = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", module.to_str().unwrap(), "--fs-crash-at", "close:1"],
-        );
-        assert!(!crash_on_wasm.status.success());
-        let crash_stderr = String::from_utf8_lossy(&crash_on_wasm.stderr);
-        assert!(
-            crash_stderr.contains("--fs-crash-at") && crash_stderr.contains("WASI"),
-            "missing --fs-crash-at-on-wasm diagnostic:\n{crash_stderr}"
-        );
-
-        let latency = directory.path().join("latency.wasm");
-        fs::write(&latency, wat::parse_str(WASI_FS_LATENCY).unwrap()).unwrap();
-        let budgeted = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", latency.to_str().unwrap(), "--budget", "1"],
-        );
-        assert!(!budgeted.status.success());
-        assert!(
-            String::from_utf8_lossy(&budgeted.stderr).contains("step budget of 1"),
-            "WASI run ignored --budget:\n{}",
-            String::from_utf8_lossy(&budgeted.stderr)
-        );
-
-        // `--sleep-jitter-nanos` is now honored on a WASI `run`: the wasip1 host
-        // applies the seeded jitter at its single sleep entry (`Preview1Host::
-        // sleep_until`, also covering `poll_oneoff` timeouts), so a knob the no-op
-        // guest never triggers simply runs clean rather than being refused.
-        invoke(
-            workspace,
-            &[
-                "run",
-                module.to_str().unwrap(),
-                "--sleep-jitter-nanos",
-                "1..2",
-            ],
-        );
-
-        // A native binary (Mach-O/ELF magic): `build` (default `--target native`),
-        // `audit`, and `run` all infer the native path.
         let source = directory.path().join("noop.rs");
         // The file write gives `--budget` boundary operations to bound.
         fs::write(
@@ -267,40 +112,79 @@ mod tests {
             audit_args.push(symbol);
         }
         invoke(workspace, &audit_args);
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
-        assert!(String::from_utf8_lossy(&ran.stdout).contains("NATIVE_OK"));
-        let budgeted = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["run", bin.to_str().unwrap(), "--budget", "1"],
+        let module = bin.to_str().unwrap();
+        let run = |args: &[&str]| invoke_unchecked(patina, workspace, args);
+
+        // Artifact leads.
+        let leading = run(&["run", module, "--seed", "7"]);
+        assert!(
+            leading.status.success(),
+            "binary-leading run failed: {}",
+            String::from_utf8_lossy(&leading.stderr)
         );
+        assert!(String::from_utf8_lossy(&leading.stdout).contains("NATIVE_OK"));
+        // A registered flag leads the artifact: identical success.
+        let flag_first = run(&["run", "--seed", "7", module]);
+        assert!(
+            flag_first.status.success(),
+            "flag-leading run failed: {}",
+            String::from_utf8_lossy(&flag_first.stderr)
+        );
+
+        // A real artifact stranded behind an unknown flag is a loud routing error
+        // naming the flag, never a silent Cargo fallthrough.
+        let stranded = run(&["run", "--frob", module]);
+        assert!(!stranded.status.success());
+        assert!(
+            String::from_utf8_lossy(&stranded.stderr).contains("--frob"),
+            "stranded-artifact error should name the unknown flag: {}",
+            String::from_utf8_lossy(&stranded.stderr)
+        );
+
+        for missing in [
+            &["run", "./definitely-missing"][..],
+            &["run", "--seed", "1", "./does-not-exist"][..],
+        ] {
+            let output = run(missing);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{missing:?}: expected a usage-error exit"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("no such file"),
+                "{missing:?}: nonexistent artifact should fail closed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // After `--`: the guest runs and exits 0; Patina help is NOT shown.
+        let guest = run(&["run", module, "--", "--help"]);
+        assert!(
+            guest.status.success(),
+            "run -- --help failed: {}\n{}",
+            guest.status,
+            String::from_utf8_lossy(&guest.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&guest.stdout).contains("cargo patina run"),
+            "a --help after -- wrongly triggered Patina help"
+        );
+        // Before `--`: the bare `--help` is intercepted and prints run help (exit 0).
+        let help = run(&["run", module, "--help"]);
+        assert!(help.status.success(), "run --help should exit 0");
+        assert!(
+            String::from_utf8_lossy(&help.stdout).contains("cargo patina run"),
+            "--help should show run help:\n{}",
+            String::from_utf8_lossy(&help.stdout)
+        );
+
+        let budgeted = run(&["run", module, "--budget", "1"]);
         assert!(!budgeted.status.success());
         assert!(
             String::from_utf8_lossy(&budgeted.stderr).contains("step budget of 1"),
             "native run ignored --budget:\n{}",
             String::from_utf8_lossy(&budgeted.stderr)
-        );
-
-        // `build --target wasi` is package-only and thread-free: a `.rs` source and
-        // `--yield-points` are both refused before any toolchain work.
-        let wasi_single = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["build", source.to_str().unwrap(), "--target", "wasi"],
-        );
-        assert!(!wasi_single.status.success());
-        assert!(String::from_utf8_lossy(&wasi_single.stderr).contains("native-only"));
-
-        let wasi_yield = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &["build", "somepkg", "--target", "wasi", "--yield-points"],
-        );
-        assert!(!wasi_yield.status.success());
-        let yield_stderr = String::from_utf8_lossy(&wasi_yield.stderr);
-        assert!(
-            yield_stderr.contains("--yield-points") && yield_stderr.contains("wasip1"),
-            "missing yield-points-on-wasi diagnostic:\n{yield_stderr}"
         );
     }
 

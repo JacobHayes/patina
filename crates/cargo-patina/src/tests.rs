@@ -4,13 +4,10 @@ use super::*;
 use crate::parse::{
     ParseResult, knob_env_pairs, knobs_of, parse, parse_cargo, parse_cargo_replay, parse_explore,
     parse_minimize, parse_native_audit_from, parse_native_build, parse_native_harness_from,
-    parse_native_replay, parse_native_run, parse_native_run_from, parse_trace, parse_wasi_build,
-    parse_wasi_replay, parse_wasi_run, parse_wasi_run_from, repeatable_payload,
+    parse_native_replay, parse_native_run, parse_native_run_from, parse_trace, repeatable_payload,
 };
-use crate::wasi_exec::execute_wasi_run;
 use crate::{campaign, cli, coverage, help, output, sites, syscalls, values};
 use patina_dst_runtime::{FaultKnob, Plumbing};
-use patina_dst_wasi_host::DEFAULT_WASM_FUEL;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -26,22 +23,17 @@ pub(super) fn invocation(values: &[&str]) -> Invocation {
     }
 }
 
-// `run`/`audit`/`build` infer their target from artifact magic bytes at the
-// routing layer (covered by the e2e suite with real artifacts and by
-// `detects_artifact_family_from_magic` below). These helpers exercise the
-// per-target parsers directly, so the first element is a readable label the
-// helper drops before parsing.
-pub(super) fn wasi_invocation(values: &[&str]) -> WasiInvocation {
-    parse_wasi_run(strings(&values[1..])).unwrap()
-}
-
+// `run`/`audit` recognize a native binary by its magic bytes at the routing
+// layer (covered by the e2e suite with real artifacts and by
+// `recognizes_native_magic`). These helpers exercise the native parsers
+// directly, so the first element is a readable label the helper drops before
+// parsing.
 pub(super) fn native_run(values: &[&str]) -> NativeRunInvocation {
     parse_native_run(strings(&values[1..])).unwrap()
 }
 
 pub(super) fn native_build_invocation(values: &[&str]) -> NativeBuildInvocation {
-    // The first element is a readable label; `build` routing lives in
-    // `parse_build`, exercised separately.
+    // The first element is a readable label.
     parse_native_build(strings(&values[1..])).unwrap()
 }
 
@@ -309,10 +301,6 @@ mod registry {
                 vec!["0", "1", "42", "18446744073709551615"],
                 vec!["-1", "abc", "", "1.5", "99999999999999999999999"],
             ),
-            Kind::U32 => (
-                vec!["0", "1", "4294967295"],
-                vec!["-1", "abc", "", "4294967296"],
-            ),
             Kind::Usize => (vec!["0", "1", "65536"], vec!["-1", "abc", ""]),
             Kind::PositiveU64 => (vec!["1", "5", "100"], vec!["0", "-1", "abc", ""]),
             Kind::WatchdogMillis => (
@@ -399,14 +387,6 @@ mod registry {
             Kind::AddressPair => (
                 vec!["a,b", "10.0.0.1:80,10.0.0.2:80", "left, right"],
                 vec!["a", "a,", ",b", "a,b,c", "", "a,a", " , "],
-            ),
-            Kind::Socket => (
-                vec!["4=a->b", "5=x->y", "100=addr1->addr2"],
-                vec!["3=a->b", "4=a->", "4=->b", "foo=a->b", "4=ab", "", "0=a->b"],
-            ),
-            Kind::Preopen => (
-                vec!["/data", "/data:ro", "/data:rw", "rel", "/a/b"],
-                vec!["", "/data:xx", ":ro"],
             ),
             Kind::UnsupportedSymbols => (
                 vec!["all", "memcpy", "a,b", "foo , bar"],
@@ -504,9 +484,6 @@ mod registry {
             ("run" | "test", help::Family::Cargo) => {
                 parse_cargo(verb.to_string(), with(none, &[])).map(|_| ())
             }
-            ("run", help::Family::Wasi) => {
-                parse_wasi_run_from(prebuilt("m.wasm"), with(none, &[])).map(|_| ())
-            }
             ("run", help::Family::Native) => {
                 parse_native_run_from(prebuilt("bin"), with(none, &[])).map(|_| ())
             }
@@ -520,7 +497,7 @@ mod registry {
                 )
                 .map(|_| ())
             }
-            ("build", help::Family::Native) => {
+            ("build", help::Family::Sole) => {
                 // A single-source build needs an output; a package build is what
                 // `--package`/`--bin` select.
                 let prefix = if matches!(flag, "--package" | "--bin") {
@@ -532,26 +509,11 @@ mod registry {
                 };
                 parse_native_build(with(prefix, &[])).map(|_| ())
             }
-            ("build", help::Family::Wasi) => {
-                parse_wasi_build(with(vec!["sub/Cargo.toml".to_string()], &[])).map(|_| ())
-            }
-            ("audit", help::Family::Native) => {
+            ("audit", help::Family::Sole) => {
                 parse_native_audit_from(prebuilt("bin"), with(none, &[])).map(|_| ())
-            }
-            ("audit", help::Family::Wasi) => {
-                cli::parse("audit", family, with(none, &[])).map(|_| ())
             }
             ("replay", help::Family::Cargo) => parse_cargo_replay(
                 PathBuf::from("."),
-                trace(),
-                with(
-                    quorum(&["--branch", "--from", "--branch-seed", "--branch-id"]),
-                    &[],
-                ),
-            )
-            .map(|_| ()),
-            ("replay", help::Family::Wasi) => parse_wasi_replay(
-                prebuilt("m.wasm"),
                 trace(),
                 with(
                     quorum(&["--branch", "--from", "--branch-seed", "--branch-id"]),
@@ -576,10 +538,10 @@ mod registry {
                 let prefix = match flag {
                     "--extend" | "--resume" => none,
                     "--faults" => vec![
-                        "art.wasm".to_string(),
+                        "art".to_string(),
                         "--dns-entry=db.internal=10.0.0.5".to_string(),
                     ],
-                    _ => vec!["art.wasm".to_string()],
+                    _ => vec!["art".to_string()],
                 };
                 let mut argv = with(prefix, &[]);
                 if flag == "--spec" {
@@ -698,7 +660,7 @@ mod registry {
     }
 
     #[test]
-    fn cargo_and_wasi_refuse_fs_crash_at_without_restart_semantics() {
+    fn cargo_refuses_fs_crash_at_without_restart_semantics() {
         let mut knobs = KnobValues::default();
         knobs.0.insert(FaultKnob::FsCrashAt, vec!["write:1".into()]);
         let cargo = execute(Invocation {
@@ -709,32 +671,13 @@ mod registry {
             realtime_epoch_nanos: None,
             hostname: None,
             params: BTreeMap::new(),
-            knobs: knobs.clone(),
+            knobs,
             buggify: None,
             working_dir: None,
         })
         .unwrap_err()
         .to_string();
         assert!(cargo.contains("cargo-family --fs-crash-at crash-restart is not implemented"));
-
-        let wasi = execute_wasi_run(WasiInvocation {
-            module: ArtifactRef::Prebuilt(PathBuf::from("missing.wasm")),
-            mode: Mode::Seeded { seed: 0 },
-            fuel: DEFAULT_WASM_FUEL,
-            arguments: Vec::new(),
-            environment: BTreeMap::new(),
-            sockets: Vec::new(),
-            preopens: Vec::new(),
-            resource_limits: WasiResourceLimitOverrides::default(),
-            step_budget: None,
-            realtime_epoch_nanos: None,
-            knobs,
-            buggify: None,
-            liveness: NativeLiveness::default(),
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(wasi.contains("WASI --fs-crash-at crash-restart is not implemented"));
     }
 
     /// The Cargo family forwards every unrecognized token verbatim, in place,
@@ -800,7 +743,7 @@ mod registry {
     #[test]
     fn every_fault_knob_reaches_every_family_and_is_refused_by_replay() {
         // Each knob, set to a valid value, must survive parsing into the same
-        // control-plane variable for the Cargo, WASI and native families, and must
+        // control-plane variable for the Cargo and native families, and must
         // be REFUSED by `replay` — which derives its refusal list from the same
         // registry slice, so a new knob is refused the day it is registered.
         for knob in FaultKnob::ALL {
@@ -817,27 +760,10 @@ mod registry {
             };
             for (verb, family) in [
                 ("run", help::Family::Cargo),
-                ("run", help::Family::Wasi),
                 ("run", help::Family::Native),
                 ("test", help::Family::Cargo),
                 ("test", help::Family::Harness),
             ] {
-                // wasip1 has no name-resolution surface at all, so the DNS knobs
-                // are a DECLARED family exception: the WASI parser must refuse
-                // them rather than accept a knob that could never fire. The
-                // registry narrows them, so this asks the registry rather than
-                // hard-coding which flags are excepted.
-                if !help::verb(verb)
-                    .expect("registered verb")
-                    .family_flags(family)
-                    .any(|registered| registered.name == flag)
-                {
-                    assert!(
-                        cli::parse(verb, family, strings(&[flag, value])).is_err(),
-                        "{verb} {family:?} must refuse the unregistered {flag}"
-                    );
-                    continue;
-                }
                 let args = cli::parse(verb, family, strings(&[flag, value]))
                     .unwrap_or_else(|error| panic!("{verb} {family:?} rejected {flag}: {error}"));
                 let pairs = knob_env_pairs(&knobs_of(&args).expect("knob parse")).expect("encode");
@@ -847,11 +773,7 @@ mod registry {
                     meta.env
                 );
             }
-            for family in [
-                help::Family::Cargo,
-                help::Family::Wasi,
-                help::Family::Native,
-            ] {
+            for family in [help::Family::Cargo, help::Family::Native] {
                 let message = match cli::parse("replay", family, strings(&[flag, value])) {
                     Err(error) => error.to_string(),
                     Ok(_) => panic!("replay accepted a re-supplied {flag}"),
@@ -920,8 +842,6 @@ mod registry {
         const NANOS: u64 = 1_000_000_000_000_000_000;
         let native = parse_native_run(strings(&["guest", "--realtime-epoch", TEXT])).unwrap();
         assert_eq!(native.realtime_epoch_nanos, Some(NANOS));
-        let wasi = parse_wasi_run(strings(&["guest.wasm", "--realtime-epoch", TEXT])).unwrap();
-        assert_eq!(wasi.realtime_epoch_nanos, Some(NANOS));
         for command in ["run", "test"] {
             let ParseResult::Run(cargo) =
                 parse_cargo(command.into(), strings(&["--realtime-epoch", TEXT])).unwrap()
@@ -943,8 +863,8 @@ mod registry {
             .expect("unix seconds are refused");
         assert!(error.to_string().contains("--realtime-epoch"), "{error}");
         assert_replay_refuses("--realtime-epoch", TEXT);
-        // The hostname reaches every family that can observe it; wasip1 has none, and the kernel's
-        // length and NUL rules apply.
+        // The hostname reaches every family, and the kernel's length and NUL rules
+        // apply.
         {
             const NAME: &str = "db-1.internal";
             let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
@@ -961,10 +881,6 @@ mod registry {
                 parse_native_run(strings(&["guest"])).unwrap().hostname,
                 None
             );
-            // wasip1 has no hostname surface, so the WASI family refuses the flag.
-            let error = parse_wasi_run(strings(&["guest.wasm", "--hostname", NAME]))
-                .expect_err("WASI refuses --hostname");
-            assert!(error.to_string().contains("--hostname"), "{error}");
             // The kernel's rules: 64 bytes fit, 65 do not, and a NUL never does.
             let longest = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES);
             let too_long = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES + 1);
@@ -987,11 +903,7 @@ mod registry {
 
     /// `replay` refuses a re-supplied run fact in every family, by name.
     fn assert_replay_refuses(flag: &str, value: &str) {
-        for family in [
-            help::Family::Cargo,
-            help::Family::Wasi,
-            help::Family::Native,
-        ] {
+        for family in [help::Family::Cargo, help::Family::Native] {
             match cli::parse("replay", family, strings(&[flag, value])) {
                 Err(error) => assert!(error.to_string().contains(flag), "{family:?}: {error}"),
                 Ok(_) => panic!("{family:?} replay accepted a re-supplied {flag}"),

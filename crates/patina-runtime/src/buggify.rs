@@ -193,7 +193,7 @@ pub struct BuggifyDeclaredSiteReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuggifySiteReport {
     pub label: String,
-    /// The `file:line` identity captured by the SDK macro / WASI import.
+    /// The `file:line` identity captured by the SDK macro.
     pub site: String,
     pub kind: BuggifyKind,
     pub active: bool,
@@ -595,8 +595,8 @@ impl Context {
     }
 
     /// Report one guest verdict — the runtime half of the verdict ABI
-    /// (`patina_verdict` natively, the `patina_sdk` `verdict` import on WASI, and
-    /// this method directly for an in-process cargo-family guest).
+    /// (`patina_verdict` natively, this method directly for an in-process
+    /// cargo-family guest).
     ///
     /// The call is recorded as an [`Operation::Verdict`] boundary event, so a
     /// replay whose verdict stream diverges from the recording fails closed like

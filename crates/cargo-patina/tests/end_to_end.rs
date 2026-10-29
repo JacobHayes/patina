@@ -21,8 +21,6 @@ use tempfile::tempdir;
 mod audit;
 #[path = "end_to_end/campaign_continuation.rs"]
 mod campaign_continuation;
-#[path = "end_to_end/campaign_depth.rs"]
-mod campaign_depth;
 #[path = "end_to_end/campaign_fault_planes.rs"]
 mod campaign_fault_planes;
 #[path = "end_to_end/campaign_forwarding.rs"]
@@ -89,16 +87,6 @@ mod sdk_harness;
 mod toolchains;
 #[path = "end_to_end/verdict.rs"]
 mod verdict;
-#[path = "end_to_end/wasi_build.rs"]
-mod wasi_build;
-#[path = "end_to_end/wasi_depth.rs"]
-mod wasi_depth;
-#[path = "end_to_end/wasi_faults.rs"]
-mod wasi_faults;
-#[path = "end_to_end/wasi_run.rs"]
-mod wasi_run;
-#[path = "end_to_end/wasi_sdk.rs"]
-mod wasi_sdk;
 
 use helpers::*;
 

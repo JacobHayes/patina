@@ -27,8 +27,8 @@ in their code. The default-off `macros` feature re-exports
 target shim-linked and runs the annotated body under the native harness. The
 runtime otherwise enters through `cargo patina build`/`run` (the shim),
 `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
-(the source-first native libtest harness for one point-solution test), or
-`build --target wasi` (the `patina_sdk` host imports), or not at all.
+(the source-first native libtest harness for one point-solution test), or not
+at all.
 
 Native startup has one important adopter rule: static constructors (`#[ctor]`,
 link-section constructors, C++ global constructors) must not perform interposed

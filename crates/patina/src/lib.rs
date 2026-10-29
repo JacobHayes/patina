@@ -87,7 +87,7 @@
 //! ## Determinism and never-reached sites
 //!
 //! Literal-label SDK macro calls also emit a dependency-free link-time site
-//! table under `cfg(patina)`. The native shim and WASI host enumerate that table
+//! table under `cfg(patina)`. The native shim enumerates that table
 //! before the guest runs and surface `declared_site=` rows in `PATINA_SDK_REPORT`,
 //! so a `sometimes!` or `reachable!` site that no generation ever reaches still
 //! appears in campaign `sites.json` with `registered_gens=0`. The table uses no
@@ -107,7 +107,7 @@
 //! This crate is a pure SDK by default: it does not run applications, and it
 //! never links the simulator. The `macros` feature adds a test orchestrator that
 //! shells out to `cargo-patina`; the guest still enters through the same native
-//! shim path. Under `cargo patina build`/`run` the native shim or WASI host
+//! shim path. Under `cargo patina build`/`run` the native shim
 //! supplies the deterministic runtime below ordinary
 //! `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented production code
 //! needs no explicit runtime dependency (usage mode 1 of [USAGE-MODES.md]).
@@ -180,21 +180,10 @@ pub mod __rt;
 
 /// FFI into the native shim. Present only when the shim is actually linked
 /// (`cfg(patina_shim)`, injected by `cargo patina build`). Under a plain
-/// `cargo build`, a WASI build, or `cargo patina run`, these symbols are never
+/// `cargo build` or `cargo patina run`, these symbols are never
 /// referenced, so nothing is left unresolved at link time.
 #[cfg(patina_shim)]
 mod ffi;
-
-/// WASI import surface for the SDK, mirroring the native shim's C ABI. Present
-/// only under a Patina wasm build (`cfg(patina)` without the native shim), so a
-/// plain `cargo build --target wasm32-wasip1` of an adopter references none of
-/// these symbols and its import table stays free of `patina_sdk`. The host side
-/// (`patina-dst-wasi-host`) defines the `patina_sdk` module against the same
-/// deterministic runtime the shim uses; `patina-dst-target`'s WASI audit allowlists
-/// exactly these fourteen names. `usize`/`*const u8` lower to wasm `i32`, matching
-/// the host's `func_wrap` signatures.
-#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-mod wasm_ffi;
 
 #[doc(hidden)]
 #[macro_export]
@@ -202,15 +191,7 @@ macro_rules! __patina_static_site {
     ($label:literal, $site:expr, $kind:expr) => {
         #[allow(unexpected_cfgs)]
         const _: () = {
-            #[cfg(all(patina, target_arch = "wasm32"))]
-            #[used]
-            #[unsafe(link_section = "patina_sites")]
-            static __PATINA_SITE: [u8; { $crate::__rt::wasm_static_site_len($label, $site) }] =
-                $crate::__rt::encode_wasm_static_site::<
-                    { $crate::__rt::wasm_static_site_len($label, $site) },
-                >($kind, $label, $site);
-
-            #[cfg(all(patina, not(target_arch = "wasm32")))]
+            #[cfg(patina)]
             #[used]
             #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__patina_sites"))]
             #[cfg_attr(not(target_os = "macos"), unsafe(link_section = "patina_sites"))]

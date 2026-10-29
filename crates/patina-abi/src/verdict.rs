@@ -3,8 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What a guest asserts about its own run through the verdict ABI — the single
-/// verb `patina_verdict` (native shim) / the `patina_sdk` `verdict` import
-/// (WASI) / `Context::verdict` (in-process).
+/// verb `patina_verdict` (native shim) / `Context::verdict` (in-process).
 ///
 /// A **closed** enum owned by the runtime: kinds are data, never new symbols, so
 /// a new kind is one enum value the compiler walks to every consumer. The `u32`
@@ -40,7 +39,7 @@ impl VerdictKind {
         VerdictKind::AbortIntent,
     ];
 
-    /// The `u32` this kind travels as across the C / WASI ABI. Numbering starts
+    /// The `u32` this kind travels as across the C ABI. Numbering starts
     /// at 1 so a zeroed argument is never a valid kind and fails closed.
     pub const fn as_abi(self) -> u32 {
         match self {
@@ -82,8 +81,8 @@ impl VerdictKind {
 mod tests {
     use super::*;
 
-    // The ABI numbering is the contract three independent mirrors compile
-    // against (the C header, the SDK's `extern "C"` block, the WASI import), so
+    // The ABI numbering is the contract two independent mirrors compile
+    // against (the C header and the SDK's `extern "C"` block), so
     // pin the exact values: a renumber here silently misclassifies every verdict
     // a shim-linked guest reports.
     #[test]

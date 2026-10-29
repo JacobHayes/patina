@@ -200,8 +200,7 @@ run_full() {
   start_rung 'workq testbed' testbeds/workq/run-patina.sh
   start_rung 'macro adopter testbed' testbeds/patina-macro-adopter/run.sh
   start_rung 'pubsub testbed' testbeds/pubsub/run-patina.sh
-  start_rung 'cross-target smoke' scripts/smoke-cross-target.sh
-  start_rung 'WASI validation' scripts/validate-wasi.sh
+  start_rung 'native smoke' scripts/smoke-native.sh
   wait_rungs || return $?
 }
 

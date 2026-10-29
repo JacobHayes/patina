@@ -35,7 +35,7 @@ pub struct RenderInput<'a> {
     pub raw: &'a Value,
     pub trace_path: &'a str,
     pub artifact: &'a str,
-    /// Target family label: `native`, `wasi`, or `cargo`.
+    /// Target family label: `native` or `cargo`.
     pub family: &'a str,
     /// The resolved timeline id being rendered (usually `main`).
     pub timeline: &'a str,

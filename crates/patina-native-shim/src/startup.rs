@@ -168,7 +168,7 @@ initialization to the harness (PATINA_DEFER_INIT), and call run/run_with exactly
             2,
             b"patina: patina_dst_harness cannot install the runtime: this binary is not running \
 under `cargo patina run` (no PATINA_MODE control plane). A shim-backed harness must be built and \
-run through Patina, e.g. `cargo patina run <manifest> --target native --harness`\n",
+run through Patina, e.g. `cargo patina run <manifest> --harness`\n",
         );
         return patina_dst_runtime::HARNESS_ERR_NOT_UNDER_PATINA;
     }

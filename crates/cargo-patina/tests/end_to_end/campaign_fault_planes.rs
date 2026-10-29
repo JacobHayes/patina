@@ -9,36 +9,22 @@ mod tests {
     /// reached the guest (a failed open or write, or a short write); otherwise it
     /// exits 7, so every generation is a notable run whose drawn flags the
     /// campaign records.
-    const FS_WRITER: &str = r#"(module
-  (import "wasi_snapshot_preview1" "path_open"
-    (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
-  (import "wasi_snapshot_preview1" "fd_write"
-    (func $fd_write (param i32 i32 i32 i32) (result i32)))
-  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "file")
-  (data (i32.const 16) "abcdefgh")
-  (func (export "_start")
-    (local $fd i32) (local $round i32)
-    (if (i32.ne
-          (call $path_open
-            (i32.const 3) (i32.const 0) (i32.const 0) (i32.const 4)
-            (i32.const 1) (i64.const 66) (i64.const 0) (i32.const 0) (i32.const 100))
-          (i32.const 0))
-      (then (call $proc_exit (i32.const 3))))
-    (local.set $fd (i32.load (i32.const 100)))
-    (i32.store (i32.const 64) (i32.const 16))
-    (i32.store (i32.const 68) (i32.const 8))
-    (loop $writes
-      (if (i32.ne
-            (call $fd_write (local.get $fd) (i32.const 64) (i32.const 1) (i32.const 80))
-            (i32.const 0))
-        (then (call $proc_exit (i32.const 3))))
-      (if (i32.ne (i32.load (i32.const 80)) (i32.const 8))
-        (then (call $proc_exit (i32.const 3))))
-      (local.set $round (i32.add (local.get $round) (i32.const 1)))
-      (br_if $writes (i32.lt_u (local.get $round) (i32.const 32))))
-    (call $proc_exit (i32.const 7))))"#;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    const FS_WRITER: &str = r#"
+use std::io::Write;
+
+fn main() {
+    let Ok(mut file) = std::fs::File::create("/file") else {
+        std::process::exit(3);
+    };
+    for _ in 0..32 {
+        if file.write(b"abcdefgh").ok() != Some(8) {
+            std::process::exit(3);
+        }
+    }
+    std::process::exit(7);
+}
+"#;
 
     /// A generation in which an fs fault reached the guest is a VIOLATION.
     const FS_FAULT_IS_A_VIOLATION: &str = r#"{"classify": {"exit_codes": {"VIOLATION": [3]}}}"#;
@@ -50,10 +36,10 @@ mod tests {
         cwd: PathBuf,
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fixture() -> Fixture {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("fs-writer.wasm");
-        fs::write(&module, wat::parse_str(FS_WRITER).unwrap()).unwrap();
+        let module = build_facts_guest(directory.path(), "fs-writer", FS_WRITER);
         let spec = directory.path().join("spec.json");
         fs::write(&spec, FS_FAULT_IS_A_VIOLATION).unwrap();
         Fixture {
@@ -134,6 +120,7 @@ mod tests {
     /// every-plane control shows fs faults do reach this guest), the out-dir
     /// records the subset, a continuation keeps it and refuses a new one, and
     /// an unknown plane is a usage error naming the valid planes.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_plane_subset_never_draws_another_plane_and_a_continuation_keeps_it() {
         let fixture = fixture();

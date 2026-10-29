@@ -5,8 +5,8 @@
 //! virtual clock, in-memory filesystem, simulated network, seeded entropy, and
 //! the deterministic scheduler — behind one [`Context`], makes every effect a
 //! pure function of a root seed, and records/replays those effects as traces.
-//! Every Patina usage mode ultimately drives this runtime: the native shim and
-//! WASI host route interposed `std` calls into it, and this crate's own API
+//! Every Patina usage mode ultimately drives this runtime: the native shim
+//! routes interposed `std` calls into it, and this crate's own API
 //! exposes it directly.
 //!
 //! # Where this crate sits (the SDK / runtime split)
@@ -28,7 +28,7 @@
 //!   effects directly. Deterministic async ([`block_on`]/`spawn`, virtual-time
 //!   sleep/timeout) layers over the same `Context` in `patina-dst-async`.
 //! - **Modes 1–2 (via `cargo patina`):** unmodified programs run under the
-//!   native shim or WASI host, which drive this same runtime below ordinary
+//!   native shim, which drives this same runtime below ordinary
 //!   `std` calls; `patina-dst-harness` configures such a run in code.
 //!
 //! See [USAGE-MODES.md] for the full map and [ARCHITECTURE.md] for the design.
@@ -139,10 +139,10 @@ pub use custom_op::CustomOpMode;
 pub use patina_dst_abi::EntropyWait;
 
 pub use reports::{
-    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DEPTH_REPORT,
-    ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT,
-    ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT,
-    ENV_SWARM_REPORT, Report, ReportConfig, sdk_report_line, set_diagnostic_writer,
+    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_FAULT_REPORT,
+    ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT,
+    ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report,
+    ReportConfig, sdk_report_line, set_diagnostic_writer,
 };
 
 pub use patina_dst_abi::VerdictKind;
@@ -562,8 +562,8 @@ pub const DEFAULT_BUGGIFY_CUTOFF_NANOS: u64 = 300_000_000_000;
 ///
 /// This is the mode-3 explicit-context API of `USAGE-MODES.md`. It creates an
 /// explicit context and does **not** control unrelated `std::fs`/`std::net`/clock
-/// calls in the rest of the program — those are interposed by the native shim or
-/// WASI host under `cargo patina build`/`run`. To configure Patina and then drive
+/// calls in the rest of the program — those are interposed by the native shim
+/// under `cargo patina build`/`run`. To configure Patina and then drive
 /// ordinary application code, use the shim-backed `patina-dst-harness` crate.
 ///
 /// The context is always finalized. If both the closure and finalization fail,

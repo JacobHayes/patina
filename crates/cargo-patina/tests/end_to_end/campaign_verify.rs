@@ -45,9 +45,9 @@ mod tests {
             "json",
         ];
         args.extend_from_slice(extra);
-        // A guest without modes (a WASI module, a single-purpose native guest)
-        // takes no `--` guest arguments: its mode is "". A moded native guest
-        // keeps the host's randomized layout (see the module docs).
+        // A guest without modes (a single-purpose native guest) takes no `--`
+        // guest arguments: its mode is "". A moded native guest keeps the host's
+        // randomized layout (see the module docs).
         if !mode.is_empty() {
             args.extend(["--allow-randomized-address-layout", "--", mode]);
         }
@@ -338,115 +338,6 @@ fn main() {
                     "{mode}: {record:#}"
                 );
             }
-        }
-    }
-
-    /// A WASI guest that writes a line of output and reports a fixed
-    /// violation, then runs `body` with `$mode` set by a custom operation: zero
-    /// while recording, nonzero in a replay. A body that skips or changes a
-    /// recorded entropy read in the replay makes it diverge, surfacing as a
-    /// runtime finalization error, not a trap.
-    fn mode_branching_wasi_guest(directory: &Path, name: &str, body: &str) -> PathBuf {
-        let wat = format!(
-            r#"(module
- (import "patina_sdk" "verdict" (func $verdict (param i32 i32 i32 i32 i32) (result i32)))
- (import "patina_sdk" "custom_op_begin" (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
- (import "patina_sdk" "custom_op_record" (func $record (param i32 i32) (result i32)))
- (import "patina_sdk" "custom_op_replay_result" (func $fetch (param i32 i32) (result i32)))
- (import "wasi_snapshot_preview1" "random_get" (func $random (param i32 i32) (result i32)))
- (import "wasi_snapshot_preview1" "fd_write" (func $write (param i32 i32 i32 i32) (result i32)))
- (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
- (memory (export "memory") 1)
- (data (i32.const 0) "fixed")
- (data (i32.const 200) "guest-output\n")
- (func (export "_start") (local $mode i32)
-  (i32.store (i32.const 80) (i32.const 200))
-  (i32.store (i32.const 84) (i32.const 13))
-  (drop (call $write (i32.const 1) (i32.const 80) (i32.const 1) (i32.const 100)))
-  (drop (call $verdict (i32.const 1) (i32.const 0) (i32.const 5) (i32.const 0) (i32.const 0)))
-  (local.set $mode (call $begin (i32.const 0) (i32.const 5) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 64)))
-  (if (i32.eqz (local.get $mode))
-   (then (drop (call $record (i32.const 0) (i32.const 0))))
-   (else (drop (call $fetch (i32.const 0) (i32.const 0)))))
-  {body}))"#
-        );
-        let path = directory.join(format!("{name}.wasm"));
-        fs::write(&path, wat::parse_str(&wat).unwrap()).unwrap();
-        path
-    }
-
-    /// A WASI replay that diverges at finalization is NONDETERMINISM in a
-    /// campaign, its exit status is compared past the eight bits a process
-    /// status carries, and the replay envelope keeps what the guest did before
-    /// the divergence surfaced.
-    #[test]
-    fn a_wasi_replay_that_diverges_at_finalization_is_nondeterminism_and_keeps_evidence() {
-        let directory = tempdir().unwrap();
-        for (name, body) in [
-            // The replay asks for a different length: the operation differs.
-            (
-                "mismatch",
-                "(drop (call $random (i32.const 128) (i32.add (i32.const 1) (local.get $mode))))",
-            ),
-            // Exit 3 while recording and 259 in the replay: one byte apart only
-            // above the eight bits a process status carries.
-            (
-                "exit-bits",
-                "(drop (call $random (i32.const 128) (i32.const 1))) \
-                 (call $exit (i32.add (i32.const 3) (i32.mul (local.get $mode) (i32.const 256))))",
-            ),
-        ] {
-            let guest = mode_branching_wasi_guest(directory.path(), name, body);
-            let (code, envelope) = campaign(&guest, &directory.path().join(name), 1, &[], "");
-            assert_eq!(code, Some(1), "{name}: {envelope:#}");
-            let record = &signatures(&envelope)[0];
-            assert_eq!(
-                record["verification"]["status"], "nondeterministic",
-                "{name}: {record:#}"
-            );
-        }
-
-        // The replay skips the recorded read: events are left over.
-        let skip_read = "(if (i32.eqz (local.get $mode)) (then (drop (call $random (i32.const 128) (i32.const 1)))))";
-        for (name, ending, guest_code) in [
-            ("returns", "", 0),
-            ("exits", "(call $exit (i32.const 17))", 17),
-        ] {
-            let guest =
-                mode_branching_wasi_guest(directory.path(), name, &format!("{skip_read} {ending}"));
-            let trace = directory.path().join(format!("{name}.patina"));
-            let workspace = native_workspace();
-            let cli = env!("CARGO_BIN_EXE_cargo-patina");
-            let guest_arg = guest.to_str().unwrap();
-            let trace_arg = trace.to_str().unwrap();
-            invoke_unchecked(
-                cli,
-                workspace,
-                &["run", guest_arg, "--seed", "7", "--record", trace_arg],
-            );
-            assert!(trace.is_file(), "{name}: the recording left no trace");
-            let output = invoke_unchecked(
-                cli,
-                workspace,
-                &["replay", guest_arg, trace_arg, "--format", "json"],
-            );
-            let envelope = campaign_json_stdout(&output);
-            assert!(
-                envelope["replay_divergence"].is_string(),
-                "{name}: {envelope:#}"
-            );
-            // The run still fails...
-            assert_ne!(output.status.code(), Some(0), "{name}: {envelope:#}");
-            // ...and keeps what the guest did before the divergence surfaced.
-            assert_eq!(envelope["stdout"], "guest-output\n", "{name}: {envelope:#}");
-            assert_eq!(
-                envelope["verdicts"][0]["label"], "fixed",
-                "{name}: {envelope:#}"
-            );
-            assert_eq!(
-                envelope["guest_exit"]["code"], guest_code,
-                "{name}: {envelope:#}"
-            );
         }
     }
 }

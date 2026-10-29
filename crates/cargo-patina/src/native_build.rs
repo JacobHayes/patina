@@ -7,10 +7,9 @@ use crate::shim_build::{
     apply_rustc_env, build_native_shim, check_native_toolchain_agreement, link_arg,
     lock_target_dir, prepare_shim_sources, stage_instrumentation_object, stage_shim_object,
 };
-use crate::wasi_exec::run_wasi_build;
 use crate::{
-    ArtifactRef, BuildSpec, BuildSpecKind, CliError, NativeBuildInvocation, NativeBuildTarget,
-    NativeSchedule, hex, output,
+    ArtifactRef, BuildSpec, CliError, NativeBuildInvocation, NativeBuildTarget, NativeSchedule,
+    hex, output,
 };
 use patina_dst_trace::TraceBundle;
 use sha2::{Digest, Sha256};
@@ -141,9 +140,9 @@ impl GuestInstrumentation {
 pub(super) const DEFAULT_NATIVE_EDITION: &str = "2024";
 
 /// A resolved run/audit/replay artifact: the concrete path to consume, a display
-/// path (the source argument when built on the fly, so a WASI guest's `argv[0]`
-/// and diagnostics name the source rather than a throwaway temp path), and an
-/// optional workspace that must outlive its use.
+/// path (the source argument when built on the fly, so diagnostics name the
+/// source rather than a throwaway temp path), and an optional workspace that
+/// must outlive its use.
 pub(super) struct ResolvedArtifact {
     pub(super) path: PathBuf,
     pub(super) display: PathBuf,
@@ -170,16 +169,9 @@ pub(super) fn resolve_artifact(artifact: ArtifactRef) -> Result<ResolvedArtifact
 fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     let workspace = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create build workspace: {error}")))?;
-    let (path, target_label) = match spec.kind {
-        BuildSpecKind::Native(mut invocation) => {
-            invocation.output = Some(workspace.path().join("patina-run-artifact"));
-            (run_native_build(invocation)?, "native")
-        }
-        BuildSpecKind::Wasi(invocation) => {
-            let output = workspace.path().join("patina-run-artifact.wasm");
-            (run_wasi_build(&invocation, Some(&output))?, "wasi")
-        }
-    };
+    let mut invocation = spec.build;
+    invocation.output = Some(workspace.path().join("patina-run-artifact"));
+    let path = run_native_build(invocation)?;
     let bytes = fs::read(&path).map_err(|error| {
         CliError(format!(
             "failed to read the built artifact {}: {error}",
@@ -191,7 +183,7 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     // Route this on-the-fly build note to stderr under `--output json` so stdout
     // stays a single clean JSON envelope; human output keeps it on stdout.
     let build_note = format!(
-        "PATINA_BUILD_ON_RUN target={target_label} source={} artifact={} sha256={}",
+        "PATINA_BUILD_ON_RUN source={} artifact={} sha256={}",
         spec.origin.display(),
         path.display(),
         hex(&hasher.finalize())
@@ -387,7 +379,7 @@ fn build_native_source(
         .arg("--edition")
         .arg(edition)
         // `patina_shim` marks a shim-linked build: the `patina` crate's SDK
-        // resolves its buggify FFI only under this cfg, so a plain/WASI/`run`
+        // resolves its buggify FFI only under this cfg, so a plain `run`
         // build (which also sets `patina`/`dst`) never references the shim
         // symbols and never fails to link.
         .args(["--cfg", "patina", "--cfg", "dst", "--cfg", "patina_shim"])

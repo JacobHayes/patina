@@ -428,10 +428,8 @@ pub struct FindingFacts {
 pub struct RunFacts {
     /// The child process's exit status.
     pub exit_code: i32,
-    /// `guest_exit.code` — the status the guest's run reported in full. A
-    /// process status keeps only its low eight bits, and a WASI guest's
-    /// `proc_exit` status is a full 32-bit value, so two runs can share a
-    /// process status and still have exited differently.
+    /// `guest_exit.code` — the status the guest itself exited with, which the
+    /// supervisor's own process status need not repeat.
     pub guest_exit_code: Option<i32>,
     /// The signal the guest died on, from `guest_exit.signal`. `exit_code` alone
     /// cannot express this (it is `128 + signal` there, the same value a guest
@@ -966,7 +964,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
 ///    `PATINA_SDK_REPORT`, `PATINA_FS_FAULT_REPORT`, `PATINA_DNS_FAULT_REPORT`,
 ///    `PATINA_NET_FAULT_REPORT`, `PATINA_ENTROPY_FAULT_REPORT`,
 ///    `PATINA_CLOCK_FAULT_REPORT`, `PATINA_CUSTOMOP_FAULT_REPORT`,
-///    `PATINA_COVERAGE_REPORT`, `PATINA_DEPTH_REPORT`. Three siblings are named
+///    `PATINA_COVERAGE_REPORT`. Three siblings are named
 ///    outright because their line name is not their knob name:
 ///    `PATINA_SCHEDULE_POLICY` (knob `PATINA_SCHEDULE_POLICY_REPORT`) and the
 ///    `PATINA_LIFECYCLE` / `PATINA_LIFECYCLE_EVENT` progress markers, and the

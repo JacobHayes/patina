@@ -141,15 +141,14 @@ guest's argv (or the oracle's), passed untouched in every family.",
     push_prose(
         &mut out,
         "`run`, `audit`, and `replay` are source-first with artifacts accepted uniformly. A \
-built artifact is recognized by its leading magic bytes (\\0asm for a WASI module, Mach-O/ELF \
-for a native binary) and used as-is; a <SOURCE.rs|DIR|Cargo.toml> is built on the fly through \
-the same pipeline as `build` (honoring --target, default native). For `test`, no source \
-positional stays the Cargo package family, while a <DIR|Cargo.toml> positional selects native \
-libtest harness mode. A positional that names a file path (.wasm/.rs/Cargo.toml, or with a \
-separator) but does not exist is a hard error.\n\
+built native binary is recognized by its leading Mach-O/ELF magic bytes and used as-is; a \
+<SOURCE.rs|DIR|Cargo.toml> is built on the fly through the same pipeline as `build`. For \
+`test`, no source positional stays the Cargo package family, while a <DIR|Cargo.toml> \
+positional selects native libtest harness mode. A positional that names a file path \
+(.rs/Cargo.toml, or with a separator) but does not exist is a hard error.\n\
 \n\
 Options and the artifact may appear in any order, like `cargo build`/`cargo run` — \
-`run --seed 5 app.wasm` and `run app.wasm --seed 5` are identical. Only known options are \
+`run --seed 5 ./app` and `run ./app --seed 5` are identical. Only known options are \
 skipped when scanning for the artifact; an UNKNOWN option (a forwarded cargo flag) stops the \
 scan, since its value could otherwise be misread as the artifact. Past that stop an unknown \
 option is only forwarded silently in the Cargo package family — if a real artifact stands \

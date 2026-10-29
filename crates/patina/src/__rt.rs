@@ -5,15 +5,12 @@ pub use core::convert::identity;
 pub use crate::static_sites::{
     STATIC_SITE_KIND_ALWAYS, STATIC_SITE_KIND_DELAY, STATIC_SITE_KIND_FAULT, STATIC_SITE_KIND_KNOB,
     STATIC_SITE_KIND_REACHABLE, STATIC_SITE_KIND_SOMETIMES, StaticSiteDescriptor,
-    WASM_STATIC_SITE_RECORD_HEADER_LEN, encode_wasm_static_site, wasm_static_site_len,
 };
 #[cfg(feature = "macros")]
 pub use crate::test_harness::{DstTest, DstTestReturn, assert_test_return, orchestrate};
 
 #[cfg(patina_shim)]
 use crate::ffi;
-#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-use crate::wasm_ffi;
 
 pub use calls::{
     always, buggify, buggify_delay, buggify_knob, lifecycle_event, lifecycle_setup_complete,
@@ -37,19 +34,7 @@ mod calls {
                 ) != 0
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::buggify(
-                    label.as_ptr(),
-                    label.len(),
-                    site.as_ptr(),
-                    site.len(),
-                    prob_permille,
-                ) != 0
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = (label, site, prob_permille);
             false
@@ -70,18 +55,7 @@ mod calls {
                 ) != 0
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::buggify_delay(
-                    label.as_ptr(),
-                    label.len(),
-                    site.as_ptr(),
-                    site.len(),
-                ) != 0
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = (label, site);
             false
@@ -105,21 +79,7 @@ mod calls {
                 )
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::buggify_knob(
-                    label.as_ptr(),
-                    label.len(),
-                    site.as_ptr(),
-                    site.len(),
-                    default,
-                    lo,
-                    hi,
-                )
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = (label, site, lo, hi);
             default
@@ -143,22 +103,7 @@ mod calls {
                 );
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            // Host-authoritative: on a violation the WASI host records the
-            // `violation` verdict and traps the guest, so this import does not
-            // return when `condition` is false.
-            unsafe {
-                super::wasm_ffi::always(
-                    i32::from(condition),
-                    label.as_ptr(),
-                    label.len(),
-                    site.as_ptr(),
-                    site.len(),
-                );
-            }
-        }
-        #[cfg(all(patina, not(patina_shim), not(target_arch = "wasm32")))]
+        #[cfg(all(patina, not(patina_shim)))]
         {
             let _ = site;
             assert!(condition, "patina always! invariant violated: {label}");
@@ -185,19 +130,7 @@ mod calls {
                 );
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::sometimes(
-                    i32::from(condition),
-                    label.as_ptr(),
-                    label.len(),
-                    site.as_ptr(),
-                    site.len(),
-                );
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = (condition, label, site);
         }
@@ -217,13 +150,7 @@ mod calls {
                 );
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::reachable(label.as_ptr(), label.len(), site.as_ptr(), site.len());
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = (label, site);
         }
@@ -238,13 +165,7 @@ mod calls {
                 super::ffi::patina_lifecycle_event(label.as_ptr(), label.len());
             }
         }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::lifecycle_event(label.as_ptr(), label.len());
-            }
-        }
-        #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+        #[cfg(not(patina_shim))]
         {
             let _ = label;
         }
@@ -257,12 +178,6 @@ mod calls {
         {
             unsafe {
                 super::ffi::patina_lifecycle_setup_complete();
-            }
-        }
-        #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-        {
-            unsafe {
-                super::wasm_ffi::lifecycle_setup_complete();
             }
         }
     }

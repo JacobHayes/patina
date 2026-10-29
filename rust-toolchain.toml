@@ -6,7 +6,6 @@ profile = "minimal"
 components = ["rustfmt", "clippy"]
 # Clippy checks OS/architecture cfg code without cross-linking or a cross SDK.
 targets = [
-  "wasm32-wasip1",
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
   "aarch64-apple-darwin",

@@ -52,7 +52,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_FACTS",
         scope: "protocol",
-        doc: "Path the runtime writes its patina.runfacts/v1 document to (cargo/WASI families). Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
+        doc: "Path the runtime writes its patina.runfacts/v1 document to (cargo family). Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
     },
     EnvVar {
         name: "PATINA_FACTS_FD",

@@ -83,7 +83,7 @@ pub(crate) fn parse_native_audit_from(
     binary: ArtifactRef,
     arguments: Vec<OsString>,
 ) -> Result<NativeAuditInvocation, CliError> {
-    let args = cli::parse("audit", help::Family::Native, arguments)?;
+    let args = cli::parse("audit", help::Family::Sole, arguments)?;
     Ok(NativeAuditInvocation {
         binary,
         allow: allow_of(&args),
@@ -102,7 +102,7 @@ pub(crate) fn parse_native_build(
     // a usage error naming the flag, not a bogus `--release=x/Cargo.toml`.
     let scan = locate_positionals("build", &arguments, 1);
     let path = scan.positionals.into_iter().next().map(PathBuf::from);
-    let args = cli::parse("build", help::Family::Native, scan.rest)?;
+    let args = cli::parse("build", help::Family::Sole, scan.rest)?;
     // The path requirement is checked after the flag scan so an unknown flag or a
     // `--release=x` stray value is named first (a usage error about the flag,
     // never a bogus manifest path derived from a flag token).
@@ -362,6 +362,19 @@ pub(crate) fn parse_native_replay(
         harness: args.flag("--harness"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
+}
+
+/// Split off a trailing `-- ARGS` section: everything after the first `--` is
+/// the guest's argument vector.
+fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
+    match arguments.iter().position(|argument| argument == "--") {
+        Some(index) => {
+            let trailing = arguments.split_off(index + 1);
+            arguments.pop();
+            trailing
+        }
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]

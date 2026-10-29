@@ -34,10 +34,9 @@ shim was linked in when the guest was built. A process already running cannot
 retro-instrument itself, which is why the point-solution test path rebuilds the
 test binary rather than wrapping the current one.
 
-Three artifact families, inferred automatically from what you hand a verb: a
-**Cargo package/test** (directory or `Cargo.toml`, run in-process), a **native
-binary** (Mach-O/ELF, linked against the shim), and a **WASI module**
-(`wasm32-wasip1`). Some capabilities are family-specific — the registry tells you
+Two artifact families, inferred automatically from what you hand a verb: a
+**Cargo package/test** (directory or `Cargo.toml`, run in-process) and a
+**native binary** (Mach-O/ELF, linked against the shim). Some capabilities are family-specific — the registry tells you
 which, see "Families" below.
 
 ## What it can do — the capability map
@@ -77,7 +76,7 @@ trace so replay reproduces them: I/O errors, short writes and latency; network d
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
 preemption and task starvation; liveness watchdogs. Native `--fs-crash-at`
 performs a real fresh-process restart and records and replays across both
-incarnations, while Cargo/WASI refuse it; campaigns draw it only from a spec's `fs_crash_reach`. Filesystem
+incarnations, while the Cargo family refuses it; campaigns draw it only from a spec's `fs_crash_reach`. Filesystem
 write tearing is therefore meaningful only with that native crash selector. A
 *swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.
@@ -105,8 +104,7 @@ as bugs here. `sites` is a static inventory of every assertion/oracle site in th
 workspace, and can be joined against what a run or campaign actually exercised.
 Native binaries can be built with yield-point instrumentation so atomics-only
 race windows become schedulable, and `coverage` symbolizes their edge coverage
-and rolls it up by crate/module/function; WASI runs report execution *depth*
-(fuel and per-import hostcall counts) as the analogous signal. The scheduler
+and rolls it up by crate/module/function. The scheduler
 warns when a spawned thread ran zero interposed operations — that is, when its
 interleavings were never actually explored.
 

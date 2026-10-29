@@ -37,8 +37,8 @@ fn does_not_consume_program_arguments_after_separator() {
     assert_eq!(parsed.cargo_args, strings(&["--", "--seed", "application"]));
     // The artifact scan never crosses `--` either: an artifact-looking token
     // there is the guest's, so it is neither routed nor failed closed.
-    let tail = invocation(&["run", "--seed", "5", "--", "nonexistent.wasm"]);
-    assert_eq!(tail.cargo_args, strings(&["--", "nonexistent.wasm"]));
+    let tail = invocation(&["run", "--seed", "5", "--", "./nonexistent"]);
+    assert_eq!(tail.cargo_args, strings(&["--", "./nonexistent"]));
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn parses_record_and_replay_and_rejects_conflicts() {
 }
 
 #[test]
-fn cargo_family_parses_fault_knobs_and_explore_run_wasi() {
+fn cargo_family_parses_fault_knobs_and_explore_run_native() {
     // The Cargo family accepts the seed-driven fault knobs on run/test.
     let parsed = invocation(&[
         "run",
@@ -134,12 +134,11 @@ fn cargo_family_parses_fault_knobs_and_explore_run_wasi() {
     // The `--` tail is forwarded to Cargo, unaffected by fault parsing.
     assert_eq!(parsed.cargo_args, strings(&["--", "app-arg"]));
 
-    // `explore run <MODULE.wasm>` sweeps the WASI family (build once, run the
-    // same artifact across seeds). The module is recognized by magic bytes at
-    // execution; here a real `.wasm` file exercises the routing.
+    // `explore run <BINARY>` sweeps the native family (build once, run the same
+    // artifact across seeds). The binary is recognized by magic bytes; here a
+    // real ELF-headed file exercises the routing.
     let directory = tempfile::tempdir().unwrap();
-    let module = directory.path().join("m.wasm");
-    std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+    let module = native_fixture(&directory, "app");
     match parse(strings(&[
         "explore",
         "run",
@@ -154,9 +153,9 @@ fn cargo_family_parses_fault_knobs_and_explore_run_wasi() {
         ParseResult::Explore(exploration) => {
             assert_eq!(exploration.start_seed, 2);
             assert_eq!(exploration.seed_count, 4);
-            assert!(matches!(exploration.target, ExploreTarget::Wasi(_)));
+            assert!(matches!(exploration.target, ExploreTarget::Native(_)));
         }
-        _ => panic!("expected a WASI exploration"),
+        _ => panic!("expected a native exploration"),
     }
 }
 
@@ -187,7 +186,7 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     // path or an unsupported option).
     assert!(is_help(&["run", "./bin", "--help"]));
     assert!(is_help(&["campaign", "artifact", "--help"]));
-    assert!(is_help(&["replay", "a.wasm", "trace", "--help"]));
+    assert!(is_help(&["replay", "./bin", "trace", "--help"]));
     assert!(is_help(&["audit", "artifact", "--help"]));
     assert!(is_help(&["build", "src.rs", "--help"]));
     assert!(is_help(&["minimize", "trace.patina", "--help"]));
@@ -199,23 +198,17 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     assert!(is_help(&["patina", "--help"]));
     assert!(is_version(&["--version"]));
     // After `--` both belong to the guest or oracle and are never intercepted.
-    assert!(!is_help(&["run", "mod.wasm", "--", "--help"]));
+    assert!(!is_help(&["run", "./bin", "--", "--help"]));
     assert!(!is_help(&["campaign", "artifact", "--", "--help"]));
     assert!(!is_help(&["test", "--", "--help"]));
     assert!(!is_version(&["run", "mycrate", "--", "--version"]));
-    // So a WASI guest's argv, like a native one's, follows `--` verbatim.
-    let inv = parse_wasi_run(strings(&["m.wasm", "--seed", "1", "--", "--help", "tail"])).unwrap();
-    assert_eq!(
-        inv.arguments,
-        vec!["--help".to_string(), "tail".to_string()]
-    );
 }
 
 #[test]
 fn nonexistent_pathlike_positional_fails_closed() {
     // A token that clearly names a file path but does not exist is a hard
     // error, not a silent cargo-family fallthrough.
-    assert!(classify_arg(OsStr::new("nonexistent.wasm")).is_err());
+    assert!(classify_arg(OsStr::new("./nonexistent")).is_err());
     assert!(classify_arg(OsStr::new("missing.rs")).is_err());
     assert!(classify_arg(OsStr::new("sub/dir/thing")).is_err());
     assert!(classify_arg(OsStr::new("no/such/Cargo.toml")).is_err());
@@ -225,21 +218,14 @@ fn nonexistent_pathlike_positional_fails_closed() {
         ArgKind::Other
     ));
     // Routed through the verbs.
-    assert!(parse(strings(&["run", "nope.wasm"])).is_err());
-    assert!(parse(strings(&["audit", "nope.wasm"])).is_err());
-    assert!(parse(strings(&["replay", "nope.wasm", "trace"])).is_err());
+    assert!(parse(strings(&["run", "./nope"])).is_err());
+    assert!(parse(strings(&["audit", "./nope"])).is_err());
+    assert!(parse(strings(&["replay", "./nope", "trace"])).is_err());
     // Registered options ahead of it are skipped, so the scan still reaches it.
-    assert!(parse(strings(&["run", "--seed", "5", "nonexistent.wasm"])).is_err());
+    assert!(parse(strings(&["run", "--seed", "5", "./nonexistent"])).is_err());
 }
 
 // ---- Options may precede the artifact (cargo-run/cargo-build ergonomics) ----
-
-/// A real WASI module on disk (recognized by its `\0asm` magic at routing).
-fn wasm_fixture(dir: &tempfile::TempDir, name: &str) -> PathBuf {
-    let path = dir.path().join(name);
-    std::fs::write(&path, b"\0asm\x01\0\0\0").unwrap();
-    path
-}
 
 /// A real native binary on disk (recognized by its ELF magic at routing).
 fn native_fixture(dir: &tempfile::TempDir, name: &str) -> PathBuf {
@@ -406,7 +392,7 @@ fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
         parse(strings(&["run", "--seed", "5", "--bin", "server"])).unwrap(),
         ParseResult::Run(_)
     ));
-    // An UNKNOWN flag stops the scan; `thing.wasm` after it is path-like but does
+    // An UNKNOWN flag stops the scan; `./thing` after it is path-like but does
     // NOT exist, so it is presumed the unknown flag's value (never an artifact)
     // and the run stays the Cargo family.
     assert!(matches!(
@@ -415,7 +401,7 @@ fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
             "--seed",
             "5",
             "--some-unknown",
-            "thing.wasm"
+            "./thing"
         ]))
         .unwrap(),
         ParseResult::Run(_)
@@ -439,9 +425,9 @@ fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
     // never a silent Cargo fallthrough.
     {
         let dir = tempfile::tempdir().unwrap();
-        let module = wasm_fixture(&dir, "app.wasm");
+        let module = native_fixture(&dir, "app");
         let m = module.to_str().unwrap();
-        // `--frob` is unknown and `app.wasm` is a real compiled artifact (never a
+        // `--frob` is unknown and `app` is a real compiled artifact (never a
         // flag value): a loud routing error naming both, never a silent Cargo
         // fallthrough.
         let message = parse_error(&["run", "--frob", m]);
@@ -450,10 +436,10 @@ fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
     }
 }
 
-/// The message of a `build` parse that must fail (parse_build's `Ok` variant
-/// is not `Debug`, so `unwrap_err` cannot be used directly).
+/// The message of a `build` parse that must fail (the parsed invocation is not
+/// `Debug`, so `unwrap_err` cannot be used directly).
 fn build_error(values: &[&str]) -> String {
-    match parse_build(strings(values)) {
+    match parse_native_build(strings(values)) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("expected a build usage error for {values:?}"),
     }
@@ -462,13 +448,9 @@ fn build_error(values: &[&str]) -> String {
 #[test]
 fn build_locates_the_path_after_options_and_names_bad_flags() {
     // `build --release <pkg>`: the path follows the flag, like `cargo build`.
-    match parse_build(strings(&["--release", "pkg"])).unwrap() {
-        ParseResult::NativeBuild(inv) => {
-            assert!(inv.release);
-            assert!(matches!(inv.target, NativeBuildTarget::Package { .. }));
-        }
-        _ => panic!("expected a native build"),
-    }
+    let inv = parse_native_build(strings(&["--release", "pkg"])).unwrap();
+    assert!(inv.release);
+    assert!(matches!(inv.target, NativeBuildTarget::Package { .. }));
     // A stray value on the valueless `--release` is a usage error naming the
     // flag, never a bogus `--release=x/Cargo.toml` manifest path.
     let err = build_error(&["--release=x"]);

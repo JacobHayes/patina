@@ -46,7 +46,7 @@ pub trait FactsSink: Send {
 }
 
 /// Where a run's facts document goes: a path the runtime writes with `std::fs`
-/// (the cargo family and in-process embedders such as the WASI host), or an
+/// (the cargo family and other in-process embedders), or an
 /// embedder-installed byte sink (the native shim's host descriptor).
 pub(crate) enum FactsOutput {
     Path(PathBuf),

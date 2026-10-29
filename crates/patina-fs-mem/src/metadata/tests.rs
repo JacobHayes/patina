@@ -400,7 +400,7 @@ fn metadata_changes_move_ctime_only() {
 }
 
 /// `timestamp_truncate`, for every door that sets times (the native
-/// shim and the WASI host alike): a named node holds ext4's range, an
+/// shim): a named node holds ext4's range, an
 /// anonymous file tmpfs's.
 #[test]
 fn a_set_time_is_truncated_to_the_filesystems_range_never_refused_or_wrapped() {

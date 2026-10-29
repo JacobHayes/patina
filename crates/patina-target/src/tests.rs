@@ -1,4 +1,4 @@
-//! Shared native and WASI test fixtures.
+//! Shared test fixtures.
 
 use crate::NativeEscape;
 use crate::provenance::NativeProvenance;
@@ -12,21 +12,6 @@ pub(super) fn instruction_finding(category: &'static str, mnemonic: &'static str
         vec![NativeProvenance::unknown()],
     )
     .with_mnemonic(mnemonic)
-}
-
-pub(super) fn module_importing(module: &str, name: &str) -> Vec<u8> {
-    let mut bytes = b"\0asm\x01\0\0\0".to_vec();
-    // One () -> () function type.
-    bytes.extend([1, 4, 1, 0x60, 0, 0]);
-    let mut import = vec![1, module.len() as u8];
-    import.extend(module.as_bytes());
-    import.push(name.len() as u8);
-    import.extend(name.as_bytes());
-    import.extend([0, 0]); // function import, type index 0
-    bytes.push(2);
-    bytes.push(import.len() as u8);
-    bytes.extend(import);
-    bytes
 }
 
 /// Build an ELF image whose symbol table has the shape a linker produces: a

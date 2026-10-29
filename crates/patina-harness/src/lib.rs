@@ -29,9 +29,9 @@
 //! (startup Option B, deferred initialization):
 //!
 //! ```sh
-//! cargo patina run path/to/harness/Cargo.toml --target native --harness --seed 1
-//! cargo patina run path/to/harness/Cargo.toml --target native --harness --record trace.patina
-//! cargo patina replay path/to/harness/Cargo.toml trace.patina --target native --harness
+//! cargo patina run path/to/harness/Cargo.toml --harness --seed 1
+//! cargo patina run path/to/harness/Cargo.toml --harness --record trace.patina
+//! cargo patina replay path/to/harness/Cargo.toml trace.patina --harness
 //! ```
 //!
 //! `--harness` sets `PATINA_DEFER_INIT=1`, which tells the packaged constructor to
@@ -102,10 +102,7 @@
 //! Building an initial virtual filesystem image from code is out of scope for v1:
 //! the CLI `--mount` owns the filesystem image. Network *topology* is likewise out
 //! of scope — the DNS builders above are one host-table entry per name, not a
-//! topology model, and multi-process topologies remain future work. WASI is
-//! unsupported — the WASI supervisor owns run configuration there, so this crate's
-//! ABI targets the native shim only, which is also why the DNS builders have no
-//! WASI counterpart (wasip1 has no name-resolution surface at all).
+//! topology model, and multi-process topologies remain future work.
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
 //! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
@@ -164,7 +161,7 @@ impl fmt::Display for HarnessError {
             HarnessError::NotUnderPatina => write!(
                 formatter,
                 "not running under Patina: build and run the harness with \
-                 `cargo patina run <manifest> --target native --harness`"
+                 `cargo patina run <manifest> --harness`"
             ),
             HarnessError::AlreadyInstalled => write!(
                 formatter,

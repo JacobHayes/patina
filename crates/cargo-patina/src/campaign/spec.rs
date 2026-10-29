@@ -44,13 +44,13 @@ pub struct CampaignSpec {
     pub guest_args: Vec<String>,
     /// Randomize cooperative-SUT (buggify) activation/fire per generation.
     pub buggify: bool,
-    /// Apply seed-derived swarm fault-class selection (native only).
+    /// Apply seed-derived swarm fault-class selection.
     pub swarm: bool,
-    /// Randomize a PCT bug depth per generation (native only).
+    /// Randomize a PCT bug depth per generation.
     pub pct: bool,
-    /// Randomize a bounded starvation-interval policy per generation (native
-    /// only): how many intervals, how deep into the schedule they may start, and
-    /// how long they may last.
+    /// Randomize a bounded starvation-interval policy per generation: how many
+    /// intervals, how deep into the schedule they may start, and how long they
+    /// may last.
     ///
     /// WHY IT IS ITS OWN SWITCH. Starvation is the one exploration policy that
     /// deliberately holds a RUNNABLE task off, which is what several liveness and
@@ -185,8 +185,7 @@ pub struct CampaignSpec {
     /// reaches fails the run (`VACUOUS_CRASH`), and how many writes, syncs or
     /// closes a guest certainly performs is a fact about the guest and its
     /// arguments only the operator can state — the same reason the DNS band
-    /// rides on [`Self::dns_entries`]. Native only: WASI and Cargo campaigns
-    /// are refused by name, as their `run` refuses `--fs-crash-at`.
+    /// rides on [`Self::dns_entries`].
     pub fs_crash_reach: Vec<patina_dst_runtime::CrashPoint>,
     /// The DNS host table (`NAME=ADDR` entries) every generation runs with.
     ///
@@ -201,8 +200,7 @@ pub struct CampaignSpec {
     ///
     /// Invocation shape rather than a per-generation draw, and — like
     /// [`Self::allow_symbols`] and [`Self::allow_unsupported_symbols`] — a fact the
-    /// trace cannot carry, so the reproduce commands re-supply it too. Native only:
-    /// there is no WASI harness family.
+    /// trace cannot carry, so the reproduce commands re-supply it too.
     pub harness: bool,
     /// Symbols added to every generation's pre-run gate allow list (`--allow`).
     pub allow_symbols: Vec<String>,

@@ -563,8 +563,8 @@ ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
   result, not a stale build.
 - Run targeted shim tests and `mise run check:native-abi` for first feedback on a
   native interposition change; run `mise run check` for the full native typed
-  targets, ecosystem testbeds and landing evidence. If the change can affect WASI or cross-target behavior,
-  also run `scripts/validate-wasi.sh` and `scripts/smoke-cross-target.sh`.
+  targets, ecosystem testbeds, the `scripts/smoke-native.sh` determinism smoke and landing
+  evidence.
 - Rust ABI probes must align opaque output storage to the C layout. A byte array
   promises only byte alignment; use a target type or explicitly aligned storage,
   including for rusage and Mach task-info buffers.

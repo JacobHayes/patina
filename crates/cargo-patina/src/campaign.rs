@@ -201,7 +201,7 @@ impl BandPolicy {
 /// Exhaustive ownership of campaign band bytes: every knob is drawn or waived.
 const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     match knob {
-        // Banded only for a native spec that declares `fs_crash_reach`: an
+        // Banded only for a spec that declares `fs_crash_reach`: an
         // armed crash point the run never reaches fails the run, and which
         // points every generation reaches is a fact about the guest that only
         // its operator can state (see the crash block in `derive_flags`).
@@ -327,33 +327,6 @@ fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
     }
 }
 
-/// The first native-only invocation flag this spec carries, if any — the name a
-/// non-native campaign's refusal quotes.
-fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
-    if !spec.fs_crash_reach.is_empty() {
-        return Some("--fs-crash-at");
-    }
-    if spec.compute_watchdog_ms.is_some() {
-        return Some("--compute-watchdog-ms");
-    }
-    if spec.harness {
-        return Some("--harness");
-    }
-    if !spec.allow_symbols.is_empty() {
-        return Some("--allow");
-    }
-    if spec.allow_unsupported_symbols.is_some() {
-        return Some("--allow-unsupported-symbols");
-    }
-    if spec.address_layout == Some(patina_dst_trace::AddressLayout::Randomized) {
-        return Some("--allow-randomized-address-layout");
-    }
-    if spec.cpus.is_some() {
-        return Some("--cpus");
-    }
-    None
-}
-
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
 /// draw: `--harness`, the pre-run gate surface (`--allow`,
 /// `--allow-unsupported-symbols`), `--allow-randomized-address-layout` and
@@ -368,16 +341,8 @@ fn non_native_invocation_flag(spec: &CampaignSpec) -> Option<&'static str> {
 /// against the recording's, so it rides here too, and a minimized or reproduced
 /// generation keeps the machine the campaign swept even where the command is a
 /// seeded `run`.
-///
-/// Native-only: `--harness` names a native harness binary and the pre-run gate is
-/// the native supervisor's. A non-native campaign carrying one is refused by name
-/// upstream (`run_campaign`), so the family check here is belt and braces —
-/// mirroring the DNS band.
-fn invocation_flags(spec: &CampaignSpec, family: &'static str) -> Vec<String> {
+fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
     let mut flags = Vec::new();
-    if family != "native" {
-        return flags;
-    }
     if let Some(bound) = spec.compute_watchdog_ms {
         push_run_flag(&mut flags, "--compute-watchdog-ms", RunValue::Int(bound));
     }
@@ -453,14 +418,12 @@ fn starve_band_fires(hash: &gen_byte::Bands, scale_permille: u64) -> bool {
     u64::from(hash.read(gen_byte::STARVE_FIRE)) * STARVE_SCALE_FULL < scale_permille * 256
 }
 
-/// Derive the per-generation `run` flags from the generation hash. Native-only
-/// exploration knobs (`--swarm`, `--sched-pct`) are skipped for a WASI module
-/// (single-threaded; the WASI `run` does not accept them). Every draw indexes
-/// through a [`gen_byte`] claim so no two bands can share a byte unnoticed.
-fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str) -> Vec<String> {
+/// Derive the per-generation `run` flags from the generation hash. Every draw
+/// indexes through a [`gen_byte`] claim so no two bands can share a byte
+/// unnoticed.
+fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
     let hash = &generation_bands(hash);
-    let native = family == "native";
-    let mut flags = invocation_flags(spec, family);
+    let mut flags = invocation_flags(spec);
     // One binding for the whole band section: every INTENSITY draw below passes
     // through `scale_intensity` with it, so a band that forgets to is a visible
     // omission rather than an invisible one.
@@ -597,10 +560,9 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
                 hi: jitter_hi,
             },
         );
-        // Runtime-level like the fs/net bands above, and accepted by every
-        // family: no host-table-shaped gate needed. It fails only
-        // `GRND_NONBLOCK` reads of a pool not yet known ready, so a guest
-        // without one (any Darwin or WASI guest, Rust's std) leaves the plane
+        // Runtime-level like the fs/net bands above: no host-table-shaped gate
+        // needed. It fails only `GRND_NONBLOCK` reads of a pool not yet known
+        // ready, so a guest without one (any Darwin guest, Rust's std) leaves the plane
         // absent: undiagnosable, never `VACUOUS_ENTROPY_FAULT`.
         let entropy_fail = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255, // [0, 200] permille
@@ -629,9 +591,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
         // operation is fault-eligible is the GUEST's declaration, and over a
         // guest that declares none the knob provably cannot fire. Every
         // generation would then report a vacuous custom-op plane — a true
-        // statement about a band that should never have been emitted. Once
-        // declared it is family-agnostic: a custom op is guest code, so all
-        // three families have them.
+        // statement about a band that should never have been emitted.
         if spec.custom_op_faults {
             let custom_op_fail = scale_intensity(
                 u64::from(band_byte(hash, FaultKnob::CustomOpFailPermille, 0)) * 200 / 255, // [0, 200] permille
@@ -646,10 +606,8 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
         // The DNS band rides on the host table, which is spec config rather than a
         // per-generation draw: with no defined name every lookup is NXDOMAIN by
         // SEMANTICS and no DNS fault is ever eligible, so banding the knobs there
-        // would ship a knob that provably cannot fire. WASI never gets them —
-        // wasip1 has no resolution surface (the artifact is refused outright
-        // upstream of this, so this is belt and braces).
-        if !spec.dns_entries.is_empty() && family != "wasi" {
+        // would ship a knob that provably cannot fire.
+        if !spec.dns_entries.is_empty() {
             for entry in &spec.dns_entries {
                 push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
             }
@@ -681,8 +639,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
     // at or before it drawn, so the selector can never go unreached. Not under
     // `--faults` or the scale dial: it is placement, not an intensity, and a
     // network campaign has no reason to inherit fs error bands to get it.
-    // Native only — the other families are refused by name upstream.
-    if !spec.fs_crash_reach.is_empty() && native {
+    if !spec.fs_crash_reach.is_empty() {
         let reach = &spec.fs_crash_reach;
         let bound = reach[usize::from(band_byte(hash, FaultKnob::FsCrashAt, 0)) % reach.len()];
         let draw = u16::from_le_bytes([
@@ -709,14 +666,14 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash, family: &'static str
             RunValue::Text(torn.into()),
         );
     }
-    if spec.swarm && native {
+    if spec.swarm {
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);
     }
-    if spec.pct && native {
+    if spec.pct {
         let depth = 1 + u32::from(hash.read(gen_byte::SCHED_PCT_DEPTH) % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
-    if spec.starve && native {
+    if spec.starve {
         // One byte, three fields. The low three bits pick the interval count; the
         // next three pick the START WINDOW as a power of two; the top two pick the
         // maximum interval length, also as a power of two.

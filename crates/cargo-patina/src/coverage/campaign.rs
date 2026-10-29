@@ -6,7 +6,6 @@ use super::*;
 pub(crate) struct CoverageArtifact {
     pub(crate) path: String,
     pub(crate) sha256: String,
-    pub(crate) family: String,
 }
 
 impl CoverageArtifact {
@@ -14,7 +13,6 @@ impl CoverageArtifact {
         json!({
             "path": self.path.clone(),
             "sha256": self.sha256.clone(),
-            "family": self.family.clone(),
         })
     }
 
@@ -25,7 +23,6 @@ impl CoverageArtifact {
         let artifact = Self {
             path: json_required_str(object, "path")?.to_string(),
             sha256: json_required_str(object, "sha256")?.to_string(),
-            family: json_required_str(object, "family")?.to_string(),
         };
         if artifact.to_json() != *value {
             return Err("coverage artifact is not in canonical lossless form".to_string());
@@ -313,13 +310,8 @@ impl CampaignCoverageStore {
         let meta = read_campaign_meta(&meta_path)?;
         if meta.artifact != artifact {
             return Err(CliError(format!(
-                "coverage state artifact identity mismatch: meta records {} sha256 {} family {}, campaign records {} sha256 {} family {}; start a new out-dir for the new build",
-                meta.artifact.path,
-                meta.artifact.sha256,
-                meta.artifact.family,
-                artifact.path,
-                artifact.sha256,
-                artifact.family,
+                "coverage state artifact identity mismatch: meta records {} sha256 {}, campaign records {} sha256 {}; start a new out-dir for the new build",
+                meta.artifact.path, meta.artifact.sha256, artifact.path, artifact.sha256,
             )));
         }
         if meta.fingerprint != fingerprint {

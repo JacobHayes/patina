@@ -71,7 +71,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
 
     let continuation_requested = has_continuation_flag(&arguments);
 
-    // Options may lead the artifact (`campaign --gens 5 art.wasm`), so locate it
+    // Options may lead the artifact (`campaign --gens 5 ./app`), so locate it
     // registry-arity-aware rather than insisting it be the first token. In
     // continuation mode, the absence of an artifact is intentional; a positional
     // that is present is rejected after parsing so the error names the doctrine.
@@ -245,9 +245,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     validate_exclusions(&spec)?;
     Ok(CampaignInvocation {
         artifact: Some(artifact.ok_or_else(|| {
-            CliError::usage(
-                "campaign requires an artifact path (a .wasm module or native binary), or --selftest",
-            )
+            CliError::usage("campaign requires a native binary path, or --selftest")
         })?),
         out_dir,
         spec,

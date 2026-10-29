@@ -4,9 +4,69 @@
 mod tests {
     use super::super::*;
 
-    // ---------------------------------------------------------------------------
-    // Coverage-guided generation scheduling (coverage-depth arc, wave E).
-    // ---------------------------------------------------------------------------
+    // A guest whose covered edges are picked by seeded entropy: three draws each
+    // select one of 32 arms, so early generations keep opening edges and the
+    // novelty log has ancestors to steer toward.
+    const BRANCHING_GUEST: &str = r#"
+use std::hash::{BuildHasher, Hasher};
+
+#[inline(never)]
+fn arm(pick: u64) -> u64 {
+    match pick % 32 {
+        0 => 3, 1 => 5, 2 => 7, 3 => 11, 4 => 13, 5 => 17, 6 => 19, 7 => 23,
+        8 => 29, 9 => 31, 10 => 37, 11 => 41, 12 => 43, 13 => 47, 14 => 53, 15 => 59,
+        16 => 61, 17 => 67, 18 => 71, 19 => 73, 20 => 79, 21 => 83, 22 => 89, 23 => 97,
+        24 => 101, 25 => 103, 26 => 107, 27 => 109, 28 => 113, 29 => 127, 30 => 131,
+        _ => 137,
+    }
+}
+
+fn main() {
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u8(0);
+    let entropy = hasher.finish();
+    let mut total = 0;
+    for draw in 0..3 {
+        total += std::hint::black_box(arm(std::hint::black_box(entropy >> (draw * 8))));
+    }
+    println!("BRANCHED total={total}");
+}
+"#;
+
+    // A guest with NO seed-dependent behaviour: identical edges every generation,
+    // so only the bootstrap generation is ever novel.
+    const CONSTANT_GUEST: &str = "fn main() { println!(\"constant\"); }\n";
+
+    /// `source` built with `--coverage-points`, so a campaign has edge coverage
+    /// to steer by.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn coverage_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
+        let path = directory.join(format!("{name}.rs"));
+        fs::write(&path, source).unwrap();
+        let binary = directory.join(name);
+        invoke(
+            native_workspace(),
+            &[
+                "build",
+                path.to_str().unwrap(),
+                "--coverage-points",
+                "--output",
+                binary.to_str().unwrap(),
+            ],
+        );
+        binary
+    }
+
+    /// The campaign's persisted edge-coverage meta (its novelty log).
+    fn campaign_coverage_meta(out_dir: &Path) -> serde_json::Value {
+        let path = out_dir.join("coverage").join("meta.json");
+        serde_json::from_str(
+            &fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!("campaign coverage meta {}: {error}", path.display())
+            }),
+        )
+        .unwrap()
+    }
 
     // Guidance must satisfy two claims at once, and each one is the other's trap: it
     // has to CHANGE the generation stream (or the mode is an inert knob, and a clean
@@ -21,7 +81,7 @@ mod tests {
     // from loop-carried state, so matching the fresh stream also proves the log is
     // a sufficient and faithful record of the guidance input.
     //
-    // The tear: the depth store is written BEFORE `campaign-state.json`, so a crash
+    // The tear: the coverage store is written BEFORE `campaign-state.json`, so a crash
     // between the two leaves the novelty log one generation ahead of the cursor, and
     // a guided resume re-derives that generation from a log that already contains
     // its own entry. Truncating the log below the generation being derived is what
@@ -32,11 +92,11 @@ mod tests {
     // depends only on generations below it. A fixture change that moves it fails
     // those checks; a probe of a few seed bases with long campaigns finds the next
     // qualifying pair.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_guided_steers_reproducibly_across_a_tear_and_differs_from_unguided() {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("depth.wasm");
-        fs::write(&module, wat::parse_str(WASI_DEPTH_MODULE).unwrap()).unwrap();
+        let module = coverage_guest(directory.path(), "branching", BRANCHING_GUEST);
         let module_path = module.to_str().unwrap().to_string();
         let run = |owned: Vec<String>| {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
@@ -87,7 +147,7 @@ mod tests {
         );
         let segment_lines: Vec<&str> = segment.lines().collect();
         assert_eq!(segment_lines.len() as u64, torn + 1);
-        let novel = campaign_depth_meta(&split_out)["new_depth_log"]
+        let novel = campaign_coverage_meta(&split_out)["new_edge_log"]
             .as_array()
             .unwrap()
             .iter()
@@ -99,7 +159,7 @@ mod tests {
             segment_lines[torn as usize]
         );
 
-        // Stage the tear: the cursor rewinds by one, the depth store keeps its
+        // Stage the tear: the cursor rewinds by one, the coverage store keeps its
         // entry for the generation about to be re-run.
         let state_path = split_out.join("campaign-state.json");
         let mut state: serde_json::Value =
@@ -241,26 +301,15 @@ mod tests {
         );
     }
 
-    // A guest with NO seed-dependent behaviour: identical fuel and identical hostcall
-    // kinds every generation, so only the bootstrap generation is ever novel. With the
-    // bootstrap excluded from the ancestor pool that leaves nothing to steer toward,
-    // which must surface as an unguided-identical stream AND a loud vacuity line —
-    // never as steering that quietly resamples the baseline.
-    const WASI_CONSTANT_MODULE: &str = r#"(module
-    (import "wasi_snapshot_preview1" "fd_write"
-        (func $write (param i32 i32 i32 i32) (result i32)))
-    (memory (export "memory") 1)
-    (data (i32.const 64) "constant\n")
-    (func (export "_start")
-        (i32.store (i32.const 0) (i32.const 64))
-        (i32.store (i32.const 4) (i32.const 9))
-        (drop (call $write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 16)))))"#;
-
+    // A guest with NO seed-dependent behaviour has only the bootstrap generation
+    // novel. With the bootstrap excluded from the ancestor pool that leaves nothing
+    // to steer toward, which must surface as an unguided-identical stream AND a loud
+    // vacuity line — never as steering that quietly resamples the baseline.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_guided_reports_vacuous_when_only_the_bootstrap_was_novel() {
         let directory = tempdir().unwrap();
-        let module = directory.path().join("constant.wasm");
-        fs::write(&module, wat::parse_str(WASI_CONSTANT_MODULE).unwrap()).unwrap();
+        let module = coverage_guest(directory.path(), "constant", CONSTANT_GUEST);
         let module_path = module.to_str().unwrap().to_string();
         let run = |owned: Vec<String>| {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
@@ -295,7 +344,7 @@ mod tests {
 
         // Only the bootstrap was novel, so the pool is empty and every generation
         // reports that it had nothing to steer toward.
-        let novelty = campaign_depth_meta(&guided_out)["new_depth_log"]
+        let novelty = campaign_coverage_meta(&guided_out)["new_edge_log"]
             .as_array()
             .unwrap()
             .len();

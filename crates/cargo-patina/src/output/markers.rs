@@ -1,4 +1,4 @@
-//! Coverage, depth, and result marker protocol.
+//! Coverage and result marker protocol.
 
 use super::*;
 
@@ -41,47 +41,6 @@ fn parse_coverage_report_line(line: &str) -> Option<CoverageReport> {
         saturated: saturated?,
         map_path: None,
     })
-}
-
-pub(super) fn depth_report_line(stdout: &str, stderr: &str) -> Option<DepthReport> {
-    stdout
-        .lines()
-        .chain(stderr.lines())
-        .find_map(parse_depth_report_line)
-}
-
-/// Parse a `PATINA_DEPTH_REPORT` marker back into its structured form. The three
-/// fixed keys are reserved; every other `name=count` token is a hostcall row, so
-/// a newly counted import needs no parser change. A line whose declared
-/// `hostcalls_total` disagrees with its rows is rejected rather than silently
-/// re-derived — a truncated depth line must not read as a smaller-but-valid one.
-pub(crate) fn parse_depth_report_line(line: &str) -> Option<DepthReport> {
-    let mut parts = line.split_whitespace();
-    if parts.next()? != "PATINA_DEPTH_REPORT" {
-        return None;
-    }
-    let mut family: Option<String> = None;
-    let mut fuel_consumed: Option<u64> = None;
-    let mut declared_total: Option<u64> = None;
-    let mut hostcalls: Vec<(String, u64)> = Vec::new();
-    for part in parts {
-        let (key, value) = part.split_once('=')?;
-        match key {
-            "family" => family = Some(value.to_string()),
-            "fuel_consumed" => fuel_consumed = Some(value.parse().ok()?),
-            "hostcalls_total" => declared_total = Some(value.parse().ok()?),
-            name => hostcalls.push((name.to_string(), value.parse().ok()?)),
-        }
-    }
-    let report = DepthReport {
-        family: family?,
-        fuel_consumed: fuel_consumed?,
-        hostcalls,
-    };
-    if report.hostcalls_total() != declared_total? {
-        return None;
-    }
-    Some(report)
 }
 
 /// The single most representative result line for the failure summary: a

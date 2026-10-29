@@ -3,8 +3,7 @@
 use super::*;
 
 #[unsafe(no_mangle)]
-/// Capture deterministic stdout (1) or stderr (2) bytes, mirroring the WASI
-/// host's captured stdio: written through to the host on Linux, flushed at
+/// Capture deterministic stdout (1) or stderr (2) bytes: written through to the host on Linux, flushed at
 /// `patina_shutdown` on macOS ([`StdioCapture`]).
 ///
 /// # Safety

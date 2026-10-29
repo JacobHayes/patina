@@ -44,7 +44,6 @@ const ENVELOPE_KEYS: &[&str] = &[
     "content_hash",
     "coverage",
     "crash_restart",
-    "depth",
     "exit_code",
     "family",
     "fault_reports",
@@ -83,11 +82,6 @@ fn fully_populated_envelope() -> Envelope {
         hits_max: 12,
         saturated: 1,
         map_path: Some(PathBuf::from("run.covmap")),
-    });
-    env.depth = Some(DepthReport {
-        family: "wasi".into(),
-        fuel_consumed: 12,
-        hostcalls: vec![("fd_write".into(), 3)],
     });
     env.render = Some("out.html".into());
     env.findings = vec!["libc::open".into()];

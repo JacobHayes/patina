@@ -18,7 +18,6 @@ patina-dst-native-shim.workspace = true
 patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true
 patina-dst-trace.workspace = true
-patina-dst-wasi-host.workspace = true
 # The native-shim source bundle. `cargo-patina` carries the shim's full source
 # closure embedded (build.rs packs it) so an installed binary can build a guest's
 # linked shim without the Patina checkout present. build.rs learns each crate's
@@ -65,7 +64,6 @@ object.workspace = true
 # unpublished conformance scenarios exist for the native_conformance test alone.
 patina-dst-conformance = { path = "../patina-conformance" }
 serde_json.workspace = true
-wat.workspace = true
 
 [[bin]]
 name = "cargo-patina"

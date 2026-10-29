@@ -2,13 +2,12 @@
 
 use crate::native_build::{DEFAULT_NATIVE_EDITION, GuestInstrumentation};
 use crate::{
-    ArtifactRef, BuildSpec, BuildSpecKind, CliError, DEFAULT_NATIVE_FINGERPRINT,
-    DEFAULT_SEED_BUDGET, ExploreInvocation, ExploreTarget, HarnessFeatures, HarnessSeeds,
-    Invocation, KnobValues, Mode, NativeAuditInvocation, NativeBuggify, NativeBuildInvocation,
-    NativeBuildTarget, NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode,
-    NativeSchedule, PATINA_RUNTIME_CRATES, UnsupportedPolicy, WasiBuildInvocation, WasiInvocation,
-    WasiPreopenConfig, WasiResourceLimitOverrides, WasiSocketConfig, campaign, cli, coverage, help,
-    minimize, sites, syscalls, trace_cmd, trace_view, values,
+    ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, DEFAULT_SEED_BUDGET,
+    ExploreInvocation, ExploreTarget, HarnessFeatures, HarnessSeeds, Invocation, KnobValues, Mode,
+    NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
+    NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
+    PATINA_RUNTIME_CRATES, UnsupportedPolicy, campaign, cli, coverage, help, minimize, sites,
+    syscalls, trace_cmd, trace_view, values,
 };
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
@@ -16,7 +15,6 @@ use patina_dst_runtime::{
     ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SWARM, FaultKnob,
     Plumbing,
 };
-use patina_dst_wasi_host::{DEFAULT_WASM_FUEL, MountPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -28,7 +26,6 @@ pub(crate) use artifact::*;
 mod cargo;
 mod control;
 mod native;
-mod wasi;
 pub(super) use control::*;
 mod inspection;
 mod minimization;
@@ -48,11 +45,6 @@ pub(super) use native::parse_native_replay;
 pub(super) use native::parse_native_run;
 pub(super) use native::parse_native_run_from;
 use native::realtime_epoch_of;
-use wasi::WasiHostInputs;
-pub(super) use wasi::parse_wasi_replay;
-#[cfg(test)]
-pub(super) use wasi::parse_wasi_run;
-pub(super) use wasi::parse_wasi_run_from;
 
 pub(super) enum ParseResult {
     Help(help::Topic),
@@ -63,9 +55,6 @@ pub(super) enum ParseResult {
     Sites(sites::SitesInvocation),
     Syscalls(syscalls::SyscallsInvocation),
     Explore(ExploreInvocation),
-    WasiBuild(WasiBuildInvocation),
-    WasiAudit(ArtifactRef),
-    WasiRun(WasiInvocation),
     NativeAudit(NativeAuditInvocation),
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
@@ -160,11 +149,11 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
             "sites" => sites::parse(arguments).map(ParseResult::Sites),
             "syscalls" => syscalls::parse(arguments).map(ParseResult::Syscalls),
             "explore" => parse_explore(arguments).map(ParseResult::Explore),
-            "build" => parse_build(arguments),
+            "build" => parse_native_build(arguments).map(ParseResult::NativeBuild),
             "audit" => parse_audit(arguments),
             "run" => parse_run(arguments),
             "test" => parse_test(arguments),
-            // `replay` is the sole replay entry point for all three families,
+            // `replay` is the sole replay entry point for both families,
             // routed by the same artifact inference as `run`: it restores each
             // family's semantic config (seed, fault knobs, buggify, guest argv)
             // from the trace and exposes no semantic flags.
@@ -185,52 +174,38 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
 }
 
 /// Route `run`: source-first with artifacts accepted uniformly. A built
-/// artifact runs as-is (family from magic); a `.rs`/dir/`Cargo.toml` with
-/// `--target` (or a lone `.rs`) builds on the fly then runs; a dir/`Cargo.toml`
-/// with no `--target`, a leading flag, or no artifact is the Cargo package
-/// family — the same machinery as `test`.
+/// artifact runs as-is; a `.rs` source builds on the fly then runs; a
+/// dir/`Cargo.toml` that integrates the Patina runtime, a leading flag, or no
+/// artifact is the Cargo package family — the same machinery as `test` — and any
+/// other dir/`Cargo.toml` builds shim-linked on the fly then runs.
 fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    let (target, rest) = extract_target(arguments)?;
     // Options may lead the artifact: locate it registry-arity-aware rather than
     // insisting it be the first token.
-    let scan = locate_positionals("run", &rest, 1);
+    let scan = locate_positionals("run", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
         // No artifact located. If the scan stopped at an unknown flag, refuse
         // loudly when a real artifact is stranded behind it; otherwise the
         // unknown flag is a genuine forwarded cargo flag (`run --manifest-path X`)
         // and the whole list stays the Cargo package family.
         if let Some(stop) = scan.stop {
-            reject_stranded_artifact("run", &rest[stop..])?;
+            reject_stranded_artifact("run", &arguments[stop..])?;
         }
-        if target.is_some() {
-            return Err(CliError::usage(
-                "--target requires a source or package to build; `run` with no artifact is the Cargo package family",
-            ));
-        }
-        return parse_cargo("run".to_string(), rest);
+        return parse_cargo("run".to_string(), arguments);
     };
-    // A directory/`Cargo.toml` positional (no `--target`) that integrates the
-    // Patina runtime stays the cargo-family path — the linked runtime owns
-    // seeding, recording, replay, and `--param`/`--budget`. A plain package has no
-    // such runtime, so it falls through to `resolve_positional`, which builds it
-    // shim-linked and runs it under the native pre-run gate exactly like `audit`
-    // (and exactly like a prebuilt binary). Either way an existing directory
-    // resolves as a source and is NEVER passed through as guest argv.
-    if target.is_none()
-        && let ArgKind::SourcePackage(manifest) = classify_arg(&first)?
+    // A directory/`Cargo.toml` positional that integrates the Patina runtime
+    // stays the cargo-family path — the linked runtime owns seeding, recording,
+    // replay, and `--param`/`--budget`. A plain package has no such runtime, so it
+    // falls through to `resolve_positional`, which builds it shim-linked and runs
+    // it under the native pre-run gate exactly like `audit` (and exactly like a
+    // prebuilt binary). Either way an existing directory resolves as a source and
+    // is NEVER passed through as guest argv.
+    if let ArgKind::SourcePackage(manifest) = classify_arg(&first)?
         && package_integrates_patina(Some(&manifest), None)
     {
-        return parse_cargo("run".to_string(), rest);
+        return parse_cargo("run".to_string(), arguments);
     }
-    match resolve_positional(&first, target.as_deref())? {
-        Some((ArtifactFamily::Wasm, mut module)) => {
-            let selection = take_package_bin(scan.rest)?;
-            apply_package_selection(&mut module, selection.package, selection.bin)?;
-            let (release, rest) = take_release(selection.rest)?;
-            apply_release(&mut module, release)?;
-            parse_wasi_run_from(module, rest).map(ParseResult::WasiRun)
-        }
-        Some((ArtifactFamily::Native, mut binary)) => {
+    match resolve_positional(&first)? {
+        Some(mut binary) => {
             let selection = take_package_bin(scan.rest)?;
             apply_package_selection(&mut binary, selection.package, selection.bin)?;
             let (release, rest) = take_release(selection.rest)?;
@@ -239,7 +214,7 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         }
         // Cargo package family: forward the whole argument list (including the
         // positional dir/Cargo.toml, which Cargo interprets) to `parse_cargo`.
-        None => parse_cargo("run".to_string(), rest),
+        None => parse_cargo("run".to_string(), arguments),
     }
 }
 
@@ -262,7 +237,7 @@ fn parse_test(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
         ArgKind::SourceFile(_) => Err(CliError::usage(
             "test native harness mode requires a Cargo package (directory or Cargo.toml), not a single .rs source",
         )),
-        ArgKind::Artifact(_) => Err(CliError::usage(
+        ArgKind::Artifact => Err(CliError::usage(
             "test native harness mode requires a Cargo package (directory or Cargo.toml), not a prebuilt artifact",
         )),
         ArgKind::Other => parse_cargo("test".to_string(), arguments),
@@ -270,110 +245,57 @@ fn parse_test(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
 }
 
 /// Route `audit`: source-first, artifacts accepted. A native binary (built or
-/// built-on-the-fly) goes to the symbol audit; a WASI module lists its imports
-/// (and takes no `--allow`, which is native-only). A dir/`Cargo.toml` with no
-/// `--target` builds native (audit has no Cargo package family).
+/// built on the fly) goes to the symbol audit; a dir/`Cargo.toml` builds
+/// shim-linked (audit has no Cargo package family).
 fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    let (target, rest) = extract_target(arguments)?;
     // Options may lead the artifact.
-    let scan = locate_positionals("audit", &rest, 1);
+    let scan = locate_positionals("audit", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
         // `audit` has no Cargo package family, so a missing artifact is always an
         // error — but name the offending unknown flag (and refuse loudly if a real
         // artifact is stranded behind it) rather than a bare "requires an artifact".
         if let Some(stop) = scan.stop {
-            reject_stranded_artifact("audit", &rest[stop..])?;
+            reject_stranded_artifact("audit", &arguments[stop..])?;
             return Err(CliError::usage(format!(
                 "unsupported option {:?} for `audit`; audit requires an artifact or source path",
-                rest[stop].to_string_lossy()
+                arguments[stop].to_string_lossy()
             )));
         }
         return Err(CliError::usage("audit requires an artifact or source path"));
     };
-    let (family, mut artifact) = resolve_positional(&first, target.as_deref())?
-        .ok_or_else(|| {
-            CliError::usage(format!(
-                "audit target {} is neither a WebAssembly module, a native binary, nor a source/package to build",
-                Path::new(&first).display()
-            ))
-        })?;
+    let mut artifact = resolve_positional(&first)?.ok_or_else(|| {
+        CliError::usage(format!(
+            "audit target {} is neither a native binary nor a source/package to build",
+            Path::new(&first).display()
+        ))
+    })?;
     // Source-first `--package`/`--bin` select the workspace member/binary to build
     // before the audit — the help advertises the form, so it must not be rejected.
-    // Consumed here, uniformly for both families, so the family parser sees only
-    // its own flags.
+    // Consumed here so the audit parser sees only its own flags.
     let selection = take_package_bin(scan.rest)?;
     apply_package_selection(&mut artifact, selection.package, selection.bin)?;
-    let flags = selection.rest;
-    match family {
-        ArtifactFamily::Native => {
-            parse_native_audit_from(artifact, flags).map(ParseResult::NativeAudit)
-        }
-        ArtifactFamily::Wasm => {
-            cli::parse("audit", help::Family::Wasi, flags)?;
-            Ok(ParseResult::WasiAudit(artifact))
-        }
-    }
-}
-
-/// Route `build`: extract `--target` (default `native`) and dispatch to the
-/// native or WASI package builder. The rest of the argument vector is handed to
-/// the per-target parser unchanged, so each target keeps its exact flag set.
-fn parse_build(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    let (target, rest) = extract_target(arguments)?;
-    match target_family(target.as_deref().unwrap_or("native"))? {
-        ArtifactFamily::Native => parse_native_build(rest).map(ParseResult::NativeBuild),
-        ArtifactFamily::Wasm => parse_wasi_build(rest).map(ParseResult::WasiBuild),
-    }
-}
-
-/// Parse `build --target wasi <DIR|Cargo.toml> [--package NAME] [--bin NAME]
-/// [--release] [--output PATH]`. WASI is package-only: a single `.rs` source is
-/// native-only, and `--yield-points` is meaningless without threads.
-pub(super) fn parse_wasi_build(arguments: Vec<OsString>) -> Result<WasiBuildInvocation, CliError> {
-    // The package path may follow options; locate it registry-arity-aware.
-    let scan = locate_positionals("build", &arguments, 1);
-    let package_path = scan.positionals.into_iter().next().map(PathBuf::from);
-    let args = cli::parse("build", help::Family::Wasi, scan.rest)?;
-    // Require the package path after the flag scan so an unknown flag is named
-    // first (never taken as the path).
-    let package_path = package_path.ok_or_else(|| {
-        CliError::usage("build --target wasi requires a Cargo package (a directory or Cargo.toml)")
-    })?;
-    if package_path.extension().and_then(OsStr::to_str) == Some("rs") {
-        return Err(CliError::usage(
-            "build --target wasi compiles a Cargo package; a single .rs source is native-only",
-        ));
-    }
-    Ok(WasiBuildInvocation {
-        manifest: native_manifest_path(&package_path),
-        package: args.string("--package"),
-        bin: args.string("--bin"),
-        release: args.flag("--release"),
-        output: args.path("--output"),
-    })
+    parse_native_audit_from(artifact, selection.rest).map(ParseResult::NativeAudit)
 }
 
 /// Route `replay <ARTIFACT|SOURCE|PKG> <TRACE>` by the same artifact inference as
-/// `run`: a WebAssembly module replays under WASI, a native binary under the
-/// native supervisor, and a directory/`Cargo.toml` (no `--target`) under the
-/// Cargo package family. Each restores its recorded semantic config from the
+/// `run`: a native binary (or a source/plain package built on the fly) replays
+/// under the native supervisor, and a runtime-linked directory/`Cargo.toml` under
+/// the Cargo package family. Each restores its recorded semantic config from the
 /// trace and exposes only that family's genuine host inputs. The two positionals
 /// (artifact/source/package, then trace) always lead; per-family flags and any
 /// `--` section follow and are handled by the family parser.
 fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // `replay` is source-first like `run`/`audit`: the artifact may be built or a
-    // source/package built on the fly (honoring `--target`). A rebuilt binary is
-    // judged against the trace by the fail-closed machinery (fingerprint +
-    // operation-mismatch), so no special-casing.
-    let (target, rest) = extract_target(arguments)?;
-    // The two positionals (artifact/source/package, then trace) may be interleaved
-    // with options in any order, e.g. `replay --fingerprint f art.wasm trace`.
-    // Their relative order is preserved: the first is the origin, the second the
-    // trace.
-    let scan = locate_positionals("replay", &rest, 2);
+    // source/package built on the fly. A rebuilt binary is judged against the
+    // trace by the fail-closed machinery (fingerprint + operation-mismatch), so no
+    // special-casing. The two positionals (artifact/source/package, then trace)
+    // may be interleaved with options in any order, e.g.
+    // `replay --fingerprint f app trace`; their relative order is preserved: the
+    // first is the origin, the second the trace.
+    let scan = locate_positionals("replay", &arguments, 2);
     if scan.positionals.len() < 2 {
         if let Some(stop) = scan.stop {
-            reject_stranded_artifact("replay", &rest[stop..])?;
+            reject_stranded_artifact("replay", &arguments[stop..])?;
         }
         return Err(CliError::usage(if scan.positionals.is_empty() {
             "replay requires an artifact/source/package path and a trace path"
@@ -389,20 +311,14 @@ fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // `--branch`/`--timeline`); a plain package rebuilds shim-linked and replays
     // through the native path, where the trace is loaded and fail-closed BEFORE
     // any guest execution.
-    if target.is_none()
-        && let ArgKind::SourcePackage(manifest) = classify_arg(&origin)?
+    if let ArgKind::SourcePackage(manifest) = classify_arg(&origin)?
         && package_integrates_patina(Some(&manifest), None)
     {
         let package_dir = cargo_package_dir(&origin)?;
         return parse_cargo_replay(package_dir, trace, flags);
     }
-    match resolve_positional(&origin, target.as_deref())? {
-        Some((ArtifactFamily::Wasm, module)) => {
-            parse_wasi_replay(module, trace, flags).map(ParseResult::WasiRun)
-        }
-        Some((ArtifactFamily::Native, binary)) => {
-            parse_native_replay(binary, trace, flags).map(ParseResult::NativeRun)
-        }
+    match resolve_positional(&origin)? {
+        Some(binary) => parse_native_replay(binary, trace, flags).map(ParseResult::NativeRun),
         // Neither an artifact nor a source/package (a leading flag or a plain
         // file): let `cargo_package_dir` produce the precise "neither ..." error.
         None => {

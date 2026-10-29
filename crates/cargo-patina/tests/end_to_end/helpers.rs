@@ -2,37 +2,6 @@
 
 use super::*;
 
-// The guest reads the monotonic clock either side of ONE eligible filesystem
-// operation and exits 70 unless virtual time advanced by at least the configured
-// latency. This is the observation `--fs-latency-nanos` exists to produce, seen
-// from inside the guest rather than from a host-side report.
-pub(super) const WASI_FS_LATENCY: &str = r#"(module
-  (import "wasi_snapshot_preview1" "clock_time_get"
-    (func $clock_time_get (param i32 i64 i32) (result i32)))
-  (import "wasi_snapshot_preview1" "path_filestat_get"
-    (func $path_filestat_get (param i32 i32 i32 i32 i32) (result i32)))
-  (import "wasi_snapshot_preview1" "fd_write"
-    (func $fd_write (param i32 i32 i32 i32) (result i32)))
-  (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "file")
-  (data (i32.const 128) "WASI_FS_FAULT_RESULT latency\n")
-  (func $print
-    (i32.store (i32.const 64) (i32.const 128))
-    (i32.store (i32.const 68) (i32.const 29))
-    (drop (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1) (i32.const 80))))
-  (func (export "_start")
-    (local $before i64) (local $after i64)
-    (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 200)))
-    (local.set $before (i64.load (i32.const 200)))
-    (drop (call $path_filestat_get
-      (i32.const 3) (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 100)))
-    (drop (call $clock_time_get (i32.const 1) (i64.const 0) (i32.const 208)))
-    (local.set $after (i64.load (i32.const 208)))
-    (if (i64.lt_u (i64.sub (local.get $after) (local.get $before)) (i64.const 1000000))
-      (then (call $proc_exit (i32.const 70))))
-    (call $print)))"#;
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn active_toolchain_binary(name: &str) -> PathBuf {
     let sysroot = Command::new("rustc")
@@ -115,10 +84,6 @@ static GLOBAL: LockingAlloc = LockingAlloc { lock: UnsafeCell::new(0), ready: At
 fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!("CUSTOM_ALLOC_OK len={}", v.len()); }
 "#;
 
-// `build --target wasi` compiles a Cargo package for `wasm32-wasip1`, and the
-// resulting module composes with `audit` and `run` inferred from its magic
-// bytes. Requires the wasm32-wasip1 target (installed in CI and by the
-// validate/smoke scripts' preflight).
 pub(super) fn campaign_gen_lines(text: &str) -> String {
     text.lines()
         .filter(|line| line.starts_with("PATINA_CAMPAIGN_GEN"))
@@ -183,16 +148,8 @@ pub(super) fn fixture_target_directory(package: &Path) -> std::path::PathBuf {
         .into()
 }
 
-pub(super) fn wasm32_wasip1_installed() -> bool {
-    Command::new("rustc")
-        .args(["--print", "target-libdir", "--target", "wasm32-wasip1"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 // The single `PATINA_SDK_REPORT` line from a run's stderr (emitted by the runtime
-// at `Context::finish`, which the in-process wasip1 host drives).
+// at `Context::finish`).
 pub(super) fn sdk_report_line(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr)
         .lines()
@@ -365,10 +322,8 @@ pub(super) fn invoke_unchecked_clean_env(
         "PATINA_BUGGIFY_ACTIVATION_PERMILLE",
         "PATINA_BUGGIFY_CUTOFF_NANOS",
         "PATINA_HARNESS",
-        "PATINA_FUEL",
         "PATINA_ARG",
         "PATINA_ENV",
-        "PATINA_PREOPEN",
         "PATINA_KIND",
         "PATINA_RUNTIME",
         "PATINA_ALL",
@@ -677,45 +632,6 @@ pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
             out.to_str().unwrap(),
         ],
     );
-}
-
-// ---------------------------------------------------------------------------
-// WASI depth (coverage-depth arc, wave D): fuel + per-import hostcall counts.
-// ---------------------------------------------------------------------------
-
-// A wasip1 guest whose hostcall mix is fixed by the module text and whose work
-// (and therefore fuel) is driven by one deterministic random byte, so depth
-// varies across seeds while staying exactly reproducible for any one seed.
-pub(super) const WASI_DEPTH_MODULE: &str = r#"(module
-    (import "wasi_snapshot_preview1" "random_get"
-        (func $random (param i32 i32) (result i32)))
-    (import "wasi_snapshot_preview1" "clock_time_get"
-        (func $clock (param i32 i64 i32) (result i32)))
-    (import "wasi_snapshot_preview1" "fd_write"
-        (func $write (param i32 i32 i32 i32) (result i32)))
-    (memory (export "memory") 1)
-    (data (i32.const 128) "DEPTH_GUEST ok\n")
-    (func (export "_start")
-        (local $n i32)
-        (drop (call $random (i32.const 64) (i32.const 1)))
-        (local.set $n (i32.and (i32.load8_u (i32.const 64)) (i32.const 63)))
-        (block $done (loop $spin
-            (br_if $done (i32.eqz (local.get $n)))
-            (local.set $n (i32.sub (local.get $n) (i32.const 1)))
-            (br $spin)))
-        (drop (call $clock (i32.const 0) (i64.const 0) (i32.const 72)))
-        (i32.store (i32.const 0) (i32.const 128))
-        (i32.store (i32.const 4) (i32.const 15))
-        (drop (call $write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 16)))))"#;
-
-pub(super) fn campaign_depth_meta(out_dir: &Path) -> serde_json::Value {
-    let path = out_dir.join("depth").join("meta.json");
-    assert!(
-        path.is_file(),
-        "campaign depth store is missing at {}",
-        path.display()
-    );
-    serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
 }
 
 // ---- campaign forwards the native `run` invocation shape ---------------------

@@ -1,7 +1,7 @@
 //! Target metadata and fail-closed import auditing.
 //!
 //! Internal crate: the analysis behind `cargo patina audit` and the pre-run
-//! default-deny gate. It parses native (Mach-O/ELF) and `wasm32-wasip1`
+//! default-deny gate. It parses native (Mach-O/ELF)
 //! artifacts, classifies every externally resolved import against the
 //! interposed/known-safe allowlists, and reports the residual effect surface —
 //! an unknown import is a refusal, never a silent escape. Adopters drive this
@@ -22,7 +22,6 @@ mod native_audit;
 mod provenance;
 mod report;
 mod shim;
-mod wasi;
 /// x86-64 forbidden-instruction scan, instruction-boundary-aware.
 ///
 /// The aarch64 ISA is fixed-width, so its scan decodes aligned 4-byte words and
@@ -163,10 +162,6 @@ pub use shim::{
     native_escape_is_tsc_manageable, native_missing_live_interposers, shim_control_plane_symbols,
     shim_host_alias_violation,
 };
-pub use wasi::{
-    PATINA_SDK_MODULE, SUPPORTED_PATINA_SDK_IMPORTS, SUPPORTED_PREVIEW1_IMPORTS,
-    WASI_PREVIEW1_MODULE, WASI_PREVIEW1_TARGET, WasiAudit, WasmImport,
-};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeEscape {
@@ -208,11 +203,9 @@ impl NativeEscape {
 
 #[derive(Debug)]
 pub enum TargetError {
-    Parse(wasmparser::BinaryReaderError),
     NativeParse(object::Error),
     NativeUnwind(gimli::Error),
     InvalidNativeCodeRanges(String),
-    UnsupportedImports(Vec<WasmImport>),
     UnsupportedNativeFormat(BinaryFormat),
     RelocatableNativeElf,
     /// A linked ELF whose section headers, dynamic symbol table, or the
@@ -226,18 +219,10 @@ pub enum TargetError {
 impl fmt::Display for TargetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Parse(error) => write!(f, "failed to parse WebAssembly module: {error}"),
             Self::NativeParse(error) => write!(f, "failed to parse native object: {error}"),
             Self::NativeUnwind(error) => write!(f, "failed to parse native unwind ranges: {error}"),
             Self::InvalidNativeCodeRanges(reason) => {
                 write!(f, "invalid native code ranges: {reason}")
-            }
-            Self::UnsupportedImports(imports) => {
-                write!(f, "unsupported WebAssembly imports:")?;
-                for import in imports {
-                    write!(f, " {}::{}", import.module, import.name)?;
-                }
-                Ok(())
             }
             Self::UnsupportedNativeFormat(format) => {
                 write!(
@@ -270,11 +255,9 @@ fails closed"
 impl std::error::Error for TargetError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Parse(error) => Some(error),
             Self::NativeParse(error) => Some(error),
             Self::NativeUnwind(error) => Some(error),
             Self::InvalidNativeCodeRanges(_)
-            | Self::UnsupportedImports(_)
             | Self::UnsupportedNativeFormat(_)
             | Self::RelocatableNativeElf
             | Self::UnauditableNativeElf

@@ -11,21 +11,19 @@ pub(super) const RUN: Verb = Verb {
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
         "cargo patina run [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina run <MODULE.wasm> [--seed N | --record PATH] [--fuel N] [--budget N] [--env K=V]... [--preopen GUEST[:ro|:rw]]... [FAULT OPTIONS] [BUGGIFY/LIVENESS OPTIONS] [-- PROGRAM ARGS]",
         "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
-        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
+        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
 `run` is source-first with artifacts accepted uniformly. A built artifact \
 (recognized by its leading magic bytes) is used as-is; a <SOURCE.rs|DIR|Cargo.toml> \
 is built on the fly through the same pipeline as `build` and its product is run \
 (a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash). A \
-`run` with a directory, a Cargo.toml, or no artifact and no --target stays the \
-Cargo package family (the same seed/record/param/budget machinery as `test`); \
---target opts a source/package into build-then-run.\n\
+`run` with no artifact, or with a directory or Cargo.toml whose package depends on \
+the Patina runtime, stays the Cargo package family (the same \
+seed/record/param/budget machinery as `test`).\n\
 \n\
-`run <MODULE.wasm>` runs under WASI; `run <BINARY>` runs a shim-linked native \
-binary under a pre-run default-deny audit: every externally resolved symbol must \
+`run <BINARY>` runs a shim-linked native binary under a pre-run default-deny audit: every externally resolved symbol must \
 be interposed or known-safe, and any unsupported symbol on the \
 blocking/time/scheduling/effect surface hard-errors. --allow SYMBOL adds a \
 known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matching \
@@ -38,13 +36,12 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
 `cargo patina replay`.",
     families: &[
         fam(Family::Cargo, "`run`", None),
-        fam(Family::Wasi, "`run` of a WASI module", None),
         fam(Family::Native, "`run` of a native binary", None),
     ],
     groups: &[
         Group {
             title: "Patina options (run/test)",
-            families: &[Family::Cargo, Family::Wasi, Family::Native],
+            families: &[Family::Cargo, Family::Native],
             flags: &[
                 f(
                     "--seed",
@@ -74,18 +71,12 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                     "Realtime at monotonic zero, as an RFC 3339 UTC timestamp (default 2026-07-22T23:00:09Z). Guest-start realtime adds the boot origin (default uptime 12345.678901234s); recorded and restored on replay.",
                     false,
                 ),
-                // wasip1 has no hostname surface at all, so the WASI family is
-                // absent and `run <MODULE.wasm> --hostname` is refused rather
-                // than accepted as a knob that could never be observed.
-                only(
-                    f(
-                        "--hostname",
-                        None,
-                        Value::Required("NAME", Kind::Hostname),
-                        "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
-                        false,
-                    ),
-                    &[Family::Cargo, Family::Native],
+                f(
+                    "--hostname",
+                    None,
+                    Value::Required("NAME", Kind::Hostname),
+                    "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
+                    false,
                 ),
                 only(
                     f(
@@ -101,12 +92,12 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         },
         Group {
             title: "Source-first selection (building a source/package on the fly)",
-            families: &[Family::Wasi, Family::Native],
+            families: &[Family::Native],
             flags: SOURCE_SELECT,
         },
         Group {
             title: "Build profile (source-first)",
-            families: &[Family::Wasi, Family::Native],
+            families: &[Family::Native],
             flags: &[f(
                 "--release",
                 None,
@@ -117,13 +108,11 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         },
         Group {
             title: "Fault options (seed-driven, default off)",
-            families: &[Family::Cargo, Family::Wasi, Family::Native],
+            families: &[Family::Cargo, Family::Native],
             flags: FAULT_FLAGS,
         },
         Group {
-            // wasip1 has no resolution surface, so the WASI family is absent
-            // here and `run <MODULE.wasm> --dns-entry` is refused.
-            title: "DNS options (no wasip1 resolution surface, so not under --target wasi)",
+            title: "DNS options",
             families: &[Family::Cargo, Family::Native],
             flags: DNS_FLAGS,
         },
@@ -191,7 +180,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
         },
         Group {
             title: "Buggify options",
-            families: &[Family::Cargo, Family::Wasi, Family::Native],
+            families: &[Family::Cargo, Family::Native],
             flags: BUGGIFY_FLAGS,
         },
         Group {
@@ -200,14 +189,9 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             flags: &[COMPUTE_WATCHDOG_FLAG],
         },
         Group {
-            title: "Liveness options (run <MODULE.wasm> & run <BINARY>)",
-            families: &[Family::Wasi, Family::Native],
+            title: "Liveness options (run <BINARY>)",
+            families: &[Family::Native],
             flags: LIVENESS_FLAGS_OPTIONAL,
-        },
-        Group {
-            title: "WASI run options (run <MODULE.wasm>)",
-            families: &[Family::Wasi],
-            flags: WASI_HOST_FLAGS,
         },
     ],
     refusals: NO_REFUSALS,
@@ -425,15 +409,14 @@ child's readable-trace receipt.",
 
 pub(super) const BUILD: Verb = Verb {
     name: "build",
-    summary: "Build the native linked-shim target (default) or a wasm32-wasip1 package.",
+    summary: "Build a guest linked against the native shim.",
     synopsis: &[
         "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--yield-points | --coverage-points[=STRIDE]] [-- RUSTC OPTIONS]",
         "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--yield-points | --coverage-points[=STRIDE]]",
-        "cargo patina build <DIR|Cargo.toml> --target wasi [--output PATH] [--package NAME] [--bin NAME] [--release]",
         "cargo patina build <GO PACKAGE DIR> --go --output <PATH> [--release] [-- GO BUILD OPTIONS]",
     ],
     prose: "\
-`build` (default --target native) packages the native linked-shim target: it \
+`build` packages the native linked-shim target: it \
 builds the patina-dst-native-shim staticlib, compiles the embedded POSIX C layer, \
 injects cfg(patina)/cfg(dst), and links the shim below the user program. A `.rs` \
 path builds a single source directly; a directory or Cargo.toml drives the \
@@ -454,29 +437,17 @@ The stride is compiled into the binary and recovered from it at run time, so it 
 is part of the compatibility fingerprint (`+covpoints:N`) and a trace never \
 cross-replays against a different stride or against --yield-points. The sampling \
 countdown is per-thread, so the sampled sites are a pure function of the seed. \
-The two flags are mutually exclusive. Both are native-only and rejected under \
---target wasi (wasip1 has no threads to preempt). `build --target wasi` compiles a \
-Cargo package for wasm32-wasip1 and is package-only (a single .rs source is \
-native-only).\n\
+The two flags are mutually exclusive.\n\
 \n\
 `--go` builds the Go main package in DIR (Linux): `go build` in cgo mode, linked \
 externally with the shim, so goroutine threads start through the shim's \
 pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
 and -o; other `go build` options follow `--`. `--release` builds the shim in \
 release mode; the yield/coverage instrumentation is Rust-only.",
-    families: &[
-        fam(Family::Native, "`build`", None),
-        fam(
-            Family::Wasi,
-            "`build --target wasi`",
-            Some(
-                "wasip1 has no threads to preempt and takes its edition from the package's Cargo.toml",
-            ),
-        ),
-    ],
+    families: &[fam(Family::Sole, "`build`", None)],
     groups: &[Group {
         title: "Build options",
-        families: &[Family::Native, Family::Wasi],
+        families: SOLE,
         flags: &[
             f(
                 "--output",
@@ -485,15 +456,12 @@ release mode; the yield/coverage instrumentation is Rust-only.",
                 "Copy the built binary out to PATH (required for a single .rs source).",
                 false,
             ),
-            only(
-                f(
-                    "--edition",
-                    None,
-                    Value::Required("YEAR", Kind::Str),
-                    "Rust edition for a single-source build (default 2024).",
-                    false,
-                ),
-                &[Family::Native],
+            f(
+                "--edition",
+                None,
+                Value::Required("YEAR", Kind::Str),
+                "Rust edition for a single-source build (default 2024).",
+                false,
             ),
             f(
                 "--release",
@@ -502,25 +470,19 @@ release mode; the yield/coverage instrumentation is Rust-only.",
                 "Build in release mode.",
                 false,
             ),
-            only(
-                f(
-                    "--yield-points",
-                    None,
-                    Value::None,
-                    "Instrument deterministic cooperative preemption (native only).",
-                    false,
-                ),
-                &[Family::Native],
+            f(
+                "--yield-points",
+                None,
+                Value::None,
+                "Instrument deterministic cooperative preemption.",
+                false,
             ),
-            only(
-                f(
-                    "--coverage-points",
-                    None,
-                    Value::Optional("STRIDE", Kind::PositiveU64),
-                    "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
-                    false,
-                ),
-                &[Family::Native],
+            f(
+                "--coverage-points",
+                None,
+                Value::Optional("STRIDE", Kind::PositiveU64),
+                "Edge counters at every basic block; bare = no added scheduling points, =N = one every N blocks. Excludes --yield-points.",
+                false,
             ),
             f(
                 "--package",
@@ -536,17 +498,13 @@ release mode; the yield/coverage instrumentation is Rust-only.",
                 "Select the binary when the package defines more than one.",
                 false,
             ),
-            only(
-                f(
-                    "--go",
-                    None,
-                    Value::None,
-                    "Build the path as a Go main package, cgo mode, externally linked with the shim (Linux).",
-                    false,
-                ),
-                &[Family::Native],
+            f(
+                "--go",
+                None,
+                Value::None,
+                "Build the path as a Go main package, cgo mode, externally linked with the shim (Linux).",
+                false,
             ),
-            TARGET_FLAG,
         ],
     }],
     refusals: NO_REFUSALS,
@@ -556,7 +514,7 @@ pub(super) const AUDIT: Verb = Verb {
     name: "audit",
     summary: "Report the true post-interposition residual effect surface of a binary.",
     synopsis: &[
-        "cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--target native|wasi] [--allow SYMBOL]...   (builds shim-linked, then audits)",
+        "cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--allow SYMBOL]...   (builds shim-linked, then audits)",
         "cargo patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `cargo patina build`-linked unless --raw)",
     ],
     prose: "\
@@ -566,27 +524,14 @@ the report is the handful of effect-surface symbols that genuinely escape. A sto
 `cargo build` binary lists every libc call the shim would interpose as an \
 unsupported import — the opposite of the truth — so `audit <prebuilt>` fails closed \
 unless the binary was produced by `cargo patina build`. `--raw` overrides that gate \
-and runs the full audit anyway under a loud banner. A WASI module lists its imports \
-and takes no --allow (the allow list is native-only).",
-    families: &[
-        fam(Family::Native, "`audit` of a native binary", None),
-        fam(
-            Family::Wasi,
-            "`audit` of a WASI module",
-            Some(
-                "a module's imports are read from the module itself; the allow list is native-only",
-            ),
-        ),
-    ],
+and runs the full audit anyway under a loud banner.",
+    families: &[fam(Family::Sole, "`audit`", None)],
     groups: &[
         Group {
             title: "Audit options",
-            families: &[Family::Native],
+            families: SOLE,
             flags: &[
-                Flag {
-                    doc: "Treat SYMBOL as known-safe (native only).",
-                    ..ALLOW_FLAG
-                },
+                ALLOW_FLAG,
                 f(
                     "--raw",
                     None,
@@ -598,7 +543,7 @@ and takes no --allow (the allow list is native-only).",
         },
         Group {
             title: "Source-first selection",
-            families: &[Family::Native, Family::Wasi],
+            families: SOLE,
             flags: SOURCE_SELECT,
         },
     ],
@@ -608,29 +553,25 @@ and takes no --allow (the allow list is native-only).",
 pub(super) const REPLAY: Verb = Verb {
     name: "replay",
     summary: "Reproduce a recorded run; routes by the same inference as `run`.",
-    synopsis: &[
-        "cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [--target native|wasi] [REPLAY OPTIONS]",
-    ],
+    synopsis: &["cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [REPLAY OPTIONS]"],
     prose: "\
-`replay <ARTIFACT|SOURCE|PKG> <TRACE>` is the sole replay entry point for all three \
-families: a wasm module replays under WASI, a native binary under the native \
-supervisor, and a directory/Cargo.toml (no --target) under the Cargo package \
-family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
+`replay <ARTIFACT|SOURCE|PKG> <TRACE>` is the sole replay entry point for both \
+families: a native binary (or a source/package built on the fly) replays under the \
+native supervisor, and a directory/Cargo.toml whose package depends on the Patina \
+runtime under the Cargo package family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
 realtime epoch, boot origin, hostname, native CPU count, guest argv, and native `--env` values) from the trace — the trace is authoritative \
 — so replay exposes no semantic flags; any re-supplied value must match the \
 recording or the replay is refused.\n\
 \n\
-Only host/build inputs the trace cannot carry stay as flags. The Cargo and WASI \
-families carry the timeline/branch controls (--timeline, and --branch --from \
---branch-seed --branch-id [--parent]); WASI re-takes its host environment \
-(--fuel/--env/--socket/--preopen and resource limits). Native traces restore \
+Only host/build inputs the trace cannot carry stay as flags. The Cargo family \
+carries the timeline/branch controls (--timeline, and --branch --from \
+--branch-seed --branch-id [--parent]). Native traces restore \
 `run --env` values from metadata and reject re-supplied native `--env`; native \
 traces are single-timeline (native runs cannot branch), so native replay accepts \
 only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, the \
 --allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
     families: &[
         fam(Family::Cargo, "`replay` of a Cargo package", None),
-        fam(Family::Wasi, "`replay` of a WASI module", None),
         fam(Family::Native, "`replay` of a native binary", None),
     ],
     groups: &[
@@ -677,19 +618,9 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, t
             ],
         },
         Group {
-            title: "Timeline/branch replay (Cargo package & WASI families)",
-            families: &[Family::Cargo, Family::Wasi],
+            title: "Timeline/branch replay (Cargo package family)",
+            families: &[Family::Cargo],
             flags: REPLAY_TIMELINE_FLAGS,
-        },
-        Group {
-            title: "WASI host environment (re-supplied and fingerprint-checked)",
-            families: &[Family::Wasi],
-            flags: WASI_HOST_FLAGS,
-        },
-        Group {
-            title: "Family selection",
-            families: &[Family::Wasi, Family::Native],
-            flags: &[TARGET_FLAG],
         },
     ],
     refusals: &[
@@ -698,7 +629,7 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, t
         // to the shared slices: a knob added to FAULT_FLAGS or BUGGIFY_FLAGS is
         // refused here the day it is added, with no second list to remember.
         Refusal {
-            families: &[Family::Cargo, Family::Wasi, Family::Native],
+            families: &[Family::Cargo, Family::Native],
             flags: &[FAULT_FLAGS, DNS_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
             names: &[
                 "--seed",
@@ -715,7 +646,7 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, t
             families: &[Family::Native],
             flags: &[REPLAY_TIMELINE_FLAGS],
             names: &[],
-            message: "{flag} is not supported for native replay: native traces are single-timeline and native runs cannot branch; branch/timeline replay is the Cargo package and WASI families",
+            message: "{flag} is not supported for native replay: native traces are single-timeline and native runs cannot branch; branch/timeline replay is the Cargo package family's",
         },
     ],
 };

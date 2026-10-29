@@ -13,7 +13,6 @@ fn offline_campaign_coverage_rejects_wrong_binary_hash() {
     data.artifact = Some(CoverageArtifact {
         path: "recorded-bin".into(),
         sha256: sha256_hex(b"expected binary"),
-        family: "native".into(),
     });
 
     validate_coverage_binary(&good, &data).unwrap();

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// request. Linux's CRNG starts uninitialized at boot. `getrandom(2)` then waits
 /// for it, or answers `EAGAIN` under `GRND_NONBLOCK`, or reads regardless under
 /// `GRND_INSECURE` (6.8 `drivers/char/random.c`, `SYSCALL_DEFINE3(getrandom)`).
-/// Once initialized it stays initialized. Darwin and WASI hosts seed their pool
+/// Once initialized it stays initialized. Darwin hosts seed their pool
 /// before any process runs and offer no call that reports an unready pool.
 ///
 /// Every caller of `Context::entropy_bytes` names its entry point's behavior
@@ -27,7 +27,7 @@ pub enum EntropyWait {
     /// call it with flags 0 and retry `EINTR` (glibc 2.39 `sysdeps/unix/sysv/linux/getentropy.c`,
     /// `stdlib/arc4random.c`). It also covers every entry point of a platform
     /// whose pool is ready before the guest runs: Darwin's `getentropy` and
-    /// `CCRandomGenerateBytes`, and WASI `random_get`.
+    /// and `CCRandomGenerateBytes`.
     UntilReady,
     /// Fails with `EAGAIN` while the pool is not initialized: `getrandom` with
     /// `GRND_NONBLOCK` and without `GRND_INSECURE`. The only request the

@@ -1,6 +1,6 @@
 //! Campaign state persistence, artifact identity, and out-dir locking.
 
-use super::observe::{DepthState, EdgeCoverageState};
+use super::observe::EdgeCoverageState;
 use super::spec::classify_rules_to_json;
 use super::verify::{CleanReruns, Verification};
 use super::{
@@ -235,7 +235,6 @@ impl GenerationOutcome {
 pub(super) struct ArtifactIdentity {
     pub(super) path: String,
     pub(super) sha256: String,
-    pub(super) family: &'static str,
 }
 
 impl ArtifactIdentity {
@@ -243,7 +242,6 @@ impl ArtifactIdentity {
         serde_json::json!({
             "path": self.path.clone(),
             "sha256": self.sha256.clone(),
-            "family": self.family,
         })
     }
 
@@ -251,13 +249,9 @@ impl ArtifactIdentity {
         let object = value
             .as_object()
             .ok_or_else(|| "artifact identity must be an object".to_string())?;
-        let family_text = json_required_str(object, "family")?;
-        let family = parse_artifact_family(family_text)
-            .ok_or_else(|| format!("unknown artifact family {family_text:?}"))?;
         let identity = ArtifactIdentity {
             path: json_required_str(object, "path")?.to_string(),
             sha256: json_required_str(object, "sha256")?.to_string(),
-            family,
         };
         if identity.to_json() != *value {
             return Err("artifact identity is not in canonical lossless form".to_string());
@@ -768,29 +762,12 @@ pub(super) fn class_counts_failures(class_counts: &BTreeMap<String, u64>) -> u64
         .sum()
 }
 
-fn parse_artifact_family(value: &str) -> Option<&'static str> {
-    match value {
-        "native" => Some("native"),
-        "wasi" => Some("wasi"),
-        _ => None,
-    }
-}
-
-fn artifact_family_from_bytes(bytes: &[u8]) -> &'static str {
-    if bytes.starts_with(b"\0asm") {
-        "wasi"
-    } else {
-        "native"
-    }
-}
-
 pub(super) fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, CliError> {
     let bytes = fs::read(path)
         .map_err(|e| CliError(format!("failed to read artifact {}: {e}", path.display())))?;
     Ok(ArtifactIdentity {
         path: path.display().to_string(),
         sha256: sha256_hex(&bytes),
-        family: artifact_family_from_bytes(&bytes),
     })
 }
 
@@ -831,12 +808,6 @@ fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError>
             recorded.sha256, recorded.path, current.sha256
         )));
     }
-    if current.family != recorded.family {
-        return Err(CliError(format!(
-            "campaign out-dir records artifact family {} but {} is now {}; start a new out-dir for the new build",
-            recorded.family, recorded.path, current.family
-        )));
-    }
     Ok(())
 }
 
@@ -857,7 +828,6 @@ pub(super) fn write_campaign_checkpoint(
     state: &CampaignState,
     coverage: &CoverageTally,
     edge_coverage: &EdgeCoverageState,
-    depth: &DepthState,
 ) -> Result<(), CliError> {
     // The state cursor is the checkpoint readers poll. Write the derived stores
     // first, then the state file, so an observed advanced cursor has matching
@@ -865,9 +835,6 @@ pub(super) fn write_campaign_checkpoint(
     // the cursor on purpose: if a crash tears here, generations_applied may be
     // one ahead and resume will re-run then watermark-skip that generation.
     if let Some(store) = edge_coverage.active() {
-        store.write_checkpoint()?;
-    }
-    if let Some(store) = depth.active() {
         store.write_checkpoint()?;
     }
     write_sites_store(sites_path, coverage)?;
@@ -1167,7 +1134,6 @@ mod tests {
             ArtifactIdentity {
                 path: "guest".to_string(),
                 sha256: "abc".to_string(),
-                family: "native",
             },
             CampaignSpec {
                 generations: 3,

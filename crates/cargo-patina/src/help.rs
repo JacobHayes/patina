@@ -44,8 +44,6 @@ use flags::LIVENESS_FLAGS_OPTIONAL;
 use flags::NATIVE_SCHEDULE_FLAGS;
 use flags::REPLAY_TIMELINE_FLAGS;
 use flags::SOURCE_SELECT;
-use flags::TARGET_FLAG;
-use flags::WASI_HOST_FLAGS;
 use flags::{
     ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG, HARNESS_FLAG,
 };
@@ -71,8 +69,6 @@ use workflows::TRACE;
 pub enum Kind {
     /// An unsigned 64-bit integer (`parse_u64`), no further bound.
     U64,
-    /// An unsigned 32-bit integer (`parse_u32`).
-    U32,
     /// A non-negative machine integer (`parse_usize`).
     Usize,
     /// An unsigned integer required to be `>= 1` (a positive count).
@@ -111,10 +107,6 @@ pub enum Kind {
     /// one address twice, or carrying a third, is a typo worth refusing at parse
     /// time rather than at the end-of-run vacuity report.
     AddressPair,
-    /// A datagram socket `FD=BIND->PEER` (FD a u32 above 3, non-empty addresses).
-    Socket,
-    /// A preopen `GUEST[:ro|:rw]` with a non-empty guest path.
-    Preopen,
     /// `all`, or a comma-separated list of at least one non-empty symbol.
     UnsupportedSymbols,
     /// One of a fixed set of string literals.
@@ -134,7 +126,6 @@ impl Kind {
     fn tag(self) -> &'static str {
         match self {
             Kind::U64 => "u64",
-            Kind::U32 => "u32",
             Kind::Usize => "usize",
             Kind::PositiveU64 => "positive-u64",
             Kind::WatchdogMillis => "watchdog-millis",
@@ -150,8 +141,6 @@ impl Kind {
             Kind::Cpus => "cpus",
             Kind::DnsEntry => "dns-entry",
             Kind::AddressPair => "address-pair",
-            Kind::Socket => "socket",
-            Kind::Preopen => "preopen",
             Kind::UnsupportedSymbols => "unsupported-symbols",
             Kind::Enum(_) => "enum",
             Kind::EnumList(_) => "enum-list",
@@ -259,8 +248,8 @@ const fn only(flag: Flag, families: &'static [Family]) -> Flag {
 
 /// A parsing family within a verb: one verb and one positional shape, but
 /// several disjoint flag sets, chosen at routing time from an artifact's magic
-/// bytes, a subcommand token, or a mode switch. Families are why `--fuel` is
-/// valid on `run <MODULE.wasm>` and invalid on `run <BINARY>`.
+/// bytes, a subcommand token, or a mode switch. Families are why `--param` is
+/// valid on the Cargo package `run` and invalid on `run <BINARY>`.
 ///
 /// The registry is the single declaration of that mapping. It builds each
 /// family's parser, decides which flags a family refuses and in what words, and
@@ -274,8 +263,6 @@ pub enum Family {
     /// The Cargo package family: an in-process `cargo run`/`cargo test` that
     /// forwards every unrecognized option to Cargo verbatim.
     Cargo,
-    /// A `wasm32-wasip1` module under the WASI host.
-    Wasi,
     /// A shim-linked native binary under the native supervisor.
     Native,
     /// `test <DIR|Cargo.toml>`: native libtest harness mode.
@@ -301,7 +288,6 @@ impl Family {
         match self {
             Family::Sole => "sole",
             Family::Cargo => "cargo",
-            Family::Wasi => "wasi",
             Family::Native => "native",
             Family::Harness => "harness",
             Family::Scenario => "scenario",

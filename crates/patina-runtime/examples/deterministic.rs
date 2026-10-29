@@ -5,7 +5,7 @@
 //! `patina_dst_runtime::run` builds a context with deterministic default drivers
 //! from `PATINA_*` and finalizes it after the closure returns. It does NOT make
 //! unrelated `std::fs`/`std::net`/clock calls deterministic — that is the job of
-//! the native shim / WASI host under `cargo patina build`/`run`, or of the
+//! the native shim under `cargo patina build`/`run`, or of the
 //! shim-backed `patina-dst-harness` crate.
 //!
 //! [`Context`]: patina_dst_runtime::Context

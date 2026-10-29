@@ -56,12 +56,6 @@ pub(crate) fn knobs_of(args: &cli::Args) -> Result<KnobValues, CliError> {
     let mut values = BTreeMap::new();
     for knob in FaultKnob::ALL {
         let meta = knob.meta();
-        // A knob the registry does not give this family is absent, not an error
-        // to read: the DNS knobs are a declared WASI exception, and the exception
-        // lives in the registry rather than being restated here.
-        if !args.registered(meta.flag) {
-            continue;
-        }
         let texts: Vec<String> = match meta.plumbing {
             Plumbing::Scalar => args.string(meta.flag).into_iter().collect(),
             Plumbing::Repeatable(_) => args
@@ -83,10 +77,9 @@ pub(crate) fn knobs_of(args: &cli::Args) -> Result<KnobValues, CliError> {
 
 /// The `PATINA_*` control-plane pairs carrying this invocation's knobs to the
 /// guest, in [`FaultKnob::ALL`] order, unset knobs omitted so a run that
-/// configured none sets nothing. Used by the WASI in-process runtime (via
-/// [`RuntimeConfig::apply_fault_env`]) and by the native and cargo subprocesses
-/// (as real environment variables), so every family applies the identical
-/// protocol the native shim reads.
+/// configured none sets nothing. The native and cargo subprocesses receive them
+/// as real environment variables, so both families apply the identical protocol
+/// the native shim reads.
 pub(crate) fn knob_env_pairs(knobs: &KnobValues) -> Result<Vec<(&'static str, String)>, CliError> {
     let mut pairs = Vec::new();
     for knob in FaultKnob::ALL {
@@ -248,125 +241,6 @@ pub(super) fn key_values(
     Ok(map)
 }
 
-/// Split off a trailing `-- ARGS` section: everything after the first `--` is
-/// the guest's argument vector, in every family.
-pub(super) fn split_trailing_args(arguments: &mut Vec<OsString>) -> Vec<OsString> {
-    match arguments.iter().position(|argument| argument == "--") {
-        Some(index) => {
-            let trailing = arguments.split_off(index + 1);
-            arguments.pop();
-            trailing
-        }
-        None => Vec::new(),
-    }
-}
-
-/// The host-supplied inputs a WASI run/replay shares. `guest_args` is the
-/// trailing `-- ARGS` section; WASI argv entries are strings, so a non-UTF-8
-/// one is refused.
-pub(super) fn wasi_host_inputs_of(
-    args: &cli::Args,
-    guest_args: Vec<OsString>,
-) -> Result<WasiHostInputs, CliError> {
-    let arguments = guest_args
-        .into_iter()
-        .map(|argument| {
-            argument.into_string().map_err(|argument| {
-                CliError::usage(format!("WASI guest arguments must be UTF-8: {argument:?}"))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let fuel = args.u64("--fuel");
-    let mut sockets = Vec::new();
-    let mut socket_fds = BTreeSet::new();
-    for entry in args.texts("--socket") {
-        let (fd, bind, peer) =
-            values::socket("--socket", entry).expect("validated by the registry grammar");
-        if !socket_fds.insert(fd) {
-            return Err(CliError::usage(
-                "--socket requires a unique FD above 3 and non-empty addresses",
-            ));
-        }
-        sockets.push(WasiSocketConfig {
-            fd,
-            bind: bind.to_string(),
-            peer: peer.to_string(),
-        });
-    }
-    let preopens = args
-        .texts("--preopen")
-        .into_iter()
-        .map(|entry| {
-            let (guest_path, read_only) =
-                values::preopen("--preopen", entry).expect("validated by the registry grammar");
-            WasiPreopenConfig {
-                guest_path: normalize_cli_preopen_path(guest_path),
-                policy: if read_only {
-                    MountPolicy::ReadOnly
-                } else {
-                    MountPolicy::ReadWrite
-                },
-            }
-        })
-        .collect();
-    Ok(WasiHostInputs {
-        fuel,
-        arguments,
-        environment: key_values(args, "--env")?,
-        sockets,
-        preopens,
-        resource_limits: WasiResourceLimitOverrides {
-            fuel,
-            max_memory_pages: args.u32("--max-memory-pages"),
-            max_iovecs: args.usize("--max-iovecs"),
-            max_io_bytes: args.usize("--max-io-bytes"),
-            max_descriptors: args.usize("--max-descriptors"),
-            max_preopens: args.usize("--max-preopens"),
-            max_path_bytes: args.usize("--max-path-bytes"),
-        },
-    })
-}
-
-/// The timeline/branch selection shared by the Cargo package and WASI replay
-/// families, which are the two that support branch-append.
-pub(super) fn replay_mode(args: &cli::Args, path: PathBuf) -> Result<Mode, CliError> {
-    let timeline = args.string("--timeline");
-    let from_sequence = args.u64("--from");
-    let branch_seed = args.u64("--branch-seed");
-    let branch_id = args.string("--branch-id");
-    let parent = args.string("--parent");
-    if !args.flag("--branch") {
-        if from_sequence.is_some()
-            || branch_seed.is_some()
-            || branch_id.is_some()
-            || parent.is_some()
-        {
-            return Err(CliError::usage(
-                "--from/--branch-seed/--branch-id/--parent require --branch",
-            ));
-        }
-        return Ok(Mode::Replay {
-            path,
-            timeline: timeline.unwrap_or_else(|| "main".into()),
-        });
-    }
-    if timeline.is_some() {
-        return Err(CliError::usage(
-            "--timeline selects a timeline to replay and is not valid with --branch",
-        ));
-    }
-    Ok(Mode::Branch {
-        path,
-        parent: parent.unwrap_or_else(|| "main".into()),
-        from_sequence: from_sequence
-            .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
-        branch_seed: branch_seed
-            .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
-        branch_id: branch_id
-            .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
-    })
-}
-
 /// The `--timeline` selector, defaulting to `main`.
 pub(super) fn timeline_or_main(args: &cli::Args) -> String {
     args.string("--timeline")
@@ -382,9 +256,8 @@ pub(crate) const BUGGIFY_ENV_VARS: &[&str] = &[
     ENV_BUGGIFY_AFTER_SETUP,
 ];
 
-/// The cooperative-SUT (buggify) control-plane pairs for the in-process WASI
-/// runtime, mirroring the env vars the native family forwards to its subprocess.
-/// Presence of `PATINA_BUGGIFY` (its value, possibly empty, being the firing
+/// The cooperative-SUT (buggify) control-plane pairs the native and cargo
+/// families forward to their subprocess. Presence of `PATINA_BUGGIFY` (its value, possibly empty, being the firing
 /// per-mille) enables buggify; the optional knobs follow.
 pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, String)> {
     let mut pairs = vec![(
@@ -406,9 +279,8 @@ pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, S
 /// The exploration scheduling-policy and swarm control-plane pairs. Presence of
 /// `PATINA_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
 /// depth); `PATINA_SCHED_STARVE` enables starvation; `PATINA_SWARM` enables
-/// swarm fault-class selection. Mirrors [`knob_env_pairs`] so the native family
-/// forwards them to the subprocess and the WASI/Cargo families to the in-process
-/// runtime through the same protocol.
+/// swarm fault-class selection. Mirrors [`knob_env_pairs`]: the native family
+/// forwards them to its subprocess through the same protocol.
 pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> {
     let mut pairs = Vec::new();
     if let Some(depth) = &schedule.pct {
@@ -432,9 +304,9 @@ pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str
     pairs
 }
 
-/// The liveness-watchdog control-plane pairs, mirroring [`schedule_env_pairs`] so
-/// the native family forwards them to the subprocess and the WASI/Cargo families
-/// to the in-process runtime through the same `apply_liveness_env` protocol.
+/// The liveness-watchdog control-plane pairs, mirroring [`schedule_env_pairs`]:
+/// the native family forwards them to its subprocess, which applies them through
+/// `apply_liveness_env`.
 pub(crate) fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> {
     let mut pairs = Vec::new();
     if let Some(bound) = &liveness.compute_watchdog_ms {
@@ -450,23 +322,4 @@ pub(crate) fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str
         }
     }
     pairs
-}
-
-fn normalize_cli_preopen_path(path: &str) -> String {
-    if !path.starts_with('/') || path.contains('\0') {
-        return path.to_owned();
-    }
-    let mut components = Vec::new();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => return path.to_owned(),
-            component => components.push(component),
-        }
-    }
-    if components.is_empty() {
-        "/".to_owned()
-    } else {
-        format!("/{}", components.join("/"))
-    }
 }

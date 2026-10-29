@@ -203,7 +203,7 @@ pub struct RuntimeConfig {
     /// reaches no recorded byte, is never fingerprinted, and is never reconciled
     /// on replay.
     pub(super) facts_path: Option<std::path::PathBuf>,
-    /// Which boot of a native crash-restart run this is. Direct/cargo/WASI
+    /// Which boot of a native crash-restart run this is. Direct and cargo
     /// contexts are always the first.
     pub(super) incarnation: Incarnation,
     pub(super) require_crash_selector_reached: bool,

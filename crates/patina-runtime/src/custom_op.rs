@@ -114,9 +114,8 @@ answered from the recording. Underlying trace error: {error}"
 
 impl Context {
     /// Announce a custom operation and learn whether to run it — the opening
-    /// half of the custom-op ABI (`patina_custom_op_begin` natively, the
-    /// `patina_sdk` `custom_op_begin` import on WASI, this method directly for an
-    /// in-process cargo-family guest).
+    /// half of the custom-op ABI (`patina_custom_op_begin` natively, this
+    /// method directly for an in-process cargo-family guest).
     ///
     /// `label` names the operation class and `key` is its logical input; both are
     /// recorded, so a replay asserts the guest asked the *same* question of the

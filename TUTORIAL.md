@@ -316,14 +316,11 @@ PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
 PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 latency_applied=1 vacuous=0
 ```
 
-Two things worth knowing beyond this example. On the producer side, a server that
+One thing worth knowing beyond this example. On the producer side, a server that
 binds `0.0.0.0:PORT` receives traffic addressed to any address on that port, so
 ordinary `INADDR_ANY` server code is reachable by a resolved name with no
 service-side registration — and a harness can name its own services with
-`HarnessBuilder::dns_service`, which allocates the virtual address for you. And
-the `--dns-*` flags are a documented family exception: wasip1 has no
-name-resolution surface at all, so `--target wasi` refuses them rather than
-accepting a knob that could never fire.
+`HarnessBuilder::dns_service`, which allocates the virtual address for you.
 
 ## 10. Machine-readable output for agents
 
@@ -356,13 +353,14 @@ reported none.
   `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
   shape as the DNS knobs in section 9. They are seed-driven and default off. All
   are recorded for flag-free replay. Crash restart (`--fs-crash-at`) is
-  native-only: Cargo/WASI refuse it, and campaigns draw it only from a spec's `fs_crash_reach`.
+  native-only: the Cargo family refuses it, and campaigns draw it only from a spec's
+  `fs_crash_reach`.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical
   workload per generation should derive its workload parameters from the
   deterministic entropy stream (seed an application RNG from bytes the runtime
-  provides — e.g. `rand` under native, `random_get` under WASI) instead of argv.
+  provides, e.g. `rand`) instead of argv.
   That way every generation is still reproducible from its patina seed alone,
   and replay needs no extra flags.
 - Make atomics-only race windows schedulable: `cargo patina build --yield-points`

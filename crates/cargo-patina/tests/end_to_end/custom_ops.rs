@@ -1,4 +1,4 @@
-//! Native and WASI custom operations, replay, faults, and campaign discovery.
+//! Native custom operations, replay, faults, and campaign discovery.
 
 use super::*;
 
@@ -111,69 +111,6 @@ fn main() {
     }
 }
 "#;
-
-// The WASI half: the three `patina_sdk` custom-op imports are backed by the same
-// runtime entries, so a wasip1 guest records and replays identically to native.
-// The module exits 10 on the record pass and 20+len+100 on the replay pass, so
-// the exit code alone proves which path ran and that the recorded bytes actually
-// landed in guest memory.
-const WASI_CUSTOM_OP_MODULE: &str = r#"(module
-    (import "patina_sdk" "custom_op_begin"
-        (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
-    (import "patina_sdk" "custom_op_replay_result"
-        (func $fetch (param i32 i32) (result i32)))
-    (import "patina_sdk" "custom_op_record"
-        (func $record (param i32 i32) (result i32)))
-    (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-    (memory (export "memory") 1)
-    (data (i32.const 0) "s3.get_object")
-    (data (i32.const 32) "bucket/key")
-    (data (i32.const 64) "etag-7")
-    (func (export "_start")
-        (local $mode i32)
-        (local $len i32)
-        ;; the 5th argument is the fault-eligibility declaration: 0 = this call
-        ;; declares no failure shape, so --custom-op-fail-permille passes it by.
-        (local.set $mode (call $begin
-            (i32.const 0) (i32.const 13) (i32.const 32) (i32.const 10)
-            (i32.const 0) (i32.const 96)))
-        (if (i32.eqz (local.get $mode))
-            (then
-                (drop (call $record (i32.const 64) (i32.const 6)))
-                (call $proc_exit (i32.const 10)))
-            (else
-                (local.set $len (call $fetch (i32.const 128) (i32.const 64)))
-                ;; the fetched length must match what begin reported at *96
-                (if (i32.ne (local.get $len) (i32.load (i32.const 96)))
-                    (then (call $proc_exit (i32.const 99))))
-                ;; ... and the bytes must really be in guest memory ('e' = 101)
-                (if (i32.ne (i32.load8_u (i32.const 128)) (i32.const 101))
-                    (then (call $proc_exit (i32.const 98))))
-                (call $proc_exit (i32.add (i32.const 120) (local.get $len)))))))"#;
-
-// The wasip1 half of the fault knob: `custom_op_begin`'s eligibility argument
-// and its third answer (2 = the declared failure) are wasm imports like any
-// other, so the seeded knob reaches a WASI guest identically. The module exits
-// 30 + mode, so the exit code alone says which branch the host chose.
-const WASI_CUSTOM_OP_FAULT_MODULE: &str = r#"(module
-    (import "patina_sdk" "custom_op_begin"
-        (func $begin (param i32 i32 i32 i32 i32 i32) (result i32)))
-    (import "patina_sdk" "custom_op_record"
-        (func $record (param i32 i32) (result i32)))
-    (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-    (memory (export "memory") 1)
-    (data (i32.const 0) "s3.get_object")
-    (data (i32.const 64) "etag-7")
-    (func (export "_start")
-        (local $mode i32)
-        ;; fault_eligible = 1: this call declares a failure shape.
-        (local.set $mode (call $begin
-            (i32.const 0) (i32.const 13) (i32.const 0) (i32.const 0)
-            (i32.const 1) (i32.const 96)))
-        ;; A record pass must still be closed out; a faulted one is already closed.
-        (if (i32.eqz (local.get $mode))
-            (then (drop (call $record (i32.const 64) (i32.const 6)))))
-        (call $proc_exit (i32.add (i32.const 30) (local.get $mode)))))"#;
 
 #[cfg(test)]
 #[path = "custom_ops/tests.rs"]

@@ -333,7 +333,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         assert_eq!(stdout_line_with(&implicit, "SF_MARKER"), recorded_line);
         let note = stdout_line_with(&implicit, "PATINA_BUILD_ON_RUN");
         assert!(
-            note.contains("target=native") && note.contains("sha256="),
+            note.contains("sha256="),
             "missing build-on-the-fly identity note:\n{}",
             String::from_utf8_lossy(&implicit.stdout)
         );

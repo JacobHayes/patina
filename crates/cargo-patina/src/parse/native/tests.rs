@@ -37,24 +37,8 @@ fn native_run_buggify_value_form_enables_and_carries_permille() {
 }
 
 #[test]
-fn parses_build_wasi_target_and_native_audit() {
-    // `build --target wasi <package>` resolves a manifest-scoped package
-    // build; a `.rs` source, `--yield-points`, and an unknown target rejected.
-    match parse_build(strings(&["pkg", "--target", "wasi", "--release"])).unwrap() {
-        ParseResult::WasiBuild(invocation) => {
-            assert_eq!(invocation.manifest, PathBuf::from("pkg/Cargo.toml"));
-            assert!(invocation.release);
-            assert_eq!(invocation.package, None);
-            assert_eq!(invocation.bin, None);
-            assert_eq!(invocation.output, None);
-        }
-        _ => panic!("expected a WASI build"),
-    }
-    assert!(parse_build(strings(&["probe.rs", "--target", "wasi"])).is_err());
-    assert!(parse_build(strings(&["pkg", "--target", "wasi", "--yield-points"])).is_err());
-    assert!(parse_build(strings(&["pkg", "--target", "riscv"])).is_err());
-
-    // Native audit parsing (routing to it by artifact magic is covered by e2e).
+fn parses_native_audit() {
+    // Audit parsing (routing to it by artifact magic is covered by e2e).
     let audit = parse_native_audit(strings(&[
         "probe",
         "--allow",

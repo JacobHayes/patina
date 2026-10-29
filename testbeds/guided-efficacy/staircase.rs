@@ -2,8 +2,8 @@
 //
 // Three gates, each keyed to a DIFFERENT byte of the generation-derivation hash
 // (fs-error permille, fs-short permille, sleep-jitter ceiling), arranged as a
-// staircase: each stage a guided campaign reaches opens a hostcall kind it has
-// never seen, which is exactly the novelty signal `--guided` steers by. Partial
+// staircase: each stage a guided campaign reaches opens edges it has never
+// covered, which is exactly the novelty signal `--guided` steers by. Partial
 // progress is therefore inheritable — a child that keeps its ancestor's
 // fs-error byte and re-rolls the rest starts one step up the stair — which is
 // the property mutation-based search exploits and uniform sampling cannot.
@@ -64,8 +64,8 @@ fn max_sleep_jitter() -> u128 {
     worst
 }
 
-// Each stage reaches for a hostcall kind no other path uses, so reaching it is a
-// depth-novelty event the campaign records in its novelty log.
+// Each stage reaches for an operation no other path uses, so reaching it opens
+// edges the campaign records in its novelty log.
 fn stage_one() {
     let _ = std::fs::create_dir("/stage-one");
     println!("STAGE_ONE");

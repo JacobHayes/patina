@@ -576,7 +576,7 @@ impl RuntimeBuilder {
             // whether or not `--fs-crash-at` is set. This preserves the historical
             // always-`CrashFs` behavior the shim relied on: a `CrashFs` is
             // crashable, so imperative callers that trigger `fs_crash()` manually
-            // (the C-ABI `patina_init_crash` path, the WASI-host crash probes)
+            // (the C-ABI `patina_init_crash` path)
             // keep working. A bare `MemFs` cannot crash — `FsDriver::crash`
             // returns `InvalidState` — so installing one here regressed those
             // paths. An un-crashed `CrashFs` reads/writes identically to its inner

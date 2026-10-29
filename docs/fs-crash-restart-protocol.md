@@ -1,6 +1,6 @@
 # Filesystem crash-restart protocol
 
-This note pins the crash-restart protocol surface for `--fs-crash-at`. Native runs use it for seeded runs, `--record`, and `replay`; WASI and cargo-family `--fs-crash-at` refuse by name.
+This note pins the crash-restart protocol surface for `--fs-crash-at`. Native runs use it for seeded runs, `--record`, and `replay`; cargo-family `--fs-crash-at` refuses by name.
 
 ## Trace contract
 
@@ -85,4 +85,4 @@ A replay that crashes although the recorded run never did, and a trace with a cr
 
 ## Remaining boundary
 
-WASI `--fs-crash-at` and cargo-family `--fs-crash-at` refuse by name, and native `--fs-crash-at` refuses `--starve`.
+Cargo-family `--fs-crash-at` refuses by name, and native `--fs-crash-at` refuses `--starve`.

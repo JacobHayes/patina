@@ -114,11 +114,6 @@ report_registry! {
     /// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
     /// native shim at the same finalization point as the runtime reports.
     Coverage => ENV_COVERAGE_REPORT = "PATINA_COVERAGE_REPORT";
-    /// Suppress the default-on WASI depth diagnostic when set to a false-y value
-    /// (`0`, `off`, `false`, `no`). WASI guests execute in-process, so the line is
-    /// emitted by `cargo-patina` rather than by a shim, but the gate spelling matches
-    /// [`ENV_COVERAGE_REPORT`] so both diagnostics are silenced the same way.
-    Depth => ENV_DEPTH_REPORT = "PATINA_DEPTH_REPORT";
 }
 
 /// Which end-of-run diagnostic reports this run prints. Every report is on by
@@ -126,8 +121,8 @@ report_registry! {
 /// variable turns that one off.
 ///
 /// Resolved ONCE, at configuration time, from whatever control plane the family
-/// supplies — the native shim's pre-scrub environment snapshot, the process
-/// environment for the cargo family, the supervisor's environment for WASI.
+/// supplies — the native shim's pre-scrub environment snapshot, or the process
+/// environment for the cargo family.
 /// Nothing consults the process environment at finalization: on native the
 /// public `getenv` is interposed and the deterministic environment is long gone
 /// by then, so a late read returns NULL and every knob reads as absent.

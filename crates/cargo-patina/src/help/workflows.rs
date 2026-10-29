@@ -6,7 +6,7 @@ pub(super) const EXPLORE: Verb = Verb {
     name: "explore",
     summary: "Sweep a seed range of `run`/`test`, reporting per-seed outcomes.",
     synopsis: &[
-        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--target native|wasi] [--seeds N] [--seed-start N] [RUN OPTIONS]",
+        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--seeds N] [--seed-start N] [RUN OPTIONS]",
         "cargo patina explore test [--seeds N] [--seed-start N] [PATINA/CARGO OPTIONS]",
     ],
     prose: "\
@@ -114,8 +114,7 @@ Disk crash-restart is drawn only when the spec declares where a crash can land: 
 the highest ordinal a generation is known to reach. Every native generation then \
 crashes at one drawn operation and ordinal within that bound, with a drawn torn \
 granularity, and restarts. A drawn point the generation never reaches is \
-VACUOUS_CRASH rather than a pass. The key is native-only (WASI and Cargo artifacts \
-refuse it by name) and is refused alongside --starve. `minimize --generation` on \
+VACUOUS_CRASH rather than a pass. The key is refused alongside --starve. `minimize --generation` on \
 a crash generation needs --no-trace-phase: its knob phase reruns seeds, but a \
 two-incarnation trace cannot be shortened without moving the crash point.\n\
 \n\
@@ -202,8 +201,8 @@ refused by name.",
                     None,
                     Value::None,
                     "Bias each generation's seed and knobs toward configurations that previously \
-                 found new coverage (native --yield-points) or depth (WASI); refused when \
-                 neither is available.",
+                 found new edge coverage (a --yield-points or --coverage-points build); refused \
+                 when there is none.",
                     false,
                 ),
                 f(
@@ -224,21 +223,21 @@ refused by name.",
                     "--swarm",
                     None,
                     Value::None,
-                    "Apply seed-derived swarm fault-class selection (native only).",
+                    "Apply seed-derived swarm fault-class selection.",
                     false,
                 ),
                 f(
                     "--sched-pct",
                     None,
                     Value::None,
-                    "Randomize a PCT bug depth per generation (native only).",
+                    "Randomize a PCT bug depth per generation.",
                     false,
                 ),
                 f(
                     "--starve",
                     None,
                     Value::None,
-                    "Randomize a bounded starvation-interval policy (count, start window, max length) per generation (native only).",
+                    "Randomize a bounded starvation-interval policy (count, start window, max length) per generation.",
                     false,
                 ),
                 f(
@@ -319,21 +318,16 @@ refused by name.",
         },
         Group {
             // Part of the campaign's shape, so it is recorded in the out-dir spec and
-            // refused on `--extend`/`--resume` like every other spec flag. A WASI
-            // artifact is refused outright — wasip1 has no resolution surface.
-            title: "DNS host table (forwarded to every generation; native artifacts only)",
+            // refused on `--extend`/`--resume` like every other spec flag.
+            title: "DNS host table (forwarded to every generation)",
             families: SOLE,
             flags: DNS_ENTRY_FLAGS,
         },
         Group {
             // `run <BINARY>`'s harness/pre-run-gate surface, forwarded verbatim to
             // every generation's child `run` (and to the reproduce commands, since
-            // these are host/build facts a trace cannot carry). Campaign has one
-            // parsing family — the artifact family is a runtime fact read from magic
-            // bytes, not a parse-time one — so the native restriction is enforced
-            // where the family is finally known, exactly like the DNS host table
-            // above, and the refusal names the offending flag.
-            title: "Native run options (forwarded to every generation; native artifacts only)",
+            // these are host/build facts a trace cannot carry).
+            title: "Native run options (forwarded to every generation)",
             families: SOLE,
             flags: &[
                 Flag {

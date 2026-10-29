@@ -102,7 +102,6 @@ pub(super) fn render_failure_report(
     out_dir: &Path,
     trace: Option<&str>,
     artifact: &Path,
-    family: &'static str,
     generation: u64,
 ) -> Option<String> {
     let trace = trace?;
@@ -112,7 +111,7 @@ pub(super) fn render_failure_report(
     let html = crate::render::render_trace_file(
         trace,
         &artifact.display().to_string(),
-        family,
+        "native",
         "main",
         None,
     )
@@ -193,7 +192,7 @@ pub(crate) fn generation_repro(
         artifact: PathBuf::from(&state.artifact.path),
         seed: outcome.seed,
         flags: outcome.flags.clone(),
-        pinned: invocation_flags(&state.spec, state.artifact.family),
+        pinned: invocation_flags(&state.spec),
         guest_args: state.spec.guest_args.clone(),
         timeout_secs: state.spec.timeout_secs,
         class: outcome.class.as_str().to_string(),
@@ -232,10 +231,7 @@ pub(crate) fn run_reduced_generation(
 #[cfg(test)]
 mod tests {
     use super::super::state::{spec_from_state_json, spec_to_json};
-    use super::super::{
-        CampaignSpec, derive_flags, generation_hash, invocation_flags, non_native_invocation_flag,
-        parse,
-    };
+    use super::super::{CampaignSpec, derive_flags, generation_hash, invocation_flags, parse};
     use super::*;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -248,7 +244,7 @@ mod tests {
             address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
-        let invocation = invocation_flags(&spec, "native");
+        let invocation = invocation_flags(&spec);
         let artifact = PathBuf::from("guest-bin");
         // The trace form: replay restores every SEMANTIC input, but `--harness` and
         // the gate surface are host/build facts it cannot carry, so a repro line
@@ -256,7 +252,7 @@ mod tests {
         let replay = reproduce_command(
             &artifact,
             7,
-            &derive_flags(&spec, &generation_hash(0, 0), "native"),
+            &derive_flags(&spec, &generation_hash(0, 0)),
             &invocation,
             &[],
             Some("out/failures/generation-0.patina"),
@@ -271,7 +267,7 @@ mod tests {
         let rerun = reproduce_command(
             &artifact,
             7,
-            &derive_flags(&spec, &generation_hash(0, 0), "native"),
+            &derive_flags(&spec, &generation_hash(0, 0)),
             &invocation,
             &[],
             None,
@@ -308,14 +304,9 @@ mod tests {
             let spec = parse(args).unwrap().spec;
             assert_eq!(spec.compute_watchdog_ms, Some(5000));
             assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
-            assert_eq!(
-                non_native_invocation_flag(&spec),
-                Some("--compute-watchdog-ms")
-            );
-            let flags = invocation_flags(&spec, "native");
+            let flags = invocation_flags(&spec);
             assert_eq!(flags, ["--compute-watchdog-ms", "5000"]);
-            assert!(invocation_flags(&spec, "wasi").is_empty());
-            let derived = derive_flags(&spec, &generation_hash(0, 0), "native");
+            let derived = derive_flags(&spec, &generation_hash(0, 0));
             assert_eq!(
                 derived
                     .iter()

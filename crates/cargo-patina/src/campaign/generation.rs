@@ -18,7 +18,7 @@ unsafe extern "C" {
 
 /// One generation's completed run: the structured facts the classifier reads,
 /// plus the child's captured streams for the folds that parse their own report
-/// lines (`PATINA_SDK_REPORT`, `PATINA_DEPTH_REPORT`).
+/// lines (`PATINA_SDK_REPORT`).
 pub(crate) struct GenerationRun {
     pub(super) facts: GenerationFacts,
     pub(super) stdout: String,
@@ -189,7 +189,7 @@ pub(crate) fn run_envelope(stdout: &str) -> Option<serde_json::Value> {
 
 /// Run one generation as a child `cargo patina run --record --format json`
 /// process, capturing its result envelope. The virtual-time watchdog and the
-/// child's own step/fuel budgets bound the *deterministic* run, but a guest can
+/// child's own step budget bound the *deterministic* run, but a guest can
 /// still wedge in a way none of those observe (an uninterposed atomics-only busy
 /// loop). `timeout_secs` is a wall-clock backstop: a generation that overruns it
 /// is killed and reported (as INFRA), so a single hung generation can never wedge

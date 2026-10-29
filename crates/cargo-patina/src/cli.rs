@@ -11,8 +11,8 @@
 //! What clap does NOT own, and why:
 //!
 //! * **Positional location.** A `run` positional decides which family parses the
-//!   rest (magic bytes pick WASI vs native), so the artifact must be found
-//!   BEFORE a `Command` exists. `crate::locate_positionals` does that, using the
+//!   rest (a native binary by its magic bytes, else the Cargo family), so the
+//!   artifact must be found BEFORE a `Command` exists. `crate::locate_positionals` does that, using the
 //!   registry for arity, and hands each family a flags-only token list.
 //! * **Cargo passthrough.** The Cargo family forwards every unrecognized option
 //!   to Cargo verbatim, interleaved, order-preserving, and non-UTF-8-safe. clap
@@ -265,16 +265,6 @@ impl Args {
             })
     }
 
-    /// Whether the registry gives this flag to the family being parsed. Lets a
-    /// shared reader (the fault-knob table, which every family walks) skip a knob
-    /// its family declines — the DNS knobs under WASI, which has no resolution
-    /// surface — instead of each caller re-encoding the exception.
-    pub(crate) fn registered(&self, name: &str) -> bool {
-        self.verb
-            .family_flags(self.family)
-            .any(|flag| flag.name == name)
-    }
-
     /// Whether the operator typed this flag, whatever its shape.
     pub(crate) fn supplied(&self, name: &str) -> bool {
         let _ = self.flag_of(name);
@@ -443,13 +433,12 @@ pub(crate) type Stripped = BTreeMap<&'static str, Vec<OsString>>;
 /// a token list, returning each stripped flag's values (in order) and the tokens
 /// that remain.
 ///
-/// Four flags are settled before a family parser can exist, because each one
+/// Some flags are settled before a family parser can exist, because each one
 /// changes which parser that is: the global output/config switches (parsed once
-/// before routing), `--target` (chooses the family outright), and
-/// `--package`/`--bin`/`--release` (apply to the build a source positional
-/// implies, and are forwarded to Cargo in the Cargo family instead). One
-/// registry-driven pre-pass serves all four, so their idea of arity cannot drift
-/// from the parser's.
+/// before routing) and `--package`/`--bin`/`--release` (apply to the build a
+/// source positional implies, and are forwarded to Cargo in the Cargo family
+/// instead). One registry-driven pre-pass serves them all, so their idea of
+/// arity cannot drift from the parser's.
 ///
 /// A `--` and everything after it belongs to the guest program and is left
 /// untouched.

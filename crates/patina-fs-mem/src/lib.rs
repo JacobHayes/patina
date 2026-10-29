@@ -200,7 +200,7 @@ struct EntryMetadata {
 /// argument, `mkdir`'s, and `mkfifo`'s all cross this boundary and are stored
 /// VERBATIM (masked to the permission bits). The process umask is applied
 /// above this boundary, where a kernel applies it — by the native shim's
-/// `umask` state or the WASI host's fixed `0o022` — so what arrives here is
+/// `umask` state — so what arrives here is
 /// what the kernel would store, and a caller asking for `0o400` gets `0o400`.
 /// An `open` of an EXISTING entry never touches its mode. Symlink leaves are
 /// the conventional `0o777`. The guest is a single non-root identity (uid/gid 1000, the value the

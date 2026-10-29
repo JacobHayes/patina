@@ -10,7 +10,7 @@ anything; it tells you where truth lives and which gates must stay green.
 |---|---|
 | [INTENTS.md](./INTENTS.md) | goals, non-goals, trade-offs, design principles |
 | [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first, the rules new surface must meet, where evidence comes from, the platform policy; cite it when proposing new surface |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim, the WASI host — the source of truth for system shape |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim — the source of truth for system shape |
 | [VALIDATION.md](./VALIDATION.md) | what is validated and how to run it, the guarantees and their oracles, known gaps |
 | [USAGE-MODES.md](./USAGE-MODES.md) | the three adoption levels and the crate map |
 | [README.md](./README.md) | the user-facing summary; must stay honest about status |
@@ -30,7 +30,7 @@ maintainer recipes; it is gitignored and is not project doctrine.
 
 `cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
 `explore`, `campaign`, `coverage`, `sites`, `trace`, `minimize`, `syscalls`. Verbs infer the artifact family (Cargo
-package / native binary / WASI module) from the argument; `run`, `audit`, and
+package / native binary) from the argument; `run`, `audit`, and
 `replay` are source-first (a `.rs` file, directory, or `Cargo.toml` builds on
 the fly).
 
@@ -52,12 +52,11 @@ index lists each verb's summary and forms but no flag rows; per-verb detail
 (flag_groups) comes from `cargo patina <verb> --help --format json`. Flag fields
 default-omit — an absent `short`/`value_grammar`/`repeatable` means none/false.
 
-A verb's forms are its **families** (`cargo`/`wasi`/`native`, the `trace`
+A verb's forms are its **families** (`cargo`/`native`, the `trace`
 subcommands, …), chosen at routing time from the artifact's magic bytes or a
 subcommand token. Each group carries a `families` array naming the forms that
 accept it, and a flag narrower than its group repeats the array — so
-`run --help --format json` says outright that `--fuel` is WASI-only and
-`--budget` is Cargo-family-only. A dependent flag carries `requires` (e.g.
+`run --help --format json` says outright that `--param` is Cargo-family-only. A dependent flag carries `requires` (e.g.
 `--sched-pct-steps` requires `--sched-pct`). A flag supplied to the wrong family
 is refused by name, not as an unknown option.
 
@@ -145,8 +144,8 @@ Prefer JSON when parsing results programmatically.
 - Crate directories are `crates/patina-*`, but published package names are
   `patina-dst-*` (e.g. `crates/patina-runtime` is `patina-dst-runtime`). The
   SDK crate at `crates/patina` is `patina-dst`, used as `patina_dst::` in code.
-- Family names are **cargo** (in-process Cargo package/test), **native**
-  (shim-linked binary), and **WASI** (`wasm32-wasip1` module).
+- Family names are **cargo** (in-process Cargo package/test) and **native**
+  (shim-linked binary).
 
 ## Style
 

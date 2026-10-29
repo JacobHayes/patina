@@ -778,7 +778,7 @@ exit "$status"
     // concurrent build mid-uplift whenever the target dir's lock allows one.
     //
     // Class pairing: every build that reads a Cargo output back (native package,
-    // native harness, WASI, and the shim publish that
+    // native harness, and the shim publish that
     // `guest_link_is_immune_to_cargo_rewriting_its_shim_copy` pins) holds
     // `lock_target_dir` from before its Cargo invocation through the read.
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -16,7 +16,6 @@ simulator that depends on the Patina runtime crates directly.
 | [`checkout-retry-idempotency/`](checkout-retry-idempotency/) | an ordinary checkout idempotency ledger called from a deterministic simulator | explicit-context virtual client/service actors over SimNet UDP; a virtual timeout forces one retry | component-level retry/idempotency testing: no host sockets or wall-clock sleeps, non-vacuous retry evidence, planted double-charge selftest |
 | [`audit-corpus/`](audit-corpus/) | twenty minimal reproducers, one per widely-used crate (rand, parking_lot, rayon, sysinfo, …) | strict-xfail gate: per-crate, per-platform pinned expectations of the residual unsupported imports | the symbol-classification / interposition surface: `cargo patina audit` over the real ecosystem, drift caught in both directions |
 | [`liveness-campaign/`](liveness-campaign/) | a small buggify-gated planted-bug fixture | guest: a deterministic bug the liveness/converge watchdog must catch | liveness/heal-then-converge oracles, buggify activation, `cargo patina campaign` classification + signature dedup |
-| [`buggify-wasi/`](buggify-wasi/) | a small `wasm32-wasip1` buggify fixture | guest: several buggify site kinds + a plantable `always!` violation | guest-side buggify lowering on WASI (`patina_sdk` imports), `PATINA_SDK_REPORT` parsing, record/replay determinism |
 | [`patina-macro-adopter/`](patina-macro-adopter/) | a standalone crate using `#[patina_dst::test]` as an adopter would | plain `cargo test` drives the macro; the macro re-enters `cargo-patina` for the shim-linked guest | point-solution DST attribute: passing sweep, seeded failure block with repros, PATH-scrubbed missing-CLI refusal, no macro deps |
 | [`guided-efficacy/`](guided-efficacy/) | a three-stage "staircase" fixture whose deeper stages unlock only under specific fault-knob bytes | measurement gate: guided vs unguided campaigns race to full edge coverage over N seed bases; exits 1 if `--guided` is slower on any base | the `--guided` selection policy's EFFICACY (not correctness): the acceptance bar for task #31's ancestor-weighting fix; records the measured no-advantage result that blocks any efficacy claim |
 | [`cap-std-dirfd/`](cap-std-dirfd/) | itself — a std + `cap-std` program driving a capability-based filesystem | guest: one directory opened through std, then create/read/stat/list/rename/symlink/remove entirely relative to that descriptor (plus nested and cross-descriptor cases) | directory-descriptor-relative (`*at`) resolution: raw `openat`/`statx`/`readlinkat`/`faccessat2`/`mkdirat`/`unlinkat`/`renameat`/`symlinkat` against a real dirfd and `getdents64` over it, proving the libc and SUD paths share one directory-descriptor table; `openat2` with `RESOLVE_BENEATH`, the path cap-primitives takes first. Also the permission-bit model (creation modes carried through `open`/`mkdir` and enforced on a later open, `chmod`/`fchmod`, and `EACCES` for read/write/traverse/list/create) and descriptor identity (rename the directory, plant a symlink at the old name, and the descriptor still serves its original node), and the two directory opens' different costs (`O_PATH` charges nothing on the entry and cannot be read; a plain read-only open charges `r`, which is a different bit from the `x` a traversal costs). SUD-only — skips loudly off x86_64-Linux/SUD |
@@ -30,8 +29,7 @@ simulator that depends on the Patina runtime crates directly.
 (a short campaign, the recovery self-test and the planted-bug catches) on every
 routine Linux CI run and every macOS run. `cargo patina campaign` specs sweep
 `workq` (`workq/campaign.json`) and pubsub (`pubsub/campaign.json`) for 200
-generations nightly, and `buggify-wasi` (`buggify-wasi/campaign.json`).
-`liveness-campaign` and `buggify-wasi` are small fixtures.
+generations nightly. `liveness-campaign` is a small fixture.
 
 Conventions:
 
@@ -45,12 +43,12 @@ Conventions:
   target directory.
 - `PATINA_CLI` names a cargo-patina already built from this checkout; the
   core batteries (FIFO/rustix-default/cap-std, workq, pubsub, macro adopter,
-  WASI and cross-target smoke) use it instead of building their own, and
+  native smoke) use it instead of building their own, and
   without it build the release CLI themselves. The local check ladder passes
   the workspace suite's build, and sets `PATINA_SHIM_TARGET_DIR` so every
   rung's guests share one native shim build.
 - The local gate runs the cheap classifier selftests (including multiproc) and the
-  workq/pubsub/macro-adopter `run-patina.sh` batteries, WASI/cross smoke, and
+  workq/pubsub/macro-adopter `run-patina.sh` batteries, the native smoke, and
   FIFO/rustix-default/cap-std gates. The multiproc native/pending-gap battery
   runs in x86_64 Linux CI. Native acceptance tests (the syscall
   conformance scenarios of `crates/patina-conformance` among them) run in the

@@ -50,17 +50,13 @@ mod tests {
         );
 
         // `run` honors the identical selection (source-first uniformity) and executes
-        // the chosen member. `--target native` pins the native build-on-the-fly path.
-        // (A bare `Cargo.toml` with no `--target` also builds native on the fly,
-        // unless the package integrates the Patina runtime: then it stays the cargo
-        // family.)
+        // the chosen member, built native on the fly (a package that integrates the
+        // Patina runtime would stay the cargo family instead).
         let ran = invoke(
             build_workspace,
             &[
                 "run",
                 manifest.to_str().unwrap(),
-                "--target",
-                "native",
                 "--package",
                 "patina-ws-app",
                 "--bin",

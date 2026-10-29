@@ -202,9 +202,9 @@ fn fs_image_choke_point_honors_configured_torn_granularity() {
     );
 }
 
-// Regression for two bugs the shim/WASI paths hit, both via
+// Regression for two bugs the shim paths hit, both via
 // `with_default_drivers` WITHOUT `with_fs_image` (exactly what
-// `Context::from_config` — the WASI `wasi-run` path — does), knob-free:
+// `Context::from_config` does), knob-free:
 //   (a) the choke point used `MemFs::default()` as the base, which is
 //       ROOTLESS (no `/`), so every path op (create_dir/open) failed with
 //       NotFound; it must use `MemFs::new()`.

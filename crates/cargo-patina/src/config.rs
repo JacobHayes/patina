@@ -782,7 +782,6 @@ pub(crate) fn env_var_names_for_verb(verb: &str) -> Vec<String> {
 fn kind_tag(kind: Kind) -> &'static str {
     match kind {
         Kind::U64 => "u64",
-        Kind::U32 => "u32",
         Kind::Usize => "usize",
         Kind::PositiveU64 => "positive-u64",
         Kind::WatchdogMillis => "watchdog-millis",
@@ -798,8 +797,6 @@ fn kind_tag(kind: Kind) -> &'static str {
         Kind::Cpus => "cpus",
         Kind::DnsEntry => "dns-entry",
         Kind::AddressPair => "address-pair",
-        Kind::Socket => "socket",
-        Kind::Preopen => "preopen",
         Kind::UnsupportedSymbols => "unsupported-symbols",
         Kind::Enum(_) => "enum",
         Kind::EnumList(_) => "enum-list",

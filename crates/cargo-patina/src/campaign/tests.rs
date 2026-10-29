@@ -28,12 +28,9 @@ fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
     let mut seen: BTreeMap<(u64, u64, u64), u64> = BTreeMap::new();
     for generation in 0..256 {
         let hash = generation_hash(0, generation);
-        let flags = derive_flags(&spec, &hash, "native");
+        let flags = derive_flags(&spec, &hash);
         // Pure: the same generation derives the same configuration.
-        assert_eq!(
-            flags,
-            derive_flags(&spec, &generation_hash(0, generation), "native")
-        );
+        assert_eq!(flags, derive_flags(&spec, &generation_hash(0, generation)));
         let intervals = value(&flags, "--starve");
         let window = value(&flags, "--starve-window");
         let max_len = value(&flags, "--starve-max-len");
@@ -56,16 +53,12 @@ fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
         seen.len()
     );
     // Off by default: a spec that did not ask for starvation emits none of it.
-    let quiet = derive_flags(&CampaignSpec::default(), &generation_hash(0, 3), "native");
+    let quiet = derive_flags(&CampaignSpec::default(), &generation_hash(0, 3));
     assert!(!quiet.iter().any(|flag| flag.starts_with("--starve")));
-    // WASI has no threads to starve, so the native-only gate holds.
-    let wasi = derive_flags(&spec, &generation_hash(0, 3), "wasi");
-    assert!(!wasi.iter().any(|flag| flag.starts_with("--starve")));
 }
 
-/// A knob the spec excludes is emitted by no generation of any family, and
-/// excluding it leaves every other flag exactly as the unexcluded campaign
-/// derives it.
+/// A knob the spec excludes is emitted by no generation, and excluding it
+/// leaves every other flag exactly as the unexcluded campaign derives it.
 #[test]
 fn an_excluded_knob_is_never_drawn_and_leaves_the_rest_alone() {
     let net = CampaignSpec {
@@ -78,22 +71,20 @@ fn an_excluded_knob_is_never_drawn_and_leaves_the_rest_alone() {
     };
     let reset = FaultKnob::NetResetPermille.meta().flag;
     let mut drawn_when_included = false;
-    for family in ["native", "wasi", "cargo"] {
-        for generation in 0..64 {
-            let hash = generation_hash(0, generation);
-            let mut expected = derive_flags(&net, &hash, family);
-            if let Some(at) = expected.iter().position(|flag| flag == reset) {
-                drawn_when_included = true;
-                expected.drain(at..at + 2);
-            }
-            assert_eq!(derive_flags(&excluded, &hash, family), expected);
+    for generation in 0..64 {
+        let hash = generation_hash(0, generation);
+        let mut expected = derive_flags(&net, &hash);
+        if let Some(at) = expected.iter().position(|flag| flag == reset) {
+            drawn_when_included = true;
+            expected.drain(at..at + 2);
         }
+        assert_eq!(derive_flags(&excluded, &hash), expected);
     }
     assert!(drawn_when_included, "the net plane never drew {reset}");
 }
 
 #[test]
-fn native_only_knobs_are_skipped_for_wasi() {
+fn spec_knobs_reach_every_generation() {
     let spec = CampaignSpec {
         buggify: true,
         swarm: true,
@@ -102,15 +93,11 @@ fn native_only_knobs_are_skipped_for_wasi() {
         ..CampaignSpec::default()
     };
     let hash = generation_hash(0, 3);
-    let wasi = derive_flags(&spec, &hash, "wasi");
-    assert!(!wasi.iter().any(|f| f == "--swarm"));
-    assert!(!wasi.iter().any(|f| f.starts_with("--sched-pct")));
-    assert!(wasi.iter().any(|f| f.starts_with("--buggify=")));
-    let native = derive_flags(&spec, &hash, "native");
+    let native = derive_flags(&spec, &hash);
     assert!(native.iter().any(|f| f == "--swarm"));
     assert!(native.iter().any(|f| f.starts_with("--sched-pct")));
-    // Every knob `--faults` bands must reach BOTH families: a band that
-    // exists only on one family halves the exploration silently.
+    assert!(native.iter().any(|f| f.starts_with("--buggify=")));
+    // Every knob `--faults` bands reaches the generation.
     for banded in [
         "--fs-error-permille",
         "--fs-short-permille",
@@ -119,30 +106,27 @@ fn native_only_knobs_are_skipped_for_wasi() {
         "--net-latency-nanos",
         "--sleep-jitter-nanos",
     ] {
-        assert!(wasi.iter().any(|f| f == banded), "wasi lacks {banded}");
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
     }
     // Crash restart rides on a declared reach, not on `--faults`: a spec
     // without one never arms a crash point it cannot know the guest reaches.
-    for family in ["native", "wasi", "cargo"] {
-        for generation in 0..64 {
-            let flags = derive_flags(&spec, &generation_hash(0, generation), family);
-            assert!(
-                !flags
-                    .iter()
-                    .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
-                "{family} generation {generation} emitted crash restart flags: {flags:?}"
-            );
-        }
+    for generation in 0..64 {
+        let flags = derive_flags(&spec, &generation_hash(0, generation));
+        assert!(
+            !flags
+                .iter()
+                .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
+            "generation {generation} emitted crash restart flags: {flags:?}"
+        );
     }
 }
 
-/// A declared crash reach arms one crash point per native generation, always
-/// at or before a declared point (so the run reaches it), and the draws
-/// actually move: across generations both declared ops, many ordinals, and
-/// both torn-write granularities appear. Other families never get one.
+/// A declared crash reach arms one crash point per generation, always at or
+/// before a declared point (so the run reaches it), and the draws actually
+/// move: across generations both declared ops, many ordinals, and both
+/// torn-write granularities appear.
 #[test]
-fn a_declared_crash_reach_draws_reachable_points_on_native_only() {
+fn a_declared_crash_reach_draws_reachable_points() {
     let reach =
         ["write:32", "close:3"].map(|point| patina_dst_runtime::CrashPoint::parse(point).unwrap());
     let spec = CampaignSpec {
@@ -157,8 +141,8 @@ fn a_declared_crash_reach_draws_reachable_points_on_native_only() {
     let mut torn = BTreeSet::new();
     for generation in 0..128 {
         let hash = generation_hash(0, generation);
-        let flags = derive_flags(&spec, &hash, "native");
-        assert_eq!(flags, derive_flags(&spec, &hash, "native"));
+        let flags = derive_flags(&spec, &hash);
+        assert_eq!(flags, derive_flags(&spec, &hash));
         let point = patina_dst_runtime::CrashPoint::parse(&value(&flags, "--fs-crash-at")).unwrap();
         let bound = reach.iter().find(|bound| bound.op == point.op).unwrap();
         assert!(
@@ -167,14 +151,6 @@ fn a_declared_crash_reach_draws_reachable_points_on_native_only() {
         );
         points.insert(point.to_string());
         torn.insert(value(&flags, "--fs-torn-granularity"));
-        for family in ["wasi", "cargo"] {
-            assert!(
-                !derive_flags(&spec, &hash, family)
-                    .iter()
-                    .any(|f| f == "--fs-crash-at" || f == "--fs-torn-granularity"),
-                "{family} generation {generation} armed a crash"
-            );
-        }
     }
     assert!(points.iter().any(|p| p.starts_with("write:")));
     assert!(points.iter().any(|p| p.starts_with("close:")));
@@ -239,15 +215,11 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
         let mut drawn = BTreeSet::new();
         for generation in 0..32 {
             let hash = generation_hash(0, generation);
-            let flags = derive_flags(&spec(subset), &hash, "native");
+            let flags = derive_flags(&spec(subset), &hash);
             assert_eq!(
                 flags,
-                restrict(
-                    derive_flags(&spec(FaultPlanes::ALL), &hash, "native"),
-                    subset
-                ),
-                "--faults={} generation {generation}",
-                subset.cli_list()
+                restrict(derive_flags(&spec(FaultPlanes::ALL), &hash), subset),
+                "--faults={subset:?} generation {generation}"
             );
             assert!(flags.iter().any(|flag| flag == "--swarm"));
             drawn.extend(flags.iter().filter_map(|flag| knob_of(flag)));
@@ -257,8 +229,7 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
                 drawn
                     .iter()
                     .any(|knob| *knob != FaultKnob::DnsEntry && in_plane(*knob, plane)),
-                "--faults={} drew nothing from {plane:?}",
-                subset.cli_list()
+                "--faults={subset:?} drew nothing from {plane:?}"
             );
         }
     }
@@ -279,7 +250,6 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
                 ..CampaignSpec::default()
             },
             &generation_hash(0, generation),
-            "native",
         )
     };
     let value = |flags: &[String], name: &str| {
@@ -301,7 +271,7 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
 }
 
 #[test]
-fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
+fn the_dns_band_rides_on_the_host_table() {
     let bare = CampaignSpec {
         faults: FaultPlanes::ALL,
         ..CampaignSpec::default()
@@ -310,7 +280,7 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
     // No host table: no DNS flags at all. Every name a guest looks up is
     // NXDOMAIN by semantics, so a banded knob could not fire — and an inert
     // knob is worse than an absent one, because the report reads clean.
-    let without = derive_flags(&bare, &hash, "native");
+    let without = derive_flags(&bare, &hash);
     assert!(
         !without.iter().any(|f| f.starts_with("--dns-")),
         "a table-free campaign must not band DNS knobs: {without:?}"
@@ -320,7 +290,7 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
         dns_entries: vec!["db.internal=10.0.0.5".into()],
         ..bare
     };
-    let native = derive_flags(&spec, &hash, "native");
+    let native = derive_flags(&spec, &hash);
     for banded in ["--dns-entry", "--dns-fail-permille", "--dns-latency-nanos"] {
         assert!(native.iter().any(|f| f == banded), "native lacks {banded}");
     }
@@ -329,18 +299,11 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
         .position(|f| f == "--dns-entry")
         .expect("host table");
     assert_eq!(native[index + 1], "db.internal=10.0.0.5");
-    // wasip1 has no resolution surface: the WASI `run` parser refuses these
-    // flags, so banding them would turn every generation into a refusal.
-    let wasi = derive_flags(&spec, &hash, "wasi");
-    assert!(
-        !wasi.iter().any(|f| f.starts_with("--dns-")),
-        "the WASI family must never receive DNS flags: {wasi:?}"
-    );
     // The band actually varies the failure rate and latency per generation.
     let mut rates = BTreeSet::new();
     let mut latencies = BTreeSet::new();
     for generation in 0..64 {
-        let flags = derive_flags(&spec, &generation_hash(0, generation), "native");
+        let flags = derive_flags(&spec, &generation_hash(0, generation));
         let value = |name: &str| {
             let index = flags.iter().position(|f| f == name).expect("banded knob");
             flags[index + 1].clone()
@@ -363,7 +326,7 @@ fn the_dns_band_rides_on_the_host_table_and_never_reaches_wasi() {
 // generation refused identically, so the forwarding is what makes the sweep
 // possible.
 #[test]
-fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_wasi() {
+fn the_native_invocation_surface_is_forwarded_to_every_generation() {
     let spec = CampaignSpec {
         harness: true,
         allow_symbols: vec!["semaphore_wait".into(), "semaphore_signal".into()],
@@ -372,7 +335,7 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
         ..CampaignSpec::default()
     };
     for generation in 0..8 {
-        let native = derive_flags(&spec, &generation_hash(0, generation), "native");
+        let native = derive_flags(&spec, &generation_hash(0, generation));
         for flag in ["--harness", "--allow-randomized-address-layout"] {
             assert!(
                 native.iter().any(|f| f == flag),
@@ -396,23 +359,8 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation_and_never_to_w
             .expect("the gate hatch");
         assert_eq!(native[index + 1], "all");
     }
-    // No WASI harness family and no WASI pre-run gate: the WASI `run` parser
-    // refuses all three, so forwarding them would turn every generation into a
-    // usage error. The artifact is refused upstream; this is belt and braces.
-    let wasi = derive_flags(&spec, &generation_hash(0, 0), "wasi");
-    for flag in [
-        "--harness",
-        "--allow",
-        "--allow-unsupported-symbols",
-        "--allow-randomized-address-layout",
-    ] {
-        assert!(
-            !wasi.iter().any(|f| f == flag),
-            "the WASI family must never receive {flag}: {wasi:?}"
-        );
-    }
     // A spec that asks for none of it forwards none of it.
-    let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0), "native");
+    let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0));
     for flag in [
         "--harness",
         "--allow",

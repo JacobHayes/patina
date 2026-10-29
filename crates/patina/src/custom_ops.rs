@@ -4,8 +4,6 @@
 use crate::ffi;
 #[cfg(doc)]
 use crate::verdict;
-#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-use crate::wasm_ffi;
 
 /// Perform one **custom operation**: an effect Patina does not model, wrapped at
 /// a boundary the guest controls so Patina can mediate it — raw bytes in, raw
@@ -25,7 +23,7 @@ use crate::wasm_ffi;
 ///   checked on replay, so a guest that asks a *different* question under the
 ///   same label is refused rather than handed a stale answer.
 ///
-/// This is the untyped surface: it lowers directly to the shim/WASI ABI with no
+/// This is the untyped surface: it lowers directly to the shim ABI with no
 /// encoding of its own. With the default-off `custom-ops` feature, `custom_op`
 /// adds serde-typed keys and results over exactly this call.
 ///
@@ -97,11 +95,11 @@ fn custom_op_bytes_inner(
     on_fault: Option<impl FnOnce() -> Vec<u8>>,
     perform: impl FnOnce() -> Vec<u8>,
 ) -> Vec<u8> {
-    #[cfg(any(patina_shim, all(patina, target_arch = "wasm32")))]
+    #[cfg(patina_shim)]
     {
         let mut len: usize = 0;
         let mode = unsafe {
-            custom_op_ffi::begin(
+            ffi::patina_custom_op_begin(
                 label.as_ptr(),
                 label.len(),
                 key.as_ptr(),
@@ -113,7 +111,7 @@ fn custom_op_bytes_inner(
         match mode {
             0 => {
                 let result = perform();
-                let code = unsafe { custom_op_ffi::record(result.as_ptr(), result.len()) };
+                let code = unsafe { ffi::patina_custom_op_record(result.as_ptr(), result.len()) };
                 assert!(
                     code >= 0,
                     "patina custom op {label:?}: the runtime refused the recorded result"
@@ -122,8 +120,9 @@ fn custom_op_bytes_inner(
             }
             1 => {
                 let mut buffer = vec![0u8; len];
-                let written =
-                    unsafe { custom_op_ffi::replay_result(buffer.as_mut_ptr(), buffer.len()) };
+                let written = unsafe {
+                    ffi::patina_custom_op_replay_result(buffer.as_mut_ptr(), buffer.len())
+                };
                 assert!(
                     written >= 0 && written as usize == len,
                     "patina custom op {label:?}: the runtime returned {written} bytes of a \
@@ -144,78 +143,10 @@ label or key argument is malformed"
             ),
         }
     }
-    #[cfg(not(any(patina_shim, all(patina, target_arch = "wasm32"))))]
+    #[cfg(not(patina_shim))]
     {
         let _ = (label, key, on_fault);
         perform()
-    }
-}
-
-/// The two ABI mirrors of the custom-op verbs behind one name, so
-/// [`custom_op_bytes`] states the protocol once instead of twice.
-#[cfg(any(patina_shim, all(patina, target_arch = "wasm32")))]
-mod custom_op_ffi {
-    #[inline]
-    pub unsafe fn begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
-    ) -> i32 {
-        #[cfg(patina_shim)]
-        // SAFETY: forwarded from `custom_op_bytes`, which passes live slices.
-        unsafe {
-            super::ffi::patina_custom_op_begin(
-                label,
-                label_len,
-                key,
-                key_len,
-                fault_eligible,
-                out_len,
-            )
-        }
-        #[cfg(not(patina_shim))]
-        // SAFETY: as above.
-        unsafe {
-            super::wasm_ffi::custom_op_begin(
-                label,
-                label_len,
-                key,
-                key_len,
-                fault_eligible,
-                out_len,
-            )
-        }
-    }
-
-    #[inline]
-    pub unsafe fn replay_result(out: *mut u8, out_cap: usize) -> isize {
-        #[cfg(patina_shim)]
-        // SAFETY: forwarded from `custom_op_bytes`, which passes a live buffer.
-        unsafe {
-            super::ffi::patina_custom_op_replay_result(out, out_cap)
-        }
-        #[cfg(not(patina_shim))]
-        // SAFETY: as above.
-        unsafe {
-            super::wasm_ffi::custom_op_replay_result(out, out_cap) as isize
-        }
-    }
-
-    #[inline]
-    pub unsafe fn record(result: *const u8, result_len: usize) -> i32 {
-        #[cfg(patina_shim)]
-        // SAFETY: forwarded from `custom_op_bytes`, which passes a live slice.
-        unsafe {
-            super::ffi::patina_custom_op_record(result, result_len)
-        }
-        #[cfg(not(patina_shim))]
-        // SAFETY: as above.
-        unsafe {
-            super::wasm_ffi::custom_op_record(result, result_len)
-        }
     }
 }
 

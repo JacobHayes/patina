@@ -316,7 +316,7 @@ pub struct EntropyFaultReport {
     /// Fault-eligible entropy requests observed: the `GRND_NONBLOCK` reads made
     /// before the random pool was known initialized, the only requests a real
     /// pool can fail. Zero on a platform or guest with no such read (Darwin,
-    /// WASI, and Rust's std, which waits or reads `GRND_INSECURE`), which
+    /// and Rust's std, which waits or reads `GRND_INSECURE`), which
     /// leaves the knob undiagnosable rather than vacuous.
     pub requests: u64,
     /// The failure knob was live over enough eligible requests that

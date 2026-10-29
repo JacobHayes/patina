@@ -23,7 +23,6 @@ members = [
     "crates/patina-target",
     "crates/patina-time-virtual",
     "crates/patina-trace",
-    "crates/patina-wasi-host",
     "crates/patina-wrapper-fault",
     "crates/patina-wrapper-latency",
 ]
@@ -106,7 +105,6 @@ patina-dst-syscalls = { path = "crates/patina-syscalls", version = "0.1.0" }
 patina-dst-target = { path = "crates/patina-target", version = "0.1.0" }
 patina-dst-time-virtual = { path = "crates/patina-time-virtual", version = "0.1.0" }
 patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }
-patina-dst-wasi-host = { path = "crates/patina-wasi-host", version = "0.1.0" }
 patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault", version = "0.1.0" }
 patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version = "0.1.0" }
 # The CLI's token engine. Minor upgrades are deliberate because parser error
@@ -138,6 +136,3 @@ sha2 = "0.11.0"
 syn = { version = "2.0.119", features = ["full", "visit"] }
 tempfile = "3.27.0"
 toml = "0.8"
-wasmi = "1.1.0"
-wasmparser = "0.254.0"
-wat = "1.254.0"

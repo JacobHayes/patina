@@ -33,7 +33,6 @@ fn detector_fingerprint_mismatch() -> (&'static str, bool, String) {
         let artifact = CoverageArtifact {
             path: "guest".into(),
             sha256: "abc".into(),
-            family: "native".into(),
         };
         let mut store = CampaignCoverageStore::fresh(
             dir.clone(),
@@ -83,7 +82,6 @@ fn detector_plateau_exactness() -> (&'static str, bool, String) {
     let artifact = CoverageArtifact {
         path: "guest".into(),
         sha256: "abc".into(),
-        family: "native".into(),
     };
     let first = synthetic_covmap(&[1, 0], &[10, 20]);
     let repeat = synthetic_covmap(&[1, 0], &[10, 20]);
@@ -122,7 +120,6 @@ fn detector_watermark_idempotency() -> (&'static str, bool, String) {
         CoverageArtifact {
             path: "guest".into(),
             sha256: "abc".into(),
-            family: "native".into(),
         },
         "patina-native+yieldpoints".into(),
         200,

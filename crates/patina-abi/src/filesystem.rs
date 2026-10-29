@@ -75,8 +75,7 @@ pub struct OpenFlags {
     pub path_only: bool,
     /// The creation mode — `open`'s third argument AFTER the process umask:
     /// the bits the kernel stores, which is what the umask-owning layer above
-    /// the driver (the native shim's `umask` state, the WASI host's fixed
-    /// `0o022`) hands down. It is consulted only when this open CREATES the
+    /// the driver (the native shim's `umask` state) hands down. It is consulted only when this open CREATES the
     /// entry: POSIX leaves it unread otherwise, and an `open` of an existing
     /// file must not touch that file's mode. A caller with no `create` flag
     /// passes [`CREATE_MODE_UNUSED`] so the recorded operation carries no
@@ -94,8 +93,7 @@ pub const DEFAULT_FILE_CREATE_MODE: u32 = 0o666;
 /// The mode `mkdir(2)`'s ordinary callers pass (`0o777`); under the default
 /// `0o022` umask it is the familiar `0o755`.
 pub const DEFAULT_DIRECTORY_CREATE_MODE: u32 = 0o777;
-/// The umask every POSIX process starts with, and the one a layer without a
-/// `umask(2)` of its own (the WASI host) applies to every creating call.
+/// The umask every POSIX process starts with.
 pub const DEFAULT_UMASK: u32 = 0o022;
 
 /// The `F_SEAL_*` bits (uapi/linux/fcntl.h) an anonymous file's seal set is
@@ -268,8 +266,7 @@ pub struct FsMetadata {
     /// POSIX permission bits (`0o7777`) — the mode WITHOUT the file-type bits,
     /// which [`FsMetadata::kind`] already carries. A creating call stores the
     /// mode it is handed verbatim: the umask is process state the caller above
-    /// the driver applies (the native shim's `umask`, the WASI host's fixed
-    /// `0o022`), so the ordinary `0o666`/`0o777` requests arrive as
+    /// the driver applies (the native shim's `umask`), so the ordinary `0o666`/`0o777` requests arrive as
     /// `0o644`/`0o755`. The driver changes this only through an explicit
     /// set-mode call.
     pub mode: u32,

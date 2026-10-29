@@ -2,8 +2,6 @@
 
 #[cfg(patina_shim)]
 use crate::ffi;
-#[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-use crate::wasm_ffi;
 
 /// What a guest asserts about its own run, for [`verdict`].
 ///
@@ -23,7 +21,7 @@ pub enum VerdictKind {
 }
 
 impl VerdictKind {
-    /// The `u32` this kind travels as across the shim / WASI ABI. Public so a
+    /// The `u32` this kind travels as across the shim ABI. Public so a
     /// guest that calls `patina_verdict` directly (a non-Rust guest, or one
     /// hand-rolling the FFI) can name the same constants the SDK uses.
     #[inline]
@@ -78,19 +76,7 @@ pub fn verdict(kind: VerdictKind, label: &str, detail: &str) {
             );
         }
     }
-    #[cfg(all(patina, not(patina_shim), target_arch = "wasm32"))]
-    {
-        unsafe {
-            wasm_ffi::verdict(
-                kind.as_abi(),
-                label.as_ptr(),
-                label.len(),
-                detail.as_ptr(),
-                detail.len(),
-            );
-        }
-    }
-    #[cfg(all(not(patina_shim), not(all(patina, target_arch = "wasm32"))))]
+    #[cfg(not(patina_shim))]
     {
         let _ = (kind, label, detail);
     }

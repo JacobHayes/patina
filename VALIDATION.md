@@ -23,9 +23,9 @@ document names directories and evidence shapes, not test functions.
 
 | Command | What it runs |
 |---|---|
-| `mise run check` | the local landing gate: fmt, clippy (host and the other OS family's cfgs), docs, packaging, `cargo nextest run --workspace` (including the native acceptance and conformance tests), doctests, WASI validation, cross-target smoke, and the testbeds |
+| `mise run check` | the local landing gate: fmt, clippy (host and the other OS family's cfgs), docs, packaging, `cargo nextest run --workspace` (including the native acceptance and conformance tests), doctests, the native smoke, and the testbeds |
 | `mise run check:native-abi` | just the native ABI integration tests |
-| `mise run smoke` | native, WASI and cross-target smoke checks |
+| `mise run smoke` | native smoke checks |
 | `mise run conformance` | syscall conformance scenarios, natively and under Patina |
 | `mise run conformance:coverage` | registry entries no scenario covers or excludes (a report; exits 1 while any remain) |
 | `mise run audit-corpus` | ecosystem symbol-audit corpus against committed per-platform expectations |
@@ -51,10 +51,9 @@ systems.
 - **Syscall conformance** (`crates/patina-conformance`): one scenario per
   behavior, run natively (the oracle) and under Patina through every vehicle the
   architecture has.
-- **WASI** (`crates/patina-wasi-host`, `scripts/validate-wasi.sh`): real
-  `wasm32-wasip1` probes.
-- **Cross-target** (`scripts/smoke-cross-target.sh`): one ordinary `std` program
-  compared across WASI, native and replay, plus a canonical result literal.
+- **Native smoke** (`scripts/smoke-native.sh`): one ordinary `std` program
+  compared across seeds, record and replay, and cold and warm builds, plus a
+  canonical result literal.
 - **Testbeds** (`testbeds/`): dogfooding guests (workq, pubsub, FIFO IPC, cap-std,
   rustix, macro adopter, multiproc, Go) driven through the CLI; see
   `testbeds/README.md`.
@@ -66,11 +65,10 @@ systems.
 | V0 | workspace quality: the `mise run check` gate | standing |
 | V1 | deterministic vertical slice at the explicit `Context` boundary | complete |
 | V2 | cooperative scheduling, SimNet, wrappers, branching, async executor | complete |
-| V3 | WASI Preview 1: the whole audited import surface | complete |
-| V4 | native linked-shim target: interposition, audit gate, threads, reactors, SUD | partial |
-| V5 | trace hardening, crash models, host capture, minimization, budgets | partial |
-| V6 | cooperative-SUT SDK (`buggify!`, `always!`, `sometimes!`), native and WASI | partial |
-| V7 | directed exploration: PCT, swarm, starvation, coverage-guided campaigns | partial |
+| V3 | native linked-shim target: interposition, audit gate, threads, reactors, SUD | partial |
+| V4 | trace hardening, crash models, host capture, minimization, budgets | partial |
+| V5 | cooperative-SUT SDK (`buggify!`, `always!`, `sometimes!`) | partial |
+| V6 | directed exploration: PCT, swarm, starvation, coverage-guided campaigns | partial |
 
 A level is complete only when all its checks pass; higher levels never weaken
 lower ones.
@@ -80,7 +78,7 @@ lower ones.
 **Seed determinism.** The same seed produces the same result and the same trace
 bytes in independent processes, and some entropy-dependent result differs across
 seeds. Oracle: byte comparison of repeated runs' output and traces, across
-explicit-context, WASI, native and testbed guests.
+explicit-context, native and testbed guests.
 
 **Strict record/replay.** A recorded run replays flag-free to the same output and
 consumes every event. Replay checks, in order: structure, native build identity

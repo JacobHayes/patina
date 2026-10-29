@@ -2,7 +2,7 @@
 //!
 //! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
 //! `test`, `audit`, `replay`, `explore`, `campaign`, `minimize`, `sites`, `trace`), artifact
-//! family inference (Cargo package / shim-linked native binary / WASI module),
+//! family inference (Cargo package / shim-linked native binary),
 //! build orchestration, the supervisor protocol that hands the `PATINA_*`
 //! control plane to a guest, and result rendering (`--format json`,
 //! `--render`). The user-facing contract is `cargo patina <verb> --help` (and
@@ -25,7 +25,6 @@ use patina_dst_runtime::{
     ENV_SEED, ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, FaultKnob,
 };
 use patina_dst_trace::remove_dead_scratch;
-use patina_dst_wasi_host::{MountPolicy, ResourceLimits};
 use sha2::{Digest, Sha256};
 
 // Additive output-side modules: HTML timeline rendering and the machine-readable
@@ -41,7 +40,6 @@ mod config;
 mod coverage;
 #[cfg(unix)]
 mod crash_restart;
-mod depth;
 mod go_build;
 mod guided;
 mod harness;
@@ -65,7 +63,6 @@ mod syscalls;
 mod trace_cmd;
 mod trace_view;
 mod values;
-mod wasi_exec;
 
 use audit::execute_native_audit;
 use harness::{execute_explore, execute_native_harness};
@@ -79,7 +76,6 @@ use parse::{
     locate_positionals, package_integrates_patina, parse, reject_stranded_artifact,
 };
 use shim_build::lock_target_dir;
-use wasi_exec::{execute_wasi_audit, execute_wasi_build, execute_wasi_run};
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
@@ -155,101 +151,6 @@ enum Mode {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WasiInvocation {
-    module: ArtifactRef,
-    mode: Mode,
-    fuel: u64,
-    arguments: Vec<String>,
-    environment: BTreeMap<String, String>,
-    sockets: Vec<WasiSocketConfig>,
-    preopens: Vec<WasiPreopenConfig>,
-    resource_limits: WasiResourceLimitOverrides,
-    /// Maximum boundary operations before the run fails explicitly (`--budget`).
-    /// Family-neutral: the same `RuntimeConfig::step_budget` the Cargo family
-    /// sets, and distinct from `--fuel`, which bounds wasm execution rather than
-    /// recorded boundary operations.
-    step_budget: Option<u64>,
-    /// The run's virtual realtime epoch in Unix-time nanoseconds
-    /// (`--realtime-epoch`), or `None` for the runtime default. Applied to the
-    /// in-process runtime on a seeded/`--record` run and recorded into the
-    /// trace; `replay` restores it from the trace and carries `None`.
-    realtime_epoch_nanos: Option<u64>,
-    /// Seed-driven fault-injection knobs applied to the in-process runtime before
-    /// `Context::from_config`, so a WASI guest's filesystem and datagram sockets
-    /// see the same seeded crash/jitter/drop drivers the native family does.
-    /// Recorded into the trace metadata on `--record`; restored from the trace on
-    /// `replay`, so a WASI replay is flag-free. `--sleep-jitter-nanos` is carried
-    /// here too: the wasip1 host applies it at its single guest-facing sleep entry
-    /// (`Preview1Host::sleep_until`, also covering `poll_oneoff` clock timeouts).
-    /// `--net-partition` rides the same table: wasip1 has no name resolution, so
-    /// the DNS knobs are refused for this family, but the partition set is an
-    /// ordinary `FaultConfig` field and applies exactly as it does natively.
-    knobs: KnobValues,
-    /// Cooperative-SUT (buggify) knobs applied to the in-process runtime through
-    /// the same `apply_buggify_env` accessor the native family feeds over its
-    /// control plane. `None` unless `--buggify` was passed. Recorded into the
-    /// trace metadata on `--record` and restored from the trace on `replay`, so a
-    /// WASI buggify replay is flag-free, exactly like the fault knobs.
-    buggify: Option<NativeBuggify>,
-    /// Liveness-watchdog knobs applied to the in-process runtime through the shared
-    /// `apply_liveness_env` accessor. Schedule-invariant, so recorded into the
-    /// trace metadata (informational) but never fingerprinted.
-    liveness: NativeLiveness,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WasiPreopenConfig {
-    guest_path: String,
-    policy: MountPolicy,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct WasiResourceLimitOverrides {
-    fuel: Option<u64>,
-    max_memory_pages: Option<u32>,
-    max_iovecs: Option<usize>,
-    max_io_bytes: Option<usize>,
-    max_descriptors: Option<usize>,
-    max_preopens: Option<usize>,
-    max_path_bytes: Option<usize>,
-}
-
-impl WasiResourceLimitOverrides {
-    fn to_host_limits(&self) -> ResourceLimits {
-        let mut limits = ResourceLimits::default();
-        if let Some(fuel) = self.fuel {
-            limits.fuel = fuel;
-        }
-        if let Some(max_memory_pages) = self.max_memory_pages {
-            limits.max_memory_pages = max_memory_pages;
-        }
-        if let Some(max_iovecs) = self.max_iovecs {
-            limits.max_iovecs = max_iovecs;
-        }
-        if let Some(max_io_bytes) = self.max_io_bytes {
-            limits.max_io_bytes = max_io_bytes;
-        }
-        if let Some(max_descriptors) = self.max_descriptors {
-            limits.max_descriptors = max_descriptors;
-        }
-        if let Some(max_preopens) = self.max_preopens {
-            limits.max_preopens = max_preopens;
-        }
-        if let Some(max_path_bytes) = self.max_path_bytes {
-            limits.max_path_bytes = max_path_bytes;
-        }
-        limits
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WasiSocketConfig {
-    fd: u32,
-    bind: String,
-    peer: String,
-}
-
 struct NativeAuditInvocation {
     binary: ArtifactRef,
     allow: BTreeSet<String>,
@@ -281,9 +182,9 @@ struct Invocation {
     hostname: Option<String>,
     params: BTreeMap<String, String>,
     /// Seed-driven fault-injection knobs forwarded to the guest through the
-    /// `PATINA_*` control plane (the same knobs the native and WASI families
-    /// accept). Recorded into the trace metadata on `--record`; restored from the
-    /// trace on the `replay` verb, so a cargo-family replay is flag-free. Default
+    /// `PATINA_*` control plane (the same knobs the native family accepts).
+    /// Recorded into the trace metadata on `--record`; restored from the trace
+    /// on the `replay` verb, so a cargo-family replay is flag-free. Default
     /// (all `None`) leaves faults off.
     knobs: KnobValues,
     /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
@@ -307,13 +208,12 @@ struct ExploreInvocation {
 
 /// What `explore` sweeps across seeds. The Cargo package family re-runs the whole
 /// `run`/`test` command per seed (each cargo invocation is cheap next to the
-/// build it caches). The native and WASI families instead build the artifact
-/// once and run that SAME artifact across every seed, so a source/package is
-/// never rebuilt per seed.
+/// build it caches). The native family instead builds the artifact once and runs
+/// that SAME artifact across every seed, so a source/package is never rebuilt
+/// per seed.
 enum ExploreTarget {
-    Cargo(Invocation),
-    Wasi(WasiInvocation),
-    Native(NativeRunInvocation),
+    Cargo(Box<Invocation>),
+    Native(Box<NativeRunInvocation>),
 }
 
 struct NativeHarnessInvocation {
@@ -441,33 +341,14 @@ enum NativeBuildTarget {
     },
 }
 
-/// What `build --target wasi` compiles: a Cargo package for `wasm32-wasip1`.
-/// WASI is package-only (a single `.rs` source is native-only).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WasiBuildInvocation {
-    manifest: PathBuf,
-    package: Option<String>,
-    bin: Option<String>,
-    release: bool,
-    /// When set, the produced `.wasm` is copied here; otherwise its Cargo
-    /// artifact path is reported.
-    output: Option<PathBuf>,
-}
-
 /// A build-on-the-fly request captured at parse time and executed by the shared
 /// build pipeline just before a run/audit/replay consumes its product. Carries
-/// the user's original source argument (`origin`) so a WASI guest's `argv[0]`
-/// and diagnostics name the source rather than a throwaway temp path.
+/// the user's original source argument (`origin`) so diagnostics name the source
+/// rather than a throwaway temp path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BuildSpec {
     origin: PathBuf,
-    kind: BuildSpecKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum BuildSpecKind {
-    Native(NativeBuildInvocation),
-    Wasi(WasiBuildInvocation),
+    build: NativeBuildInvocation,
 }
 
 /// A run/audit/replay artifact argument: either an already-built file used
@@ -509,8 +390,8 @@ struct NativeRunInvocation {
     /// metadata on `--record` and restored by replay like the environment.
     cwd: Option<String>,
     /// Maximum boundary operations before the run fails explicitly (`--budget`),
-    /// forwarded over the control plane. Family-neutral: the same
-    /// `RuntimeConfig::step_budget` the Cargo and WASI families set.
+    /// forwarded over the control plane: the `RuntimeConfig::step_budget` the
+    /// runtime enforces.
     step_budget: Option<u64>,
     /// The run's virtual realtime epoch in Unix-time nanoseconds
     /// (`--realtime-epoch`), forwarded as [`ENV_REALTIME_EPOCH_NANOS`]; `None`
@@ -584,9 +465,9 @@ struct NativeRunInvocation {
 ///
 /// One store for both plumbing shapes: a [`Plumbing::Scalar`] knob holds at most
 /// one value, a [`Plumbing::Repeatable`] one holds the whole set in CLI order.
-/// Every family's plumbing — the WASI in-process overlay, the native subprocess
-/// environment, the cargo subprocess environment and its scrub list, and the
-/// native harness's re-emitted `run` command line — iterates
+/// Every family's plumbing — the native subprocess environment, the cargo
+/// subprocess environment and its scrub list, and the native harness's
+/// re-emitted `run` command line — iterates
 /// [`FaultKnob::ALL`], so a knob added to the registry cannot be forwarded by one
 /// family and silently dropped by another. There is no per-knob field, accessor
 /// or forwarding row to forget: the CLI builds its knob rows from ALL through
@@ -661,12 +542,6 @@ struct NativeLiveness {
     /// `--heal-after=NANOS`: explicit override for the converge arm-time. Inert
     /// without `converge`.
     heal_after: Option<String>,
-}
-
-impl NativeLiveness {
-    fn is_enabled(&self) -> bool {
-        self.watchdog.is_some() || self.converge.is_some()
-    }
 }
 
 /// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
@@ -796,9 +671,6 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::Sites(invocation) => sites::execute(invocation),
         ParseResult::Syscalls(invocation) => syscalls::execute(invocation),
         ParseResult::Explore(invocation) => execute_explore(invocation),
-        ParseResult::WasiBuild(invocation) => execute_wasi_build(invocation),
-        ParseResult::WasiAudit(artifact) => execute_wasi_audit(artifact),
-        ParseResult::WasiRun(invocation) => execute_wasi_run(invocation),
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
@@ -1020,11 +892,9 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             fingerprint: Some(fingerprint),
             seed,
             coverage: None,
-            depth: None,
             crash_restart: None,
             facts,
             native_run_marker: None,
-            guest_exit_code: None,
             qualifications: Vec::new(),
         },
         captured,

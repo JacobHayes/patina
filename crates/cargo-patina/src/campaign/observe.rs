@@ -1,12 +1,11 @@
-//! Campaign coverage, depth, SDK-site folds, and guidance inputs.
+//! Campaign coverage, SDK-site folds, and guidance inputs.
 
 use super::classify::STARVATION_STALL_EXIT;
 use super::state::CampaignState;
-use super::{CampaignSpec, FaultPlanes, RunFacts};
+use super::{CampaignSpec, RunFacts};
 use crate::CliError;
 use crate::aux_store::{AuxFoldDecision, fold_decision};
 use crate::coverage::{CampaignCoverageStore, CoverageArtifact, FoldOutcome};
-use crate::depth::{CampaignDepthStore, DepthFoldOutcome};
 use crate::guided::{GuidancePlan, NoveltyEntry};
 use crate::sdk_report::CoverageTally;
 use std::fs;
@@ -46,14 +45,6 @@ pub(super) fn initialize_edge_coverage(
     state: &CampaignState,
     campaign_generations_done: u64,
 ) -> Result<EdgeCoverageState, CliError> {
-    if state.artifact.family != "native" {
-        return Ok(EdgeCoverageState::unavailable(
-            "not-native",
-            Some(
-                "only instrumented native binaries carry edge coverage; a WASI module accumulates depth instead",
-            ),
-        ));
-    }
     let artifact_path = PathBuf::from(&state.artifact.path);
     // Edge coverage rides the SanitizerCoverage counters, which BOTH instrumented
     // build modes emit. `--coverage-points` emits them without the per-block
@@ -84,7 +75,6 @@ pub(super) fn initialize_edge_coverage(
     let artifact = CoverageArtifact {
         path: state.artifact.path.clone(),
         sha256: state.artifact.sha256.clone(),
-        family: state.artifact.family.to_string(),
     };
     let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumentation);
     let store = CampaignCoverageStore::load(
@@ -118,150 +108,32 @@ pub(super) fn campaign_coverage_fingerprint(
     fingerprint
 }
 
-/// The depth store's compatibility fingerprint. It binds accumulated depth to the
-/// exploration policy that produced it, exactly as the coverage fingerprint does:
-/// re-running a WASI campaign under different knobs explores a different space, so
-/// its fuel high-water marks and hostcall sums must not be unioned with the old
-/// ones. Module identity itself rides the artifact hash, not this string.
-/// Which store supplies the guidance signal, or a loud refusal naming why there
-/// is none. Native campaigns steer on edge coverage, WASI campaigns on depth.
-pub(super) fn guidance_source_or_refuse(
-    edge_coverage: &EdgeCoverageState,
-    depth: &DepthState,
-    family: &'static str,
-) -> Result<(), CliError> {
-    if edge_coverage.active().is_some() || depth.active().is_some() {
+/// The guidance signal, or a loud refusal naming why there is none: a guided
+/// campaign steers on edge coverage.
+pub(super) fn guidance_source_or_refuse(edge_coverage: &EdgeCoverageState) -> Result<(), CliError> {
+    if edge_coverage.active().is_some() {
         return Ok(());
     }
-    let hint = if family == "native" {
-        "rebuild with cargo patina build --yield-points so generations have edge coverage to steer by"
-    } else {
-        "coverage-guided campaigns need a native yield-point binary or a WASI module"
-    };
-    Err(CliError(format!(
-        "--guided needs a novelty signal but this {family} campaign has neither edge coverage nor WASI depth; {hint}"
-    )))
+    Err(CliError(
+        "--guided needs a novelty signal but this campaign has no edge coverage; rebuild with \
+cargo patina build --coverage-points (or --yield-points) so generations have edge coverage to steer by"
+            .to_string(),
+    ))
 }
 
-/// Resolve the guidance plan from whichever store is accumulating novelty. Built
-/// per generation rather than cached: the log is sparse, so the forward pass is
-/// a handful of hashes, and rebuilding keeps the derivation an obvious pure
+/// Resolve the guidance plan from the edge-coverage novelty log. Built per
+/// generation rather than cached: the log is sparse, so the forward pass is a
+/// handful of hashes, and rebuilding keeps the derivation an obvious pure
 /// function of the persisted state rather than of loop-carried state.
 pub(super) fn guidance_plan(
     spec: &CampaignSpec,
     edge_coverage: &EdgeCoverageState,
-    depth: &DepthState,
 ) -> GuidancePlan {
-    let log: Vec<NoveltyEntry> = match (edge_coverage.active(), depth.active()) {
-        (Some(store), _) => store.novelty_log(),
-        (None, Some(store)) => store.novelty_log(),
-        (None, None) => Vec::new(),
-    };
+    let log: Vec<NoveltyEntry> = edge_coverage
+        .active()
+        .map(CampaignCoverageStore::novelty_log)
+        .unwrap_or_default();
     GuidancePlan::new(spec.seed_base, spec.plateau_after, &log)
-}
-
-fn campaign_depth_fingerprint(spec: &CampaignSpec) -> String {
-    let mut fingerprint = "patina-wasi".to_string();
-    if spec.buggify {
-        fingerprint.push_str("+buggify");
-    }
-    match spec.faults {
-        FaultPlanes::NONE => {}
-        FaultPlanes::ALL => fingerprint.push_str("+faults"),
-        subset => fingerprint.push_str(&format!("+faults={}", subset.cli_list())),
-    }
-    for knob in &spec.exclude_knobs {
-        fingerprint.push_str(&format!("-{}", knob.meta().flag.trim_start_matches('-')));
-    }
-    fingerprint
-}
-
-/// WASI depth accumulation state, mirroring [`EdgeCoverageState`]. A native
-/// campaign reports `unavailable` here and edge coverage there, so exactly one of
-/// the two blocks carries data and neither is silently absent.
-#[derive(Debug)]
-pub(super) enum DepthState {
-    Active(Box<CampaignDepthStore>),
-    Unavailable {
-        reason: &'static str,
-        hint: Option<&'static str>,
-    },
-}
-
-impl DepthState {
-    fn active_mut(&mut self) -> Option<&mut CampaignDepthStore> {
-        match self {
-            Self::Active(store) => Some(store.as_mut()),
-            Self::Unavailable { .. } => None,
-        }
-    }
-
-    pub(super) fn active(&self) -> Option<&CampaignDepthStore> {
-        match self {
-            Self::Active(store) => Some(store.as_ref()),
-            Self::Unavailable { .. } => None,
-        }
-    }
-}
-
-pub(super) fn initialize_depth(
-    out_dir: &Path,
-    state: &CampaignState,
-    campaign_generations_done: u64,
-) -> Result<DepthState, CliError> {
-    if state.artifact.family != "wasi" {
-        return Ok(DepthState::Unavailable {
-            reason: "not-wasi",
-            hint: Some(
-                "depth (fuel + hostcalls) is the WASI family's measure; native binaries accumulate edge coverage instead",
-            ),
-        });
-    }
-    let depth_dir = out_dir.join("depth");
-    fs::create_dir_all(&depth_dir).map_err(|error| {
-        CliError(format!(
-            "failed to create campaign depth dir {}: {error}",
-            depth_dir.display()
-        ))
-    })?;
-    let artifact = CoverageArtifact {
-        path: state.artifact.path.clone(),
-        sha256: state.artifact.sha256.clone(),
-        family: state.artifact.family.to_string(),
-    };
-    let store = CampaignDepthStore::load(
-        depth_dir,
-        artifact,
-        campaign_depth_fingerprint(&state.spec),
-        state.spec.plateau_after,
-        campaign_generations_done,
-    )?;
-    Ok(DepthState::Active(Box::new(store)))
-}
-
-/// Fold one generation's `PATINA_DEPTH_REPORT` (parsed out of the child's already
-/// captured stderr — no descriptor plumbing needed) into the depth store.
-///
-/// A generation that exited cleanly must carry a depth line; one that was killed
-/// by the wall-clock backstop or died inside the engine may not, and contributes
-/// no measurement while still advancing the watermark.
-pub(super) fn fold_depth_generation(
-    depth: &mut DepthState,
-    generation: u64,
-    exit: i32,
-    timed_out: bool,
-    stderr: &str,
-) -> Result<Option<DepthFoldOutcome>, CliError> {
-    let Some(store) = depth.active_mut() else {
-        return Ok(None);
-    };
-    let report = stderr
-        .lines()
-        .find_map(crate::output::parse_depth_report_line);
-    let requires_report = exit == 0 && !timed_out;
-    store
-        .fold_generation(generation, report.as_ref(), requires_report)
-        .map(Some)
 }
 
 pub(super) fn fold_sites_generation(
@@ -322,9 +194,8 @@ pub(super) fn fold_edge_coverage_generation(
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if len == 0 {
-        // A killed generation has no coverage to contribute and never claimed to:
-        // it is skipped, exactly like a killed generation's missing depth line.
-        // Failing the whole campaign here would make `--starve` (whose stall
+        // A killed generation has no coverage to contribute and never claimed to,
+        // so it is skipped. Failing the whole campaign here would make `--starve` (whose stall
         // backstop kills a wedged generation BY DESIGN) unusable with coverage.
         if !reached_shutdown {
             let _ = fs::remove_file(path);

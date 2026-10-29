@@ -338,8 +338,6 @@ mod tests {
     // no auto-init is allowed, so the shim aborts loudly. A guest write is a
     // boundary effect too, though capture answers it with no context installed: the
     // install that follows refuses. Either way the application code never proceeds.
-    // `--harness` itself is native-only: a WASI run rejects it up front (the WASI
-    // supervisor owns run configuration), never silently ignoring it.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn harness_boundary_effects_before_install_fail_closed() {
@@ -369,28 +367,5 @@ mod tests {
                 "{mode}: application code ran past the pre-install boundary"
             );
         }
-
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("app.wasm");
-        fs::write(
-            &module,
-            wat::parse_str("(module (func (export \"_start\")))").unwrap(),
-        )
-        .unwrap();
-        let output = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &["run", module.to_str().unwrap(), "--harness"],
-        );
-        assert!(
-            !output.status.success(),
-            "--harness on a WASI run succeeded"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("`run` of a WASI module does not accept --harness"),
-            "missing native-only rejection:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 }

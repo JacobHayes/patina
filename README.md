@@ -111,19 +111,18 @@ instrumentation to a caught, replayed, HTML-rendered bug in about ten minutes.
 
 ## How to use it
 
-One CLI, three artifact families, inferred automatically: a **Cargo
-package/test** (directory or `Cargo.toml`, run in-process), a **native binary**
-(Mach-O/ELF, linked against the deterministic shim), and a **WASI module**
-(`wasm32-wasip1`, run under a deterministic host). `run`, `audit`, and `replay`
-are source-first: hand them a `.rs` file, a directory, or a `Cargo.toml` and
-they build through the same pipeline as `build` first. `test` also has a
+One CLI, two artifact families, inferred automatically: a **Cargo
+package/test** (directory or `Cargo.toml`, run in-process) and a **native
+binary** (Mach-O/ELF, linked against the deterministic shim). `run`, `audit`,
+and `replay` are source-first: hand them a `.rs` file, a directory, or a
+`Cargo.toml` and they build through the same pipeline as `build` first. `test` also has a
 source-first native libtest harness mode for one exact test target.
 
 | Verb | What it does | Example |
 |---|---|---|
 | `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
 | `test` | Run Cargo-family tests, or rebuild one libtest harness shim-linked and sweep an exact test. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
-| `build` | Build the shim-linked native binary (default), a Go main package (`--go`, Linux), or a wasip1 package. | `cargo patina build ./pkg --output app` |
+| `build` | Build the shim-linked native binary, or a Go main package (`--go`, Linux). | `cargo patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
@@ -180,13 +179,13 @@ Replay refuses `[defaults.replay]` because traces are authoritative.
 Faults are seed-driven and default-off. Fault configurations are recorded
 into the trace so replay reproduces them flag-free. `--fs-crash-at` has
 fresh-incarnation semantics on native runs, and its record/replay carries both
-incarnations; Cargo-family and WASI crash refuse by name until their restart
-paths are wired.
+incarnations; Cargo-family crash refuses by name until its restart path is
+wired.
 
 - **Filesystem faults**: native `--fs-crash-at open|write|sync|close[:N]`
   terminates the current incarnation and restarts once from the recovered
   durable image, with block- or byte-granularity torn writes
-  (`--fs-torn-granularity`). Other families refuse crash restart rather than
+  (`--fs-torn-granularity`). The Cargo family refuses crash restart rather than
   emulate it with rollback-and-continue. The remaining fs
   faults are
   rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
@@ -195,7 +194,7 @@ paths are wired.
   and peers).
 - **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
   `--net-latency-nanos` (base delivery latency, on datagrams and TCP alike).
-- **DNS** (native and Cargo families; wasip1 has no resolution surface):
+- **DNS**:
   `--dns-entry NAME=ADDR` defines the host table a guest can resolve — every
   other name is NXDOMAIN — and `--dns-fail-permille` / `--dns-latency-nanos`
   inject seeded resolution failures and delays against the defined names. A
@@ -208,7 +207,7 @@ paths are wired.
 - **Entropy**: `--entropy-fail-permille` models a guest that starts before the
   kernel's random pool is initialized: a `GRND_NONBLOCK` `getrandom` answers
   `EAGAIN` until a read shows the pool ready. No other entropy API can fail, so
-  a guest that makes no such read (any Darwin or WASI guest, and Rust's std)
+  a guest that makes no such read (any Darwin guest, and Rust's std)
   gets no entropy report. The knob is undiagnosable there, not vacuous.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
@@ -274,7 +273,7 @@ trace carries the seed, fault knobs, buggify config, guest argv, and native
 `--env` values, and any mismatch — changed binary, changed
 config, diverging operation — fails closed rather than lying. A native trace
 names its binary by digest, so replaying it against one that differs by a
-single byte is refused before the guest starts, naming what differs. Cargo and WASI
+single byte is refused before the guest starts, naming what differs. Cargo
 traces also support *branch timelines*: replay a recorded prefix, then explore a
 different seeded suffix from that moment
 (`replay … --branch --from N --branch-seed S --branch-id ID`).
@@ -306,12 +305,8 @@ Why debug finds more bugs:
   binaries persist the union under `<out-dir>/coverage/`, and the offline
   coverage report refuses a campaign store if `<binary>` does not hash to the
   recorded campaign artifact. Campaigns report plateau with `--plateau-after`.
-  WASI has no sancov, so that family reports *depth* instead of coverage: every
-  run emits `PATINA_DEPTH_REPORT` (fuel plus per-import hostcall counts) and a
-  campaign accumulates it under `<out-dir>/depth/`, plateauing on the same
-  `--plateau-after` window.
   `campaign --guided` closes the loop: generations are biased toward
-  configurations that previously found new coverage or depth, while staying a
+  configurations that previously found new coverage, while staying a
   pure function of the seed base and the persisted novelty log.
 - **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
   between every edit.
@@ -343,14 +338,11 @@ then `run` the resulting artifact.
 - **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
   interposed over virtual sockets, pipes, and the virtual clock.
 - **Record/replay** with byte-identical traces, branch timelines
-  (Cargo/WASI), and failure-oracle **trace minimization**.
+  (Cargo), and failure-oracle **trace minimization**.
 - **Default-deny audit gate**: before a native guest runs, every externally
   resolved symbol must be interposed or provably effect-free; unknown imports
   and raw syscall/clock/entropy instructions are refusals
   (`--allow-unsupported-symbols` is the loud, recorded escape hatch).
-- **WASI Preview 1**: the entire 46-function audited import surface, with
-  read-only/read-write preopens, resource limits, fuel, sockets via configured
-  descriptors, record/replay, and branching.
 - **Campaigns**: deterministic multi-generation sweeps with an outcome
   classifier (finding, harness and catch-all classes, plus one vacuity class per
   fault plane), failure-signature dedup, and per-failure repro commands.
@@ -367,7 +359,6 @@ then `run` the resulting artifact.
 | macOS | Supported; static instruction scan + import audit for containment. |
 | Linux x86_64 | Supported; adds syscall-user-dispatch, which traps raw inline syscalls (e.g. rustix's default `linux_raw` backend) into the runtime, plus a whole-run `strace` containment gate in CI. |
 | Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
-| `wasm32-wasip1` | Supported via the deterministic WASI host. |
 
 On Linux the virtual kernel is pinned to Ubuntu 24.04's GA kernel (Ubuntu's
 Linux 6.8 build; `cargo patina --version` names it): `uname` reports 6.8, a
@@ -415,7 +406,7 @@ silently:
   and render a planted bug.
 - [USAGE-MODES.md](./USAGE-MODES.md) — the three adoption levels and crate map.
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — system design: targets, drivers,
-  wrappers, traces, the native shim, and the WASI host.
+  wrappers, traces, and the native shim.
 - [INTENTS.md](./INTENTS.md) — goals, non-goals, trade-offs, and the niche
   Patina occupies.
 - [docs/SCOPE.md](./docs/SCOPE.md) — who Patina serves first and the rules new

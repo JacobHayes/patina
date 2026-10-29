@@ -1,7 +1,6 @@
 # Standalone package: its own empty [workspace] table keeps it OUT of the root
 # Patina workspace so `cargo` here never touches crates/ or the root manifest.
-# Built to wasm32-wasip1 via `cargo patina build --target wasi` (or to the native
-# host via `cargo patina build`) and swept by `cargo patina campaign`.
+# Built via `cargo patina build` and swept by `cargo patina campaign`.
 #
 # This is the wave-13 planted-bug guest: a buggify-gated liveness bug. When the
 # `liveness-wedge` site fires, the guest fails to converge and spins on retry

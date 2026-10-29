@@ -15,32 +15,21 @@ mod tests {
         })
     }
 
-    fn sometimes_gate_wat(label: &str, satisfied: bool) -> Vec<u8> {
-        let bit = if satisfied { 1 } else { 0 };
-        let wat = format!(
-            r#"(module
-    (import "patina_sdk" "sometimes"
-        (func $sometimes (param i32 i32 i32 i32 i32) (result i32)))
-    (import "patina_sdk" "lifecycle_setup_complete" (func $setup (result i32)))
-    (memory (export "memory") 1)
-    (data (i32.const 0) "{label}")
-    (data (i32.const 32) "wat:sometimes")
-    (func (export "_start")
-        (drop (call $setup))
-        (drop (call $sometimes (i32.const {bit})
-            (i32.const 0) (i32.const {label_len}) (i32.const 32) (i32.const 13)))))"#,
-            label_len = label.len()
+    /// An SDK guest with one `sometimes!` site, satisfied or never satisfied.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn sometimes_gate_guest(label: &str, satisfied: bool) -> PathBuf {
+        let main = format!(
+            "fn main() {{\n    patina_dst::lifecycle::setup_complete();\n    patina_dst::sometimes!(std::hint::black_box({satisfied}), \"{label}\");\n}}\n"
         );
-        wat::parse_str(&wat).unwrap()
+        super::super::run_facts::shared_sdk_guest(&format!("sometimes-{label}"), &main)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
         let directory = tempdir().unwrap();
-        let unmet = directory.path().join("never-green.wasm");
-        let met = directory.path().join("met.wasm");
-        fs::write(&unmet, sometimes_gate_wat("never-green", false)).unwrap();
-        fs::write(&met, sometimes_gate_wat("met-green", true)).unwrap();
+        let unmet = sometimes_gate_guest("never-green", false);
+        let met = sometimes_gate_guest("met-green", true);
 
         let run = |module: &Path, out: &Path, extra: &[&str], inherited_report: Option<&str>| {
             let mut args = vec![

@@ -80,9 +80,8 @@ pub(crate) fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocatio
     // command, including the verb token itself and anything past `--`.
     let (owned, forwarded) = cli::partition(verb, help::Family::Sole, arguments);
     let args = cli::parse("explore", help::Family::Sole, owned)?;
-    // `explore run <artifact|src>` sweeps the native or WASI families; `explore
-    // run`/`test` with no diverting artifact stays the Cargo package family. Every
-    // family must be in a plain seeded mode — record/replay/branch pin a single
+    // `explore run <artifact|src>` sweeps the native family; `explore run`/`test`
+    // with no diverting artifact stays the Cargo package family. Every family must be in a plain seeded mode — record/replay/branch pin a single
     // run and have nothing to sweep. The recursive `parse` re-points the current
     // verb at the wrapped `run`/`test`; restore `explore` so any later usage error
     // here prints the explore synopsis.
@@ -92,15 +91,11 @@ pub(crate) fn parse_explore(arguments: Vec<OsString>) -> Result<ExploreInvocatio
     let (target, mode_seed) = match parsed {
         ParseResult::Run(invocation) => {
             let seed = explore_seed_of(&invocation.mode)?;
-            (ExploreTarget::Cargo(invocation), seed)
-        }
-        ParseResult::WasiRun(invocation) => {
-            let seed = explore_seed_of(&invocation.mode)?;
-            (ExploreTarget::Wasi(invocation), seed)
+            (ExploreTarget::Cargo(Box::new(invocation)), seed)
         }
         ParseResult::NativeRun(invocation) => {
             let seed = explore_native_seed_of(&invocation.mode)?;
-            (ExploreTarget::Native(invocation), seed)
+            (ExploreTarget::Native(Box::new(invocation)), seed)
         }
         _ => {
             return Err(CliError::usage(
@@ -157,10 +152,50 @@ pub(super) fn cargo_package_dir(origin: &OsStr) -> Result<PathBuf, CliError> {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| PathBuf::from("."))),
         _ => Err(CliError::usage(format!(
-            "replay target {} is neither a WASI module, a native binary, nor a Cargo package (a directory or Cargo.toml)",
+            "replay target {} is neither a native binary nor a Cargo package (a directory or Cargo.toml)",
             Path::new(origin).display()
         ))),
     }
+}
+
+/// The timeline/branch selection of a cargo-family replay, the one family that
+/// supports branch-append.
+fn replay_mode(args: &cli::Args, path: PathBuf) -> Result<Mode, CliError> {
+    let timeline = args.string("--timeline");
+    let from_sequence = args.u64("--from");
+    let branch_seed = args.u64("--branch-seed");
+    let branch_id = args.string("--branch-id");
+    let parent = args.string("--parent");
+    if !args.flag("--branch") {
+        if from_sequence.is_some()
+            || branch_seed.is_some()
+            || branch_id.is_some()
+            || parent.is_some()
+        {
+            return Err(CliError::usage(
+                "--from/--branch-seed/--branch-id/--parent require --branch",
+            ));
+        }
+        return Ok(Mode::Replay {
+            path,
+            timeline: timeline.unwrap_or_else(|| "main".into()),
+        });
+    }
+    if timeline.is_some() {
+        return Err(CliError::usage(
+            "--timeline selects a timeline to replay and is not valid with --branch",
+        ));
+    }
+    Ok(Mode::Branch {
+        path,
+        parent: parent.unwrap_or_else(|| "main".into()),
+        from_sequence: from_sequence
+            .ok_or_else(|| CliError::usage("replay --branch requires --from"))?,
+        branch_seed: branch_seed
+            .ok_or_else(|| CliError::usage("replay --branch requires --branch-seed"))?,
+        branch_id: branch_id
+            .ok_or_else(|| CliError::usage("replay --branch requires --branch-id"))?,
+    })
 }
 
 #[cfg(test)]

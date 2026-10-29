@@ -6,43 +6,6 @@ mod tests {
     use super::super::run_facts::{outcome_guest, shared_sdk_guest};
     use super::super::*;
 
-    // A WASI campaign's `-- GUEST_ARGS` reach the guest in every generation. The
-    // guest exits with `argc - 3`: clean only when the program name and both
-    // arguments arrive, including one that looks like a flag.
-    #[test]
-    fn wasi_campaign_forwards_guest_args_to_every_generation() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("argc.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(
-                r#"(module
-                (import "wasi_snapshot_preview1" "args_sizes_get"
-                    (func $args_sizes_get (param i32 i32) (result i32)))
-                (import "wasi_snapshot_preview1" "proc_exit" (func $proc_exit (param i32)))
-                (memory (export "memory") 1)
-                (func (export "_start")
-                    (drop (call $args_sizes_get (i32.const 0) (i32.const 8)))
-                    (call $proc_exit (i32.sub (i32.load (i32.const 0)) (i32.const 3)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let swept = campaign_run(
-            &directory.path().join("out"),
-            &module,
-            &["--", "alpha", "--beta"],
-        );
-        assert!(
-            swept.status.success(),
-            "a WASI campaign must hand its guest args to every generation:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&swept.stdout),
-            String::from_utf8_lossy(&swept.stderr)
-        );
-        assert_eq!(campaign_json_stdout(&swept)["classes"]["OK"], 2);
-    }
-
     // Gate: a `patina-dst-harness` binary is sweepable. Without `--harness` the
     // supervisor installs the runtime itself and the guest's own install fails closed
     // (`AlreadyInstalled`) in every generation; with it, every generation runs.
@@ -213,13 +176,10 @@ mod tests {
 
     // A campaign asked for a mode its artifact cannot serve is refused by name, never
     // swept in a different mode than the operator asked for. A plain native binary
-    // (no yield points) has no edge coverage and is not WASI, so `--guided` has no
-    // novelty signal; a WASI campaign carrying the native invocation surface is
-    // refused where the artifact family is finally known, the same shape as the
-    // `--dns-entry` family refusal.
+    // (no yield points) has no edge coverage, so `--guided` has no novelty signal.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn campaign_refuses_a_mode_its_artifact_cannot_serve() {
+    fn campaign_refuses_guided_without_a_novelty_signal() {
         let directory = tempdir().unwrap();
         let refused = campaign_run(
             &directory.path().join("guided"),
@@ -242,38 +202,5 @@ mod tests {
                 && refusal.contains("--yield-points"),
             "the refusal must name the cause and the fix:\n{refusal}"
         );
-
-        let module = directory.path().join("app.wasm");
-        fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
-        for (flag, value) in [
-            ("--harness", None),
-            ("--allow", Some("dlsym")),
-            ("--allow-unsupported-symbols", Some("all")),
-        ] {
-            let out = directory.path().join(flag.trim_start_matches('-'));
-            let mut args = vec![
-                "campaign",
-                module.to_str().unwrap(),
-                "--gens",
-                "1",
-                "--out-dir",
-                out.to_str().unwrap(),
-                flag,
-            ];
-            if let Some(value) = value {
-                args.push(value);
-            }
-            let refused = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                native_workspace(),
-                &args,
-            );
-            assert!(!refused.status.success(), "{flag} must be refused for WASI");
-            let stderr = String::from_utf8_lossy(&refused.stderr);
-            assert!(
-                stderr.contains(flag) && stderr.contains("native"),
-                "the refusal must name {flag} and the family:\n{stderr}"
-            );
-        }
     }
 }

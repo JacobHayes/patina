@@ -56,14 +56,6 @@ pub const HELP_FLAGS: &[Flag] = &[
     ),
 ];
 
-pub(super) const TARGET_FLAG: Flag = f(
-    "--target",
-    None,
-    Value::Required("native|wasi", Kind::Enum(&["native", "wasi"])),
-    "Select the family for a source/package argument (default native); stripped before routing.",
-    false,
-);
-
 pub(super) const SOURCE_SELECT: &[Flag] = &[
     f(
         "--package",
@@ -79,7 +71,6 @@ pub(super) const SOURCE_SELECT: &[Flag] = &[
         "Select the binary when the package defines more than one.",
         false,
     ),
-    TARGET_FLAG,
 ];
 
 use patina_dst_runtime::{FaultKnob, Plumbing};
@@ -233,82 +224,9 @@ const fn knob_flags<const N: usize>(group: KnobGroup) -> [Flag; N] {
 }
 pub(super) const FAULT_FLAGS: &[Flag] =
     &knob_flags::<{ knob_count(KnobGroup::Fault) }>(KnobGroup::Fault);
-// WASI has no resolution surface. Campaign takes the semantic table alone.
+// Campaign takes the semantic table alone.
 pub(super) const DNS_FLAGS: &[Flag] = &knob_flags::<{ knob_count(KnobGroup::Dns) }>(KnobGroup::Dns);
 pub(super) const DNS_ENTRY_FLAGS: &[Flag] = &[knob_flag(FaultKnob::DnsEntry).0];
-
-pub(super) const WASI_HOST_FLAGS: &[Flag] = &[
-    f(
-        "--fuel",
-        None,
-        Value::Required("N", Kind::U64),
-        "Maximum wasm fuel (execution budget).",
-        false,
-    ),
-    f(
-        "--env",
-        None,
-        Value::Required("K=V", Kind::KeyValue),
-        "Set a guest environment variable.",
-        true,
-    ),
-    f(
-        "--socket",
-        None,
-        Value::Required("FD=BIND->PEER", Kind::Socket),
-        "Configure a datagram socket at a unique FD above 3.",
-        true,
-    ),
-    f(
-        "--preopen",
-        None,
-        Value::Required("GUEST[:ro|:rw]", Kind::Preopen),
-        "Preopen an absolute guest path (default rw; first explicit preopen replaces the implicit rw `/`).",
-        true,
-    ),
-    f(
-        "--max-memory-pages",
-        None,
-        Value::Required("N", Kind::U32),
-        "Maximum guest memory pages (64 KiB each).",
-        false,
-    ),
-    f(
-        "--max-descriptors",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Maximum open WASI descriptors.",
-        false,
-    ),
-    f(
-        "--max-preopens",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Maximum configured preopened directories.",
-        false,
-    ),
-    f(
-        "--max-path-bytes",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Maximum bytes in a single guest path.",
-        false,
-    ),
-    f(
-        "--max-io-bytes",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Maximum bytes in one WASI I/O operation.",
-        false,
-    ),
-    f(
-        "--max-iovecs",
-        None,
-        Value::Required("N", Kind::Usize),
-        "Maximum iovec entries in one WASI operation.",
-        false,
-    ),
-];
 
 pub(super) const BUGGIFY_FLAGS: &[Flag] = &[
     f(

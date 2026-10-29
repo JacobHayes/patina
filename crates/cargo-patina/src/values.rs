@@ -8,8 +8,8 @@
 //! `0..N`.
 //!
 //! Validators return the value's text unchanged. Converting that text into a
-//! `u64`, a preopen, or a socket route is the caller's job; by then the grammar
-//! is already guaranteed, so those conversions cannot fail.
+//! `u64` or a crash point is the caller's job; by then the grammar is already
+//! guaranteed, so those conversions cannot fail.
 
 use crate::help::Kind;
 use crate::trace_view;
@@ -19,10 +19,6 @@ use crate::trace_view;
 pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String> {
     match kind {
         Kind::U64 => u64_of(name, value).map(drop),
-        Kind::U32 => value
-            .parse::<u32>()
-            .map(drop)
-            .map_err(|_| format!("{name} must be an unsigned 32-bit integer")),
         Kind::Usize => value
             .parse::<usize>()
             .map(drop)
@@ -63,8 +59,6 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             }),
         Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::AddressPair => address_pair(name, value).map(drop),
-        Kind::Socket => socket(name, value).map(drop),
-        Kind::Preopen => preopen(name, value).map(drop),
         Kind::UnsupportedSymbols => unsupported_symbols(name, value).map(drop),
         Kind::Enum(allowed) => {
             if allowed.contains(&value) {
@@ -293,40 +287,6 @@ pub(crate) fn address_pair<'a>(name: &str, value: &'a str) -> Result<(&'a str, &
         ));
     }
     Ok((left, right))
-}
-
-/// A datagram socket route `FD=BIND->PEER`. Uniqueness of the FD across
-/// repetitions is a cross-value rule the WASI parser still enforces.
-pub(crate) fn socket<'a>(name: &str, value: &'a str) -> Result<(u32, &'a str, &'a str), String> {
-    let (fd, route) = value
-        .split_once('=')
-        .ok_or_else(|| format!("{name} requires FD=BIND->PEER"))?;
-    let fd = fd
-        .parse::<u32>()
-        .map_err(|_| format!("{name} FD must be an unsigned 32-bit integer"))?;
-    let (bind, peer) = route
-        .split_once("->")
-        .ok_or_else(|| format!("{name} requires FD=BIND->PEER"))?;
-    if fd <= 3 || bind.is_empty() || peer.is_empty() {
-        return Err(format!(
-            "{name} requires a unique FD above 3 and non-empty addresses"
-        ));
-    }
-    Ok((fd, bind, peer))
-}
-
-/// A preopen `GUEST[:ro|:rw]`, split into its guest path and read-only flag.
-pub(crate) fn preopen<'a>(name: &str, value: &'a str) -> Result<(&'a str, bool), String> {
-    let (guest_path, read_only) = match value.rsplit_once(':') {
-        Some((guest_path, "ro")) => (guest_path, true),
-        Some((guest_path, "rw")) => (guest_path, false),
-        Some(_) => return Err(format!("{name} requires GUEST, GUEST:ro, or GUEST:rw")),
-        None => (value, false),
-    };
-    if guest_path.is_empty() {
-        return Err(format!("{name} guest path must not be empty"));
-    }
-    Ok((guest_path, read_only))
 }
 
 /// `all`, or a comma-separated list of at least one non-empty symbol.

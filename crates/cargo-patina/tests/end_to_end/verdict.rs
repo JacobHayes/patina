@@ -1,4 +1,4 @@
-//! Native and WASI verdict ABI recording, replay, and envelope delivery, and
+//! Native verdict ABI recording, replay, and envelope delivery, and
 //! the native SDK verdict guest the minimize tests share.
 
 use super::*;
@@ -60,8 +60,8 @@ mod tests {
     use super::verdict_guest;
 
     // ---------------------------------------------------------------------------
-    // The verdict ABI (outcome-channel arc, Wave A): one shim verb / one WASI
-    // import, recorded as trace events and surfaced in `patina.result/v1`.
+    // The verdict ABI (outcome-channel arc, Wave A): one shim verb, recorded as
+    // trace events and surfaced in `patina.result/v1`.
     // ---------------------------------------------------------------------------
 
     /// The `PATINA_VERDICT` lines in a stderr stream, in order.
@@ -337,85 +337,5 @@ mod tests {
         // so it must not wait on a lock a guest thread can hold: here a worker
         // is parked holding std's stderr lock when main fails its invariant.
         assert_replays_identically(&record_always_violation(&["--", "parked"]));
-    }
-
-    // The WASI half: the `patina_sdk` `verdict` import is backed by the same runtime
-    // entry, so a wasip1 guest's verdicts reach the envelope identically to native.
-    // An unknown kind traps rather than being reclassified.
-    #[test]
-    fn wasi_verdict_import_records_and_refuses_an_unknown_kind() {
-        let directory = tempdir().unwrap();
-        let module = directory.path().join("verdict.wasm");
-        fs::write(
-            &module,
-            wat::parse_str(
-                r#"(module
-                (import "patina_sdk" "verdict"
-                    (func $verdict (param i32 i32 i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
-                (data (i32.const 0) "two leaders")
-                (data (i32.const 16) "term=4")
-                (func (export "_start")
-                    (drop (call $verdict (i32.const 1)
-                        (i32.const 0) (i32.const 11) (i32.const 16) (i32.const 6)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-
-        let run = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &[
-                "run",
-                module.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--format",
-                "json",
-            ],
-        );
-        let stdout = String::from_utf8_lossy(&run.stdout);
-        let value: serde_json::Value = serde_json::from_str(stdout.trim())
-            .unwrap_or_else(|error| panic!("envelope was not one JSON object: {error}\n{stdout}"));
-        let verdicts = value["verdicts"]
-            .as_array()
-            .unwrap_or_else(|| panic!("wasip1 run carried no verdicts[]: {value}"));
-        assert_eq!(verdicts.len(), 1, "{value}");
-        assert_eq!(verdicts[0]["kind"], "violation");
-        assert_eq!(verdicts[0]["label"], "two leaders");
-        assert_eq!(verdicts[0]["detail"], "term=4");
-
-        // An out-of-range kind is refused, not defaulted: a guest built against a
-        // newer verdict ABI must fail closed rather than report a wrong kind.
-        let unknown = directory.path().join("unknown-kind.wasm");
-        fs::write(
-            &unknown,
-            wat::parse_str(
-                r#"(module
-                (import "patina_sdk" "verdict"
-                    (func $verdict (param i32 i32 i32 i32 i32) (result i32)))
-                (memory (export "memory") 1)
-                (func (export "_start")
-                    (drop (call $verdict (i32.const 99)
-                        (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0)))))"#,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            directory.path(),
-            &["run", unknown.to_str().unwrap(), "--seed", "1"],
-        );
-        assert!(
-            !refused.status.success(),
-            "an unknown verdict kind must fail the run"
-        );
-        let stderr = String::from_utf8_lossy(&refused.stderr);
-        assert!(
-            stderr.contains("unknown verdict kind 99"),
-            "the refusal must name the unknown kind:\n{stderr}"
-        );
     }
 }

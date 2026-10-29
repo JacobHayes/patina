@@ -149,14 +149,6 @@ impl FaultPlanes {
         Ok(Self(bits))
     }
 
-    /// The comma-separated spelling `--faults=` takes, in canonical order.
-    pub fn cli_list(self) -> String {
-        self.planes()
-            .map(FaultPlane::name)
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-
     /// The recorded form: `false` off, `true` every plane, else the selected
     /// plane names in canonical order.
     pub(super) fn to_json(self) -> serde_json::Value {
@@ -212,7 +204,10 @@ mod tests {
         // Names select a set: order and repeats do not matter, and the list
         // renders in canonical order.
         let subset = FaultPlanes::from_names(["sleep", "net", "sleep"]).unwrap();
-        assert_eq!(subset.cli_list(), "net,sleep");
+        assert_eq!(
+            subset.planes().map(FaultPlane::name).collect::<Vec<_>>(),
+            ["net", "sleep"]
+        );
         assert_eq!(
             FaultPlanes::from_names(FAULT_PLANE_NAMES.iter().copied()),
             Ok(FaultPlanes::ALL)

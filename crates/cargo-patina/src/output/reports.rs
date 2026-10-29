@@ -15,41 +15,6 @@ pub struct CoverageReport {
     pub map_path: Option<PathBuf>,
 }
 
-/// The WASI family's depth proxy: fuel plus per-import hostcall counts. Depth is
-/// deliberately NOT called coverage — it measures how far a guest ran, not which
-/// edges it reached.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DepthReport {
-    pub family: String,
-    pub fuel_consumed: u64,
-    /// Per-import call counts in import-name order. An import the guest never
-    /// called has no row at all, so "no depth data" can never be read as "zero".
-    pub hostcalls: Vec<(String, u64)>,
-}
-
-impl DepthReport {
-    pub fn hostcalls_total(&self) -> u64 {
-        self.hostcalls
-            .iter()
-            .fold(0u64, |total, (_, count)| total.saturating_add(*count))
-    }
-
-    /// The stderr marker line. Every value is an integer and the row order is the
-    /// map's, so the line is a deterministic function of the run.
-    pub fn marker_line(&self) -> String {
-        let mut line = format!(
-            "PATINA_DEPTH_REPORT family={} fuel_consumed={} hostcalls_total={}",
-            self.family,
-            self.fuel_consumed,
-            self.hostcalls_total()
-        );
-        for (name, count) in &self.hostcalls {
-            line.push_str(&format!(" {name}={count}"));
-        }
-        line
-    }
-}
-
 pub struct RunReport<'a> {
     pub verb: &'a str,
     pub family: &'a str,
@@ -61,7 +26,6 @@ pub struct RunReport<'a> {
     pub fingerprint: Option<String>,
     pub seed: Option<u64>,
     pub coverage: Option<CoverageReport>,
-    pub depth: Option<DepthReport>,
     /// Supervisor-owned native crash-restart facts. These are produced by the
     /// native parent, not recovered by parsing stderr markers, so JSON consumers
     /// can reason about restarts structurally.
@@ -74,10 +38,6 @@ pub struct RunReport<'a> {
     /// appended to the run's stderr, verbatim; `None` for every other family
     /// and for a native run that appended none.
     pub native_run_marker: Option<String>,
-    /// The status the guest itself reached, when the run's exit code is
-    /// patina's own instead (a replay that diverged after the guest finished).
-    /// `guest_exit` reports it; `None` means the exit code is the guest's.
-    pub guest_exit_code: Option<i32>,
     /// What the operator relaxed for this run, each one a reason its
     /// determinism is not guaranteed. Empty for an unqualified run.
     pub qualifications: Vec<Qualification>,
@@ -171,10 +131,6 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .coverage
             .clone()
             .or_else(|| coverage_report_line(&stdout_text, &stderr_text));
-        env.depth = report
-            .depth
-            .clone()
-            .or_else(|| depth_report_line(&stdout_text, &stderr_text));
         env.crash_restart = report.crash_restart.clone();
         env.native_run_marker = report.native_run_marker.clone();
         env.qualifications = report.qualifications.clone();
@@ -202,7 +158,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         // is what makes an *unattributed* abort meaningful.
         env.refusal = refusal(captured.exit_code, &stdout_text, &stderr_text);
         env.guest_exit = Some(GuestExit {
-            code: report.guest_exit_code.unwrap_or(captured.exit_code),
+            code: captured.exit_code,
             signal: captured.signal,
             core: captured.core,
         });
@@ -214,27 +170,6 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
     }
 
     Ok(captured.exit_code)
-}
-
-/// Finalize a WASI run (executed in-process, so its output is already in hand)
-/// exactly like [`finalize_run`], without a child process.
-pub fn finalize_inprocess(
-    report: RunReport<'_>,
-    exit: i32,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-) -> Result<i32, CliError> {
-    finalize_run(
-        report,
-        Captured {
-            exit_code: exit,
-            stdout,
-            stderr,
-            captured: true,
-            signal: None,
-            core: false,
-        },
-    )
 }
 
 /// Classify a run's outcome for the envelope and failure report.

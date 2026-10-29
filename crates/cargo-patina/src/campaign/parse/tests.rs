@@ -26,7 +26,7 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     let argv = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
 
     // Spec alone.
-    let only_spec = parse(argv(&["art.wasm", "--spec", &spec])).unwrap().spec;
+    let only_spec = parse(argv(&["art", "--spec", &spec])).unwrap().spec;
     assert_eq!(only_spec.generations, 7);
     assert!(
         only_spec.buggify,
@@ -37,7 +37,7 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     // A flag wins over the spec whether it precedes or follows `--spec`.
     for args in [
         vec![
-            "art.wasm",
+            "art",
             "--spec",
             &spec,
             "--gens",
@@ -46,7 +46,7 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
             "22",
         ],
         vec![
-            "art.wasm",
+            "art",
             "--gens",
             "3",
             "--liveness-watchdog",
@@ -227,10 +227,10 @@ fn campaign_locates_the_artifact_around_options() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     // Options may lead the artifact, in any form/order, matching the leading
     // spelling exactly.
-    let base = parse(args(&["art.wasm", "--gens", "5", "--seed-start", "2"])).unwrap();
+    let base = parse(args(&["art", "--gens", "5", "--seed-start", "2"])).unwrap();
     for spelling in [
-        &["--gens", "5", "--seed-start", "2", "art.wasm"][..],
-        &["--gens=5", "art.wasm", "--seed-start=2"][..],
+        &["--gens", "5", "--seed-start", "2", "art"][..],
+        &["--gens=5", "art", "--seed-start=2"][..],
     ] {
         let got = parse(args(spelling)).unwrap();
         assert_eq!(got.artifact, base.artifact);
@@ -247,8 +247,8 @@ fn campaign_locates_the_artifact_around_options() {
     // A real compiled artifact stranded behind an unknown flag is a loud
     // routing error naming both, never a confusing later "failed to read".
     let dir = tempfile::tempdir().unwrap();
-    let module = dir.path().join("app.wasm");
-    std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+    let module = dir.path().join("app");
+    std::fs::write(&module, [0x7f, b'E', b'L', b'F', 2, 1, 1, 0]).unwrap();
     let m = module.to_str().unwrap();
     let message = error(&["--frob", m]);
     assert!(message.contains("--frob"), "{message}");

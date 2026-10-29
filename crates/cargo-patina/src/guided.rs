@@ -33,7 +33,7 @@
 
 use crate::campaign::gen_byte::Hash;
 
-/// One generation that moved a coverage/depth dimension, with how much it moved.
+/// One generation that opened new edge coverage, with how much it opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NoveltyEntry {
     pub(crate) generation: u64,
@@ -258,7 +258,7 @@ impl GuidanceTally {
 }
 
 /// The guided detectors reported by `cargo patina campaign --selftest`, in the
-/// `(name, passed, detail)` shape the coverage and depth stores use.
+/// `(name, passed, detail)` shape the coverage store uses.
 pub(crate) fn campaign_detector_selftest() -> Vec<(&'static str, bool, String)> {
     vec![
         detector_no_ancestors_matches_unguided(),

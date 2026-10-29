@@ -2,23 +2,15 @@
 
 use super::*;
 use crate::tests::strings;
-use crate::{ArtifactRef, BuildSpecKind, NativeBuildTarget};
+use crate::{ArtifactRef, NativeBuildTarget};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 
 #[test]
-fn detects_artifact_family_from_magic() {
-    // WebAssembly preamble.
-    assert_eq!(
-        detect_artifact_family(b"\0asm\x01\0\0\0"),
-        Some(ArtifactFamily::Wasm)
-    );
+fn recognizes_native_magic() {
     // ELF.
-    assert_eq!(
-        detect_artifact_family(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]),
-        Some(ArtifactFamily::Native)
-    );
+    assert!(is_native_magic(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]));
     // Mach-O thin (both byte orders) and universal ("fat").
     for magic in [
         [0xfe, 0xed, 0xfa, 0xce],
@@ -28,37 +20,17 @@ fn detects_artifact_family_from_magic() {
         [0xca, 0xfe, 0xba, 0xbe],
         [0xbe, 0xba, 0xfe, 0xca],
     ] {
-        assert_eq!(
-            detect_artifact_family(&magic),
-            Some(ArtifactFamily::Native),
+        assert!(
+            is_native_magic(&magic),
             "Mach-O magic {magic:02x?} should classify as native"
         );
     }
-    // Unrecognized: a Cargo.toml, a too-short buffer, an empty buffer.
-    assert_eq!(detect_artifact_family(b"[package]\nname = \"x\"\n"), None);
-    assert_eq!(detect_artifact_family(b"\0as"), None);
-    assert_eq!(detect_artifact_family(b""), None);
-}
-
-#[test]
-fn extracts_target_selector() {
-    let (target, rest) =
-        extract_target(strings(&["src.rs", "--target", "wasi", "--release"])).unwrap();
-    assert_eq!(target.as_deref(), Some("wasi"));
-    assert_eq!(rest, strings(&["src.rs", "--release"]));
-
-    let (target, rest) = extract_target(strings(&["pkg", "--target=native"])).unwrap();
-    assert_eq!(target.as_deref(), Some("native"));
-    assert_eq!(rest, strings(&["pkg"]));
-
-    // A `--target` past `--` is a rustc/cargo flag, left in place.
-    let (target, rest) = extract_target(strings(&["src.rs", "--", "--target", "x86"])).unwrap();
-    assert_eq!(target, None);
-    assert_eq!(rest, strings(&["src.rs", "--", "--target", "x86"]));
-
-    assert_eq!(target_family("native").unwrap(), ArtifactFamily::Native);
-    assert_eq!(target_family("wasi").unwrap(), ArtifactFamily::Wasm);
-    assert!(target_family("riscv").is_err());
+    // Unrecognized: a WebAssembly module, a Cargo.toml, a too-short buffer, an
+    // empty buffer.
+    assert!(!is_native_magic(b"\0asm\x01\0\0\0"));
+    assert!(!is_native_magic(b"[package]\nname = \"x\"\n"));
+    assert!(!is_native_magic(b"\x7fEL"));
+    assert!(!is_native_magic(b""));
 }
 
 #[test]
@@ -71,14 +43,7 @@ fn classifies_and_resolves_positional_arguments() {
     fs::write(&elf, [0x7f, b'E', b'L', b'F', 2, 1, 1, 0]).unwrap();
     assert!(matches!(
         classify_arg(elf.as_os_str()).unwrap(),
-        ArgKind::Artifact(ArtifactFamily::Native)
-    ));
-    // A WebAssembly magic file is a built artifact.
-    let wasm = root.join("mod.wasm");
-    fs::write(&wasm, b"\0asm\x01\0\0\0").unwrap();
-    assert!(matches!(
-        classify_arg(wasm.as_os_str()).unwrap(),
-        ArgKind::Artifact(ArtifactFamily::Wasm)
+        ArgKind::Artifact
     ));
     // A `.rs` source, a package directory, and a Cargo.toml are sources.
     let source = root.join("main.rs");
@@ -110,36 +75,27 @@ fn classifies_and_resolves_positional_arguments() {
         ArgKind::Other
     ));
 
-    // Resolution: a lone `.rs` builds native; `--target wasi` on a `.rs`
-    // errors (native-only); a prebuilt artifact with a mismatched --target
-    // errors.
-    let (family, artifact) = resolve_positional(source.as_os_str(), None)
-        .unwrap()
-        .unwrap();
-    assert_eq!(family, ArtifactFamily::Native);
-    assert!(matches!(artifact, ArtifactRef::Build(_)));
-    assert!(resolve_positional(source.as_os_str(), Some("wasi")).is_err());
-    assert!(resolve_positional(wasm.as_os_str(), Some("native")).is_err());
+    // Resolution: a prebuilt binary is used as-is and a lone `.rs` builds.
+    assert!(matches!(
+        resolve_positional(elf.as_os_str()).unwrap(),
+        Some(ArtifactRef::Prebuilt(_))
+    ));
+    assert!(matches!(
+        resolve_positional(source.as_os_str()).unwrap(),
+        Some(ArtifactRef::Build(_))
+    ));
 
-    // A package directory resolves to a native build-on-the-fly with no
-    // `--target` — the SAME path `audit` uses, so an existing directory is
-    // never reinterpreted as guest argv. (Keeping a runtime-linked package on
-    // the cargo family is a `run`/`replay` routing decision made upstream via
-    // `package_integrates_patina`, not by this pure resolver.) `--target wasi`
-    // selects the WASI package build.
-    let (family, artifact) = resolve_positional(pkg.as_os_str(), None).unwrap().unwrap();
-    assert_eq!(family, ArtifactFamily::Native);
-    assert!(matches!(artifact, ArtifactRef::Build(_)));
-    let (family, _) = resolve_positional(pkg.as_os_str(), Some("wasi"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(family, ArtifactFamily::Wasm);
+    // A package directory resolves to a native build-on-the-fly — the SAME path
+    // `audit` uses, so an existing directory is never reinterpreted as guest
+    // argv. (Keeping a runtime-linked package on the cargo family is a
+    // `run`/`replay` routing decision made upstream via
+    // `package_integrates_patina`, not by this pure resolver.)
+    assert!(matches!(
+        resolve_positional(pkg.as_os_str()).unwrap(),
+        Some(ArtifactRef::Build(_))
+    ));
     // A leading flag resolves to nothing (the caller's no-artifact path).
-    assert!(
-        resolve_positional(OsStr::new("--seed"), None)
-            .unwrap()
-            .is_none()
-    );
+    assert!(resolve_positional(OsStr::new("--seed")).unwrap().is_none());
 }
 
 #[test]
@@ -172,15 +128,12 @@ fn source_first_package_selection_and_release_thread_into_the_build_spec() {
     )));
     apply_package_selection(&mut artifact, Some("member".into()), Some("app".into())).unwrap();
     match &artifact {
-        ArtifactRef::Build(spec) => match &spec.kind {
-            BuildSpecKind::Native(inv) => match &inv.target {
-                NativeBuildTarget::Package { package, bin, .. } => {
-                    assert_eq!(package.as_deref(), Some("member"));
-                    assert_eq!(bin.as_deref(), Some("app"));
-                }
-                _ => panic!("expected a package target"),
-            },
-            _ => panic!("expected a native build"),
+        ArtifactRef::Build(spec) => match &spec.build.target {
+            NativeBuildTarget::Package { package, bin, .. } => {
+                assert_eq!(package.as_deref(), Some("member"));
+                assert_eq!(bin.as_deref(), Some("app"));
+            }
+            _ => panic!("expected a package target"),
         },
         _ => panic!("expected a build spec"),
     }
@@ -207,25 +160,17 @@ fn source_first_package_selection_and_release_thread_into_the_build_spec() {
         assert_eq!(rest, strings(&["--seed", "1"]));
         assert!(take_release(strings(&["--release=yes"])).is_err());
 
-        // Applied to a native source/package build, it flips the release profile;
-        // a WASI package build spec flips too.
+        // Applied to a source/package build, it flips the release profile.
         for mut artifact in [
             ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs")))),
             ArtifactRef::Build(Box::new(native_package_spec(
                 PathBuf::from("ws"),
                 PathBuf::from("ws/Cargo.toml"),
             ))),
-            ArtifactRef::Build(Box::new(wasi_package_spec(
-                PathBuf::from("ws"),
-                PathBuf::from("ws/Cargo.toml"),
-            ))),
         ] {
             apply_release(&mut artifact, true).unwrap();
             let released = match &artifact {
-                ArtifactRef::Build(spec) => match &spec.kind {
-                    BuildSpecKind::Native(inv) => inv.release,
-                    BuildSpecKind::Wasi(inv) => inv.release,
-                },
+                ArtifactRef::Build(spec) => spec.build.release,
                 _ => panic!("expected a build spec"),
             };
             assert!(

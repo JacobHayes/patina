@@ -13,7 +13,6 @@ fn campaign_fold_is_watermark_idempotent() {
         CoverageArtifact {
             path: "guest".into(),
             sha256: "abc".into(),
-            family: "native".into(),
         },
         "patina-native+yieldpoints".into(),
         200,
@@ -36,7 +35,6 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
     let artifact = CoverageArtifact {
         path: "guest".into(),
         sha256: "abc".into(),
-        family: "native".into(),
     };
     let covmap = parse_covmap_bytes(&covmap_bytes(&[1], &[10]), Path::new("a")).unwrap();
     let mut store = CampaignCoverageStore::fresh(
@@ -111,7 +109,6 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
             CoverageArtifact {
                 path: "guest".into(),
                 sha256: "abc".into(),
-                family: "native".into(),
             },
             "patina-native+yieldpoints".into(),
             &covmap,
@@ -146,7 +143,6 @@ fn plateau_rule_is_exact_and_zero_disables() {
     let artifact = CoverageArtifact {
         path: "guest".into(),
         sha256: "abc".into(),
-        family: "native".into(),
     };
     let mut store = CampaignCoverageStore::fresh(
         PathBuf::from("out/coverage"),

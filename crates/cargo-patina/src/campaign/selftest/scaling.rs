@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 /// The `--fault-scale-permille` checks the classifier selftest runs, in the same
-/// `(name, ok, detail)` shape as the coverage/depth/guided detector selftests.
+/// `(name, ok, detail)` shape as the coverage/guided detector selftests.
 ///
 /// The flag exists to make the fault plane RARER, and a knob that changes the
 /// sweep is only safe because four properties hold: the scaled draw is a pure
@@ -38,8 +38,8 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut distinct: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
     for generation in 0..16u64 {
         let hash = generation_hash(0, generation);
-        let first = derive_flags(&spec, &hash, "native");
-        let second = derive_flags(&spec, &generation_hash(0, generation), "native");
+        let first = derive_flags(&spec, &hash);
+        let second = derive_flags(&spec, &generation_hash(0, generation));
         stable &= first == second;
         distinct.insert(first);
     }
@@ -62,7 +62,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     default_spec.fault_scale_permille = CampaignSpec::default().fault_scale_permille;
     let unchanged = (0..32u64).all(|generation| {
         let hash = generation_hash(0, generation);
-        derive_flags(&full, &hash, "native") == derive_flags(&default_spec, &hash, "native")
+        derive_flags(&full, &hash) == derive_flags(&default_spec, &hash)
     });
     out.push((
         "full-scale-leaves-the-default-bands-alone",
@@ -76,7 +76,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let rate_of = |spec: &CampaignSpec| -> u64 {
         let mut total = 0;
         for generation in 0..256u64 {
-            let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+            let flags = derive_flags(spec, &generation_hash(0, generation));
             for knob in [
                 "--fs-error-permille",
                 "--fs-short-permille",
@@ -148,7 +148,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     // exactly. That is stronger than echoing the flag: the reproduce command
     // cannot disagree with the generation it reproduces.
     let hash = generation_hash(0, 3);
-    let flags = derive_flags(&spec, &hash, "native");
+    let flags = derive_flags(&spec, &hash);
     let line = reproduce_command(
         Path::new("art"),
         7,
@@ -163,7 +163,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
         .filter(|pair| pair.len() == 2 && pair[0].ends_with("-permille"))
         .all(|pair| line.contains(&format!("{} {}", pair[0], pair[1])));
     let differs = line != {
-        let full_flags = derive_flags(&full, &hash, "native");
+        let full_flags = derive_flags(&full, &hash);
         reproduce_command(
             Path::new("art"),
             7,
@@ -227,8 +227,8 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut distinct: std::collections::BTreeSet<Vec<String>> = std::collections::BTreeSet::new();
     for generation in 0..64u64 {
         let hash = generation_hash(0, generation);
-        let first = derive_flags(&spec, &hash, "native");
-        let second = derive_flags(&spec, &generation_hash(0, generation), "native");
+        let first = derive_flags(&spec, &hash);
+        let second = derive_flags(&spec, &generation_hash(0, generation));
         stable &= first == second;
         distinct.insert(
             first
@@ -260,7 +260,7 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     });
     let unchanged = (0..64u64).all(|generation| {
         let hash = generation_hash(0, generation);
-        derive_flags(&full, &hash, "native") == derive_flags(&default_spec, &hash, "native")
+        derive_flags(&full, &hash) == derive_flags(&default_spec, &hash)
     });
     out.push((
         "full-scale-leaves-the-default-policy-alone",
@@ -277,7 +277,7 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
         let mut intervals = 0;
         let mut max_len = 0;
         for generation in 0..256u64 {
-            let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+            let flags = derive_flags(spec, &generation_hash(0, generation));
             if let Some(count) = value(&flags, "--starve") {
                 starving += 1;
                 intervals += count;
@@ -310,8 +310,8 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut compared = 0;
     for generation in 0..256u64 {
         let hash = generation_hash(0, generation);
-        let full_flags = derive_flags(&full, &hash, "native");
-        let mid_flags = derive_flags(&mid, &hash, "native");
+        let full_flags = derive_flags(&full, &hash);
+        let mid_flags = derive_flags(&mid, &hash);
         if value(&mid_flags, "--starve").is_none() {
             continue; // the gate closed this generation at the lower scale
         }
@@ -374,7 +374,7 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     // the gate closed prints no starvation flags at all, rather than a policy it
     // never ran.
     let line = |spec: &CampaignSpec, generation: u64| {
-        let flags = derive_flags(spec, &generation_hash(0, generation), "native");
+        let flags = derive_flags(spec, &generation_hash(0, generation));
         let text = reproduce_command(
             Path::new("art"),
             7,
@@ -388,7 +388,7 @@ pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     };
     let starves = |generation: u64| {
         value(
-            &derive_flags(&spec, &generation_hash(0, generation), "native"),
+            &derive_flags(&spec, &generation_hash(0, generation)),
             "--starve",
         )
         .is_some()

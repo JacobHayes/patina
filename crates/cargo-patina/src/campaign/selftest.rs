@@ -960,7 +960,6 @@ fork (process)\n";
         "PATINA_CLOCK_FAULT_REPORT jumps=1",
         "PATINA_CUSTOMOP_FAULT_REPORT refusals=1",
         "PATINA_COVERAGE_REPORT edges=9",
-        "PATINA_DEPTH_REPORT family=wasi fuel_consumed=7 hostcalls_total=0",
         "PATINA_LIFECYCLE setup_complete",
         "PATINA_LIFECYCLE_EVENT label=x",
         // The supervisor's restart summary carries both incarnations' host
@@ -1371,16 +1370,6 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
 
     println!("-- native edge coverage store --");
     for (name, ok, detail) in crate::coverage::campaign_detector_selftest() {
-        if ok {
-            println!("  ok   {name:<40} -> {detail}");
-        } else {
-            println!("  FAIL {name:<40} -> {detail}");
-            failures += 1;
-        }
-    }
-
-    println!("-- wasi depth store --");
-    for (name, ok, detail) in crate::depth::campaign_detector_selftest() {
         if ok {
             println!("  ok   {name:<40} -> {detail}");
         } else {

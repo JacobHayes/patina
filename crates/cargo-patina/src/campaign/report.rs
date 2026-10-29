@@ -2,7 +2,7 @@
 
 use super::AllowUnmetSometimes;
 use super::classify::{HOST_KILL_SHAPE, SHUTDOWN_FAILURE_SHAPE};
-use super::observe::{DepthState, EdgeCoverageState};
+use super::observe::EdgeCoverageState;
 use super::state::{
     CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord, allow_unmet_to_json,
     class_counts_failures, signatures_to_json,
@@ -136,7 +136,6 @@ pub(super) struct ProgressHeartbeatInput<'a> {
     pub(super) class_counts: &'a BTreeMap<String, u64>,
     pub(super) coverage: &'a CoverageTally,
     pub(super) edge_coverage: &'a EdgeCoverageState,
-    pub(super) depth: &'a DepthState,
     pub(super) guidance: Option<GuidanceTally>,
 }
 
@@ -156,7 +155,6 @@ pub(super) fn print_progress_heartbeat(input: ProgressHeartbeatInput<'_>) {
         coverage_summary.unmet.len()
     ));
     append_edge_coverage_progress(&mut line, input.edge_coverage);
-    append_depth_progress(&mut line, input.depth);
     if let Some(guidance) = input.guidance {
         line.push_str(&format!(
             " guided_exploit={}/{}",
@@ -187,96 +185,6 @@ fn append_edge_coverage_progress(line: &mut String, edge_coverage: &EdgeCoverage
         EdgeCoverageState::Unavailable { reason, .. } => {
             line.push_str(&format!(" coverage=unavailable reason={reason}"));
         }
-    }
-}
-
-fn append_depth_progress(line: &mut String, depth: &DepthState) {
-    match depth {
-        DepthState::Active(store) => {
-            let meta = store.meta();
-            line.push_str(&format!(
-                " depth_gens={}/{} fuel_max={} hostcall_kinds={} last_new_depth_gen={} depth_plateau={}",
-                meta.generations_with_depth,
-                meta.generations_applied,
-                meta.fuel_max,
-                meta.hostcall_kinds(),
-                meta.last_new_depth_gen
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                meta.depth_plateaued as u8,
-            ));
-        }
-        DepthState::Unavailable { reason, .. } => {
-            line.push_str(&format!(" depth=unavailable reason={reason}"));
-        }
-    }
-}
-
-/// The final depth block. Depth is labeled as a proxy everywhere: it says how far
-/// the guests ran and which host surface they touched, never which code they
-/// covered.
-fn print_depth_summary(depth: &DepthState) {
-    println!("-- depth (wasi fuel/hostcalls) --");
-    match depth {
-        DepthState::Unavailable { reason, hint } => {
-            println!("depth=unavailable reason={reason}");
-            if let Some(hint) = hint {
-                println!("hint: {hint}");
-            }
-        }
-        DepthState::Active(store) if store.meta().generations_applied == 0 => {
-            println!("depth=pending no generation has folded a depth report yet");
-            println!("depth store: {}", store.dir().display());
-        }
-        DepthState::Active(store) => {
-            let meta = store.meta();
-            println!(
-                "generations_with_depth={}/{} fuel_max={} fuel_total={} hostcall_kinds={} hostcalls_total={}",
-                meta.generations_with_depth,
-                meta.generations_applied,
-                meta.fuel_max,
-                meta.fuel_total,
-                meta.hostcall_kinds(),
-                meta.hostcalls_total(),
-            );
-            println!(
-                "last_new_depth_gen={} plateau_after={} depth_plateaued={}",
-                meta.last_new_depth_gen
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                meta.plateau_window,
-                meta.depth_plateaued as u8,
-            );
-            if meta.is_vacuous() {
-                // Non-vacuity is a gate, not a nicety: an accumulation with no
-                // measurement at all must announce itself rather than read as a
-                // clean "zero depth" result.
-                println!(
-                    "PATINA_CAMPAIGN_DEPTH_VACUOUS generations={} reason=no-generation-reported-depth",
-                    meta.generations_applied
-                );
-            } else {
-                let mut hottest: Vec<(&String, &u64)> = meta.hostcalls.iter().collect();
-                hottest.sort_by(|left, right| right.1.cmp(left.1).then(left.0.cmp(right.0)));
-                println!("top_hostcalls:");
-                for (name, count) in hottest.iter().take(5) {
-                    println!("  {name} calls={count}");
-                }
-            }
-            println!("depth store: {}", store.dir().display());
-        }
-    }
-}
-
-fn append_depth_complete(line: &mut String, depth: &DepthState) {
-    if let DepthState::Active(store) = depth {
-        let meta = store.meta();
-        line.push_str(&format!(
-            " fuel_max={} hostcall_kinds={} depth_plateaued={}",
-            meta.fuel_max,
-            meta.hostcall_kinds(),
-            meta.depth_plateaued as u8,
-        ));
     }
 }
 
@@ -316,53 +224,12 @@ fn guidance_json(guidance: Option<GuidanceTally>) -> serde_json::Value {
     }
 }
 
-fn depth_json(depth: &DepthState) -> serde_json::Value {
-    match depth {
-        DepthState::Unavailable { reason, hint } => serde_json::json!({
-            "state": "unavailable",
-            "reason": reason,
-            "hint": hint,
-        }),
-        DepthState::Active(store) => {
-            let meta = store.meta();
-            // Three distinguishable states, mirroring the edge-coverage object:
-            // nothing folded yet, folded but no generation carried a measurement,
-            // and real data. Collapsing the first two into "available" would print
-            // all-zero depth for a store that never measured anything.
-            let state = if meta.generations_applied == 0 {
-                "pending"
-            } else if meta.is_vacuous() {
-                "vacuous"
-            } else {
-                "available"
-            };
-            serde_json::json!({
-                "state": state,
-                "schema": crate::depth::CAMPAIGN_DEPTH_SCHEMA,
-                "depth_dir": store.dir().display().to_string(),
-                "generations_applied": meta.generations_applied,
-                "generations_with_depth": meta.generations_with_depth,
-                "fuel_max": meta.fuel_max,
-                "fuel_total": meta.fuel_total,
-                "hostcall_kinds": meta.hostcall_kinds(),
-                "hostcalls_total": meta.hostcalls_total(),
-                "hostcalls": meta.hostcalls.iter().map(|(name, count)| (name.clone(), serde_json::Value::from(*count))).collect::<serde_json::Map<_, _>>(),
-                "last_new_depth_gen": meta.last_new_depth_gen,
-                "plateau_after": meta.plateau_window,
-                "depth_plateaued": meta.depth_plateaued,
-                "new_depth_log": meta.new_depth_log.iter().map(|(generation, new_kinds, fuel_max)| serde_json::json!([generation, new_kinds, fuel_max])).collect::<Vec<_>>(),
-            })
-        }
-    }
-}
-
 pub(super) struct CampaignSummaryInput<'a> {
     pub(super) class_counts: &'a BTreeMap<String, u64>,
     pub(super) signatures: &'a BTreeMap<String, SignatureRecord>,
     pub(super) coverage: &'a CoverageTally,
     pub(super) coverage_verdict: &'a CoverageVerdict<'a>,
     pub(super) edge_coverage: &'a EdgeCoverageState,
-    pub(super) depth: &'a DepthState,
     pub(super) guidance: Option<GuidanceTally>,
     pub(super) verification: VerificationSummary,
     pub(super) artifact_path: &'a Path,
@@ -454,7 +321,6 @@ the run — the trace resource limit, an unwritable trace; not findings)"
     println!("{}", input.verification.line());
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
     print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
-    print_depth_summary(input.depth);
     print_guidance_summary(input.guidance);
     println!("signature store: {}", input.store_path.display());
     let mut complete = format!(
@@ -462,7 +328,6 @@ the run — the trace resource limit, an unwritable trace; not findings)"
         input.generations, input.failures, input.novel
     );
     append_edge_coverage_complete(&mut complete, input.edge_coverage);
-    append_depth_complete(&mut complete, input.depth);
     if let Some(guidance) = input.guidance {
         complete.push_str(&format!(
             " guided_exploit={} guided_explore={}",
@@ -587,7 +452,6 @@ pub(super) struct CampaignEnvelopeInput<'a> {
     pub(super) coverage: &'a CoverageTally,
     pub(super) coverage_verdict: &'a CoverageVerdict<'a>,
     pub(super) edge_coverage: &'a EdgeCoverageState,
-    pub(super) depth: &'a DepthState,
     pub(super) guidance: Option<GuidanceTally>,
     pub(super) out_dir: &'a Path,
     pub(super) state_path: &'a Path,
@@ -649,9 +513,6 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
             store.dir().display().to_string().into(),
         );
     }
-    if let Some(store) = input.depth.active() {
-        artifacts.insert("depth_dir".into(), store.dir().display().to_string().into());
-    }
     if failures > 0 {
         artifacts.insert(
             "failures_dir".into(),
@@ -677,7 +538,6 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         "result": input.result,
         "exit_code": input.exit_code,
         "artifact": state.artifact.path.clone(),
-        "family": state.artifact.family,
         "generations": state.spec.generations,
         "seed_base": state.spec.seed_base,
         "failures": failures,
@@ -688,7 +548,6 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         "invocations": state.invocations.iter().map(InvocationRecord::to_json).collect::<Vec<_>>(),
         "sdk_sites": sdk_sites_json,
         "coverage": coverage_json,
-        "depth": depth_json(input.depth),
         "guidance": guidance_json(input.guidance),
         "verification": VerificationSummary::of(state).to_json(),
         "artifacts": artifacts,
@@ -802,7 +661,7 @@ fn sdk_sites_summary_json(
 #[cfg(test)]
 mod tests {
     use super::super::classify::STARVATION_STALL_EXIT;
-    use super::super::observe::{DepthState, EdgeCoverageState};
+    use super::super::observe::EdgeCoverageState;
     use super::super::selftest::planted;
     use super::super::state::{ArtifactIdentity, CampaignState, GenerationOutcome};
     use super::super::{CampaignClass, CampaignSpec, ClassifyRules, RunFacts, classify};
@@ -848,8 +707,8 @@ mod tests {
         );
     }
 
-    /// Build the campaign envelope for `state`, with no coverage or depth
-    /// signal, written under `out/`.
+    /// Build the campaign envelope for `state`, with no coverage signal, written
+    /// under `out/`.
     fn envelope_for(state: &CampaignState, result: &str, exit_code: i32) -> serde_json::Value {
         let coverage = CoverageTally {
             generations_observed: state.generations_done,
@@ -857,10 +716,6 @@ mod tests {
         };
         let coverage_verdict = coverage_verdict(&coverage, None);
         let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
-        let depth = DepthState::Unavailable {
-            reason: "not-wasi",
-            hint: None,
-        };
         build_campaign_envelope(CampaignEnvelopeInput {
             result,
             exit_code,
@@ -868,7 +723,6 @@ mod tests {
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
             edge_coverage: &edge_coverage,
-            depth: &depth,
             guidance: None,
             out_dir: Path::new("out"),
             state_path: Path::new("out/campaign-state.json"),
@@ -881,7 +735,6 @@ mod tests {
             ArtifactIdentity {
                 path: "guest".to_string(),
                 sha256: "abc".to_string(),
-                family: "native",
             },
             CampaignSpec {
                 generations,

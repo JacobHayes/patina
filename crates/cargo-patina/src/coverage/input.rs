@@ -44,12 +44,6 @@ pub(super) fn validate_coverage_binary(binary: &Path, data: &CoverageData) -> Re
     let Some(artifact) = data.artifact.as_ref() else {
         return Ok(());
     };
-    if artifact.family != "native" {
-        return Err(CliError(format!(
-            "coverage store records artifact family {} for {}; offline native coverage can only symbolize native artifacts",
-            artifact.family, artifact.path
-        )));
-    }
     let bytes = fs::read(binary).map_err(|error| {
         CliError(format!(
             "failed to read coverage binary {} for campaign artifact identity check: {error}",

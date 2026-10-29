@@ -9,7 +9,7 @@ use patina_dst_driver_api::{DriverResult, EntropyDriver};
 /// with one of these labels (or a new label added here), not through ad-hoc XOR
 /// constants or by reusing the root seed directly.
 pub mod fault_domain {
-    /// Guest entropy bytes (`Context::entropy_bytes`, WASI `random_get`, native
+    /// Guest entropy bytes (`Context::entropy_bytes`, native
     /// `getrandom`/`getentropy`/`CCRandomGenerateBytes` interposers and
     /// `/dev/urandom` reads).
     pub const ENTROPY: &str = "patina.entropy";

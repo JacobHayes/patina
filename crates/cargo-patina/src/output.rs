@@ -36,8 +36,6 @@ pub use capture::parse_facts;
 pub use envelope::CRASH_REPLAY_DIVERGED;
 pub use envelope::Envelope;
 use markers::coverage_report_line;
-use markers::depth_report_line;
-pub(crate) use markers::parse_depth_report_line;
 use markers::result_line;
 pub use outcomes::GuestExit;
 pub use outcomes::Refusal;
@@ -47,11 +45,9 @@ use outcomes::extract_markers;
 use outcomes::extract_verdicts;
 use outcomes::refusal;
 pub use reports::CoverageReport;
-pub use reports::DepthReport;
 pub use reports::Qualification;
 pub use reports::RunReport;
 pub(crate) use reports::TraceFacts;
-pub use reports::finalize_inprocess;
 pub use reports::finalize_run;
 
 /// The stable schema identifier stamped into every JSON envelope. Bump the
@@ -155,12 +151,8 @@ fn parse_format(value: &str) -> Result<OutputFormat, CliError> {
     }
 }
 
-/// Emit a verb's envelope for the audit path: the findings are the flagged /
-/// listed imports.
-pub fn emit_audit(verb: &str, family: &str, artifact: &str, findings: Vec<String>, exit_code: i32) {
-    emit_audit_with_details(verb, family, artifact, findings, Vec::new(), exit_code);
-}
-
+/// Emit a verb's envelope for the audit path: the findings are the flagged
+/// imports.
 pub fn emit_audit_with_details(
     verb: &str,
     family: &str,
