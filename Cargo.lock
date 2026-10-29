@@ -336,14 +336,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "patina-dst-bench"
-version = "0.1.0"
-dependencies = [
- "patina-dst-abi",
- "patina-dst-runtime",
-]
-
-[[package]]
 name = "patina-dst-conformance"
 version = "0.1.0"
 dependencies = [

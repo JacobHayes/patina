@@ -97,7 +97,6 @@ patina-dst-rng-seeded       # SplitMix64 and seed derivation
 patina-dst-sched-det        # scheduler policies (uniform, PCT, starvation)
 patina-dst-wrapper-fault    # fault-injection wrapper drivers
 patina-dst-native-shim      # libc/pthread/dispatch/syscall interposition + SUD
-patina-dst-bench            # performance qualification workload
 ```
 
 ```text

@@ -4,7 +4,6 @@ members = [
     "crates/patina",
     "crates/patina-abi",
     "crates/patina-async",
-    "crates/patina-bench",
     "crates/patina-conformance",
     "crates/patina-driver-api",
     "crates/patina-fs-crash",
