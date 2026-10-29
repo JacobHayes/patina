@@ -385,15 +385,11 @@ pub fn native_missing_live_interposers(
 /// all leave the guest import table. Its residue is therefore the single `dlsym`
 /// resolution primitive, matching macOS.
 ///
-/// BOTH the pre-run gate in `native-run` AND standalone `audit` bake this set in
-/// through cargo-patina's single `effective_native_allow` constructor, so the
-/// surface `audit` reports is exactly the surface `run` enforces (a guest
-/// importing anything else on the blocking/effect surface still fails closed).
-/// Auditing the shim's own `dlsym` control-plane vehicle as "denied" while `run`
-/// silently permits it was a reported audit/run disparity; auditing against the
-/// same effective allow set removes it. Default-deny stays provable: this set is
-/// the fixed, near-empty `{dlsym}` control-plane residue, and every real escape
-/// symbol outside it is still denied by both paths.
+/// The seal holds the shim's own objects to this set: a host-bound name the
+/// shim's code references outside it is a host-alias violation. Guests are not
+/// judged against it: the audit admits the executable's `dlsym` in a
+/// shim-linked binary by where it binds, and a library's `dlsym` stays a
+/// `dynamic-loading` refusal.
 pub fn shim_control_plane_symbols() -> BTreeSet<String> {
     #[cfg(target_os = "macos")]
     const SYMBOLS: &[&str] = &[

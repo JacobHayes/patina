@@ -29,7 +29,6 @@ use patina_dst_target::{
     native_binary_has_tsc_marker, native_binary_is_shim_linked, native_deny_trap_armed,
     native_escape_is_sud_manageable, native_escape_is_tsc_manageable, render_compat_mode_note,
     render_cpu_nondeterminism_note, render_thread_pointer_note, render_tsc_managed_note,
-    shim_control_plane_symbols,
 };
 use patina_dst_trace::{
     TraceBundle, TraceError, create_scratch, parse_abandoned_trace_marker, remove_dead_scratch,
@@ -60,7 +59,6 @@ use child::wait_native_child_once;
 #[cfg(all(test, unix))]
 pub(super) use child::{NativeChildStatus, native_child_status};
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
-pub(super) use gate::effective_native_allow;
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
 pub(super) use gate::target_has_sud;

@@ -4,12 +4,14 @@ use crate::bindings::{Binding, ElfImage, bind, is_host, parse_images};
 use crate::early_init::{EARLY_INIT_CATEGORY, early_init_escapes};
 use crate::import_policy::{
     NativeFormat, NativeImportDecision, SHIM_DLSYM_VERSION, native_import_decision,
+    normalize_native_symbol,
 };
 use crate::import_xrefs::collect_import_provenance;
 use crate::instruction_scan::{
     native_escape_is_go_build_marker, native_escape_is_host_identity, scan_instruction_ranges,
 };
 use crate::load_set::{ImageRole, LoadSet, LoadedImage, elf_load_request};
+use crate::macho_bindings::{bind_macho, parse_macho_images};
 use crate::provenance::{NativeProvenance, NativeProvenanceIndex};
 use crate::shim::native_binary_is_shim_linked;
 use crate::{HostBinding, NativeEscape, TargetError, code_ranges};
@@ -23,6 +25,9 @@ pub(super) const UNRESOLVED_CATEGORY: &str = "unresolved-import";
 /// The category of a reference whose provider defines the name outside the
 /// symbol-version subset the audit models (see [`crate::bindings`]).
 pub(super) const UNDECIDABLE_CATEGORY: &str = "undecidable-binding";
+/// A reference bound into an application library dyld maps from its shared
+/// cache, whose code and own bindings the audit cannot read.
+pub(super) const UNREADABLE_LIBRARY_CATEGORY: &str = "shared-cache-library";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeAudit {
@@ -52,12 +57,21 @@ impl NativeAudit {
         if unauditable_elf(&file) {
             return Err(TargetError::UnauditableElf);
         }
-        let mut imports = file
-            .imports()
-            .map_err(TargetError::Parse)?
-            .into_iter()
-            .map(|import| String::from_utf8_lossy(import.name()).into_owned())
-            .collect::<Vec<_>>();
+        // A Mach-O flat-namespace reference has no library to name, which
+        // `imports()` refuses; its undefined symbols are the same list.
+        let mut imports = match format {
+            NativeFormat::Elf => file
+                .imports()
+                .map_err(TargetError::Parse)?
+                .into_iter()
+                .map(|import| String::from_utf8_lossy(import.name()).into_owned())
+                .collect::<Vec<_>>(),
+            NativeFormat::MachO => file
+                .symbols()
+                .filter(|symbol| symbol.is_undefined())
+                .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
+                .collect(),
+        };
         imports.sort();
         imports.dedup();
         let provenance = NativeProvenanceIndex::new(&file);
@@ -98,21 +112,14 @@ impl NativeAudit {
                 &mut denied,
                 &mut inert_weak_imports,
             )?,
-            // Mach-O libraries are not resolved yet: every import binds into
-            // a dylib and is judged by name.
-            NativeFormat::MachO => {
-                for symbol in &imports {
-                    if let NativeImportDecision::Denied(category) =
-                        native_import_decision(symbol, format, allow)
-                    {
-                        denied.push(NativeEscape::new(
-                            symbol.clone(),
-                            category,
-                            provenance_of(symbol),
-                        ));
-                    }
-                }
-            }
+            NativeFormat::MachO => judge_macho_bindings(
+                load_set,
+                &file,
+                allow,
+                &provenance_of,
+                &mut denied,
+                &mut inert_weak_imports,
+            )?,
         }
         denied.extend(early_init_escapes(&file, &provenance));
         for image in load_set.images() {
@@ -250,6 +257,87 @@ fn judge_elf_bindings(
     Ok(())
 }
 
+/// Judge every reference of every audited Mach-O image by where dyld binds
+/// it (`crate::macho_bindings`): to an audited image it is contained; a weak
+/// one nothing provides is inert; into a host image it is judged by the
+/// effect policy, by name; into a shared-cache application image, whose code
+/// and own bindings cannot be read, it is refused by name.
+fn judge_macho_bindings(
+    load_set: &LoadSet<'_>,
+    executable: &object::File<'_>,
+    allow: &BTreeSet<String>,
+    provenance_of: &dyn Fn(&str) -> Vec<NativeProvenance>,
+    denied: &mut Vec<NativeEscape>,
+    inert: &mut Vec<String>,
+) -> Result<(), TargetError> {
+    let images = parse_macho_images(load_set)?;
+    let shim_linked = native_binary_is_shim_linked(&load_set.executable().bytes).unwrap_or(false);
+    let executable_defines: BTreeSet<&str> = executable
+        .symbols()
+        .filter(|symbol| symbol.is_definition())
+        .filter_map(|symbol| symbol.name().ok())
+        .collect();
+    for (from, image) in images.iter().enumerate() {
+        let Some(image) = image else { continue };
+        let site = Site::new(load_set, from, provenance_of);
+        // dyld runs an export's resolver when it binds a reference to it,
+        // before the shim's entry.
+        if image.runs_resolvers {
+            denied.push(site.escape("export-resolver".into(), EARLY_INIT_CATEGORY));
+        }
+        let coalesced: Vec<_> = image.coalesced_definitions().collect();
+        for reference in image.references().iter().chain(&coalesced) {
+            let name = String::from_utf8_lossy(reference.name).into_owned();
+            let allowed = allow.contains(&name)
+                || allow.contains(normalize_native_symbol(&name))
+                || allow.contains(&site.label(&name));
+            match bind_macho(load_set, &images, from, reference) {
+                Binding::Image(to)
+                    if matches!(
+                        load_set.images()[to].role,
+                        ImageRole::Executable | ImageRole::Library
+                    ) => {}
+                Binding::Absent => inert.push(site.label(&name)),
+                Binding::Unresolved | Binding::Undecidable if allowed => {}
+                Binding::Unresolved => denied.push(site.escape(name, UNRESOLVED_CATEGORY)),
+                Binding::Undecidable => denied.push(site.escape(name, UNDECIDABLE_CATEGORY)),
+                Binding::Image(to) => {
+                    let provider = &load_set.images()[to];
+                    // The shim's own host-alias resolver: the executable's
+                    // `dlsym` in a shim-linked binary. A library's `dlsym` is a
+                    // guest resolver like any other.
+                    if from == 0
+                        && shim_linked
+                        && provider.role == ImageRole::Host
+                        && normalize_native_symbol(&name) == "dlsym"
+                    {
+                        continue;
+                    }
+                    let category = match native_import_decision(&name, NativeFormat::MachO, allow) {
+                        NativeImportDecision::Denied(category) => category,
+                        NativeImportDecision::Allowed if provider.role == ImageRole::Host => {
+                            continue;
+                        }
+                        // Admitted by name, but bound into code the audit
+                        // cannot read: only an explicit allowance clears it.
+                        NativeImportDecision::Allowed if allowed => continue,
+                        NativeImportDecision::Allowed => UNREADABLE_LIBRARY_CATEGORY,
+                    };
+                    let around_executable = executable_defines.contains(name.as_str());
+                    let mut escape = site.escape(name, category);
+                    escape.binding = Some(HostBinding {
+                        version: None,
+                        provider: provider.name.clone(),
+                        around_executable,
+                    });
+                    denied.push(escape);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Where a reference is made: the executable, attributed by its own
 /// provenance, or a library, named.
 struct Site<'a> {
@@ -320,6 +408,7 @@ fn library_code_escapes(image: &LoadedImage<'_>) -> Result<Vec<NativeEscape>, Ta
     if unauditable_elf(&file) {
         return Err(in_library(TargetError::UnauditableElf));
     }
+    let elf = matches!(file, object::File::Elf64(_));
     let provenance = NativeProvenanceIndex::new(&file);
     let code_ranges = code_ranges::CodeRanges::new(&file)?;
     let mut escapes: Vec<NativeEscape> = scan_instruction_ranges(&file, &provenance, &code_ranges)?
@@ -335,6 +424,9 @@ fn library_code_escapes(image: &LoadedImage<'_>) -> Result<Vec<NativeEscape>, Ta
             escape
         })
         .collect();
+    if !elf {
+        return Ok(escapes);
+    }
     let request = elf_load_request(&image.bytes)?.unwrap_or_default();
     if request.init_first {
         escapes.push(library_escape(

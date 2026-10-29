@@ -20,6 +20,7 @@ mod import_policy;
 mod import_xrefs;
 mod instruction_scan;
 mod load_set;
+mod macho_bindings;
 mod native_audit;
 mod provenance;
 mod report;
@@ -148,7 +149,10 @@ pub use instruction_scan::{
     THREAD_POINTER_CATEGORY, native_escape_is_go_build_marker, native_escape_is_host_identity,
     native_go_build_marker_sites, native_host_identity_sites, relocatable_raw_opcode_sites,
 };
-pub use load_set::{ElfLoadRequest, ImageRole, LoadSet, LoadedImage, elf_load_request};
+pub use load_set::{
+    ElfLoadRequest, ExportOracle, ImageRole, LoadSet, LoadedImage, MachODylib, MachOLoadRequest,
+    elf_load_request, macho_load_request,
+};
 pub use native_audit::NativeAudit;
 pub use provenance::NativeProvenance;
 use provenance::NativeProvenanceIndex;

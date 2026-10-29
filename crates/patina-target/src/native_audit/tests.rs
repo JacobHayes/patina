@@ -556,3 +556,477 @@ fn an_exact_versioned_allowance_clears_only_that_finding() {
     let refused: Vec<&str> = denied.iter().map(|escape| escape.symbol.as_str()).collect();
     assert_eq!(refused, ["mmap"]);
 }
+
+mod macho {
+    //! Mach-O load sets: each reference binds to the image its library
+    //! ordinal names.
+    use super::*;
+    use crate::load_set::{ExportOracle, LoadedImage};
+    use crate::tests::{
+        MachODylibSpec, MachOImports, MachOUndefined, macho_image, macho_image_with,
+    };
+    use std::borrow::Cow;
+
+    const LIBSYSTEM: &str = "/usr/lib/libSystem.B.dylib";
+
+    /// An image after the executable: its name, bytes, role and dependencies.
+    type Image<'a> = (&'a str, Vec<u8>, ImageRole, Vec<Option<usize>>);
+
+    fn dylib(install_name: &str) -> MachODylibSpec<'_> {
+        MachODylibSpec {
+            install_name,
+            weak: false,
+            reexport: false,
+        }
+    }
+
+    fn reference(name: &str, ordinal: u8, weak: bool) -> MachOUndefined<'_> {
+        MachOUndefined {
+            name,
+            ordinal,
+            weak,
+        }
+    }
+
+    /// A host oracle whose libSystem exports exactly `names` (C spelling).
+    fn libsystem_exporting(names: &'static [&'static str]) -> ExportOracle {
+        ExportOracle::new(move |image, symbol| {
+            (image == LIBSYSTEM).then(|| names.contains(&symbol))
+        })
+    }
+
+    /// A load set of `images` after the executable, each `(name, bytes,
+    /// role, dependencies)`; the executable's dependencies come first.
+    fn macho_set<'a>(
+        executable: &'a [u8],
+        executable_dependencies: Vec<Option<usize>>,
+        images: Vec<Image<'_>>,
+        oracle: ExportOracle,
+    ) -> LoadSet<'a> {
+        let mut set = vec![LoadedImage::new(
+            "guest",
+            Cow::Borrowed(executable),
+            ImageRole::Executable,
+        )];
+        set[0].dependencies = executable_dependencies;
+        for (name, bytes, role, dependencies) in images {
+            let mut image = LoadedImage::new(name, Cow::Owned(bytes), role);
+            image.dependencies = dependencies;
+            set.push(image);
+        }
+        LoadSet::new(set)
+            .expect("an executable first")
+            .with_export_oracle(oracle)
+    }
+
+    fn host(name: &str) -> Image<'_> {
+        (name, b"identity".to_vec(), ImageRole::Host, Vec::new())
+    }
+
+    // A weak reference binds to the host image its ordinal names when that
+    // image exports the name, and is NULL when it does not: whether it is
+    // inert is the platform's answer, not the name's.
+    #[test]
+    fn a_weak_reference_is_inert_only_when_its_dylib_does_not_export_it() {
+        let bytes = macho_image(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main"],
+            &[
+                reference("_getloadavg", 1, true),
+                reference("_patina_probe_absent_hook", 1, true),
+            ],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&["getloadavg"]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied.len(), 1, "{denied:?}");
+        assert_eq!(denied[0].symbol, "_getloadavg");
+        let binding = denied[0].binding.as_ref().expect("binds to libSystem");
+        assert_eq!(binding.provider, LIBSYSTEM);
+
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&[]),
+        );
+        let audit = NativeAudit::audit(&set, &BTreeSet::new()).expect("both are NULL");
+        assert_eq!(
+            audit.inert_weak_imports,
+            ["_getloadavg", "_patina_probe_absent_hook"]
+        );
+    }
+
+    // A weak reference to a host image that cannot be asked is refused by name
+    // rather than guessed inert.
+    #[test]
+    fn a_weak_host_reference_the_platform_cannot_answer_is_refused() {
+        let bytes = macho_image(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main"],
+            &[reference("_getloadavg", 1, true)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            ExportOracle::new(|_, _| None),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].category, UNDECIDABLE_CATEGORY);
+    }
+
+    // An application dylib's references are judged as the executable's are:
+    // its call into libSystem is refused by name, attributed to it.
+    #[test]
+    fn a_dylibs_references_are_judged_by_where_they_bind() {
+        let library = macho_image(
+            Some("@rpath/libfoo.dylib"),
+            &[dylib(LIBSYSTEM)],
+            &["_foo_entry"],
+            &[reference("_getloadavg", 1, false)],
+        );
+        let bytes = macho_image(
+            None,
+            &[dylib("@rpath/libfoo.dylib"), dylib(LIBSYSTEM)],
+            &["_main"],
+            &[reference("_foo_entry", 1, false)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1), Some(2)],
+            vec![
+                (
+                    "@rpath/libfoo.dylib",
+                    library,
+                    ImageRole::Library,
+                    vec![Some(2)],
+                ),
+                host(LIBSYSTEM),
+            ],
+            libsystem_exporting(&["getloadavg"]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied.len(), 1, "{denied:?}");
+        assert_eq!(denied[0].symbol, "_getloadavg");
+        assert_eq!(denied[0].image.as_deref(), Some("@rpath/libfoo.dylib"));
+    }
+
+    // A reference an application dylib does not export, and that nothing it
+    // re-exports provides, does not bind: refused as unresolved.
+    #[test]
+    fn a_reference_its_dylib_does_not_export_is_unresolved() {
+        let library = macho_image(Some("@rpath/libfoo.dylib"), &[], &["_other"], &[]);
+        let bytes = macho_image(
+            None,
+            &[dylib("@rpath/libfoo.dylib")],
+            &["_main"],
+            &[reference("_foo_entry", 1, false)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![(
+                "@rpath/libfoo.dylib",
+                library,
+                ImageRole::Library,
+                Vec::new(),
+            )],
+            libsystem_exporting(&[]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].category, UNRESOLVED_CATEGORY);
+    }
+
+    // A reference bound into a shared-cache application image (libc++) is
+    // refused: its code and its own bindings cannot be read, even when the
+    // name alone would be admitted.
+    #[test]
+    fn a_reference_bound_into_the_shared_cache_is_refused_by_name() {
+        let libcxx = "/usr/lib/libc++.1.dylib";
+        let bytes = macho_image(
+            None,
+            &[dylib(libcxx), dylib(LIBSYSTEM)],
+            &["_main"],
+            &[reference("_strlen", 1, false)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1), Some(2)],
+            vec![
+                (
+                    libcxx,
+                    b"identity".to_vec(),
+                    ImageRole::SharedCache,
+                    Vec::new(),
+                ),
+                host(LIBSYSTEM),
+            ],
+            libsystem_exporting(&[]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].category, UNREADABLE_LIBRARY_CATEGORY);
+        assert_eq!(denied[0].binding.as_ref().unwrap().provider, libcxx);
+        let allow = BTreeSet::from(["_strlen".to_owned()]);
+        NativeAudit::audit(&set, &allow).expect("an explicit allowance clears it");
+    }
+
+    // The shim's `dlsym` vehicle is the executable's, in a shim-linked
+    // binary: a dylib's `dlsym` is a guest resolver.
+    #[test]
+    fn only_the_executables_dlsym_is_the_shim_vehicle() {
+        let library = macho_image(
+            Some("@rpath/libfoo.dylib"),
+            &[dylib(LIBSYSTEM)],
+            &["_foo_entry"],
+            &[reference("_dlsym", 1, false)],
+        );
+        let bytes = macho_image(
+            None,
+            &[dylib("@rpath/libfoo.dylib"), dylib(LIBSYSTEM)],
+            &["_main", "_patina_init_from_env"],
+            &[
+                reference("_foo_entry", 1, false),
+                reference("_dlsym", 2, false),
+            ],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1), Some(2)],
+            vec![
+                (
+                    "@rpath/libfoo.dylib",
+                    library,
+                    ImageRole::Library,
+                    vec![Some(2)],
+                ),
+                host(LIBSYSTEM),
+            ],
+            libsystem_exporting(&["dlsym"]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied.len(), 1, "{denied:?}");
+        assert_eq!(denied[0].image.as_deref(), Some("@rpath/libfoo.dylib"));
+        assert_eq!(denied[0].category, "dynamic-loading");
+    }
+
+    // A weak dylib dyld does not find leaves its references NULL.
+    #[test]
+    fn a_reference_into_a_missing_weak_dylib_is_inert() {
+        let bytes = macho_image(
+            None,
+            &[MachODylibSpec {
+                install_name: "@rpath/libmissing.dylib",
+                weak: true,
+                reexport: false,
+            }],
+            &["_main"],
+            &[reference("_optional_hook", 1, true)],
+        );
+        let set = macho_set(&bytes, vec![None], Vec::new(), libsystem_exporting(&[]));
+        let audit = NativeAudit::audit(&set, &BTreeSet::new()).expect("NULL at load");
+        assert_eq!(audit.inert_weak_imports, ["_optional_hook"]);
+    }
+
+    // A flat-namespace lookup is host-bound when any host image exports the
+    // name, whatever an audited image defines.
+    #[test]
+    fn a_flat_lookup_a_host_image_answers_is_host_bound() {
+        let bytes = macho_image(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main", "_getloadavg"],
+            &[reference("_getloadavg", 0xfe, false)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&["getloadavg"]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].binding.as_ref().unwrap().provider, LIBSYSTEM);
+    }
+
+    // A chained-fixups import binds as its table says: a weak import of a
+    // name libSystem exports is host-bound and judged by name.
+    #[test]
+    fn a_chained_import_binds_by_its_table() {
+        let bytes = macho_image_with(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main"],
+            &[reference("_getloadavg", 1, true)],
+            MachOImports::Chained,
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&["getloadavg"]),
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].symbol, "_getloadavg");
+        assert_eq!(denied[0].binding.as_ref().unwrap().provider, LIBSYSTEM);
+    }
+
+    // A weak-definition coalescing lookup (C++ inline and template code)
+    // may bind to any loaded image's definition: an application dylib's weak
+    // replacement does not contain it when the shared-cache libc++ exports
+    // the name too.
+    #[test]
+    fn a_coalesced_reference_the_shared_cache_exports_is_refused() {
+        let now = "__ZNSt3__16chrono12system_clock3nowEv";
+        let libcxx = "/usr/lib/libc++.1.dylib";
+        let library = macho_image(Some("@rpath/libfoo.dylib"), &[], &[now], &[]);
+        let bytes = macho_image_with(
+            None,
+            &[dylib("@rpath/libfoo.dylib"), dylib(libcxx)],
+            &["_main"],
+            &[reference(now, 0xfd, false)],
+            MachOImports::Chained,
+        );
+        let oracle =
+            ExportOracle::new(move |image, symbol| Some(image == libcxx && symbol == &now[1..]));
+        let set = macho_set(
+            &bytes,
+            vec![Some(1), Some(2)],
+            vec![
+                (
+                    "@rpath/libfoo.dylib",
+                    library,
+                    ImageRole::Library,
+                    Vec::new(),
+                ),
+                (
+                    libcxx,
+                    b"identity".to_vec(),
+                    ImageRole::SharedCache,
+                    Vec::new(),
+                ),
+            ],
+            oracle,
+        );
+        let denied = refused(NativeAudit::audit(&set, &BTreeSet::new()));
+        assert_eq!(denied[0].binding.as_ref().unwrap().provider, libcxx);
+    }
+
+    // A flat lookup nothing exports is NULL, shared-cache images included
+    // when the platform answers for them: an unused libiconv does not make
+    // an absent weak hook undecidable.
+    #[test]
+    fn a_flat_weak_lookup_nothing_exports_is_inert() {
+        let libiconv = "/usr/lib/libiconv.2.dylib";
+        let bytes = macho_image(
+            None,
+            &[dylib(LIBSYSTEM), dylib(libiconv)],
+            &["_main"],
+            &[reference("_OPENSSL_memory_alloc", 0xfe, true)],
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1), Some(2)],
+            vec![
+                host(LIBSYSTEM),
+                (
+                    libiconv,
+                    b"identity".to_vec(),
+                    ImageRole::SharedCache,
+                    Vec::new(),
+                ),
+            ],
+            ExportOracle::new(|_, _| Some(false)),
+        );
+        let audit = NativeAudit::audit(&set, &BTreeSet::new()).expect("NULL at load");
+        assert_eq!(audit.inert_weak_imports, ["_OPENSSL_memory_alloc"]);
+    }
+
+    // An image whose symbol table was stripped of its undefined symbols while
+    // dyld still applies bind records hides what it imports: refused.
+    #[test]
+    fn a_stripped_import_table_is_unreadable() {
+        let bytes = macho_image_with(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main"],
+            &[reference("_getloadavg", 1, false)],
+            MachOImports::StrippedWithBinds,
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&["getloadavg"]),
+        );
+        assert!(matches!(
+            NativeAudit::audit(&set, &BTreeSet::new()),
+            Err(TargetError::UnreadableLoadSet(_))
+        ));
+    }
+
+    // An image's pointers to its own weak function leave weak-bind records
+    // and no undefined symbol: nothing is hidden, so it is not unreadable.
+    #[test]
+    fn weak_binds_to_an_images_own_definition_are_not_a_stripped_table() {
+        let bytes = macho_image_with(
+            None,
+            &[dylib(LIBSYSTEM)],
+            &["_main"],
+            &[],
+            MachOImports::WeakBindsOnly,
+        );
+        let set = macho_set(
+            &bytes,
+            vec![Some(1)],
+            vec![host(LIBSYSTEM)],
+            libsystem_exporting(&[]),
+        );
+        NativeAudit::audit(&set, &BTreeSet::new()).expect("nothing binds out");
+    }
+
+    // The load commands name the dylibs in ordinal order, with their kinds.
+    #[test]
+    fn a_load_request_lists_dylibs_in_ordinal_order() {
+        let bytes = macho_image(
+            Some("@rpath/libfoo.dylib"),
+            &[
+                dylib(LIBSYSTEM),
+                MachODylibSpec {
+                    install_name: "@rpath/libbar.dylib",
+                    weak: true,
+                    reexport: false,
+                },
+                MachODylibSpec {
+                    install_name: "@rpath/libbaz.dylib",
+                    weak: false,
+                    reexport: true,
+                },
+            ],
+            &[],
+            &[],
+        );
+        let request = crate::load_set::macho_load_request(&bytes)
+            .unwrap()
+            .expect("a Mach-O image");
+        assert_eq!(request.install_name.as_deref(), Some("@rpath/libfoo.dylib"));
+        let kinds: Vec<(&str, bool, bool)> = request
+            .dylibs
+            .iter()
+            .map(|dylib| (dylib.install_name.as_str(), dylib.weak, dylib.reexport))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (LIBSYSTEM, false, false),
+                ("@rpath/libbar.dylib", true, false),
+                ("@rpath/libbaz.dylib", false, true),
+            ]
+        );
+    }
+}

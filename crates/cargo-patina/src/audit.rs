@@ -1,7 +1,7 @@
 //! Native audits and escape diagnostics.
 
 use crate::native_build::resolve_artifact;
-use crate::native_run::{effective_native_allow, emit_native_deny_trap_note};
+use crate::native_run::emit_native_deny_trap_note;
 use crate::{ArtifactRef, CliError, NativeAuditInvocation, output};
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, native_binary_has_sud_marker,
@@ -66,10 +66,10 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     // shim-linked artifact this is the true post-interposition residual, and it
     // fails closed on any genuine escape.
     //
-    // The allow set is the shared `effective_native_allow` (shim control-plane +
-    // the operator's `--allow`), the SAME set the pre-run `run` gate audits
-    // against, so the static surface `audit` reports equals the surface `run`
-    // enforces — closing the reported `_dlsym` disparity.
+    // The allow set is the operator's `--allow`, the SAME set the pre-run
+    // `run` gate audits against, so the static surface `audit` reports equals
+    // the surface `run` enforces; the shim's own `dlsym` vehicle is admitted
+    // by its binding in both.
     //
     // syscall-user-dispatch (SUD-DESIGN.md §7.1): a `direct-syscall` *instruction*
     // finding in a SUD-dispatch-capable binary is not a hard escape — at run time
@@ -77,7 +77,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     // static (no live kernel probe), so it reports BOTH outcomes: runnable under
     // SUD, refused on kernels without it. Any OTHER denial (or the same finding
     // without the SUD marker) still fails closed.
-    let effective = effective_native_allow(&invocation.allow);
+    let effective = &invocation.allow;
     // Host-identity reads (`cpuid`) are informational, so they are reported on
     // EVERY outcome of the three-way split below — clean, trap-managed, and
     // refused. Scan for them once here rather than in each arm. The scan can only
@@ -94,7 +94,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
         eprintln!("{note}");
     }
     let load_set = crate::load_set::discover(&resolved.path, &bytes)?;
-    let audit = match NativeAudit::audit(&load_set, &effective) {
+    let audit = match NativeAudit::audit(&load_set, effective) {
         Ok(audit) => audit,
         Err(TargetError::UnsupportedImports(denied)) => {
             let sud_marker = native_binary_has_sud_marker(&bytes)

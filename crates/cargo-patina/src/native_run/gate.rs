@@ -90,28 +90,6 @@ fn platform_supports_tsc_trap() -> bool {
     false
 }
 
-/// The effective symbol allow set the native gate audits against: the
-/// operator's explicit `--allow` symbols, and on macOS the shim's control-plane
-/// vehicle `dlsym`. On Linux the audit admits the shim's own resolver
-/// reference by its binding (the executable's weak `dlsym` at glibc's default
-/// version), so no name is allowed for it and a library's `dlsym` stays a
-/// `dynamic-loading` refusal. On macOS a guest's own `dlsym` rides the same
-/// allowance: a named gap until Mach-O references are resolved by binding.
-///
-/// Constructed in exactly ONE place and called by BOTH the standalone `audit`
-/// (`execute_native_audit`) and the pre-run `run` gate (`native_prerun_gate`), so
-/// the static surface `audit` reports and the static surface `run` enforces can
-/// never drift: a symbol one tolerates, the other tolerates too. This closes the
-/// reported disparity where `audit` reported `_dlsym (dynamic-loading)` as denied
-/// while `run` silently permitted it as the shim control-plane vehicle.
-pub(crate) fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut allow = user_allow.clone();
-    if cfg!(target_os = "macos") {
-        allow.extend(shim_control_plane_symbols());
-    }
-    allow
-}
-
 /// Emit the non-blocking "fails later" note for the deny-trap-armed symbols a
 /// shim-linked binary references. These symbols pass the import audit and the
 /// pre-run gate (the shim strong-def drops them off the import table), but a call
@@ -162,7 +140,7 @@ pub(crate) fn target_has_sud(target: &str) -> bool {
 /// A verdict that lets the run proceed with nothing downgraded is remembered
 /// in the run cache, with the notes it printed, under the bytes' digest and
 /// every other input it read: the program's path (the notes name it), each
-/// library the loader maps (by name and digest), the effective allow set and
+/// library the loader maps (by name and digest), the allow set and
 /// the two host capabilities. The policy is not among
 /// them: it only splits findings into downgraded and blocked ones, and such a
 /// verdict has neither. Any other verdict is judged afresh on every run.
@@ -173,18 +151,21 @@ pub(super) fn native_prerun_gate(
     allow: &BTreeSet<String>,
     policy: &UnsupportedPolicy,
 ) -> Result<Vec<NativeEscape>, CliError> {
-    let effective = effective_native_allow(allow);
+    // The operator's `--allow`, and nothing else: the shim's own `dlsym`
+    // vehicle is admitted by its binding (`NativeAudit::audit`), the same in
+    // `audit` and here.
+    let effective = allow;
     let host = HostTraps {
         sud: kernel_supports_sud(),
         tsc: platform_supports_tsc_trap(),
     };
-    let entry = verdict_entry(binary, image, load_set, &effective, host);
+    let entry = verdict_entry(binary, image, load_set, effective, host);
     if let Some(notes) = run_cache::load(&entry) {
         eprint!("{notes}");
         return Ok(Vec::new());
     }
     let mut notes = String::new();
-    let outcome = judge(binary, load_set, &effective, policy, host, &mut notes);
+    let outcome = judge(binary, load_set, effective, policy, host, &mut notes);
     eprint!("{notes}");
     if matches!(&outcome, Ok(downgraded) if downgraded.is_empty()) {
         image.store_unchanged(&entry, &notes);
