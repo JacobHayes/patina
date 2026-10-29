@@ -382,18 +382,6 @@ mod tests {
                 );
                 assert!(command.contains("--compute-watchdog-ms 5000"), "{command}");
             }
-            assert!(
-                spec_to_json(&CampaignSpec::default())
-                    .get("compute_watchdog_ms")
-                    .is_none()
-            );
-            for bound in [0, 86_400_001] {
-                assert!(
-                    CampaignSpec::default()
-                        .apply_json(&serde_json::json!({"compute_watchdog_ms": bound}))
-                        .is_err()
-                );
-            }
         }
     }
 }

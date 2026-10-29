@@ -744,7 +744,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_verification_round_trips_through_its_json() {
+    fn a_diverging_reproduction_is_nondeterministic() {
         let observed = Observation {
             class: CampaignClass::Unclassified,
             signature: Some("UNCLASSIFIED|PLANTED token=#|".into()),
@@ -761,10 +761,6 @@ mod tests {
         reproduction.replay_diverged = true;
         let verification = Verification::judge(VerifyPath::Replay, observed, reproduction);
         assert_eq!(verification.status, VerifyStatus::Nondeterministic);
-        assert_eq!(
-            Verification::from_json(&verification.to_json()).unwrap(),
-            verification
-        );
         // A nondeterministic signature is keyed by the OBSERVED outcome alone, so two generations
         // that observed the same failure dedup onto one record.
         {

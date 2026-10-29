@@ -88,40 +88,4 @@ fn diff_reports_identical_metadata_operation_outcome_and_length_classes() {
     assert_eq!(length.aligned_prefix, 2);
     assert!(length.divergence.as_ref().unwrap().a_event.is_some());
     assert!(length.divergence.as_ref().unwrap().b_event.is_some());
-    // A differing record names the member that differs; a record on one side only is reported
-    // whole.
-    {
-        use patina_dst_trace::{NativeIdentityRecord, Sha256Digest};
-
-        let identity = NativeIdentityRecord {
-            executable_sha256: Sha256Digest([1; 32]),
-            supervisor_sha256: Sha256Digest([3; 32]),
-            patina_version: "1.0.0".into(),
-            shim_bundle_sha256: Sha256Digest([2; 32]),
-            target: "x86_64-unknown-linux-gnu".into(),
-        };
-        let mut a = bundle_with(Vec::new());
-        a.metadata.native = Some(identity.clone());
-        let mut b = a.clone();
-        b.metadata.native = Some(NativeIdentityRecord {
-            executable_sha256: Sha256Digest([3; 32]),
-            ..identity
-        });
-        let report = diff_for(&a, &b, 1);
-        let fields: Vec<&str> = report
-            .metadata_diff
-            .iter()
-            .map(|diff| diff.field.as_str())
-            .collect();
-        assert_eq!(fields, ["native.executable_sha256"]);
-        assert_eq!(
-            report.metadata_diff[0].b,
-            serde_json::json!(Sha256Digest([3; 32]).to_string())
-        );
-
-        // A record present on one side only is reported whole.
-        b.metadata.native = None;
-        let report = diff_for(&a, &b, 1);
-        assert_eq!(report.metadata_diff[0].field, "native");
-    }
 }

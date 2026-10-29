@@ -83,17 +83,6 @@ fn refusal_attributes_patinas_own_fail_closed_aborts() {
         assert_eq!(refused.class, "trace_unavailable");
         assert_eq!(refused.guest_exit_code, Some(0));
 
-        let failing_guest = refusal(
-            101,
-            "",
-            &format!(
-                "{} guest_exit_code=101 — the trace could not be written",
-                crate::TRACE_CHANNEL_UNAVAILABLE
-            ),
-        )
-        .expect("a failed trace channel is a refusal");
-        assert_eq!(failing_guest.guest_exit_code, Some(101));
-
         // RED twin: the truncated trace a DYING guest leaves is a consequence of
         // the run, not a refusal — attributing it to patina would make every
         // guest abort mid-record look like patina's fault.

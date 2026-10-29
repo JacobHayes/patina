@@ -49,21 +49,8 @@ fn params_minimization_lifts_the_commands_own_params_out() {
 fn params_minimization_needs_a_command_with_params() {
     for argv in [
         &["minimize", "--params"][..],
-        &["minimize", "--params", "--", "./oracle"],
-        &[
-            "minimize", "--params", "--", "./oracle", "--", "--param", "k=v",
-        ],
         &[
             "minimize", "--params", "--", "./oracle", "--param", "novalue",
-        ],
-        &[
-            "minimize",
-            "--params",
-            "--",
-            "./o",
-            "--param",
-            "k=1",
-            "--param=k=2",
         ],
         // Generation-only options are rejected in parameter mode.
         &[

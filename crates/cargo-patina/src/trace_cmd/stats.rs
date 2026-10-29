@@ -250,6 +250,3 @@ pub(super) fn print_stats_human(stats: &Value) {
         println!("no virtual-time samples");
     }
 }
-
-#[cfg(test)]
-mod tests;

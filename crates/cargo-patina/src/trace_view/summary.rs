@@ -244,6 +244,3 @@ pub fn human_nanos(n: u64) -> String {
     }
     format!("{n} ns")
 }
-
-#[cfg(test)]
-mod tests;

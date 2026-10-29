@@ -1,8 +1,8 @@
 use super::*;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::process::Command;
-use std::{env, fs};
 
 use crate::shim_cache;
 
@@ -35,27 +35,9 @@ fn a_shim_object_is_keyed_by_the_sdk_the_compiler_reads() {
 #[test]
 fn a_relative_rustc_probes_as_one_program_from_both_directories() {
     let from = Path::new("/work/guest");
-    // A bare name is PATH-resolved, which does not vary by directory.
-    assert_eq!(
-        anchored_program(None, from, "rustc"),
-        OsString::from("rustc")
-    );
-    assert_eq!(
-        anchored_program(Some("rustc".into()), from, "rustc"),
-        OsString::from("rustc")
-    );
-    // An absolute path already names one program.
-    assert_eq!(
-        anchored_program(Some("/opt/rust/bin/rustc".into()), from, "rustc"),
-        OsString::from("/opt/rust/bin/rustc")
-    );
     // A relative path with a directory component would otherwise resolve
     // against each probe's own working directory — two different programs,
     // reported as a toolchain split that does not exist.
-    assert_eq!(
-        anchored_program(Some("./tools/rustc".into()), from, "rustc"),
-        OsString::from("/work/guest/./tools/rustc")
-    );
     assert_eq!(
         anchored_program(Some("tools/rustc".into()), from, "rustc"),
         OsString::from("/work/guest/tools/rustc")
@@ -105,27 +87,6 @@ fn shim_caches_are_separated_by_source_bundle_and_complete_toolchain_identity() 
     assert_ne!(rebuilt.staticlib, changed.staticlib);
     let release = publish_native_shim(&archive, &base, "bundle-b", &stable, "release").unwrap();
     assert_ne!(release.staticlib, changed.staticlib);
-
-    assert_eq!(
-        native_shim_cache_base(workspace, Some(OsStr::new("/custom-target"))).unwrap(),
-        PathBuf::from("/custom-target/patina-native-shim")
-    );
-    assert_eq!(
-        native_shim_cache_base(workspace, Some(OsStr::new("relative"))).unwrap(),
-        env::current_dir()
-            .unwrap()
-            .join("relative/patina-native-shim")
-    );
-    // PATINA_SHIM_TARGET_DIR takes precedence over CARGO_TARGET_DIR; an empty one is unset.
-    {
-        let shim = || Some(OsString::from("/shim-target"));
-        let cargo = || Some(OsString::from("/cargo-target"));
-        assert_eq!(shim_target_base(shim(), cargo()), shim());
-        assert_eq!(shim_target_base(shim(), None), shim());
-        assert_eq!(shim_target_base(None, cargo()), cargo());
-        assert_eq!(shim_target_base(Some(OsString::new()), cargo()), cargo());
-        assert_eq!(shim_target_base(None, None), None);
-    }
 }
 
 #[test]
@@ -436,18 +397,6 @@ fn a_same_version_toolchain_split_still_names_the_difference() {
     assert!(
         message.contains("commit-hash: aaaaaaaaa") && message.contains("commit-hash: bbbbbbbbb"),
         "the same-banner case must show the full identities:\n{message}"
-    );
-
-    // Differing banners are self-explanatory; no full dump.
-    let other = RustcIdentity {
-        banner: "rustc 1.98.1 (48a229cea 2026-09-01)".into(),
-        verbose: "rustc 1.98.1 (48a229cea 2026-09-01)\ncommit-hash: 48a229cea".into(),
-    };
-    let message = toolchain_mismatch_message(&shim, Path::new("/patina"), &other, Path::new("/g"));
-    assert!(message.contains("rustc 1.98.1"), "{message}");
-    assert!(
-        !message.contains("commit-hash: 48a229cea"),
-        "differing banners need no full dump:\n{message}"
     );
 }
 

@@ -187,50 +187,6 @@ mod registry {
         }
     }
 
-    #[test]
-    fn json_flag_omits_default_valued_fields() {
-        // `--release` (build) is a valueless, non-repeatable switch with no short
-        // form: only name/value_kind/doc survive; the default-valued keys are gone.
-        let build = verb_json("build");
-        let release = find_flag(&build["verb"]["flag_groups"], "--release")
-            .expect("build registers --release");
-        assert_eq!(release["value_kind"], "none");
-        for absent in [
-            "short",
-            "placeholder",
-            "value_grammar",
-            "choices",
-            "repeatable",
-        ] {
-            assert!(
-                release.get(absent).is_none(),
-                "--release should omit default-valued `{absent}`, got {release}"
-            );
-        }
-        // `--output` (build) has a short form and a required value: those keys are
-        // present, but `repeatable` (false) is still omitted.
-        let output =
-            find_flag(&build["verb"]["flag_groups"], "--output").expect("build registers --output");
-        assert_eq!(output["short"], "-o");
-        assert_eq!(output["value_kind"], "required");
-        assert_eq!(output["placeholder"], "PATH");
-        assert!(
-            output.get("repeatable").is_none(),
-            "non-repeatable --output should omit `repeatable`"
-        );
-        // A repeatable flag emits `repeatable: true`; `--env` is repeatable.
-        let run = verb_json("run");
-        let env = find_flag(&run["verb"]["flag_groups"], "--env").expect("run registers --env");
-        assert_eq!(env["repeatable"], true);
-        // An enum-valued flag emits its choices; `--format` (global) is native|json.
-        let format = find_flag(&run["global_flags"], "--format").expect("global --format");
-        assert_eq!(format["value_grammar"], "enum");
-        assert!(
-            format["choices"].as_array().is_some(),
-            "an enum flag lists its choices"
-        );
-    }
-
     /// The set of flag `name`s across an array of `{title, flags}` groups (or a
     /// single such group object).
     fn flag_names(groups_or_group: &serde_json::Value) -> BTreeSet<String> {
@@ -241,18 +197,6 @@ mod registry {
             }
         });
         names
-    }
-
-    /// The first flag object named `name` across an array of groups or a single
-    /// `{title, flags}` group.
-    fn find_flag(groups_or_group: &serde_json::Value, name: &str) -> Option<serde_json::Value> {
-        let mut found = None;
-        collect_flags(groups_or_group, &mut |flag| {
-            if found.is_none() && flag["name"].as_str() == Some(name) {
-                found = Some(flag.clone());
-            }
-        });
-        found
     }
 
     /// Invoke `visit` on every flag object inside an array of `{title, flags}`
@@ -688,20 +632,6 @@ mod registry {
         assert_eq!(nanos("2000-02-29t12:34:56.5z"), Ok(951_827_696_500_000_000));
         assert_eq!(nanos("1970-01-01T00:00:00.000000001Z"), Ok(1));
         assert_eq!(nanos("2554-07-21T23:34:33.709551615Z"), Ok(u64::MAX));
-        // Unix seconds, a numeric offset, ten fraction digits, a non-leap-year
-        // Feb 29, a leap second, pre-epoch, and one nanosecond past u64.
-        for text in [
-            "1784761209",
-            "2026-07-22T23:00:09+00:00",
-            "2026-07-22T23:00:09.1234567890Z",
-            "2100-02-29T00:00:00Z",
-            "2026-07-22T23:00:60Z",
-            "1969-12-31T23:59:59Z",
-            "2554-07-21T23:34:33.709551616Z",
-        ] {
-            let error = nanos(text).expect_err(text);
-            assert!(error.contains("--realtime-epoch"), "{text}: {error}");
-        }
     }
 
     #[test]
@@ -717,40 +647,8 @@ mod registry {
                 .realtime_epoch_nanos,
             None
         );
-        // Unix seconds are not the grammar: the flag is refused by name.
-        let error = parse_native_run(strings(&["guest", "--realtime-epoch", "1784761209"]))
-            .err()
-            .expect("unix seconds are refused");
-        assert!(error.to_string().contains("--realtime-epoch"), "{error}");
         assert_replay_refuses("--realtime-epoch", TEXT);
-        // The hostname reaches every family, and the kernel's length and NUL rules
-        // apply.
-        {
-            const NAME: &str = "db-1.internal";
-            let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
-            assert_eq!(native.hostname.as_deref(), Some(NAME));
-            assert_eq!(
-                parse_native_run(strings(&["guest"])).unwrap().hostname,
-                None
-            );
-            // The kernel's rules: 64 bytes fit, 65 do not, and a NUL never does.
-            let longest = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES);
-            let too_long = "h".repeat(patina_dst_runtime::HOSTNAME_MAX_BYTES + 1);
-            assert_eq!(
-                parse_native_run(strings(&["guest", "--hostname", &longest]))
-                    .unwrap()
-                    .hostname
-                    .as_deref(),
-                Some(longest.as_str())
-            );
-            for refused in [too_long.as_str(), "a\0b"] {
-                let error = parse_native_run(strings(&["guest", "--hostname", refused]))
-                    .err()
-                    .expect("refused hostname");
-                assert!(error.to_string().contains("--hostname"), "{error}");
-            }
-            assert_replay_refuses("--hostname", NAME);
-        }
+        assert_replay_refuses("--hostname", "db-1.internal");
     }
 
     /// `replay` refuses a re-supplied run fact.

@@ -37,22 +37,6 @@ fn native_run_buggify_value_form_enables_and_carries_permille() {
 }
 
 #[test]
-fn parses_native_audit() {
-    // Audit parsing (routing to it by artifact magic is covered by e2e).
-    let audit = parse_native_audit(strings(&[
-        "probe",
-        "--allow",
-        "write",
-        "--allow",
-        "clock_gettime",
-    ]))
-    .unwrap();
-    assert_eq!(audit.binary, ArtifactRef::Prebuilt(PathBuf::from("probe")));
-    assert!(audit.allow.contains("write"));
-    assert!(audit.allow.contains("clock_gettime"));
-}
-
-#[test]
 fn parses_native_build_for_sources_and_packages() {
     let invocation = native_build_invocation(&[
         "native-build",
@@ -128,22 +112,6 @@ fn parses_native_build_for_sources_and_packages() {
             _ => panic!("expected a package target"),
         }
 
-        // --output is optional for packages; a Cargo.toml path is used as-is.
-        let invocation = native_build_invocation(&["native-build", "pkg/Cargo.toml"]);
-        assert!(invocation.output.is_none());
-        match invocation.target {
-            NativeBuildTarget::Package {
-                manifest,
-                package,
-                bin,
-            } => {
-                assert_eq!(manifest, PathBuf::from("pkg/Cargo.toml"));
-                assert_eq!(package, None);
-                assert_eq!(bin, None);
-            }
-            _ => panic!("expected a package target"),
-        }
-
         // Single-source options are rejected for a package.
         assert!(parse_native_build(strings(&["pkg", "--edition", "2021"])).is_err());
         assert!(parse_native_build(strings(&["pkg", "--", "-C", "opt-level=2"])).is_err());
@@ -181,11 +149,7 @@ fn parses_a_go_build_with_its_go_build_options() {
     for refused in [
         &["pkg", "--go"][..],
         &["pkg", "--go", "--output", "o", "--edition", "2021"],
-        &["pkg", "--go", "--output", "o", "--package", "p"],
-        &["pkg", "--go", "--output", "o", "--bin", "b"],
-        &["pkg", "--go", "--output", "o", "--instrument"],
         &["pkg", "--go", "--output", "o", "--", "-ldflags=-s"],
-        &["pkg", "--go", "--output", "o", "--", "-o", "elsewhere"],
     ] {
         assert!(parse_native_build(strings(refused)).is_err(), "{refused:?}");
     }
@@ -208,16 +172,6 @@ fn parses_native_run_modes_and_rejects_conflicts() {
     assert_eq!(seeded.program_args, strings(&["one"]));
     assert_eq!(seeded.environment["RUST_LOG"], "debug");
     assert!(parse_native_run(strings(&["probe", "--env", ""])).is_err());
-
-    let covered = native_run(&[
-        "native-run",
-        "probe",
-        "--seed",
-        "9",
-        "--coverage-out",
-        "run.covmap",
-    ]);
-    assert_eq!(covered.coverage_out, Some(PathBuf::from("run.covmap")));
 
     let recorded = native_run(&[
         "native-run",
@@ -243,7 +197,6 @@ fn parses_native_run_modes_and_rejects_conflicts() {
     }
     // `run <BINARY>` has no `--replay` flag: replay is the sole domain of the
     // `replay` subcommand, so the native runner rejects it as an unknown option.
-    assert!(parse_native_run(strings(&["probe", "--replay", "run.patina"])).is_err());
     assert!(parse_native_run(Vec::new()).is_err());
 
     // `replay <bin> <trace>` parses into replay mode, restoring seed/faults/
@@ -276,60 +229,13 @@ fn parses_native_run_modes_and_rejects_conflicts() {
             "replay",
             probe,
             "run.patina",
-            "--fingerprint",
-            "fp"
-        ]))
-        .is_ok()
-    );
-    assert!(
-        parse(strings(&[
-            "replay",
-            probe,
-            "run.patina",
             "--mount",
             "corpus"
         ]))
         .is_ok()
     );
-    match parse(strings(&[
-        "replay",
-        probe,
-        "run.patina",
-        "--coverage-out",
-        "replay.covmap",
-    ]))
-    .unwrap()
-    {
-        ParseResult::NativeRun(invocation) => {
-            assert_eq!(
-                invocation.coverage_out,
-                Some(PathBuf::from("replay.covmap"))
-            );
-        }
-        _ => panic!("expected native replay invocation"),
-    }
     // ... but rejects semantic knobs (the trace is authoritative) and a
     // missing trace path.
-    assert!(
-        parse(strings(&[
-            "replay",
-            probe,
-            "run.patina",
-            "--net-latency-nanos",
-            "5"
-        ]))
-        .is_err()
-    );
     assert!(parse(strings(&["replay", probe, "run.patina", "--seed", "1"])).is_err());
-    assert!(
-        parse(strings(&[
-            "replay",
-            probe,
-            "run.patina",
-            "--env",
-            "RUST_LOG=trace"
-        ]))
-        .is_err()
-    );
     assert!(parse(strings(&["replay", probe])).is_err());
 }

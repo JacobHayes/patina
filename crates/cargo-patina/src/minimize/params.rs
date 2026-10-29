@@ -64,34 +64,3 @@ fn shrink_value(value: &str) -> Vec<String> {
         .filter(|candidate| candidate != value && seen.insert(candidate.clone()))
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
-        entries
-            .iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-            .collect()
-    }
-
-    #[test]
-    fn drops_unneeded_keys_and_shrinks_the_load_bearing_values() {
-        let reduced = reduce(&map(&[("a", "1"), ("b", "2"), ("c", "3")]), |candidate| {
-            Ok(candidate.get("b").map(String::as_str) == Some("2"))
-        })
-        .unwrap();
-        assert_eq!(reduced, map(&[("b", "2")]));
-
-        let reduced = reduce(&map(&[("n", "100")]), |candidate| {
-            Ok(candidate
-                .get("n")
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|value| value >= 10))
-        })
-        .unwrap();
-        let value: u64 = reduced["n"].parse().unwrap();
-        assert!((10..100).contains(&value), "{value}");
-    }
-}

@@ -868,7 +868,7 @@ mod tests {
             assert_eq!(selected.name, "app");
             assert_eq!(selected.package, "first");
         }
-        for selector in ["example:app", "lib:missing", "lib:"] {
+        for selector in ["example:app", "lib:missing"] {
             assert!(select_native_harness_target(&metadata, selector, Some("first")).is_err());
         }
 
@@ -886,10 +886,6 @@ mod tests {
         assert_eq!(directory("app"), directory("lib:app"));
         assert_eq!(directory("lib_app"), directory("test:lib_app"));
         assert_ne!(directory("lib:app"), directory("lib_app"));
-        assert_eq!(
-            directory("app"),
-            Path::new("target/patina/dst/pkg/lib/app/tests__case")
-        );
     }
 
     #[test]

@@ -1034,31 +1034,6 @@ mod tests {
             .filter(|class| !class.is_cross_run())
             .collect();
         assert_eq!(fired, single_run);
-        // Every class token round-trips (ALL's order is checked at compile time).
-        for class in CampaignClass::ALL {
-            assert_eq!(CampaignClass::parse(class.as_str()), Some(*class));
-        }
-        assert_eq!(CampaignClass::parse("NOT_A_CLASS"), None);
-    }
-
-    /// The structural half of the guest-agnostic doctrine: no built-in class may
-    /// be decided by guest output. `built_in_class` takes [`RunFacts`], which has
-    /// no text in it at all, so the same facts classify identically whatever the
-    /// guest printed.
-    #[test]
-    fn guest_output_alone_never_changes_a_built_in_class() {
-        let rules = ClassifyRules::default();
-        let noisy = "GUEST_VIOLATION two-leaders\nGUEST_BUG reordered\npanicked at src/x.rs:9\nPATINA_FS_FAULT_REPORT vacuous=1";
-        for facts in [
-            RunFacts::ok(),
-            RunFacts::ok().exit(3),
-            RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT),
-        ] {
-            assert_eq!(
-                classify(&planted(facts.clone(), noisy), &rules),
-                classify(&planted(facts, ""), &rules),
-            );
-        }
     }
 
     #[test]

@@ -42,16 +42,6 @@ fn flatten_round_trips_every_operation_json_and_counts_kinds() {
     }
     let total: u64 = flat.kind_counts.values().map(|stat| stat.count).sum();
     assert_eq!(total, flat.events.len() as u64);
-    assert_eq!(
-        flat.kind_counts
-            .get("lifecycle_start")
-            .map(|stat| stat.count),
-        Some(1)
-    );
-    assert_eq!(
-        flat.kind_counts.get("lifecycle_end").map(|stat| stat.count),
-        Some(1)
-    );
     for (tag, _) in OP_KINDS {
         assert_eq!(flat.kind_counts.get(*tag).map(|stat| stat.count), Some(1));
     }

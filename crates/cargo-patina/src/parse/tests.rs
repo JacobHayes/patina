@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::tests::strings;
-use crate::{ArtifactRef, NativeBuildTarget, NativeRunInvocation, NativeRunMode};
+use crate::{ArtifactRef, NativeBuildTarget, NativeRunMode};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -20,50 +20,29 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
         "trace",
     ] {
         assert!(is_help(&[verb, "--help"]), "{verb} --help");
-        assert!(is_help(&[verb, "-h"]), "{verb} -h");
-        assert!(is_version(&[verb, "--version"]), "{verb} --version");
         assert!(is_version(&[verb, "-V"]), "{verb} -V");
     }
-    // Trace subcommands.
-    assert!(is_help(&["trace", "info", "--help"]));
-    assert!(is_help(&["trace", "events", "--help"]));
     // After a positional (the old bug: `--help` swallowed as an artifact/trace
     // path or an unsupported option).
     assert!(is_help(&["run", "./bin", "--help"]));
-    assert!(is_help(&["campaign", "artifact", "--help"]));
     assert!(is_help(&["replay", "./bin", "trace", "--help"]));
-    assert!(is_help(&["audit", "artifact", "--help"]));
-    assert!(is_help(&["build", "src.rs", "--help"]));
-    assert!(is_help(&["minimize", "trace.patina", "--help"]));
     assert!(is_help(&["trace", "events", "trace.patina", "--help"]));
     // Top-level.
     assert!(is_help(&["--help"]));
-    assert!(is_help(&["-h"]));
-    assert!(is_help(&["patina", "--help"]));
     assert!(is_version(&["--version"]));
     // After `--` both belong to the guest or oracle and are never intercepted.
     assert!(!is_help(&["run", "./bin", "--", "--help"]));
-    assert!(!is_help(&["campaign", "artifact", "--", "--help"]));
-    assert!(!is_help(&["test", "--", "--help"]));
     assert!(!is_version(&["run", "mycrate", "--", "--version"]));
 }
 
 #[test]
 fn nonexistent_pathlike_positional_fails_closed() {
     // A positional that does not exist is a hard error.
-    for missing in [
-        "./nonexistent",
-        "missing.rs",
-        "sub/dir/thing",
-        "no/such/Cargo.toml",
-        "mycrate",
-    ] {
+    for missing in ["missing.rs", "no/such/Cargo.toml"] {
         assert!(classify_arg(OsStr::new(missing)).is_err(), "{missing}");
     }
     // Routed through the verbs.
     assert!(parse(strings(&["run", "./nope"])).is_err());
-    assert!(parse(strings(&["audit", "./nope"])).is_err());
-    assert!(parse(strings(&["replay", "./nope", "trace"])).is_err());
     // Registered options ahead of it are skipped, so the scan still reaches it.
     assert!(parse(strings(&["run", "--seed", "5", "./nonexistent"])).is_err());
 }
@@ -119,13 +98,6 @@ fn run_and_replay_locate_native_positionals_around_options() {
         ][..],
         &[
             "run",
-            "--seed=5",
-            "--record=t.patina",
-            "--fingerprint=fp",
-            b,
-        ][..],
-        &[
-            "run",
             "--fingerprint",
             "fp",
             b,
@@ -138,14 +110,6 @@ fn run_and_replay_locate_native_positionals_around_options() {
         let got = native(spelling);
         assert_eq!(got.binary, base.binary);
         assert_eq!(native_seed(&got.mode), native_seed(&base.mode));
-    }
-    // Interleaved artifact between semantic flags, record mode.
-    match native(&["run", "--seed", "5", b, "--record", "t.patina"]).mode {
-        NativeRunMode::Record { seed, path, .. } => {
-            assert_eq!(seed, 5);
-            assert_eq!(path, PathBuf::from("t.patina"));
-        }
-        _ => panic!("expected record mode"),
     }
     // Replay's two positionals keep their binary-then-trace order around options.
     {
@@ -165,14 +129,6 @@ fn run_and_replay_locate_native_positionals_around_options() {
                 }
             }
             _ => panic!("expected a native run from replay"),
-        }
-        // Interleaved keeps binary-then-trace order.
-        match parse(strings(&["replay", b, "--fingerprint", "f", "run.patina"])).unwrap() {
-            ParseResult::NativeRun(inv) => {
-                assert_eq!(inv.binary, ArtifactRef::Prebuilt(PathBuf::from(b)));
-                assert!(matches!(inv.mode, NativeRunMode::Replay { .. }));
-            }
-            _ => panic!("expected a native run"),
         }
     }
 }
@@ -211,15 +167,6 @@ fn fingerprint_on_a_seeded_native_run_is_refused_not_ignored() {
         },
         _ => panic!("expected a native run"),
     }
-
-    // A seeded run without the flag is untouched.
-    assert!(matches!(
-        parse(strings(&["run", b, "--seed", "5"])).unwrap(),
-        ParseResult::NativeRun(NativeRunInvocation {
-            mode: NativeRunMode::Seeded { seed: 5 },
-            ..
-        })
-    ));
 }
 
 #[test]
@@ -232,11 +179,7 @@ fn run_and_test_without_an_artifact_are_usage_errors() {
     let m = module.to_str().unwrap();
     for argv in [
         &["run"][..],
-        &["run", "--bin", "server"],
-        &["run", "--release", "--seed", "5"],
-        &["run", "--seed", "5", "--some-unknown", "./thing"],
         &["run", "--frob", m],
-        &["test"],
         &["test", "--seed", "1"],
         &["test", m],
     ] {

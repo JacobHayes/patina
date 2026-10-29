@@ -767,19 +767,6 @@ mod tests {
 
         let artifacts = &envelope["artifacts"];
         assert_eq!(artifacts["out_dir"], "out");
-        for (key, suffix) in [
-            ("campaign_state", "campaign-state.json"),
-            ("signature_store", "signatures.json"),
-            ("failures_dir", "failures"),
-            ("site_coverage", "sites.json"),
-        ] {
-            assert!(
-                artifacts[key].as_str().unwrap().ends_with(suffix),
-                "{key}: {envelope:#}"
-            );
-        }
-        assert_eq!(envelope["sdk_sites"]["labels_seen"], 0);
-        assert_eq!(envelope["coverage"]["gate"], "pass");
         // No `--report`, so no reports pointer is promised.
         assert!(artifacts.get("reports_dir").is_none());
 

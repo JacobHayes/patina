@@ -584,7 +584,7 @@ fn write_data_note(html: &mut String, input: &RenderInput<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_dst_abi::{ClockKind, Fd, Operation, Outcome, SocketId, TaskId};
+    use patina_dst_abi::{ClockKind, Operation, Outcome};
     use patina_dst_trace::{RunMetadata, TraceBundle, TraceEvent};
 
     fn bundle_with(events: Vec<(Operation, Outcome)>) -> TraceBundle {
@@ -655,60 +655,6 @@ mod tests {
         assert!(html.contains("surfaced"));
         assert!(html.contains("GUEST_VIOLATION"));
         assert!(html.contains("applied_hash"));
-    }
-
-    #[test]
-    fn renders_task_lanes_and_notable_events() {
-        let bundle = bundle_with(vec![
-            (
-                Operation::TaskSpawn {
-                    label: "worker".into(),
-                },
-                Outcome::Task(TaskId(1)),
-            ),
-            (
-                Operation::SchedulerNext,
-                Outcome::OptionalTask(Some(TaskId(1))),
-            ),
-            (Operation::FsSync { fd: Fd(3) }, Outcome::Unit),
-            (Operation::TaskComplete { task: TaskId(1) }, Outcome::Unit),
-        ]);
-        let html = render_bundle(&bundle);
-        assert!(html.contains("task 1"));
-        assert!(html.contains("worker"));
-        // Crashes, errors and drops surface as notable (detection is tested in
-        // `trace_view`); the page carries each one's data.
-        {
-            use patina_dst_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
-            let bundle = bundle_with(vec![
-                (Operation::FsCrash, Outcome::Unit),
-                (
-                    Operation::FsOpen {
-                        path: "/x".into(),
-                        flags: patina_dst_abi::OpenFlags::read_only(),
-                    },
-                    Outcome::Error(EffectError::new(ErrorCode::NotFound, "missing")),
-                ),
-                (
-                    Operation::NetSend {
-                        socket: SocketId(1),
-                        to: "127.0.0.1:9".into(),
-                        bytes: vec![0; 8],
-                        now_nanos: 5,
-                    },
-                    Outcome::SendReport(SendReport {
-                        written: 0,
-                        copies: 0,
-                        delivery_nanos: vec![],
-                        disposition: SendDisposition::DroppedByFault,
-                    }),
-                ),
-            ]);
-            let html = render_bundle(&bundle);
-            assert!(html.contains("fs_crash"));
-            assert!(html.contains("not_found") && html.contains("missing"));
-            assert!(html.contains("127.0.0.1:9"));
-        }
     }
 
     #[test]

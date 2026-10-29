@@ -68,19 +68,6 @@ pub(crate) fn parse_native_harness_from(
     })
 }
 
-/// Thin wrapper: treat the leading argument as an already-built binary. Used by
-/// unit tests; `audit` routing calls [`parse_native_audit_from`].
-#[cfg(test)]
-fn parse_native_audit(mut arguments: Vec<OsString>) -> Result<NativeAuditInvocation, CliError> {
-    if arguments.is_empty() {
-        return Err(CliError::usage(
-            "audit of a native binary requires a binary path",
-        ));
-    }
-    let binary = ArtifactRef::Prebuilt(PathBuf::from(arguments.remove(0)));
-    parse_native_audit_from(binary, arguments)
-}
-
 /// Parse the flags of a native `audit` given an already-resolved binary
 /// reference (an existing binary or a build-on-the-fly spec).
 pub(crate) fn parse_native_audit_from(

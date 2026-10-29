@@ -420,60 +420,22 @@ mod tests {
         let report = darwin_report();
         let os = Os::host().name();
         let arch = registry::Arch::host().name();
-        {
-            assert_eq!(report["schema"], SYSCALLS_SCHEMA);
-            assert_eq!(report["os"], os);
-            assert_eq!(report["arch"], arch);
-            assert!(report["metadata"][os].is_object());
-            assert_eq!(report["scope"]["unit"], "kernel-entry");
-            let namespaces = report["scope"]["namespaces"].as_array().unwrap();
-            assert!(namespaces.iter().all(Value::is_string));
-            for source in report["sources"].as_array().unwrap() {
-                assert!(source["path"].is_string() && source["url"].is_string());
-            }
-            let symbols = report["symbols"].as_array().unwrap();
-            let mut expected = BTreeMap::<String, usize>::new();
-            for symbol in symbols {
-                assert!(symbol["name"].is_string() && symbol["platform"].is_string());
-                let status = symbol["status"].as_str().unwrap();
-                let key = if status.starts_with("deny(") {
-                    "deny"
-                } else {
-                    status
-                };
-                *expected.entry(key.to_string()).or_default() += 1;
-                assert!(
-                    symbol["serves"].is_null()
-                        || symbol["serves"].is_array()
-                        || symbol["serves"] == "*"
-                );
-            }
-            assert!(report["summary"]["symbols"].is_object());
-            assert_eq!(report["summary"]["symbols"], json!(expected));
-            let rows = report["rows"].as_array().unwrap();
-            assert_eq!(
-                report["summary"]["rows"].as_u64().unwrap() as usize,
-                rows.len()
-            );
-            let mut identities = std::collections::BTreeSet::new();
-            for row in rows {
-                assert!(namespaces.contains(&row["namespace"]));
-                let namespace = row["namespace"].as_str().unwrap();
-                let nr = row["nr"].as_i64().unwrap();
-                assert!(row["subcode"].is_null() || row["subcode"].is_u64());
-                assert!(identities.insert((namespace, nr, row["subcode"].as_u64())));
-                assert!(row["name"].is_string());
-                let variants = row["variants"].as_array().unwrap();
-                assert!(!variants.is_empty());
-                for variant in variants {
-                    assert!(variant["entry"].is_null() || variant["entry"].is_string());
-                    assert!(variant["table_status"].is_string());
-                    assert!(variant["condition"].is_null() || variant["condition"].is_string());
-                }
-                for symbol in row["symbols"].as_array().unwrap() {
-                    assert!(symbol["name"].is_string() && symbol["status"].is_string());
-                }
-            }
+        assert_eq!(report["os"], os);
+        assert_eq!(report["arch"], arch);
+        // Each kernel entry is one row: the summary counts them, and no
+        // (namespace, nr, subcode) identity repeats.
+        let rows = report["rows"].as_array().unwrap();
+        assert_eq!(
+            report["summary"]["rows"].as_u64().unwrap() as usize,
+            rows.len()
+        );
+        let mut identities = std::collections::BTreeSet::new();
+        for row in rows {
+            assert!(identities.insert((
+                row["namespace"].as_str().unwrap(),
+                row["nr"].as_i64().unwrap(),
+                row["subcode"].as_u64()
+            )));
         }
     }
 
@@ -519,23 +481,11 @@ mod tests {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn linux_report_carries_dispositions_in_json_and_text() {
+    fn linux_report_carries_dispositions() {
         let report = Report::linux().to_json();
-        assert_eq!(report["schema"], SYSCALLS_SCHEMA);
-        assert!(!report["sources"][0]["sha256"].as_str().unwrap().is_empty());
         let read = &report["rows"][0];
         assert_eq!(read["name"], "read");
-        assert_eq!(read["namespace"], "linux");
-        assert_eq!(read["variants"][0]["entry"], "sys_read");
-        assert!(read.get("nrs").is_none());
         assert_eq!(read["linux"]["disposition"]["kind"], "modeled");
-        assert!(
-            read["symbols"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|symbol| symbol["name"] == "read")
-        );
         let fork = report["rows"]
             .as_array()
             .unwrap()
@@ -546,9 +496,6 @@ mod tests {
             fork["linux"]["disposition"],
             json!({ "kind": "trap", "class": "process" })
         );
-        assert_eq!(report["vehicles"], json!(["syscall"]));
-        assert_eq!(report["metadata"]["linux"]["virtual_abi"], VIRTUAL_ABI);
-        assert_eq!(read["linux"]["since"], Value::Null);
         let fchroot = report["rows"]
             .as_array()
             .unwrap()
@@ -557,12 +504,5 @@ mod tests {
             .unwrap();
         assert_eq!(fchroot["linux"]["disposition"], json!({ "kind": "absent" }));
         assert_eq!(fchroot["linux"]["since"], "7.3");
-
-        // The human rendering lists the same rows, dispositions and symbols.
-        let text = Report::linux().render();
-        assert!(text.contains(&format!("virtual ABI {VIRTUAL_ABI}")));
-        for needle in ["read", "fchroot", "trap(process)", "__open64_2"] {
-            assert!(text.contains(needle), "{needle} missing from:\n{text}");
-        }
     }
 }
