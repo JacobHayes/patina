@@ -857,6 +857,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             family: "cargo",
             artifact: &artifact,
             trace_path,
+            trace_facts: None,
             timeline: &timeline,
             fingerprint: Some(fingerprint),
             seed,

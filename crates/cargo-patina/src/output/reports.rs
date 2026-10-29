@@ -22,6 +22,9 @@ pub struct RunReport<'a> {
     /// The on-disk trace path for a record/replay run, or `None` for a plain
     /// seeded run (no trace was written).
     pub trace_path: Option<PathBuf>,
+    /// The facts of the trace at `trace_path`, when the caller already loaded
+    /// it; `None` reads them from `trace_path`.
+    pub trace_facts: Option<TraceFacts>,
     pub timeline: &'a str,
     pub fingerprint: Option<String>,
     pub seed: Option<u64>,
@@ -136,9 +139,12 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.fingerprint = report.fingerprint.clone();
         env.seed = report.seed;
         env.render = render_path.clone();
-        if let Some(trace) = &report.trace_path {
-            env.trace = trace_facts(trace, report.timeline);
-        }
+        env.trace = report.trace_facts.clone().or_else(|| {
+            report
+                .trace_path
+                .as_ref()
+                .and_then(|trace| trace_facts(trace, report.timeline))
+        });
         env.coverage = report.coverage.clone();
         env.crash_restart = report.crash_restart.clone();
         env.qualifications = report.qualifications.clone();
@@ -280,32 +286,7 @@ fn failure_summary(
 /// effort: a load failure yields `None` rather than aborting the run's exit.
 fn trace_facts(path: &Path, timeline: &str) -> Option<TraceFacts> {
     let bundle = patina_dst_trace::TraceBundle::load(path).ok()?;
-    let events = bundle
-        .resolved_timeline(timeline)
-        .map(|d| d.len())
-        .unwrap_or_else(|_| {
-            bundle
-                .timelines
-                .first()
-                .map(|t| t.decisions.len())
-                .unwrap_or(0)
-        });
-    // Read the raw metadata generically so future fields still surface.
-    let raw: serde_json::Value = std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(serde_json::Value::Null);
-    let metadata = raw
-        .get("metadata")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    Some(TraceFacts {
-        path: path.to_string_lossy().into_owned(),
-        format_version: bundle.format_version,
-        timelines: bundle.timelines.iter().map(|t| t.id.clone()).collect(),
-        event_count: events,
-        metadata,
-    })
+    Some(TraceFacts::of(path, &bundle, timeline))
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +301,37 @@ pub(crate) struct TraceFacts {
     pub(super) timelines: Vec<String>,
     pub(super) event_count: usize,
     pub(super) metadata: serde_json::Value,
+}
+
+impl TraceFacts {
+    /// The facts of `bundle`, already loaded from `path`, so a caller holding
+    /// the bundle does not read the trace again.
+    pub(crate) fn of(path: &Path, bundle: &patina_dst_trace::TraceBundle, timeline: &str) -> Self {
+        let event_count = bundle
+            .resolved_timeline(timeline)
+            .map(|decisions| decisions.len())
+            .unwrap_or_else(|_| {
+                bundle
+                    .timelines
+                    .first()
+                    .map(|timeline| timeline.decisions.len())
+                    .unwrap_or(0)
+            });
+        Self {
+            path: path.to_string_lossy().into_owned(),
+            format_version: bundle.format_version,
+            timelines: bundle
+                .timelines
+                .iter()
+                .map(|timeline| timeline.id.clone())
+                .collect(),
+            event_count,
+            // Every metadata field is typed and unknown fields are refused on
+            // load, so the typed metadata serializes back to what the file
+            // holds.
+            metadata: serde_json::to_value(&bundle.metadata).unwrap_or(serde_json::Value::Null),
+        }
+    }
 }
 
 #[cfg(test)]

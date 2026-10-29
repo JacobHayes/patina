@@ -37,7 +37,10 @@ fn commit_stamps_the_build_identity_into_a_trace_the_recorder_left_without_one()
         .write_all(&recorded.to_bytes().unwrap())
         .unwrap();
 
-    assert_eq!(sink.commit(&identity()).ok(), Some(final_path.clone()));
+    assert_eq!(
+        sink.commit(&identity()).ok().map(|(path, _)| path),
+        Some(final_path.clone())
+    );
     let committed = TraceBundle::load(&final_path).unwrap();
     assert_eq!(committed.metadata.native, Some(identity()));
     let mut unstamped = committed.clone();

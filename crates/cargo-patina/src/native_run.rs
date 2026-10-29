@@ -101,11 +101,18 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // A replay reads its trace once: the build identity, the guest arguments,
     // the fingerprint components and the crash-restart plan all come from this
     // one load.
+    // The envelope's trace facts come from this load too.
     let replay_trace = match &invocation.mode {
         NativeRunMode::Replay { path, .. } => Some(TraceBundle::load(path).map_err(|error| {
             CliError(format!("failed to read trace {}: {error}", path.display()))
         })?),
         NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
+    };
+    let mut trace_facts = match (&invocation.mode, &replay_trace) {
+        (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
+            Some(output::TraceFacts::of(path, bundle, "main"))
+        }
+        _ => None,
     };
 
     // A replay restores the recorded environment; a new run of a Go guest
@@ -592,11 +599,12 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             .as_ref()
             .expect("a recording computes its build identity");
         match sink.commit(identity) {
-            Ok(path) => {
+            Ok((path, bundle)) => {
                 if let Err(error) = write_unsupported_sidecar(&path, &downgraded) {
                     let _ = fs::remove_file(&path);
                     return Err(error);
                 }
+                trace_facts = Some(output::TraceFacts::of(&path, &bundle, "main"));
                 committed_record_trace = Some(path);
             }
             Err(failure) => {
@@ -708,6 +716,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             family: "native",
             artifact: &artifact,
             trace_path,
+            trace_facts,
             timeline: "main",
             fingerprint,
             seed,

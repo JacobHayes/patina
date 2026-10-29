@@ -105,13 +105,14 @@ impl NativeTraceSink {
             })
     }
 
-    /// Stamp `identity` into the recorded trace and move it to its final path.
-    /// The stamp is written into the locked scratch file before the rename, so
-    /// the final path only ever holds a complete, stamped trace.
+    /// Stamp `identity` into the recorded trace and move it to its final path,
+    /// returning the path and the stamped bundle. The stamp is written into the
+    /// locked scratch file before the rename, so the final path only ever holds
+    /// a complete, stamped trace.
     pub(super) fn commit(
         mut self,
         identity: &NativeIdentityRecord,
-    ) -> Result<PathBuf, TraceCommitFailure> {
+    ) -> Result<(PathBuf, TraceBundle), TraceCommitFailure> {
         // Held, and with it the scratch file's lock, until the rename is done.
         let file = self.file.take().expect("trace sink is live until commit");
         let mut bundle = match TraceBundle::load(&self.temp_path) {
@@ -136,7 +137,7 @@ impl NativeTraceSink {
                 self.final_path.display()
             ))
         })?;
-        Ok(self.final_path.clone())
+        Ok((self.final_path.clone(), bundle))
     }
 
     /// Classify, and clean up after, a recording that left no loadable bundle.
