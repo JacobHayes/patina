@@ -11,8 +11,10 @@ pub struct SdkSiteMacro {
 }
 
 // The dollar token lets this generator declare the inner macros' metavariables
-// on stable Rust. Literal-label arms always emit a descriptor before the call;
-// expression-label arms keep the existing runtime-only registration behavior.
+// on stable Rust. Every macro emits a link-time descriptor before the call, and
+// the label must be a compile-time `&str` (a literal, a `const`, `concat!`): a
+// runtime `String` or `format!` label is a compile error, since a site that
+// is not known at link time could never be reported as never-evaluated.
 macro_rules! declare_site_macros {
     ($d:tt; $(
         $(#[$doc:meta])*
@@ -38,7 +40,7 @@ macro_rules! declare_site_macros {
             $(#[$doc])*
             #[macro_export]
             macro_rules! $name {
-                ($($d $before:expr,)* $d label:literal $(, $d $after:expr)*) => {{
+                ($($d $before:expr,)* $d label:expr $(, $d $after:expr)*) => {{
                     $d crate::__patina_static_site!(
                         $d label,
                         ::core::concat!(::core::file!(), ":", ::core::line!()),
@@ -50,13 +52,6 @@ macro_rules! declare_site_macros {
                         $($d crate::__rt::$convert($d $after),)* $($tail),*
                     )
                 }};
-                ($($d $before:expr,)* $d label:expr $(, $d $after:expr)*) => {
-                    $d crate::__rt::$call(
-                        $($d $before,)* $d label,
-                        ::core::concat!(::core::file!(), ":", ::core::line!()),
-                        $($d crate::__rt::$convert($d $after),)* $($tail),*
-                    )
-                };
             }
         )*
     };

@@ -72,6 +72,59 @@ mod tests {
         assert!(registered("evaluated-always") > 0);
     }
 
+    /// A site family is declared at link time: a family that never runs is in
+    /// the store before any generation reaches it, and one that runs registers
+    /// once however many instances call it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn campaign_declares_site_families_before_they_run() {
+        let main = r#"patina_dst::always_family!(DORMANT, "dormant-family");
+patina_dst::always_family!(LIVE, "live-family");
+fn main() {
+    patina_dst::lifecycle::setup_complete();
+    for shard in 0..3 {
+        LIVE.check(std::hint::black_box(true), format_args!("shard={shard}"));
+    }
+}
+"#;
+        let guest = super::super::run_facts::shared_sdk_guest("site-families", main);
+        let directory = tempdir().unwrap();
+        let out = directory.path().join("campaign");
+        let run = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+            .current_dir(native_workspace())
+            .args([
+                "campaign",
+                guest.to_str().unwrap(),
+                "--gens",
+                "2",
+                "--out-dir",
+            ])
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let sites: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("sites.json")).unwrap()).unwrap();
+        let row = |label: &str| {
+            sites["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|site| site["label"] == label)
+                .unwrap_or_else(|| panic!("missing {label}: {sites:#}"))
+                .clone()
+        };
+        assert_eq!(row("dormant-family")["registered_gens"], 0);
+        assert_eq!(row("dormant-family")["kind"], "always");
+        assert!(row("live-family")["registered_gens"].as_u64().unwrap() > 0);
+        assert!(row("live-family")["evals"].as_u64().unwrap() >= 3);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {

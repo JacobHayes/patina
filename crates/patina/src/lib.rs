@@ -62,12 +62,61 @@
 //!   same libtest harness shim-linked and sweeps the annotated test under plain
 //!   `cargo test`.
 //!
-//! Site labels are explicit strings and must be unique across the program; a
-//! label reused at a different call site is fatal. For literal labels the
-//! link-time site table (below) catches the reuse before the guest runs, even
-//! when neither site is ever evaluated; a computed label is caught at its first
-//! evaluation. Either way the embedder emits `PATINA_BUGGIFY_DUPLICATE_LABEL`
-//! and aborts.
+//! # Labels, helpers and families
+//!
+//! A site label is a compile-time `&str`: a literal, a `const`, or `concat!`.
+//! Every site macro declares its label in the link-time site table, so a site
+//! that never runs is still reported. A label computed at runtime (`String`,
+//! `format!`) is a compile error:
+//!
+//! ```compile_fail
+//! let shard = 3;
+//! patina_dst::reachable!(format!("shard-{shard}"));
+//! ```
+//!
+//! ```
+//! const LABEL: &str = "const-label";
+//! patina_dst::reachable!(LABEL);
+//! patina_dst::reachable!(concat!("concat-", "label"));
+//! ```
+//!
+//! Labels must be unique across the program; one reused at a different call
+//! site is fatal, and the link-time table catches it before the guest runs,
+//! even when neither site is ever evaluated. The embedder emits
+//! `PATINA_BUGGIFY_DUPLICATE_LABEL` and aborts.
+//!
+//! A site's identity is its label. A *function* that contains an assertion is one
+//! site, however many callers it has: every caller aggregates into it, as in
+//! the Antithesis SDKs. To get one site per caller, write the helper as a
+//! `macro_rules!` that takes the label as a parameter, so each expansion is its
+//! own site:
+//!
+//! ```
+//! macro_rules! check_sorted {
+//!     ($values:expr, $label:expr) => {
+//!         patina_dst::always!($values.windows(2).all(|w| w[0] <= w[1]), $label)
+//!     };
+//! }
+//! check_sorted!([1, 2, 3], "ledger-sorted");
+//! check_sorted!([4, 5, 6], "journal-sorted");
+//! ```
+//!
+//! When the same check genuinely runs for many dynamic instances (one per
+//! shard, table or connection), do not compute the label. Declare a family up
+//! front with a literal label ([`always_family!`], [`sometimes_family!`],
+//! [`reachable_family!`]) and put the varying part in the call's detail, not in
+//! its identity. The family is one declared site, so it is reported even if it
+//! never runs; an [`always_family!`] violation reports its detail as a verdict
+//! under the family label:
+//!
+//! ```
+//! patina_dst::always_family!(SHARD_BALANCED, "shard-balanced");
+//!
+//! fn check_shard(id: u32, balance: i64) {
+//!     SHARD_BALANCED.check(balance >= 0, format_args!("shard={id}"));
+//! }
+//! check_shard(3, 10);
+//! ```
 //!
 //! [`verdict`] and [`custom_op_bytes`] labels share that namespace — the same
 //! string names the same thing in `sites.json`, in a run's `verdicts[]`, and in
@@ -88,7 +137,7 @@
 //!
 //! ## Determinism and never-reached sites
 //!
-//! Literal-label SDK macro calls also emit a dependency-free link-time site
+//! SDK site macros and families also emit a dependency-free link-time site
 //! table under `cfg(patina)`. The native shim enumerates that table
 //! before the guest runs and surface `declared_site=` rows in `PATINA_SDK_REPORT`,
 //! so a `sometimes!` or `reachable!` site that no generation ever reaches still
@@ -132,6 +181,7 @@ pub use patina_dst_macros::test;
 
 mod custom_ops;
 mod simulation;
+mod site_family;
 mod static_sites;
 mod test_harness;
 mod verdict;
@@ -139,6 +189,7 @@ mod verdict;
 pub use custom_ops::{custom_op, custom_op_faultable};
 pub use custom_ops::{custom_op_bytes, custom_op_bytes_faultable};
 pub use simulation::{is_simulated, param, rng};
+pub use site_family::{AlwaysFamily, ReachableFamily, SometimesFamily};
 pub use verdict::{VerdictKind, verdict};
 
 /// Lifecycle markers for cooperating with the simulator's run phases.
@@ -180,7 +231,9 @@ mod ffi;
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __patina_static_site {
-    ($label:literal, $site:expr, $kind:expr) => {
+    ($label:expr, $site:expr, $kind:expr) => {
+        // A label must be a compile-time `&str`; anything else fails here.
+        const _: &str = $label;
         #[allow(unexpected_cfgs)]
         const _: () = {
             #[cfg(patina)]
