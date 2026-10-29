@@ -83,7 +83,7 @@ use crate::liveness::{Escalation, LivenessWatchdog};
 use crate::recording::Execution;
 use crate::schedule::ScheduleTracker;
 use patina_dst_abi::{EffectError, Operation, Outcome, TaskId};
-use patina_dst_driver_api::{FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_driver_api::{FsDriver, NetDriver};
 use patina_dst_fs_mem::FsSnapshot;
 use patina_dst_rng_seeded::SplitMix64;
 use patina_dst_trace::{HandoffConsumedState, TraceError};
@@ -107,6 +107,7 @@ mod recording;
 mod replay;
 mod reports;
 mod schedule;
+mod scheduler;
 mod swarm;
 mod time;
 
@@ -121,6 +122,9 @@ pub use builder::RuntimeBuilder;
 pub use charge::CpuAlarms;
 pub use clock::VirtualClock;
 pub use recording::TraceTransport;
+pub use scheduler::{
+    DetScheduler, PctConfig, SchedulePolicy, SchedulePolicyReport, StarvationConfig,
+};
 
 pub use config_env::trace_fd_from_env;
 pub use crash::{CrashAttemptSink, Incarnation, RESTART_DOWNTIME_NANOS};
@@ -594,7 +598,7 @@ pub fn run_with<T>(
     configure: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
     operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, RuntimeError> {
-    let builder = RuntimeBuilder::new(RuntimeConfig::from_env()?).with_default_drivers();
+    let builder = RuntimeBuilder::new(RuntimeConfig::from_env()?);
     run_with_context(configure(builder).build()?, operation)
 }
 
@@ -649,12 +653,12 @@ pub struct Context {
     cpus: u32,
     yield_stride: u32,
     execution: Execution,
-    filesystem: Option<Box<dyn FsDriver>>,
+    filesystem: Box<dyn FsDriver>,
     filesystem_is_capture: bool,
-    clock: Option<VirtualClock>,
-    entropy: Option<entropy::SeededEntropy>,
-    scheduler: Option<Box<dyn SchedulerDriver>>,
-    network: Option<Box<dyn NetDriver>>,
+    clock: VirtualClock,
+    entropy: entropy::SeededEntropy,
+    scheduler: DetScheduler,
+    network: Box<dyn NetDriver>,
     /// Virtual-clock timer queue. Ordered by `(monotonic_deadline_nanos,
     /// registration_seq)` so the deadlock-rescue path advances to the single
     /// earliest deadline and wakes due tasks in a stable order. Maintained
@@ -665,7 +669,7 @@ pub struct Context {
     timer_by_task: BTreeMap<TaskId, (u64, u64)>,
     timer_seq: u64,
     /// Shadow of the scheduler's task set and which tasks are parked, so the
-    /// runtime can tell — without a new `SchedulerDriver` method — when
+    /// runtime can tell — without a new scheduler method — when
     /// `scheduler.next()` would deadlock and a timer rescue is warranted.
     scheduler_tasks: std::collections::BTreeSet<TaskId>,
     parked_tasks: std::collections::BTreeSet<TaskId>,
@@ -1058,7 +1062,7 @@ impl Context {
     /// caller owns finalization: call [`Context::finish`] when done (or use
     /// [`run`]/[`run_with`], which do).
     pub fn from_config(config: RuntimeConfig) -> Result<Self, RuntimeError> {
-        RuntimeBuilder::new(config).with_default_drivers().build()
+        RuntimeBuilder::new(config).build()
     }
 
     /// Like [`Context::from_config`] with a config read from the `PATINA_*`

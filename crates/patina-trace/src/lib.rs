@@ -115,7 +115,8 @@ pub use replay::Replayer;
 ///   torn-write granularity, and where a crash-restart trace crashed is its
 ///   `Crash` marker alone. Format 22 traces are refused rather than replayed
 ///   against a crash point the trace no longer names.
-pub const TRACE_FORMAT_VERSION: u32 = 23;
+/// - 24: no `decision_policy` in the metadata; it only ever held one value.
+pub const TRACE_FORMAT_VERSION: u32 = 24;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

@@ -39,7 +39,6 @@ async fn tcp_echo_scenario(order: Rc<RefCell<Vec<&'static str>>>) -> Result<Vec<
 #[test]
 fn async_tcp_echo_over_simnet() {
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(8))
-        .with_default_drivers()
         .with_network(SimNet::new())
         .build()
         .unwrap();
@@ -71,7 +70,6 @@ fn async_tcp_echo_over_simnet() {
 #[test]
 fn tcp_latency_uses_timed_net_delivery() {
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(9))
-        .with_default_drivers()
         .with_network(SimNet::builder().base_latency_nanos(75).build().unwrap())
         .build()
         .unwrap();
@@ -93,7 +91,6 @@ fn tcp_latency_uses_timed_net_delivery() {
 #[test]
 fn tcp_backpressure_wakes_writer_when_reader_drains() {
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(11))
-        .with_default_drivers()
         .with_network(SimNet::builder().tcp_buffer_bytes(4).build().unwrap())
         .build()
         .unwrap();
@@ -126,7 +123,6 @@ fn tcp_backpressure_wakes_writer_when_reader_drains() {
 
 fn run_recorded_echo(config: RuntimeConfig) -> Result<Vec<u8>, RuntimeError> {
     let mut ctx = RuntimeBuilder::new(config)
-        .with_default_drivers()
         .with_network(SimNet::new())
         .build()?;
     let result = block_on(
@@ -161,7 +157,6 @@ fn echo_replays_and_a_divergent_payload_is_refused() {
     );
 
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::replay(&trace, "async-echo-v1"))
-        .with_default_drivers()
         .with_network(SimNet::new())
         .build()
         .unwrap();

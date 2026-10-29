@@ -146,7 +146,6 @@ fn an_installed_clock_owns_its_epoch_and_is_reconciled_like_a_configured_one() {
 
     // The trace records the epoch the installed clock really runs on.
     let mut context = RuntimeBuilder::new(RuntimeConfig::record(3, &path, "epoch-v1"))
-        .with_default_drivers()
         .with_clock(VirtualClock::new(EPOCH))
         .build()
         .unwrap();
@@ -163,10 +162,7 @@ fn an_installed_clock_owns_its_epoch_and_is_reconciled_like_a_configured_one() {
     // A configured epoch the installed clock would ignore is refused, and a
     // matching one is not...
     let with_clock = |config: RuntimeConfig, clock: VirtualClock| {
-        RuntimeBuilder::new(config)
-            .with_default_drivers()
-            .with_clock(clock)
-            .build()
+        RuntimeBuilder::new(config).with_clock(clock).build()
     };
     assert_config_refusal(with_clock(
         RuntimeConfig::seeded(0).with_realtime_epoch_nanos(7),

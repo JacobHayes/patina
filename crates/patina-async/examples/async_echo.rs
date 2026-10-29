@@ -8,7 +8,6 @@ fn main() -> Result<(), RuntimeError> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
     let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(seed))
-        .with_default_drivers()
         .with_network(SimNet::new())
         .build()?;
 

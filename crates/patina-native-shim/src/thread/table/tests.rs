@@ -1,7 +1,6 @@
 //! Managed-thread scheduler and synchronization regression tests.
 
-use patina_dst_driver_api::SchedulerDriver;
-use patina_dst_sched_det::DetScheduler;
+use patina_dst_runtime::DetScheduler;
 
 use super::*;
 
@@ -19,7 +18,7 @@ impl DetAdapter {
 
     /// Spawn and immediately select a task as running.
     fn spawn_running(&mut self) -> TaskId {
-        let task = SchedulerDriver::spawn(&mut self.scheduler, "task").unwrap();
+        let task = self.scheduler.spawn("task").unwrap();
         self.scheduler.select(Some(task)).unwrap();
         task
     }
@@ -27,7 +26,7 @@ impl DetAdapter {
 
 impl Scheduler for DetAdapter {
     fn spawn(&mut self, label: &str) -> Result<TaskId, String> {
-        SchedulerDriver::spawn(&mut self.scheduler, label).map_err(|error| error.message)
+        self.scheduler.spawn(label).map_err(|error| error.message)
     }
 
     fn yield_task(&mut self, task: TaskId) -> Result<(), String> {
@@ -560,7 +559,7 @@ fn join_delivers_exit_value_after_target_finishes() {
     let mut table = ThreadTable::default();
     let mut scheduler = DetAdapter::new(1);
     let main = scheduler.spawn_running();
-    let worker = SchedulerDriver::spawn(&mut scheduler.scheduler, "worker").unwrap();
+    let worker = scheduler.scheduler.spawn("worker").unwrap();
     table.register(worker);
 
     assert!(matches!(

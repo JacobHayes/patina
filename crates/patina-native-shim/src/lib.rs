@@ -226,7 +226,7 @@ pub use thread::{
 ///
 /// The guest's `pthread_create`/`join`, `pthread_mutex_*`, and
 /// `pthread_cond_*` calls (and thereby Rust `std::thread`, `Mutex`, and
-/// `Condvar`) execute under Patina's [`DetScheduler`](patina_dst_sched_det). Real
+/// `Condvar`) execute under Patina's [`DetScheduler`](patina_dst_runtime::DetScheduler). Real
 /// host OS threads back each managed task, but a single execution baton ensures
 /// exactly one runs at a time; every handoff is a seeded scheduler decision
 /// recorded and replayed like any other boundary operation.
@@ -252,7 +252,7 @@ pub use thread::{
 ///   as it reaches the real `read`/`write`/`sem_*`.
 ///
 /// Every scheduling decision — which task runs next at each boundary — is made
-/// by [`DetScheduler`](patina_dst_sched_det) and recorded/replayed; the OS
+/// by [`DetScheduler`](patina_dst_runtime::DetScheduler) and recorded/replayed; the OS
 /// primitives only provide the vehicle and the blocking.
 mod thread;
 

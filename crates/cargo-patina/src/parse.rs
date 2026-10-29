@@ -252,10 +252,9 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let scan = locate_positionals("audit", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
         // `audit` has no Cargo package family, so a missing artifact is always an
-        // error — but name the offending unknown flag (and refuse loudly if a real
-        // artifact is stranded behind it) rather than a bare "requires an artifact".
+        // error — but name the offending unknown flag rather than a bare
+        // "requires an artifact".
         if let Some(stop) = scan.stop {
-            reject_stranded_artifact("audit", &arguments[stop..])?;
             return Err(CliError::usage(format!(
                 "unsupported option {:?} for `audit`; audit requires an artifact or source path",
                 arguments[stop].to_string_lossy()
@@ -295,7 +294,10 @@ fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let scan = locate_positionals("replay", &arguments, 2);
     if scan.positionals.len() < 2 {
         if let Some(stop) = scan.stop {
-            reject_stranded_artifact("replay", &arguments[stop..])?;
+            return Err(CliError::usage(format!(
+                "unsupported option {:?} for `replay`",
+                arguments[stop].to_string_lossy()
+            )));
         }
         return Err(CliError::usage(if scan.positionals.is_empty() {
             "replay requires an artifact/source/package path and a trace path"

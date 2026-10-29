@@ -11,7 +11,6 @@ pub enum ErrorCode {
     Denied,
     InvalidInput,
     InvalidHandle,
-    MissingDriver,
     NotFound,
     NotReadable,
     NotWritable,
@@ -75,13 +74,6 @@ impl EffectError {
             message: message.into(),
         }
     }
-
-    pub fn missing_driver(capability: &str) -> Self {
-        Self::new(
-            ErrorCode::MissingDriver,
-            format!("no {capability} driver is installed"),
-        )
-    }
 }
 
 impl fmt::Display for EffectError {
@@ -100,7 +92,6 @@ impl fmt::Display for ErrorCodeDisplay {
             ErrorCode::Denied => "denied",
             ErrorCode::InvalidInput => "invalid_input",
             ErrorCode::InvalidHandle => "invalid_handle",
-            ErrorCode::MissingDriver => "missing_driver",
             ErrorCode::NotFound => "not_found",
             ErrorCode::NotReadable => "not_readable",
             ErrorCode::NotWritable => "not_writable",

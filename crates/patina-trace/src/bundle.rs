@@ -304,11 +304,6 @@ impl TraceBundle {
                 "trace compatibility fingerprint is empty".into(),
             ));
         }
-        if self.metadata.decision_policy.is_empty() {
-            return Err(TraceError::Invalid(
-                "trace decision policy identifier is empty".into(),
-            ));
-        }
         if fingerprint_declares_component(&self.metadata.fingerprint, "buggify")
             && self.metadata.buggify.is_none()
         {
@@ -553,7 +548,7 @@ fn require_complete_current_bundle(
             path: path.to_path_buf(),
             reason: "trace metadata is missing or not an object".into(),
         })?;
-    for field in ["root_seed", "decision_policy", "fingerprint"] {
+    for field in ["root_seed", "fingerprint"] {
         if !metadata.contains_key(field) {
             return Err(TraceError::Incomplete {
                 path: path.to_path_buf(),

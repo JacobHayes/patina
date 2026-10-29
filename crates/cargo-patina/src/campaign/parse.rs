@@ -55,20 +55,12 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         }
     }
 
-    let continuation_requested = has_continuation_flag(&arguments);
-
     // Options may lead the artifact (`campaign --gens 5 ./app`), so locate it
     // registry-arity-aware rather than insisting it be the first token. In
     // continuation mode, the absence of an artifact is intentional; a positional
     // that is present is rejected after parsing so the error names the doctrine.
     let scan = crate::locate_positionals("campaign", &arguments, 1);
     let artifact = scan.positionals.into_iter().next().map(PathBuf::from);
-    if artifact.is_none()
-        && !continuation_requested
-        && let Some(stop) = scan.stop
-    {
-        crate::reject_stranded_artifact("campaign", &arguments[stop..])?;
-    }
     let args = cli::parse("campaign", help::Family::Sole, scan.rest)?;
 
     // In continuation mode the out-dir's recorded spec is authoritative, so any
@@ -252,14 +244,6 @@ const CONTINUATION_FLAGS: &[&str] = &[
     "--timeout-secs",
     "--progress-every",
 ];
-
-fn has_continuation_flag(arguments: &[OsString]) -> bool {
-    arguments.iter().any(|argument| {
-        argument
-            .to_str()
-            .is_some_and(|text| matches!(cli::split_name(text), "--extend" | "--resume"))
-    })
-}
 
 fn campaign_cli(arguments: &[OsString]) -> String {
     let mut parts = vec!["campaign".to_string()];

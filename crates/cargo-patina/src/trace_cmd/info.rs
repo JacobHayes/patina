@@ -42,7 +42,6 @@ pub(crate) fn info_value(
         "fingerprint": bundle.metadata.fingerprint,
         "native": bundle.metadata.native,
         "root_seed": bundle.metadata.root_seed,
-        "decision_policy": bundle.metadata.decision_policy,
         "guest_argv": bundle.metadata.guest_argv,
         "timeline": timeline,
         "timelines": timelines,
@@ -130,10 +129,6 @@ pub(super) fn print_info_human(facts: &Value) {
         );
     }
     println!("root_seed: {}", facts["root_seed"]);
-    println!(
-        "decision_policy: {}",
-        facts["decision_policy"].as_str().unwrap_or("?")
-    );
     if !facts["guest_argv"].is_null() {
         println!("guest_argv: {}", compact_json_lossy(&facts["guest_argv"]));
     }

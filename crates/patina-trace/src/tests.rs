@@ -19,7 +19,7 @@ pub(super) fn operation() -> Operation {
 /// have, and a bundle from another time model is refused by that model.
 #[test]
 fn a_current_bundle_must_state_valid_run_facts() {
-    let bytes = include_bytes!("../tests/fixtures/format-23.patina");
+    let bytes = include_bytes!("../tests/fixtures/current.patina");
     let edited = |edit: &dyn Fn(&mut serde_json::Map<String, serde_json::Value>)| {
         let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         edit(value["metadata"].as_object_mut().unwrap());
@@ -124,7 +124,7 @@ fn feature_fixtures_decode_canonically_and_replay() {
         ),
     ];
     assert_fixture_replays(
-        include_bytes!("../tests/fixtures/format-23-memory.patina"),
+        include_bytes!("../tests/fixtures/current-memory.patina"),
         memory,
     );
 
@@ -172,7 +172,7 @@ fn feature_fixtures_decode_canonically_and_replay() {
         ),
     ];
     assert_fixture_replays(
-        include_bytes!("../tests/fixtures/format-23-sparse.patina"),
+        include_bytes!("../tests/fixtures/current-sparse.patina"),
         sparse,
     );
 
@@ -230,7 +230,7 @@ fn feature_fixtures_decode_canonically_and_replay() {
         ),
     ];
     assert_fixture_replays(
-        include_bytes!("../tests/fixtures/format-23-network.patina"),
+        include_bytes!("../tests/fixtures/current-network.patina"),
         network,
     );
 
@@ -255,7 +255,7 @@ fn feature_fixtures_decode_canonically_and_replay() {
         },
     ];
     assert_fixture_replays(
-        include_bytes!("../tests/fixtures/format-23-signals.patina"),
+        include_bytes!("../tests/fixtures/current-signals.patina"),
         signals.map(|operation| (operation, Outcome::Unit)),
     );
 }

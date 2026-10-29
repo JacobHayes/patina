@@ -33,11 +33,7 @@ impl Context {
                 decode_u64,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .seek(fd, 0, SeekWhence::Current)?)
+        Ok(self.filesystem.seek(fd, 0, SeekWhence::Current)?)
     }
 
     /// The metadata of the entry filesystem handle `fd` is open on, read
@@ -57,11 +53,7 @@ impl Context {
                 decode_metadata,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .fd_metadata_unfaulted(fd)?)
+        Ok(self.filesystem.fd_metadata_unfaulted(fd)?)
     }
 
     /// The metadata of the entry inode `ino` names
@@ -76,11 +68,7 @@ impl Context {
                 decode_metadata,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .inode_metadata_unfaulted(ino)?)
+        Ok(self.filesystem.inode_metadata_unfaulted(ino)?)
     }
 
     /// Up to `max_len` bytes of `fd`'s file from `offset`, read UNRECORDED and
@@ -111,8 +99,6 @@ impl Context {
         }
         Ok(self
             .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
             .read_at_unfaulted(clock, fd, offset, max_len)?)
     }
 
@@ -133,11 +119,7 @@ impl Context {
             )
             .into());
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .dirty_pages(fd, first, last)?)
+        Ok(self.filesystem.dirty_pages(fd, first, last)?)
     }
 
     /// A path-only handle on canonical `path` the runtime's embedder holds
@@ -163,11 +145,7 @@ impl Context {
                 decode_handle,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .open_path_unfaulted(clock, path)?)
+        Ok(self.filesystem.open_path_unfaulted(clock, path)?)
     }
 
     /// Release a handle [`Self::fs_open_path_unrecorded`] opened, UNRECORDED
@@ -184,11 +162,7 @@ impl Context {
                 decode_unit,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .close(fd)?)
+        Ok(self.filesystem.close(fd)?)
     }
 
     /// `F_SETFL`'s `O_APPEND` on filesystem handle `fd`'s description
@@ -201,11 +175,7 @@ impl Context {
         if self.filesystem_is_capture {
             return Ok(());
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .set_append(fd, append)?)
+        Ok(self.filesystem.set_append(fd, append)?)
     }
 
     /// The metadata of the entry at canonical `path`, read UNRECORDED and
@@ -222,11 +192,7 @@ impl Context {
                 decode_metadata,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .metadata_unfaulted(path)?)
+        Ok(self.filesystem.metadata_unfaulted(path)?)
     }
 
     /// The target of the symlink at canonical `path` ([`Self::fs_read_link`]),
@@ -247,11 +213,7 @@ impl Context {
                 decode_string,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .read_link_unfaulted(clock, path)?)
+        Ok(self.filesystem.read_link_unfaulted(clock, path)?)
     }
 
     /// Where filesystem handle `fd`'s node is now ([`Self::fs_fd_path`]),
@@ -268,11 +230,7 @@ impl Context {
                 decode_string,
             );
         }
-        Ok(self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?
-            .fd_path(fd)?)
+        Ok(self.filesystem.fd_path(fd)?)
     }
 
     /// An unrecorded read on a host-capture filesystem, whose replay executes
@@ -290,11 +248,7 @@ impl Context {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode(&operation, outcome),
         };
-        let filesystem = self
-            .filesystem
-            .as_deref_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem"))?;
-        let actual = read(filesystem).unwrap_or_else(Outcome::Error);
+        let actual = read(self.filesystem.as_mut()).unwrap_or_else(Outcome::Error);
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         decode(&operation, outcome)
     }

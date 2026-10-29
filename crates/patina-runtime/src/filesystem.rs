@@ -89,7 +89,7 @@ impl Context {
     /// against that larger count precisely so the bypass shows up as vacuity
     /// rather than as silence.
     pub fn fs_fault_report(&self) -> Option<patina_dst_driver_api::FsFaultReport> {
-        let driver = self.filesystem.as_ref().and_then(|fs| fs.fault_report());
+        let driver = self.filesystem.fault_report();
         if driver.is_none() && self.fs_latency_nanos.is_none() {
             return None;
         }
@@ -108,11 +108,7 @@ impl Context {
     /// [`Self::current_monotonic`] does, and an fs op costs no extra trace op)
     /// under the fixed relatime policy. A missing clock is a named refusal.
     pub(crate) fn fs_clock(&mut self) -> Result<FsClock, RuntimeError> {
-        let now_nanos = self
-            .clock
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("clock"))?
-            .now(ClockKind::Realtime)?;
+        let now_nanos = self.clock.now(ClockKind::Realtime)?;
         Ok(FsClock {
             now_nanos,
             atime: AtimePolicy::Relatime,
@@ -128,9 +124,6 @@ impl Context {
     }
 
     pub fn fs_open(&mut self, path: &str, flags: OpenFlags) -> Result<Fd, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsOpen {
             path: path.into(),
@@ -141,11 +134,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .open(clock, path, flags);
+        let result = self.filesystem.open(clock, path, flags);
         let actual = match result {
             Ok(fd) => Outcome::Handle(fd),
             Err(error) => Outcome::Error(error),
@@ -155,9 +144,6 @@ impl Context {
     }
 
     pub fn fs_read(&mut self, fd: Fd, max_len: usize) -> Result<Vec<u8>, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsRead { fd, max_len };
         let expected = match self.filesystem_expected(&operation)? {
@@ -165,11 +151,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .read(clock, fd, max_len);
+        let result = self.filesystem.read(clock, fd, max_len);
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -179,9 +161,6 @@ impl Context {
     }
 
     pub fn fs_write(&mut self, fd: Fd, bytes: &[u8]) -> Result<usize, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsWrite {
             fd,
@@ -192,11 +171,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .write(clock, fd, bytes);
+        let result = self.filesystem.write(clock, fd, bytes);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -214,9 +189,6 @@ impl Context {
         offset: u64,
         max_len: usize,
     ) -> Result<Vec<u8>, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsReadAt {
             fd,
@@ -228,11 +200,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .read_at(clock, fd, offset, max_len);
+        let result = self.filesystem.read_at(clock, fd, offset, max_len);
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -250,9 +218,6 @@ impl Context {
         offset: u64,
         bytes: &[u8],
     ) -> Result<usize, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsWriteAt {
             fd,
@@ -264,11 +229,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .write_at(clock, fd, offset, bytes);
+        let result = self.filesystem.write_at(clock, fd, offset, bytes);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -287,9 +248,6 @@ impl Context {
         offset: u64,
         bytes: &[u8],
     ) -> Result<usize, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsWriteBackAt {
             fd,
             offset,
@@ -300,11 +258,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_usize(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .write_back_at(clock, fd, offset, bytes);
+        let result = self.filesystem.write_back_at(clock, fd, offset, bytes);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -323,9 +277,6 @@ impl Context {
         seals: u32,
         huge_page: u64,
     ) -> Result<Fd, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsCreateAnonymous {
             name: name.into(),
             mode,
@@ -339,8 +290,6 @@ impl Context {
         let clock = self.fs_clock()?;
         let result = self
             .filesystem
-            .as_mut()
-            .expect("driver was checked")
             .create_anonymous(clock, name, mode, seals, huge_page);
         let actual = match result {
             Ok(fd) => Outcome::Handle(fd),
@@ -352,9 +301,6 @@ impl Context {
 
     /// `F_GET_SEALS` ([`Operation::FsSeals`]).
     pub fn fs_seals(&mut self, fd: Fd) -> Result<u32, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsSeals { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
@@ -362,11 +308,7 @@ impl Context {
                 return decode_u64(&operation, outcome).map(|seals| seals as u32);
             }
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .seals(fd);
+        let result = self.filesystem.seals(fd);
         let actual = match result {
             Ok(seals) => Outcome::U64(u64::from(seals)),
             Err(error) => Outcome::Error(error),
@@ -393,19 +335,12 @@ impl Context {
     }
 
     pub fn fs_close(&mut self, fd: Fd) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsClose { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_unit(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .close(fd);
+        let result = self.filesystem.close(fd);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
@@ -415,19 +350,12 @@ impl Context {
     }
 
     pub fn fs_dup(&mut self, fd: Fd) -> Result<Fd, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsDup { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_handle(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .dup(fd);
+        let result = self.filesystem.dup(fd);
         let actual = match result {
             Ok(fd) => Outcome::Handle(fd),
             Err(error) => Outcome::Error(error),
@@ -442,19 +370,12 @@ impl Context {
         offset: i64,
         whence: SeekWhence,
     ) -> Result<u64, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsSeek { fd, offset, whence };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_u64(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .seek(fd, offset, whence);
+        let result = self.filesystem.seek(fd, offset, whence);
         let actual = match result {
             Ok(position) => Outcome::U64(position),
             Err(error) => Outcome::Error(error),
@@ -464,20 +385,13 @@ impl Context {
     }
 
     pub fn fs_metadata(&mut self, path: &str) -> Result<FsMetadata, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsMetadata { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .metadata(path);
+        let result = self.filesystem.metadata(path);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
             Err(error) => Outcome::Error(error),
@@ -487,20 +401,13 @@ impl Context {
     }
 
     pub fn fs_fd_metadata(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsFdMetadata { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .fd_metadata(fd);
+        let result = self.filesystem.fd_metadata(fd);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
             Err(error) => Outcome::Error(error),
@@ -520,20 +427,13 @@ impl Context {
     /// [`DeterministicContext::fs_fd_metadata`] because this IS that `fstat`,
     /// not an extra lookup beside it.
     pub fn fs_inode_metadata(&mut self, ino: u64) -> Result<FsMetadata, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsInodeMetadata { ino };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_metadata(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .inode_metadata(ino);
+        let result = self.filesystem.inode_metadata(ino);
         let actual = match result {
             Ok(metadata) => Outcome::Metadata(metadata),
             Err(error) => Outcome::Error(error),
@@ -633,9 +533,6 @@ impl Context {
         atime: FsTime,
         mtime: FsTime,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let clock = self.fs_clock()?;
         let (atime_nanos, mtime_nanos) = (atime.resolve(clock), mtime.resolve(clock));
@@ -664,9 +561,6 @@ impl Context {
         atime: FsTime,
         mtime: FsTime,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let clock = self.fs_clock()?;
         let (atime_nanos, mtime_nanos) = (atime.resolve(clock), mtime.resolve(clock));
@@ -695,9 +589,6 @@ impl Context {
         atime: FsTime,
         mtime: FsTime,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let clock = self.fs_clock()?;
         let (atime_nanos, mtime_nanos) = (atime.resolve(clock), mtime.resolve(clock));
@@ -712,9 +603,6 @@ impl Context {
     }
 
     pub fn fs_read_directory(&mut self, path: &str) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsReadDirectory { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
@@ -724,11 +612,7 @@ impl Context {
             }
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .read_directory(clock, path);
+        let result = self.filesystem.read_directory(clock, path);
         let actual = match result {
             Ok(entries) => Outcome::DirectoryEntries(entries),
             Err(error) => Outcome::Error(error),
@@ -742,9 +626,6 @@ impl Context {
     /// holds — which is also why a descriptor opened `O_PATH` cannot list at
     /// all, however permissive the directory's bits are.
     pub fn fs_read_directory_fd(&mut self, fd: Fd) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsReadDirectoryFd { fd };
         let expected = match self.filesystem_expected(&operation)? {
@@ -754,11 +635,7 @@ impl Context {
             }
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .read_directory_fd(clock, fd);
+        let result = self.filesystem.read_directory_fd(clock, fd);
         let actual = match result {
             Ok(entries) => Outcome::DirectoryEntries(entries),
             Err(error) => Outcome::Error(error),
@@ -957,20 +834,12 @@ impl Context {
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<Vec<u8>, EffectError>,
     ) -> Result<Vec<u8>, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_bytes(&operation, outcome),
         };
-        let result = invoke(
-            self.filesystem
-                .as_mut()
-                .expect("driver was checked")
-                .as_mut(),
-        );
+        let result = invoke(self.filesystem.as_mut());
         let actual = match result {
             Ok(bytes) => Outcome::Bytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -1033,19 +902,12 @@ impl Context {
     /// storage. Charging latency would bill every `*at` twice, and an injected
     /// `EIO` here would be a failure mode no real `openat` has.
     pub fn fs_fd_path(&mut self, fd: Fd) -> Result<String, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsFdPath { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .fd_path(fd);
+        let result = self.filesystem.fd_path(fd);
         let actual = match result {
             Ok(path) => Outcome::Bytes(path.into_bytes()),
             Err(error) => Outcome::Error(error),
@@ -1060,19 +922,12 @@ impl Context {
     /// bookkeeping that does no I/O, and no real `fcntl` or `flock` fails with
     /// an injected `EIO`.
     pub fn fs_fd_ino(&mut self, fd: Fd) -> Result<u64, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let operation = Operation::FsFdIno { fd };
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_u64(&operation, outcome),
         };
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .fd_ino(fd);
+        let result = self.filesystem.fd_ino(fd);
         let actual = match result {
             Ok(ino) => Outcome::U64(ino),
             Err(error) => Outcome::Error(error),
@@ -1082,9 +937,6 @@ impl Context {
     }
 
     pub fn fs_read_link(&mut self, path: &str) -> Result<String, RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let operation = Operation::FsReadLink { path: path.into() };
         let expected = match self.filesystem_expected(&operation)? {
@@ -1092,11 +944,7 @@ impl Context {
             FilesystemExpected::Captured(outcome) => return decode_string(&operation, outcome),
         };
         let clock = self.fs_clock()?;
-        let result = self
-            .filesystem
-            .as_mut()
-            .expect("driver was checked")
-            .read_link(clock, path);
+        let result = self.filesystem.read_link(clock, path);
         let actual = match result {
             Ok(target) => Outcome::Bytes(target.into_bytes()),
             Err(error) => Outcome::Error(error),
@@ -1174,9 +1022,6 @@ impl Context {
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver, FsClock) -> Result<(), EffectError>,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         let clock = self.fs_clock()?;
         self.filesystem_unit_undelayed(operation, |fs| invoke(fs, clock))
@@ -1189,9 +1034,6 @@ impl Context {
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<(), EffectError>,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         self.apply_fs_latency()?;
         self.filesystem_unit_undelayed(operation, invoke)
     }
@@ -1203,19 +1045,11 @@ impl Context {
         operation: Operation,
         invoke: impl FnOnce(&mut dyn FsDriver) -> Result<(), EffectError>,
     ) -> Result<(), RuntimeError> {
-        if self.filesystem.is_none() {
-            return Err(EffectError::missing_driver("filesystem").into());
-        }
         let expected = match self.filesystem_expected(&operation)? {
             FilesystemExpected::Execute(expected) => expected,
             FilesystemExpected::Captured(outcome) => return decode_unit(&operation, outcome),
         };
-        let result = invoke(
-            self.filesystem
-                .as_mut()
-                .expect("driver was checked")
-                .as_mut(),
-        );
+        let result = invoke(self.filesystem.as_mut());
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),

@@ -6,9 +6,9 @@ use crate::config::{
     EntropyFaultConfig, FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
 };
 use crate::liveness::resolve_heal_after;
+use crate::scheduler::{PctConfig, SchedulePolicy, StarvationConfig};
 use crate::{FINGERPRINT_BUGGIFY, RuntimeError};
 use patina_dst_abi::ClockKind;
-use patina_dst_sched_det::{PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_trace::AddressLayout;
 use std::collections::BTreeMap;
 
@@ -634,7 +634,7 @@ mod tests {
         reconcile_replay_sud,
     };
 
-    use patina_dst_sched_det::{PctConfig, SchedulePolicy};
+    use crate::scheduler::{PctConfig, SchedulePolicy};
 
     use std::collections::BTreeMap;
 

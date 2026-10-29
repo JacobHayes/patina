@@ -68,7 +68,6 @@ fn workload(context: &mut Context, iterations: usize) -> Result<(), RuntimeError
 /// The boundary-operation count of a seeded run.
 fn seeded_ops(iterations: usize) -> u64 {
     let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_default_drivers()
         .build()
         .unwrap();
     workload(&mut context, iterations).unwrap();
@@ -81,7 +80,6 @@ fn seeded_ops(iterations: usize) -> u64 {
 fn record(iterations: usize) -> (u64, CapturingTransport) {
     let transport = CapturingTransport::default();
     let mut context = RuntimeBuilder::new(RuntimeConfig::record_transport(1, FINGERPRINT))
-        .with_default_drivers()
         .with_trace_transport(transport.clone())
         .build()
         .unwrap();
@@ -122,7 +120,6 @@ fn trace_growth_stays_within_budget() {
         "main",
         FINGERPRINT,
     ))
-    .with_default_drivers()
     .with_trace_transport(transport)
     .build()
     .unwrap();

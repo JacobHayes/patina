@@ -244,15 +244,11 @@ fn campaign_locates_the_artifact_around_options() {
         Ok(_) => panic!("expected a usage error for {values:?}"),
     };
     assert!(error(&["--frob"]).contains("--frob"));
-    // A real compiled artifact stranded behind an unknown flag is a loud
-    // routing error naming both, never a confusing later "failed to read".
+    // An unknown flag ahead of the artifact is refused by name.
     let dir = tempfile::tempdir().unwrap();
     let module = dir.path().join("app");
     std::fs::write(&module, [0x7f, b'E', b'L', b'F', 2, 1, 1, 0]).unwrap();
-    let m = module.to_str().unwrap();
-    let message = error(&["--frob", m]);
-    assert!(message.contains("--frob"), "{message}");
-    assert!(message.contains(m), "{message}");
+    assert!(error(&["--frob", module.to_str().unwrap()]).contains("--frob"));
 }
 
 #[test]

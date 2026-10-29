@@ -412,7 +412,7 @@ impl Context {
         if !schedule.vacuous.is_empty() {
             findings.push(facts::vacuous_schedule_finding(&schedule));
         }
-        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report())
+        if let Some(report) = self.scheduler.policy_report()
             && report.starve_vacuous > 0
         {
             findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
@@ -429,9 +429,8 @@ impl Context {
             }
             if let Some(report) = self
                 .scheduler
-                .as_ref()
-                .and_then(|s| s.policy_report())
-                .filter(patina_dst_driver_api::SchedulePolicyReport::is_active)
+                .policy_report()
+                .filter(crate::scheduler::SchedulePolicyReport::is_active)
             {
                 root.insert("schedule_policy".into(), facts::schedule_policy(&report));
             }
@@ -549,7 +548,7 @@ a recorded result or a replay fetch",
         // Exploration-policy diagnostic (PCT / starvation). Populated from live
         // selection, so it reflects a record/seeded run; a replay reports the
         // inert default because recorded selections bypass the policy.
-        if let Some(report) = self.scheduler.as_ref().and_then(|s| s.policy_report()) {
+        if let Some(report) = self.scheduler.policy_report() {
             emit_schedule_policy_report(self.reports, &report);
         }
         // Filesystem fault-injection diagnostic. Default-on so a run configured

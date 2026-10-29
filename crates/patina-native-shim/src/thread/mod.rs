@@ -580,7 +580,7 @@ impl From<String> for ThreadError {
 
 /// The scheduler transitions the thread runtime needs. Implemented for the
 /// real runtime [`Context`](super::Context) and, in tests, for a bare
-/// [`DetScheduler`](patina_dst_sched_det).
+/// [`DetScheduler`](patina_dst_runtime::DetScheduler).
 trait Scheduler {
     fn spawn(&mut self, label: &str) -> Result<TaskId, String>;
     fn yield_task(&mut self, task: TaskId) -> Result<(), String>;
@@ -710,7 +710,7 @@ enum JoinResolve {
 /// backing host OS semaphore (a libdispatch semaphore on macOS, a POSIX
 /// `sem_t` on Linux) is a pure blocking primitive that carries no
 /// deterministic decision — every scheduling choice is made by
-/// [`DetScheduler`](patina_dst_sched_det).
+/// [`DetScheduler`](patina_dst_runtime::DetScheduler).
 ///
 /// On macOS the baton uses the *canonical* Darwin primitive — a libdispatch
 /// semaphore, the same one Rust std's thread [`Parker`] uses — rather than a

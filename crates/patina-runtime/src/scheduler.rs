@@ -1,4 +1,4 @@
-//! Seeded cooperative task scheduling.
+//! Seeded cooperative task scheduling: the runtime's one scheduler.
 //!
 //! The default policy selects one runnable task uniformly at random from a
 //! stable, sorted set — the historical behavior, preserved byte-for-byte so
@@ -25,8 +25,57 @@
 use std::collections::BTreeMap;
 
 use patina_dst_abi::{EffectError, ErrorCode, TaskId};
-use patina_dst_driver_api::{DriverResult, SchedulePolicyReport, SchedulerDriver};
+use patina_dst_driver_api::DriverResult;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
+
+/// End-of-run summary of an exploration scheduling policy (PCT priority-change
+/// points, starvation intervals). Populated only during a live selection run
+/// (`next()` decisions), so it reflects the record/seeded schedule; on replay the
+/// recorded task selections are consumed through `select()` and `next()` is not
+/// called, so a replay reports the inert default. The runtime folds these counts
+/// into the facts document's `schedule_policy` and the
+/// bug-depth annotation of a failing schedule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedulePolicyReport {
+    /// Whether the PCT (Probabilistic Concurrency Testing) policy was active.
+    pub pct: bool,
+    /// Configured PCT bug-depth `d` (number of priority bands; `d-1` change
+    /// points).
+    pub pct_depth: u32,
+    /// Configured number of priority-change points (`d-1`).
+    pub pct_change_points: u32,
+    /// Number of priority-change points that were actually reached during the
+    /// schedule (a live change point demoted a running task). This is the PCT
+    /// contribution to the bug-depth estimate of a schedule.
+    pub pct_change_points_hit: u32,
+    /// Whether the starvation-interval policy was active.
+    pub starvation: bool,
+    /// Number of scheduling decisions where the starvation policy actually
+    /// excluded at least one runnable task from selection.
+    pub starve_events: u64,
+    /// Number of scheduling decisions where honoring the starvation set would
+    /// have left no schedulable task (every runnable task starved). The policy
+    /// falls back to the full runnable set at those steps (liveness safety) and
+    /// counts them here so a vacuous starvation configuration is diagnosed.
+    pub starve_vacuous: u64,
+    /// Total scheduling decisions (`next()` calls) observed under the policy.
+    pub decisions: u64,
+}
+
+impl SchedulePolicyReport {
+    /// Whether any exploration policy was active this run.
+    pub fn is_active(&self) -> bool {
+        self.pct || self.starvation
+    }
+
+    /// The bug-depth estimate for the realized schedule: the number of ordering
+    /// decisions (priority-change points hit plus starvation exclusions) that
+    /// were live in the schedule. A failure found under a schedule with a higher
+    /// estimate exercised a deeper interleaving.
+    pub fn bug_depth(&self) -> u64 {
+        u64::from(self.pct_change_points_hit) + self.starve_events
+    }
+}
 
 /// Configuration for the PCT (Probabilistic Concurrency Testing) policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,7 +374,7 @@ pub struct DetScheduler {
     /// from selection under an active exploration policy (a starvation interval
     /// excluding a runnable task, or PCT priority ordering deferring a
     /// lower-priority runnable task). Exposed through
-    /// [`SchedulerDriver::liveness_deferring`] so the liveness watchdog never
+    /// [`DetScheduler::liveness_deferring`] so the liveness watchdog never
     /// misreports a policy-explained non-progress window. Reset to `false` before
     /// every default (policy-free) selection.
     last_decision_deferred: bool,
@@ -483,8 +532,9 @@ interval window.",
     }
 }
 
-impl SchedulerDriver for DetScheduler {
-    fn spawn(&mut self, _label: &str) -> DriverResult<TaskId> {
+/// Task-state transitions and selection.
+impl DetScheduler {
+    pub fn spawn(&mut self, _label: &str) -> DriverResult<TaskId> {
         let task = TaskId(self.next_task);
         self.next_task = self.next_task.checked_add(1).ok_or_else(|| {
             EffectError::new(
@@ -499,7 +549,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(task)
     }
 
-    fn yield_task(&mut self, task: TaskId) -> DriverResult<()> {
+    pub fn yield_task(&mut self, task: TaskId) -> DriverResult<()> {
         let state = self.state_mut(task)?;
         if state != &TaskState::Running {
             return Err(invalid_transition(task, "yield", state));
@@ -508,7 +558,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(())
     }
 
-    fn park(&mut self, task: TaskId, reason: &str) -> DriverResult<()> {
+    pub fn park(&mut self, task: TaskId, reason: &str) -> DriverResult<()> {
         let state = self.state_mut(task)?;
         if state != &TaskState::Running {
             return Err(invalid_transition(task, "park", state));
@@ -517,7 +567,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(())
     }
 
-    fn wake(&mut self, task: TaskId) -> DriverResult<()> {
+    pub fn wake(&mut self, task: TaskId) -> DriverResult<()> {
         let state = self.state_mut(task)?;
         if !matches!(state, TaskState::Parked(_)) {
             return Err(invalid_transition(task, "wake", state));
@@ -526,7 +576,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(())
     }
 
-    fn complete(&mut self, task: TaskId) -> DriverResult<()> {
+    pub fn complete(&mut self, task: TaskId) -> DriverResult<()> {
         let state = self.state_mut(task)?;
         if state != &TaskState::Running {
             return Err(invalid_transition(task, "complete", state));
@@ -541,7 +591,9 @@ impl SchedulerDriver for DetScheduler {
         Ok(())
     }
 
-    fn next(&mut self) -> DriverResult<Option<TaskId>> {
+    // Not an iterator: selection fails on deadlock and mutates task state.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> DriverResult<Option<TaskId>> {
         if let Some((task, _)) = self
             .tasks
             .iter()
@@ -578,7 +630,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(Some(selected))
     }
 
-    fn select(&mut self, task: Option<TaskId>) -> DriverResult<()> {
+    pub fn select(&mut self, task: Option<TaskId>) -> DriverResult<()> {
         let Some(task) = task else {
             if self.tasks.is_empty() {
                 return Ok(());
@@ -606,7 +658,7 @@ impl SchedulerDriver for DetScheduler {
         Ok(())
     }
 
-    fn policy_report(&self) -> Option<SchedulePolicyReport> {
+    pub fn policy_report(&self) -> Option<SchedulePolicyReport> {
         if self.pct.is_none() && self.starvation.is_none() {
             return None;
         }
@@ -627,7 +679,7 @@ impl SchedulerDriver for DetScheduler {
         Some(report)
     }
 
-    fn liveness_deferring(&self) -> bool {
+    pub fn liveness_deferring(&self) -> bool {
         self.last_decision_deferred
     }
 }

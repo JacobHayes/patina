@@ -124,18 +124,6 @@ fn unrecorded_filesystem_queries_are_never_faulted() {
 }
 
 #[test]
-fn filesystem_without_a_clock_refuses_instead_of_stamping_epoch() {
-    let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_filesystem(MemFs::new())
-        .build()
-        .unwrap();
-    let error = ctx
-        .fs_open("/f", OpenFlags::create_truncate_write())
-        .unwrap_err();
-    assert!(error.to_string().contains("no clock driver"));
-}
-
-#[test]
 fn filesystem_mutations_sample_after_latency() {
     // Class pairing: the clocked filesystem choke point and trace replay.
     let mut context =

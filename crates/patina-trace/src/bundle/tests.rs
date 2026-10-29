@@ -87,7 +87,6 @@ fn buggify_fingerprint_requires_buggify_metadata() {
         "format_version": TRACE_FORMAT_VERSION,
         "metadata": {
             "root_seed": 7,
-            "decision_policy": "splitmix64-v1",
             "fingerprint": "fingerprint+buggify",
             "realtime_epoch_nanos": 0,
             "boot_origin_nanos": 1000,
@@ -156,7 +155,7 @@ fn rejects_malformed_incomplete_and_oversized_trace_files() {
     fs::write(
         &incomplete_metadata,
         format!(
-            r#"{{"format_version":{TRACE_FORMAT_VERSION},"metadata":{{"root_seed":1,"decision_policy":"splitmix64-v1"}},"timelines":[]}}"#
+            r#"{{"format_version":{TRACE_FORMAT_VERSION},"metadata":{{"root_seed":1}},"timelines":[]}}"#
         ),
     )
     .unwrap();

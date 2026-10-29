@@ -70,7 +70,6 @@ pub extern "C" fn patina_init_crash(seed: u64) -> c_int {
         .map_err(RuntimeError::Effect)
         .and_then(|filesystem| {
             RuntimeBuilder::new(RuntimeConfig::seeded(seed))
-                .with_default_drivers()
                 .with_filesystem(filesystem)
                 .build()
         });
@@ -81,9 +80,7 @@ pub(crate) fn init_from_env() -> c_int {
     let context = runtime_config_from_control_plane().and_then(|(config, trace_fd)| {
         layout::verify()?;
         watchdog::configure()?;
-        let mut builder = RuntimeBuilder::new(config)
-            .with_default_drivers()
-            .with_fs_image(fs_image_base()?);
+        let mut builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }

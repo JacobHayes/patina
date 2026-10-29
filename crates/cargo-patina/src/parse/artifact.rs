@@ -453,7 +453,9 @@ order, but an unknown option is only forwarded in the Cargo package family — c
 /// after it can only be a misuse); otherwise `Ok(())` lets the caller forward the
 /// list to its no-artifact family. The token immediately after an unknown flag is
 /// that flag's presumed value (`--manifest-path ./x/Cargo.toml`) and is exempt
-/// UNLESS it is a compiled artifact, which is never a flag value.
+/// UNLESS it is a compiled artifact, which is never a flag value. Only the
+/// verbs with a Cargo package family (`run`, `test`) forward unknown flags, so
+/// only they need this; every other verb's parser refuses the flag by name.
 pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<(), CliError> {
     let unknown = tail.first().cloned().unwrap_or_default();
     let mut index = 0;

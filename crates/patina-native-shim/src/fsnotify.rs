@@ -673,7 +673,6 @@ mod tests {
     #[test]
     fn a_crash_rebuilds_the_held_names_from_the_rebuilt_image() {
         let mut context: Context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-            .with_default_drivers()
             .with_filesystem(CrashFs::builder().seed(1).build().unwrap())
             .build()
             .unwrap();

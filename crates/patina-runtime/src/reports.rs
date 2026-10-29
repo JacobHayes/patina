@@ -581,7 +581,7 @@ addresses this run actually connects between.",
 /// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
 pub(super) fn emit_schedule_policy_report(
     reports: ReportConfig,
-    report: &patina_dst_driver_api::SchedulePolicyReport,
+    report: &crate::scheduler::SchedulePolicyReport,
 ) {
     if !report.is_active() {
         return;

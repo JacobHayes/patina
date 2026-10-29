@@ -278,7 +278,7 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn incomplete_traces_are_refused_before_guest_exec(guest: &common::native::Guest) {
     let incomplete_metadata = format!(
-        r#"{{"format_version":{},"metadata":{{"root_seed":1,"decision_policy":"splitmix64-v1"}},"timelines":[]}}"#,
+        r#"{{"format_version":{},"metadata":{{"root_seed":1}},"timelines":[]}}"#,
         patina_dst_trace::TRACE_FORMAT_VERSION
     );
     let cases: [(&str, &[u8], &str); 3] = [

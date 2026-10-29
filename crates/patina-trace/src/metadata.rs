@@ -321,7 +321,6 @@ fn is_zero_u64(value: &u64) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct RunMetadata {
     pub root_seed: u64,
-    pub decision_policy: String,
     pub fingerprint: String,
     /// The run's fault-injection configuration, authoritative on replay.
     /// Absent (`None`) in traces recorded before format 4, which the runtime
@@ -488,7 +487,6 @@ impl RunMetadata {
     ) -> Self {
         Self {
             root_seed,
-            decision_policy: "splitmix64-v1".into(),
             fingerprint: fingerprint.into(),
             faults: None,
             buggify: None,

@@ -3,12 +3,12 @@
 use crate::crash::Incarnation;
 use crate::network::builtin_dns_resolution;
 use crate::reports::ReportConfig;
+use crate::scheduler::SchedulePolicy;
 use crate::{
     DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_BUGGIFY_ACTIVATION_PERMILLE, DEFAULT_BUGGIFY_CUTOFF_NANOS,
     DEFAULT_BUGGIFY_FIRE_PERMILLE, DEFAULT_REALTIME_EPOCH_NANOS, ENV_GUEST_CWD, HOSTNAME_MAX_BYTES,
     RuntimeError,
 };
-use patina_dst_sched_det::SchedulePolicy;
 use std::collections::BTreeMap;
 
 use std::path::PathBuf;

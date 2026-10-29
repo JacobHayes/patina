@@ -9,7 +9,6 @@ mod address;
 mod faults;
 mod filesystem;
 mod network;
-mod scheduler;
 
 pub use address::{
     ANY_FAMILY_HOST, InterfaceIpv4, NetInterface, VIRTUAL_INTERFACES, WILDCARD_HOST,
@@ -24,6 +23,5 @@ pub use faults::{
 };
 pub use filesystem::{FsDriver, XattrNamespace, xattr_permission};
 pub use network::{NetDriver, NetReadiness};
-pub use scheduler::{SchedulePolicyReport, SchedulerDriver};
 
 pub type DriverResult<T> = Result<T, EffectError>;

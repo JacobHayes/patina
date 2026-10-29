@@ -7,7 +7,7 @@ use crate::{Context, DEFAULT_BOOT_ORIGIN_NANOS, RuntimeError};
 use patina_dst_abi::{ClockKind, Operation, TaskId};
 
 use crate::VirtualClock;
-use patina_dst_sched_det::{PctConfig, SchedulePolicy};
+use crate::scheduler::{PctConfig, SchedulePolicy};
 use patina_dst_trace::TraceBundle;
 
 use tempfile::tempdir;
@@ -217,7 +217,6 @@ fn realtime_deadlines_convert_through_the_clock_epoch() {
     // A clock whose realtime epoch is 1_000ns ahead of monotonic: a realtime
     // deadline of origin + 1_150 must rescue at monotonic origin + 150.
     let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_default_drivers()
         .with_clock(VirtualClock::new(1_000))
         .build()
         .unwrap();

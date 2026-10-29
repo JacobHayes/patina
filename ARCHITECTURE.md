@@ -81,7 +81,7 @@ patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-light)
 patina-dst-macros           # the SDK's proc macros
 patina-dst-harness          # configure-then-run harness under the shim
 patina-dst-abi              # boundary operations/outcomes, time-model constants
-patina-dst-runtime          # Context, driver installation, record/replay, params
+patina-dst-runtime          # Context, drivers, scheduler policies, record/replay, params
 patina-dst-async            # deterministic executor over the explicit boundary
 patina-dst-trace            # trace bundle, branch metadata, strict replay
 patina-dst-minimize         # failure-oracle reducers
@@ -91,10 +91,9 @@ patina-dst-conformance      # host-oracle syscall scenarios (unpublished)
 patina-dst-driver-api       # driver traits
 patina-dst-fs-mem           # in-memory filesystem
 patina-dst-fs-crash         # crash-consistency filesystem model
-patina-dst-fs-host          # allowlisted read-only host capture
+patina-dst-fs-host          # read-only host capture (runtime test fixture)
 patina-dst-net-sim          # virtual network (datagrams + TCP)
 patina-dst-rng-seeded       # SplitMix64 and seed derivation
-patina-dst-sched-det        # scheduler policies (uniform, PCT, starvation)
 patina-dst-wrapper-fault    # fault-injection wrapper drivers
 patina-dst-native-shim      # libc/pthread/dispatch/syscall interposition + SUD
 ```
@@ -199,8 +198,7 @@ Patina fails closed. Before a native guest runs:
 - a **pre-constructor check** (ELF): the preinit array holds only the shim's
   entry; anything else is `early-init`. `ET_REL` inputs are refused.
 
-At run time: missing drivers return `missing_driver` (never the host);
-deny-trap interposers (the process-spawn family, `dlopen`/`dlclose`) abort
+At run time: deny-trap interposers (the process-spawn family, `dlopen`/`dlclose`) abort
 by name if reached; a SUD-trapped row marked `Trap` aborts by name; on Linux
 `dlsym` answers the shim's own definitions (`src/posix/dlsym.rs`) and NULL
 otherwise; replay refuses fingerprint and operation mismatches.
@@ -349,8 +347,9 @@ Concrete drivers implement capabilities: `MemFs`, `CrashFs` (checkpoints,
 torn writes, rename atomicity, directory `fsync` as the namespace barrier),
 `SimNet`, `VirtualClock`, `SeededEntropy`, `DetScheduler`. Wrapper drivers
 compose around them (`FaultNet`). Record and replay live at the runtime
-boundary, not in drivers, so they compose with any driver stack. Filesystem
-execution requires a clock driver; it never silently uses the epoch.
+boundary, not in drivers, so they compose with any driver stack. Every
+`Context` has every driver: a slot the builder is not handed gets the
+standard one.
 
 Crash restart (`--crash-permille`, native only): a crash point exports the
 `FsSnapshot`, the shim hands it to the supervisor, and a fresh incarnation

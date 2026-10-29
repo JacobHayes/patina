@@ -1,9 +1,9 @@
 //! Task scheduling, timer rescue, and schedule diagnostics.
 
 use crate::recording::{decode_optional_task, decode_task, decode_unit};
+use crate::scheduler::DetScheduler;
 use crate::{Context, RuntimeError};
 use patina_dst_abi::{ClockKind, EffectError, ErrorCode, Operation, Outcome, TaskId};
-use patina_dst_driver_api::SchedulerDriver;
 use patina_dst_trace::{Replayer, TraceError};
 use std::collections::BTreeMap;
 
@@ -378,18 +378,11 @@ impl Context {
     }
 
     pub fn task_spawn(&mut self, label: &str) -> Result<TaskId, RuntimeError> {
-        if self.scheduler.is_none() {
-            return Err(EffectError::missing_driver("scheduler").into());
-        }
         let operation = Operation::TaskSpawn {
             label: label.into(),
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .scheduler
-            .as_mut()
-            .expect("driver was checked")
-            .spawn(label);
+        let result = self.scheduler.spawn(label);
         let actual = match result {
             Ok(task) => Outcome::Task(task),
             Err(error) => Outcome::Error(error),
@@ -463,14 +456,8 @@ impl Context {
         clock: ClockKind,
         deadline_nanos: u64,
     ) -> Result<(), RuntimeError> {
-        if self.scheduler.is_none() {
-            return Err(EffectError::missing_driver("scheduler").into());
-        }
         // Registration expires a reached deadline, which reads the clock: a
         // missing clock fails here, before the task is parked.
-        if self.clock.is_none() {
-            return Err(EffectError::missing_driver("clock").into());
-        }
         // Reserve the registration sequence up front so an exhausted counter
         // fails closed before the task is parked with no way to wake it.
         let seq = self.timer_seq;
@@ -491,11 +478,7 @@ impl Context {
             deadline_nanos: monotonic_deadline,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .scheduler
-            .as_mut()
-            .expect("driver was checked")
-            .park(task, reason);
+        let result = self.scheduler.park(task, reason);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
@@ -578,11 +561,7 @@ impl Context {
     /// monotonic value is maintained identically on record and replay by the
     /// recorded `SleepUntil`, so the result is deterministic.
     pub(super) fn current_monotonic(&self) -> Result<u64, RuntimeError> {
-        self.clock
-            .as_ref()
-            .ok_or_else(|| EffectError::missing_driver("clock"))?
-            .now(ClockKind::Monotonic)
-            .map_err(Into::into)
+        self.clock.now(ClockKind::Monotonic).map_err(Into::into)
     }
 
     /// Whether `scheduler.next()` would report a deadlock: tasks exist but every
@@ -655,9 +634,6 @@ impl Context {
     }
 
     pub fn scheduler_next(&mut self) -> Result<Option<TaskId>, RuntimeError> {
-        if self.scheduler.is_none() {
-            return Err(EffectError::missing_driver("scheduler").into());
-        }
         // Deadlock-rescue: while every task is parked but a timer pends, advance
         // virtual time to the single earliest deadline and wake every task due
         // at the new time, in ascending `(deadline, seq)` order. This runs
@@ -677,13 +653,8 @@ impl Context {
         let operation = Operation::SchedulerNext;
         let expected = self.replay_expected(&operation)?;
         let result = match expected.as_ref().map(|(_, outcome)| outcome) {
-            Some(Outcome::OptionalTask(task)) => self
-                .scheduler
-                .as_mut()
-                .expect("driver was checked")
-                .select(*task)
-                .map(|()| *task),
-            _ => self.scheduler.as_mut().expect("driver was checked").next(),
+            Some(Outcome::OptionalTask(task)) => self.scheduler.select(*task).map(|()| *task),
+            _ => self.scheduler.next(),
         };
         let actual = match result {
             Ok(task) => Outcome::OptionalTask(task),
@@ -698,18 +669,10 @@ impl Context {
     fn scheduler_unit(
         &mut self,
         operation: Operation,
-        invoke: impl FnOnce(&mut dyn SchedulerDriver) -> Result<(), EffectError>,
+        invoke: impl FnOnce(&mut DetScheduler) -> Result<(), EffectError>,
     ) -> Result<(), RuntimeError> {
-        if self.scheduler.is_none() {
-            return Err(EffectError::missing_driver("scheduler").into());
-        }
         let expected = self.replay_expected(&operation)?;
-        let result = invoke(
-            self.scheduler
-                .as_mut()
-                .expect("driver was checked")
-                .as_mut(),
-        );
+        let result = invoke(&mut self.scheduler);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),

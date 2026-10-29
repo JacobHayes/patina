@@ -537,7 +537,7 @@ impl Context {
     /// timer — which may wake a task — before it asks for the next task. A
     /// deadline a parked task shares is left to the deadlock rescue.
     pub fn advance_idle_to(&mut self, deadline: u64) -> Result<bool, RuntimeError> {
-        if self.clock.is_none() || !self.scheduler_would_deadlock() {
+        if !self.scheduler_would_deadlock() {
             return Ok(false);
         }
         let now = self.current_monotonic()?;
@@ -588,17 +588,13 @@ impl Context {
     /// exceeded. Inert unless the watchdog is active (record/seeded with a budget
     /// configured), so a plain run and every replay are unaffected.
     fn liveness_track(&mut self, progress: bool) -> Result<(), RuntimeError> {
-        if !self.liveness.active || self.clock.is_none() {
+        if !self.liveness.active {
             return Ok(());
         }
         // Arm offsets were anchored to run start at construction; observations
         // and diagnostic timestamps stay in the trace's monotonic domain.
         let now = self.current_monotonic()?;
-        let deferring = self
-            .scheduler
-            .as_ref()
-            .map(|scheduler| scheduler.liveness_deferring())
-            .unwrap_or(false);
+        let deferring = self.scheduler.liveness_deferring();
         if let Some(violation) = self.liveness.observe(now, progress, deferring) {
             // The single interface-contract line, loud.
             // Emitted from the runtime so it reaches stderr regardless of the
@@ -682,9 +678,6 @@ impl Context {
     /// Charge one escalation of `class` to `task`. Its time is carried like
     /// any charge.
     fn escalate(&mut self, task: Option<TaskId>, class: ChargeClass) -> Result<(), RuntimeError> {
-        if self.clock.is_none() {
-            return Ok(());
-        }
         let now = self.current_monotonic()?;
         // Backstop first: a loop that ignores time rather than waiting for it
         // must become a named abort, not an unbounded stream of escalations.

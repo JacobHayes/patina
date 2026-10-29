@@ -75,7 +75,6 @@ fn a_path_and_a_sink_together_are_refused() {
         }
     }
     let built = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_facts_path("/facts.json"))
-        .with_default_drivers()
         .with_facts_sink(Discard)
         .build();
     let Err(error) = built else {
@@ -116,7 +115,6 @@ fn trace_transport_records_and_replays_without_paths() {
     let mut record = RuntimeBuilder::new(
         RuntimeConfig::record_transport(99, "fixture-v1").with_boot_origin_nanos(origin),
     )
-    .with_default_drivers()
     .with_trace_transport(transport.clone())
     .build()
     .unwrap();
@@ -128,7 +126,6 @@ fn trace_transport_records_and_replays_without_paths() {
         "main",
         "fixture-v1",
     ))
-    .with_default_drivers()
     .with_trace_transport(transport.clone())
     .build()
     .unwrap();
@@ -141,7 +138,6 @@ fn trace_transport_records_and_replays_without_paths() {
         "main",
         "fixture-v1",
     ))
-    .with_default_drivers()
     .with_trace_transport(transport)
     .build()
     .unwrap();
@@ -159,7 +155,6 @@ fn crash_writes_the_incarnation_recording_ending_with_the_trigger() {
             .with_crash_permille(1000)
             .with_crash_supervisor(),
     )
-    .with_default_drivers()
     .with_trace_transport(transport.clone())
     .build()
     .unwrap();
@@ -182,14 +177,11 @@ fn crash_writes_the_incarnation_recording_ending_with_the_trigger() {
 #[test]
 fn trace_transport_configuration_fails_loudly() {
     assert!(matches!(
-        RuntimeBuilder::new(RuntimeConfig::record_transport(1, "fixture-v1"))
-            .with_default_drivers()
-            .build(),
+        RuntimeBuilder::new(RuntimeConfig::record_transport(1, "fixture-v1")).build(),
         Err(RuntimeError::Config(_))
     ));
     assert!(matches!(
         RuntimeBuilder::new(RuntimeConfig::seeded(1))
-            .with_default_drivers()
             .with_trace_transport(SharedTransport::default())
             .build(),
         Err(RuntimeError::Config(_))

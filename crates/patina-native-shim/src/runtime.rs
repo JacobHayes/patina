@@ -338,7 +338,6 @@ pub(crate) fn effect_errno(error: &EffectError) -> c_int {
         ErrorCode::Denied => EACCES,
         ErrorCode::InvalidInput => EINVAL,
         ErrorCode::InvalidHandle => EBADF,
-        ErrorCode::MissingDriver => ENOSYS,
         ErrorCode::NotFound => ENOENT,
         ErrorCode::NotReadable | ErrorCode::NotWritable => EBADF,
         ErrorCode::AlreadyExists | ErrorCode::AlreadyBound => EEXIST,

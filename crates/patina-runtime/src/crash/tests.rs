@@ -47,7 +47,6 @@ fn crash_torn_writes_record_and_replay_reproduce_the_same_image() {
     let trace = directory.path().join("torn.patina");
     let config = RuntimeConfig::record(3, &trace, "crash-torn-v1");
     let mut record = RuntimeBuilder::new(config)
-        .with_default_drivers()
         .with_filesystem(crash_fs())
         .build()
         .unwrap();
@@ -66,7 +65,6 @@ fn crash_torn_writes_record_and_replay_reproduce_the_same_image() {
 
     let config = RuntimeConfig::replay(&trace, "crash-torn-v1");
     let mut replay = RuntimeBuilder::new(config)
-        .with_default_drivers()
         .with_filesystem(crash_fs())
         .build()
         .unwrap();
@@ -88,7 +86,6 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
             .with_crash_permille(1)
             .with_crash_supervisor(),
     )
-    .with_default_drivers()
     .with_filesystem(CrashFs::default())
     .build();
     assert!(matches!(result, Err(RuntimeError::Config(_))));
@@ -96,7 +93,6 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
     // Explicit filesystem + a non-default crash kind -> refuse, even with no
     // crash rate, because the kind would be dropped.
     let result = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_crash_kind(CrashKind::Process))
-        .with_default_drivers()
         .with_filesystem(CrashFs::default())
         .build();
     assert!(matches!(result, Err(RuntimeError::Config(_))));
@@ -105,7 +101,6 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
     // embedders that drive `fs_crash` manually).
     assert!(
         RuntimeBuilder::new(RuntimeConfig::seeded(1))
-            .with_default_drivers()
             .with_filesystem(CrashFs::default())
             .build()
             .is_ok()
@@ -113,7 +108,6 @@ fn explicit_filesystem_with_crash_knobs_fails_closed() {
 
     // Supplying both a base image and an explicit filesystem is ambiguous.
     let result = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_default_drivers()
         .with_filesystem(MemFs::new())
         .with_fs_image(MemFs::new())
         .build();
@@ -209,9 +203,9 @@ fn the_crash_kind_decides_the_restart_image() {
     );
 }
 
-// Regression for two bugs the shim paths hit, both via
-// `with_default_drivers` WITHOUT `with_fs_image` (exactly what
-// `Context::from_config` does), knob-free:
+// Regression for two bugs the shim paths hit, both via the default
+// filesystem WITHOUT `with_fs_image` (exactly what `Context::from_config`
+// does), knob-free:
 //   (a) the choke point used `MemFs::default()` as the base, which is
 //       ROOTLESS (no `/`), so every path op (create_dir/open) failed with
 //       NotFound; it must use `MemFs::new()`.

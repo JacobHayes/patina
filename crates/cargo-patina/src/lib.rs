@@ -71,7 +71,7 @@ use native_build::{
 use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
 use parse::{
     BUGGIFY_ENV_VARS, ParseResult, buggify_env_pairs, current_verb, knob_env_pairs, knob_env_vars,
-    locate_positionals, package_integrates_patina, parse, reject_stranded_artifact,
+    locate_positionals, package_integrates_patina, parse,
 };
 use shim_build::lock_target_dir;
 

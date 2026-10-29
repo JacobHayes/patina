@@ -94,7 +94,6 @@ fn recorded_origin_is_authoritative_for_replay_branch_and_installed_clocks() {
     }
     assert!(
         RuntimeBuilder::new(RuntimeConfig::replay(&path, "origin+buggify"))
-            .with_default_drivers()
             .with_clock(VirtualClock::default())
             .build()
             .is_err()
@@ -114,7 +113,6 @@ fn recorded_origin_is_authoritative_for_replay_branch_and_installed_clocks() {
 
     let custom_path = dir.path().join("custom.patina");
     let mut custom = RuntimeBuilder::new(RuntimeConfig::record(3, &custom_path, "custom"))
-        .with_default_drivers()
         .with_clock(VirtualClock::at(origin, DEFAULT_REALTIME_EPOCH_NANOS))
         .build()
         .unwrap();
@@ -163,7 +161,6 @@ fn boot_origin_signed_bounds_apply_to_config_installed_clocks_and_replay() {
         ));
         assert!(
             RuntimeBuilder::new(RuntimeConfig::seeded(1))
-                .with_default_drivers()
                 .with_clock(VirtualClock::at(origin, epoch))
                 .build()
                 .is_err()
@@ -183,7 +180,6 @@ fn boot_origin_signed_bounds_apply_to_config_installed_clocks_and_replay() {
     }
     // Inclusive bound, using the installed clock's epoch, not the unused default.
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_default_drivers()
         .with_clock(VirtualClock::at(max, 0))
         .build()
         .unwrap();

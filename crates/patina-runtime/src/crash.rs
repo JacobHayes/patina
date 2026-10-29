@@ -10,7 +10,7 @@
 
 use crate::recording::Execution;
 use crate::{Context, InjectedCrash, RuntimeError};
-use patina_dst_abi::{CrashKind, EffectError, Fd, Outcome};
+use patina_dst_abi::{CrashKind, Fd, Outcome};
 
 use patina_dst_fs_mem::FsSnapshot;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain, incarnation_seed};
@@ -257,8 +257,6 @@ impl Context {
         }
         let bytes = self
             .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem").to_string())?
             .crash_and_export_restart_snapshot(kind)
             .map_err(|error| error.to_string())?;
         FsSnapshot::decode(&bytes).map_err(|error| {
@@ -280,10 +278,7 @@ impl Context {
             return Ok(());
         }
         let clock = self.fs_clock().map_err(|error| error.to_string())?;
-        let filesystem = self
-            .filesystem
-            .as_mut()
-            .ok_or_else(|| EffectError::missing_driver("filesystem").to_string())?;
+        let filesystem = self.filesystem.as_mut();
         for (fd, offset, bytes) in stores {
             filesystem
                 .write_back_at(clock, fd, offset, &bytes)

@@ -198,7 +198,7 @@ impl Context {
     /// next. A no-op inside an embedder section, where time stands still:
     /// the embedder cannot settle an expiry there.
     pub fn show_carry(&mut self) -> Result<(), RuntimeError> {
-        if self.embedder_section || self.charges.carry == 0 || self.clock.is_none() {
+        if self.embedder_section || self.charges.carry == 0 {
             return Ok(());
         }
         let now = self.current_monotonic()?;
@@ -210,10 +210,7 @@ impl Context {
             return Ok(());
         }
         self.charges.carry -= target - now;
-        self.clock
-            .as_mut()
-            .expect("driver was checked")
-            .sleep_until(ClockKind::Monotonic, target)?;
+        self.clock.sleep_until(ClockKind::Monotonic, target)?;
         self.expire_due_timers()
     }
 

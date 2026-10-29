@@ -45,7 +45,6 @@ const SHIM_PACKAGES: &[&str] = &[
     "patina-dst-net-sim",
     "patina-dst-rng-seeded",
     "patina-dst-runtime",
-    "patina-dst-sched-det",
     "patina-dst-trace",
     "patina-dst-wrapper-fault",
     "patina-dst-native-shim",

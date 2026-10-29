@@ -6,6 +6,7 @@ use crate::config::{
     validate_hostname, validate_partition,
 };
 
+use crate::scheduler::{PctConfig, StarvationConfig};
 use crate::{
     DEFAULT_CONVERGE_BUDGET_NANOS, DEFAULT_LIVENESS_BUDGET_NANOS, DEFAULT_PCT_DEPTH,
     DEFAULT_PCT_STEPS, DEFAULT_STARVE_INTERVALS, DEFAULT_STARVE_MAX_LEN, DEFAULT_STARVE_WINDOW,
@@ -18,7 +19,6 @@ use crate::{
     ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane,
     RuntimeError,
 };
-use patina_dst_sched_det::{PctConfig, StarvationConfig};
 use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
@@ -718,12 +718,12 @@ mod tests {
     use crate::config::RuntimeConfig;
 
     use crate::replay::{reconcile_replay_guest_cwd, reconcile_replay_guest_env};
+    use crate::scheduler::{PctConfig, StarvationConfig};
     use crate::{
         ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
         ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SWARM,
         RuntimeError,
     };
-    use patina_dst_sched_det::{PctConfig, StarvationConfig};
     use std::collections::BTreeMap;
 
     #[test]

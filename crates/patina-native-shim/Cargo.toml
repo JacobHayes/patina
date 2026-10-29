@@ -36,5 +36,4 @@ patina-dst-trace.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-patina-dst-sched-det.workspace = true
 tempfile.workspace = true

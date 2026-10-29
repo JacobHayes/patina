@@ -153,22 +153,15 @@ impl Context {
     /// prints at finalization; embedders and tests read it directly to assert a
     /// knob was non-vacuous.
     pub fn net_fault_report(&self) -> Option<patina_dst_driver_api::NetFaultReport> {
-        self.network.as_ref().and_then(|net| net.fault_report())
+        self.network.fault_report()
     }
 
     pub fn net_bind(&mut self, address: &str) -> Result<SocketId, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetBind {
             address: address.into(),
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .bind(address);
+        let result = self.network.bind(address);
         let actual = match result {
             Ok(socket) => Outcome::Socket(socket),
             Err(error) => Outcome::Error(error),
@@ -179,18 +172,11 @@ impl Context {
 
     /// Bind one more member of a shared (`SO_REUSEPORT`) binding at `address`.
     pub fn net_bind_shared(&mut self, address: &str) -> Result<SocketId, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetBindShared {
             address: address.into(),
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .bind_shared(address);
+        let result = self.network.bind_shared(address);
         let actual = match result {
             Ok(socket) => Outcome::Socket(socket),
             Err(error) => Outcome::Error(error),
@@ -205,9 +191,6 @@ impl Context {
         to: &str,
         bytes: &[u8],
     ) -> Result<SendReport, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetSend {
             socket,
@@ -216,11 +199,7 @@ impl Context {
             now_nanos,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .send(socket, to, bytes, now_nanos);
+        let result = self.network.send(socket, to, bytes, now_nanos);
         let actual = match result {
             Ok(report) => Outcome::SendReport(report),
             Err(error) => Outcome::Error(error),
@@ -230,17 +209,10 @@ impl Context {
     }
 
     pub fn net_recv(&mut self, socket: SocketId) -> Result<Option<Datagram>, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetRecv { socket, now_nanos };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .recv(socket, now_nanos);
+        let result = self.network.recv(socket, now_nanos);
         let actual = match result {
             Ok(datagram) => Outcome::Datagram(datagram),
             Err(error) => Outcome::Error(error),
@@ -250,17 +222,10 @@ impl Context {
     }
 
     pub fn net_next_delivery(&mut self, socket: SocketId) -> Result<Option<u64>, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetNextDelivery { socket, now_nanos };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_ref()
-            .expect("driver was checked")
-            .next_delivery(socket, now_nanos);
+        let result = self.network.next_delivery(socket, now_nanos);
         let actual = match result {
             Ok(deadline) => Outcome::OptionalU64(deadline),
             Err(error) => Outcome::Error(error),
@@ -312,23 +277,13 @@ impl Context {
     }
 
     fn network(&self) -> Result<&dyn NetDriver, RuntimeError> {
-        match self.network.as_deref() {
-            Some(network) => Ok(network),
-            None => Err(EffectError::missing_driver("network").into()),
-        }
+        Ok(self.network.as_ref())
     }
 
     pub fn net_close(&mut self, socket: SocketId) -> Result<(), RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetClose { socket };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .close(socket);
+        let result = self.network.close(socket);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
@@ -342,19 +297,12 @@ impl Context {
         address: &str,
         backlog: usize,
     ) -> Result<SocketId, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetTcpListen {
             address: address.into(),
             backlog,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_listen(address, backlog);
+        let result = self.network.tcp_listen(address, backlog);
         let actual = match result {
             Ok(socket) => Outcome::Socket(socket),
             Err(error) => Outcome::Error(error),
@@ -367,20 +315,13 @@ impl Context {
         &mut self,
         listener: SocketId,
     ) -> Result<Option<TcpAccepted>, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetTcpAccept {
             listener,
             now_nanos,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_accept(listener, now_nanos);
+        let result = self.network.tcp_accept(listener, now_nanos);
         let actual = match result {
             Ok(accepted) => Outcome::TcpAccepted(accepted),
             Err(error) => Outcome::Error(error),
@@ -390,9 +331,6 @@ impl Context {
     }
 
     pub fn net_tcp_connect(&mut self, address: &str, to: &str) -> Result<SocketId, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetTcpConnect {
             address: address.into(),
@@ -400,11 +338,7 @@ impl Context {
             now_nanos,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_connect(address, to, now_nanos);
+        let result = self.network.tcp_connect(address, to, now_nanos);
         let actual = match result {
             Ok(socket) => Outcome::Socket(socket),
             Err(error) => Outcome::Error(error),
@@ -414,9 +348,6 @@ impl Context {
     }
 
     pub fn net_tcp_send(&mut self, socket: SocketId, bytes: &[u8]) -> Result<usize, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetTcpSend {
             socket,
@@ -424,11 +355,7 @@ impl Context {
             now_nanos,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_send(socket, bytes, now_nanos);
+        let result = self.network.tcp_send(socket, bytes, now_nanos);
         let actual = match result {
             Ok(written) => Outcome::Usize(written),
             Err(error) => Outcome::Error(error),
@@ -442,9 +369,6 @@ impl Context {
         socket: SocketId,
         max_len: usize,
     ) -> Result<Option<Vec<u8>>, RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let now_nanos = self.now(ClockKind::Monotonic)?;
         let operation = Operation::NetTcpRecv {
             socket,
@@ -452,11 +376,7 @@ impl Context {
             now_nanos,
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_recv(socket, max_len, now_nanos);
+        let result = self.network.tcp_recv(socket, max_len, now_nanos);
         let actual = match result {
             Ok(bytes) => Outcome::OptionalBytes(bytes),
             Err(error) => Outcome::Error(error),
@@ -473,20 +393,13 @@ impl Context {
         tos: u8,
         source: Option<&str>,
     ) -> Result<(), RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetMark {
             socket,
             tos,
             source: source.map(Into::into),
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .mark_datagrams(socket, tos, source);
+        let result = self.network.mark_datagrams(socket, tos, source);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
@@ -503,20 +416,13 @@ impl Context {
         local: &str,
         peer: Option<&str>,
     ) -> Result<(), RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetConnect {
             socket,
             local: local.into(),
             peer: peer.map(Into::into),
         };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .connect_datagram(socket, local, peer);
+        let result = self.network.connect_datagram(socket, local, peer);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
@@ -530,16 +436,9 @@ impl Context {
         socket: SocketId,
         how: ShutdownHow,
     ) -> Result<(), RuntimeError> {
-        if self.network.is_none() {
-            return Err(EffectError::missing_driver("network").into());
-        }
         let operation = Operation::NetTcpShutdown { socket, how };
         let expected = self.replay_expected(&operation)?;
-        let result = self
-            .network
-            .as_mut()
-            .expect("driver was checked")
-            .tcp_shutdown(socket, how);
+        let result = self.network.tcp_shutdown(socket, how);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),

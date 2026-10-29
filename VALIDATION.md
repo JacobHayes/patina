@@ -9,7 +9,7 @@ document names directories and evidence shapes, not test functions.
 1. **Test observable contracts.** Seeds, traces, replay failures, virtual effects
    and CLI behavior are public contracts. Internal conventions are enforced by
    types, visibility or lints, never by tests that scan or patch source text.
-2. **Nondeterminism fails visibly.** A missing driver, malformed trace,
+2. **Nondeterminism fails visibly.** A malformed trace,
    incompatible fingerprint, mismatched operation or unconsumed replay event fails
    the run. There is no permissive fallback.
 3. **Repetitions are independent.** Reproducibility means separate processes

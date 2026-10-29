@@ -108,7 +108,6 @@ fn same_deadline_rescue_peer_wake_reconciles_shadow_state() {
     // registries, the drain issues a `task_wake` on a Runnable task and the
     // program aborts with InvalidState.
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(14))
-        .with_default_drivers()
         .with_network(SimNet::builder().base_latency_nanos(50).build().unwrap())
         .build()
         .unwrap();

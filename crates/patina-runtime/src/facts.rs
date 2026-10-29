@@ -327,7 +327,7 @@ pub(crate) fn sdk(diag: &crate::BuggifyDiagnostics) -> Value {
 
 /// The exploration-policy (PCT / starvation) accounting, with the bug-depth
 /// estimate a found failure is annotated with.
-pub(crate) fn schedule_policy(report: &patina_dst_driver_api::SchedulePolicyReport) -> Value {
+pub(crate) fn schedule_policy(report: &crate::scheduler::SchedulePolicyReport) -> Value {
     object(vec![
         ("pct", Value::from(report.pct)),
         ("pct_depth", Value::from(report.pct_depth)),

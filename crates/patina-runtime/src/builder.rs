@@ -18,15 +18,15 @@ use crate::replay::{
     validate_buggify_fingerprint_contract, watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
+use crate::scheduler::{DetScheduler, SchedulePolicy};
 use crate::swarm::apply_swarm_mask;
 use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, facts};
 use patina_dst_abi::ClockKind;
-use patina_dst_driver_api::{FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_driver_api::{FsDriver, NetDriver};
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::MemFs;
 use patina_dst_net_sim::SimNet;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
-use patina_dst_sched_det::{DetScheduler, SchedulePolicy};
 use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle};
 use patina_dst_wrapper_fault::FaultFs;
 use std::collections::BTreeMap;
@@ -34,16 +34,13 @@ use std::collections::BTreeMap;
 /// Assembles a [`Context`] from a [`RuntimeConfig`] plus a driver per effect
 /// family (filesystem, clock, entropy, scheduler, network).
 ///
-/// [`with_default_drivers`](RuntimeBuilder::with_default_drivers) installs the
-/// standard deterministic set; any `with_*` driver call overrides one slot with
-/// a caller-supplied implementation of the `patina-dst-driver-api` trait —
-/// this is how [`run_with`] callers add latency/fault wrapper drivers or a
-/// custom network. [`build`](RuntimeBuilder::build) validates the combination
+/// Every slot gets the standard deterministic driver unless a `with_*` call
+/// supplies one — this is how [`run_with`] callers add fault wrapper drivers
+/// or a custom network. [`build`](RuntimeBuilder::build) validates the combination
 /// and is the single choke point that wires config-driven fault injection
 /// (e.g. the crash filesystem) so a parsed knob can never be silently dropped.
 pub struct RuntimeBuilder {
     config: RuntimeConfig,
-    install_defaults: bool,
     trace_transport: Option<Box<dyn TraceTransport>>,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
@@ -55,8 +52,6 @@ pub struct RuntimeBuilder {
     /// mutually exclusive.
     fs_image: Option<MemFs>,
     clock: Option<VirtualClock>,
-    entropy: Option<SeededEntropy>,
-    scheduler: Option<Box<dyn SchedulerDriver>>,
     network: Option<Box<dyn NetDriver>>,
     /// Byte channel for the run's structured facts document, for embedders whose
     /// guest cannot write a host file directly (the native shim).
@@ -68,14 +63,11 @@ impl RuntimeBuilder {
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
             config,
-            install_defaults: false,
             trace_transport: None,
             filesystem: None,
             filesystem_is_capture: false,
             fs_image: None,
             clock: None,
-            entropy: None,
-            scheduler: None,
             network: None,
             facts_sink: None,
             crash_attempt_sink: None,
@@ -94,11 +86,6 @@ impl RuntimeBuilder {
     /// carried out (see [`CrashAttemptSink`]).
     pub fn with_crash_attempt_sink(mut self, sink: impl CrashAttemptSink + 'static) -> Self {
         self.crash_attempt_sink = Some(Box::new(sink));
-        self
-    }
-
-    pub fn with_default_drivers(mut self) -> Self {
-        self.install_defaults = true;
         self
     }
 
@@ -577,25 +564,17 @@ impl RuntimeBuilder {
                 ));
             }
         }
-        if self.install_defaults {
-            // The base image is ALWAYS wrapped in a config-driven `CrashFs`,
-            // whether or not `--crash-permille` is set. This preserves the historical
-            // always-`CrashFs` behavior the shim relied on: a `CrashFs` is
-            // crashable, so imperative callers that trigger `fs_crash()` manually
-            // (the C-ABI `patina_init_crash` path)
-            // keep working. A bare `MemFs` cannot crash — `FsDriver::crash`
-            // returns `InvalidState` — so installing one here regressed those
-            // paths. An un-crashed `CrashFs` reads/writes identically to its inner
-            // `MemFs` and consumes no seeded entropy, so non-crash runs are
-            // byte-for-byte unchanged.
-            if self.filesystem.is_none() {
+        // The base image is ALWAYS wrapped in a config-driven `CrashFs`,
+        // whether or not `--crash-permille` is set: a `CrashFs` is crashable,
+        // so imperative callers that trigger `fs_crash()` manually (the C-ABI
+        // `patina_init_crash` path) work, while a bare `MemFs` cannot crash.
+        // An un-crashed `CrashFs` reads/writes identically to its inner `MemFs`
+        // and consumes no seeded entropy.
+        let filesystem = match self.filesystem.take() {
+            Some(filesystem) => filesystem,
+            None => {
                 // NOT `unwrap_or_default()`: `MemFs::new()` seeds the root `/`
-                // directory, while `MemFs::default()` is ROOTLESS. A caller that
-                // uses `with_default_drivers` without `with_fs_image` (e.g.
-                // `Context::from_config`) would otherwise get a rootless
-                // filesystem and fail every path op with NotFound. Clippy's
-                // `unwrap_or_default` suggestion is wrong here because the two
-                // constructors are not equivalent.
+                // directory, while `MemFs::default()` is ROOTLESS.
                 #[allow(clippy::unwrap_or_default)]
                 let base = self.fs_image.take().unwrap_or_else(MemFs::new);
                 // A machine crash leaves any subset of the unsynced blocks on
@@ -607,26 +586,24 @@ impl RuntimeBuilder {
                     .torn_write_probability(0.5)
                     .build()
                     .map_err(RuntimeError::Effect)?;
-                self.filesystem = Some(Box::new(
+                Box::new(
                     FaultFs::new(crash_fs, root_seed)
                         .error_permille(self.config.faults.fs.error_permille)
                         .error_at(self.config.faults.fs.error_at.iter().copied())
                         .short_permille(self.config.faults.fs.short_permille)
                         .latency_live(self.config.faults.fs.latency_nanos.is_some()),
-                ));
+                )
             }
-            self.clock
-                .get_or_insert_with(|| VirtualClock::at(boot_origin_nanos, realtime_epoch));
-            self.entropy.get_or_insert_with(|| {
-                SeededEntropy::new(domain_seed(root_seed, fault_domain::ENTROPY))
-            });
-            self.scheduler.get_or_insert_with(|| {
-                Box::new(DetScheduler::with_policy(
-                    root_seed,
-                    self.config.schedule_policy,
-                ))
-            });
-            if self.network.is_none() {
+        };
+        let clock = self
+            .clock
+            .take()
+            .unwrap_or_else(|| VirtualClock::at(boot_origin_nanos, realtime_epoch));
+        let entropy = SeededEntropy::new(domain_seed(root_seed, fault_domain::ENTROPY));
+        let scheduler = DetScheduler::with_policy(root_seed, self.config.schedule_policy);
+        let network = match self.network.take() {
+            Some(network) => network,
+            None => {
                 let net = &self.config.faults.net;
                 let mut network = SimNet::builder()
                     .base_latency_nanos(net.latency_nanos)
@@ -644,20 +621,9 @@ impl RuntimeBuilder {
                 for (left, right) in &net.partitions {
                     network = network.partition(left.clone(), right.clone());
                 }
-                self.network = Some(Box::new(network.build().map_err(RuntimeError::Effect)?));
+                Box::new(network.build().map_err(RuntimeError::Effect)?) as Box<dyn NetDriver>
             }
-        }
-
-        // A base image is only ever consumed by the default-driver choke point
-        // above. If one survives, `with_fs_image` was used without
-        // `with_default_drivers`, so it would be silently dropped — fail closed.
-        if self.fs_image.is_some() {
-            return Err(RuntimeError::Config(
-                "with_fs_image requires with_default_drivers so the runtime can \
-                 build the filesystem from it"
-                    .into(),
-            ));
-        }
+        };
 
         // Build the liveness watchdog before the Context literal consumes
         // `self.config` fields. The heal-then-converge arm arms at the fault-window
@@ -746,12 +712,12 @@ impl RuntimeBuilder {
                 .hostname
                 .unwrap_or_else(|| patina_dst_syscalls::IDENTITY_HOSTNAME.to_owned()),
             execution,
-            filesystem: self.filesystem,
+            filesystem,
             filesystem_is_capture: self.filesystem_is_capture,
-            clock: self.clock,
-            entropy: self.entropy,
-            scheduler: self.scheduler,
-            network: self.network,
+            clock,
+            entropy,
+            scheduler,
+            network,
             timers: BTreeMap::new(),
             timer_by_task: BTreeMap::new(),
             timer_seq: 0,
@@ -811,11 +777,10 @@ impl RuntimeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::builder::RuntimeBuilder;
     use crate::config::RuntimeConfig;
     use crate::entropy::SeededEntropy;
-    use crate::{Context, EntropyWait, RuntimeError};
-    use patina_dst_abi::{ClockKind, EffectError, ErrorCode, SendDisposition};
+    use crate::{Context, EntropyWait};
+    use patina_dst_abi::{ClockKind, SendDisposition};
     use patina_dst_driver_api::NetDriver;
     use patina_dst_net_sim::SimNet;
     use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
@@ -897,22 +862,5 @@ mod tests {
         let mut sleep_rng = SplitMix64::new(domain_seed(seed, fault_domain::SLEEP_JITTER));
         let expected_jitter = 500 + (sleep_rng.next_u64() % 1_001);
         assert_eq!(jittered, 1_000 + expected_jitter);
-    }
-
-    #[test]
-    fn missing_drivers_fail_without_fallback() {
-        let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-            .build()
-            .unwrap();
-        let error = context
-            .entropy_bytes(1, EntropyWait::UntilReady)
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            RuntimeError::Effect(EffectError {
-                code: ErrorCode::MissingDriver,
-                ..
-            })
-        ));
     }
 }

@@ -44,7 +44,6 @@ fn replay_order(bundle: &TraceBundle) -> Result<Vec<u64>, RuntimeError> {
         "main",
         FINGERPRINT,
     ))
-    .with_default_drivers()
     .with_trace_transport(MemoryTransport::from_bytes(bytes))
     .build()?;
     let order = drive(&mut replay)?;
@@ -62,7 +61,6 @@ fn record_multi_task() -> (TraceBundle, Vec<u64>) {
     for seed in 0..64u64 {
         let transport = MemoryTransport::empty();
         let mut record = RuntimeBuilder::new(RuntimeConfig::record_transport(seed, FINGERPRINT))
-            .with_default_drivers()
             .with_trace_transport(transport.clone())
             .build()
             .expect("record builder");

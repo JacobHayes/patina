@@ -20,9 +20,6 @@ impl Context {
         len: usize,
         wait: EntropyWait,
     ) -> Result<Vec<u8>, RuntimeError> {
-        if self.entropy.is_none() {
-            return Err(EffectError::missing_driver("entropy").into());
-        }
         let operation = Operation::EntropyFill { len, wait };
         let outcome = match self.replay_expected(&operation)? {
             Some((_, recorded)) => recorded,
@@ -31,10 +28,7 @@ impl Context {
                     Some(error) => Outcome::Error(error),
                     None => {
                         let mut bytes = vec![0; len];
-                        self.entropy
-                            .as_mut()
-                            .expect("driver was checked")
-                            .fill(&mut bytes);
+                        self.entropy.fill(&mut bytes);
                         Outcome::Bytes(bytes)
                     }
                 };
@@ -93,9 +87,6 @@ impl Context {
     }
 
     pub fn now(&mut self, clock: ClockKind) -> Result<u64, RuntimeError> {
-        if self.clock.is_none() {
-            return Err(EffectError::missing_driver("clock").into());
-        }
         let operation = Operation::ClockNow { clock };
         let outcome = match self.replay_expected(&operation)? {
             // The time model cross-check: replay re-derives the monotonic
@@ -118,7 +109,7 @@ recording read the monotonic clock as {recorded:?}, the replay's charges and idl
             }
             Some((_, recorded)) => recorded,
             None => {
-                let result = self.clock.as_mut().expect("driver was checked").now(clock);
+                let result = self.clock.now(clock);
                 let outcome = match result {
                     Ok(nanos) => {
                         let nanos = match clock {
@@ -191,20 +182,13 @@ recording read the monotonic clock as {recorded:?}, the replay's charges and idl
         clock: ClockKind,
         deadline_nanos: u64,
     ) -> Result<(), RuntimeError> {
-        if self.clock.is_none() {
-            return Err(EffectError::missing_driver("clock").into());
-        }
         let operation = Operation::SleepUntil {
             clock,
             deadline_nanos,
         };
         let expected = self.replay_expected(&operation)?;
         let before = self.current_monotonic()?;
-        let result = self
-            .clock
-            .as_mut()
-            .expect("driver was checked")
-            .sleep_until(clock, deadline_nanos);
+        let result = self.clock.sleep_until(clock, deadline_nanos);
         let actual = match result {
             Ok(()) => Outcome::Unit,
             Err(error) => Outcome::Error(error),
