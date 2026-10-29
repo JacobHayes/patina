@@ -32,7 +32,6 @@ struct FileHandleHeader {
     handle_type: i32,
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

@@ -789,7 +789,6 @@ pub(crate) struct Sigevent {
     pad: [i32; 11],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

@@ -70,14 +70,12 @@ macro_rules! plain {
 }
 
 /// Return a valid all-zero value of `T`.
-#[allow(dead_code)]
 pub(crate) fn zeroed<T: Plain>() -> T {
     // SAFETY: `Plain` guarantees that the all-zero byte pattern is valid for `T`.
     unsafe { core::mem::zeroed() }
 }
 
 /// View a plain value as its complete byte representation.
-#[allow(dead_code)]
 pub(crate) fn bytes<T: Plain>(value: &T) -> &[u8] {
     // SAFETY: `Plain` guarantees every byte is initialized and that no padding
     // lies within the value's representation.
@@ -87,7 +85,7 @@ pub(crate) fn bytes<T: Plain>(value: &T) -> &[u8] {
 }
 
 /// View a slice of plain values as its complete byte representation.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn bytes_slice<T: Plain>(values: &[T]) -> &[u8] {
     // SAFETY: `Plain` guarantees initialized elements with no padding, and the
     // slice's pointer and length describe exactly those contiguous elements.
@@ -97,7 +95,6 @@ pub(crate) fn bytes_slice<T: Plain>(values: &[T]) -> &[u8] {
 }
 
 /// View a plain value as its complete mutable byte representation.
-#[allow(dead_code)]
 pub(crate) fn bytes_mut<T: Plain>(value: &mut T) -> &mut [u8] {
     // SAFETY: `Plain` guarantees every byte is initialized and that no padding
     // lies within the value's representation; `&mut T` uniquely borrows it.
@@ -107,7 +104,7 @@ pub(crate) fn bytes_mut<T: Plain>(value: &mut T) -> &mut [u8] {
 }
 
 /// View a mutable slice of plain values as its complete byte representation.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn bytes_mut_slice<T: Plain>(values: &mut [T]) -> &mut [u8] {
     // SAFETY: `Plain` guarantees initialized elements with no padding; the
     // mutable slice uniquely borrows the contiguous elements for this view.
@@ -123,7 +120,7 @@ pub(crate) fn bytes_mut_slice<T: Plain>(values: &mut [T]) -> &mut [u8] {
 ///
 /// # Safety
 /// `destination` must be aligned and valid for writing one `T`.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) unsafe fn store<T: Plain>(destination: *mut T, value: T) {
     // SAFETY: the caller guarantees that `destination` is aligned and writable for one `T`.
     unsafe { destination.write(value) };
@@ -133,7 +130,7 @@ pub(crate) unsafe fn store<T: Plain>(destination: *mut T, value: T) {
 ///
 /// # Safety
 /// `destination` must be valid for writing one `T`.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) unsafe fn store_unaligned<T: Plain>(destination: *mut T, value: T) {
     // SAFETY: the caller guarantees that `destination` is writable for one `T`; unaligned writes
     // do not require an alignment invariant.

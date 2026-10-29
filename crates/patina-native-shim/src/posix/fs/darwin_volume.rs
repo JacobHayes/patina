@@ -53,7 +53,6 @@ struct DarwinStatfs {
     f_reserved: [u32; 7],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

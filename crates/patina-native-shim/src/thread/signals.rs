@@ -90,7 +90,6 @@ pub(crate) struct Info {
     pub words: [u64; 16],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

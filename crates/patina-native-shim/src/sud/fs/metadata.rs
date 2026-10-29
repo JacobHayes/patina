@@ -272,7 +272,6 @@ pub(in crate::sud) struct Statx {
     __spare3: [u64; 12],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

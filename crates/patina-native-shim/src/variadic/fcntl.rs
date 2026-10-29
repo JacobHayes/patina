@@ -27,7 +27,6 @@ struct KernelFlock {
     l_whence: libc::c_short,
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

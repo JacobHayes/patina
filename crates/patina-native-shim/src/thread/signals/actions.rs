@@ -33,7 +33,6 @@ impl From<Stack> for KernelStack {
     }
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

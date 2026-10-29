@@ -64,7 +64,6 @@ struct Waitv {
     reserved: u32,
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

@@ -22,7 +22,6 @@ pub(crate) struct PollFd {
     pub revents: i16,
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

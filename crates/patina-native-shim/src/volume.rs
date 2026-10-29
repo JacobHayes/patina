@@ -50,7 +50,6 @@ pub struct KernelStatfs {
     pub f_spare: [i64; 4],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 

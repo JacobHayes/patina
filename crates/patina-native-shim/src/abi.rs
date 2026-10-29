@@ -25,7 +25,6 @@ impl Errno {
 pub(crate) type SysResult<T> = Result<T, Errno>;
 
 /// Preserve `fail(code)`'s model-errno write while returning its error value.
-#[allow(dead_code)]
 pub(crate) fn failed(code: c_int) -> Errno {
     crate::set_errno(code);
     Errno::new(code)
@@ -163,7 +162,7 @@ pub(crate) fn from_neg(result: i64) -> SysResult<i64> {
 }
 
 /// Decode raw Linux syscall registers using the kernel parameter widths.
-#[allow(dead_code)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod reg {
     use core::ffi::c_int;
 
@@ -180,16 +179,6 @@ pub(crate) mod reg {
     #[inline]
     pub(crate) const fn uint(value: u64) -> u32 {
         value as u32
-    }
-
-    #[inline]
-    pub(crate) const fn ushort(value: u64) -> u16 {
-        value as u16
-    }
-
-    #[inline]
-    pub(crate) const fn long(value: u64) -> i64 {
-        value as i64
     }
 
     #[inline]

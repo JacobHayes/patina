@@ -185,7 +185,6 @@ pub struct PatinaInterface {
     pub ipv6: [u8; 16],
 }
 
-#[allow(dead_code)]
 mod plain_impls {
     #![deny(clippy::undocumented_unsafe_blocks)]
 
