@@ -7,25 +7,48 @@ pub(super) fn strings(values: &[&str]) -> Vec<OsString> {
 }
 
 #[test]
-fn executes_scenario_minimization_shrinking_seed_and_params() {
-    // Smoke-check the scenario reducer end to end through a real oracle:
-    // the failure needs seed >= 3 and the `keep` parameter present, both
-    // read from the PATINA_* environment protocol.
-    let invocation = ScenarioMinimize {
-        seed: 9,
-        params: [("keep", "1"), ("drop", "5")]
+fn params_minimization_keeps_only_what_the_failure_needs() {
+    // The command fails (status 3) while `keep` is set to a number;
+    // a candidate that fails another way (status 4, `drop` alone) is not the
+    // failure.
+    let invocation = ParamsMinimize {
+        head: strings(&[
+            "sh",
+            "-c",
+            "case \"$*\" in *keep=[0-9]*) exit 3;; *drop=*) exit 4;; esac",
+            "sh",
+        ]),
+        tail: strings(&["--", "guest"]),
+        params: [("keep", "17"), ("drop", "5")]
             .into_iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect(),
-        seed_budget: 64,
-        oracle: strings(&[
+    };
+    let (reduced, _) = minimize_params(&invocation).unwrap();
+    assert_eq!(
+        reduced.into_iter().collect::<Vec<_>>(),
+        [("keep".to_string(), "0".to_string())]
+    );
+}
+
+#[test]
+fn params_minimization_tells_fatal_signals_apart() {
+    // SIGTERM while `keep` is set, SIGKILL without it: dropping `keep` changes
+    // the failure, so it stays.
+    let invocation = ParamsMinimize {
+        head: strings(&[
             "sh",
             "-c",
-            "test \"$PATINA_RT_SEED\" -ge 3 \
-                 && printf '%s' \"$PATINA_RT_PARAMS_JSON\" | grep -q '\"keep\"' && exit 1; exit 0",
+            "case \"$*\" in *keep=*) kill -TERM $$;; *) kill -KILL $$;; esac",
+            "sh",
         ]),
+        tail: Vec::new(),
+        params: [("keep".to_string(), "x".to_string())]
+            .into_iter()
+            .collect(),
     };
-    assert_eq!(execute_scenario(invocation).unwrap(), 0);
+    let (reduced, _) = minimize_params(&invocation).unwrap();
+    assert!(reduced.contains_key("keep"), "{reduced:?}");
 }
 
 pub(super) fn verdict(kind: &str, label: &str) -> VerdictFacts {

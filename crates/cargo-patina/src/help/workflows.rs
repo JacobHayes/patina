@@ -546,10 +546,10 @@ or --all opt into per-site drill-down rows. Results are cached per file under \
 
 pub(super) const MINIMIZE: Verb = Verb {
     name: "minimize",
-    summary: "Reduce a failing campaign generation or experiment inputs.",
+    summary: "Reduce a failing campaign generation's fault knobs or a failing run's parameters.",
     synopsis: &[
         "cargo patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--jobs N]",
-        "cargo patina minimize --scenario --seed <U64> [--param K=V]... [--seed-budget N] -- <ORACLE> [ARGS]...",
+        "cargo patina minimize --params -- cargo patina run <BINARY> --param K=V... [RUN OPTIONS] [-- GUEST ARGS]",
     ],
     prose: "\
 `minimize --generation N` reduces one failing generation of a recorded campaign: it \
@@ -565,10 +565,11 @@ neither is refused rather than reduced against a guess. A NONDETERMINISM generat
 is refused, --marker or not: its failure is that two runs disagree, which no \
 single-run oracle can preserve.\n\
 \n\
-`minimize --scenario` shrinks experiment inputs instead: it drops and shrinks \
---param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
-candidate re-runs the oracle as a fresh seeded child through the \
-PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
+`minimize --params` reduces a failing run's parameters instead: it drops and shrinks \
+the --param values of the command after `--` (those before the command's own `--`), \
+re-running the command with each candidate set. A candidate still fails when it exits \
+with the original's non-zero status, so a candidate that fails differently is not \
+mistaken for the failure. The reduced command is printed as the reproduction.",
     families: &[
         fam(
             Family::Generation,
@@ -578,9 +579,9 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
             ),
         ),
         fam(
-            Family::Scenario,
-            "minimize --scenario",
-            Some("minimize --scenario reduces experiment inputs"),
+            Family::Params,
+            "minimize --params",
+            Some("minimize --params reduces a failing command's --param set"),
         ),
     ],
     groups: &[
@@ -632,38 +633,15 @@ PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
             ],
         },
         Group {
-            title: "Scenario minimization (--scenario)",
-            families: &[Family::Scenario],
-            flags: &[
-                f(
-                    "--scenario",
-                    None,
-                    Value::None,
-                    "Shrink experiment inputs (seed/params).",
-                    false,
-                ),
-                f(
-                    "--seed",
-                    None,
-                    Value::Required("U64", Kind::U64),
-                    "The failing seed to canonicalize toward zero (required).",
-                    false,
-                ),
-                f(
-                    "--seed-budget",
-                    None,
-                    Value::Required("N", Kind::U64),
-                    "Seed canonicalization budget (default 256).",
-                    false,
-                ),
-                f(
-                    "--param",
-                    None,
-                    Value::Required("K=V", Kind::KeyValue),
-                    "A scenario parameter to drop/shrink.",
-                    true,
-                ),
-            ],
+            title: "Parameter minimization (--params)",
+            families: &[Family::Params],
+            flags: &[f(
+                "--params",
+                None,
+                Value::None,
+                "Reduce the --param set of the failing command after `--`.",
+                false,
+            )],
         },
     ],
     refusals: NO_REFUSALS,

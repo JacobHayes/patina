@@ -549,10 +549,9 @@ mod registry {
                 let prefix = unless("--generation", &["--generation=1"]);
                 parse_minimize(with(prefix, &[])).map(|_| ())
             }
-            ("minimize", help::Family::Scenario) => {
-                let mut prefix = vec!["--scenario".to_string()];
-                prefix.extend(unless("--seed", &["--seed=0"]));
-                parse_minimize(with(prefix, &["--", "oracle"])).map(|_| ())
+            ("minimize", help::Family::Params) => {
+                let prefix = unless("--params", &["--params"]);
+                parse_minimize(with(prefix, &["--", "oracle", "--param", "k=v"])).map(|_| ())
             }
             ("trace", help::Family::Diff) => parse_trace(with(
                 vec![

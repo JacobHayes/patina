@@ -1,5 +1,5 @@
-//! `minimize`: reducing a failing campaign generation's inputs, or an
-//! experiment's inputs. Knobs and inputs only; recorded decisions are never
+//! `minimize`: reducing a failing campaign generation's fault knobs, or a
+//! failing run's parameters. Knobs and inputs only; recorded decisions are never
 //! edited.
 //!
 //! # Knobs, not decisions
@@ -16,8 +16,8 @@
 //! minimal-knob run, so the failure replays without flags. Recording is not a
 //! reduction. Each knob candidate is a fresh seeded `run`, spelled exactly as
 //! the campaign spelled its generations, so the output is a standalone
-//! reproduction command. `minimize --scenario` reduces the seed and parameters
-//! of an experiment against an oracle command.
+//! reproduction command. `minimize --params` reduces the `--param` set of a
+//! failing `cargo patina run`.
 //!
 //! # Candidates are independent
 //!
@@ -45,23 +45,24 @@
 //! A `NONDETERMINISM` generation is refused by name too, `--marker` or not:
 //! its failure is that two runs disagree, and every oracle here judges one.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use patina_dst_minimize::{Scenario, reduce_scenario};
 use patina_dst_trace::TraceBundle;
 
+use crate::CliError;
 use crate::campaign::VerdictFacts;
 use crate::help;
 use crate::output;
-use crate::{CliError, ENV_MODE, ENV_PARAMS_JSON, ENV_SEED};
 
 mod generation;
 mod knobs;
 mod oracle;
+mod params;
 
 use generation::execute_generation;
 use knobs::Knob;
@@ -80,7 +81,7 @@ use oracle::judge_concurrently;
 /// A `minimize` request.
 pub(crate) enum MinimizeInvocation {
     Generation(GenerationMinimize),
-    Scenario(ScenarioMinimize),
+    Params(ParamsMinimize),
 }
 
 pub(crate) struct GenerationMinimize {
@@ -94,58 +95,121 @@ pub(crate) struct GenerationMinimize {
     pub(crate) jobs: Option<usize>,
 }
 
-pub(crate) struct ScenarioMinimize {
-    pub(crate) seed: u64,
-    pub(crate) params: std::collections::BTreeMap<String, String>,
-    pub(crate) seed_budget: u64,
-    pub(crate) oracle: Vec<OsString>,
+/// `minimize --params`: reduce the `--param` set of a failing command.
+pub(crate) struct ParamsMinimize {
+    /// The failing command with its `--param` words lifted out: the words
+    /// before the parameters' insertion point (the command's own `--`, or its
+    /// end) and the words from it on.
+    pub(crate) head: Vec<OsString>,
+    pub(crate) tail: Vec<OsString>,
+    pub(crate) params: BTreeMap<String, String>,
+}
+
+impl ParamsMinimize {
+    /// The command with `params` spliced back in.
+    fn command(&self, params: &BTreeMap<String, String>) -> Vec<OsString> {
+        let mut words = self.head.clone();
+        for (key, value) in params {
+            words.push(OsString::from("--param"));
+            words.push(OsString::from(format!("{key}={value}")));
+        }
+        words.extend(self.tail.iter().cloned());
+        words
+    }
 }
 
 pub(crate) fn execute(invocation: MinimizeInvocation) -> Result<i32, CliError> {
     match invocation {
         MinimizeInvocation::Generation(generation) => execute_generation(generation),
-        MinimizeInvocation::Scenario(scenario) => execute_scenario(scenario),
+        MinimizeInvocation::Params(params) => execute_params(&params),
     }
 }
 
-fn execute_scenario(invocation: ScenarioMinimize) -> Result<i32, CliError> {
-    let mut base = Scenario::new(invocation.seed);
-    base.params = invocation.params;
-    let mut calls = 0_u64;
-    // Each candidate runs the oracle as a fresh seeded child, handing it the
-    // seed and parameters through the same PATINA_* environment protocol a
-    // recorded run uses. A non-zero exit means the failure still reproduces.
-    let mut oracle = |candidate: &Scenario| -> io::Result<bool> {
+/// How a candidate ended: its exit code, or the signal that killed it, so two
+/// different fatal signals are two different failures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Code(i32),
+    Signal(i32),
+}
+
+/// The `PATINA_<FLAG>` variable that defaults `--param`. A candidate runs
+/// without it, so a parameter the reduction removed cannot come back through
+/// the environment, and the printed reproduction unsets it too.
+fn param_env() -> Option<String> {
+    crate::cli::flag("run", "--param").env_name()
+}
+
+/// Run one candidate of a `--params` reduction to its ending, its output
+/// discarded: only the ending is judged.
+fn ending_of(words: &[OsString]) -> Result<Ending, CliError> {
+    use std::os::unix::process::ExitStatusExt;
+    let mut command = Command::new(&words[0]);
+    command
+        .args(&words[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(name) = param_env() {
+        command.env_remove(name);
+    }
+    let status = command.status().map_err(|error| {
+        CliError(format!(
+            "failed to run {}: {error}",
+            words[0].to_string_lossy()
+        ))
+    })?;
+    Ok(match (status.code(), status.signal()) {
+        (Some(code), _) => Ending::Code(code),
+        (None, signal) => Ending::Signal(signal.unwrap_or(-1)),
+    })
+}
+
+/// Reduce the command's parameters; the reduced set and the commands run.
+fn minimize_params(
+    invocation: &ParamsMinimize,
+) -> Result<(BTreeMap<String, String>, u64), CliError> {
+    // The target is the original command's own failure: a candidate still
+    // fails only when it ends the same way (exit code or fatal signal), so a candidate
+    // that fails differently (a usage error, a refusal) is not mistaken for
+    // the failure being minimized.
+    let target = ending_of(&invocation.command(&invocation.params))?;
+    if target == Ending::Code(0) {
+        return Err(CliError(
+            "minimize --params: the command succeeds with its parameters, so there is no \
+             failure to preserve"
+                .into(),
+        ));
+    }
+    let mut calls = 1_u64;
+    let reduced = params::reduce(&invocation.params, |candidate| {
         calls += 1;
-        let mut command = Command::new(&invocation.oracle[0]);
-        command
-            .args(&invocation.oracle[1..])
-            .env(ENV_MODE, "seeded")
-            .env(ENV_SEED, candidate.seed.to_string())
-            .env_remove(ENV_PARAMS_JSON);
-        if !candidate.params.is_empty() {
-            let params = serde_json::to_string(&candidate.params).map_err(io::Error::other)?;
-            command.env(ENV_PARAMS_JSON, params);
-        }
-        let status = command.status()?;
-        Ok(!status.success())
-    };
-    let reduced = reduce_scenario(&base, &mut oracle, invocation.seed_budget)
-        .map_err(|error| CliError(format!("scenario minimization failed: {error}")))?;
-    let params = reduced
-        .params
+        Ok(ending_of(&invocation.command(candidate))? == target)
+    })?;
+    Ok((reduced, calls))
+}
+
+fn execute_params(invocation: &ParamsMinimize) -> Result<i32, CliError> {
+    let (reduced, calls) = minimize_params(invocation)?;
+    let rendered = reduced
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(",");
-    let detail = format!(
-        "seed={} params=[{params}] oracle_runs={calls}",
-        reduced.seed
-    );
+    let mut repro = invocation
+        .command(&reduced)
+        .iter()
+        .map(|word| crate::cli::shell_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(name) = param_env().filter(|name| std::env::var_os(name).is_some()) {
+        repro = format!("env -u {name} {repro}");
+    }
+    let detail = format!("params=[{rendered}] oracle_runs={calls} repro: {repro}");
     if output::options().is_json() {
         output::emit_simple("minimize", "ok", 0, Some(detail));
     } else {
-        println!("PATINA_MINIMIZE_SCENARIO_COMPLETE {detail}");
+        println!("PATINA_MINIMIZE_PARAMS_COMPLETE {detail}");
     }
     Ok(0)
 }

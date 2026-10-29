@@ -13,7 +13,6 @@ patina-dst.workspace = true
 patina-dst-syscalls.workspace = true
 patina-dst-abi.workspace = true
 patina-dst-fs-mem.workspace = true
-patina-dst-minimize.workspace = true
 patina-dst-native-shim.workspace = true
 patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true

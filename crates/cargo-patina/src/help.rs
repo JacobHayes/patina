@@ -281,8 +281,8 @@ const fn needs(flag: Flag, parent: &'static str) -> Flag {
 pub enum Family {
     /// A verb with a single argument surface.
     Sole,
-    /// `minimize --scenario`: seed/parameter reduction.
-    Scenario,
+    /// `minimize --params`: reduce a failing command's `--param` set.
+    Params,
     /// `minimize --generation N`: reduce a recorded campaign generation's knobs.
     Generation,
     /// `trace info`.
@@ -300,7 +300,7 @@ impl Family {
     pub fn tag(self) -> &'static str {
         match self {
             Family::Sole => "sole",
-            Family::Scenario => "scenario",
+            Family::Params => "params",
             Family::Generation => "generation",
             Family::Info => "info",
             Family::Events => "events",

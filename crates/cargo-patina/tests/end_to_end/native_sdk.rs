@@ -9,7 +9,7 @@ use super::*;
 /// visible through the linked table. The `no-setup` argument skips
 /// `setup_complete`, a declared-but-never-called harness bug under
 /// `--buggify-after-setup`. The `naps` run parameter sets how many sleeps the
-/// run makes.
+/// run makes; five or more fail it.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sdk_main() -> String {
     let registry = patina_dst::SDK_SITE_MACROS
@@ -36,8 +36,14 @@ fn sdk_main() -> String {
     // A run parameter that decides how many boundary operations the run makes,
     // so a replay that lost it would diverge from its recording.
     let naps = patina_dst::param("naps");
-    for _ in 0..naps.as_deref().map_or(0, |naps| naps.parse::<u32>().unwrap()) {{
+    let count = naps.as_deref().map_or(0, |naps| naps.parse::<u32>().unwrap_or(0));
+    for _ in 0..count {{
         std::thread::sleep(std::time::Duration::from_nanos(1));
+    }}
+    // The bug parameter minimization hunts: five naps or more fail the run.
+    if count >= 5 {{
+        eprintln!("too many naps");
+        std::process::exit(7);
     }}
     println!("RESULT knob={{knob}} fired={{fired}} rng={{}} naps={{naps:?}}", patina_dst::rng());
 }}

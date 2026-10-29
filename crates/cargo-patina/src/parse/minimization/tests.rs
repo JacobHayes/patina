@@ -4,49 +4,74 @@ use super::*;
 use crate::minimize;
 use crate::tests::strings;
 
-fn scenario_invocation(values: &[&str]) -> minimize::ScenarioMinimize {
+fn params_invocation(values: &[&str]) -> minimize::ParamsMinimize {
     match parse(strings(values)).unwrap() {
-        ParseResult::Minimize(minimize::MinimizeInvocation::Scenario(invocation)) => invocation,
-        _ => panic!("expected scenario minimization"),
+        ParseResult::Minimize(minimize::MinimizeInvocation::Params(invocation)) => invocation,
+        _ => panic!("expected parameter minimization"),
     }
 }
 
 #[test]
-fn parses_scenario_minimization_with_seed_and_params() {
-    let invocation = scenario_invocation(&[
+fn params_minimization_lifts_the_commands_own_params_out() {
+    let invocation = params_invocation(&[
         "minimize",
-        "--scenario",
-        "--seed",
-        "12",
+        "--params",
+        "--",
+        "cargo",
+        "patina",
+        "run",
+        "./guest",
         "--param",
         "zone=a",
-        "--seed-budget",
-        "16",
+        "--seed",
+        "3",
+        "--param=clients=4",
         "--",
-        "./oracle",
-        "--flag",
+        "--param",
+        "guest=arg",
     ]);
-    assert_eq!(invocation.seed, 12);
-    assert_eq!(invocation.seed_budget, 16);
-    assert_eq!(invocation.params.get("zone").map(String::as_str), Some("a"));
-    assert_eq!(invocation.oracle, strings(&["./oracle", "--flag"]));
-    // --scenario requires a seed and an oracle after `--`.
-    assert!(parse(strings(&["minimize", "--scenario", "--", "./oracle"])).is_err());
-    assert!(parse(strings(&["minimize", "--scenario", "--seed", "1"])).is_err());
-    // Generation-only options are rejected in scenario mode.
-    assert!(
-        parse(strings(&[
-            "minimize",
-            "--scenario",
-            "--seed",
-            "1",
-            "--marker",
-            "x",
-            "--",
-            "./oracle",
-        ]))
-        .is_err()
+    assert_eq!(
+        invocation.params,
+        BTreeMap::from([
+            ("clients".to_owned(), "4".to_owned()),
+            ("zone".to_owned(), "a".to_owned()),
+        ])
     );
+    assert_eq!(
+        invocation.head,
+        strings(&["cargo", "patina", "run", "./guest", "--seed", "3"])
+    );
+    // The guest's own arguments stay the guest's.
+    assert_eq!(invocation.tail, strings(&["--", "--param", "guest=arg"]));
+}
+
+#[test]
+fn params_minimization_needs_a_command_with_params() {
+    for argv in [
+        &["minimize", "--params"][..],
+        &["minimize", "--params", "--", "./oracle"],
+        &[
+            "minimize", "--params", "--", "./oracle", "--", "--param", "k=v",
+        ],
+        &[
+            "minimize", "--params", "--", "./oracle", "--param", "novalue",
+        ],
+        &[
+            "minimize",
+            "--params",
+            "--",
+            "./o",
+            "--param",
+            "k=1",
+            "--param=k=2",
+        ],
+        // Generation-only options are rejected in parameter mode.
+        &[
+            "minimize", "--params", "--marker", "x", "--", "./o", "--param", "k=v",
+        ],
+    ] {
+        assert!(parse(strings(argv)).is_err(), "{argv:?}");
+    }
 }
 
 #[test]

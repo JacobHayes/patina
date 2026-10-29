@@ -11,11 +11,11 @@ pub(crate) fn parse_minimize(
     // exactly like `--generation 14`. A selector's environment default routes
     // too, unless the other selector was typed.
     let typed_generation = has_minimize_flag(&arguments, "--generation");
-    let typed_scenario = has_minimize_flag(&arguments, "--scenario");
+    let typed_params = has_minimize_flag(&arguments, "--params");
     let selected = |name: &str, other_typed: bool| -> Result<bool, CliError> {
         Ok(!other_typed && cli::env_value(cli::flag("minimize", name))?.is_some())
     };
-    if typed_generation || selected("--generation", typed_scenario)? {
+    if typed_generation || selected("--generation", typed_params)? {
         return parse_minimize_generation(arguments).map(minimize::MinimizeInvocation::Generation);
     }
     let delimiter = arguments
@@ -23,21 +23,21 @@ pub(crate) fn parse_minimize(
         .position(|argument| argument == "--")
         .ok_or_else(|| {
             CliError::usage(
-                "minimize requires --generation <N>, or --scenario with `-- <ORACLE> [ARGS]...`",
+                "minimize requires --generation <N>, or --params with `-- <COMMAND> [ARGS]...`",
             )
         })?;
     let oracle = arguments.split_off(delimiter + 1);
     arguments.pop();
     if oracle.is_empty() {
         return Err(CliError::usage(
-            "minimize requires an oracle command after `--`",
+            "minimize --params requires the failing command after `--`",
         ));
     }
-    if typed_scenario || selected("--scenario", typed_generation)? {
-        parse_minimize_scenario(arguments, oracle).map(minimize::MinimizeInvocation::Scenario)
+    if typed_params || selected("--params", typed_generation)? {
+        parse_minimize_params(arguments, oracle).map(minimize::MinimizeInvocation::Params)
     } else {
         Err(CliError::usage(
-            "minimize requires --generation <N>, or --scenario with `-- <ORACLE> [ARGS]...`",
+            "minimize requires --generation <N>, or --params with `-- <COMMAND> [ARGS]...`",
         ))
     }
 }
@@ -78,18 +78,58 @@ fn parse_minimize_generation(
     })
 }
 
-fn parse_minimize_scenario(
+/// Parse `minimize --params -- <COMMAND>`: lift the command's own `--param`
+/// words (space or `=` form) out of it, up to the command's `--`, which starts
+/// a guest's arguments, and keep the rest verbatim.
+fn parse_minimize_params(
     arguments: Vec<OsString>,
-    oracle: Vec<OsString>,
-) -> Result<minimize::ScenarioMinimize, CliError> {
-    let args = cli::parse("minimize", help::Family::Scenario, arguments)?;
-    Ok(minimize::ScenarioMinimize {
-        seed: args
-            .u64("--seed")
-            .ok_or_else(|| CliError::usage("minimize --scenario requires --seed <U64>"))?,
-        params: key_values(&args, "--param")?,
-        seed_budget: args.u64("--seed-budget").unwrap_or(DEFAULT_SEED_BUDGET),
-        oracle,
+    command: Vec<OsString>,
+) -> Result<minimize::ParamsMinimize, CliError> {
+    cli::parse("minimize", help::Family::Params, arguments)?;
+    let split = command
+        .iter()
+        .position(|word| word == "--")
+        .unwrap_or(command.len());
+    let (own, tail) = command.split_at(split);
+    let mut head = Vec::new();
+    let mut params = BTreeMap::new();
+    let mut words = own.iter();
+    while let Some(word) = words.next() {
+        let entry = if word == "--param" {
+            words.next().cloned().ok_or_else(|| {
+                CliError::usage("minimize --params: the command's --param needs K=V")
+            })?
+        } else if let Some(entry) = word.to_str().and_then(|text| text.strip_prefix("--param=")) {
+            OsString::from(entry)
+        } else {
+            head.push(word.clone());
+            continue;
+        };
+        let (key, value) = entry
+            .to_str()
+            .and_then(|entry| entry.split_once('='))
+            .filter(|(key, _)| !key.is_empty())
+            .ok_or_else(|| {
+                CliError::usage(format!(
+                    "minimize --params: the command's --param {} is not K=V",
+                    entry.to_string_lossy()
+                ))
+            })?;
+        if params.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(CliError::usage(format!(
+                "minimize --params: the command sets --param {key} twice"
+            )));
+        }
+    }
+    if params.is_empty() {
+        return Err(CliError::usage(
+            "minimize --params: the command carries no --param K=V to reduce",
+        ));
+    }
+    Ok(minimize::ParamsMinimize {
+        head,
+        tail: tail.to_vec(),
+        params,
     })
 }
 

@@ -58,7 +58,6 @@ dependencies = [
  "patina-dst-driver-api",
  "patina-dst-fs-crash",
  "patina-dst-fs-mem",
- "patina-dst-minimize",
  "patina-dst-native-shim",
  "patina-dst-net-sim",
  "patina-dst-rng-seeded",
@@ -371,10 +370,6 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-macros"
-version = "0.1.0"
-
-[[package]]
-name = "patina-dst-minimize"
 version = "0.1.0"
 
 [[package]]

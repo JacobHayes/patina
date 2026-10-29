@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-use patina_dst_runtime::{ENV_MODE, ENV_PARAMS_JSON, ENV_SEED, FaultKnob};
+use patina_dst_runtime::FaultKnob;
 use patina_dst_trace::remove_dead_scratch;
 use sha2::{Digest, Sha256};
 
@@ -119,9 +119,6 @@ struct NativeAuditInvocation {
     /// marking the import findings as pre-interposition.
     raw: bool,
 }
-
-/// Default number of candidate seeds tried when reducing a scenario's seed.
-const DEFAULT_SEED_BUDGET: u64 = 256;
 
 struct NativeHarnessInvocation {
     origin: PathBuf,

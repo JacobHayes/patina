@@ -85,7 +85,6 @@ patina-dst-abi              # boundary operations/outcomes, time-model constants
 patina-dst-runtime          # Context, drivers, scheduler policies, record/replay, params
 patina-dst-async            # deterministic executor over the explicit boundary
 patina-dst-trace            # trace bundle, branch metadata, strict replay
-patina-dst-minimize         # seed and parameter reducers
 patina-dst-target           # target metadata, import audit, instruction scan
 patina-dst-syscalls         # syscall registry (generated identities + support)
 patina-dst-conformance      # host-oracle syscall scenarios (unpublished)

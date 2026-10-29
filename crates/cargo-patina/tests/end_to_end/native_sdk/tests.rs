@@ -120,6 +120,42 @@ fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
     assert!(result(&unset).ends_with("naps=None"), "{}", result(&unset));
 }
 
+// `minimize --params` reduces a failing native run's parameters: a candidate
+// still fails when the run exits as the original did, so the irrelevant
+// parameter goes and the load-bearing one shrinks to the smallest failing value.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn minimize_params_reduces_a_failing_native_runs_parameters() {
+    let (_, binary) = sdk_guest();
+    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    // A `--param` environment default must not refill a parameter a candidate
+    // dropped.
+    let output = invoke_in_with_env(
+        native_workspace(),
+        &[
+            "minimize",
+            "--params",
+            "--",
+            patina,
+            "run",
+            binary.to_str().unwrap(),
+            "--seed",
+            "4",
+            "--param",
+            "naps=40",
+            "--param",
+            "noise=loud",
+        ],
+        &[("PATINA_PARAM", "naps=40")],
+    );
+    let line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.starts_with("PATINA_MINIMIZE_PARAMS_COMPLETE"))
+        .unwrap_or_else(|| panic!("missing completion: {output:?}"))
+        .to_owned();
+    assert!(line.contains("params=[naps=5]"), "{line}");
+}
+
 // Class pairing: the SDK declaration generates macros and literal descriptors
 // together. Every declared macro, a newly added registry row included, emits a
 // linked descriptor at its own source line though no run reaches it, and a
