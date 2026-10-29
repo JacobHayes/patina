@@ -1,5 +1,6 @@
 //! Campaign coverage, SDK-site folds, and guidance inputs.
 
+use super::gen_byte::Unit;
 use super::state::CampaignState;
 use super::{CampaignSpec, RunFacts};
 use crate::CliError;
@@ -129,13 +130,14 @@ cargo patina build --instrument so generations have edge coverage to steer by"
 /// function of the persisted state rather than of loop-carried state.
 pub(super) fn guidance_plan(
     spec: &CampaignSpec,
+    units: &[Unit],
     edge_coverage: &EdgeCoverageState,
 ) -> GuidancePlan {
     let log: Vec<NoveltyEntry> = edge_coverage
         .active()
         .map(CampaignCoverageStore::novelty_log)
         .unwrap_or_default();
-    GuidancePlan::new(spec.seed_base, spec.plateau_after, &log)
+    GuidancePlan::new(spec.seed_base, spec.plateau_after, units.to_vec(), &log)
 }
 
 pub(super) fn fold_sites_generation(

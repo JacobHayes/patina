@@ -312,3 +312,56 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation() {
         assert!(!bare.iter().any(|f| f == flag), "unasked-for {flag}");
     }
 }
+
+/// A guided child inherits every knob it does not mutate, the extension
+/// block's crash draws and the yield stride included: those used to be a hash
+/// of the whole input and were re-rolled by any mutation.
+#[test]
+fn a_guided_child_inherits_its_ancestors_unmutated_knobs() {
+    let spec = CampaignSpec {
+        yield_stride: true,
+        faults: FaultPlanes::ALL,
+        ..CampaignSpec::default()
+    };
+    let units = mutation_units(&spec);
+    let entries = [(0, 3), (2, 1), (5, 2)]
+        .map(|(generation, weight)| crate::guided::NoveltyEntry { generation, weight });
+    let plan = crate::guided::GuidancePlan::new(11, 200, units, &entries);
+    let value = |flags: &[String], name: &str| {
+        let at = flags
+            .iter()
+            .position(|flag| flag == name || flag.starts_with(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("{name} missing from {flags:?}"));
+        flags[at]
+            .strip_prefix(&format!("{name}="))
+            .map_or_else(|| flags[at + 1].clone(), str::to_string)
+    };
+    let watched = [
+        "--machine-crash-permille",
+        "--process-crash-permille",
+        "--yield-stride",
+    ];
+    let mut kept = [0u32; 3];
+    let mut children = 0u32;
+    for generation in 6..400 {
+        let (child, decision) = plan.generation_hash(generation);
+        let crate::guided::GuidanceDecision::Exploit { ancestor } = decision else {
+            continue;
+        };
+        children += 1;
+        let parent = derive_flags(&spec, &plan.generation_hash(ancestor).0);
+        let child = derive_flags(&spec, &child);
+        for (index, name) in watched.iter().enumerate() {
+            if value(&parent, name) == value(&child, name) {
+                kept[index] += 1;
+            }
+        }
+    }
+    assert!(children > 50, "too few exploit children: {children}");
+    for (name, kept) in watched.iter().zip(kept) {
+        assert!(
+            kept * 10 > children * 8,
+            "{name} was inherited by only {kept}/{children} children"
+        );
+    }
+}

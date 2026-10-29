@@ -231,21 +231,14 @@ fn excludable(knob: FaultKnob) -> bool {
     FaultPlanes::ALL.draws(knob) && matches!(campaign_policy(knob), BandPolicy::Draw(_))
 }
 
-/// The band material a generation draws every knob from: its 32-byte generation
-/// hash, followed by a domain-separated 32-byte extension block.
+/// The band material a generation draws every knob from: its full 64-byte
+/// derivation material (see [`gen_byte`]).
 ///
-/// The namespace grew because byte 31 was the last free one and later bands
-/// still needed draws. Appending
-/// rather than re-hashing is the whole point: bytes 0..32 are the generation
-/// hash unchanged, so every band that existed before the extension derives
-/// byte-for-byte what it always did and every recorded campaign still
-/// reproduces.
-///
-/// Keyed on the HASH rather than on `(seed_base, generation)` so it composes
-/// with `--guided`: a guided generation runs a MUTATED hash, and deriving the
-/// extension from that hash keeps [`derive_flags`] a pure function of the hash
-/// alone — a second keying would have handed a mutated generation the unmutated
-/// generation's extension draws.
+/// Bytes 0..32 are the generation hash and 32..64 a domain-separated extension
+/// derived from it when the unguided generation is derived. A guided generation
+/// runs MUTATED material, edited claim by claim, so the extension's draws are
+/// inherited like every other knob rather than re-rolled from a hash of the
+/// whole input.
 fn generation_bands(hash: &gen_byte::Hash) -> gen_byte::Bands {
     gen_byte::Bands::new(hash)
 }
@@ -622,8 +615,15 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
     flags
 }
 
-/// `SHA-256("patina-campaign-<seed_base>-<generation>")` — the deterministic per-generation
-/// derivation (no wall clock / `$RANDOM`).
+/// The units a guided child may mutate under `spec`: the seed and every claim
+/// [`derive_flags`] actually reads for this spec.
+pub(crate) fn mutation_units(spec: &CampaignSpec) -> Vec<gen_byte::Unit> {
+    gen_byte::Unit::live(|hash| derive_flags(spec, hash))
+}
+
+/// `SHA-256("patina-campaign-<seed_base>-<generation>")`, extended to the full
+/// band material — the deterministic per-generation derivation (no wall clock /
+/// `$RANDOM`).
 fn generation_hash(seed_base: u64, generation: u64) -> gen_byte::Hash {
     gen_byte::Hash::derive(seed_base, generation)
 }

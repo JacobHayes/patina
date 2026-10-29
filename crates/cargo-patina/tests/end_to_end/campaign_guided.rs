@@ -82,16 +82,11 @@ fn main() {
     // a sufficient and faithful record of the guidance input.
     //
     // The tear: the coverage store is written BEFORE `campaign-state.json`, so a crash
-    // between the two leaves the novelty log one generation ahead of the cursor, and
-    // a guided resume re-derives that generation from a log that already contains
-    // its own entry. Truncating the log below the generation being derived is what
-    // keeps the re-derivation identical. The torn generation has to be novel (its
-    // own entry is in the log) and exploited (it consults the ancestor set), or the
-    // truncation is a no-op and the leg proves nothing. Generation 5 of seed base 3
-    // qualifies, which the first segment checks; derivation for generation g
-    // depends only on generations below it. A fixture change that moves it fails
-    // those checks; a probe of a few seed bases with long campaigns finds the next
-    // qualifying pair.
+    // between the two leaves the store one generation ahead of the cursor, and a
+    // guided resume re-derives that generation from a store that already holds
+    // its own fold. The torn generation has to be novel (its own entry is in the
+    // store) and exploited (it consults the ancestor set), or the tear proves
+    // nothing; the test picks the first such generation from the fresh run.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_guided_steers_reproducibly_across_a_tear_and_differs_from_unguided() {
@@ -102,7 +97,7 @@ fn main() {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
             invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
         };
-        let (gens, torn) = (12, 5);
+        let gens = 12;
         let campaign_of = |out: &Path, guided: bool, gens: u64| {
             let mut args = vec![
                 "campaign".to_string(),
@@ -138,6 +133,27 @@ fn main() {
         let first = run(campaign(&first_out, true));
         let guided_stream = succeeded("guided-1", &first);
         let first_stdout = String::from_utf8_lossy(&first.stdout).into_owned();
+
+        // The torn generation: novel and exploited in the fresh run. Derivation
+        // of generation g depends only on generations below it, so a shorter
+        // campaign at the same seed base derives the same prefix.
+        let novel: Vec<u64> = campaign_coverage_meta(&first_out)["new_edge_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry[0].as_u64().unwrap())
+            .collect();
+        let torn = guided_stream
+            .lines()
+            .enumerate()
+            .map(|(generation, line)| (generation as u64, line))
+            .find(|(generation, line)| {
+                *generation + 1 < gens
+                    && line.contains(" guided=exploit:")
+                    && novel.contains(generation)
+            })
+            .map(|(generation, _)| generation)
+            .unwrap_or_else(|| panic!("no novel exploited generation to tear:\n{guided_stream}"));
 
         // The first segment ends on the torn generation.
         let split_out = directory.path().join("guided-split");

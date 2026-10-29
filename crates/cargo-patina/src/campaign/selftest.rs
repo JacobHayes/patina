@@ -1304,16 +1304,6 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
         }
     }
 
-    println!("-- guided generation scheduling --");
-    for (name, ok, detail) in crate::guided::campaign_detector_selftest() {
-        if ok {
-            println!("  ok   {name:<40} -> {detail}");
-        } else {
-            println!("  FAIL {name:<40} -> {detail}");
-            failures += 1;
-        }
-    }
-
     assert_eq!(
         failures, 0,
         "failing checks are marked FAIL in the output above"

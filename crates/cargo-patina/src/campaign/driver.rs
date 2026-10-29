@@ -25,7 +25,7 @@ use super::verify::{
 };
 use super::{
     CampaignClass, CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
-    signature,
+    mutation_units, signature,
 };
 use crate::CliError;
 use crate::guided::{GuidanceDecision, GuidanceTally};
@@ -134,6 +134,11 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         guidance_source_or_refuse(&edge_coverage)?;
     }
     let mut guidance = GuidanceTally::default();
+    let units = if state.spec.guided {
+        mutation_units(&state.spec)
+    } else {
+        Vec::new()
+    };
 
     let traces_dir = out_dir.join("traces");
     fs::create_dir_all(&traces_dir)
@@ -211,12 +216,12 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     };
 
     for generation in from_gen..state.spec.generations {
-        // Unguided: the pure per-generation hash. Guided: possibly a mutation of
-        // a previously productive generation's hash. Either way ONE 32-byte value
-        // feeds both the seed and every knob, so guidance needs no per-knob
-        // special case and the derivation stays a pure function.
+        // Unguided: the pure per-generation material. Guided: possibly a local
+        // mutation of a previously productive generation's material. Either way
+        // ONE value feeds both the seed and every knob, so guidance needs no
+        // per-knob special case and the derivation stays a pure function.
         let (hash, decision) = if state.spec.guided {
-            let plan = guidance_plan(&state.spec, &edge_coverage);
+            let plan = guidance_plan(&state.spec, &units, &edge_coverage);
             plan.generation_hash(generation)
         } else {
             (

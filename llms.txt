@@ -188,9 +188,10 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   `reachable!` oracle sites, including link-time-declared rows with
   `registered_gens=0`, fail the campaign by default unless explicitly waived.
   `--guided` steers generations instead of deriving them independently: a
-  generation may inherit most of the derivation bytes of an earlier generation
-  that found new coverage, so the sweep concentrates near productive
-  configurations. It stays deterministic (a pure function of seed base,
+  generation may be a local mutation of an earlier generation that found new
+  coverage, keeping its seed and every knob except one to three re-drawn or
+  nudged units (the seed, or a knob the spec reads), so the sweep concentrates
+  near productive configurations. It stays deterministic (a pure function of seed base,
   generation, and the persisted novelty log, truncated below the generation being
   derived so a resumed campaign re-derives identically), records the per-generation
   decision on the `PATINA_CAMPAIGN_GEN` line as `guided=exploit:<gen>|explore|none`,

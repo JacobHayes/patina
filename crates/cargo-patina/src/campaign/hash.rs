@@ -5,9 +5,11 @@
 //! through 63 are free. Claim a free byte for a new independent knob rather than
 //! correlating unrelated knobs by reusing an existing claim.
 //!
-//! The original 32 bytes remain unchanged. The extension is keyed on the
-//! effective hash, including guided mutation, so new extension claims preserve
-//! every existing generation's seed and knob draws.
+//! A generation's material is all 64 bytes: the original 32-byte hash and a
+//! 32-byte extension derived from it once, when the unguided generation is
+//! derived. Guided mutation then edits the 64 bytes claim by claim, so a child
+//! inherits every knob it does not mutate, the extension's crash draws
+//! included.
 use super::GEN_BAND_BYTES;
 use sha2::{Digest, Sha256};
 use std::ops::Range;
@@ -61,14 +63,7 @@ pub(super) use Claim::*;
 pub(super) struct Bands([u8; GEN_BAND_BYTES]);
 impl Bands {
     pub(super) fn new(hash: &Hash) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"patina-campaign-bands/v1");
-        hasher.update(hash.0);
-        let extension: [u8; 32] = hasher.finalize().into();
-        let mut bands = [0; GEN_BAND_BYTES];
-        bands[..32].copy_from_slice(&hash.0);
-        bands[32..].copy_from_slice(&extension);
-        Self(bands)
+        Self(hash.0)
     }
     pub(super) fn read(&self, claim: Claim) -> u8 {
         self.0[claim as usize]
@@ -85,61 +80,122 @@ pub(super) const EXPLORATION_CLAIMS: &[Claim] = &[
 /// The derivation input stays opaque before band expansion as well. Guidance
 /// can transform it but never borrow or index its underlying array.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Hash([u8; 32]);
+pub(crate) struct Hash([u8; GEN_BAND_BYTES]);
 
 impl Hash {
     pub(crate) fn derive(seed_base: u64, generation: u64) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(format!("patina-campaign-{seed_base}-{generation}").as_bytes());
-        Self(hasher.finalize().into())
+        let head: [u8; 32] = hasher.finalize().into();
+        let mut hasher = Sha256::new();
+        hasher.update(b"patina-campaign-bands/v1");
+        hasher.update(head);
+        let extension: [u8; 32] = hasher.finalize().into();
+        let mut bytes = [0; GEN_BAND_BYTES];
+        bytes[..32].copy_from_slice(&head);
+        bytes[32..].copy_from_slice(&extension);
+        Self(bytes)
     }
 
     pub(crate) fn seed(self) -> u64 {
         u64::from_le_bytes(self.0[SEED].try_into().expect("seed claim width"))
     }
 
-    // Guidance selection is deliberately keyed on the same input as the
-    // historical algorithm. These ranges are selector inputs, not fault bands.
-    pub(crate) fn guidance_roll(self) -> u64 {
-        const ROLL: Range<usize> = 8..10;
-        u64::from(u16::from_le_bytes(self.0[ROLL].try_into().expect("roll width")) % 1000)
-    }
-
-    pub(crate) fn guidance_ticket(self, total: u64) -> u64 {
-        const TICKET: Range<usize> = 10..18;
-        u64::from_le_bytes(self.0[TICKET].try_into().expect("ticket width")) % total
-    }
-
-    /// Preserve the existing mask algorithm, including its forced fresh byte.
-    pub(crate) fn mutate(self, fresh: &Self) -> Self {
-        // 64/256 selects fresh bytes: a child keeps roughly three quarters of
-        // its ancestor's configuration while the remaining bands move.
-        const MUTATION_THRESHOLD: u8 = 64;
-        let mut hasher = Sha256::new();
-        hasher.update(b"patina-campaign-guided-mask-v1");
-        hasher.update(fresh.0);
-        let mask: [u8; 32] = hasher.finalize().into();
+    /// `self` with one unit changed. `Replace` takes the unit's bytes from
+    /// `fresh`; `Nudge` steps a one-byte knob by a small signed amount,
+    /// saturating, so a child can move a threshold-shaped knob a little rather
+    /// than only re-roll it. A seed nudge would be a different random stream,
+    /// not a nearby one, so the seed is only ever replaced.
+    ///
+    /// The unit always changes: a nudge pinned at a byte's limit steps the
+    /// other way, and a knob replaced by its own value steps by one.
+    pub(crate) fn with_unit(self, unit: &Unit, op: UnitOp, fresh: &Self) -> Self {
         let mut out = self.0;
-        let mut took_any = false;
-        for index in 0..32 {
-            if mask[index] < MUTATION_THRESHOLD {
-                out[index] = fresh.0[index];
-                took_any = true;
+        let range = unit.0.clone();
+        match op {
+            UnitOp::Nudge(step) if range.len() == 1 => {
+                let old = out[range.start];
+                let stepped = old.saturating_add_signed(step);
+                out[range.start] = if stepped == old {
+                    old.saturating_add_signed(step.saturating_neg())
+                } else {
+                    stepped
+                };
+            }
+            UnitOp::Replace | UnitOp::Nudge(_) => {
+                out[range.clone()].copy_from_slice(&fresh.0[range.clone()]);
             }
         }
-        if !took_any {
-            let index = usize::from(fresh.0[0] % 32);
-            out[index] = fresh.0[index];
+        if out[range.clone()] == self.0[range.clone()] {
+            out[range.start] = out[range.start].wrapping_add(1);
         }
         Self(out)
     }
 
+    /// The units on which two hashes differ.
     #[cfg(test)]
-    pub(crate) fn shared_bytes(self, other: Self) -> usize {
-        self.0
+    pub(crate) fn differing_units(self, other: Self, units: &[Unit]) -> Vec<&Unit> {
+        units
             .iter()
-            .zip(other.0)
-            .filter(|(a, b)| **a == *b)
-            .count()
+            .filter(|unit| self.0[unit.0.clone()] != other.0[unit.0.clone()])
+            .collect()
+    }
+
+    /// Whether the two hashes agree on every byte outside `units`.
+    #[cfg(test)]
+    pub(crate) fn agrees_outside(self, other: Self, units: &[&Unit]) -> bool {
+        (0..GEN_BAND_BYTES).all(|index| {
+            units.iter().any(|unit| unit.0.contains(&index)) || self.0[index] == other.0[index]
+        })
+    }
+}
+
+/// One independently mutable part of a generation's material: the seed, or
+/// one claimed knob byte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unit(Range<usize>);
+
+/// How a guided child changes one [`Unit`] of its ancestor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnitOp {
+    Replace,
+    Nudge(i8),
+}
+
+impl Unit {
+    pub(crate) fn is_seed(&self) -> bool {
+        self.0 == SEED
+    }
+
+    /// The seed plus every claim that `flags` actually reads.
+    ///
+    /// A claim is live when changing its byte changes the derived flags for
+    /// some probe generation. Mutating a dead claim (a plane the spec did not
+    /// select) would re-run the parent's
+    /// configuration unchanged, so those claims are never offered.
+    pub(super) fn live(flags: impl Fn(&Hash) -> Vec<String>) -> Vec<Self> {
+        let mut units = vec![Self(SEED)];
+        for &claim in Claim::ALL {
+            let index = claim as usize;
+            // Derived probes, plus uniform-byte ones: a knob that only matters
+            // when another byte opens a threshold gate must be probed with the
+            // gate open, and all-zero and all-0xff material opens every
+            // threshold gate from one side or the other.
+            let probes = (0..8)
+                .map(|generation| Hash::derive(0, generation))
+                .chain([0x00, 0x80, 0xff].map(|byte| Hash([byte; GEN_BAND_BYTES])));
+            let live = probes.into_iter().any(|probe| {
+                let base = flags(&probe);
+                (0..=u8::MAX).step_by(17).any(|value| {
+                    let mut bytes = probe.0;
+                    bytes[index] = value;
+                    flags(&Hash(bytes)) != base
+                })
+            });
+            if live {
+                units.push(Self(index..index + 1));
+            }
+        }
+        units
     }
 }
