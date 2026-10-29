@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use patina_dst_abi::{Operation, Outcome};
@@ -97,7 +97,7 @@ impl TraceBundle {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, TraceError> {
         let path = path.as_ref();
-        let file = File::open(path).map_err(|source| TraceError::Io {
+        let mut file = File::open(path).map_err(|source| TraceError::Io {
             action: format!("open trace {}", path.display()),
             source,
         })?;
@@ -115,21 +115,13 @@ impl TraceBundle {
                 reason: "empty trace file; record finalization did not complete".into(),
             });
         }
-        let value: serde_json::Value =
-            serde_json::from_reader(BufReader::new(file)).map_err(|source| {
-                if source.is_eof() {
-                    TraceError::Incomplete {
-                        path: path.to_path_buf(),
-                        reason: format!("truncated JSON trace: {source}"),
-                    }
-                } else {
-                    TraceError::Parse {
-                        path: path.to_path_buf(),
-                        source,
-                    }
-                }
+        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+        file.read_to_end(&mut bytes)
+            .map_err(|source| TraceError::Io {
+                action: format!("read trace {}", path.display()),
+                source,
             })?;
-        Self::decode(value, path.to_path_buf())
+        Self::decode(&bytes, path.to_path_buf())
     }
 
     /// Parse and validate a bundle from in-memory bytes, enforcing the same
@@ -148,27 +140,37 @@ impl TraceBundle {
                     .into(),
             });
         }
-        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|source| {
-            if source.is_eof() {
-                TraceError::Incomplete {
-                    path: path.clone(),
-                    reason: format!("truncated JSON trace: {source}"),
-                }
-            } else {
-                TraceError::Parse {
-                    path: path.clone(),
-                    source,
-                }
-            }
-        })?;
-        Self::decode(value, path)
+        Self::decode(bytes, path)
     }
 
-    /// Check a decoded bundle's version, then deserialize and validate it.
+    /// Deserialize and validate a bundle, refusing any other format version.
     ///
-    /// Only a bundle at [`TRACE_FORMAT_VERSION`] is deserialized; any other
-    /// declared version is refused before any structural interpretation.
-    fn decode(value: serde_json::Value, path: PathBuf) -> Result<Self, TraceError> {
+    /// A current bundle deserializes straight into its types. Only bytes that do
+    /// not are read again as generic JSON, to say why: an abandoned-trace
+    /// marker, another format version (refused before any structural
+    /// interpretation), a bundle cut short, or a malformed one.
+    fn decode(bytes: &[u8], path: PathBuf) -> Result<Self, TraceError> {
+        match serde_json::from_slice::<Self>(bytes) {
+            Ok(bundle) => {
+                bundle.validate()?;
+                Ok(bundle)
+            }
+            Err(typed) => Err(Self::diagnose(bytes, path, typed)),
+        }
+    }
+
+    /// Why `bytes` did not deserialize as a current bundle.
+    fn diagnose(bytes: &[u8], path: PathBuf, typed: serde_json::Error) -> TraceError {
+        let value: serde_json::Value = match serde_json::from_slice(bytes) {
+            Ok(value) => value,
+            Err(source) if source.is_eof() => {
+                return TraceError::Incomplete {
+                    path,
+                    reason: format!("truncated JSON trace: {source}"),
+                };
+            }
+            Err(source) => return TraceError::Parse { path, source },
+        };
         // An abandoned-trace marker is a valid JSON document that is not a
         // bundle. Recognize it FIRST so the refusal names what actually
         // happened — the recorder gave up on this trace, and why — instead of
@@ -178,25 +180,27 @@ impl TraceBundle {
             .get(ABANDONED_TRACE_KEY)
             .and_then(|marker| serde_json::from_value::<AbandonedTrace>(marker.clone()).ok())
         {
-            return Err(TraceError::Incomplete {
+            return TraceError::Incomplete {
                 path,
                 reason: format!(
                     "the recorder abandoned this trace ({}): {}; it holds no events and cannot be \
                      replayed",
                     abandoned.reason, abandoned.detail
                 ),
-            });
+            };
         }
         if let Some(found) = format_version_of(&value)
             && found != TRACE_FORMAT_VERSION
         {
-            return Err(TraceError::UnsupportedVersion { found });
+            return TraceError::UnsupportedVersion { found };
         }
-        require_complete_current_bundle(&value, &path)?;
-        let bundle: Self =
-            serde_json::from_value(value).map_err(|source| TraceError::Parse { path, source })?;
-        bundle.validate()?;
-        Ok(bundle)
+        if let Err(error) = require_complete_current_bundle(&value, &path) {
+            return error;
+        }
+        TraceError::Parse {
+            path,
+            source: typed,
+        }
     }
 
     /// Validate and serialize this bundle to the canonical byte encoding.
