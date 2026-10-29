@@ -3,7 +3,7 @@ use patina_dst_net_sim::SimNet;
 use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig, RuntimeError};
 
 fn main() -> Result<(), RuntimeError> {
-    let seed = std::env::var("PATINA_SEED")
+    let seed = std::env::var("PATINA_RT_SEED")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);

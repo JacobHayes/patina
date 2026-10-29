@@ -153,7 +153,7 @@ never called patina_dst::lifecycle::setup_complete()\n",
 /// its budget" from "this run never finalized", and it must keep failing loudly
 /// on the latter.
 ///
-/// In `PATINA_TRACE` path mode there is no descriptor and no file — the budget
+/// In `PATINA_RT_TRACE` path mode there is no descriptor and no file — the budget
 /// is enforced before the trace is created — so the stderr lines are the whole
 /// report and a later `replay` simply finds nothing at the path.
 fn abandon_over_budget_trace(error: &TraceError) {

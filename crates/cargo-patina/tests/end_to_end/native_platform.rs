@@ -1023,8 +1023,8 @@ fn main() {
             assert_eq!(generations, [(SIGTERM as u8, SignalTarget::Process)]);
         }
         let output = Command::new(&guest)
-            .env("PATINA_MODE", "seeded")
-            .env("PATINA_SEED", "1")
+            .env("PATINA_RT_MODE", "seeded")
+            .env("PATINA_RT_SEED", "1")
             .output()
             .unwrap();
         assert_eq!(

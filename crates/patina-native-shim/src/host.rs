@@ -1078,7 +1078,7 @@ pub(crate) fn host_write_all(fd: c_int, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Run-facts channel over a supervisor-provided host descriptor
-/// (`PATINA_FACTS_FD`). The guest's filesystem is fully interposed, so the
+/// (`PATINA_RT_FACTS_FD`). The guest's filesystem is fully interposed, so the
 /// structured facts document must leave through the private host aliases exactly
 /// like the trace bundle and the coverage map do.
 pub(crate) struct FdFactsSink {
@@ -1091,7 +1091,7 @@ impl patina_dst_runtime::FactsSink for FdFactsSink {
     }
 }
 
-/// The supervisor's crash-report pipe (`PATINA_CRASH_REPORT_FD`), told that
+/// The supervisor's crash-report pipe (`PATINA_RT_CRASH_REPORT_FD`), told that
 /// the run's crash point was reached. A pipe write is subject to neither a
 /// file size limit nor `SIGXFSZ`; a failed one leaves the supervisor no
 /// report, and the shim's own failure path then names the crash on stderr.
@@ -1112,7 +1112,7 @@ impl patina_dst_runtime::CrashAttemptSink for FdCrashAttemptSink {
     }
 }
 
-/// Trace channel over a supervisor-provided host descriptor (`PATINA_TRACE_FD`).
+/// Trace channel over a supervisor-provided host descriptor (`PATINA_RT_TRACE_FD`).
 pub(crate) struct FdTraceTransport {
     pub(crate) fd: c_int,
 }

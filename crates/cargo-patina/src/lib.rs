@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use patina_dst_runtime::{
-    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_GUEST_CPUS,
-    ENV_GUEST_HOSTNAME, ENV_MODE, ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS,
-    ENV_SEED, ENV_STEP_BUDGET, ENV_TIMELINE, ENV_TRACE, FaultKnob,
+    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_GUEST_HOSTNAME, ENV_MODE,
+    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET,
+    ENV_TIMELINE, ENV_TRACE, FaultKnob,
 };
 use patina_dst_trace::remove_dead_scratch;
 use sha2::{Digest, Sha256};
@@ -70,10 +70,24 @@ use native_build::{
 };
 use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
 use parse::{
-    BUGGIFY_ENV_VARS, ParseResult, buggify_env_pairs, current_verb, knob_env_pairs, knob_env_vars,
-    locate_positionals, package_integrates_patina, parse,
+    ParseResult, buggify_env_pairs, current_verb, knob_env_pairs, locate_positionals,
+    package_integrates_patina, parse,
 };
 use shim_build::lock_target_dir;
+
+/// Remove every inherited runtime control-plane variable
+/// ([`patina_dst_runtime::RUNTIME_ENV_PREFIX`]) from `command`'s environment,
+/// so only what the supervisor itself sets reaches the child.
+pub(crate) fn strip_runtime_env(command: &mut Command) {
+    for (name, _) in env::vars_os() {
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(patina_dst_runtime::RUNTIME_ENV_PREFIX))
+        {
+            command.env_remove(name);
+        }
+    }
+}
 
 const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
 
@@ -97,7 +111,7 @@ const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// observes real program arguments is affected.
 const NATIVE_GUEST_ARGV0: &str = "patina-guest";
 // Native supervisor descriptors are inherited at their already-open fd numbers;
-// the child discovers them from `PATINA_TRACE_FD` / `PATINA_FS_IMAGE_FD`. Keeping
+// the child discovers them from `PATINA_RT_TRACE_FD` / `PATINA_RT_FS_IMAGE_FD`. Keeping
 // the actual numbers avoids a macOS fork/exec edge where pre-exec
 // relocation onto fixed low fds could still leave those fds closed after exec.
 #[cfg(unix)]
@@ -186,7 +200,7 @@ struct Invocation {
     /// (all `None`) leaves faults off.
     knobs: KnobValues,
     /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
-    /// passed. Forwarded over the same `PATINA_BUGGIFY*` control plane the other
+    /// passed. Forwarded over the same `PATINA_RT_BUGGIFY*` control plane the other
     /// families use; the guest's `apply_buggify_env` is family-neutral, so only
     /// the parser ever omitted them.
     buggify: Option<NativeBuggify>,
@@ -422,7 +436,7 @@ struct NativeRunInvocation {
     allow_unsupported: UnsupportedPolicy,
     /// Host path where `run --coverage-out` writes the native yield-point edge
     /// counter map. The supervisor creates the file and passes its descriptor via
-    /// `PATINA_COVERAGE_FD`, so the shim never opens it through the deterministic
+    /// `PATINA_RT_COVERAGE_FD`, so the shim never opens it through the deterministic
     /// filesystem. Native yield-point binaries only.
     coverage_out: Option<PathBuf>,
     /// Host directory to capture read-only into the guest filesystem, mounted at
@@ -433,7 +447,7 @@ struct NativeRunInvocation {
     /// fingerprint so replay rejects a different corpus.
     mount: Option<PathBuf>,
     /// `--harness`: the guest is a `patina-dst-harness` binary (usage mode 2). Sets
-    /// `PATINA_DEFER_INIT=1` so the packaged constructor captures/scrubs the
+    /// `PATINA_RT_DEFER_INIT=1` so the packaged constructor captures/scrubs the
     /// control plane and registers finalization but does NOT install the runtime;
     /// `patina_dst_harness::run`/`run_with` installs it explicitly after applying
     /// its configuration overlay. Applies to both record/seeded runs and replay of
@@ -471,7 +485,7 @@ impl KnobValues {
 }
 
 /// Cooperative-SUT (buggify) knobs for `native-run`, forwarded to the guest as
-/// validated raw strings through the `PATINA_BUGGIFY*` control plane. Presence
+/// validated raw strings through the `PATINA_RT_BUGGIFY*` control plane. Presence
 /// of the enclosing `Option` means `--buggify` was passed (buggify enabled).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NativeBuggify {
@@ -487,7 +501,7 @@ struct NativeBuggify {
 }
 
 /// Exploration scheduling-policy and swarm knobs for `native-run`, forwarded to
-/// the guest as validated raw strings through the `PATINA_SCHED_*`/`PATINA_SWARM`
+/// the guest as validated raw strings through the `PATINA_SCHED_*`/`PATINA_RT_SWARM`
 /// control plane. Each is default-off; enabling a non-default policy or swarm
 /// folds a fingerprint component so a policy trace never cross-replays with a
 /// plain build.
@@ -732,29 +746,12 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     command
         .arg(&invocation.cargo_command)
         .args(&invocation.cargo_args)
-        .env("RUSTFLAGS", patina_rustflags())
-        .env(ENV_FINGERPRINT, fingerprint.clone())
-        .env_remove(ENV_MODE)
-        .env_remove(ENV_SEED)
-        .env_remove(ENV_TRACE)
-        .env_remove(ENV_TIMELINE)
-        .env_remove(ENV_BRANCH_FROM)
-        .env_remove(ENV_BRANCH_SEED)
-        .env_remove(ENV_BRANCH_ID)
-        .env_remove(ENV_PARENT_TIMELINE)
-        .env_remove(ENV_STEP_BUDGET)
-        .env_remove(ENV_REALTIME_EPOCH_NANOS)
-        .env_remove(ENV_GUEST_HOSTNAME)
-        .env_remove(ENV_GUEST_CPUS)
-        .env_remove(ENV_PARAMS_JSON);
-    // Scrub the fault-injection control plane so only the flags this invocation
-    // parsed reach the child; an ambient `PATINA_CRASH_PERMILLE` (or any sibling) in
-    // the caller's environment must never silently perturb a run that requested
-    // no faults. Driven by the shared knob table, so a new knob is scrubbed the
-    // day it is registered.
-    for variable in knob_env_vars() {
-        command.env_remove(variable);
-    }
+        .env("RUSTFLAGS", patina_rustflags());
+    // Only the control plane this invocation sets reaches the child: an
+    // ambient `PATINA_RT_*` in the caller's environment must never perturb a
+    // run. Stripped before anything is set.
+    strip_runtime_env(&mut command);
+    command.env(ENV_FINGERPRINT, fingerprint.clone());
     // Forward this run's fault knobs. On a `--record` run the child's runtime
     // captures them into the trace metadata; on the `replay` verb none are set
     // (the trace is authoritative and the runtime restores them), so replay is
@@ -762,12 +759,7 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     for (name, value) in knob_env_pairs(&invocation.knobs)? {
         command.env(name, value);
     }
-    // Cooperative-SUT (buggify) knobs ride the same control plane. Scrubbed
-    // first, for the same reason the fault knobs are: an ambient PATINA_BUGGIFY
-    // must never enable buggify in a run that did not ask for it.
-    for variable in BUGGIFY_ENV_VARS {
-        command.env_remove(variable);
-    }
+    // Cooperative-SUT (buggify) knobs ride the same control plane.
     if let Some(buggify) = &invocation.buggify {
         for (name, value) in buggify_env_pairs(buggify) {
             command.env(name, value);
@@ -829,9 +821,6 @@ and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)
     }
     // The structured run-facts channel. A cargo-family guest is not interposed,
     // so it writes the document to a plain path like it writes its trace.
-    // Scrubbed first: an ambient value must never redirect a run's facts.
-    command.env_remove(patina_dst_runtime::ENV_FACTS);
-    command.env_remove(patina_dst_runtime::ENV_FACTS_FD);
     let facts_file = if output::facts_active() {
         Some(tempfile::NamedTempFile::new().map_err(|error| {
             CliError(format!("failed to create the run-facts channel: {error}"))

@@ -335,7 +335,7 @@ fn run_and_replay_locate_native_positionals_around_options() {
 }
 
 /// `--fingerprint` is only ever read back off a recorded trace: the seeded
-/// native path sets no `PATINA_FINGERPRINT` at all, so a label supplied there
+/// native path sets no `PATINA_RT_FINGERPRINT` at all, so a label supplied there
 /// could never be compared against anything. It is refused instead of quietly
 /// discarded, so "I pinned this run to a build" cannot be believed of a run
 /// that pinned nothing.

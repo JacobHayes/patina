@@ -237,7 +237,7 @@ mod tests {
         let bin = harness_guest();
         let directory = tempdir().unwrap();
 
-        // Direct exec with a scrubbed environment: no PATINA_MODE, so the shim's
+        // Direct exec with a scrubbed environment: no PATINA_RT_MODE, so the shim's
         // constructor installs nothing and `run` fails closed.
         let output = Command::new(&bin).env_clear().output().unwrap();
         assert!(

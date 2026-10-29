@@ -29,6 +29,16 @@ individual flag where it differs), plus `requires` for a flag that is inert
 without another. A flag given to the wrong family is refused by name, not as an
 unknown option.
 
+Every flag except `--help`/`--version` can be defaulted from `PATINA_<FLAG>`:
+`PATINA_` plus the long name in upper snake case (`--seed-start` ->
+`PATINA_SEED_START`), shown as `[env: ...]` in help and as `env` in the JSON
+registry. A typed flag wins, then a non-empty variable, then the built-in default
+(a typed flag also beats a variable for a flag it is mutually exclusive with). A
+switch reads `0/false/no/off/n/f` as off and anything else as on. A variable
+defaults its flag only where that flag is accepted, and the children a campaign
+or minimize spawns never inherit one. `PATINA_RT_*` is the runtime's internal
+control plane: only the supervisor sets it, and an inherited one is stripped.
+
 ## CLI verbs
 
 - `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--instrument]`

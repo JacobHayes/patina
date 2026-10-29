@@ -1107,3 +1107,47 @@ mod registry {
         }
     }
 }
+
+mod flag_env {
+    use super::*;
+
+    /// A flag's `PATINA_<FLAG>` default can never shadow the runtime control
+    /// plane or a variable the registry documents for another purpose.
+    #[test]
+    fn flag_env_names_are_disjoint_from_every_other_variable() {
+        let documented: BTreeSet<&str> = help::ENVIRONMENT
+            .iter()
+            .flat_map(|variable| variable.name.split(" / "))
+            .collect();
+        let names = help::flag_env_names();
+        assert!(!names.is_empty());
+        for name in names {
+            assert!(
+                !name.starts_with(patina_dst_runtime::RUNTIME_ENV_PREFIX),
+                "{name} defaults a flag inside the runtime's reserved prefix"
+            );
+            assert!(
+                !documented.contains(name.as_str()),
+                "{name} defaults a flag and is documented as another variable"
+            );
+        }
+    }
+
+    /// A child this supervisor spawns takes its flags from argv alone.
+    #[test]
+    fn a_supervised_child_inherits_no_flag_defaults() {
+        let mut command = std::process::Command::new("true");
+        crate::supervisor_identity::expect_this_supervisor(&mut command).unwrap();
+        let removed: BTreeSet<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        let names = help::flag_env_names();
+        assert!(
+            names.is_subset(&removed),
+            "inherited by a child: {:?}",
+            names.difference(&removed).collect::<Vec<_>>()
+        );
+    }
+}

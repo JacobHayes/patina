@@ -203,8 +203,8 @@ fn executes_scenario_minimization_shrinking_seed_and_params() {
         oracle: strings(&[
             "sh",
             "-c",
-            "test \"$PATINA_SEED\" -ge 3 \
-                 && printf '%s' \"$PATINA_PARAMS_JSON\" | grep -q '\"keep\"' && exit 1; exit 0",
+            "test \"$PATINA_RT_SEED\" -ge 3 \
+                 && printf '%s' \"$PATINA_RT_PARAMS_JSON\" | grep -q '\"keep\"' && exit 1; exit 0",
         ]),
     };
     assert_eq!(execute_scenario(invocation).unwrap(), 0);

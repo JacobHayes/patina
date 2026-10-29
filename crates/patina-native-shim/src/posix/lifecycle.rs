@@ -4,7 +4,7 @@
 //! from the PATINA_* protocol (idempotent) and registers finalization through
 //! atexit, so record mode is finalized on any normal exit path (main return or
 //! exit()) without an explicit patina_shutdown. A standalone run (no
-//! PATINA_MODE) is left uninstalled; its first effect boundary fails closed
+//! PATINA_RT_MODE) is left uninstalled; its first effect boundary fails closed
 //! (`ensure_runtime`). The public getenv reads only the deterministic guest map
 //! after startup; startup reads the PATINA_* control plane through the private
 //! snapshot before scrubbing the ambient environ and publishing the guest's.
@@ -98,7 +98,7 @@ extern "C" fn native_start() {
             Some(super::stdio::take_pending),
         )
     };
-    // Deferred harness init (PATINA_DEFER_INIT=1, set by `cargo patina run
+    // Deferred harness init (PATINA_RT_DEFER_INIT=1, set by `cargo patina run
     // --harness`): still capture the control plane, register finalization and
     // scrub the environment, but leave the runtime uninstalled so
     // patina-dst-harness can apply its configuration overlay and install
@@ -106,9 +106,9 @@ extern "C" fn native_start() {
     // `ensure_runtime` (never auto-inits under defer).
     let control =
         |name: &core::ffi::CStr| unsafe { crate::posix_env::control_getenv(name.as_ptr()) };
-    let defer = control(c"PATINA_DEFER_INIT");
+    let defer = control(c"PATINA_RT_DEFER_INIT");
     let deferred = !defer.is_null() && unsafe { core::ffi::CStr::from_ptr(defer) } == c"1";
-    if !control(c"PATINA_MODE").is_null() && !deferred {
+    if !control(c"PATINA_RT_MODE").is_null() && !deferred {
         crate::patina_init_from_env();
     }
     crate::patina_publish_environ();

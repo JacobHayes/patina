@@ -261,7 +261,7 @@ pub(super) const COMPUTE_WATCHDOG_FLAG: Flag = f(
     "--compute-watchdog-ms",
     None,
     Value::Required("MS", Kind::WatchdogMillis),
-    "Native call-free starvation bound in host milliseconds (1..=86400000; default 10000). Overrides PATINA_COMPUTE_WATCHDOG_MS; replay follows the recorded stop, not host time.",
+    "Native call-free starvation bound in host milliseconds (1..=86400000; default 10000); replay follows the recorded stop, not host time.",
     false,
 );
 

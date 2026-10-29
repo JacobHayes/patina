@@ -60,6 +60,14 @@ accept it, and a flag narrower than its group repeats the array — so
 `--sched-pct-steps` requires `--sched-pct`). A flag supplied to the wrong family
 is refused by name, not as an unknown option.
 
+Environment variables split by prefix. `PATINA_<FLAG>` defaults a registry flag
+(derived in `cli.rs`, so a new flag gets one for free); `PATINA_RT_*` is the
+runtime's supervisor↔guest control plane (`RUNTIME_ENV_PREFIX`), set only by the
+supervisor and stripped from anything inherited. A new control-plane variable
+takes the `PATINA_RT_` prefix; a unit test refuses a flag variable that collides
+with any documented one. Self-spawned `cargo-patina` children go through
+`supervisor_identity::expect_this_supervisor`, which clears every flag variable.
+
 Every execution verb also accepts `--format json`, usually emitting one
 `patina.result/v1` envelope on stdout; verb-specific report verbs may emit their
 own schemas (for example `coverage --format json` emits `patina.coverage/v1`).

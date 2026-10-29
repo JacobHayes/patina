@@ -18,6 +18,15 @@
 //!   to Cargo verbatim, interleaved, order-preserving, and non-UTF-8-safe. clap
 //!   has no such mode, so [`partition`] splits the token list first — again from
 //!   the registry, so the split cannot disagree with the parser about arity.
+//!
+//! **Environment defaults.** Every registry flag except help/version can be
+//! defaulted from `PATINA_<FLAG>` ([`Flag::env_name`]) through clap's own `env`
+//! support: a typed flag wins, then a non-empty variable, then the built-in
+//! default. A switch reads a false-y value (`0`, `false`, `no`, `off`, `n`, `f`)
+//! as off and anything else as on. A variable only defaults a flag where that
+//! flag is accepted; a family that does not take the flag ignores it. The
+//! pre-pass flags clap never sees read the same variables through
+//! [`env_value`].
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -29,6 +38,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use crate::CliError;
 use crate::help::{self, Family, Flag, Kind, Value};
 use crate::values;
+use clap::parser::ValueSource;
 
 /// The value a bare optional-value switch records (`--buggify` with no `=N`).
 ///
@@ -60,8 +70,16 @@ fn arg_of(flag: &'static Flag) -> Arg {
     if let Some(short) = flag.short {
         arg = arg.short(short.trim_start_matches('-').chars().next().expect("short"));
     }
+    // clap treats a set-but-empty variable as a value, so only a non-empty one
+    // is attached: an empty `PATINA_SEED=` means "unset", as it does for the
+    // pre-pass flags.
+    if let Some((name, _)) = env_default(flag) {
+        arg = arg.env(name);
+    }
     match flag.value {
-        Value::None => arg.action(ArgAction::SetTrue),
+        Value::None => arg
+            .action(ArgAction::SetTrue)
+            .value_parser(clap::builder::FalseyValueParser::new()),
         Value::Required(placeholder, kind) => arg
             .action(ArgAction::Append)
             .num_args(1)
@@ -162,10 +180,112 @@ pub(crate) fn parse(
     arguments: Vec<OsString>,
 ) -> Result<Args, CliError> {
     let verb = help::verb(verb_name).expect("routed verb is registered");
+    let typed: Vec<String> = arguments
+        .iter()
+        .filter_map(|argument| argument.to_str().map(|text| split_name(text).to_string()))
+        .collect();
     let matches = command(verb, family)
         .try_get_matches_from(arguments)
-        .map_err(|error| CliError::usage(clap_message(error)))?;
+        .map_err(|error| {
+            // A malformed environment default is named, since nothing the
+            // operator typed is wrong.
+            let message = clap_message(error);
+            let origin = verb
+                .family_flags(family)
+                .filter(|flag| {
+                    message.contains(&format!("'{}", flag.name))
+                        && !typed.iter().any(|token| {
+                            token == flag.name || flag.short.is_some_and(|short| token == short)
+                        })
+                })
+                .find_map(env_default)
+                .map(|(name, _)| format!(" (from {name})"))
+                .unwrap_or_default();
+            CliError::usage(format!("{message}{origin}"))
+        })?;
     Args::new(verb, family, matches)
+}
+
+/// A flag's environment default, when its variable is set and non-empty.
+fn env_default(flag: &Flag) -> Option<(String, OsString)> {
+    let name = flag.env_name()?;
+    let value = std::env::var_os(&name).filter(|value| !value.is_empty())?;
+    Some((name, value))
+}
+
+/// The flag defaults set (non-empty) in this process's environment, by name.
+fn set_env_defaults() -> Vec<(String, OsString)> {
+    help::flag_env_names()
+        .into_iter()
+        .filter_map(|name| {
+            let value = std::env::var_os(&name).filter(|value| !value.is_empty())?;
+            Some((name, value))
+        })
+        .collect()
+}
+
+/// A printed command whose argv already carries every input, made immune to
+/// the operator's flag defaults: `env -u` for each one set here. Unchanged in
+/// a clean environment.
+pub(crate) fn without_env_defaults(command: String) -> String {
+    let unset: Vec<String> = set_env_defaults()
+        .into_iter()
+        .map(|(name, _)| format!("-u {name}"))
+        .collect();
+    if unset.is_empty() {
+        command
+    } else {
+        format!("env {} {command}", unset.join(" "))
+    }
+}
+
+/// A printed command built from the operator's own argv, carrying the flag
+/// defaults this process ran it with so it reproduces in any environment.
+pub(crate) fn with_env_defaults(command: String) -> String {
+    let set: Vec<String> = set_env_defaults()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={}", shell_quote(&value)))
+        .collect();
+    if set.is_empty() {
+        command
+    } else {
+        format!("{} {command}", set.join(" "))
+    }
+}
+
+/// Quote one word for a POSIX shell, leaving a plain word bare.
+pub(crate) fn shell_quote(value: &OsStr) -> String {
+    let text = value.to_string_lossy();
+    if !text.is_empty()
+        && text.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '+' | ',')
+        })
+    {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The environment default of a flag clap never parses (a pre-pass flag),
+/// held to the flag's declared grammar. A switch yields `Some("")` when its
+/// variable is truthy and `None` when it is false-y.
+pub(crate) fn env_value(flag: &'static Flag) -> Result<Option<OsString>, CliError> {
+    let Some((name, value)) = env_default(flag) else {
+        return Ok(None);
+    };
+    let Some(kind) = flag.value.grammar() else {
+        let off = value.to_str().is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off" | "n" | "f"
+            )
+        });
+        return Ok((!off).then(OsString::new));
+    };
+    check_value(flag, kind, &value)
+        .map_err(|message| CliError::usage(format!("{message} (from {name})")))?;
+    Ok(Some(value))
 }
 
 /// Reduce a clap error to the one line the CLI prints. The `usage` feature is
@@ -219,7 +339,17 @@ impl Args {
                 continue;
             };
             if supplied(&matches, flag.name) && !supplied(&matches, parent) {
-                return Err(CliError::usage(format!("{} requires {parent}", flag.name)));
+                let origin = match matches.value_source(flag.name) {
+                    Some(ValueSource::EnvVariable) => flag
+                        .env_name()
+                        .map(|name| format!(" (set by {name})"))
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                return Err(CliError::usage(format!(
+                    "{}{origin} requires {parent}",
+                    flag.name
+                )));
             }
         }
         // One generic duplicate check in place of a `set_once` per flag: the
@@ -265,10 +395,38 @@ impl Args {
             })
     }
 
-    /// Whether the operator typed this flag, whatever its shape.
+    /// Whether the operator supplied this flag, typed or through its
+    /// environment default, whatever its shape.
     pub(crate) fn supplied(&self, name: &str) -> bool {
         let _ = self.flag_of(name);
         supplied(&self.matches, name)
+    }
+
+    /// Whether the operator typed this flag, as opposed to its environment
+    /// default supplying it.
+    pub(crate) fn typed(&self, name: &str) -> bool {
+        let _ = self.flag_of(name);
+        self.matches.value_source(name) == Some(ValueSource::CommandLine)
+    }
+
+    /// Which of two mutually exclusive flags are in effect. A typed flag beats
+    /// the other's environment default, so the pair conflicts only when both
+    /// were typed or both came from the environment.
+    pub(crate) fn exclusive(
+        &self,
+        a: &str,
+        b: &str,
+        conflict: &str,
+    ) -> Result<(bool, bool), CliError> {
+        let (on_a, on_b) = (self.supplied(a), self.supplied(b));
+        if !(on_a && on_b) {
+            return Ok((on_a, on_b));
+        }
+        match (self.typed(a), self.typed(b)) {
+            (true, false) => Ok((true, false)),
+            (false, true) => Ok((false, true)),
+            _ => Err(CliError::usage(conflict)),
+        }
     }
 
     /// Whether a valueless switch was supplied.
@@ -325,9 +483,18 @@ impl Args {
     }
 }
 
-/// Whether an argument was actually typed, as opposed to defaulted or absent.
+/// Whether an argument was supplied, typed or by its environment default, as
+/// opposed to absent. A switch whose variable is false-y is not supplied.
 fn supplied(matches: &ArgMatches, name: &str) -> bool {
-    matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine)
+    match matches.value_source(name) {
+        Some(ValueSource::CommandLine) => true,
+        Some(ValueSource::EnvVariable) => matches
+            .try_get_one::<bool>(name)
+            .ok()
+            .flatten()
+            .is_none_or(|on| *on),
+        _ => false,
+    }
 }
 
 fn parsed<T: std::str::FromStr>(name: &str, value: &str) -> T {
@@ -489,21 +656,21 @@ pub(crate) fn strip(
         // parsers enforce, so a flag stripped before routing cannot quietly
         // accept what the same flag would reject after it.
         if let Some(kind) = flag.value.grammar() {
-            match value.to_str() {
-                Some(text) => values::validate(kind, flag.name, text).map_err(CliError::usage)?,
-                None if matches!(kind, Kind::Path) => {}
-                None => {
-                    return Err(CliError::usage(format!(
-                        "{} requires a UTF-8 value",
-                        flag.name
-                    )));
-                }
-            }
+            check_value(flag, kind, &value).map_err(CliError::usage)?;
         }
         found.entry(flag.name).or_default().push(value);
         index += 1;
     }
     Ok((found, rest))
+}
+
+/// Hold a pre-pass value to the flag's declared grammar.
+fn check_value(flag: &Flag, kind: Kind, value: &OsStr) -> Result<(), String> {
+    match value.to_str() {
+        Some(text) => values::validate(kind, flag.name, text),
+        None if matches!(kind, Kind::Path) => Ok(()),
+        None => Err(format!("{} requires a UTF-8 value", flag.name)),
+    }
 }
 
 /// The single value of a stripped flag, refusing a repeat.

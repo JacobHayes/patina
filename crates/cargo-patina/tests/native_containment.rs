@@ -166,8 +166,8 @@ fn original_envp_is_scrubbed() {
         &g.binary,
         &[],
         &[
-            ("PATINA_MODE", "seeded"),
-            ("PATINA_SEED", "9"),
+            ("PATINA_RT_MODE", "seeded"),
+            ("PATINA_RT_SEED", "9"),
             ("PATINA_ENVP_CANARY", "leak"),
             ("ENVP_CANARY", "leak"),
         ],
@@ -423,7 +423,7 @@ fn a_host_reader_that_went_away_raises_no_guest_sigpipe() {
     let output = std::process::Command::new(&g.binary)
         .env_clear()
         .arg("host-pipe")
-        .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")])
+        .envs([("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")])
         .stdout(writer)
         .output()
         .unwrap();
@@ -464,7 +464,7 @@ fn planted_guest() -> Guest {
 fn shim_faults_are_named_stops_never_the_guests() {
     use std::os::unix::process::ExitStatusExt;
     let g = planted_guest();
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")];
     for (case, sig) in [("segv", 11), ("bus", 7), ("ill", 4)] {
         let output = standalone_output(&g.binary, &[case], &env);
         assert_eq!(output.status.signal(), Some(sig), "{case}: {output:?}");
@@ -642,14 +642,14 @@ mod linux {
                 assert_standalone_success(
                     &c.binary,
                     &[door],
-                    &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+                    &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")],
                 );
             }
             use std::os::unix::process::ExitStatusExt;
             let output = standalone_output(
                 &c.binary,
                 &["guest-sigsys"],
-                &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+                &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")],
             );
             assert_eq!(output.status.signal(), Some(6), "{output:?}");
             assert!(
@@ -766,7 +766,7 @@ mod linux {
             let native = assert_build_c_guest(source, CLink::Unlinked);
             assert_standalone_success(&native.binary, &["native-frame"], &[]);
             let patina = assert_build_c_guest(source, CLink::PosixShim);
-            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+            let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")];
             let without_sud = assert_build_c_guest(source, CLink::PosixShimWithoutSud);
             for (g, case) in [
                 (&patina, "read-fault"),
@@ -829,7 +829,7 @@ mod linux {
             let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
             let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
             assert_standalone_success(&native.binary, &["prefixed"], &[]);
-            let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+            let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")];
             let output = standalone_output(&patina.binary, &["prefixed"], &env);
             assert_eq!(output.status.signal(), Some(6), "{output:?}");
         }
@@ -910,7 +910,7 @@ mod early_init {
             .arg(cpu.to_string())
             .arg(&g.binary)
             .arg("rseq")
-            .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")]);
+            .envs([("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")]);
         let out = common::output_with_deadline(&mut command, Duration::from_secs(20))
             .expect("rseq probe exceeded 20s");
         let out = assert_success(out);

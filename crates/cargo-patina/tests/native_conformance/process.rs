@@ -15,7 +15,7 @@ use std::time::Duration;
 /// How long one run may take before its process group is killed.
 pub(super) const RUN_DEADLINE: Duration = Duration::from_secs(60);
 /// The seed of every `cargo patina` run.
-pub(super) const PATINA_SEED: &str = "1";
+pub(super) const PATINA_RT_SEED: &str = "1";
 /// The seed of the shim-linked binary run directly (no `cargo patina`).
 pub(super) const DIRECT_SEED: &str = "9";
 pub(super) const FINGERPRINT: &str = "patina-conformance";

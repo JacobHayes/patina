@@ -215,6 +215,40 @@ pub(super) fn apply_package_selection(
     }
 }
 
+/// Apply the `PATINA_PACKAGE`/`PATINA_BIN` environment defaults to a
+/// Cargo-package build. A default fills only a selection nothing else made, and
+/// only where a selection applies: unlike a typed flag, it is silently inert for
+/// a single source, a Go package, or a prebuilt artifact.
+pub(super) fn apply_env_package_selection(artifact: &mut ArtifactRef) -> Result<(), CliError> {
+    if let ArtifactRef::Build(spec) = artifact
+        && let NativeBuildTarget::Package { package, bin, .. } = &mut spec.build.target
+    {
+        if package.is_none() {
+            *package = env_text(cli::flag("run", "--package"))?;
+        }
+        if bin.is_none() {
+            *bin = env_text(cli::flag("run", "--bin"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply the `PATINA_RELEASE` environment default to a build on the fly; inert
+/// for a prebuilt artifact, which has no build profile.
+pub(super) fn apply_env_release(artifact: &mut ArtifactRef) -> Result<(), CliError> {
+    if let ArtifactRef::Build(spec) = artifact
+        && !spec.build.release
+    {
+        spec.build.release = cli::env_value(cli::flag("run", "--release"))?.is_some();
+    }
+    Ok(())
+}
+
+/// A text flag's environment default.
+pub(super) fn env_text(flag: &'static help::Flag) -> Result<Option<String>, CliError> {
+    Ok(cli::env_value(flag)?.map(|value| value.to_string_lossy().into_owned()))
+}
+
 /// Extract a source-first `--release` switch from the head of a `run` flag list,
 /// stopping at `--` so a guest/program `--release` after the separator passes
 /// through untouched. Mirrors [`take_package_bin`]: the flag is consumed here so

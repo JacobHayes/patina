@@ -47,9 +47,9 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         let output = common::output_with_deadline(
             Command::new(&g.binary)
                 .env_clear()
-                .env("PATINA_MODE", "seeded")
-                .env("PATINA_SEED", "7")
-                .env("PATINA_COMPUTE_WATCHDOG_MS", bound)
+                .env("PATINA_RT_MODE", "seeded")
+                .env("PATINA_RT_SEED", "7")
+                .env("PATINA_RT_COMPUTE_WATCHDOG_MS", bound)
                 .arg(mode),
             deadline,
         )
@@ -63,8 +63,8 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             .arg(&g.binary)
             .args(["--compute-watchdog-ms", bound])
             .args(args)
-            // A valid CLI value must override even an invalid inherited knob.
-            .env("PATINA_COMPUTE_WATCHDOG_MS", "0");
+            // An inherited control-plane value never reaches the guest.
+            .env("PATINA_RT_COMPUTE_WATCHDOG_MS", "0");
         let started = Instant::now();
         let output = common::output_with_deadline(&mut command, deadline)
             .expect("compute watchdog must stop without an outer kill");

@@ -8,8 +8,14 @@ pub(crate) fn parse_minimize(
     // `--generation` builds its own oracle, so it is the one form that takes no
     // `-- <ORACLE>` tail — and must be routed before the tail is demanded. The
     // name is read through the registry's splitter, so `--generation=14` routes
-    // exactly like `--generation 14`.
-    if has_minimize_flag(&arguments, "--generation") {
+    // exactly like `--generation 14`. A selector's environment default routes
+    // too, unless the other selector was typed.
+    let typed_generation = has_minimize_flag(&arguments, "--generation");
+    let typed_scenario = has_minimize_flag(&arguments, "--scenario");
+    let selected = |name: &str, other_typed: bool| -> Result<bool, CliError> {
+        Ok(!other_typed && cli::env_value(cli::flag("minimize", name))?.is_some())
+    };
+    if typed_generation || selected("--generation", typed_scenario)? {
         return parse_minimize_generation(arguments).map(minimize::MinimizeInvocation::Generation);
     }
     let delimiter = arguments
@@ -23,7 +29,7 @@ pub(crate) fn parse_minimize(
             "minimize requires an oracle command after `--`",
         ));
     }
-    if has_minimize_flag(&arguments, "--scenario") {
+    if typed_scenario || selected("--scenario", typed_generation)? {
         parse_minimize_scenario(arguments, oracle).map(minimize::MinimizeInvocation::Scenario)
     } else {
         parse_minimize_trace(arguments, oracle).map(minimize::MinimizeInvocation::Trace)
@@ -48,13 +54,12 @@ fn parse_minimize_trace(
     // so locate it registry-arity-aware rather than forcing it to lead.
     let scan = locate_positionals("minimize", &arguments, 1);
     let args = cli::parse("minimize", help::Family::Sole, scan.rest)?;
-    let timeline = args.string("--timeline");
-    let prune = args.flag("--prune-branches");
-    if prune && timeline.is_some() {
-        return Err(CliError::usage(
-            "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
-        ));
-    }
+    let (prune, timeline) = args.exclusive(
+        "--prune-branches",
+        "--timeline",
+        "--prune-branches operates on the whole branch forest and cannot be combined with --timeline",
+    )?;
+    let timeline = args.string("--timeline").filter(|_| timeline);
     Ok(minimize::TraceMinimize {
         trace: scan
             .positionals

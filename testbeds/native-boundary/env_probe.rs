@@ -14,7 +14,7 @@ fn main() {
     }
     if std::env::var_os("HOME").is_some()
         || std::env::var_os("PATH").is_some()
-        || std::env::var_os("PATINA_MODE").is_some()
+        || std::env::var_os("PATINA_RT_MODE").is_some()
     {
         std::process::exit(61);
     }

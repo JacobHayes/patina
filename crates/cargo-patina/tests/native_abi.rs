@@ -72,16 +72,16 @@ fn prefixed_c_abi_preserves_crash_checkpoint_and_replays() {
 
     let trace = g.dir.path().join("env.patina");
     let env = [
-        ("PATINA_MODE", "record"),
-        ("PATINA_SEED", "123"),
-        ("PATINA_TRACE", trace.to_str().unwrap()),
-        ("PATINA_FINGERPRINT", "c-abi-v1"),
+        ("PATINA_RT_MODE", "record"),
+        ("PATINA_RT_SEED", "123"),
+        ("PATINA_RT_TRACE", trace.to_str().unwrap()),
+        ("PATINA_RT_FINGERPRINT", "c-abi-v1"),
     ];
     let record = assert_standalone_success(&g.binary, &["env"], &env).stdout;
     let replay_env = [
-        ("PATINA_MODE", "replay"),
-        ("PATINA_TRACE", trace.to_str().unwrap()),
-        ("PATINA_FINGERPRINT", "c-abi-v1"),
+        ("PATINA_RT_MODE", "replay"),
+        ("PATINA_RT_TRACE", trace.to_str().unwrap()),
+        ("PATINA_RT_FINGERPRINT", "c-abi-v1"),
     ];
     assert_eq!(
         record,
@@ -435,7 +435,7 @@ mod stdio_lifecycle {
         standalone_output(
             binary,
             &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", &seed)],
+            &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", &seed)],
         )
     }
 

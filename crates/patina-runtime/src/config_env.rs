@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 
-/// Parse the documented `PATINA_TRACE_FD` variable into a raw descriptor.
+/// Parse the documented `PATINA_RT_TRACE_FD` variable into a raw descriptor.
 ///
 /// Embedders that can service the descriptor (for example the native shim)
 /// use this to build a [`TraceTransport`]; `RuntimeConfig::from_env` uses it

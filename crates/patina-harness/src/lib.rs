@@ -34,7 +34,7 @@
 //! cargo patina replay path/to/harness/Cargo.toml trace.patina --harness
 //! ```
 //!
-//! `--harness` sets `PATINA_DEFER_INIT=1`, which tells the packaged constructor to
+//! `--harness` sets `PATINA_RT_DEFER_INIT=1`, which tells the packaged constructor to
 //! capture and scrub the control plane and register finalization but leave the
 //! runtime uninstalled; [`run`]/[`run_with`] then install it after applying the
 //! configuration overlay. A plain `cargo run` (or any execution without the
@@ -220,7 +220,7 @@ impl HarnessBuilder {
     }
 
     /// A typed-builder parameter exposed to the application through the runtime.
-    /// Accumulated and encoded as the `PATINA_PARAMS_JSON` control-plane value.
+    /// Accumulated and encoded as the `PATINA_RT_PARAMS_JSON` control-plane value.
     #[must_use]
     pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.params.insert(key.into(), value.into());

@@ -55,7 +55,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 fn push_flag(out: &mut String, flag: &Flag) {
     let left = flag_left(flag);
-    let doc_lines = wrap(flag.doc, WRAP_WIDTH.saturating_sub(DOC_COLUMN));
+    let doc = match flag.env_name() {
+        Some(env) => format!("{} [env: {env}]", flag.doc),
+        None => flag.doc.to_string(),
+    };
+    let doc_lines = wrap(&doc, WRAP_WIDTH.saturating_sub(DOC_COLUMN));
     // The left column and the first doc line share a row unless the left column
     // overruns the doc column, in which case the doc starts on the next line.
     if left.chars().count() + 2 > DOC_COLUMN {

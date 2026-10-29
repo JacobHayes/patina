@@ -28,7 +28,7 @@ pub(super) fn reproduce_command(
             trace.to_string(),
         ];
         parts.extend(invocation.iter().cloned());
-        return parts.join(" ");
+        return crate::cli::without_env_defaults(parts.join(" "));
     }
     let mut parts = vec![
         "cargo patina run".to_string(),
@@ -56,7 +56,10 @@ pub(super) fn reproduce_command(
         parts.push("--".to_string());
         parts.extend(guest_args.iter().cloned());
     }
-    parts.join(" ")
+    // The generation ran as an isolated child from these flags alone (see
+    // `expect_this_supervisor`), so the printed command must not pick up the
+    // operator's flag defaults either.
+    crate::cli::without_env_defaults(parts.join(" "))
 }
 
 /// Save a failing generation's trace into `<out>/failures/`, but ONLY when the

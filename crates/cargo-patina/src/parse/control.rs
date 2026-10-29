@@ -127,12 +127,6 @@ pub(crate) fn knob_flag_pairs(knobs: &KnobValues) -> Vec<(&'static str, &String)
         .collect()
 }
 
-/// Every `PATINA_*` variable a fault knob can arrive on, for the scrub that keeps
-/// an ambient environment from perturbing a run that requested no faults.
-pub(crate) fn knob_env_vars() -> impl Iterator<Item = &'static str> {
-    FaultKnob::ALL.iter().map(|knob| knob.meta().env)
-}
-
 /// The cooperative-SUT (buggify) knobs, or `None` when buggify was not enabled.
 /// Any of the four flags enables it — the three detail knobs each imply
 /// `--buggify`, as their help says.
@@ -227,17 +221,8 @@ pub(super) fn timeline_or_main(args: &cli::Args) -> String {
         .unwrap_or_else(|| "main".to_string())
 }
 
-/// Every `PATINA_BUGGIFY*` control-plane variable, for the scrub that keeps an
-/// ambient environment from enabling buggify in a run that did not ask for it.
-pub(crate) const BUGGIFY_ENV_VARS: &[&str] = &[
-    ENV_BUGGIFY,
-    ENV_BUGGIFY_ACTIVATION,
-    ENV_BUGGIFY_CUTOFF,
-    ENV_BUGGIFY_AFTER_SETUP,
-];
-
 /// The cooperative-SUT (buggify) control-plane pairs the native and cargo
-/// families forward to their subprocess. Presence of `PATINA_BUGGIFY` (its value, possibly empty, being the firing
+/// families forward to their subprocess. Presence of `PATINA_RT_BUGGIFY` (its value, possibly empty, being the firing
 /// per-mille) enables buggify; the optional knobs follow.
 pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, String)> {
     let mut pairs = vec![(
@@ -257,8 +242,8 @@ pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, S
 }
 
 /// The exploration scheduling-policy and swarm control-plane pairs. Presence of
-/// `PATINA_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
-/// depth); `PATINA_SCHED_STARVE` enables starvation; `PATINA_SWARM` enables
+/// `PATINA_RT_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
+/// depth); `PATINA_RT_SCHED_STARVE` enables starvation; `PATINA_RT_SWARM` enables
 /// swarm fault-class selection. Mirrors [`knob_env_pairs`]: the native family
 /// forwards them to its subprocess through the same protocol.
 pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> {
@@ -293,7 +278,7 @@ pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str
 pub(crate) fn liveness_env_pairs(liveness: &NativeLiveness) -> Vec<(&'static str, String)> {
     let mut pairs = Vec::new();
     if let Some(bound) = &liveness.compute_watchdog_ms {
-        pairs.push(("PATINA_COMPUTE_WATCHDOG_MS", bound.clone()));
+        pairs.push(("PATINA_RT_COMPUTE_WATCHDOG_MS", bound.clone()));
     }
     if let Some(budget) = &liveness.watchdog {
         pairs.push((ENV_LIVENESS_WATCHDOG, budget.clone()));

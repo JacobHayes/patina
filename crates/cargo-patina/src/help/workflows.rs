@@ -656,7 +656,7 @@ opts in, because only a patina-owned oracle is hermetic by construction.\n\
 `minimize --scenario` shrinks experiment inputs instead: it drops and shrinks \
 --param values and canonicalizes --seed toward zero, bounded by --seed-budget. Each \
 candidate re-runs the oracle as a fresh seeded child through the \
-PATINA_SEED/PATINA_PARAMS_JSON protocol.",
+PATINA_RT_SEED/PATINA_RT_PARAMS_JSON protocol.",
     families: &[
         fam(Family::Sole, "`minimize`", None),
         fam(

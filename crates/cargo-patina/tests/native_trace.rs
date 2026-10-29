@@ -31,8 +31,8 @@ mod linux {
                     .arg(&trace)
                     .arg(binary)
                     .env_remove("LD_LIBRARY_PATH")
-                    .env("PATINA_MODE", "seeded")
-                    .env("PATINA_SEED", "9")
+                    .env("PATINA_RT_MODE", "seeded")
+                    .env("PATINA_RT_SEED", "9")
                     .output()
                     .unwrap(),
             );

@@ -50,7 +50,7 @@ Replay restores the map and its reservation from the trace without resupplying
 flags. The platform trailer remains available after envp's NULL (ELF auxv on
 Linux, the apple-string vector on Darwin).
 
-A direct native `PATINA_*` protocol launch without the supervisor's reservation
+A direct native `PATINA_RT_*` protocol launch without the supervisor's reservation
 may only start with an empty deterministic map. A nonempty map aborts at startup
 with the named `unreserved initial-stack environment` refusal; use the supervisor
 rather than publishing a map only through `environ`. Direct empty-map launches
@@ -75,7 +75,7 @@ Built and run through `cargo patina build` / `cargo patina run --harness`
 --harness` forwards it to every generation and to the reproduce commands it
 prints). Startup is *Option B:
 deferred init* (the name code comments reference): the flag sets
-`PATINA_DEFER_INIT=1`, the shim's startup constructor still
+`PATINA_RT_DEFER_INIT=1`, the shim's startup constructor still
 captures the control plane, registers finalization, and scrubs the
 environment, but leaves the runtime uninstalled; `patina_harness_install`
 applies the harness configuration as a control-plane overlay and installs

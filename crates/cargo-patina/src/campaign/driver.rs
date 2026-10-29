@@ -96,9 +96,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 crate::supervisor_identity::supervisor_sha256()?.to_string(),
             )
         }
-        CampaignMode::Resume | CampaignMode::Extend { .. } => {
-            load_campaign_state(&state_path)?
-        }
+        CampaignMode::Resume | CampaignMode::Extend { .. } => load_campaign_state(&state_path)?,
     };
 
     let mut coverage = match mode {

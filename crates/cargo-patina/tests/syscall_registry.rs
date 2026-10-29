@@ -595,7 +595,7 @@ fn an_engine_call_to_a_door_reaches_the_host_not_the_door() {
     );
     let child = std::process::Command::new(&binary)
         .env_clear()
-        .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")])
+        .envs([("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

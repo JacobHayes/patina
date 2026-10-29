@@ -236,8 +236,8 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
         const SIGABRT: i32 = 6;
         let direct = Command::new(bin)
             .arg("abort")
-            .env("PATINA_MODE", "seeded")
-            .env("PATINA_SEED", "1")
+            .env("PATINA_RT_MODE", "seeded")
+            .env("PATINA_RT_SEED", "1")
             .output()
             .unwrap();
         assert_eq!(direct.status.signal(), Some(SIGABRT));

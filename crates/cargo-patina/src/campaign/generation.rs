@@ -557,7 +557,7 @@ mod tests {
         let (scratch, file) = crate::create_scratch(&trace).expect("scratch");
         let fd = file.as_raw_fd();
         // The leader exits at once; the member it backgrounds inherits the
-        // locked scratch descriptor, as the guest inherits `PATINA_TRACE_FD`.
+        // locked scratch descriptor, as the guest inherits `PATINA_RT_TRACE_FD`.
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg("sleep 60 & exit 0").process_group(0);
         // SAFETY: `fcntl` is async-signal-safe, and clearing `FD_CLOEXEC` here

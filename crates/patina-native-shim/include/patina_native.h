@@ -107,7 +107,7 @@ int32_t patina_init_seed(uint64_t seed);
 int32_t patina_init_crash(uint64_t seed);
 /*
  * Build the runtime from the documented PATINA_* environment protocol.
- * When PATINA_TRACE_FD names an inherited host descriptor, record mode
+ * When PATINA_RT_TRACE_FD names an inherited host descriptor, record mode
  * writes the finalized trace bundle to it and replay mode reads the bundle
  * from it, using non-interposed host descriptor I/O so fully interposed
  * processes never recurse into the deterministic filesystem.

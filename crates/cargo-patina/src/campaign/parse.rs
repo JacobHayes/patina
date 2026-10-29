@@ -64,24 +64,26 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     let args = cli::parse("campaign", help::Family::Sole, scan.rest)?;
 
     // In continuation mode the out-dir's recorded spec is authoritative, so any
-    // flag that would change it is refused. The permitted set is the handful of
-    // knobs that describe THIS invocation rather than the campaign's shape.
-    let mode = match (args.u64("--extend"), args.flag("--resume")) {
-        (Some(_), true) => {
-            return Err(CliError::usage(
-                "--extend and --resume are redundant; choose exactly one continuation mode",
-            ));
-        }
-        (Some(additional), false) => CampaignMode::Extend { additional },
-        (None, true) => CampaignMode::Resume,
-        (None, false) => CampaignMode::Fresh,
+    // typed flag that would change it is refused. The permitted set is the
+    // handful of knobs that describe THIS invocation rather than the campaign's
+    // shape. An environment default yields to the recorded spec as it yields to
+    // a typed flag, so it is ignored here rather than refused.
+    let (extend, resume) = args.exclusive(
+        "--extend",
+        "--resume",
+        "--extend and --resume are redundant; choose exactly one continuation mode",
+    )?;
+    let mode = match args.u64("--extend").filter(|_| extend) {
+        Some(additional) => CampaignMode::Extend { additional },
+        None if resume => CampaignMode::Resume,
+        None => CampaignMode::Fresh,
     };
     if !matches!(mode, CampaignMode::Fresh) {
         for flag in help::verb("campaign")
             .expect("`campaign` is registered")
             .family_flags(help::Family::Sole)
         {
-            if !CONTINUATION_FLAGS.contains(&flag.name) && args.supplied(flag.name) {
+            if !CONTINUATION_FLAGS.contains(&flag.name) && args.typed(flag.name) {
                 return Err(reject_continuation_override(flag.name));
             }
         }

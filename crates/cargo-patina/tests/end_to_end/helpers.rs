@@ -394,25 +394,12 @@ pub(super) fn invoke_unchecked_clean_env(
 ) -> Output {
     let mut command = Command::new(executable);
     command.current_dir(fixture).args(arguments);
-    for name in [
-        "PATINA_SEED",
-        "PATINA_RECORD",
-        "PATINA_BUDGET",
-        "PATINA_PARAM",
-        "PATINA_BUGGIFY",
-        "PATINA_BUGGIFY_AFTER_SETUP",
-        "PATINA_BUGGIFY_ACTIVATION_PERMILLE",
-        "PATINA_BUGGIFY_CUTOFF_NANOS",
-        "PATINA_HARNESS",
-        "PATINA_ARG",
-        "PATINA_ENV",
-        "PATINA_KIND",
-        "PATINA_RUNTIME",
-        "PATINA_ALL",
-        "PATINA_EXERCISED",
-        "PATINA_GENERATIONS",
-    ] {
-        command.env_remove(name);
+    // Neither a flag default nor a control-plane variable from the caller's
+    // environment may reach the invocation under test.
+    for (name, _) in env::vars_os() {
+        if name.to_string_lossy().starts_with("PATINA_") {
+            command.env_remove(name);
+        }
     }
     for (name, value) in envs {
         command.env(name, value);

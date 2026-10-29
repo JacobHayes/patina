@@ -84,7 +84,7 @@ pub(crate) fn init_from_env() -> c_int {
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }
-        // The structured run-facts channel. A `PATINA_FACTS` path alongside it is
+        // The structured run-facts channel. A `PATINA_RT_FACTS` path alongside it is
         // refused by `build` rather than silently losing one document.
         if let Some(fd) = control_facts_fd()? {
             builder = builder.with_facts_sink(FdFactsSink { fd });
@@ -120,7 +120,7 @@ pub extern "C" fn patina_init_from_env() -> c_int {
 /// Install the deterministic runtime for a shim-backed harness (see
 /// `patina-dst-harness`, USAGE-MODES.md startup Option B). Called by
 /// `patina_dst_harness::run`/`run_with` under `cargo patina run --harness`
-/// (`PATINA_DEFER_INIT=1`), after the harness has injected its configuration
+/// (`PATINA_RT_DEFER_INIT=1`), after the harness has injected its configuration
 /// overlay onto the captured control plane via [`patina_control_set_entry`]. The
 /// runtime is then built from the (overlaid) control plane through the SAME
 /// parsers the constructor path uses ([`init_from_env`]), so every fault/buggify/
@@ -131,7 +131,7 @@ pub extern "C" fn patina_init_from_env() -> c_int {
 /// Fails closed, returning a distinct [`patina_dst_runtime`] `HARNESS_ERR_*`
 /// sentinel and printing a loud diagnostic, when: a boundary effect already ran
 /// (`HARNESS_ERR_BOUNDARY_BEFORE_INSTALL`); the runtime is already installed
-/// (`HARNESS_ERR_ALREADY_INSTALLED`); there is no `PATINA_MODE` in the control
+/// (`HARNESS_ERR_ALREADY_INSTALLED`); there is no `PATINA_RT_MODE` in the control
 /// plane, i.e. not under `cargo patina run` (`HARNESS_ERR_NOT_UNDER_PATINA`); or
 /// the configuration failed to build/validate (`HARNESS_ERR_CONFIG`).
 pub extern "C" fn patina_harness_install() -> c_int {
@@ -155,7 +155,7 @@ effects inside the harness closure so replay stays unambiguous\n",
             2,
             b"patina: patina_dst_harness cannot install the runtime: a deterministic runtime is \
 already installed. Run the harness binary with `cargo patina run --harness` so startup defers \
-initialization to the harness (PATINA_DEFER_INIT), and call run/run_with exactly once\n",
+initialization to the harness (PATINA_RT_DEFER_INIT), and call run/run_with exactly once\n",
         );
         return patina_dst_runtime::HARNESS_ERR_ALREADY_INSTALLED;
     }
@@ -164,7 +164,7 @@ initialization to the harness (PATINA_DEFER_INIT), and call run/run_with exactly
         let _ = host_write_all(
             2,
             b"patina: patina_dst_harness cannot install the runtime: this binary is not running \
-under `cargo patina run` (no PATINA_MODE control plane). A shim-backed harness must be built and \
+under `cargo patina run` (no PATINA_RT_MODE control plane). A shim-backed harness must be built and \
 run through Patina, e.g. `cargo patina run <manifest> --harness`\n",
         );
         return patina_dst_runtime::HARNESS_ERR_NOT_UNDER_PATINA;

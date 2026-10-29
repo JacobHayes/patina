@@ -147,6 +147,11 @@ Rust test function. Plain `cargo test` then discovers `cargo-patina` through
 libtest target shim-linked, and sweeps the test (20 seeds by default). Missing
 CLI discovery is a test failure, never a skip.
 
+Any flag can be defaulted from the environment as `PATINA_<FLAG>` (`--seed` ->
+`PATINA_SEED`, `--format` -> `PATINA_FORMAT`); a typed flag still wins, and help
+shows each flag's variable. `PATINA_RT_*` is reserved for the runtime's internal
+control plane.
+
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare
 `cargo patina --help --format json` is a compact index (every verb's summary and

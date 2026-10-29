@@ -44,9 +44,9 @@ fn replay_standalone(
         .arg(&g.binary)
         .args(args)
         .envs([
-            ("PATINA_MODE", "replay"),
-            ("PATINA_TRACE_FD", "3"),
-            ("PATINA_FINGERPRINT", fingerprint),
+            ("PATINA_RT_MODE", "replay"),
+            ("PATINA_RT_TRACE_FD", "3"),
+            ("PATINA_RT_FINGERPRINT", fingerprint),
         ]);
     common::output_with_deadline(&mut command, std::time::Duration::from_secs(20))
         .expect("standalone replay exceeded 20s")
@@ -113,12 +113,12 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
         }
     }
 
-    let control = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    let control = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")];
     let mut promised = std::process::Command::new(&g.binary);
     promised
         .env_clear()
         .envs(control)
-        .env("PATINA_ADDRESS_LAYOUT", "fixed");
+        .env("PATINA_RT_ADDRESS_LAYOUT", "fixed");
     // The test's own parent may run with randomization off (`setarch -R`);
     // the guest must not inherit that.
     #[cfg(target_os = "linux")]
@@ -140,7 +140,7 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     assert!(!refused.status.success(), "{refused:?}");
     assert!(refused.stdout.is_empty(), "{refused:?}");
     assert!(
-        text(&refused.stderr).contains("PATINA_ADDRESS_LAYOUT"),
+        text(&refused.stderr).contains("PATINA_RT_ADDRESS_LAYOUT"),
         "{refused:?}"
     );
     assert_standalone_success(&g.binary, &[NO_CHURN], &control);

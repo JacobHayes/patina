@@ -161,16 +161,22 @@ pub(super) fn cargo_package_dir(origin: &OsStr) -> Result<PathBuf, CliError> {
 /// The timeline/branch selection of a cargo-family replay, the one family that
 /// supports branch-append.
 fn replay_mode(args: &cli::Args, path: PathBuf) -> Result<Mode, CliError> {
-    let timeline = args.string("--timeline");
+    let (branch, timeline) = args.exclusive(
+        "--branch",
+        "--timeline",
+        "--timeline selects a timeline to replay and is not valid with --branch",
+    )?;
+    let timeline = args.string("--timeline").filter(|_| timeline);
     let from_sequence = args.u64("--from");
     let branch_seed = args.u64("--branch-seed");
     let branch_id = args.string("--branch-id");
     let parent = args.string("--parent");
-    if !args.flag("--branch") {
-        if from_sequence.is_some()
-            || branch_seed.is_some()
-            || branch_id.is_some()
-            || parent.is_some()
+    if !branch {
+        // Only a typed branch parameter is an error here: an environment
+        // default for one is inert without the branch it parameterizes.
+        if ["--from", "--branch-seed", "--branch-id", "--parent"]
+            .into_iter()
+            .any(|name| args.typed(name))
         {
             return Err(CliError::usage(
                 "--from/--branch-seed/--branch-id/--parent require --branch",
@@ -180,11 +186,6 @@ fn replay_mode(args: &cli::Args, path: PathBuf) -> Result<Mode, CliError> {
             path,
             timeline: timeline.unwrap_or_else(|| "main".into()),
         });
-    }
-    if timeline.is_some() {
-        return Err(CliError::usage(
-            "--timeline selects a timeline to replay and is not valid with --branch",
-        ));
     }
     Ok(Mode::Branch {
         path,

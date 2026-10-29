@@ -217,6 +217,39 @@ pub struct Flag {
     pub families: Option<&'static [Family]>,
 }
 
+/// The prefix of every flag's environment default (`--seed` → `PATINA_SEED`).
+pub const FLAG_ENV_PREFIX: &str = "PATINA_";
+
+impl Flag {
+    /// The environment variable that defaults this flag when it is not typed:
+    /// `PATINA_` plus the long name in upper snake case (`--seed-start` →
+    /// `PATINA_SEED_START`). The help/version switches have none.
+    pub fn env_name(&self) -> Option<String> {
+        if HELP_FLAGS.iter().any(|help| help.name == self.name) {
+            return None;
+        }
+        Some(format!(
+            "{FLAG_ENV_PREFIX}{}",
+            self.name
+                .trim_start_matches('-')
+                .replace('-', "_")
+                .to_ascii_uppercase()
+        ))
+    }
+}
+
+/// Every environment variable that defaults a registry flag, deduplicated.
+/// A flag name shared by several verbs shares one variable.
+pub fn flag_env_names() -> std::collections::BTreeSet<String> {
+    VERBS
+        .iter()
+        .flat_map(|verb| verb.groups.iter())
+        .flat_map(|group| group.flags.iter())
+        .chain(GLOBAL_OUTPUT.iter())
+        .filter_map(Flag::env_name)
+        .collect()
+}
+
 /// Terse constructor so the registry tables stay one-flag-per-line.
 const fn f(
     name: &'static str,
@@ -426,9 +459,7 @@ pub fn flag_arity(verb_name: &str, name: &str) -> Option<Value> {
 }
 
 /// Registered flag lookup by long or short CLI spelling, including global/help
-/// flags. This is the parser-facing surface; config defaults use the narrower
-/// `configurable_*` helpers below so help/output switches do not become project
-/// defaults.
+/// flags.
 pub fn flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
     verb(verb_name)
         .into_iter()

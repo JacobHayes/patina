@@ -154,7 +154,7 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
                 // label plus the `+buggify`/`+pct`/`+swarm` components the run
                 // really armed), the runtime writes it into the trace, and replay
                 // recomputes and compares it. A seeded run writes no trace and the
-                // runtime never even reads `PATINA_FINGERPRINT` in seeded mode, so
+                // runtime never even reads `PATINA_RT_FINGERPRINT` in seeded mode, so
                 // a label supplied there could not be checked by anything —
                 // declared dependent on `--record` so it is refused rather than
                 // silently discarded.

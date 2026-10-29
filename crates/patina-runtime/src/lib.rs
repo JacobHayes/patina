@@ -170,19 +170,24 @@ mod facts;
 
 pub use facts::{FACTS_SCHEMA, FactsSink};
 
-pub const ENV_MODE: &str = "PATINA_MODE";
+/// The prefix every runtime control-plane variable carries. The supervisor
+/// sets these for the guest; no user-facing variable shares the prefix, and a
+/// supervisor strips inherited ones before setting its own.
+pub const RUNTIME_ENV_PREFIX: &str = "PATINA_RT_";
 
-pub const ENV_SEED: &str = "PATINA_SEED";
+pub const ENV_MODE: &str = "PATINA_RT_MODE";
 
-pub const ENV_TRACE: &str = "PATINA_TRACE";
+pub const ENV_SEED: &str = "PATINA_RT_SEED";
 
-pub const ENV_TRACE_FD: &str = "PATINA_TRACE_FD";
+pub const ENV_TRACE: &str = "PATINA_RT_TRACE";
+
+pub const ENV_TRACE_FD: &str = "PATINA_RT_TRACE_FD";
 
 /// Inherited host descriptor receiving a `patina.covmap/v1` native edge-coverage
 /// counter map. Set only by `run --coverage-out PATH` for yield-point-instrumented
 /// native binaries, so the fully interposed guest writes coverage through the
 /// supervisor-owned host descriptor rather than through the deterministic FS.
-pub const ENV_COVERAGE_FD: &str = "PATINA_COVERAGE_FD";
+pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 
 /// Path the runtime writes this run's structured
 /// [`patina.runfacts/v1`](FACTS_SCHEMA) document to at finalization. Set by
@@ -191,7 +196,7 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_COVERAGE_FD";
 /// document carries the same per-plane accounting the `PATINA_*_REPORT` lines
 /// carry, built from the report structs rather than from the lines. Unset =
 /// no document is produced and the run is byte-for-byte unchanged.
-pub const ENV_FACTS: &str = "PATINA_FACTS";
+pub const ENV_FACTS: &str = "PATINA_RT_FACTS";
 
 /// Inherited host descriptor receiving the same [`patina.runfacts/v1`](FACTS_SCHEMA)
 /// document as [`ENV_FACTS`]. Used by the native family, whose guest filesystem
@@ -199,7 +204,7 @@ pub const ENV_FACTS: &str = "PATINA_FACTS";
 /// supervisor-owned host descriptor rather than through the deterministic FS —
 /// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`]. Setting both
 /// [`ENV_FACTS`] and this variable is refused.
-pub const ENV_FACTS_FD: &str = "PATINA_FACTS_FD";
+pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
 
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `native-run` streams a read-only host directory tree into the guest and
@@ -207,53 +212,53 @@ pub const ENV_FACTS_FD: &str = "PATINA_FACTS_FD";
 /// so a fully interposed guest sees a fixed corpus without touching the host.
 /// The image's hash is folded into the run fingerprint, so replay rejects a
 /// different corpus. Off when unset.
-pub const ENV_FS_IMAGE_FD: &str = "PATINA_FS_IMAGE_FD";
+pub const ENV_FS_IMAGE_FD: &str = "PATINA_RT_FS_IMAGE_FD";
 
 /// Supervisor-owned descriptor the native shim writes a crash-restart handoff to
 /// when the run crashes. Only the native supervisor sets it; ordinary
 /// guest code never sees it after the startup scrub.
-pub const ENV_HANDOFF_FD: &str = "PATINA_HANDOFF_FD";
+pub const ENV_HANDOFF_FD: &str = "PATINA_RT_HANDOFF_FD";
 
 /// Supervisor-owned pipe the native shim reports its crash on
 /// (`patina_dst_trace::CrashReport`): that it was reached, then whether the
 /// handoff went out or why the crash failed. Only the native supervisor sets
 /// it, for the incarnation the crash fires in.
-pub const ENV_CRASH_REPORT_FD: &str = "PATINA_CRASH_REPORT_FD";
+pub const ENV_CRASH_REPORT_FD: &str = "PATINA_RT_CRASH_REPORT_FD";
 
 /// Hex-encoded 32-byte supervisor key used by the native shim to seal the
 /// crash-restart handoff written to [`ENV_HANDOFF_FD`].
-pub const ENV_HANDOFF_KEY: &str = "PATINA_HANDOFF_KEY";
+pub const ENV_HANDOFF_KEY: &str = "PATINA_RT_HANDOFF_KEY";
 
 /// Supervisor-owned descriptor containing an encoded [`patina_dst_fs_mem::FsSnapshot`]
 /// used to seed a fresh native incarnation after a modeled crash.
-pub const ENV_RESTART_SNAPSHOT_FD: &str = "PATINA_RESTART_SNAPSHOT_FD";
+pub const ENV_RESTART_SNAPSHOT_FD: &str = "PATINA_RT_RESTART_SNAPSHOT_FD";
 
 /// Zero-based process incarnation identifier for native crash-restart runs.
-pub const ENV_INCARNATION: &str = "PATINA_INCARNATION";
+pub const ENV_INCARNATION: &str = "PATINA_RT_INCARNATION";
 
 /// The realtime, in Unix-time nanoseconds, the crashed incarnation's clock had
 /// reached: set by the native supervisor, from the handoff, for every restarted
 /// incarnation and only for one (see [`Incarnation::Restarted`]).
-pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RESTART_REALTIME_NANOS";
+pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RT_RESTART_REALTIME_NANOS";
 
-pub const ENV_FINGERPRINT: &str = "PATINA_FINGERPRINT";
+pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";
 
 /// Deferred-initialization flag for the shim-backed harness (see
 /// `patina-dst-harness`, USAGE-MODES.md startup Option B). When present (`=1`)
-/// alongside `PATINA_MODE`, the packaged native constructor captures and scrubs
+/// alongside `PATINA_RT_MODE`, the packaged native constructor captures and scrubs
 /// the control plane and registers finalization but does NOT install the runtime;
 /// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
 /// the harness's configuration overlay. An interposed effect that reaches the
 /// boundary before the harness installs fails closed loudly (never auto-inits).
 /// Set by `cargo patina run --harness` (and the matching `replay`). Off when
 /// unset (the ordinary constructor-installs-at-startup path).
-pub const ENV_DEFER_INIT: &str = "PATINA_DEFER_INIT";
+pub const ENV_DEFER_INIT: &str = "PATINA_RT_DEFER_INIT";
 
 /// Native supervisor reservation marker (`=1`): the initial environment has
 /// room for the deterministic map and a disjoint copy of the platform trailer.
 /// The shim checks actual capacity before publishing into the initial stack.
 /// Unreserved direct launches may only start with an empty guest map.
-pub const ENV_INITIAL_STACK: &str = "PATINA_INITIAL_STACK";
+pub const ENV_INITIAL_STACK: &str = "PATINA_RT_INITIAL_STACK";
 
 /// Native supervisor address-layout marker. `fixed`: the guest was exec'd
 /// with address-space randomization off (Linux `ADDR_NO_RANDOMIZE`, Darwin
@@ -261,66 +266,66 @@ pub const ENV_INITIAL_STACK: &str = "PATINA_INITIAL_STACK";
 /// honored it and stops the run by name if it did not. `randomized`: the
 /// operator passed `--allow-randomized-address-layout`, and the run records
 /// that its addresses are the host's. Any other value stops the run.
-pub const ENV_ADDRESS_LAYOUT: &str = "PATINA_ADDRESS_LAYOUT";
+pub const ENV_ADDRESS_LAYOUT: &str = "PATINA_RT_ADDRESS_LAYOUT";
 
 /// Extra pointer-sized environment slots the native supervisor reserves for
 /// the platform startup trailer. The shim fails closed if the trailer does not
 /// fit; this is reservation policy, not a claim about a platform's auxv size.
 pub const NATIVE_INITIAL_STACK_TRAILER_SLOTS: usize = 256;
 
-pub const ENV_BRANCH_FROM: &str = "PATINA_BRANCH_FROM";
+pub const ENV_BRANCH_FROM: &str = "PATINA_RT_BRANCH_FROM";
 
-pub const ENV_BRANCH_SEED: &str = "PATINA_BRANCH_SEED";
+pub const ENV_BRANCH_SEED: &str = "PATINA_RT_BRANCH_SEED";
 
-pub const ENV_BRANCH_ID: &str = "PATINA_BRANCH_ID";
+pub const ENV_BRANCH_ID: &str = "PATINA_RT_BRANCH_ID";
 
-pub const ENV_PARENT_TIMELINE: &str = "PATINA_PARENT_TIMELINE";
+pub const ENV_PARENT_TIMELINE: &str = "PATINA_RT_PARENT_TIMELINE";
 
-pub const ENV_TIMELINE: &str = "PATINA_TIMELINE";
+pub const ENV_TIMELINE: &str = "PATINA_RT_TIMELINE";
 
-pub const ENV_STEP_BUDGET: &str = "PATINA_STEP_BUDGET";
+pub const ENV_STEP_BUDGET: &str = "PATINA_RT_STEP_BUDGET";
 
-pub const ENV_PARAMS_JSON: &str = "PATINA_PARAMS_JSON";
+pub const ENV_PARAMS_JSON: &str = "PATINA_RT_PARAMS_JSON";
 
 /// The guest program arguments (`argv[1..]`, i.e. everything after `--`) as a
 /// JSON string array. The supervisor forwards this in record mode so the run's
 /// arguments are captured into the trace metadata; the runtime records them and
 /// a later `replay` restores them without re-passing the `--` section. Absent
 /// leaves the recorded argv unset. Malformed JSON is rejected fail-closed.
-pub const ENV_GUEST_ARGV: &str = "PATINA_GUEST_ARGV";
+pub const ENV_GUEST_ARGV: &str = "PATINA_RT_GUEST_ARGV";
 
 /// Deterministic guest environment values as a JSON object (`KEY` -> `VALUE`).
 /// Set by native `run --env KEY=VALUE`; recorded into trace metadata and restored
 /// on replay so environment-dependent native guests reproduce without re-supplying
 /// flags. Malformed JSON, empty keys, keys containing `=`, or NUL bytes fail closed.
-pub const ENV_GUEST_ENV: &str = "PATINA_GUEST_ENV_JSON";
+pub const ENV_GUEST_ENV: &str = "PATINA_RT_GUEST_ENV_JSON";
 
 /// The guest's initial working directory as an absolute virtual path. Set by
 /// native `run --cwd PATH`; recorded into trace metadata and restored on replay
 /// so relative-path guests reproduce without re-supplying the flag. Absent means
 /// `/`. A relative path, an empty one, a NUL byte, or a `..` component fails
 /// closed; the value is canonicalized lexically (`.` and `//` dropped).
-pub const ENV_GUEST_CWD: &str = "PATINA_GUEST_CWD";
+pub const ENV_GUEST_CWD: &str = "PATINA_RT_GUEST_CWD";
 
 /// The run's virtual realtime epoch as Unix-time nanoseconds (decimal `u64`):
 /// what `ClockKind::Realtime` reads at monotonic zero. Set by `run
 /// --realtime-epoch`, which accepts an RFC 3339 UTC timestamp and forwards its
 /// nanosecond value here; recorded into trace metadata and restored on replay.
 /// Absent means [`DEFAULT_REALTIME_EPOCH_NANOS`]. A malformed value fails closed.
-pub const ENV_REALTIME_EPOCH_NANOS: &str = "PATINA_REALTIME_EPOCH_NANOS";
+pub const ENV_REALTIME_EPOCH_NANOS: &str = "PATINA_RT_REALTIME_EPOCH_NANOS";
 
 /// The node name the guest's virtual kernel reports (`uname`'s `nodename`,
 /// `gethostname`). Set by `run --hostname`; recorded into trace metadata and
 /// restored on replay. Absent means `patina_dst_syscalls::IDENTITY_HOSTNAME`.
 /// A value [`validate_hostname`] refuses fails closed.
-pub const ENV_GUEST_HOSTNAME: &str = "PATINA_GUEST_HOSTNAME";
+pub const ENV_GUEST_HOSTNAME: &str = "PATINA_RT_GUEST_HOSTNAME";
 
 /// The virtual machine's CPU count (decimal, 1 to
 /// [`patina_dst_abi::MAX_CPUS`]). Set by native `run --cpus`; recorded into
 /// trace metadata and restored on replay, where a value that disagrees with the
 /// trace's is refused. Absent means [`patina_dst_abi::DEFAULT_CPUS`]. A value
 /// [`validate_cpus`] refuses fails closed.
-pub const ENV_GUEST_CPUS: &str = "PATINA_GUEST_CPUS";
+pub const ENV_GUEST_CPUS: &str = "PATINA_RT_GUEST_CPUS";
 
 /// The longest node name the kernel stores, in bytes (`__NEW_UTS_LEN`).
 pub const HOSTNAME_MAX_BYTES: usize = 64;
@@ -328,91 +333,91 @@ pub const HOSTNAME_MAX_BYTES: usize = 64;
 /// Base link latency in nanoseconds applied to the default `SimNet` network
 /// (datagrams and TCP segments). Blocking receives under a non-zero value park
 /// on the virtual-clock timer queue until delivery. Invalid values are rejected fail-closed.
-pub const ENV_NET_LATENCY: &str = "PATINA_NET_LATENCY_NANOS";
+pub const ENV_NET_LATENCY: &str = "PATINA_RT_NET_LATENCY_NANOS";
 
 /// Seeded per-datagram delivery jitter range `MIN..MAX` in nanoseconds applied
 /// to the default `SimNet`. Varying jitter reorders datagrams relative to their
 /// send order — the UDP-reorder fault. Off when unset.
-pub const ENV_NET_JITTER: &str = "PATINA_NET_JITTER_NANOS";
+pub const ENV_NET_JITTER: &str = "PATINA_RT_NET_JITTER_NANOS";
 
 /// Seeded datagram drop probability in per-mille (0..=1000) applied to the
 /// default `SimNet`. Off (zero) when unset.
-pub const ENV_NET_DROP_PERMILLE: &str = "PATINA_NET_DROP_PERMILLE";
+pub const ENV_NET_DROP_PERMILLE: &str = "PATINA_RT_NET_DROP_PERMILLE";
 
 /// Seeded datagram duplication probability in per-mille (0..=1000). Each
 /// duplicate is an independent copy with its own jitter draw, so the twins can
 /// arrive apart — the at-least-once delivery hazard. Off (zero) when unset.
-pub const ENV_NET_DUPLICATE_PERMILLE: &str = "PATINA_NET_DUPLICATE_PERMILLE";
+pub const ENV_NET_DUPLICATE_PERMILLE: &str = "PATINA_RT_NET_DUPLICATE_PERMILLE";
 
 /// Seeded probability in per-mille (0..=1000) that an otherwise-establishable
 /// TCP connection is refused. Off (zero) when unset.
-pub const ENV_NET_CONNECT_REFUSE_PERMILLE: &str = "PATINA_NET_CONNECT_REFUSE_PERMILLE";
+pub const ENV_NET_CONNECT_REFUSE_PERMILLE: &str = "PATINA_RT_NET_CONNECT_REFUSE_PERMILLE";
 
 /// Seeded probability in per-mille (0..=1000) that a fault-eligible established
 /// TCP stream operation tears the stream down with a reset. Off (zero) when unset.
-pub const ENV_NET_RESET_PERMILLE: &str = "PATINA_NET_RESET_PERMILLE";
+pub const ENV_NET_RESET_PERMILLE: &str = "PATINA_RT_NET_RESET_PERMILLE";
 
 /// Statically partitioned address pairs as a JSON array of two-element arrays
 /// (`[["a","b"],…]`). Both directions of each pair are blocked. Deterministic
 /// topology configuration rather than a seeded rate. Empty when unset.
-pub const ENV_NET_PARTITIONS: &str = "PATINA_NET_PARTITIONS_JSON";
+pub const ENV_NET_PARTITIONS: &str = "PATINA_RT_NET_PARTITIONS_JSON";
 
 /// Virtual TCP receive-buffer size in bytes. Smaller buffers make would-block
 /// behavior reachable. The driver default applies when unset.
-pub const ENV_NET_TCP_BUFFER_BYTES: &str = "PATINA_NET_TCP_BUFFER_BYTES";
+pub const ENV_NET_TCP_BUFFER_BYTES: &str = "PATINA_RT_NET_TCP_BUFFER_BYTES";
 
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every guest sleep,
 /// inflating virtual elapsed time to trip wall-clock deadline assumptions. Off
 /// when unset.
-pub const ENV_SLEEP_JITTER: &str = "PATINA_SLEEP_JITTER_NANOS";
+pub const ENV_SLEEP_JITTER: &str = "PATINA_RT_SLEEP_JITTER_NANOS";
 
 /// Seeded per-mille chance (0..=1000) that each crash point — a completed
 /// operation with an effect a crash could cut short — is where a supervised
 /// native run crashes and restarts. Off (zero) when unset.
-pub const ENV_CRASH_PERMILLE: &str = "PATINA_CRASH_PERMILLE";
+pub const ENV_CRASH_PERMILLE: &str = "PATINA_RT_CRASH_PERMILLE";
 
 /// What the crash takes down: `process` (the page cache survives, so unsynced
 /// writes are still there after the restart) or `machine` (the default: only
 /// durable state is certain to survive). Only meaningful alongside
 /// [`ENV_CRASH_PERMILLE`].
-pub const ENV_CRASH_KIND: &str = "PATINA_CRASH_KIND";
+pub const ENV_CRASH_KIND: &str = "PATINA_RT_CRASH_KIND";
 
 /// Seeded filesystem error probability in per-mille (0..=1000), applied to
 /// eligible filesystem operations by the default `FaultFs` wrapper. Off (zero)
 /// when unset.
-pub const ENV_FS_ERROR_PERMILLE: &str = "PATINA_FS_ERROR_PERMILLE";
+pub const ENV_FS_ERROR_PERMILLE: &str = "PATINA_RT_FS_ERROR_PERMILLE";
 
 /// Seeded short-read/short-write probability in per-mille (0..=1000), applied
 /// to read/write operations by the default `FaultFs` wrapper. Off (zero) when
 /// unset.
-pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_FS_SHORT_PERMILLE";
+pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_RT_FS_SHORT_PERMILLE";
 
 /// Targeted filesystem errors, a JSON array of `KIND:N:ERRNO` spellings
 /// ([`patina_dst_driver_api::FsErrorTarget`]): the Nth fault-eligible
 /// operation of each kind fails, whatever the seed. None when unset.
-pub const ENV_FS_ERROR_AT: &str = "PATINA_FS_ERROR_AT";
+pub const ENV_FS_ERROR_AT: &str = "PATINA_RT_FS_ERROR_AT";
 
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every fault-eligible
 /// filesystem operation before it executes, applied by the `Context` (the only
 /// site that owns the clock). Slow I/O reorders against timers and peers. Off
 /// when unset.
-pub const ENV_FS_LATENCY: &str = "PATINA_FS_LATENCY_NANOS";
+pub const ENV_FS_LATENCY: &str = "PATINA_RT_FS_LATENCY_NANOS";
 
 /// Seeded DNS resolution-failure probability in per-mille (0..=1000), applied to
 /// lookups of names the host table defines. Off (zero) when unset.
-pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_DNS_FAIL_PERMILLE";
+pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_RT_DNS_FAIL_PERMILLE";
 
 /// Seeded guest entropy-request failure probability in per-mille (0..=1000),
 /// applied to the requests a real random pool can fail: `GRND_NONBLOCK` reads
 /// before the pool is known initialized ([`EntropyWait`]). Off (zero) when
 /// unset.
-pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_ENTROPY_FAIL_PERMILLE";
+pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_RT_ENTROPY_FAIL_PERMILLE";
 
 /// Seeded guest custom-operation failure probability in per-mille (0..=1000),
 /// applied to every custom operation the guest declared fault-eligible. On fire
 /// the operation's `perform` closure does not run and the guest is handed the
 /// failure it declared. Off (zero) when unset.
-pub const ENV_CUSTOM_OP_FAIL_PERMILLE: &str = "PATINA_CUSTOM_OP_FAIL_PERMILLE";
+pub const ENV_CUSTOM_OP_FAIL_PERMILLE: &str = "PATINA_RT_CUSTOM_OP_FAIL_PERMILLE";
 
 /// Seeded realtime-epoch jump magnitude in nanoseconds. Every
 /// `Context::now(ClockKind::Realtime)` read draws a signed offset uniformly in
@@ -420,74 +425,74 @@ pub const ENV_CUSTOM_OP_FAIL_PERMILLE: &str = "PATINA_CUSTOM_OP_FAIL_PERMILLE";
 /// can regress or leap between adjacent reads — never applied to
 /// `ClockKind::Monotonic`, which drives timers and the liveness watchdog. Off
 /// (zero) when unset.
-pub const ENV_EPOCH_JUMP_NANOS: &str = "PATINA_EPOCH_JUMP_NANOS";
+pub const ENV_EPOCH_JUMP_NANOS: &str = "PATINA_RT_EPOCH_JUMP_NANOS";
 
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every eligible name
 /// resolution, applied by the `Context`. Off when unset.
-pub const ENV_DNS_LATENCY: &str = "PATINA_DNS_LATENCY_NANOS";
+pub const ENV_DNS_LATENCY: &str = "PATINA_RT_DNS_LATENCY_NANOS";
 
 /// The run's DNS host table as a JSON object (`NAME` -> dotted-quad `ADDR`).
 /// Semantic configuration, not a fault knob: names outside it are NXDOMAIN.
-pub const ENV_DNS_ENTRIES: &str = "PATINA_DNS_ENTRIES_JSON";
+pub const ENV_DNS_ENTRIES: &str = "PATINA_RT_DNS_ENTRIES_JSON";
 
 /// Enable cooperative-SUT (buggify) fault injection. Its value is the
 /// per-evaluation firing probability in per-mille for an active site (0..=1000);
 /// an empty value uses the FoundationDB default of 25% (250). Presence of the
 /// variable enables buggify; absence disables it (zero behavior change).
-pub const ENV_BUGGIFY: &str = "PATINA_BUGGIFY";
+pub const ENV_BUGGIFY: &str = "PATINA_RT_BUGGIFY";
 
 /// Per-run site activation probability in per-mille (0..=1000): the fraction of
 /// buggify sites made active for the run. Default 25% (250). Inert without
 /// [`ENV_BUGGIFY`].
-pub const ENV_BUGGIFY_ACTIVATION: &str = "PATINA_BUGGIFY_ACTIVATION_PERMILLE";
+pub const ENV_BUGGIFY_ACTIVATION: &str = "PATINA_RT_BUGGIFY_ACTIVATION_PERMILLE";
 
 /// Elapsed virtual nanoseconds since guest start after which buggify stops firing
 /// (the FoundationDB damage-control window). Default 300 virtual seconds. Inert
 /// without [`ENV_BUGGIFY`].
-pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_BUGGIFY_CUTOFF_NANOS";
+pub const ENV_BUGGIFY_CUTOFF: &str = "PATINA_RT_BUGGIFY_CUTOFF_NANOS";
 
 /// Declare that the guest calls `patina_dst::lifecycle::setup_complete()`, gating
 /// buggify off until that call. A false-y value (or absence) leaves it off.
 /// Inert without [`ENV_BUGGIFY`]. When set and the guest never calls
 /// `setup_complete()`, the run fails loudly at finalization.
-pub const ENV_BUGGIFY_AFTER_SETUP: &str = "PATINA_BUGGIFY_AFTER_SETUP";
+pub const ENV_BUGGIFY_AFTER_SETUP: &str = "PATINA_RT_BUGGIFY_AFTER_SETUP";
 
 /// Enable the PCT (Probabilistic Concurrency Testing) exploration scheduling
 /// policy. Its value is the target bug depth `d` (>= 1); an empty value uses the
 /// default depth. Presence enables PCT; absence leaves the default uniform
 /// policy (zero behavior change). Folds a `+pct` fingerprint component.
-pub const ENV_SCHED_PCT: &str = "PATINA_SCHED_PCT";
+pub const ENV_SCHED_PCT: &str = "PATINA_RT_SCHED_PCT";
 
 /// Expected schedule length over which PCT distributes its `d-1` priority-change
 /// points. Default [`DEFAULT_PCT_STEPS`]. Inert without [`ENV_SCHED_PCT`].
-pub const ENV_SCHED_PCT_STEPS: &str = "PATINA_SCHED_PCT_STEPS";
+pub const ENV_SCHED_PCT_STEPS: &str = "PATINA_RT_SCHED_PCT_STEPS";
 
 /// Enable the starvation-interval exploration scheduling policy. Its value is the
 /// number of bounded intervals to place (>= 1); an empty value uses the default
 /// count. Presence enables starvation; absence leaves it off. Folds a `+starve`
 /// fingerprint component.
-pub const ENV_SCHED_STARVE: &str = "PATINA_SCHED_STARVE";
+pub const ENV_SCHED_STARVE: &str = "PATINA_RT_SCHED_STARVE";
 
 /// Maximum length (scheduling decisions) of any starvation interval — the bound
 /// that keeps starvation liveness-safe. Default [`DEFAULT_STARVE_MAX_LEN`]. Inert
 /// without [`ENV_SCHED_STARVE`].
-pub const ENV_SCHED_STARVE_MAX_LEN: &str = "PATINA_SCHED_STARVE_MAX_LEN";
+pub const ENV_SCHED_STARVE_MAX_LEN: &str = "PATINA_RT_SCHED_STARVE_MAX_LEN";
 
 /// Window `[1, N]` over which starvation interval starts are placed. Default
 /// [`DEFAULT_STARVE_WINDOW`]. Inert without [`ENV_SCHED_STARVE`].
-pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_SCHED_STARVE_WINDOW";
+pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_RT_SCHED_STARVE_WINDOW";
 
 /// The yield stride of an instrumented guest's edge hook: an unsigned 32-bit
 /// count, 0 (the default) for no added scheduling points, N for one every Nth
 /// edge a thread executes. A non-zero stride is recorded in the schedule policy
 /// and folds a `+yieldstride` fingerprint component.
-pub const ENV_SCHED_YIELD_STRIDE: &str = "PATINA_SCHED_YIELD_STRIDE";
+pub const ENV_SCHED_YIELD_STRIDE: &str = "PATINA_RT_SCHED_YIELD_STRIDE";
 
 /// Enable swarm fault-class selection: a seed-derived subset of the enabled fault
 /// classes is applied this generation instead of all of them. A false-y value
 /// (or absence) keeps the existing always-all behavior. Folds a `+swarm`
 /// fingerprint component.
-pub const ENV_SWARM: &str = "PATINA_SWARM";
+pub const ENV_SWARM: &str = "PATINA_RT_SWARM";
 
 /// The compatibility-fingerprint component a supervisor folds (as `+buggify`)
 /// when a run arms cooperative-SUT injection, and the component swarm strips
@@ -504,17 +509,17 @@ pub const FINGERPRINT_BUGGIFY: &str = "buggify";
 /// Enable the generic liveness watchdog with a virtual-time no-progress budget in
 /// nanoseconds (armed from run start). A bare/empty value uses
 /// [`DEFAULT_LIVENESS_BUDGET_NANOS`].
-pub const ENV_LIVENESS_WATCHDOG: &str = "PATINA_LIVENESS_WATCHDOG_NANOS";
+pub const ENV_LIVENESS_WATCHDOG: &str = "PATINA_RT_LIVENESS_WATCHDOG_NANOS";
 
 /// Enable the heal-then-converge watchdog with a virtual-time convergence budget
 /// in nanoseconds, armed at the fault-window end. A bare/empty value uses
 /// [`DEFAULT_CONVERGE_BUDGET_NANOS`].
-pub const ENV_CONVERGE_WITHIN: &str = "PATINA_CONVERGE_WITHIN_NANOS";
+pub const ENV_CONVERGE_WITHIN: &str = "PATINA_RT_CONVERGE_WITHIN_NANOS";
 
 /// Explicit override for the heal-then-converge arm-time (virtual nanoseconds).
 /// When unset and converge is enabled, the runtime derives it from the buggify
 /// damage-control cutoff (if buggify is enabled) else 0.
-pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
+pub const ENV_HEAL_AFTER: &str = "PATINA_RT_HEAL_AFTER_NANOS";
 
 // Return codes for the shim's `patina_harness_install` C ABI, shared by the
 // native shim (which returns them) and `patina-dst-harness` (which maps them to
@@ -524,7 +529,7 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_HEAL_AFTER_NANOS";
 /// Harness install succeeded: the runtime is installed with the overlay applied.
 pub const HARNESS_OK: i32 = 0;
 
-/// No `PATINA_MODE` in the control plane: the harness binary was not run under
+/// No `PATINA_RT_MODE` in the control plane: the harness binary was not run under
 /// `cargo patina run --harness` (plain execution or missing supervisor protocol).
 pub const HARNESS_ERR_NOT_UNDER_PATINA: i32 = -1;
 

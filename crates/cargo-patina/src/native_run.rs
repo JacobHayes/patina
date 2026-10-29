@@ -11,7 +11,7 @@ use crate::native_build::{
     resolve_artifact, trace_has_buggify,
 };
 use crate::output;
-use crate::parse::{knob_env_pairs, knob_env_vars, liveness_env_pairs, schedule_env_pairs};
+use crate::parse::{knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
 use crate::run_cache::Image;
 use crate::{
     CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
@@ -470,9 +470,6 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
         // reaches the guest at all. Driven by `Report::ALL` rather than a
         // hand-kept list, so a report added to the runtime is silenceable on
         // native the day it exists.
-        if let Some(value) = env::var_os("PATINA_COMPUTE_WATCHDOG_MS") {
-            command.env("PATINA_COMPUTE_WATCHDOG_MS", value);
-        }
         for report in patina_dst_runtime::Report::ALL {
             if let Some(value) = env::var_os(report.env()) {
                 command.env(report.env(), value);
@@ -503,20 +500,16 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
         if let Some(budget) = invocation.step_budget {
             command.env(ENV_STEP_BUDGET, budget.to_string());
         }
-        // Forward whatever fault knobs the operator supplied to the guest,
-        // scrubbing every knob's variable first so an ambient value cannot leak
-        // into a run that set none. On record and seeded runs these configure
+        // Forward whatever fault knobs the operator supplied to the guest (its
+        // environment is cleared above). On record and seeded runs these configure
         // the faults and are recorded into the trace metadata. Native replay
         // does not accept semantic re-supply; the trace's recorded configuration
         // is authoritative and restored by the runtime.
-        for variable in knob_env_vars() {
-            command.env_remove(variable);
-        }
         for (name, value) in knob_env_pairs(&invocation.knobs)? {
             command.env(name, value);
         }
         // Forward the cooperative-SUT (buggify) knobs. Presence of
-        // `PATINA_BUGGIFY` enables buggify; its value (if any) is the firing
+        // `PATINA_RT_BUGGIFY` enables buggify; its value (if any) is the firing
         // per-mille. Like the fault knobs, these are recorded into trace metadata
         // and restored from the trace on native replay, rather than re-supplied
         // as semantic flags.
@@ -623,7 +616,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
         run.captured
     } else {
         // Hold the trace channel open until the child exits so the inherited
-        // descriptor named by `PATINA_TRACE_FD` stays valid.
+        // descriptor named by `PATINA_RT_TRACE_FD` stays valid.
         let replay_trace_file = replay_channel;
         let trace = trace_sink
             .as_ref()
@@ -889,6 +882,6 @@ pub(super) const STARVATION_STALL_EXIT: i32 = 111;
 #[cfg(not(unix))]
 pub(super) fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError> {
     Err(CliError(
-        "native-run requires a Unix host for the PATINA_TRACE_FD supervisor channel".into(),
+        "native-run requires a Unix host for the PATINA_RT_TRACE_FD supervisor channel".into(),
     ))
 }

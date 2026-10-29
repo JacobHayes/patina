@@ -18,7 +18,7 @@ use std::process::Command;
 use crate::CliError;
 
 /// The environment variable naming the inherited read end in a child.
-const ENV_LIFELINE_FD: &str = "PATINA_LIFELINE_FD";
+const ENV_LIFELINE_FD: &str = "PATINA_RT_LIFELINE_FD";
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;

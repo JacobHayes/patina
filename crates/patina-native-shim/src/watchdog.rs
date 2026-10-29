@@ -10,7 +10,7 @@ use std::sync::{Once, OnceLock};
 use super::TaskId;
 use patina_dst_runtime::RuntimeError;
 
-pub(crate) const ENV: &str = "PATINA_COMPUTE_WATCHDOG_MS";
+pub(crate) const ENV: &str = "PATINA_RT_COMPUTE_WATCHDOG_MS";
 const DEFAULT_MS: u64 = 10_000;
 static BOUND_MS: OnceLock<u64> = OnceLock::new();
 

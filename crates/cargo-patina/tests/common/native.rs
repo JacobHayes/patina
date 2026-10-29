@@ -282,10 +282,10 @@ impl Guest {
             .arg(&self.binary)
             .args(args)
             .envs([
-                ("PATINA_MODE", "record"),
-                ("PATINA_SEED", "1"),
-                ("PATINA_TRACE_FD", "3"),
-                ("PATINA_FINGERPRINT", "native-boundary"),
+                ("PATINA_RT_MODE", "record"),
+                ("PATINA_RT_SEED", "1"),
+                ("PATINA_RT_TRACE_FD", "3"),
+                ("PATINA_RT_FINGERPRINT", "native-boundary"),
             ]);
         let output = super::output_with_deadline(&mut command, Duration::from_secs(20))
             .expect("recorded standalone guest exceeded 20s");
@@ -304,10 +304,10 @@ impl Guest {
             .arg(&self.binary)
             .args(args)
             .envs([
-                ("PATINA_MODE", "replay"),
-                ("PATINA_SEED", "1"),
-                ("PATINA_TRACE_FD", "3"),
-                ("PATINA_FINGERPRINT", "native-boundary"),
+                ("PATINA_RT_MODE", "replay"),
+                ("PATINA_RT_SEED", "1"),
+                ("PATINA_RT_TRACE_FD", "3"),
+                ("PATINA_RT_FINGERPRINT", "native-boundary"),
             ]);
         super::output_with_deadline(&mut command, Duration::from_secs(20))
             .expect("replayed standalone guest exceeded 20s")

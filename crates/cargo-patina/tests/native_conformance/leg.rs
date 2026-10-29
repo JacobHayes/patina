@@ -3,8 +3,8 @@
 use super::hang::HangWatch;
 use super::oracle::{Oracle, judge_native, prefixed, tail, undeclared_death, with_stderr};
 use super::process::{
-    DIRECT_SEED, FINGERPRINT, PATINA_SEED, RUN_DEADLINE, direct_observation, envelope_observation,
-    pin_process_state, probes, run, text,
+    DIRECT_SEED, FINGERPRINT, PATINA_RT_SEED, RUN_DEADLINE, direct_observation,
+    envelope_observation, pin_process_state, probes, run, text,
 };
 use crate::common;
 use patina_dst_conformance::catalog::{self, Need, Scenario};
@@ -143,7 +143,7 @@ impl Leg<'_> {
     fn patina(&self, record: Option<&Path>) -> Result<Observation, String> {
         let binary = probes().patina.display().to_string();
         let trace = record.map(|path| path.display().to_string());
-        let mut arguments = vec!["run", &binary, "--seed", PATINA_SEED, "--format", "json"];
+        let mut arguments = vec!["run", &binary, "--seed", PATINA_RT_SEED, "--format", "json"];
         if let Some(trace) = &trace {
             arguments.extend(["--record", trace, "--fingerprint", FINGERPRINT]);
         }
@@ -254,8 +254,8 @@ impl Leg<'_> {
         command
             .args(self.args())
             .env_remove("LD_LIBRARY_PATH")
-            .env("PATINA_MODE", "seeded")
-            .env("PATINA_SEED", DIRECT_SEED);
+            .env("PATINA_RT_MODE", "seeded")
+            .env("PATINA_RT_SEED", DIRECT_SEED);
         let output = run(&mut command)?;
         self.keep(
             if strace_log.is_some() {

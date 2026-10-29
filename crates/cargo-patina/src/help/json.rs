@@ -55,6 +55,10 @@ fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
         }
     }
     m.insert("doc".into(), J::from(flag.doc));
+    // The `PATINA_<FLAG>` variable that defaults this flag when it is not typed.
+    if let Some(env) = flag.env_name() {
+        m.insert("env".into(), J::from(env));
+    }
     if flag.repeatable {
         m.insert("repeatable".into(), J::from(true));
     }

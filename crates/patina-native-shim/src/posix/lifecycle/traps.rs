@@ -111,8 +111,8 @@ unsafe fn auxv(envp: *const *const c_char) -> *mut [usize; 2] {
     }
 }
 
-/// The decimal value of the `name=` entry (`PATINA_SEED=`,
-/// `PATINA_INCARNATION=`) of the still-intact environment, or 0.
+/// The decimal value of the `name=` entry (`PATINA_RT_SEED=`,
+/// `PATINA_RT_INCARNATION=`) of the still-intact environment, or 0.
 unsafe fn env_u64(envp: *const *const c_char, name: &[u8]) -> u64 {
     let mut entry = envp;
     unsafe {
@@ -157,8 +157,8 @@ unsafe fn determinize_at_random(envp: *const *const c_char) {
     // boot is its own (`Incarnation::stream_root`).
     let (seed, incarnation) = unsafe {
         (
-            env_u64(envp, b"PATINA_SEED="),
-            env_u64(envp, b"PATINA_INCARNATION="),
+            env_u64(envp, b"PATINA_RT_SEED="),
+            env_u64(envp, b"PATINA_RT_INCARNATION="),
         )
     };
     let mut state = patina_dst_runtime::incarnation_seed(seed, incarnation) ^ 0x5241_4E44_4F4D_0001;
@@ -265,10 +265,10 @@ fn regions(maps: &[u8]) -> Result<(), ()> {
 /// Main-thread SUD setup, before guest constructors. Arms only a managed run
 /// on a SUD-capable kernel. The libc frame restorer is captured even for a
 /// standalone run: Rust std registers handlers before reporting
-/// NotUnderPatina. A standalone run (no PATINA_MODE) stays unarmed: its first
+/// NotUnderPatina. A standalone run (no PATINA_RT_MODE) stays unarmed: its first
 /// interposed boundary already fails closed.
 pub(super) unsafe fn sud_init(envp: *const *const c_char, probe: bool) {
-    let managed = unsafe { env_has(envp, b"PATINA_MODE") };
+    let managed = unsafe { env_has(envp, b"PATINA_RT_MODE") };
     // Kernel independent: before the probe below can return early.
     if managed {
         unsafe { determinize_at_random(envp) };
@@ -329,7 +329,7 @@ pub(super) unsafe fn sud_init(envp: *const *const c_char, probe: bool) {
 pub(super) unsafe fn tsc_init(envp: *const *const c_char) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        if !env_has(envp, b"PATINA_MODE") {
+        if !env_has(envp, b"PATINA_RT_MODE") {
             return;
         }
         let prctl = arming::prctl().or_else(resolve_prctl);
@@ -389,7 +389,7 @@ pub(super) unsafe fn tsc_init(envp: *const *const c_char) {
 /// trap took SIGSEGV where it arms, and arm the main thread's private signal
 /// stack. The host action carries no guest flags yet: `front_action` adds them.
 pub(super) unsafe fn fault_front_init(envp: *const *const c_char) {
-    if !unsafe { env_has(envp, b"PATINA_MODE") } {
+    if !unsafe { env_has(envp, b"PATINA_RT_MODE") } {
         return;
     }
     let Some(sigaction) = real_sigaction() else {

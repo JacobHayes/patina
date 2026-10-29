@@ -16,7 +16,7 @@ fn libc_waits_answer_an_interrupting_signal_as_glibc_does() {
         let output = assert_standalone_success(
             &g.binary,
             &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+            &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")],
         );
         assert_eq!(output.stdout, b"NATIVE_SIGNAL_READINESS_OK\n", "{case}");
     }
@@ -43,7 +43,7 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
     use std::os::unix::process::ExitStatusExt;
     let native = assert_build_c_guest("signals/segv_routing.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/segv_routing.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")];
     for case in [
         "overflow",
         "raise",
@@ -101,7 +101,7 @@ fn a_guest_segv_handler_gets_what_the_kernel_would_give_it() {
 #[cfg(target_os = "linux")]
 fn assert_delivery_stack_cost(native: &Guest, patina: &Guest) {
     use std::io::Write;
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")];
     let costs = |binary: &std::path::Path, env: &[(&str, &str)]| -> Vec<usize> {
         let output = assert_standalone_success(binary, &["route-cost"], env);
         let line = text(&output.stdout)
@@ -177,7 +177,7 @@ fn assert_delivery_stack_cost(native: &Guest, patina: &Guest) {
 #[test]
 fn handlers_run_on_the_stacks_they_ask_for() {
     let native = assert_build_c_guest("signals/small_stack.c", CLink::Unlinked);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "3")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "3")];
     let cases = [
         "altstack",
         "autodisarm",
@@ -303,7 +303,7 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
     }
     let native = assert_build_c_guest("signals/frame_abandon.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/frame_abandon.c", CLink::PosixShimPlanted);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "5")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "5")];
     let keys = ["handled", "beneath", "over"];
     for (case, expect) in cases {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
@@ -341,7 +341,7 @@ fn handlers_leaving_shim_calls_leave_no_shim_frames() {
 fn a_held_back_signal_survives_a_jump_out_of_its_handler() {
     let native = assert_build_c_guest("signals/held_back_escape.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/held_back_escape.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "2")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "2")];
     let oracle = assert_standalone_success(&native.binary, &[], &[]);
     let output = assert_standalone_success(&patina.binary, &[], &env);
     assert_eq!(text(&output.stdout), text(&oracle.stdout));
@@ -360,7 +360,7 @@ fn a_held_back_signal_survives_a_jump_out_of_its_handler() {
 fn delivery_batches_build_their_frames_as_the_kernel_does() {
     let native = assert_build_c_guest("signals/batch_order.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/batch_order.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "4")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "4")];
     let mut cases = vec![
         "nodefer".to_owned(),
         "nodefer-jump".to_owned(),
@@ -389,7 +389,7 @@ fn delivery_batches_build_their_frames_as_the_kernel_does() {
 fn a_door_writes_its_errno_after_its_handlers() {
     let native = assert_build_c_guest("signals/errno_order.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/errno_order.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "6")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "6")];
     for case in ["entry", "restart"] {
         let oracle = assert_standalone_success(&native.binary, &[case], &[]);
         let output = assert_standalone_success(&patina.binary, &[case], &env);
@@ -406,7 +406,7 @@ fn a_door_writes_its_errno_after_its_handlers() {
 fn delivery_under_rust_scope_stops_by_name() {
     use std::os::unix::process::ExitStatusExt;
     let g = assert_build_c_guest("signals/drive_under_scope.c", CLink::PosixShimPlanted);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")];
     let output = standalone_output(&g.binary, &[], &env);
     assert_eq!(output.status.signal(), Some(6), "{output:?}");
     assert!(text(&output.stderr).contains("not modeled"), "{output:?}");
@@ -429,7 +429,7 @@ fn synchronous_signals_meet_the_action_the_kernel_would_give_them() {
     use std::os::unix::process::ExitStatusExt;
     let native = assert_build_c_guest("signals/fault_routing.c", CLink::Unlinked);
     let patina = assert_build_c_guest("signals/fault_routing.c", CLink::PosixShim);
-    let env = [("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")];
+    let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")];
     let oracle = assert_standalone_success(&native.binary, &["swap-escape"], &[]);
     let output = assert_standalone_success(&patina.binary, &["swap-escape"], &env);
     assert_eq!(text(&output.stdout), text(&oracle.stdout));
@@ -480,7 +480,7 @@ fn a_handler_frame_cannot_block_the_containment_signals() {
         let output = standalone_output(
             &patina.binary,
             &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "7")],
+            &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "7")],
         );
         assert!(
             output.status.success(),
@@ -524,7 +524,7 @@ fn thread_registrations_are_the_virtual_kernels() {
         let output = assert_standalone_success(
             &g.binary,
             &[case],
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", seed)],
+            &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", seed)],
         );
         text(&output.stdout).to_owned()
     };

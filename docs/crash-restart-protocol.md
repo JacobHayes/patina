@@ -59,7 +59,7 @@ The seal is deliberately exposed as a `seal` / `open` API with a `HandoffSealKey
 
 The supervisor runs a seeded or record run whenever `--crash-permille` is above zero, and runs a replay whenever its trace records a crash. In either case it launches incarnation 0 with a handoff channel, a crash-report pipe and a seal key derived from the run seed and the crash kind.
 
-When the crash lands, the runtime turns it into an internal termination control the guest cannot catch. The control follows the operation that completed at the crash point. The shim seals the handoff and terminates with `_exit`. The supervisor validates the handoff, including that its kind is the run's, then starts exactly one fresh incarnation. That incarnation gets the snapshot as its base image, clean descriptor state, and the handoff's realtime (`PATINA_RESTART_REALTIME_NANOS`).
+When the crash lands, the runtime turns it into an internal termination control the guest cannot catch. The control follows the operation that completed at the crash point. The shim seals the handoff and terminates with `_exit`. The supervisor validates the handoff, including that its kind is the run's, then starts exactly one fresh incarnation. That incarnation gets the snapshot as its base image, clean descriptor state, and the handoff's realtime (`PATINA_RT_RESTART_REALTIME_NANOS`).
 
 Both incarnations get the same configuration and run seed. A run whose rate never hits is an ordinary single-incarnation run that the supervisor watched, reported as `crash_restart.terminal_outcome.kind = "exited_without_crash"`.
 
@@ -78,7 +78,7 @@ A corrupt handoff is a named supervisor error (`PATINA_CRASH_INVALID_HANDOFF`).
 
 ### Crash reports
 
-Incarnation 0 reports its crash on a supervisor-owned pipe (`PATINA_CRASH_REPORT_FD`) as framed `CrashReport` records. The supervisor decides whether a crash was attempted from these reports alone, never from an exit status the guest could also produce. A pipe write is subject to neither a file size limit nor `SIGXFSZ`.
+Incarnation 0 reports its crash on a supervisor-owned pipe (`PATINA_RT_CRASH_REPORT_FD`) as framed `CrashReport` records. The supervisor decides whether a crash was attempted from these reports alone, never from an exit status the guest could also produce. A pipe write is subject to neither a file size limit nor `SIGXFSZ`.
 
 - `Attempting` goes out as soon as the crash lands, before the snapshot export and before any recording I/O.
 - `HandedOver` follows once the sealed handoff is written in full.

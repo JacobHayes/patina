@@ -642,7 +642,7 @@ fn campaign_continuation_refusals_are_loud() {
         Command::new(patina)
             .current_dir(cwd)
             .args(["run", module_arg])
-            .env("PATINA_EXPECTED_SUPERVISOR_SHA256", digest)
+            .env("PATINA_RT_EXPECTED_SUPERVISOR_SHA256", digest)
             .output()
             .unwrap()
     };

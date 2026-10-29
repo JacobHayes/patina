@@ -439,7 +439,7 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
         abort_preinit_interposed_call();
     }
-    // Deferred harness init (PATINA_DEFER_INIT=1, `cargo patina run --harness`):
+    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `cargo patina run --harness`):
     // the harness owns installation, so an effect that arrives with no context
     // installed and no install yet performed ran BEFORE `patina_harness_install`.
     // Do NOT auto-init from the env — that would race the harness's overlay and
@@ -463,7 +463,7 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
         }
     }
     let message: &[u8] = b"patina: this binary was built with `cargo patina build` and must \
-run under `cargo patina run` (or with the PATINA_MODE protocol set); no deterministic runtime is installed\n";
+run under `cargo patina run` (or with the PATINA_RT_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
     crate::host_abort();
 }
@@ -835,7 +835,7 @@ fn required_control_string(name: &str) -> Result<String, RuntimeError> {
         .ok_or_else(|| RuntimeError::Config(format!("{name} is required")))
 }
 
-/// Parse `PATINA_FACTS_FD` from the control plane, mirroring `control_trace_fd`.
+/// Parse `PATINA_RT_FACTS_FD` from the control plane, mirroring `control_trace_fd`.
 /// Present only when the supervisor asked for the structured run-facts document.
 pub(crate) fn control_facts_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_FACTS_FD)
@@ -893,7 +893,7 @@ pub(crate) fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
-/// Parse `PATINA_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
+/// Parse `PATINA_RT_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
 /// Present only when `native-run --mount` streamed a captured host directory.
 fn control_restart_snapshot_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD)
@@ -946,7 +946,7 @@ fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
 }
 
 /// Build the deterministic filesystem for a native run. When
-/// `PATINA_FS_IMAGE_FD` is set (`native-run --mount`), rebuild the streamed
+/// `PATINA_RT_FS_IMAGE_FD` is set (`native-run --mount`), rebuild the streamed
 /// read-only corpus image and wrap it in the same crash-modeling `CrashFs` used
 /// otherwise, so the crash knobs compose identically with a mount.
 /// Absent the knob, an empty `CrashFs`, exactly as before. `FsImage::decode`

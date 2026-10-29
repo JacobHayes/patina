@@ -65,8 +65,8 @@ mod tests {
             &fixture,
             &["replay", ".", facts_trace.to_str().unwrap()],
             &[
-                ("PATINA_REALTIME_EPOCH_NANOS", "7"),
-                ("PATINA_GUEST_HOSTNAME", "ambient"),
+                ("PATINA_RT_REALTIME_EPOCH_NANOS", "7"),
+                ("PATINA_RT_GUEST_HOSTNAME", "ambient"),
             ],
         );
         assert!(

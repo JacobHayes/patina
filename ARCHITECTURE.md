@@ -60,9 +60,9 @@ trace format.
   point. A metered run defaults `GOMAXPROCS=1`.
 - **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
   configures the run in code, then runs ordinary `std` code under the shim's
-  global runtime. `--harness` sets `PATINA_DEFER_INIT=1`, so the constructor
+  global runtime. `--harness` sets `PATINA_RT_DEFER_INIT=1`, so the constructor
   scrubs the control plane but leaves installation to
-  `patina_harness_install`. Its overlay flows through the same `PATINA_*`
+  `patina_harness_install`. Its overlay flows through the same `PATINA_RT_*`
   values and `RuntimeConfig` fields as the CLI, so replay reconciliation
   covers it. Run without Patina, it returns `NotUnderPatina`.
 - **Cargo package, in process** (usage mode 3). Code performs effects through
@@ -225,7 +225,7 @@ diagnostic, and `getenv` answers NULL.
 These concerns are kept out of the interposed data plane:
 
 - **Trace channel.** The supervisor passes an inherited host descriptor
-  (`PATINA_TRACE_FD`); the shim reads and writes bundles through private host
+  (`PATINA_RT_TRACE_FD`); the shim reads and writes bundles through private host
   aliases, never through the interposed file symbols.
 - **Captured stdio.** The descriptions 1 and 2 name at startup are capture
   sinks; on Linux each write also goes through to the host descriptor. The
@@ -238,7 +238,7 @@ These concerns are kept out of the interposed data plane:
   records it. After startup the environment is guest memory
   (`src/posix_env.rs`), reproduced by re-execution, not recorded. `--cwd` and
   the umask work the same way; the working directory is held as a node.
-- **Knob resolution.** Every `PATINA_*` knob is resolved once, at
+- **Knob resolution.** Every `PATINA_RT_*` knob is resolved once, at
   configuration time. The runtime never reads the process environment after
   installation. Report suppressors travel one table
   (`patina_dst_runtime::Report`) and are presentation only.

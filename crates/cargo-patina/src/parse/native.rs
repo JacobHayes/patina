@@ -19,11 +19,13 @@ pub(crate) fn parse_native_harness_from(
         ));
     }
     let args = cli::parse("test", help::Family::Harness, selection.rest)?;
-    let seed = args.u64("--seed");
-    let seeds = args.u64("--seeds");
-    if seed.is_some() && seeds.is_some() {
-        return Err(CliError::usage("--seed and --seeds are mutually exclusive"));
-    }
+    let (seed, seeds) = args.exclusive(
+        "--seed",
+        "--seeds",
+        "--seed and --seeds are mutually exclusive",
+    )?;
+    let seed = args.u64("--seed").filter(|_| seed);
+    let seeds = args.u64("--seeds").filter(|_| seeds);
     if let Some(count) = seeds
         && (count == 0 || count > 1_000_000)
     {
@@ -32,7 +34,10 @@ pub(crate) fn parse_native_harness_from(
     Ok(NativeHarnessInvocation {
         origin,
         manifest,
-        package: selection.package,
+        package: match selection.package {
+            Some(package) => Some(package),
+            None => env_text(cli::flag("test", "--package"))?,
+        },
         harness_target: args.string("--harness-target").ok_or_else(|| {
             CliError::usage("test native harness mode requires --harness-target <NAME>")
         })?,
@@ -256,7 +261,7 @@ pub(crate) fn parse_native_run_from(
     let seed = args.u64("--seed").unwrap_or(0);
     let record = args.path("--record");
     // The label is only ever read back off a recorded trace, and the seeded
-    // control plane sets no `PATINA_FINGERPRINT` at all, so `--fingerprint` is
+    // control plane sets no `PATINA_RT_FINGERPRINT` at all, so `--fingerprint` is
     // registered as dependent on `--record` (see the native run group in
     // `help.rs`): a seeded run carrying one is refused by the generic registry
     // check rather than silently discarding it.

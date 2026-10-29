@@ -125,12 +125,25 @@ pub fn options() -> &'static OutputOptions {
 pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>), CliError> {
     let flags: Vec<&'static Flag> = help::GLOBAL_OUTPUT.iter().collect();
     let (found, rest) = crate::cli::strip(&flags, arguments)?;
+    // A typed flag wins; otherwise its `PATINA_<FLAG>` default applies.
+    let value = |name: &str| -> Result<Option<OsString>, CliError> {
+        match crate::cli::single(&found, name)? {
+            Some(value) => Ok(Some(value)),
+            None => crate::cli::env_value(
+                flags
+                    .iter()
+                    .copied()
+                    .find(|flag| flag.name == name)
+                    .expect("global output flag"),
+            ),
+        }
+    };
     let mut options = OutputOptions::default();
-    if let Some(value) = crate::cli::single(&found, "--format")? {
-        options.format = parse_format(&value.to_string_lossy())?;
+    if let Some(format) = value("--format")? {
+        options.format = parse_format(&format.to_string_lossy())?;
     }
-    options.render = crate::cli::single(&found, "--render")?.map(PathBuf::from);
-    options.report = crate::cli::single(&found, "--report")?.map(PathBuf::from);
+    options.render = value("--render")?.map(PathBuf::from);
+    options.report = value("--report")?.map(PathBuf::from);
     Ok((options, rest))
 }
 

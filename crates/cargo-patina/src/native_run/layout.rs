@@ -388,15 +388,15 @@ mod tests {
     fn the_control_plane_never_resizes_the_initial_stack() {
         let mut seeded = launch(
             "/a/guest",
-            &[("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")],
+            &[("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", "1")],
         );
         let mut recorded = launch(
             "/a/longer/checkout/guest",
             &[
-                ("PATINA_MODE", "record"),
-                ("PATINA_SEED", "1"),
-                ("PATINA_TRACE_FD", "11"),
-                ("PATINA_FINGERPRINT", "native-boundary-v1"),
+                ("PATINA_RT_MODE", "record"),
+                ("PATINA_RT_SEED", "1"),
+                ("PATINA_RT_TRACE_FD", "11"),
+                ("PATINA_RT_FINGERPRINT", "native-boundary-v1"),
             ],
         );
         assert_ne!(initial_stack(&seeded), initial_stack(&recorded));
@@ -407,7 +407,7 @@ mod tests {
         // A control plane past the reservation cannot be padded and is refused.
         let mut oversized = launch(
             "/guest",
-            &[("PATINA_PARAMS_JSON", &"x".repeat(RESERVED_BYTES))],
+            &[("PATINA_RT_PARAMS_JSON", &"x".repeat(RESERVED_BYTES))],
         );
         assert!(pad_initial_stack(&mut oversized, ENVP_SLOT_PREFIX, 0).is_err());
     }

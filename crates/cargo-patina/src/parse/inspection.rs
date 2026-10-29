@@ -62,10 +62,16 @@ fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents
         filters.op_kinds = kinds.into_iter().map(str::to_string).collect();
         filters.categories = categories.into_iter().collect();
     }
-    if filters.first.is_some() && filters.last.is_some() {
-        return Err(CliError::usage(
-            "--first and --last are mutually exclusive for trace events",
-        ));
+    let (first, last) = args.exclusive(
+        "--first",
+        "--last",
+        "--first and --last are mutually exclusive for trace events",
+    )?;
+    if !first {
+        filters.first = None;
+    }
+    if !last {
+        filters.last = None;
     }
     Ok(trace_cmd::TraceEvents {
         path: scan

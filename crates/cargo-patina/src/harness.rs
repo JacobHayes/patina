@@ -12,7 +12,7 @@ use crate::shim_build::{
 };
 use crate::{
     ArtifactRef, CliError, ExploreInvocation, ExploreTarget, Mode, NativeHarnessInvocation,
-    NativeRunMode, execute, exit_code, output,
+    NativeRunMode, cli, execute, exit_code, output,
 };
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -20,22 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs};
 
-fn shell_quote(value: &OsStr) -> String {
-    let text = value.to_string_lossy();
-    if !text.is_empty()
-        && text.chars().all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '+' | ',')
-        })
-    {
-        return text.into_owned();
-    }
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
 fn command_line(prefix: &str, args: &[OsString]) -> String {
     let mut parts = vec![prefix.to_string()];
-    parts.extend(args.iter().map(|arg| shell_quote(arg)));
+    parts.extend(args.iter().map(|arg| cli::shell_quote(arg)));
     parts.join(" ")
 }
 
@@ -79,8 +66,13 @@ fn command_with_seed(args: &[OsString], seed: u64) -> Vec<OsString> {
     out
 }
 
+/// Explore ran the wrapped command in this process, so the flag defaults in
+/// its environment shaped every seed; the repro carries them.
 fn exploration_repro(wrapped_command: &[OsString], seed: u64) -> String {
-    command_line("cargo patina", &command_with_seed(wrapped_command, seed))
+    cli::with_env_defaults(command_line(
+        "cargo patina",
+        &command_with_seed(wrapped_command, seed),
+    ))
 }
 
 struct BuiltNativeHarness {
@@ -807,14 +799,17 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
         Some(trace) => (
             trace.path.clone(),
             format!(
-                "\n    cargo patina replay {} {}{}",
-                shell_quote(failure.built.guest.as_os_str()),
-                shell_quote(OsStr::new(&trace.path)),
-                if failure.invocation.allow_randomized_layout {
-                    " --allow-randomized-address-layout"
-                } else {
-                    ""
-                }
+                "\n    {}",
+                cli::without_env_defaults(format!(
+                    "cargo patina replay {} {}{}",
+                    cli::shell_quote(failure.built.guest.as_os_str()),
+                    cli::shell_quote(OsStr::new(&trace.path)),
+                    if failure.invocation.allow_randomized_layout {
+                        " --allow-randomized-address-layout"
+                    } else {
+                        ""
+                    }
+                ))
             ),
         ),
         None => ("not produced".to_string(), String::new()),
@@ -874,7 +869,8 @@ fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> Stri
         args.push(OsString::from("--instrument"));
     }
     append_native_harness_run_flags(&mut args, invocation);
-    command_line("cargo patina", &args)
+    // Each seed ran as an isolated child from these resolved flags alone.
+    cli::without_env_defaults(command_line("cargo patina", &args))
 }
 
 fn indent_tail(text: &str, max_lines: usize) -> String {

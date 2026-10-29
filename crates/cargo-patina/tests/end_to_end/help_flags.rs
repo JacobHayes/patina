@@ -6,7 +6,7 @@ mod tests {
 
     #[test]
     fn the_cargo_family_accepts_buggify_flags_and_scrubs_an_ambient_control_plane() {
-        // Buggify was reachable from the Cargo family only through PATINA_BUGGIFY* in
+        // Buggify was reachable from the Cargo family only through PATINA_RT_BUGGIFY* in
         // the caller's environment: the runtime path was always family-neutral, but
         // the parser omitted the flags. Now `run`/`test` carry them like every other
         // family — and, like the fault knobs, scrub the ambient control plane so a
@@ -40,7 +40,7 @@ mod tests {
         );
 
         // `replay` registers no buggify flag — the trace is authoritative — so an
-        // ambient PATINA_BUGGIFY has no CLI meaning there. Before the scrub it would
+        // ambient PATINA_RT_BUGGIFY has no CLI meaning there. Before the scrub it would
         // still have reached the guest's own control-plane read and buggified a
         // replay of a buggify-free recording, which is a corrupted reproduction.
         let trace = directory.path().join("clean.patina");
@@ -55,16 +55,16 @@ mod tests {
             patina,
             &fixture,
             &["replay", ".", trace.to_str().unwrap()],
-            &[("PATINA_BUGGIFY", "900")],
+            &[("PATINA_RT_BUGGIFY", "900")],
         );
         let stderr = String::from_utf8_lossy(&replayed.stderr);
         assert!(
             replayed.status.success(),
-            "replay under an ambient PATINA_BUGGIFY failed:\n{stderr}"
+            "replay under an ambient PATINA_RT_BUGGIFY failed:\n{stderr}"
         );
         assert!(
             !stderr.contains("PATINA_SDK_REPORT enabled=1"),
-            "an ambient PATINA_BUGGIFY buggified a replay of a buggify-free trace:\n{stderr}"
+            "an ambient PATINA_RT_BUGGIFY buggified a replay of a buggify-free trace:\n{stderr}"
         );
     }
 
@@ -306,6 +306,128 @@ mod tests {
             param.get("short").is_none(),
             "a short-less flag omits the `short` key entirely (absent means none)"
         );
+    }
+
+    /// Every flag defaults from its `PATINA_<FLAG>` variable: a typed flag wins,
+    /// then a non-empty variable, then the built-in default. `trace events` on a
+    /// committed fixture observes this without building anything.
+    #[test]
+    fn flag_env_defaults_yield_to_typed_flags() {
+        let directory = tempdir().unwrap();
+        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../patina-trace/tests/fixtures/current-crash-restart.patina"
+        );
+        let events = |arguments: &[&str], envs: &[(&str, &str)]| -> Vec<String> {
+            let mut all = vec!["trace", "events", fixture];
+            all.extend_from_slice(arguments);
+            let output = invoke_unchecked_clean_env(patina, directory.path(), &all, envs);
+            assert!(
+                output.status.success(),
+                "trace events {arguments:?} with {envs:?} failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        };
+
+        let all = events(&[], &[]);
+        assert!(
+            all.len() > 2,
+            "fixture too small to observe --first: {all:?}"
+        );
+        // Env over default.
+        assert_eq!(events(&[], &[("PATINA_FIRST", "2")]), all[..2]);
+        // Typed over env.
+        assert_eq!(
+            events(&["--first", "1"], &[("PATINA_FIRST", "2")]),
+            all[..1]
+        );
+        // A typed flag also beats a variable it is mutually exclusive with.
+        assert_eq!(
+            events(&["--last", "1"], &[("PATINA_FIRST", "2")]),
+            all[all.len() - 1..]
+        );
+        // An empty variable is unset.
+        assert_eq!(events(&[], &[("PATINA_FIRST", "")]), all);
+        // A switch: false-y is off, anything else is on.
+        let notable = events(&["--notable"], &[]);
+        assert_ne!(notable, all, "fixture cannot tell --notable apart");
+        assert_eq!(events(&[], &[("PATINA_NOTABLE", "off")]), all);
+        assert_eq!(events(&[], &[("PATINA_NOTABLE", "1")]), notable);
+        // A pre-pass global flag reads its variable too, and still yields.
+        let json = events(&[], &[("PATINA_FORMAT", "json")]);
+        assert!(
+            json.iter()
+                .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok()),
+            "PATINA_FORMAT=json did not select JSON: {json:?}"
+        );
+        assert_eq!(
+            events(&["--format", "human"], &[("PATINA_FORMAT", "json")]),
+            all
+        );
+
+        // A selector's default routes like the typed selector: `--generation`
+        // takes no `-- <ORACLE>`, so the reduction reaches its out-dir check.
+        let missing = directory.path().join("no-campaign");
+        let routed = invoke_unchecked_clean_env(
+            patina,
+            directory.path(),
+            &["minimize", "--out-dir", missing.to_str().unwrap()],
+            &[("PATINA_GENERATION", "14")],
+        );
+        let typed = invoke_unchecked_clean_env(
+            patina,
+            directory.path(),
+            &[
+                "minimize",
+                "--generation",
+                "14",
+                "--out-dir",
+                missing.to_str().unwrap(),
+            ],
+            &[],
+        );
+        assert_eq!(routed.stderr, typed.stderr);
+
+        // A malformed default names the variable it came from.
+        let bad = invoke_unchecked_clean_env(
+            patina,
+            directory.path(),
+            &["trace", "events", fixture],
+            &[("PATINA_FIRST", "many")],
+        );
+        assert!(!bad.status.success());
+        assert!(
+            String::from_utf8_lossy(&bad.stderr).contains("PATINA_FIRST"),
+            "a malformed env default did not name its variable:\n{}",
+            String::from_utf8_lossy(&bad.stderr)
+        );
+    }
+
+    /// Help shows each flag's environment variable, in both renderings.
+    #[test]
+    fn help_names_each_flags_env_variable() {
+        let directory = tempdir().unwrap();
+        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let human = invoke_unchecked_clean_env(patina, directory.path(), &["trace", "--help"], &[]);
+        assert!(human.status.success());
+        assert!(String::from_utf8_lossy(&human.stdout).contains("PATINA_FIRST"));
+
+        let json = invoke_unchecked_clean_env(
+            patina,
+            directory.path(),
+            &["trace", "--help", "--format", "json"],
+            &[],
+        );
+        assert!(json.status.success());
+        let payload: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        let groups = &payload["verb"]["flag_groups"];
+        let first = e2e_find_flag(groups, "--first").expect("trace --first");
+        assert_eq!(first["env"], "PATINA_FIRST");
     }
 
     /// Every flag `name` across an array of `{title, flags}` groups.
