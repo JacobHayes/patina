@@ -277,9 +277,9 @@ guest and every dependency are extra oracles, frames stay exact for triage,
 and `--yield-stride` sees more edges to preempt.
 Use `--release` (on `run`, or `build --release` then `run`) for performance
 measurement, long campaigns once the hunt is over, and release-only codegen
-paths. `--instrument` binaries emit edge coverage (`--coverage-out`,
-`cargo patina coverage`), which campaigns accumulate and `campaign --guided`
-uses to bias generations toward new coverage.
+paths. `--instrument` binaries and Go guests emit edge coverage
+(`--coverage-out`, `cargo patina coverage`), which campaigns accumulate and
+`campaign --guided` uses to bias generations toward new coverage.
 
 ### proptest
 

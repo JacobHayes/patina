@@ -27,11 +27,11 @@ pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c"
 /// under `--instrument`, alongside (and overridden by) `PATINA_SANCOV_C`.
 pub(super) const PATINA_SANCOV_STUB_C: &str = include_str!("../c/patina_sancov_stub.c");
 /// Marker string the instrumented build's hook embeds; `run` looks for it in the
-/// binary to know it carries edge counters and honours `--yield-stride`, and to
-/// fold that into the compatibility fingerprint.
+/// binary to know it carries the edge hook (counters and `--yield-stride`), and
+/// to fold that into the compatibility fingerprint.
 const PATINA_INSTRUMENTED_MARKER: &[u8] = b"PATINA_INSTRUMENTED_V1";
-/// Fingerprint suffix distinguishing an instrumented binary from a plain one, so
-/// their recorded traces never cross-replay.
+/// Fingerprint suffix distinguishing an `--instrument` binary from a plain one,
+/// so their recorded traces never cross-replay.
 const PATINA_INSTRUMENTED_FINGERPRINT_SUFFIX: &str = "+instrumented";
 pub(super) const DEFAULT_NATIVE_EDITION: &str = "2024";
 
@@ -791,22 +791,42 @@ pub(super) fn native_package_link_args(
     args
 }
 
-/// Whether the program whose bytes are `image` was built with `--instrument`,
-/// recovered from the linked hook's embedded marker.
+/// What a program's build linked in to observe and steer it, recovered from the
+/// markers its linked objects embed.
 ///
-/// This classification is load-bearing: it selects the compatibility-fingerprint
-/// suffix and decides whether `--coverage-out` and `--yield-stride` have a hook
-/// to act on, so it reads the bytes the run is about to execute rather than
+/// The two properties are separate because Go guests have one without the
+/// other. An `--instrument` build's trace-pc-guard hook keeps edge counters AND
+/// takes `--yield-stride` scheduling points. A Go guest's libFuzzer
+/// instrumentation keeps 8-bit edge counters, but its hooks are the compute
+/// meter's, so it has no yield hook. This classification is load-bearing: it
+/// decides whether `--coverage-out` and a campaign's coverage have counters to
+/// read, whether `--yield-stride` has a hook to act on, and the fingerprint
+/// suffix, so it reads the bytes the run is about to execute rather than
 /// trusting a flag to be re-passed.
-pub(super) fn binary_instrumented(image: &[u8]) -> bool {
-    memchr::memmem::find(image, PATINA_INSTRUMENTED_MARKER).is_some()
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Instrumentation {
+    /// The shim has edge counters to write as coverage.
+    pub(crate) edge_counters: bool,
+    /// The `--instrument` edge hook, which takes `--yield-stride` points.
+    pub(crate) yield_hook: bool,
 }
 
-/// Append the instrumentation suffix to a base fingerprint, leaving a plain
-/// binary's fingerprint untouched, so an instrumented binary and a plain one
-/// never cross-replay.
-pub(super) fn instrumentation_fingerprint(base: &str, instrumented: bool) -> String {
-    if instrumented {
+/// The instrumentation of the program whose bytes are `image`.
+pub(super) fn binary_instrumentation(image: &[u8]) -> Instrumentation {
+    let yield_hook = memchr::memmem::find(image, PATINA_INSTRUMENTED_MARKER).is_some();
+    Instrumentation {
+        edge_counters: yield_hook || crate::go_build::carries_meter(image),
+        yield_hook,
+    }
+}
+
+/// Append the instrumentation suffix to a base fingerprint when the binary
+/// carries the `--instrument` edge hook, leaving any other binary's fingerprint
+/// untouched, so an instrumented binary and a plain one never cross-replay. A Go
+/// guest's counters add nothing: every Go guest carries them, so there is no
+/// plain Go build to keep apart.
+pub(super) fn instrumentation_fingerprint(base: &str, instrumentation: Instrumentation) -> String {
+    if instrumentation.yield_hook {
         format!("{base}{PATINA_INSTRUMENTED_FINGERPRINT_SUFFIX}")
     } else {
         base.to_string()
@@ -830,10 +850,10 @@ pub(super) fn binary_is_harness(image: &[u8]) -> bool {
 /// a run turned on.
 pub(super) fn native_run_fingerprint(
     base: &str,
-    instrumented: bool,
+    instrumentation: Instrumentation,
     image_hash: Option<&str>,
 ) -> String {
-    let head = instrumentation_fingerprint(base, instrumented);
+    let head = instrumentation_fingerprint(base, instrumentation);
     match image_hash {
         Some(hash) => format!("{head}{IMAGE_FINGERPRINT_COMPONENT}{hash}"),
         None => head,
@@ -952,20 +972,32 @@ mod tests {
         }
         // The run side reads the build from the binary's own bytes, wherever the
         // marker sits, since no flag re-states it at run time.
-        let mut image = vec![0u8; 200_000];
-        assert!(!binary_instrumented(&image));
-        let at = 64 * 1024 - (PATINA_INSTRUMENTED_MARKER.len() / 2);
-        image[at..at + PATINA_INSTRUMENTED_MARKER.len()]
-            .copy_from_slice(PATINA_INSTRUMENTED_MARKER);
-        assert!(binary_instrumented(&image));
-        // Only an instrumented binary's fingerprint changes, so a plain binary's
-        // traces never cross-replay against an instrumented one.
+        let plant = |marker: &[u8]| {
+            let mut image = vec![0u8; 200_000];
+            let at = 64 * 1024 - (marker.len() / 2);
+            image[at..at + marker.len()].copy_from_slice(marker);
+            binary_instrumentation(&image)
+        };
+        let plain = binary_instrumentation(&[0u8; 200_000]);
+        assert_eq!(plain, Instrumentation::default());
+        let instrumented = plant(PATINA_INSTRUMENTED_MARKER);
+        assert!(instrumented.edge_counters && instrumented.yield_hook);
+        // A Go guest's meter brings edge counters but no yield hook.
+        let go = plant(b"PATINA_GO_METER_V1 stride=4096;");
+        assert!(go.edge_counters && !go.yield_hook);
+        // Only an `--instrument` binary's fingerprint changes, so a plain
+        // binary's traces never cross-replay against an instrumented one; a Go
+        // guest, which has no plain variant, keeps the base.
         assert_eq!(
-            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, false),
+            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, plain),
+            DEFAULT_NATIVE_FINGERPRINT
+        );
+        assert_eq!(
+            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, go),
             DEFAULT_NATIVE_FINGERPRINT
         );
         assert_ne!(
-            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, true),
+            instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, instrumented),
             DEFAULT_NATIVE_FINGERPRINT
         );
     }

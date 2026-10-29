@@ -11,10 +11,24 @@ pub(crate) struct CoverageRange {
     pub(crate) len: usize,
 }
 
-#[derive(Default)]
-struct CoverageState {
-    guard_ranges: Vec<CoverageRange>,
-    pc_ranges: Vec<CoverageRange>,
+/// Every counter range the guest registered, read at finalization.
+///
+/// Two counter kinds feed one map. An `--instrument` build's trace-pc-guard
+/// words are `u32` hit counters that saturate, each with a pc-table entry. A Go
+/// guest's libFuzzer instrumentation keeps one `u8` counter per block instead
+/// (Go's `-d=libfuzzer`, over the linker's `.go.fuzzcntrs` section): the
+/// compiler's increment never lands on zero (it wraps 255 to 1), so "covered"
+/// is exact but the count is a hit count modulo that wrap, and Go registers no
+/// pcs (its pc table is a zero-filled heap buffer), so a byte counter's site is
+/// unknown.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CoverageRanges {
+    /// Trace-pc-guard counter words (`u32`), one range per codegen unit.
+    pub(crate) guards: Vec<CoverageRange>,
+    /// The pc tables of `guards`, one `(pc, flags)` pair per guard.
+    pub(crate) pcs: Vec<CoverageRange>,
+    /// Go's 8-bit counters (`u8`), which have no pc table.
+    pub(crate) bytes: Vec<CoverageRange>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -33,10 +47,10 @@ pub(crate) struct PreparedCoverage {
     map: Option<Vec<u8>>,
 }
 
-static COVERAGE_STATE: OnceLock<SpinMutex<CoverageState>> = OnceLock::new();
+static COVERAGE_STATE: OnceLock<SpinMutex<CoverageRanges>> = OnceLock::new();
 
-fn coverage_state() -> &'static SpinMutex<CoverageState> {
-    COVERAGE_STATE.get_or_init(|| SpinMutex::new(CoverageState::default()))
+fn coverage_state() -> &'static SpinMutex<CoverageRanges> {
+    COVERAGE_STATE.get_or_init(|| SpinMutex::new(CoverageRanges::default()))
 }
 
 fn coverage_len<T>(start: *const T, stop: *const T) -> usize {
@@ -72,7 +86,18 @@ pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     let len = coverage_len(start.cast_const(), stop.cast_const());
     let mut state = coverage_state().lock();
-    register_coverage_range(&mut state.guard_ranges, start as usize, len);
+    register_coverage_range(&mut state.guards, start as usize, len);
+}
+
+#[unsafe(no_mangle)]
+/// Register one range of 8-bit edge counters, which carries no pc table. Called
+/// by a Go guest's meter object from `__sanitizer_cov_8bit_counters_init`, which
+/// the Go runtime calls once at start-up over the `.go.fuzzcntrs` section.
+pub extern "C" fn patina_coverage_register_u8(start: *mut u8, stop: *mut u8) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    let len = coverage_len(start.cast_const(), stop.cast_const());
+    let mut state = coverage_state().lock();
+    register_coverage_range(&mut state.bytes, start as usize, len);
 }
 
 #[unsafe(no_mangle)]
@@ -85,12 +110,11 @@ pub extern "C" fn patina_coverage_register_pcs(start: *const usize, stop: *const
     let words = coverage_len(start, stop);
     let entries = words / 2;
     let mut state = coverage_state().lock();
-    register_coverage_range(&mut state.pc_ranges, start as usize, entries);
+    register_coverage_range(&mut state.pcs, start as usize, entries);
 }
 
-fn coverage_snapshot() -> (Vec<CoverageRange>, Vec<CoverageRange>) {
-    let state = coverage_state().lock();
-    (state.guard_ranges.clone(), state.pc_ranges.clone())
+fn coverage_snapshot() -> CoverageRanges {
+    coverage_state().lock().clone()
 }
 
 /// Why requested coverage could not be prepared or encoded. Every variant is
@@ -98,9 +122,9 @@ fn coverage_snapshot() -> (Vec<CoverageRange>, Vec<CoverageRange>) {
 /// text) tell the failure classes apart.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CoverageError {
-    /// The binary registered no guard ranges: it was not built instrumented.
+    /// The binary registered no edge counters: it was not built instrumented.
     Unavailable,
-    /// Guards are registered but none was ever hit.
+    /// Edge counters are registered but none was ever hit.
     Empty { edges_total: u64 },
     /// The guard and pc tables disagree in total size.
     TableMismatch { guards: usize, pcs: usize },
@@ -112,11 +136,11 @@ impl core::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unavailable => f.write_str(
-                "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --instrument`",
+                "requested coverage is unavailable: the binary registered no edge counters; rebuild with `cargo patina build --instrument` (or `--go`)",
             ),
             Self::Empty { edges_total } => write!(
                 f,
-                "requested coverage is empty: edges_total={edges_total} edges_covered=0; the yield-point hook did not count any executed guard"
+                "requested coverage is empty: edges_total={edges_total} edges_covered=0; no edge counter recorded an executed edge"
             ),
             Self::TableMismatch { guards, pcs } => {
                 write!(f, "guard/pc-table count mismatch: guards={guards} pcs={pcs}")
@@ -168,27 +192,63 @@ fn validate_coverage_ranges(
     Ok(guard_count)
 }
 
-pub(crate) fn coverage_summary(guard_ranges: &[CoverageRange]) -> CoverageSummary {
+impl CoverageRanges {
+    /// Every registered edge counter: the guard words, then the byte counters
+    /// widened, in registration order — the map's edge order.
+    fn counters(&self) -> impl Iterator<Item = u32> + '_ {
+        let guards = self.guards.iter().flat_map(|range| {
+            // SAFETY: SanitizerCoverage guard arrays are process-lifetime static
+            // storage. Registration only records the compiler-provided
+            // `[start, stop)` subranges, and finalization runs after managed
+            // execution is stopped.
+            unsafe { slice::from_raw_parts(range.start as *const u32, range.len) }
+                .iter()
+                .copied()
+        });
+        let bytes = self.bytes.iter().flat_map(|range| {
+            // SAFETY: Go's counter section is process-lifetime static storage,
+            // registered as the `[start, stop)` the runtime passed.
+            unsafe { slice::from_raw_parts(range.start as *const u8, range.len) }
+                .iter()
+                .map(|&hits| u32::from(hits))
+        });
+        guards.chain(bytes)
+    }
+
+    /// The map's ranges: the guard ranges, then the byte ranges.
+    fn counter_ranges(&self) -> impl Iterator<Item = &CoverageRange> {
+        self.guards.iter().chain(&self.bytes)
+    }
+
+    fn edge_count(&self) -> Result<usize, CoverageError> {
+        coverage_count(&self.guards)?
+            .checked_add(coverage_count(&self.bytes)?)
+            .ok_or_else(|| {
+                CoverageError::Malformed(
+                    "registered coverage ranges exceed this platform's addressable size"
+                        .to_string(),
+                )
+            })
+    }
+}
+
+pub(crate) fn coverage_summary(ranges: &CoverageRanges) -> CoverageSummary {
     let mut edges_total = 0u64;
     let mut edges_covered = 0u64;
     let mut hits_total = 0u64;
     let mut hits_max = 0u32;
     let mut saturated = 0u64;
-    for range in guard_ranges {
-        // SAFETY: SanitizerCoverage guard arrays are process-lifetime static
-        // storage. Registration only records the compiler-provided `[start, stop)`
-        // subranges, and finalization runs after managed execution is stopped.
-        let counters = unsafe { slice::from_raw_parts(range.start as *const u32, range.len) };
-        edges_total += counters.len() as u64;
-        for &hits in counters {
-            if hits != 0 {
-                edges_covered += 1;
-            }
-            hits_total = hits_total.saturating_add(hits as u64);
-            hits_max = hits_max.max(hits);
-            if hits == u32::MAX {
-                saturated += 1;
-            }
+    for hits in ranges.counters() {
+        edges_total += 1;
+        if hits != 0 {
+            edges_covered += 1;
+        }
+        hits_total = hits_total.saturating_add(hits as u64);
+        hits_max = hits_max.max(hits);
+        // Only a guard word saturates; a byte counter wraps and never reads
+        // `u32::MAX` widened.
+        if hits == u32::MAX {
+            saturated += 1;
         }
     }
     let covered_permille = if edges_total == 0 {
@@ -218,12 +278,10 @@ fn push_i64_le(out: &mut Vec<u8>, value: i64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-pub(crate) fn build_coverage_map(
-    guard_ranges: &[CoverageRange],
-    pc_ranges: &[CoverageRange],
-) -> Result<Vec<u8>, CoverageError> {
-    let guard_count = validate_coverage_ranges(guard_ranges, pc_ranges)?;
-    let range_count = guard_ranges.len();
+pub(crate) fn build_coverage_map(ranges: &CoverageRanges) -> Result<Vec<u8>, CoverageError> {
+    validate_coverage_ranges(&ranges.guards, &ranges.pcs)?;
+    let guard_count = ranges.edge_count()?;
+    let range_count = ranges.guards.len() + ranges.bytes.len();
     let mut bytes = Vec::with_capacity(
         COVERAGE_MAGIC.len()
             + 4
@@ -237,27 +295,23 @@ pub(crate) fn build_coverage_map(
     push_u64_le(&mut bytes, guard_count as u64);
     push_u64_le(&mut bytes, range_count as u64);
 
-    let mut guard_offset = 0u64;
-    let mut pc_offset = 0u64;
-    for (guards, pcs) in guard_ranges.iter().zip(pc_ranges) {
-        push_u64_le(&mut bytes, guard_offset);
-        push_u64_le(&mut bytes, guards.len as u64);
-        push_u64_le(&mut bytes, pc_offset);
-        push_u64_le(&mut bytes, pcs.len as u64);
-        guard_offset += guards.len as u64;
-        pc_offset += pcs.len as u64;
+    // Every range has one site delta per counter: a guard range's from its pc
+    // table (validated equal in length above), a byte range's all zero.
+    let mut offset = 0u64;
+    for range in ranges.counter_ranges() {
+        push_u64_le(&mut bytes, offset);
+        push_u64_le(&mut bytes, range.len as u64);
+        push_u64_le(&mut bytes, offset);
+        push_u64_le(&mut bytes, range.len as u64);
+        offset += range.len as u64;
     }
 
-    for range in guard_ranges {
-        // SAFETY: see `coverage_summary`.
-        let counters = unsafe { slice::from_raw_parts(range.start as *const u32, range.len) };
-        for &counter in counters {
-            push_u32_le(&mut bytes, counter);
-        }
+    for counter in ranges.counters() {
+        push_u32_le(&mut bytes, counter);
     }
 
     let anchor = patina_yield_point as *const () as i128;
-    for range in pc_ranges {
+    for range in &ranges.pcs {
         // SAFETY: pc-table arrays are process-lifetime static storage. `len` is
         // the number of `(pc, flags)` pairs, so the raw word slice is `len * 2`.
         let words = unsafe { slice::from_raw_parts(range.start as *const usize, range.len * 2) };
@@ -286,6 +340,14 @@ pub(crate) fn build_coverage_map(
                 })?
             };
             push_i64_le(&mut bytes, delta);
+        }
+    }
+    // A byte counter has no pc: Go registers none. Its site is the zero delta,
+    // the same unattributable site a guard's pc-table sentinel gets, so the
+    // readers count it as an edge by its index and name no function for it.
+    for range in &ranges.bytes {
+        for _ in 0..range.len {
+            push_i64_le(&mut bytes, 0);
         }
     }
     Ok(bytes)
@@ -322,37 +384,34 @@ static REPORTS: OnceLock<patina_dst_runtime::ReportConfig> = OnceLock::new();
 
 pub(crate) fn prepare_coverage_output(
     requested: bool,
-    guard_ranges: &[CoverageRange],
-    pc_ranges: &[CoverageRange],
+    ranges: &CoverageRanges,
 ) -> Result<Option<PreparedCoverage>, CoverageError> {
-    let guard_count = coverage_count(guard_ranges)?;
-    if requested && guard_count == 0 {
+    let edge_count = ranges.edge_count()?;
+    if requested && edge_count == 0 {
         return Err(CoverageError::Unavailable);
     }
-    if guard_count == 0 {
+    if edge_count == 0 {
         return Ok(None);
     }
     // Validate before reading counters or emitting a report so the fail-closed
     // guard/pc-table invariant always wins over any derived observation.
-    validate_coverage_ranges(guard_ranges, pc_ranges)?;
-    let summary = coverage_summary(guard_ranges);
+    validate_coverage_ranges(&ranges.guards, &ranges.pcs)?;
+    let summary = coverage_summary(ranges);
     if requested && summary.edges_covered == 0 {
         return Err(CoverageError::Empty {
             edges_total: summary.edges_total,
         });
     }
-    let map = requested
-        .then(|| build_coverage_map(guard_ranges, pc_ranges))
-        .transpose()?;
+    let map = requested.then(|| build_coverage_map(ranges)).transpose()?;
     Ok(Some(PreparedCoverage { summary, map }))
 }
 
 pub(crate) fn finalize_coverage() -> Result<(), String> {
     let coverage_fd = control_coverage_fd().map_err(|error| error.to_string())?;
     let requested = coverage_fd.is_some();
-    let (guard_ranges, pc_ranges) = coverage_snapshot();
-    let Some(prepared) = prepare_coverage_output(requested, &guard_ranges, &pc_ranges)
-        .map_err(|error| error.to_string())?
+    let ranges = coverage_snapshot();
+    let Some(prepared) =
+        prepare_coverage_output(requested, &ranges).map_err(|error| error.to_string())?
     else {
         return Ok(());
     };

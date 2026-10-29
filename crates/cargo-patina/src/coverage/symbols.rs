@@ -14,6 +14,70 @@ struct FunctionSymbol {
 struct SymbolTable {
     anchor: u64,
     functions: Vec<FunctionSymbol>,
+    /// A Go guest's 8-bit counters, in section order, each with the package
+    /// that owns it.
+    go_counters: Vec<Option<String>>,
+}
+
+/// The section Go's linker gathers its libFuzzer 8-bit counters into, which the
+/// runtime registers whole at start-up.
+const GO_COUNTER_SECTION: &str = ".go.fuzzcntrs";
+
+/// The packages that own a Go binary's 8-bit counters, by offset into
+/// [`GO_COUNTER_SECTION`]. Go writes no pc table, but each counter is a
+/// compiler static named `<package>..stmp_<N>`, so a counter names its package
+/// (not its function). Empty when the binary has no such section.
+fn go_counter_packages(file: &object::File<'_>) -> Vec<Option<String>> {
+    use object::ObjectSection;
+    let Some(section) = file.section_by_name(GO_COUNTER_SECTION) else {
+        return Vec::new();
+    };
+    let (start, len) = (section.address(), section.size());
+    let Ok(slots) = usize::try_from(len) else {
+        return Vec::new();
+    };
+    let mut packages = vec![None; slots];
+    for symbol in file.symbols() {
+        let Some(offset) = symbol.address().checked_sub(start).filter(|&at| at < len) else {
+            continue;
+        };
+        let Some((package, _)) = symbol
+            .name()
+            .ok()
+            .and_then(|name| name.rsplit_once("..stmp_"))
+        else {
+            continue;
+        };
+        packages[offset as usize] = Some(go_import_path(package));
+    }
+    packages
+}
+
+/// The import path a Go linker symbol prefix names. The linker escapes a few
+/// bytes of the path as `%xx` (a `.` in its last element, `%`, `"`, spaces and
+/// control bytes; `cmd/internal/objabi.PathToPrefix`), so `dot.pkg` links as
+/// `dot%2epkg`. A malformed escape stays as written.
+fn go_import_path(prefix: &str) -> String {
+    let bytes = prefix.as_bytes();
+    let mut path = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let escaped = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match escaped {
+            Some(byte) => {
+                path.push(byte);
+                at += 3;
+            }
+            None => {
+                path.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&path).into_owned()
 }
 
 fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
@@ -29,6 +93,7 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
             binary.display()
         ))
     })?;
+    let go_counters = go_counter_packages(&file);
     let mut anchor = None;
     let mut functions = BTreeMap::<u64, FunctionSymbol>::new();
     for symbol in file.symbols().chain(file.dynamic_symbols()) {
@@ -75,7 +140,11 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
             }
         }
     }
-    Ok(SymbolTable { anchor, functions })
+    Ok(SymbolTable {
+        anchor,
+        functions,
+        go_counters,
+    })
 }
 
 fn demangle_symbol(name: &str) -> String {
@@ -183,6 +252,7 @@ pub(super) fn symbolize_coverage(
         )));
     }
     let symbols = read_symbol_table(binary)?;
+    let go_packages = go_edge_packages(&symbols.go_counters, &data.deltas);
     let mut edges = Vec::with_capacity(data.hits.len());
     let mut crates = BTreeMap::<String, CoverageStats>::new();
     let mut modules = BTreeMap::<(String, String), CoverageStats>::new();
@@ -193,9 +263,12 @@ pub(super) fn symbolize_coverage(
         let function = static_pc.and_then(|pc| symbols.function_for_pc(pc));
         let (crate_name, module, function_path, symbol_name) = function.map_or_else(
             || {
+                // A Go counter's package is its crate and module both; its
+                // function is unknown.
+                let package = go_packages(index).unwrap_or("<unknown>");
                 (
-                    "<unknown>".to_string(),
-                    "<unknown>".to_string(),
+                    package.to_string(),
+                    package.to_string(),
                     "<unknown>".to_string(),
                     "<unknown>".to_string(),
                 )
@@ -236,6 +309,25 @@ pub(super) fn symbolize_coverage(
         modules,
         functions,
     })
+}
+
+/// The package owning edge `index`, for the edges that are a Go binary's 8-bit
+/// counters. The shim writes those last, after any guard words, in section
+/// order and each with the zero (unknown) site, so the trailing
+/// `packages.len()` edges are the section's counters when every one of them
+/// has the zero site. Any other shape names no package.
+fn go_edge_packages<'a>(
+    packages: &'a [Option<String>],
+    deltas: &[i64],
+) -> impl Fn(usize) -> Option<&'a str> {
+    let first = deltas
+        .len()
+        .checked_sub(packages.len())
+        .filter(|&first| !packages.is_empty() && deltas[first..].iter().all(|&delta| delta == 0));
+    move |index| {
+        let offset = index.checked_sub(first?)?;
+        packages.get(offset)?.as_deref()
+    }
 }
 
 struct ParsedSymbolPath {
@@ -358,5 +450,36 @@ mod tests {
         assert_eq!(edge_static_pc(1, anchor, 0x10).unwrap(), Some(0x1010));
         assert_eq!(edge_static_pc(2, anchor, -0x10).unwrap(), Some(0xff0));
         assert!(edge_static_pc(3, anchor, -0x2000).is_err());
+    }
+
+    #[test]
+    fn a_go_symbol_prefix_unescapes_to_its_import_path() {
+        assert_eq!(
+            go_import_path("example.com/a/dot%2epkg"),
+            "example.com/a/dot.pkg"
+        );
+        assert_eq!(
+            go_import_path("crypto/internal/entropy/v1%2e0%2e0"),
+            "crypto/internal/entropy/v1.0.0"
+        );
+        assert_eq!(go_import_path("fmt"), "fmt");
+        assert_eq!(go_import_path("odd%zz%2"), "odd%zz%2");
+    }
+
+    #[test]
+    fn go_counters_name_the_trailing_zero_site_edges_only() {
+        let packages = vec![Some("fmt".to_string()), None, Some("main".to_string())];
+        // One guard edge with a real site, then the three Go counters.
+        let owner = go_edge_packages(&packages, &[8, 0, 0, 0]);
+        assert_eq!(
+            (0..4).map(&owner).collect::<Vec<_>>(),
+            [None, Some("fmt"), None, Some("main")]
+        );
+        // A map whose trailing edges are not all unknown sites, or that is
+        // shorter than the section, is not this binary's Go counters.
+        let owner = go_edge_packages(&packages, &[0, 0, 8]);
+        assert!((0..3).all(|index| owner(index).is_none()));
+        let owner = go_edge_packages(&packages, &[0, 0]);
+        assert!((0..2).all(|index| owner(index).is_none()));
     }
 }

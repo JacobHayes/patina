@@ -18,8 +18,14 @@
  * replay. The stride is a constant of this object, stamped into the marker
  * below.
  *
- * The libFuzzer entry points that carry no work (the counter and pc-table
- * registrations) do nothing: the edge counters stay inline in the guest.
+ * COVERAGE. The same instrumentation keeps an 8-bit counter per block, in the
+ * linker's `.go.fuzzcntrs` section, which the runtime registers once at
+ * start-up. The counters stay inline in the guest; the registration hands
+ * their range to the shim, which writes them as `--coverage-out` edges. Go
+ * fills no pc table (it passes a zeroed buffer), so that registration does
+ * nothing and every Go edge's site is unknown. The counters are no yield hook:
+ * a Go guest takes no `--yield-stride` points.
+ *
  * Linked only on the Go build path; never instrumented itself.
  */
 
@@ -27,6 +33,7 @@
 
 /* Provided by the patina-dst-native-shim staticlib. */
 extern void patina_compute_point(uint64_t units);
+extern void patina_coverage_register_u8(uint8_t *start, uint8_t *stop);
 
 /* Comparisons between two scheduling points. */
 #define PATINA_GO_METER_STRIDE 4096
@@ -66,10 +73,11 @@ void __sanitizer_weak_hook_strcmp(void *caller_pc, const char *s1, const char *s
 
 /* The runtime registers its edge counters and pc table at start-up. */
 void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
-    (void)start; (void)stop;
+    patina_coverage_register_u8(start, stop);
     patina_go_meter_anchor = PATINA_GO_METER_MARKER;
 }
 
+/* Go's pc table is all zeros: no sites to register. */
 void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
     (void)start; (void)stop;
 }

@@ -6,7 +6,7 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    IMAGE_FINGERPRINT_COMPONENT, binary_instrumented, binary_is_harness,
+    IMAGE_FINGERPRINT_COMPONENT, binary_instrumentation, binary_is_harness,
     instrumentation_fingerprint, native_run_fingerprint, resolve_artifact,
 };
 use crate::output;
@@ -190,19 +190,20 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
     }
 
-    // An `--instrument` binary carries the edge hooks. Detect the linked hook's
-    // marker: it decides whether there are counters to write and a stride to
-    // honour, and it folds into the compatibility fingerprint, so a trace never
+    // An `--instrument` binary carries the edge hook (counters and a stride to
+    // honour); a Go guest carries counters only. Detect the linked markers: they
+    // decide whether there are counters to write and a stride to honour, and the
+    // edge hook folds into the compatibility fingerprint, so a trace never
     // cross-replays between an instrumented binary and a plain one.
-    let instrumented = image.remember("instrumented", || {
-        Ok::<_, CliError>(binary_instrumented(image.bytes()))
+    let instrumented = image.remember("instrumentation", || {
+        Ok::<_, CliError>(binary_instrumentation(image.bytes()))
     })?;
-    if invocation.coverage_out.is_some() && !instrumented {
+    if invocation.coverage_out.is_some() && !instrumented.edge_counters {
         return Err(CliError::usage(
-            "--coverage-out requires a native binary built with `cargo patina build --instrument`; coverage rides the SanitizerCoverage edge counters",
+            "--coverage-out requires a native binary with edge counters: one built with `cargo patina build --instrument` (or a Go guest built with `--go`)",
         ));
     }
-    if invocation.schedule.yield_stride != 0 && !instrumented {
+    if invocation.schedule.yield_stride != 0 && !instrumented.yield_hook {
         return Err(CliError::usage(format!(
             "--yield-stride {} takes its scheduling points at the edge hooks of a binary built with \
 `cargo patina build --instrument`; {} has none, so the stride would be inert",

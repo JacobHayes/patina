@@ -51,6 +51,14 @@ mod over_budget_trace_tests {
 mod coverage_tests {
     use super::*;
 
+    fn guarded(guards: &[CoverageRange], pcs: &[CoverageRange]) -> CoverageRanges {
+        CoverageRanges {
+            guards: guards.to_vec(),
+            pcs: pcs.to_vec(),
+            bytes: Vec::new(),
+        }
+    }
+
     #[test]
     fn coverage_summary_counts_hits_and_saturation() {
         let counters = [0u32, 2, u32::MAX];
@@ -58,7 +66,7 @@ mod coverage_tests {
             start: counters.as_ptr() as usize,
             len: counters.len(),
         }];
-        let summary = coverage_summary(&ranges);
+        let summary = coverage_summary(&guarded(&ranges, &[]));
         assert_eq!(summary.edges_total, 3);
         assert_eq!(summary.edges_covered, 2);
         assert_eq!(summary.covered_permille, 666);
@@ -72,7 +80,7 @@ mod coverage_tests {
     #[test]
     fn requested_coverage_refuses_missing_empty_or_mismatched_tables() {
         assert_eq!(
-            prepare_coverage_output(true, &[], &[]).unwrap_err(),
+            prepare_coverage_output(true, &CoverageRanges::default()).unwrap_err(),
             CoverageError::Unavailable
         );
 
@@ -91,7 +99,7 @@ mod coverage_tests {
             start: pcs.as_ptr() as usize,
             len: counters.len(),
         }];
-        let error = prepare_coverage_output(true, &guards, &pc_ranges).unwrap_err();
+        let error = prepare_coverage_output(true, &guarded(&guards, &pc_ranges)).unwrap_err();
         assert_eq!(error, CoverageError::Empty { edges_total: 2 });
 
         let guards = [CoverageRange {
@@ -102,7 +110,7 @@ mod coverage_tests {
             start: 0x2000,
             len: 2,
         }];
-        let error = prepare_coverage_output(true, &guards, &pcs).unwrap_err();
+        let error = prepare_coverage_output(true, &guarded(&guards, &pcs)).unwrap_err();
         assert_eq!(error, CoverageError::TableMismatch { guards: 3, pcs: 2 });
     }
 
@@ -126,7 +134,7 @@ mod coverage_tests {
             start: pcs.as_ptr() as usize,
             len: counters.len(),
         }];
-        let map = build_coverage_map(&guards, &pc_ranges).unwrap();
+        let map = build_coverage_map(&guarded(&guards, &pc_ranges)).unwrap();
         assert!(map.starts_with(COVERAGE_MAGIC));
         let header_len = COVERAGE_MAGIC.len() + 4 + 8 + 8 + 32;
         assert_eq!(
@@ -155,16 +163,75 @@ mod coverage_tests {
                 }];
                 if hits != 0 {
                     // The finalization path a requested-coverage run takes.
-                    prepare_coverage_output(true, &guards, &pc_ranges).unwrap_or_else(|error| {
-                        panic!("hit sentinel pc={sentinel} refused: {error}")
-                    });
+                    prepare_coverage_output(true, &guarded(&guards, &pc_ranges)).unwrap_or_else(
+                        |error| panic!("hit sentinel pc={sentinel} refused: {error}"),
+                    );
                 }
-                let map = build_coverage_map(&guards, &pc_ranges).unwrap();
+                let map = build_coverage_map(&guarded(&guards, &pc_ranges)).unwrap();
                 let delta_start = header_len + 4;
                 assert_eq!(&map[header_len..delta_start], &hits.to_le_bytes());
                 assert_eq!(&map[delta_start..delta_start + 8], &0i64.to_le_bytes());
             }
         }
+    }
+
+    /// Go's 8-bit counters, which carry no pc table, follow the guard words in
+    /// the map: each widened to a counter word with the zero (unknown) site, and
+    /// a wrapped count never reads as saturated.
+    #[test]
+    fn byte_counters_join_the_map_after_the_guards_with_unknown_sites() {
+        let anchor = patina_yield_point as *const () as usize;
+        let words = [3u32];
+        let pcs = [anchor.wrapping_add(16), 0usize];
+        let bytes = [0u8, 1, 255];
+        let ranges = CoverageRanges {
+            guards: vec![CoverageRange {
+                start: words.as_ptr() as usize,
+                len: words.len(),
+            }],
+            pcs: vec![CoverageRange {
+                start: pcs.as_ptr() as usize,
+                len: words.len(),
+            }],
+            bytes: vec![CoverageRange {
+                start: bytes.as_ptr() as usize,
+                len: bytes.len(),
+            }],
+        };
+        let summary = coverage_summary(&ranges);
+        assert_eq!(summary.edges_total, 4);
+        assert_eq!(summary.edges_covered, 3);
+        assert_eq!(summary.hits_max, 255);
+        assert_eq!(summary.saturated, 0);
+
+        let map = build_coverage_map(&ranges).unwrap();
+        let mut at = COVERAGE_MAGIC.len() + 4;
+        let u64_at = |at: &mut usize| {
+            let value = u64::from_le_bytes(map[*at..*at + 8].try_into().unwrap());
+            *at += 8;
+            value
+        };
+        assert_eq!((u64_at(&mut at), u64_at(&mut at)), (4, 2));
+        // Range table: (guard_offset, guard_count, pc_offset, pc_count) each.
+        let table: Vec<u64> = (0..8).map(|_| u64_at(&mut at)).collect();
+        assert_eq!(table, [0, 1, 0, 1, 1, 3, 1, 3]);
+        let counters: Vec<u32> = map[at..at + 16]
+            .chunks(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(counters, [3, 0, 1, 255]);
+        let deltas: Vec<i64> = map[at + 16..]
+            .chunks(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect();
+        assert_eq!(deltas, [16, 0, 0, 0]);
+
+        // Byte counters alone are coverage a run can request.
+        let go_only = CoverageRanges {
+            bytes: ranges.bytes.clone(),
+            ..CoverageRanges::default()
+        };
+        assert!(prepare_coverage_output(true, &go_only).unwrap().is_some());
     }
 }
 

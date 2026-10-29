@@ -149,7 +149,7 @@ refused by name.",
                     None,
                     Value::None,
                     "Bias each generation's seed and knobs toward configurations that previously \
-                 found new edge coverage (an --instrument build); refused \
+                 found new edge coverage (an --instrument build or a Go guest); refused \
                  when there is none.",
                     false,
                 ),
@@ -293,13 +293,16 @@ pub(super) const COVERAGE: Verb = Verb {
         "cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]",
     ],
     prose: "\
-`coverage` is a read-only offline report over native `--instrument` coverage. \
-Pass the same binary that produced a `patina.covmap/v1` map (from run/replay \
---coverage-out) or a campaign out-dir with `<out-dir>/coverage/`. The report \
-uses the map's anchor-relative PCs, resolves them against the binary's \
-`patina_yield_point` symbol, demangles Rust symbols, buckets edges into the \
-shared crate/module rollup, and reports covered percentages plus hit \
-concentration. The JSON form emits schema patina.coverage/v1.",
+`coverage` is a read-only offline report over native edge coverage (an \
+`--instrument` build or a Go guest). Pass the same binary that produced a \
+`patina.covmap/v1` map (from run/replay --coverage-out) or a campaign out-dir \
+with `<out-dir>/coverage/`. The report uses the map's anchor-relative PCs, \
+resolves them against the binary's `patina_yield_point` symbol, demangles Rust \
+symbols, buckets edges into the shared crate/module rollup, and reports covered \
+percentages plus hit concentration. Go's counters carry no PCs: each is \
+attributed to its package (from the counter's own symbol) and to no function, \
+and its hit count wraps at 255, so for Go only covered/uncovered is exact. The \
+JSON form emits schema patina.coverage/v1.",
     families: &[fam(Family::Sole, "`coverage`", None)],
     groups: &[Group {
         title: "Coverage options",

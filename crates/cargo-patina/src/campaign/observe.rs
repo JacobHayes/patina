@@ -46,9 +46,9 @@ pub(super) fn initialize_edge_coverage(
     campaign_generations_done: u64,
 ) -> Result<EdgeCoverageState, CliError> {
     let artifact_path = PathBuf::from(&state.artifact.path);
-    // Edge coverage rides the SanitizerCoverage counters an `--instrument` build
-    // keeps at every stride, 0 included, so a guided campaign pays no
-    // preemption cost just to see coverage.
+    // Edge coverage rides the edge counters an `--instrument` build keeps at
+    // every stride, 0 included, so a guided campaign pays no preemption cost
+    // just to see coverage, and those a Go guest keeps without any yield hook.
     let image = fs::File::open(&artifact_path)
         .and_then(|file| crate::run_cache::Image::map(&file))
         .map_err(|error| {
@@ -57,15 +57,15 @@ pub(super) fn initialize_edge_coverage(
                 artifact_path.display()
             ))
         })?;
-    let instrumented = crate::binary_instrumented(image.bytes());
-    if state.spec.yield_stride && !instrumented {
+    let instrumentation = crate::binary_instrumentation(image.bytes());
+    if state.spec.yield_stride && !instrumentation.yield_hook {
         return Err(CliError(format!(
             "--yield-stride draws a scheduling-point stride per generation, but {} was not built \
 with cargo patina build --instrument, so it has no edge hook to take them",
             artifact_path.display()
         )));
     }
-    if !instrumented {
+    if !instrumentation.edge_counters {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",
             Some("rebuild with cargo patina build --instrument"),
@@ -82,7 +82,7 @@ with cargo patina build --instrument, so it has no edge hook to take them",
         path: state.artifact.path.clone(),
         sha256: state.artifact.sha256.clone(),
     };
-    let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumented);
+    let fingerprint = campaign_coverage_fingerprint(&state.spec, instrumentation);
     let store = CampaignCoverageStore::load(
         coverage_dir,
         artifact,
@@ -93,9 +93,12 @@ with cargo patina build --instrument, so it has no edge hook to take them",
     Ok(EdgeCoverageState::Active(Box::new(store)))
 }
 
-pub(super) fn campaign_coverage_fingerprint(spec: &CampaignSpec, instrumented: bool) -> String {
+pub(super) fn campaign_coverage_fingerprint(
+    spec: &CampaignSpec,
+    instrumentation: crate::Instrumentation,
+) -> String {
     let mut fingerprint =
-        crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumented);
+        crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumentation);
     if spec.buggify {
         fingerprint.push_str("+buggify");
     }

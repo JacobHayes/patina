@@ -686,9 +686,13 @@ mod tests {
             pct: true,
             ..CampaignSpec::default()
         };
+        let instrumented = crate::Instrumentation {
+            edge_counters: true,
+            yield_hook: true,
+        };
         assert_ne!(
-            campaign_coverage_fingerprint(&exploring, true),
-            campaign_coverage_fingerprint(&CampaignSpec::default(), true)
+            campaign_coverage_fingerprint(&exploring, instrumented),
+            campaign_coverage_fingerprint(&CampaignSpec::default(), instrumented)
         );
     }
 

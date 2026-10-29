@@ -20,7 +20,13 @@
 #   [3] two same-seed runs are byte-identical (stdout AND captured stderr,
 #       virtual elapsed time included);
 #   [4] a recorded run replays byte-identically (stdout and stderr);
-#   [5] four other seeds reach the same GO_GUEST_RESULT.
+#   [5] four other seeds reach the same GO_GUEST_RESULT;
+#   [6] Go's own edge counters are coverage: `--coverage-out` writes a map
+#       with covered edges, byte-identical across same-seed runs and between
+#       a record and its replay, and `cargo patina coverage` attributes covered
+#       edges to the guest's own package; the guest has no edge hook, so
+#       `--yield-stride` is refused;
+#   [7] a `--guided` campaign over the guest folds that coverage.
 ###############################################################################
 set -uo pipefail
 
@@ -125,5 +131,50 @@ for seed in 0 2 3 4; do
   fi
 done
 
+echo "==> [6] edge coverage: seed-stable, record → replay identical, attributed"
+for run in 1 2; do
+  if ! "$PATINA" patina run "$built" --seed 1 --coverage-out "$out/cov$run.map" \
+      >"$out/cov$run.out" 2>&1; then
+    echo "go-guest: FAIL [6] --coverage-out run $run failed" >&2
+    cat "$out/cov$run.out" >&2; exit 1
+  fi
+done
+"$PATINA" patina run "$built" --seed 1 --record "$out/cov.patina" --coverage-out "$out/cov-record.map" \
+  >"$out/cov-record.out" 2>&1 \
+  && "$PATINA" patina replay "$built" "$out/cov.patina" --coverage-out "$out/cov-replay.map" \
+    >"$out/cov-replay.out" 2>&1 || {
+  echo "go-guest: FAIL [6] coverage record/replay failed" >&2
+  cat "$out/cov-record.out" "$out/cov-replay.out" >&2; exit 1; }
+for map in cov2 cov-record cov-replay; do
+  if ! cmp -s "$out/cov1.map" "$out/$map.map"; then
+    echo "go-guest: FAIL [6] $map.map differs from the first seed-1 map" >&2; exit 1
+  fi
+done
+if ! "$PATINA" patina coverage "$built" "$out/cov1.map" --format json >"$out/cov-report.json" \
+  || ! python3 -c '
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["summary"]["edges_covered"] > 0, "no covered edge"
+main = [c for c in report["rollup"]["crates"] if c["name"] == "main"]
+assert main and main[0]["edges_covered"] > 0, "no covered edge attributed to package main"
+' "$out/cov-report.json"; then
+  echo "go-guest: FAIL [6] the coverage report has no covered edges in package main" >&2
+  cat "$out/cov-report.json" >&2; exit 1
+fi
+"$PATINA" patina run "$built" --seed 1 --yield-stride 1 >"$out/stride.out" 2>&1
+if [[ $? != 2 ]]; then
+  echo "go-guest: FAIL [6] --yield-stride was not refused on a guest with no edge hook" >&2
+  cat "$out/stride.out" >&2; exit 1
+fi
+
+echo "==> [7] a --guided campaign folds the edge coverage"
+rm -rf "$out/campaign"
+if ! "$PATINA" patina campaign "$built" --gens 3 --guided --out-dir "$out/campaign" \
+    >"$out/campaign.out" 2>&1 \
+  || ! grep -Eq '^PATINA_CAMPAIGN_COMPLETE .*covered_permille=[1-9]' "$out/campaign.out"; then
+  echo "go-guest: FAIL [7] the guided campaign reported no edge coverage" >&2
+  cat "$out/campaign.out" >&2; exit 1
+fi
+
 grep -E "$expected" "$out/run1.out"
-echo "GO_GUEST_LEGS_RAN legs=audit-clean,run,seed-stable,record-replay,seed-sweep"
+echo "GO_GUEST_LEGS_RAN legs=audit-clean,run,seed-stable,record-replay,seed-sweep,coverage,campaign"

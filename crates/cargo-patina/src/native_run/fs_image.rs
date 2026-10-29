@@ -253,18 +253,18 @@ mod tests {
     #[test]
     fn the_image_hash_is_read_where_the_fingerprint_puts_it() {
         for label in ["label+fsimg:custom", "a+fsimg:b+fsimg:c", "base"] {
-            let head = instrumentation_fingerprint(label, false);
+            let head = instrumentation_fingerprint(label, Default::default());
             for policy in ["", "+buggify", "+pct+swarm+yieldstride"] {
                 let recorded = format!(
                     "{}{policy}",
-                    native_run_fingerprint(label, false, Some("aa.bb"))
+                    native_run_fingerprint(label, Default::default(), Some("aa.bb"))
                 );
                 assert_eq!(
                     recorded_image_hash(&recorded, &head),
                     Some("aa.bb"),
                     "{label} {policy}"
                 );
-                let other = instrumentation_fingerprint("other", false);
+                let other = instrumentation_fingerprint("other", Default::default());
                 assert_eq!(recorded_image_hash(&recorded, &other), None);
                 assert_eq!(recorded_image_hash(&format!("{head}{policy}"), &head), None);
             }

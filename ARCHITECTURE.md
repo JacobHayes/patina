@@ -57,7 +57,13 @@ trace format.
   Every Go guest carries a compute meter (`crates/cargo-patina/src/go_build.rs`,
   `c/patina_go_meter.c`): libFuzzer comparison hooks hand batches of work to
   `patina_compute_point`, which charges virtual time and takes a scheduling
-  point. A metered run defaults `GOMAXPROCS=1`.
+  point. A metered run defaults `GOMAXPROCS=1`. The same instrumentation keeps
+  Go's 8-bit edge counters, which the meter registers with the shim
+  (`patina_coverage_register_u8`), so a Go guest has edge coverage
+  (`--coverage-out`, campaigns, `--guided`) without the `--instrument` yield
+  hook. Go records no pcs, so the covmap gives its edges the zero (unknown)
+  site and `cargo patina coverage` attributes each to its package by the
+  counter's `<package>..stmp_N` symbol.
 - **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
   configures the run in code, then runs ordinary `std` code under the shim's
   global runtime. a harness binary's `PATINA_HARNESS_V1` marker makes the supervisor set
