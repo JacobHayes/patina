@@ -12,10 +12,9 @@
  * (argv[2] `held`), or through prctl(2), an entry that dispatches with no
  * hold around it (`unheld`). In `door` the shim's call is syscall(2), which
  * binds to the shim's own door, as std's futex-based locks and once-cells do
- * when they wait or wake; in `trap` (x86_64, under syscall-user-dispatch) it
- * is a raw syscall instruction, which traps. Either way the shim's call is a
- * named stop before it is serviced: serviced, it would write
- * PATINA_PLANTED_SERVICED, and the program would exit 98.
+ * when they wait or wake. The shim's call is a named stop before it is
+ * serviced: serviced, it would write PATINA_PLANTED_SERVICED, and the program
+ * would exit 98.
  *
  * `budget` runs the private signal stack's budget report, linked in from
  * `private_budget.c`. */
@@ -32,9 +31,8 @@ unsigned char patina_planted_reentry(int kind);
 int private_budget(void);
 
 static int reentry(const char *door, const char *outer) {
-    int kind = strcmp(door, "trap") == 0;
-    assert(kind || strcmp(door, "door") == 0);
-    patina_planted_reentry(kind);
+    assert(strcmp(door, "door") == 0);
+    patina_planted_reentry(0);
     if (strcmp(outer, "held") == 0) {
         syscall(SYS_getpid);
     } else {

@@ -335,6 +335,15 @@ pub(crate) fn note_main_returned() {
     MAIN_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Set while the main task's activation runs (`ensure_active`): the one
+/// scheduler operation the guard after `main` returned lets through
+/// (`runtime::with_context_msg`), since the guest's own call makes it.
+static ACTIVATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn activating() -> bool {
+    ACTIVATING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the process has entered post-`main` teardown.
 pub(crate) fn main_returned() -> bool {
     MAIN_RETURNED.load(std::sync::atomic::Ordering::Relaxed)
@@ -1080,13 +1089,18 @@ impl ThreadRuntime {
             return Ok(());
         }
         let mut scheduler = RealScheduler;
-        let main = scheduler.spawn("main")?;
+        ACTIVATING.store(true, std::sync::atomic::Ordering::Relaxed);
+        let activated = (|| {
+            let main = scheduler.spawn("main")?;
+            Ok::<_, ThreadError>((main, scheduler.next()?))
+        })();
+        ACTIVATING.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (main, selected) = activated?;
         if main != MAIN_TASK {
             return Err(ThreadError::Fatal(format!(
                 "the scheduler numbered the main task {main:?}, not {MAIN_TASK:?}"
             )));
         }
-        let selected = scheduler.next()?;
         if selected != Some(main) {
             return Err(ThreadError::Fatal(format!(
                 "scheduler selected {selected:?} instead of the main task {main:?}"

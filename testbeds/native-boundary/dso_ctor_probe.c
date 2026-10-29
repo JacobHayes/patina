@@ -1,9 +1,11 @@
 /* The executable for dso_ctor_escape.c: prints what that library's
- * constructor saw, and for `rseq` what the main thread's area reads now. */
+ * constructor saw, for `rseq` what the main thread's area reads now, and the
+ * parent process id through the interposed getppid. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 extern long patina_dso_ctor_value;
 extern int patina_dso_ctor_ran;
@@ -13,7 +15,7 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "none";
     uint32_t cpu;
     memcpy(&cpu, (const char *)__builtin_thread_pointer() + __rseq_offset + 4, sizeof cpu);
-    printf("DSO_CTOR_RESULT mode=%s ran=%d value=%ld main_cpu=%u\n", mode, patina_dso_ctor_ran,
-           patina_dso_ctor_value, (unsigned)cpu);
+    printf("DSO_CTOR_RESULT mode=%s ran=%d value=%ld main_cpu=%u parent=%ld\n", mode,
+           patina_dso_ctor_ran, patina_dso_ctor_value, (unsigned)cpu, (long)getppid());
     return 0;
 }

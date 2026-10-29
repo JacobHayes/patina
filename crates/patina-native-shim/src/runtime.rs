@@ -217,8 +217,8 @@ pub extern "C" fn patina_fcntl_owner_get(raw_fd: c_int, ex: c_int, owner: *mut c
 }
 
 /// Pass a process-local syscall through to the host kernel via glibc's
-/// `syscall(2)` wrapper, resolved as a host alias (its kernel entry sits in
-/// glibc text, the SUD-allowed region). See [`sud`] `mem_passthrough`.
+/// `syscall(2)` wrapper, resolved as a host alias (called while the shim holds
+/// the thread, which SUD lets through). See [`sud`] `mem_passthrough`.
 ///
 /// # Safety
 /// The arguments are the guest's own for a process-local memory-management
@@ -714,7 +714,11 @@ pub(crate) fn with_context_msg<T>(
     // unmanaged-window leak (a boundary that bypassed the silence): fail LOUDLY
     // and named rather than record/consume a trace op that would otherwise resurface
     // as an unexplained record/replay op-count divergence at some far-away index.
-    if thread::main_returned() {
+    // The one exception is the main task's own activation, which the first
+    // thread-subsystem call makes, wherever the guest's code makes it (a mask
+    // restored by `siglongjmp` in an atexit handler): its call is the guest's,
+    // made at the same point in every run.
+    if thread::main_returned() && !thread::activating() {
         let _ = flush_before_refusal();
         let _ = host_write_all(
             2,

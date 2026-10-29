@@ -1,10 +1,13 @@
 //! Syscall-user-dispatch (SUD) dispatch table — Linux only.
 //!
 //! Startup (`posix::lifecycle`) arms SUD (`prctl(PR_SET_SYSCALL_USER_DISPATCH,
-//! …)` with allowed region = glibc's executable segment, NULL selector) and
-//! installs the C `SIGSYS` handler. When guest code executes a raw `syscall`/`svc`
-//! instruction outside glibc's text, the kernel rolls the instruction back and
-//! delivers a synchronous, thread-directed `SIGSYS` at the exact faulting IP.
+//! …)` under the contract in [`arming`]: an allowed region that follows the
+//! thread's owner, glibc's text while the shim holds it and only the signal
+//! return vehicle's instruction while guest code does) and installs the C `SIGSYS` handler.
+//! When guest code makes a system call, wherever its code lies (its own
+//! inline `syscall`/`svc`, glibc's internals, a library's), the kernel rolls
+//! the instruction back and delivers a synchronous, thread-directed `SIGSYS`
+//! at the exact faulting IP.
 //! The handler decodes the syscall number and its six argument registers from
 //! the `ucontext` (in Rust), then calls [`patina_sud_dispatch`], which routes
 //! the call into the same typed core or prefixed entry as the libc door and
@@ -394,10 +397,9 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     // whose first raw syscall preceded its first spawn). No dispatch-side check is
     // needed to hold the invariant: arming strictly follows `set_current_task` in
     // the trampoline, so an armed non-main thread always has a task; a foreign
-    // host thread never executes the guest's inline syscall instructions (the C
-    // handler already proved `call_addr` is in main-executable text); and shim
-    // code that reaches the boundary itself from inside a dispatch (a raw
-    // syscall, or std calling the shim's own `syscall(2)` door) stops by name
+    // host thread is never armed; and shim code that reaches the boundary
+    // itself from inside a dispatch (std calling the shim's own `syscall(2)`
+    // door, or guest code the shim called) stops by name
     // before a nested dispatch: the SIGSYS handler and the door hold ask
     // whether a call that found the thread already the shim's nests, and
     // beneath this entry's scope (`enter_syscall`) none does, whoever called.

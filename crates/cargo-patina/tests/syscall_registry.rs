@@ -510,7 +510,10 @@ fn an_engine_comdat_group_survives_a_guests_group_of_the_same_name() {
 /// and panic machinery do, is the engine's use of the host, never a guest
 /// call: the seal binds it to the host's definition. A planted engine call
 /// to `getpid` answers the process's own id while the guest's call of the
-/// same name answers the virtual one.
+/// same name answers the virtual one. Engine code runs beneath an export
+/// that holds the thread, where syscall-user-dispatch lets the host call
+/// through; the plant, called straight from `main`, holds the selector open
+/// itself as that hold would (on Linux; elsewhere the bracket is empty).
 #[test]
 fn an_engine_call_to_a_door_reaches_the_host_not_the_door() {
     let dir = tempfile::tempdir().unwrap();
@@ -520,7 +523,20 @@ fn an_engine_call_to_a_door_reaches_the_host_not_the_door() {
     let plant = compile_plant(
         dir.path(),
         "patina_dst_planted",
-        "int getpid(void);\nint patina_planted_engine_getpid(void) { return getpid(); }\n",
+        "int getpid(void);\n\
+         #ifdef __linux__\n\
+         unsigned char patina_sud_host_open(void);\n\
+         void patina_sud_host_close(unsigned char);\n\
+         #else\n\
+         static unsigned char patina_sud_host_open(void) { return 0; }\n\
+         static void patina_sud_host_close(unsigned char previous) { (void)previous; }\n\
+         #endif\n\
+         int patina_planted_engine_getpid(void) {\n\
+             unsigned char held = patina_sud_host_open();\n\
+             int pid = getpid();\n\
+             patina_sud_host_close(held);\n\
+             return pid;\n\
+         }\n",
     );
     let planted = plant_member(&archive, dir.path(), &plant);
     let sealed = cargo_patina::seal_shim(&planted, &posix, &dir.path().join("sealed"))

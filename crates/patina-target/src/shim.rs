@@ -80,12 +80,12 @@ pub fn native_binary_has_sud_marker(bytes: &[u8]) -> Result<bool, TargetError> {
 /// traps them where the kernel has IA32 emulation, but they arrive with the i386
 /// syscall ABI, which the shim's handler refuses (it accepts only its own arch's
 /// `si_arch`); elsewhere they fault. Downgrading them would admit a binary the
-/// run then aborts, so they stay refusals. A site in a library is outside the
-/// main executable's text, where the SUD handler stops the run by name rather
-/// than serving the call, so it is never manageable either.
+/// run then aborts, so they stay refusals. A site in a loaded library is
+/// manageable as one in the executable is: the SUD handler serves a trapped
+/// call wherever its code lies (only the dynamic loader's own are a stop, and
+/// the loader is no library of the load set).
 pub fn native_escape_is_sud_manageable(escape: &NativeEscape) -> bool {
-    escape.image.is_none()
-        && escape.category == "direct-syscall"
+    escape.category == "direct-syscall"
         && escape.symbol.starts_with("instruction@")
         && matches!(escape.mnemonic, Some("syscall" | "svc"))
 }

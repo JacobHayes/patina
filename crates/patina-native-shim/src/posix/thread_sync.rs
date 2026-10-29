@@ -119,6 +119,36 @@ unsafe extern "C" fn pthread_getname_np(
     })
 }
 
+/// glibc's own, held: for the main thread glibc reads the stack's extent
+/// from the host's `/proc/self/maps` and `RLIMIT_STACK` (the fixed address
+/// layout makes it the same in every run), which syscall-user-dispatch
+/// would otherwise route to the virtual procfs, which has no `maps`, and
+/// Rust's stack-overflow guard would lose the main thread's stack.
+///
+/// # Safety
+/// As pthread_getattr_np's.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn pthread_getattr_np(
+    thread: libc::pthread_t,
+    attr: *mut libc::pthread_attr_t,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    type Host = unsafe extern "C" fn(libc::pthread_t, *mut libc::pthread_attr_t) -> c_int;
+    static HOST: std::sync::OnceLock<Host> = std::sync::OnceLock::new();
+    let host = *HOST.get_or_init(|| {
+        // SAFETY: the private resolver returns glibc's `pthread_getattr_np`,
+        // whose ABI is exactly `Host`.
+        unsafe {
+            core::mem::transmute::<*mut core::ffi::c_void, Host>(crate::host::hostapi::resolve(
+                c"pthread_getattr_np",
+            ))
+        }
+    });
+    // SAFETY: forwarded from the caller's contract.
+    unsafe { host(thread, attr) }
+}
+
 /// # Safety
 /// As pthread_setname_np's.
 #[cfg(target_os = "linux")]

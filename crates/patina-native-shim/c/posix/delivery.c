@@ -75,14 +75,30 @@ extern void patina_trap_take_back(const struct patina_exit *delivery);
 extern __attribute__((visibility("hidden"))) long (*patina_fault_host_syscall)(long, ...);
 static _Noreturn void patina_fault_stop(const char *message, size_t length);
 
+/* The C side's host system calls go through the private vehicle with
+ * syscall-user-dispatch's selector allowing them (src/sud/arming.rs): some
+ * are made outside any hold, the thread already the guest's (a release that
+ * starts guest handlers, a signal frame's stack switch, the fault stop), where
+ * the selector otherwise blocks. A handler that runs on the call's return
+ * leaves the selector as it found it. */
+extern uint8_t patina_sud_host_open(void);
+extern void patina_sud_host_close(uint8_t previous);
+extern uint8_t patina_sud_guest_open(void);
+static long patina_host_syscall(long nr, long a0, long a1, long a2, long a3) {
+    uint8_t previous = patina_sud_host_open();
+    long rc = patina_fault_host_syscall(nr, a0, a1, a2, a3);
+    patina_sud_host_close(previous);
+    return rc;
+}
+
 /* The only code that starts a guest handler for a signal the shim queued. */
 static void patina_release(const struct patina_exit *delivery) {
     long rc;
     if (delivery->release == PATINA_RELEASE_UNBLOCK) {
-        rc = patina_fault_host_syscall(SYS_rt_sigprocmask, SIG_SETMASK, &delivery->mask, NULL, 8);
+        rc = patina_host_syscall(SYS_rt_sigprocmask, SIG_SETMASK, (long)&delivery->mask, 0, 8);
     } else {
-        rc = patina_fault_host_syscall(SYS_rt_tgsigqueueinfo, (long)delivery->pid, (long)delivery->tid,
-                                       (long)delivery->sig, delivery->info);
+        rc = patina_host_syscall(SYS_rt_tgsigqueueinfo, (long)delivery->pid, (long)delivery->tid,
+                                 (long)delivery->sig, (long)delivery->info);
     }
     if (rc != 0) {
         static const char message[] = "patina: host signal release failed\n";

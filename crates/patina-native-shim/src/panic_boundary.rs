@@ -146,15 +146,12 @@ impl PanicScope {
     }
     fn set(value: bool, charge: Option<ChargeClass>) -> Self {
         count(1);
-        let previous = IN_SHIM.with(|scope| {
-            let previous = scope.get();
-            scope.set(match (value, previous) {
-                (false, _) => Owner::Guest,
-                (true, Owner::Guest | Owner::Shim) => Owner::Shim,
-                (true, Owner::Exit) => Owner::ExitEntry,
-                (true, Owner::ExitEntry | Owner::ExitCalled) => Owner::ExitCalled,
-            });
-            previous
+        let previous = IN_SHIM.with(Cell::get);
+        own(match (value, previous) {
+            (false, _) => Owner::Guest,
+            (true, Owner::Guest | Owner::Shim) => Owner::Shim,
+            (true, Owner::Exit) => Owner::ExitEntry,
+            (true, Owner::ExitEntry | Owner::ExitCalled) => Owner::ExitCalled,
         });
         // A guest call is the entry that takes the thread from guest code,
         // or the first one a trap holder makes for it (a trapped system call,
@@ -252,7 +249,7 @@ impl Drop for PanicScope {
         if let Some(call) = self.call {
             crate::charge::end(call);
         }
-        IN_SHIM.with(|scope| scope.set(self.previous));
+        own(self.previous);
         count(u64::MAX);
         #[cfg(target_os = "linux")]
         {
@@ -261,6 +258,17 @@ impl Drop for PanicScope {
             DISPATCHING.set(self.previous_dispatching);
         }
     }
+}
+
+/// The thread's owner is `owner` from here: every change of owner is made
+/// here, so syscall-user-dispatch's allowed region follows it
+/// (`sud::arming`): glibc's text while the shim holds the thread, only the
+/// signal return vehicle's instruction while guest code does.
+#[inline(always)]
+fn own(owner: Owner) {
+    IN_SHIM.with(|scope| scope.set(owner));
+    #[cfg(target_os = "linux")]
+    crate::sud::arming::follow(owner == Owner::Guest);
 }
 
 /// The shim took the thread from guest code whose stack pointer was `sp`.
@@ -371,7 +379,7 @@ pub(crate) fn claim(sp: usize) -> Claim {
     let previous = IN_SHIM.with(Cell::get);
     let taken = previous == Owner::Guest;
     if taken {
-        IN_SHIM.with(|scope| scope.set(Owner::Exit));
+        own(Owner::Exit);
         took(sp);
     }
     Claim {
@@ -434,7 +442,7 @@ pub(crate) fn release(claim: Claim) {
             "guest code called under a trap handler's hold made a held call: not modeled",
         );
     }
-    IN_SHIM.with(|scope| scope.set(claim.previous));
+    own(claim.previous);
 }
 
 /// The entry a trap exit hands the thread to guest handlers from, and takes
@@ -452,7 +460,7 @@ pub struct Held {
 #[cfg(target_os = "linux")]
 pub(crate) fn hand_over() -> Held {
     let (sp, entry) = guest_entry();
-    IN_SHIM.with(|scope| scope.set(Owner::Guest));
+    own(Owner::Guest);
     Held { sp, entry }
 }
 
@@ -460,7 +468,7 @@ pub(crate) fn hand_over() -> Held {
 /// entry it served before [`hand_over`].
 #[cfg(target_os = "linux")]
 pub(crate) fn take_back(held: Held) {
-    IN_SHIM.with(|scope| scope.set(Owner::Exit));
+    own(Owner::Exit);
     GUEST_SP.set(held.sp);
     ENTRY.set((held.entry, ENTRY.get().1));
 }

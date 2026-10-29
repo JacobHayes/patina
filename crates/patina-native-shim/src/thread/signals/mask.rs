@@ -2,12 +2,16 @@
 
 use super::*;
 
-// All host operations use the already-resolved syscall alias in glibc's allowed
-// text region, never a guest-visible symbol or an inline syscall instruction.
+// All host operations use the already-resolved syscall alias, never a
+// guest-visible symbol or an inline syscall instruction; they run while the
+// shim holds the thread, whose glibc calls syscall-user-dispatch lets
+// through, or (a release that starts guest handlers, made with the thread
+// already theirs) under the selector's explicit allowance.
 pub(super) fn host(nr: i64, args: [u64; 6]) -> i64 {
     #[cfg(test)]
     tests::observe_host_call(nr, args);
-    unsafe {
+    let previous = crate::sud::arming::patina_sud_host_open();
+    let rc = unsafe {
         crate::sud_host_syscall(
             nr,
             args[0] as i64,
@@ -17,7 +21,9 @@ pub(super) fn host(nr: i64, args: [u64; 6]) -> i64 {
             args[4] as i64,
             args[5] as i64,
         )
-    }
+    };
+    crate::sud::arming::patina_sud_host_close(previous);
+    rc
 }
 
 pub(crate) fn host_mask(mask: u64) -> u64 {
@@ -129,7 +135,9 @@ pub unsafe extern "C" fn patina_signal_frame(mask: *mut u64, stack: *mut Stack) 
 /// return's. Keep the containment signals out of it, as every mask the guest
 /// installs ([`host_mask`]); a frame that cannot be read is left to the
 /// kernel's `rt_sigreturn`, which faults it as it would natively. Answers the
-/// vehicle that issues the kernel's `rt_sigreturn`: glibc's real `syscall(2)`.
+/// vehicle that issues the kernel's `rt_sigreturn`, whose system call
+/// syscall-user-dispatch lets through (`sud::arming`): glibc's restorer on
+/// x86-64, glibc's real `syscall(2)` on arm64.
 pub extern "C" fn patina_signal_return(mask: usize) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Ok(saved) = crate::uaccess::read::<u64>(mask) {
@@ -150,7 +158,11 @@ pub extern "C" fn patina_signal_return(mask: usize) -> usize {
             }
         }
     }
-    crate::hostapi::get().host_syscall as usize
+    #[cfg(target_arch = "x86_64")]
+    let vehicle = RESTORER.load(Ordering::Relaxed);
+    #[cfg(not(target_arch = "x86_64"))]
+    let vehicle = crate::hostapi::get().host_syscall as usize;
+    vehicle
 }
 
 /// A handler asked, through its frame's saved mask, to block a signal the

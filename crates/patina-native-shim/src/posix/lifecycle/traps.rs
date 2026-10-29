@@ -5,12 +5,13 @@
 //! read, and decodes and completes a trapped syscall around the C frame's
 //! dispatch call.
 //!
-//! Syscall-user-dispatch (SUD-DESIGN.md) traps a guest's raw inline `syscall`
-//! instruction into the deterministic runtime. The allowed region is glibc's
-//! single executable segment, with no selector: every syscall instruction
-//! outside glibc text delivers a thread-directed SIGSYS. The shim reaches the
-//! kernel only through glibc host aliases, so glibc text is the exact allowed
-//! region. The main thread arms here; every managed thread arms itself
+//! Syscall-user-dispatch traps every system call guest code makes, wherever
+//! it is made (the guest's executable, glibc's internals, a shared library),
+//! into the deterministic runtime. What passes untrapped is the contract in
+//! `crate::sud::arming`: while guest code holds the thread only the signal
+//! return vehicle's one instruction, and while the shim does glibc's text
+//! (the host code the shim calls), so guest code that host code calls back
+//! still traps. The main thread arms here; every managed thread arms itself
 //! (`crate::sud::arming`). The timestamp-counter trap (x86-64,
 //! `PR_SET_TSC(PR_TSC_SIGSEGV)`) makes `rdtsc`/`rdtscp` raise a synchronous
 //! SIGSEGV the C handler answers from the virtual clock (src/tsc.rs). The
@@ -46,11 +47,14 @@ unsafe extern "C" {
     fn patina_fault_front_installed(handler: usize);
 }
 
-/// The main executable's text span, which every trapped site must lie in.
+/// The main executable's text span, which bounds the counter trap's decode.
 #[unsafe(no_mangle)]
 static patina_sud_text_lo: AtomicUsize = AtomicUsize::new(0);
 #[unsafe(no_mangle)]
 static patina_sud_text_hi: AtomicUsize = AtomicUsize::new(0);
+/// The dynamic loader's text span: a system call trapped there is glibc
+/// loading a library itself after startup, which is not modeled.
+static LOADER_TEXT: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
 /// glibc's sigaction, which the C handlers restore dispositions through.
 #[unsafe(no_mangle)]
 static patina_host_sigaction: AtomicUsize = AtomicUsize::new(0);
@@ -254,11 +258,34 @@ unsafe fn discover_regions() -> Result<(), ()> {
 
 fn regions(maps: &[u8]) -> Result<(), ()> {
     let marker = patina_sud_sigsys as *const () as usize;
-    let ([lo, hi], [base, end]) = arming::maps_regions(maps, marker).ok_or(())?;
+    let regions = arming::maps_regions(maps, marker).ok_or(())?;
+    let ([lo, hi], [base, end]) = (regions.text, regions.libc);
     patina_sud_text_lo.store(lo, Ordering::Relaxed);
     patina_sud_text_hi.store(hi, Ordering::Relaxed);
     arming::LIBC_TEXT[0].store(base, Ordering::Relaxed);
     arming::LIBC_TEXT[1].store(end - base, Ordering::Relaxed);
+    if let Some([lo, hi]) = regions.loader {
+        LOADER_TEXT[0].store(lo, Ordering::Relaxed);
+        LOADER_TEXT[1].store(hi, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Find the signal return vehicle's system call (`arming::vehicle_syscall`)
+/// in glibc's text, where `vehicle` must lie, and make it the allowed region.
+/// Fails closed: an unrecognized vehicle leaves no instruction to allow.
+fn allow_vehicle(vehicle: usize) -> Result<(), ()> {
+    let base = arming::LIBC_TEXT[0].load(Ordering::Relaxed);
+    let end = base + arming::LIBC_TEXT[1].load(Ordering::Relaxed);
+    if !(base..end).contains(&vehicle) {
+        return Err(());
+    }
+    let available = (end - vehicle).min(arming::VEHICLE_CODE);
+    // SAFETY: inside glibc's mapped executable segment.
+    let code = unsafe { core::slice::from_raw_parts(vehicle as *const u8, available) };
+    let after = arming::vehicle_syscall(code, vehicle).ok_or(())?;
+    arming::VEHICLE[0].store(after, Ordering::Relaxed);
+    arming::VEHICLE[1].store(1, Ordering::Relaxed);
     Ok(())
 }
 
@@ -293,9 +320,8 @@ pub(super) unsafe fn sud_init(envp: *const *const c_char, probe: bool) {
     if unsafe { sigaction(libc::SIGSYS, core::ptr::null(), &mut action) } != 0 {
         crate::trap_fatal("SUD: failed to query the signal restorer");
     }
-    crate::thread::signals::patina_signal_restorer(
-        action.sa_restorer.map_or(0, |restorer| restorer as usize),
-    );
+    let restorer = action.sa_restorer.map_or(0, |restorer| restorer as usize);
+    crate::thread::signals::patina_signal_restorer(restorer);
     if !managed {
         return;
     }
@@ -313,6 +339,22 @@ pub(super) unsafe fn sud_init(envp: *const *const c_char, probe: bool) {
         crate::trap_fatal(
             "SUD: could not determine glibc's single executable segment and the main-executable \
              text from /proc/self/maps; refusing to arm on a guessed region",
+        );
+    }
+    // The vehicle every signal frame returns through: x86-64's restorer; on
+    // arm64 the kernel's frames return through the vDSO, and a guest
+    // frame's through glibc's syscall(2) (`patina_signal_return`).
+    #[cfg(target_arch = "x86_64")]
+    let vehicle = restorer;
+    #[cfg(target_arch = "aarch64")]
+    let vehicle = {
+        let _ = restorer;
+        crate::hostapi::symbol(c"syscall") as usize
+    };
+    if allow_vehicle(vehicle).is_err() {
+        crate::trap_fatal(
+            "SUD: glibc's signal return vehicle is not the system call it is known to be; \
+             refusing to arm without an instruction to return through",
         );
     }
     unsafe { scrub_vdso(envp) };
@@ -431,9 +473,10 @@ pub struct SudTrap {
 
 /// Decode a syscall-user-dispatch SIGSYS: synchronous, on the trapping thread,
 /// at the guest's own syscall instruction (the kernel rolled it back), so
-/// re-entering the runtime is sound (SUD-DESIGN.md §4.2). Provenance first:
-/// a seccomp or `kill -SYS` SIGSYS, another architecture's, or a site outside
-/// the main executable's text (ld.so, a DSO, the vDSO) is a named stop. A
+/// re-entering the runtime is sound. Provenance first: a seccomp or `kill
+/// -SYS` SIGSYS, another architecture's, or a site in the dynamic loader's
+/// text (glibc loading a library itself) is a named stop; any other site is
+/// guest code's call, wherever its code lies. A
 /// guest restorer's `rt_sigreturn` resumes at the host vehicle with the
 /// guest's stack pointer (`patina_guest_sigreturn`): the handler's own return
 /// installs the trapped context with those registers changed, and 0 is
@@ -464,12 +507,11 @@ pub unsafe extern "C" fn patina_sud_decode(
     if arch != AUDIT_ARCH {
         fatal("SUD: SIGSYS with unexpected si_arch");
     }
-    let text =
-        patina_sud_text_lo.load(Ordering::Relaxed)..patina_sud_text_hi.load(Ordering::Relaxed);
-    if !text.contains(&call_addr) {
+    let loader = LOADER_TEXT[0].load(Ordering::Relaxed)..LOADER_TEXT[1].load(Ordering::Relaxed);
+    if loader.contains(&call_addr) {
         fatal(
-            "SUD: trapped a syscall outside the main executable text (ld.so / DSO / vDSO); this \
-             path is not modeled",
+            "SUD: the dynamic loader made a system call after startup (glibc loading a library \
+             itself: an NSS or iconv module, libgcc_s for unwinding); not modeled",
         );
     }
     let context = unsafe { &raw mut (*uc).uc_mcontext };

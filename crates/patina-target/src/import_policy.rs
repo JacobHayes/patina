@@ -108,10 +108,12 @@ pub fn macho_import_allowlist() -> impl Iterator<Item = &'static AllowedImports>
 pub(crate) const SHIM_DLSYM_VERSION: &str = "GLIBC_2.34";
 
 /// How the platform libc's implementation of an allowlisted import reaches
-/// the kernel. An import is a call into libc's own text, which syscall user
-/// dispatch leaves to the host kernel, so an allowlisted import that enters
-/// the kernel there is a host effect unless the shim defines the symbol
-/// itself. Every group says which it is; `cargo-patina/tests/syscall_registry.rs`
+/// the kernel. An import is a call into libc's own text. Where
+/// syscall-user-dispatch is armed its system calls trap into the virtual
+/// kernel as the guest's own do (the shim's calls alone pass); where it is
+/// not (macOS, a kernel without it), they reach the host, so an allowlisted
+/// import that enters the kernel is a host effect there unless the shim
+/// defines the symbol itself. Every group says which it is; `cargo-patina/tests/syscall_registry.rs`
 /// checks that no group lists a name the shim defines, whose claim would
 /// describe code that never runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -715,12 +717,8 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
     // caller-owned `cpu_set_t`, pure arithmetic over caller memory (distinct from
     // `sched_getcpu`, which reads the live CPU id and IS interposed to the virtual one).
     const PURE_COMPUTE: &[&str] = &["ctype_b_loc", "sched_cpucount"];
-    // glibc-only pthread introspection: reads the current thread's attributes
-    // for Rust's stack-overflow guard. For the main thread glibc reads
-    // `/proc/self/maps`, `RLIMIT_STACK` and the affinity mask from the host to
-    // fill them in. The XPG strerror_r alias is the pure message formatter
-    // behind std::io::Error display.
-    const THREAD_ATTRIBUTES: &[&str] = &["pthread_getattr_np"];
+    // The XPG strerror_r alias is the pure message formatter behind
+    // std::io::Error display.
     const ERROR_HELPERS: &[&str] = &["xpg_strerror_r"];
     // ld.so's restartable-sequence layout words (`__rseq_offset`, `__rseq_size`,
     // `__rseq_flags`): constants of the loaded glibc naming where each thread's
@@ -746,12 +744,6 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(PROGRAM_BREAK, HEAP),
         AllowedImports::exact(BYTE_ORDER, Never),
         AllowedImports::exact(PURE_COMPUTE, Never),
-        AllowedImports::exact(
-            THREAD_ATTRIBUTES,
-            HostPassthrough(
-                "the main thread's stack extent comes from the host's /proc/self/maps and RLIMIT_STACK; only stack-guard placement reads it",
-            ),
-        ),
         AllowedImports::exact(ERROR_HELPERS, Never),
         AllowedImports::exact(RSEQ_LAYOUT, Never),
     ]

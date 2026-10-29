@@ -115,7 +115,7 @@ macro_rules! early_rows {
                 $id,
                 Family::Signal,
                 Disposition::Modeled,
-                "A handler returning through the caller's own restorer (a raw `SA_RESTORER` action, as Go's runtime installs): the frame is the kernel's, so both vehicles resume at the host kernel's own `rt_sigreturn` with the guest's stack pointer, issued from glibc text (the SIGSYS handler edits the trapped context; the `syscall(2)` entry tail-jumps), which restores the interrupted context and the frame's mask; the containment signals are kept out of that mask, as out of every mask the guest installs. glibc's restorer returns without a trap, so the delivery point takes them out of the restored mask once the handlers return.",
+                "A handler returning through the caller's own restorer (a raw `SA_RESTORER` action, as Go's runtime installs): the frame is the kernel's, so both vehicles resume at the host kernel's own `rt_sigreturn` with the guest's stack pointer, issued from the one return-vehicle instruction syscall-user-dispatch lets through (the SIGSYS handler edits the trapped context; the `syscall(2)` entry tail-jumps), which restores the interrupted context and the frame's mask; the containment signals are kept out of that mask, as out of every mask the guest installs. glibc's restorer returns without a trap, so the delivery point takes them out of the restored mask once the handlers return.",
                 None,
             ),
             Syscall::N_ioctl => r(

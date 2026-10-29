@@ -108,7 +108,8 @@ fn an_allocator_reading_its_cpu_runs_threads() {
 /// program's `#[global_allocator]` and its C `malloc`, runs threads and lists
 /// a directory. The runtime reaches its C entry points from inside calls of
 /// its own: a new thread's TLS while it creates the host thread, holding its
-/// state, and a directory stream. Each call the allocator makes there
+/// state, a directory stream, and the C library's formatter allocating a long
+/// number's digits inside the runtime's `printf`. Each call the allocator makes there
 /// (`syscall(SYS_getcpu)`; while listing, `getrusage`, a failing `getrusage`
 /// whose errno it reads, `sched_getaffinity`; and, where syscall-user-dispatch
 /// traps it, a raw `getcpu`) nests in the runtime's call, which carries on as
@@ -130,9 +131,16 @@ fn an_allocator_making_system_calls_runs_threads() {
         let fields = assert_fields(
             &out,
             "NATIVE_SYSCALL_ALLOC_RESULT ",
-            &["total", "asked", "cpus_seen", "read_state", "listed"],
+            &[
+                "total",
+                "asked",
+                "cpus_seen",
+                "read_state",
+                "listed",
+                "formatted",
+            ],
         );
-        for key in ["asked", "read_state", "listed"] {
+        for key in ["asked", "read_state", "listed", "formatted"] {
             assert_eq!(fields[key], "1", "{bin} {key}: {}", text(&out));
         }
         assert_eq!(fields["cpus_seen"], count, "{bin}: {}", text(&out));

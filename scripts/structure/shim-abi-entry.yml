@@ -41,11 +41,14 @@ rule:
     # The allocator routes read ownership to pick an allocator, so entering a
     # scope would send every guest allocation to the runtime's arena. The
     # host bindings' resolver runs beneath whatever engine code called the
-    # binding, guest-owned or not, and must not change that ownership.
+    # binding, guest-owned or not, and must not change that ownership. The
+    # syscall-user-dispatch selector bracket is written from the C signal
+    # paths around a host call; entering a scope would rewrite the selector
+    # it brackets.
     - not:
         has:
           field: name
-          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|__real_dlsym|patina_host_symbol|patina_route_(alloc|alloc_zeroed|dealloc|realloc))$'
+          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|__real_dlsym|patina_host_symbol|patina_sud_(host_open|host_close|guest_open)|patina_route_(alloc|alloc_zeroed|dealloc|realloc))$'
     - any:
         - not:
             has:

@@ -8,9 +8,15 @@
  *                open/read of /proc/loadavg) / /proc/loadavg read through
  *                the interposed open and read
  *   library      the same getloadavg, called from a shared library
- *   library-raw  an inline getpid in a shared library / getpid() */
+ *   library-raw  an inline getpid in a shared library / getpid()
+ *   stack        the main thread's attributes, which glibc fills in from the
+ *                host's /proc/self/maps (pthread_getattr_np holds the thread
+ *                so its reads stay the host's) / a local's address, which
+ *                the stack they name must hold */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -63,6 +69,15 @@ int main(int argc, char **argv) {
     } else if (strcmp(mode, "library-raw") == 0) {
         long raw = probe_library_raw_getpid();
         printf("GLIBC_INTERNAL mode=%s raw=%ld door=%ld\n", mode, raw, (long)getpid());
+    } else if (strcmp(mode, "stack") == 0) {
+        pthread_attr_t attr;
+        void *base = NULL;
+        size_t size = 0;
+        int rc = pthread_getattr_np(pthread_self(), &attr);
+        if (rc == 0) pthread_attr_getstack(&attr, &base, &size);
+        uintptr_t local = (uintptr_t)&rc;
+        int holds = rc == 0 && local >= (uintptr_t)base && local - (uintptr_t)base < size;
+        printf("GLIBC_INTERNAL mode=%s rc=%d holds=%d\n", mode, rc, holds);
     } else {
         return 2;
     }

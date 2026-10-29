@@ -188,7 +188,7 @@ static uintptr_t patina_interrupted_sp(const ucontext_t *uc) {
 }
 
 static void patina_host_altstack(const stack_t *stack) {
-    if (patina_fault_host_syscall(SYS_sigaltstack, stack, NULL) != 0) {
+    if (patina_host_syscall(SYS_sigaltstack, (long)stack, 0, 0, 0) != 0) {
         static const char message[] = "patina: host private signal stack switch failed\n";
         patina_fault_stop(message, sizeof message - 1);
     }
@@ -202,14 +202,19 @@ static void patina_host_altstack(const stack_t *stack) {
 static void patina_run_guest_handler(int sig, siginfo_t *info, ucontext_t *uc,
                                      struct patina_fault_frame *frame,
                                      const struct patina_signal_action *handler) {
+    /* The handler is guest code: its system calls trap even when the signal
+     * arrived inside a host call's selector allowance (src/sud/arming.rs). */
+    uint8_t selector = patina_sud_guest_open();
     if (frame->target == 0) {
         /* The kernel passes siginfo and ucontext to every handler, whether it
          * asked for SA_SIGINFO or not. */
         ((void (*)(int, siginfo_t *, void *))handler->handler)(sig, info, uc);
+        patina_sud_host_close(selector);
         return;
     }
     patina_host_altstack(&frame->nested);
     patina_call_guest_handler(handler->handler, sig, info, uc, frame->target);
+    patina_sud_host_close(selector);
     /* Back in the shim: nested frames go below this one, in its level, until
      * the frame's rt_sigreturn installs the registration it names. */
     static const stack_t off = {.ss_flags = SS_DISABLE};
@@ -294,7 +299,9 @@ static void patina_tsc_take_real_fault(int sig, siginfo_t *info, void *ucontext)
      * instruction raises again (a signal frame that did not fit on its stack
      * is one): taken now, it is never lost with the trap left disarmed. */
     if (info->si_code == SI_KERNEL) patina_trap_take_default(sig);
+    uint8_t previous = patina_sud_host_open();
     (void)patina_host_sigaction(sig, &patina_tsc_prev, NULL);
+    patina_sud_host_close(previous);
 }
 
 void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
@@ -348,11 +355,12 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
 #endif
 
 /* Resolved before installing the front handler. The stop must never enter
- * Rust, resolve a symbol, format, or use an interposed vehicle. glibc's
- * syscall is a leaf and is inside SUD's allowed text region. */
+ * Rust beyond the selector's allowance, resolve a symbol, format, or use an
+ * interposed vehicle. glibc's syscall is a leaf. */
 static _Noreturn void patina_fault_stop(const char *message, size_t length) {
     static const unsigned long default_action[4] = {0, 0, 0, 0};
     static const uint64_t unblock = UINT64_C(1) << (SIGABRT - 1);
+    (void)patina_sud_host_open();
     (void)patina_fault_host_syscall(SYS_write, 2, message, length);
     /* Private abort, not guest abort: reset/unblock SIGABRT and send it to
      * this thread. No Rust scope, trace finalization or guest handler. */
@@ -377,7 +385,9 @@ void patina_fault_front(int sig, siginfo_t *info, void *ucontext) {
     struct sigaction deflt;
     memset(&deflt, 0, sizeof deflt);
     deflt.sa_handler = SIG_DFL;
+    uint8_t previous = patina_sud_host_open();
     (void)patina_host_sigaction(sig, &deflt, NULL);
+    patina_sud_host_close(previous);
 }
 
 /*

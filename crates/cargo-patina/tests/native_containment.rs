@@ -491,9 +491,9 @@ fn planted_guest() -> Guest {
 /// (planted, in the dispatch of the guest's own call: `syscall(2)`, which
 /// holds the thread around it, or `prctl(2)`, which holds nothing) is a named
 /// stop before its call is serviced as the guest's: through the `syscall(2)`
-/// door, which the unsealed archive binds shim code's own call to, on every Linux arch,
-/// and as a raw syscall instruction, where the host has syscall-user-dispatch.
-/// Guest code a shim entry calls nests instead
+/// door, which the unsealed archive binds shim code's own call to, on every Linux arch.
+/// (A raw syscall instruction in shim code is the seal's refusal:
+/// syscall-user-dispatch lets the shim's own calls pass.) Guest code a shim entry calls nests instead
 /// (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`).
 ///
 /// Each plant says so on stderr before it acts, so an earlier death cannot
@@ -512,25 +512,19 @@ fn shim_faults_are_named_stops_never_the_guests() {
             "{case}: {output:?}"
         );
     }
-    let mut kinds = vec!["door"];
-    if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Sud) {
-        kinds.push("trap");
-    }
-    for kind in kinds {
-        for outer in ["held", "unheld"] {
-            let case = format!("{kind} {outer}");
-            let output = standalone_output(&g.binary, &[kind, outer], &env);
-            assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
-            let stderr = text(&output.stderr);
-            assert!(
-                stderr.contains("PATINA_PLANTED_REENTRY"),
-                "{case}: {output:?}"
-            );
-            assert!(
-                !stderr.contains("PATINA_PLANTED_SERVICED"),
-                "{case}: {output:?}"
-            );
-        }
+    for outer in ["held", "unheld"] {
+        let case = format!("door {outer}");
+        let output = standalone_output(&g.binary, &["door", outer], &env);
+        assert_eq!(output.status.signal(), Some(6), "{case}: {output:?}");
+        let stderr = text(&output.stderr);
+        assert!(
+            stderr.contains("PATINA_PLANTED_REENTRY"),
+            "{case}: {output:?}"
+        );
+        assert!(
+            !stderr.contains("PATINA_PLANTED_SERVICED"),
+            "{case}: {output:?}"
+        );
     }
 }
 
@@ -1108,12 +1102,15 @@ mod early_init {
         (1..libc::CPU_SETSIZE as usize).find(|&cpu| unsafe { libc::CPU_ISSET(cpu, &set) })
     }
 
-    /// An inline syscall or counter read in a library constructor is refused
-    /// by the pre-run audit, which scans the library's code; run without the
-    /// gate, it lies outside the main executable's text: a named stop, never
-    /// a host effect. A library constructor already reads the virtual CPU
-    /// from glibc's rseq area, even on a host CPU other than 0, and a library
-    /// doing only that audits clean.
+    /// A counter read in a library constructor is refused by the pre-run
+    /// audit, which scans the library's code; run without the gate, it lies
+    /// outside the main executable's text, where the counter trap does not
+    /// answer: a named stop, never a host effect. An inline syscall there is
+    /// the virtual kernel's to answer, where syscall-user-dispatch traps it,
+    /// before any of the executable's constructors ran. A library
+    /// constructor already reads the virtual CPU from glibc's rseq area, even
+    /// on a host CPU other than 0, and a library doing only that audits
+    /// clean.
     #[test]
     fn library_constructor_escapes_stop_by_name() {
         let libs = tempfile::tempdir().unwrap();
@@ -1121,10 +1118,18 @@ mod early_init {
         let rpath = format!("-Wl,-rpath,{}", libs.path().display());
         let flags = [library.to_str().unwrap(), rpath.as_str()];
         let g = assert_build_c_guest_with_flags("dso_ctor_probe.c", CLink::PosixShim, &flags);
-        assert_refused(
-            g.command("audit", &[]),
-            &["libdso_ctor_escape.so", "direct-syscall"],
-        );
+        // The library's inline syscall is SUD-managed, as one in the
+        // executable is: on x86_64 its counter read is what the audit refuses.
+        if cfg!(target_arch = "x86_64") {
+            assert_refused(
+                g.command("audit", &[]),
+                &["libdso_ctor_escape.so", "cpu-nondeterminism"],
+            );
+        } else {
+            let out = assert_success(g.command("audit", &[]));
+            let report = format!("{}{}", text(&out.stdout), text(&out.stderr));
+            assert!(report.contains("direct-syscall"), "{report}");
+        }
         let rseq_libs = tempfile::tempdir().unwrap();
         let rseq_library = assert_build_c_library(
             "dso_ctor_escape.c",
@@ -1139,10 +1144,14 @@ mod early_init {
         );
         rseq.assert_audit_clean();
         if kernel_supports(KernelFeature::Sud) {
-            g.assert_internal_fatal(
-                &["syscall"],
-                &["SUD: trapped a syscall outside the main executable text"],
+            let (out, _) = g.record_standalone(&["syscall"]);
+            let out = assert_success(out);
+            let fields = assert_fields(
+                &out.stdout,
+                "DSO_CTOR_RESULT ",
+                &["mode", "ran", "value", "main_cpu", "parent"],
             );
+            assert_eq!(fields["value"], fields["parent"], "{}", text(&out.stdout));
         }
         if cfg!(target_arch = "x86_64") && kernel_supports(KernelFeature::Tsc) {
             g.assert_internal_fatal(
@@ -1165,10 +1174,18 @@ mod early_init {
         let out = common::output_with_deadline(&mut command, Duration::from_secs(20))
             .expect("rseq probe exceeded 20s");
         let out = assert_success(out);
-        assert_eq!(
-            text(&out.stdout),
-            "DSO_CTOR_RESULT mode=rseq ran=1 value=0 main_cpu=0\n"
+        let fields = assert_fields(
+            &out.stdout,
+            "DSO_CTOR_RESULT ",
+            &["mode", "ran", "value", "main_cpu", "parent"],
         );
+        let seen = [
+            fields["mode"],
+            fields["ran"],
+            fields["value"],
+            fields["main_cpu"],
+        ];
+        assert_eq!(seen, ["rseq", "1", "0", "0"], "{}", text(&out.stdout));
     }
 
     // A guest's own preinit entry would run before the shim's (link order):
@@ -1296,7 +1313,8 @@ mod early_init {
 /// library) and a shared library's inline syscall. Where
 /// syscall-user-dispatch arms, each traps into the virtual kernel wherever
 /// its code lies, so it answers what the same question asked through an
-/// interposed call answers.
+/// interposed call answers. The main thread's attributes, which glibc reads
+/// from the host's `/proc/self/maps`, still name the stack the thread runs on.
 #[cfg(target_os = "linux")]
 #[test]
 fn calls_no_interposer_sees_reach_the_virtual_kernel() {
@@ -1337,11 +1355,24 @@ fn calls_no_interposer_sees_reach_the_virtual_kernel() {
         );
         assert_eq!(fields["glibc"], "3", "{mode}: {}", text(&out.stdout));
         assert_eq!(fields["door"], "3", "{mode}: {}", text(&out.stdout));
-        assert_eq!(fields["internal"], fields["loads"], "{mode}: {}", text(&out.stdout));
+        assert_eq!(
+            fields["internal"],
+            fields["loads"],
+            "{mode}: {}",
+            text(&out.stdout)
+        );
     }
     let out = run("library-raw");
     let fields = assert_fields(&out.stdout, "GLIBC_INTERNAL ", &["mode", "raw", "door"]);
     assert_eq!(fields["raw"], fields["door"], "{}", text(&out.stdout));
+    let out = run("stack");
+    let fields = assert_fields(&out.stdout, "GLIBC_INTERNAL ", &["mode", "rc", "holds"]);
+    assert_eq!(
+        [fields["rc"], fields["holds"]],
+        ["0", "1"],
+        "{}",
+        text(&out.stdout)
+    );
 }
 
 #[cfg(target_os = "macos")]

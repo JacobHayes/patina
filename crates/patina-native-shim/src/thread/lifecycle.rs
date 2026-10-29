@@ -291,6 +291,7 @@ fn thread_returns(task: TaskId, retval: usize) {
         }
     }
     thread_finish(task, retval, 0);
+    crate::sud::arming::thread_completed();
 }
 
 #[unsafe(no_mangle)]
@@ -315,6 +316,7 @@ pub extern "C" fn patina_main_thread_exited() {
             MAIN_EXIT_VALUE.load(std::sync::atomic::Ordering::SeqCst),
             0,
         );
+        crate::sud::arming::thread_completed();
     } else {
         last_thread_exits();
     }

@@ -11,8 +11,10 @@
 // it also reads its rusage and affinity (`getrusage`, `sched_getaffinity`:
 // held libc doors that read the runtime's state, which a thread's creation
 // holds, so they are asked only then) and makes a `getrusage` that fails,
-// whose errno it reads. [`main`] spawns and joins threads and lists a
-// directory; the C entry points' calls that answered are tallied (the C
+// whose errno it reads. [`main`] spawns and joins threads, lists a
+// directory and prints a number long enough that the C library's formatter,
+// which the runtime's `printf` calls holding its state, allocates its
+// digits; the C entry points' calls that answered are tallied (the C
 // library and the runtime are their only callers), and the CPUs every call
 // saw.
 use std::alloc::{GlobalAlloc, Layout};
@@ -195,12 +197,17 @@ pub fn main() {
     LISTING.store(true, Ordering::Relaxed);
     let entries = std::fs::read_dir("/").unwrap().count();
     LISTING.store(false, Ordering::Relaxed);
+    let before = C_ASKED.load(Ordering::Relaxed);
+    unsafe { printf(c"NATIVE_SYSCALL_ALLOC_DIGITS %.10000f\n".as_ptr(), 1.0f64) };
+    unsafe { fflush(null_mut()) };
+    let formatted = C_ASKED.load(Ordering::Relaxed) > before;
     println!(
-        "NATIVE_SYSCALL_ALLOC_RESULT total={total} asked={} cpus_seen={} read_state={} listed={}",
+        "NATIVE_SYSCALL_ALLOC_RESULT total={total} asked={} cpus_seen={} read_state={} listed={} formatted={}",
         u64::from(C_ASKED.load(Ordering::Relaxed) > 0),
         SEEN.load(Ordering::Relaxed).count_ones(),
         u64::from(C_READ_STATE.load(Ordering::Relaxed) > 0),
         u64::from(entries > 0),
+        u64::from(formatted),
     );
 }
 
@@ -217,5 +224,7 @@ unsafe extern "C" {
     fn getrusage(who: c_int, usage: *mut c_void) -> c_int;
     fn sched_getaffinity(pid: c_int, size: usize, set: *mut c_void) -> c_int;
     fn abort() -> !;
+    fn printf(format: *const std::ffi::c_char, ...) -> c_int;
+    fn fflush(stream: *mut c_void) -> c_int;
     fn __errno_location() -> *mut c_int;
 }

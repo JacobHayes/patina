@@ -503,9 +503,9 @@ pub(crate) mod hostapi {
     // deterministic last reference (see `patina_thread_join`).
     pub type HostPthreadJoin = unsafe extern "C" fn(*mut c_void, *mut *mut c_void) -> c_int;
     // The real glibc `syscall(2)` wrapper, the pass-through vehicle for the SUD
-    // dispatcher's process-local memory rows (mmap-anon/munmap/mprotect/…). Its
-    // kernel entry sits in glibc text — the SUD-allowed region — so a syscall it
-    // issues never re-traps. Declared with the six integer argument registers the
+    // dispatcher's process-local memory rows (mmap-anon/munmap/mprotect/…). The
+    // shim holds the thread whenever it calls it, which SUD lets through, so a
+    // syscall it issues never re-traps. Declared with the six integer argument registers the
     // Linux syscall ABI uses; the glibc entry is variadic but every argument is an
     // integer passed in registers, so a fixed-arity call is ABI-compatible.
     pub type HostThreadAtexit =

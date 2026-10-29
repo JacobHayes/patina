@@ -820,6 +820,12 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
+        "pthread_getattr_np",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
         "pthread_getname_np",
         Platform::Linux,
         Serves::Syscalls(&["prctl"]),

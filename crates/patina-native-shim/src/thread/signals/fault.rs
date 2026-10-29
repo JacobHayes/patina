@@ -318,9 +318,9 @@ static PLANTED_REENTRY: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomic
 /// which holds the thread, or `prctl`, which does not) makes one of its own
 /// from inside its dispatch. It writes a marker to stderr through the C library's `syscall(2)`
 /// (`kind` 0), which binds to the shim's own door in the unsealed archive the
-/// plant links (a sealed engine's call binds to the host's), or as a raw `syscall`
-/// instruction (`kind` 1, x86_64), which traps: the marker is written only if
-/// that call is serviced.
+/// plant links (a sealed engine's call binds to the host's): the marker is
+/// written only if that call is serviced. (A raw instruction in shim code is
+/// the seal's refusal: syscall-user-dispatch lets the shim's own calls pass.)
 #[cfg(feature = "planted-faults")]
 pub extern "C" fn patina_planted_reentry(kind: i32) -> u8 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -348,23 +348,6 @@ pub(crate) fn planted_reentry() {
         unsafe {
             libc::syscall(libc::SYS_write, 2, serviced.as_ptr(), serviced.len())
         };
-    }
-    #[cfg(target_arch = "x86_64")]
-    if kind == 1 {
-        // SAFETY: as above, made as the raw instruction; `rcx` and `r11` are
-        // the instruction's own clobbers.
-        unsafe {
-            std::arch::asm!(
-                "syscall",
-                inlateout("rax") libc::SYS_write => _,
-                in("rdi") 2,
-                in("rsi") serviced.as_ptr(),
-                in("rdx") serviced.len(),
-                out("rcx") _,
-                out("r11") _,
-                options(nostack),
-            );
-        }
     }
 }
 
