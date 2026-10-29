@@ -16,7 +16,7 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     // routes to Help — never consumed as a positional, never an error.
     let is_version = |values: &[&str]| matches!(parse(strings(values)), Ok(ParseResult::Version));
     for verb in [
-        "run", "test", "build", "audit", "replay", "campaign", "minimize", "coverage", "sites",
+        "run", "test", "build", "audit", "replay", "campaign", "minimize", "coverage",
         "syscalls", "trace",
     ] {
         assert!(is_help(&[verb, "--help"]), "{verb} --help");

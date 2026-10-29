@@ -4,17 +4,13 @@
 //! `patina.runfacts/v1` document (carried into the `patina.result/v1`
 //! envelope). Link-time declarations (`declared_sites`) fold into
 //! `<out>/sites.json` (`patina.campaign.sites/v1`) with `registered_gens=0`
-//! until an evaluated site (`sites`) registers them. `cargo patina sites
-//! --exercised` reads the same store back.
+//! until an evaluated site registers them.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::CliError;
 
 pub(crate) const CAMPAIGN_SITES_SCHEMA: &str = "patina.campaign.sites/v1";
 
@@ -365,60 +361,6 @@ fn validate_site_record(site: &ExercisedSite) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExercisedSource {
-    pub(crate) path: String,
-    pub(crate) generations_observed: u64,
-    pub(crate) sites: BTreeMap<String, ExercisedSite>,
-}
-
-/// Parse an exercised source: a campaign out-dir, or its `sites.json` store
-/// (schema `patina.campaign.sites/v1`). A missing or malformed store fails
-/// loudly.
-pub(crate) fn parse_exercised_file(path: &Path) -> Result<ExercisedSource, CliError> {
-    if path.is_dir() {
-        return parse_campaign_sites_store(&path.join("sites.json"), Some(path));
-    }
-    parse_campaign_sites_store(path, None)
-}
-
-fn parse_campaign_sites_store(
-    path: &Path,
-    display_path: Option<&Path>,
-) -> Result<ExercisedSource, CliError> {
-    let text = fs::read_to_string(path).map_err(|error| {
-        CliError(format!(
-            "failed to read campaign sites store {}: {error}",
-            path.display()
-        ))
-    })?;
-    let json: Value = serde_json::from_str(&text).map_err(|error| {
-        CliError(format!(
-            "campaign sites store {} is invalid JSON: {error}",
-            path.display()
-        ))
-    })?;
-    let mut source = exercised_source_from_store(path, &json)?;
-    if let Some(display_path) = display_path {
-        source.path = display_path.display().to_string();
-    }
-    Ok(source)
-}
-
-fn exercised_source_from_store(path: &Path, json: &Value) -> Result<ExercisedSource, CliError> {
-    let tally = CoverageTally::from_json(json).map_err(|error| {
-        CliError(format!(
-            "campaign sites store {} is invalid: {error}",
-            path.display()
-        ))
-    })?;
-    Ok(ExercisedSource {
-        path: path.display().to_string(),
-        generations_observed: tally.generations_observed,
-        sites: tally.sites,
-    })
-}
-
 fn validate_identity(label: &str, kind: &str, site: &str) -> Result<(), String> {
     required_text("label", label)?;
     parse_kind(kind)?;
@@ -513,18 +455,6 @@ mod tests {
         let loaded = CoverageTally::from_json(&json).unwrap();
         assert_eq!(loaded, tally);
         assert_eq!(json, loaded.to_json());
-
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join("sites.json"),
-            serde_json::to_string_pretty(&json).unwrap(),
-        )
-        .unwrap();
-        for source in [dir.path().to_path_buf(), dir.path().join("sites.json")] {
-            let source = parse_exercised_file(&source).unwrap();
-            assert_eq!(source.generations_observed, 2);
-            assert_eq!(source.sites["x"].first_satisfied_seed, Some(456));
-        }
 
         // Declared sites that never registered round-trip as zero-registered rows.
         let declared = json!({

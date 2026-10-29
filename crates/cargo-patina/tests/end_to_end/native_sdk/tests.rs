@@ -6,7 +6,7 @@ use common::native::Guest;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
-    let (package, binary) = sdk_guest();
+    let (_, binary) = sdk_guest();
     let guest = Guest {
         dir: tempdir().unwrap(),
         binary,
@@ -34,8 +34,7 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
         sdk_report_line(&seeded).contains("|@src/main.rs:"),
         "SDK report rows must carry file:line identities: {stderr}"
     );
-    assert_sites_join_for_campaign(
-        &package,
+    assert_campaign_sites_carry_identities(
         &guest.binary,
         &[
             "batch",
@@ -159,12 +158,11 @@ fn minimize_params_reduces_a_failing_native_runs_parameters() {
 // Class pairing: the SDK declaration generates macros and literal descriptors
 // together. Every declared macro, a newly added registry row included, emits a
 // linked descriptor at its own source line though no run reaches it, and a
-// campaign fails coverage on the never-called `reachable!` and joins it back to
-// the source through `sites --exercised`.
+// campaign fails coverage on the never-called `reachable!`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
-    let (package, binary) = sdk_guest();
+    let (_, binary) = sdk_guest();
     let directory = tempdir().unwrap();
     let out = directory.path().join("campaign");
     let campaign = invoke_unchecked(
@@ -214,40 +212,6 @@ fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
         assert_eq!(row["registered_gens"], 0);
         assert_eq!(row["first_registered_gen"], serde_json::Value::Null);
     }
-
-    let joined = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        &package,
-        &[
-            "sites",
-            "--no-cache",
-            "--exercised",
-            out.to_str().unwrap(),
-            "--site",
-            "registry-reachable",
-            "--format",
-            "json",
-        ],
-    );
-    assert!(
-        joined.status.success(),
-        "sites --exercised campaign out-dir failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&joined.stdout),
-        String::from_utf8_lossy(&joined.stderr)
-    );
-    let joined_json: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap();
-    assert_eq!(
-        joined_json["unmatched_runtime_labels"], 0,
-        "{joined_json:#}"
-    );
-    assert_eq!(
-        joined_json["totals"]["exercised"]["never_exercised"], 1,
-        "{joined_json:#}"
-    );
-    assert_eq!(
-        joined_json["sites"][0]["exercised"]["registered_gens"], 0,
-        "{joined_json:#}"
-    );
 }
 
 /// A build into a Cargo target directory that already holds another SDK

@@ -200,14 +200,6 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   up by crate/module/function, refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
   `patina.coverage/v1` JSON envelope.
-- `cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]`
-  Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
-  proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
-  JSON output is schema `patina.sites/v1`; per-file cache is
-  `.patina/out/sites-cache.json` unless `--no-cache` is set. `--exercised OUTDIR`
-  reads a campaign's `OUTDIR/sites.json` (or that file itself) and joins its
-  runtime counters and link-time declared SDK rows by label or dynamic-label
-  file:line.
 - `cargo patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--jobs N]`
   Reduce one failing campaign generation: delta-debug the fault-knob
   vector that generation drew (each candidate a fresh seeded `run`), print and

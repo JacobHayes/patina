@@ -29,7 +29,7 @@ maintainer recipes; it is gitignored and is not project doctrine.
 ## The CLI: verbs, and where its truth lives
 
 `cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
-`campaign`, `coverage`, `sites`, `trace`, `minimize`, `syscalls`. Every run is
+`campaign`, `coverage`, `trace`, `minimize`, `syscalls`. Every run is
 native and interposed; `run`, `audit`, and `replay` are source-first (a `.rs`
 file, package directory, or `Cargo.toml` builds on the fly).
 

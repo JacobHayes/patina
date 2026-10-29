@@ -450,8 +450,7 @@ pub(super) fn write_sdk_fixture(root: &Path, main: &str) {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn assert_sites_join_for_campaign(
-    package: &Path,
+pub(super) fn assert_campaign_sites_carry_identities(
     binary: &Path,
     expected_labels: &[&str],
 ) {
@@ -472,47 +471,18 @@ pub(super) fn assert_sites_join_for_campaign(
             out.to_str().unwrap(),
         ],
     );
-    let joined = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        package,
-        &[
-            "sites",
-            "--no-cache",
-            "--exercised",
-            out.to_str().unwrap(),
-            "--all",
-            "--format",
-            "json",
-        ],
-    );
-    assert!(
-        joined.status.success(),
-        "sites --exercised failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&joined.stdout),
-        String::from_utf8_lossy(&joined.stderr)
-    );
-    let json: serde_json::Value = serde_json::from_slice(&joined.stdout).unwrap_or_else(|error| {
-        panic!(
-            "sites --exercised did not emit JSON: {error}\nstdout:\n{}",
-            String::from_utf8_lossy(&joined.stdout)
-        )
-    });
-    assert_eq!(json["schema"], "patina.sites/v1");
-    assert_eq!(json["unmatched_runtime_labels"], 0, "{json:#}");
-    assert_eq!(
-        json["totals"]["exercised"]["unmatched_runtime_labels"], 0,
-        "{json:#}"
-    );
+    let sites: serde_json::Value =
+        serde_json::from_slice(&fs::read(out.join("sites.json")).unwrap()).unwrap();
     for label in expected_labels {
-        let row = json["sites"]
+        let row = sites["sites"]
             .as_array()
             .unwrap()
             .iter()
             .find(|site| site["label"].as_str() == Some(label))
-            .unwrap_or_else(|| panic!("missing static site for label {label}: {json:#}"));
+            .unwrap_or_else(|| panic!("missing site for label {label}: {sites:#}"));
         assert!(
-            row.get("exercised").is_some(),
-            "label {label} did not join an exercised row: {json:#}"
+            row["site"].as_str().is_some_and(|site| site.contains(".rs:")),
+            "label {label} has no file:line identity: {sites:#}"
         );
     }
 }

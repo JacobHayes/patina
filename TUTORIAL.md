@@ -101,18 +101,6 @@ PATINA_SDK_REPORT enabled=1 swarm_deselected=0 fire_permille=250 activation_perm
   sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...|@src/main.rs:9
 ```
 
-You can inventory the static instrumentation from the `ledger/` workspace, and
-join a run's SDK report back to that inventory. Capture stderr from any run and
-feed it to `sites --exercised`:
-
-```
-$ cargo patina run ./ledger/ledger --seed 5 --buggify 2> ./sdk.stderr
-$ cargo patina sites --no-cache --site batch-commit --exercised ./sdk.stderr
-== sites static inventory ==
-...
-src/main.rs:9 fault driven id=batch-commit label=batch-commit ... exercised(reg=1 evals=8 fires=2 ...)
-```
-
 For native edge coverage, build with `--instrument`, write a covmap, then use the
 read-only coverage report to symbolize and roll it up by crate/module/function:
 

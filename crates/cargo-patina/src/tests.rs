@@ -6,7 +6,7 @@ use crate::parse::{
     parse_native_harness_from, parse_native_replay, parse_native_run, parse_native_run_from,
     parse_trace, repeatable_payload,
 };
-use crate::{campaign, cli, coverage, help, output, sites, syscalls, values};
+use crate::{campaign, cli, coverage, help, output, syscalls, values};
 use patina_dst_runtime::{FaultKnob, Plumbing};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -543,7 +543,6 @@ mod registry {
                 &[],
             ))
             .map(|_| ()),
-            ("sites", _) => sites::parse(with(none, &[])).map(|_| ()),
             ("syscalls", _) => syscalls::parse(with(none, &[])).map(|_| ()),
             ("minimize", help::Family::Generation) => {
                 let prefix = unless("--generation", &["--generation=1"]);

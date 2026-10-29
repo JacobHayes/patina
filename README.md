@@ -127,7 +127,6 @@ source-first native libtest harness mode for one exact test target.
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
-| `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
 | `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `cargo patina syscalls` |
 
@@ -259,7 +258,7 @@ with `registered_gens=0`. Each row carries `@file:line`. `cargo patina
 campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
 when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
-loads through `cargo patina sites --exercised <out-dir>`.
+is the source of truth for which sites the build declares.
 
 ### Record and replay
 

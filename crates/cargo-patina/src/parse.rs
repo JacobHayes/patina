@@ -5,7 +5,7 @@ use crate::{
     ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, HarnessFeatures, HarnessSeeds,
     KnobValues, NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
     NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
-    UnsupportedPolicy, campaign, cli, coverage, help, minimize, sites, syscalls, trace_cmd,
+    UnsupportedPolicy, campaign, cli, coverage, help, minimize, syscalls, trace_cmd,
     trace_view, values,
 };
 use patina_dst_runtime::{
@@ -42,7 +42,6 @@ pub(super) enum ParseResult {
     Version,
     Campaign(campaign::CampaignInvocation),
     Coverage(coverage::CoverageInvocation),
-    Sites(sites::SitesOptions),
     Syscalls(syscalls::SyscallsInvocation),
     NativeAudit(NativeAuditInvocation),
     NativeBuild(NativeBuildInvocation),
@@ -134,7 +133,6 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
         return match name {
             "campaign" => campaign::parse(arguments).map(ParseResult::Campaign),
             "coverage" => coverage::parse(arguments).map(ParseResult::Coverage),
-            "sites" => sites::parse(arguments).map(ParseResult::Sites),
             "syscalls" => syscalls::parse(arguments).map(ParseResult::Syscalls),
             "build" => parse_native_build(arguments).map(ParseResult::NativeBuild),
             "audit" => parse_audit(arguments),

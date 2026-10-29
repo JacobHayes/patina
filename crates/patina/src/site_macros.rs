@@ -1,13 +1,12 @@
-//! One declaration generates the SDK site macros and their recognition metadata.
+//! One declaration generates the SDK site macros and a fixture registry.
 
-/// Internal metadata shared with cargo-patina's source recognizer.
+/// One generated site macro, for end-to-end checks that every macro emits a
+/// link-time descriptor.
 #[doc(hidden)]
 pub struct SdkSiteMacro {
     pub name: &'static str,
     pub kind: &'static str,
-    pub runtime: &'static str,
-    pub label_index: usize,
-    /// A valid literal-label guest invocation for product checks.
+    /// A valid literal-label guest invocation.
     pub fixture: &'static str,
 }
 
@@ -17,7 +16,7 @@ pub struct SdkSiteMacro {
 macro_rules! declare_site_macros {
     ($d:tt; $(
         $(#[$doc:meta])*
-        $name:ident ($descriptor:ident, $kind:literal, $runtime:literal)
+        $name:ident ($descriptor:ident, $kind:literal)
         [$($before:ident = $before_sample:expr),*]
         [$($after:ident = $after_sample:expr => $convert:ident),*]
         => $call:ident [$($tail:expr),*];
@@ -27,8 +26,6 @@ macro_rules! declare_site_macros {
             $(SdkSiteMacro {
                 name: stringify!($name),
                 kind: $kind,
-                runtime: $runtime,
-                label_index: (&[$(stringify!($before)),*] as &[&str]).len(),
                 fixture: concat!(
                     stringify!($name), "!(",
                     $(stringify!($before_sample), ",",)*
@@ -86,7 +83,7 @@ declare_site_macros! { $;
 /// // Outside a Patina build the site never fires.
 /// assert_eq!(commit(true), Ok(()));
 /// ```
-buggify (STATIC_SITE_KIND_FAULT, "fault", "driven")
+buggify (STATIC_SITE_KIND_FAULT, "fault")
     [] [] => buggify [-1];
 
 /// Like [`buggify!`] but with an explicit per-evaluation probability in `0.0..=1.0`,
@@ -96,7 +93,7 @@ buggify (STATIC_SITE_KIND_FAULT, "fault", "driven")
 /// // Outside Patina this is always false, even at probability 1.0.
 /// assert!(!patina_dst::buggify_with_prob!("aggressive-retry", 1.0));
 /// ```
-buggify_with_prob (STATIC_SITE_KIND_FAULT, "fault", "driven")
+buggify_with_prob (STATIC_SITE_KIND_FAULT, "fault")
     [] [probability = 0.5 => prob_to_permille] => buggify [];
 
 /// Inject a deterministic delay at a labeled site through the virtual clock
@@ -110,7 +107,7 @@ buggify_with_prob (STATIC_SITE_KIND_FAULT, "fault", "driven")
 /// // Outside a Patina build: no delay, and no real time passes.
 /// assert!(!patina_dst::buggify_delay!("pre-heartbeat-stall"));
 /// ```
-buggify_delay (STATIC_SITE_KIND_DELAY, "delay", "driven")
+buggify_delay (STATIC_SITE_KIND_DELAY, "delay")
     [] [] => buggify_delay [];
 
 /// A per-run perturbed value within `[lo, hi]` (deterministic from the seed and
@@ -124,7 +121,7 @@ buggify_delay (STATIC_SITE_KIND_DELAY, "delay", "driven")
 /// // Outside Patina the default is returned unchanged.
 /// assert_eq!(batch_size, 64);
 /// ```
-buggify_knob (STATIC_SITE_KIND_KNOB, "knob", "driven")
+buggify_knob (STATIC_SITE_KIND_KNOB, "knob")
     [] [default = 7_i64 => identity, lo = 1 => identity, hi = 10 => identity]
     => buggify_knob [];
 
@@ -138,7 +135,7 @@ buggify_knob (STATIC_SITE_KIND_KNOB, "knob", "driven")
 /// let ledger = [1, 5, 9];
 /// patina_dst::always!(ledger.windows(2).all(|w| w[0] <= w[1]), "ledger-sorted");
 /// ```
-always (STATIC_SITE_KIND_ALWAYS, "always", "observed")
+always (STATIC_SITE_KIND_ALWAYS, "always")
     [condition = true] [] => always [];
 
 /// Coverage oracle: record that `condition` was true at least once at this site.
@@ -157,7 +154,7 @@ always (STATIC_SITE_KIND_ALWAYS, "always", "observed")
 /// }
 /// assert!(lookup(&[7], 7));
 /// ```
-sometimes (STATIC_SITE_KIND_SOMETIMES, "sometimes", "observed")
+sometimes (STATIC_SITE_KIND_SOMETIMES, "sometimes")
     [condition = true] [] => sometimes [];
 
 /// Coverage oracle: record that this site was reached. The companion of
@@ -168,6 +165,6 @@ sometimes (STATIC_SITE_KIND_SOMETIMES, "sometimes", "observed")
 /// ```
 /// patina_dst::reachable!("startup-recovery-path");
 /// ```
-reachable (STATIC_SITE_KIND_REACHABLE, "reachable", "observed")
+reachable (STATIC_SITE_KIND_REACHABLE, "reachable")
     [] [] => reachable [];
 }

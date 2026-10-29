@@ -51,7 +51,6 @@ pub use human::usage_synopsis;
 use workflows::CAMPAIGN;
 use workflows::COVERAGE;
 use workflows::MINIMIZE;
-use workflows::SITES;
 use workflows::SYSCALLS;
 use workflows::TRACE;
 
@@ -403,7 +402,7 @@ pub enum Topic {
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &CAMPAIGN, &COVERAGE, &SITES, &TRACE, &MINIMIZE,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &CAMPAIGN, &COVERAGE, &TRACE, &MINIMIZE,
     &SYSCALLS,
 ];
 

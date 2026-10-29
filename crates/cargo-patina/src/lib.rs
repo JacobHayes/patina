@@ -52,7 +52,6 @@ mod sdk_report;
 mod seal;
 mod shim_build;
 mod shim_cache;
-mod sites;
 mod supervisor_identity;
 mod syscalls;
 mod trace_cmd;
@@ -553,7 +552,6 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         }
         ParseResult::Campaign(invocation) => campaign::execute(invocation),
         ParseResult::Coverage(invocation) => coverage::execute(invocation),
-        ParseResult::Sites(options) => sites::execute(options),
         ParseResult::Syscalls(invocation) => syscalls::execute(invocation),
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),

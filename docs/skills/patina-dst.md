@@ -97,8 +97,8 @@ Patina so adopters pay nothing in production builds:
 - `rng()` for seed-bridged entropy, `is_simulated()` to branch on the runtime.
 
 **Visibility into whether the search actually searched.** Inert knobs are treated
-as bugs here. `sites` is a static inventory of every assertion/oracle site in the
-workspace, and can be joined against what a run or campaign actually exercised.
+as bugs here. Every literal-label SDK site is declared at link time, so
+the campaign's `sites.json` lists sites that never ran.
 Native binaries built with `--instrument` take a scheduling point every
 `--yield-stride` edges, so atomics-only race windows become schedulable, and
 `coverage` symbolizes their edge coverage
