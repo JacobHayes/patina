@@ -51,7 +51,7 @@ pub(super) fn initialize_edge_coverage(
     // scheduler hook, so a guided campaign no longer has to pay --yield-points'
     // preemption cost just to see coverage.
     let image = fs::File::open(&artifact_path)
-        .and_then(crate::run_cache::Image::map)
+        .and_then(|file| crate::run_cache::Image::map(&file))
         .map_err(|error| {
             CliError(format!(
                 "failed to read {} to detect its instrumentation: {error}",

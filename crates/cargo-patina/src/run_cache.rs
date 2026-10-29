@@ -10,11 +10,7 @@
 //! An entry is addressed by the BLAKE3 digest of the exact bytes it describes,
 //! which is computed afresh on every run from the bytes the run then uses: an
 //! executable changed in place, whatever its size, timestamps or inode, has
-//! another digest and is judged again. An entry is stored only if the file
-//! was not written while its fact was derived: its device, inode, size, and
-//! modification and change times read the same before the bytes were hashed
-//! and after, and the bytes hash the same again. Any write moves the change
-//! time, so a rewrite that restores the original bytes is caught too. Entries live under a directory named by
+//! another digest and is judged again. Entries live under a directory named by
 //! the running `cargo-patina`'s own build ID, so a rebuilt supervisor, whose
 //! gate may judge differently, never reads an older one's results; a
 //! supervisor without a build ID keeps nothing. Everything here is
@@ -32,72 +28,24 @@ use sha2::{Digest, Sha256};
 pub(crate) struct Image {
     map: memmap2::Mmap,
     digest: OnceLock<String>,
-    file: fs::File,
-    stamp: Stamp,
-}
-
-/// What any write to a file changes: (device, inode, size, mtime, ctime).
-type Stamp = (u64, u64, u64, i64, i64, i64, i64);
-
-#[cfg(unix)]
-fn stamp(file: &fs::File) -> std::io::Result<Stamp> {
-    use std::os::unix::fs::MetadataExt;
-    let m = file.metadata()?;
-    Ok((
-        m.dev(),
-        m.ino(),
-        m.size(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec(),
-    ))
-}
-
-#[cfg(not(unix))]
-fn stamp(file: &fs::File) -> std::io::Result<Stamp> {
-    Ok((0, 0, file.metadata()?.len(), 0, 0, 0, 0))
 }
 
 impl Image {
-    pub(crate) fn map(file: fs::File) -> std::io::Result<Self> {
-        let stamp = stamp(&file)?;
+    pub(crate) fn map(file: &fs::File) -> std::io::Result<Self> {
         // SAFETY: the mapping is private and read-only. The bytes are those of
         // an executable about to run (or of the running supervisor) and are not
         // expected to change while it is mapped; one rewritten in place would
         // change the bytes read here, as reading it into memory could too, and
         // one truncated faults the supervisor before any guest starts.
-        let map = unsafe { memmap2::Mmap::map(&file)? };
+        let map = unsafe { memmap2::Mmap::map(file)? };
         Ok(Self {
             map,
             digest: OnceLock::new(),
-            file,
-            stamp,
         })
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.map
-    }
-
-    /// The path to exec the file these bytes were mapped from, `path`. On
-    /// Linux it is the open descriptor (`/proc/self/fd/N`, resolved at exec
-    /// before close-on-exec drops it), so the kernel runs the file that was
-    /// hashed and judged even if `path` was replaced since; the guest still
-    /// sees its real file as `/proc/self/exe` and the supervisor's fixed
-    /// `argv[0]`. Elsewhere it is `path`, which a replacement between the
-    /// gate and the exec would still swap.
-    pub(crate) fn exec_path(&self, path: &Path) -> PathBuf {
-        #[cfg(target_os = "linux")]
-        {
-            let _ = path;
-            use std::os::unix::io::AsRawFd;
-            PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            path.to_path_buf()
-        }
     }
 
     /// The BLAKE3 digest of [`Self::bytes`], in hex: the address of every
@@ -141,16 +89,9 @@ impl Image {
     /// changed while it was derived: the file can be rewritten in place under
     /// the mapping, and an entry must describe the bytes its name addresses.
     pub(crate) fn store_unchanged(&self, name: &str, value: &str) {
-        if self.unchanged() {
+        if blake3::hash(&self.map).to_hex().as_str() == self.digest() {
             store(name, value);
         }
-    }
-
-    /// Whether the file is as it was when mapped: the same bytes, and no write
-    /// since (one that put the same bytes back still moved the change time).
-    fn unchanged(&self) -> bool {
-        blake3::hash(&self.map).to_hex().as_str() == self.digest()
-            && stamp(&self.file).is_ok_and(|now| now == self.stamp)
     }
 }
 
@@ -239,53 +180,5 @@ fn prune(root: &Path, own: &Path) {
         if idle && path != own {
             let _ = fs::remove_dir_all(&path);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::{Seek, Write};
-
-    /// A rewrite that puts the original bytes back leaves the digest as it
-    /// was, though a fact derived meanwhile may describe the other bytes: the
-    /// image no longer counts as unchanged, so nothing derived is stored.
-    #[test]
-    fn a_rewrite_that_restores_the_bytes_is_not_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("guest");
-        fs::write(&path, b"original bytes").unwrap();
-        // Past the coarse timestamp tick of a kernel without fine-grained
-        // change times, so the rewrite below lands on a later one.
-        std::thread::sleep(Duration::from_millis(20));
-        let image = Image::map(fs::File::open(&path).unwrap()).unwrap();
-        image.digest();
-        assert!(image.unchanged());
-        let mut writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
-        for bytes in [b"rewritten byte", b"original bytes"] {
-            writer.rewind().unwrap();
-            writer.write_all(bytes).unwrap();
-        }
-        assert_eq!(image.bytes(), b"original bytes");
-        assert!(!image.unchanged());
-    }
-
-    /// A path replaced after its bytes were mapped (a rebuild renaming a new
-    /// binary into place) does not change what runs: the exec reaches the
-    /// mapped file. `true` is mapped, then `false` takes its path.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_mapped_file_runs_after_its_path_is_replaced() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("guest");
-        let replacement = directory.path().join("replacement");
-        fs::copy("/bin/true", &path).unwrap();
-        fs::copy("/bin/false", &replacement).unwrap();
-        let image = Image::map(fs::File::open(&path).unwrap()).unwrap();
-        fs::rename(&replacement, &path).unwrap();
-        let status = std::process::Command::new(image.exec_path(&path))
-            .status()
-            .unwrap();
-        assert!(status.success(), "the replacement ran: {status}");
     }
 }

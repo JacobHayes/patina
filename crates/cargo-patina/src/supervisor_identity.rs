@@ -113,7 +113,7 @@ fn image() -> Result<&'static Image, String> {
     IMAGE
         .get_or_init(|| {
             let (path, file) = executable().as_ref().map_err(Clone::clone)?;
-            file.try_clone().and_then(Image::map).map_err(|error| {
+            Image::map(file).map_err(|error| {
                 format!(
                     "failed to read the running cargo-patina executable {} to compute its build \
                      identity: {error}",
