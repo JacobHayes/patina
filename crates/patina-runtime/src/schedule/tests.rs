@@ -6,8 +6,8 @@ use crate::schedule::{SCAFFOLDING_YIELD_FLOOR, TaskCompletionCause};
 use crate::{Context, DEFAULT_BOOT_ORIGIN_NANOS, RuntimeError};
 use patina_dst_abi::{ClockKind, Operation, TaskId};
 
+use crate::VirtualClock;
 use patina_dst_sched_det::{PctConfig, SchedulePolicy};
-use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
 
 use tempfile::tempdir;
@@ -365,56 +365,4 @@ fn a_timed_park_whose_deadline_passed_expires_beside_a_runnable_peer() {
         .unwrap();
     assert!(context.take_expired_timeouts().is_empty());
     assert!(context.has_future_deadline(waiter));
-}
-
-/// A virtual clock whose reads fail while `failing` is set.
-struct FlakyClock {
-    inner: VirtualClock,
-    failing: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl patina_dst_driver_api::ClockDriver for FlakyClock {
-    fn now(&mut self, clock: ClockKind) -> patina_dst_driver_api::DriverResult<u64> {
-        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(patina_dst_abi::EffectError::new(
-                patina_dst_abi::ErrorCode::Io,
-                "clock read failed",
-            ));
-        }
-        self.inner.now(clock)
-    }
-    fn sleep_until(
-        &mut self,
-        clock: ClockKind,
-        deadline_nanos: u64,
-    ) -> patina_dst_driver_api::DriverResult<()> {
-        self.inner.sleep_until(clock, deadline_nanos)
-    }
-}
-
-#[test]
-fn a_timed_park_whose_clock_read_fails_leaves_the_task_runnable() {
-    // All or nothing: registration expiry reads the clock, and that read
-    // precedes the park, so a failing driver changes no scheduler state.
-    let failing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut context = RuntimeBuilder::new(RuntimeConfig::seeded(1))
-        .with_default_drivers()
-        .with_clock(FlakyClock {
-            inner: VirtualClock::new(0),
-            failing: failing.clone(),
-        })
-        .build()
-        .unwrap();
-    let task = context.task_spawn("sleeper").unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
-    failing.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert!(
-        context
-            .task_park_timed(task, "sleep", ClockKind::Monotonic, u64::MAX)
-            .is_err()
-    );
-    failing.store(false, std::sync::atomic::Ordering::SeqCst);
-    // Still runnable, with no timer: the scheduler selects it again.
-    context.task_yield(task).unwrap();
-    assert_eq!(context.scheduler_next().unwrap(), Some(task));
 }

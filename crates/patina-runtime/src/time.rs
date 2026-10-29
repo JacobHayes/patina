@@ -31,15 +31,11 @@ impl Context {
                     Some(error) => Outcome::Error(error),
                     None => {
                         let mut bytes = vec![0; len];
-                        let result = self
-                            .entropy
+                        self.entropy
                             .as_mut()
                             .expect("driver was checked")
                             .fill(&mut bytes);
-                        match result {
-                            Ok(()) => Outcome::Bytes(bytes),
-                            Err(error) => Outcome::Error(error),
-                        }
+                        Outcome::Bytes(bytes)
                     }
                 };
                 self.complete(operation.clone(), outcome)

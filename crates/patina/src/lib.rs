@@ -122,9 +122,6 @@
 //!   [`patina-dst-runtime`] directly (mode 3); the deterministic async surface
 //!   lives in `patina-dst-async` over that same `Context`. This API creates an
 //!   explicit context and does not control unrelated `std` calls.
-//! - For proptest properties whose case generation is a pure function of the
-//!   Patina seed, see `patina-dst-proptest`, which builds on this crate's
-//!   [`rng`].
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
 //! [README]: https://github.com/JacobHayes/patina/blob/main/README.md

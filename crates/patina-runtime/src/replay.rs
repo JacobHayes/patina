@@ -1,5 +1,6 @@
 //! Trace metadata conversion and authoritative replay configuration reconciliation.
 
+use crate::clock::VirtualClock;
 use crate::config::{
     BuggifyConfig, ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig,
     EntropyFaultConfig, FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
@@ -7,7 +8,6 @@ use crate::config::{
 use crate::liveness::resolve_heal_after;
 use crate::{FINGERPRINT_BUGGIFY, RuntimeError};
 use patina_dst_abi::ClockKind;
-use patina_dst_driver_api::ClockDriver;
 use patina_dst_sched_det::{PctConfig, SchedulePolicy, StarvationConfig};
 use patina_dst_trace::AddressLayout;
 use std::collections::BTreeMap;
@@ -251,7 +251,7 @@ pub(super) fn reconcile_replay_guest_cwd(
 /// The realtime epoch an installed clock driver runs on: its realtime reading
 /// minus its monotonic one, both read unrecorded (the values are a pure
 /// function of the clock's configuration, as `Context::fs_clock` relies on).
-pub(super) fn installed_clock_epoch(clock: &mut dyn ClockDriver) -> Result<u64, RuntimeError> {
+pub(super) fn installed_clock_epoch(clock: &mut VirtualClock) -> Result<u64, RuntimeError> {
     let realtime = clock.now(ClockKind::Realtime)?;
     let monotonic = clock.now(ClockKind::Monotonic)?;
     realtime.checked_sub(monotonic).ok_or_else(|| {

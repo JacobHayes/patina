@@ -1,11 +1,9 @@
-//! Deterministic monotonic and realtime clocks.
+//! The runtime's virtual clock: deterministic monotonic and realtime readings.
 
 use patina_dst_abi::{ClockKind, EffectError, ErrorCode};
-use patina_dst_driver_api::{ClockDriver, DriverResult};
+use patina_dst_driver_api::DriverResult;
 
-/// Re-exported beside the clock that defaults to it; defined in
-/// `patina-dst-abi` so crates below the drivers can name it too.
-pub use patina_dst_abi::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
+use patina_dst_abi::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
 
 /// A clock that advances only when instructed by the deterministic runtime.
 pub struct VirtualClock {
@@ -51,12 +49,15 @@ impl Default for VirtualClock {
     }
 }
 
-impl ClockDriver for VirtualClock {
-    fn now(&mut self, clock: ClockKind) -> DriverResult<u64> {
+impl VirtualClock {
+    /// The clock's current reading in the `clock` domain.
+    pub fn now(&mut self, clock: ClockKind) -> DriverResult<u64> {
         self.observed_time(clock)
     }
 
-    fn sleep_until(&mut self, clock: ClockKind, deadline_nanos: u64) -> DriverResult<()> {
+    /// Advance to `deadline_nanos` in the `clock` domain; a past deadline
+    /// never moves the clock backwards.
+    pub fn sleep_until(&mut self, clock: ClockKind, deadline_nanos: u64) -> DriverResult<()> {
         let monotonic_deadline = match clock {
             ClockKind::Monotonic => deadline_nanos,
             ClockKind::Realtime => deadline_nanos.saturating_sub(self.realtime_epoch_nanos),

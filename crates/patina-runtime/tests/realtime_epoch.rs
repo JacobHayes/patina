@@ -3,11 +3,11 @@
 //! trace, authoritative on replay).
 
 use patina_dst_abi::ClockKind;
+use patina_dst_runtime::VirtualClock;
 use patina_dst_runtime::{
     Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS, ENV_REALTIME_EPOCH_NANOS,
     RuntimeBuilder, RuntimeConfig, RuntimeError,
 };
-use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
 use tempfile::tempdir;
 

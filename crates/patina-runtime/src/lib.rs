@@ -83,7 +83,7 @@ use crate::liveness::{Escalation, LivenessWatchdog};
 use crate::recording::Execution;
 use crate::schedule::ScheduleTracker;
 use patina_dst_abi::{EffectError, Operation, Outcome, TaskId};
-use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_driver_api::{FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_mem::FsSnapshot;
 use patina_dst_rng_seeded::SplitMix64;
 use patina_dst_trace::{HandoffConsumedState, TraceError};
@@ -94,10 +94,12 @@ mod bookkeeping;
 mod buggify;
 mod builder;
 mod charge;
+mod clock;
 mod config;
 mod config_env;
 mod crash;
 mod custom_op;
+mod entropy;
 mod filesystem;
 mod liveness;
 mod network;
@@ -117,6 +119,7 @@ pub use config::{
 pub use bookkeeping::Bookkeeping;
 pub use builder::RuntimeBuilder;
 pub use charge::CpuAlarms;
+pub use clock::VirtualClock;
 pub use recording::TraceTransport;
 
 pub use config_env::trace_fd_from_env;
@@ -147,7 +150,7 @@ pub use patina_dst_abi::VerdictKind;
 
 pub use patina_dst_abi::CrashKind;
 
-pub use patina_dst_time_virtual::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
+pub use patina_dst_abi::{DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS};
 
 pub use patina_dst_trace::MAX_TRACE_BYTES;
 
@@ -636,8 +639,8 @@ pub struct Context {
     execution: Execution,
     filesystem: Option<Box<dyn FsDriver>>,
     filesystem_is_capture: bool,
-    clock: Option<Box<dyn ClockDriver>>,
-    entropy: Option<Box<dyn EntropyDriver>>,
+    clock: Option<VirtualClock>,
+    entropy: Option<entropy::SeededEntropy>,
     scheduler: Option<Box<dyn SchedulerDriver>>,
     network: Option<Box<dyn NetDriver>>,
     /// Virtual-clock timer queue. Ordered by `(monotonic_deadline_nanos,

@@ -2,7 +2,7 @@
 //! `USAGE-MODES.md`).
 //!
 //! This drives Patina's virtual scheduler and network APIs directly through an
-//! explicit [`Context`], swapping in a faulted, latency-wrapped `SimNet` before
+//! explicit [`Context`], swapping in a faulted, latency-configured `SimNet` before
 //! `patina_dst_runtime::run_with` builds the context. It is a simulator-native
 //! example: it exercises the virtual APIs directly and does NOT interpose
 //! ordinary `std` calls. Configuring Patina and then driving real application
@@ -13,20 +13,18 @@
 use patina_dst_net_sim::SimNet;
 use patina_dst_runtime::RuntimeError;
 use patina_dst_wrapper_fault::FaultNet;
-use patina_dst_wrapper_latency::LatencyNet;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let summary = patina_dst_runtime::run_with(
         |builder| {
             let network = SimNet::builder()
+                .base_latency_nanos(100)
+                .jitter_nanos(0, 25)
                 .build()
                 .expect("example SimNet configuration is valid");
             let network = FaultNet::new(network, 17)
                 .drop_permille(200)
                 .duplicate_permille(333);
-            let network = LatencyNet::new(network, 23)
-                .latency_nanos(100)
-                .jitter_nanos(25);
             builder.with_network(network)
         },
         |context| {

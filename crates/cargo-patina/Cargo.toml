@@ -23,15 +23,14 @@ patina-dst-trace.workspace = true
 # linked shim without the Patina checkout present. build.rs learns each crate's
 # source directory over cargo's `links`/`DEP_<pkg>_SRC_DIR` channel, which cargo
 # exposes only to a DIRECT dependent — so `cargo-patina` must depend directly on
-# all 12 crates in the closure, not merely reach them transitively. These seven
-# are direct deps purely for that reason (the closure's other five appear above
+# every crate in the closure, not merely reach it transitively. The crates below
+# are direct deps purely for that reason (the closure's others appear above
 # already for their own APIs); see crates/patina-native-shim/AGENTS.md.
 patina-dst-driver-api.workspace = true
 patina-dst-fs-crash.workspace = true
 patina-dst-net-sim.workspace = true
 patina-dst-rng-seeded.workspace = true
 patina-dst-sched-det.workspace = true
-patina-dst-time-virtual.workspace = true
 patina-dst-wrapper-fault.workspace = true
 blake3.workspace = true
 clap.workspace = true

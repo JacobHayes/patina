@@ -6,7 +6,6 @@ use crate::{UdpSocket, sleep_for};
 use patina_dst_abi::ClockKind;
 use patina_dst_net_sim::SimNet;
 use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig};
-use patina_dst_wrapper_latency::LatencyNet;
 
 #[test]
 fn spawn_join_and_yield() {
@@ -110,7 +109,7 @@ fn same_deadline_rescue_peer_wake_reconciles_shadow_state() {
     // program aborts with InvalidState.
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(14))
         .with_default_drivers()
-        .with_network(LatencyNet::new(SimNet::new(), 1).latency_nanos(50))
+        .with_network(SimNet::builder().base_latency_nanos(50).build().unwrap())
         .build()
         .unwrap();
     let order = Rc::new(RefCell::new(Vec::new()));

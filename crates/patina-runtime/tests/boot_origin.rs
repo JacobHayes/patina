@@ -2,11 +2,11 @@
 //! fault windows, CPU charges or deadline ordering. Native boot_origin.c is
 //! the ABI-level pairing; realtime_epoch.rs covers epoch reconciliation.
 use patina_dst_abi::ClockKind;
+use patina_dst_runtime::VirtualClock;
 use patina_dst_runtime::{
     BuggifyConfig, Context, DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_REALTIME_EPOCH_NANOS,
     LivenessConfig, LivenessKind, RuntimeBuilder, RuntimeConfig, RuntimeError, SiteOutcome,
 };
-use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::TraceBundle;
 
 fn workload(ctx: &mut Context) -> (u64, u64) {

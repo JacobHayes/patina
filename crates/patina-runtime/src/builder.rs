@@ -2,8 +2,10 @@
 use crate::ENV_FACTS;
 
 use crate::buggify::Buggify;
+use crate::clock::VirtualClock;
 use crate::config::{BuggifyConfig, ExecutionMode, FaultConfig, RuntimeConfig, validate_guest_env};
 use crate::crash::{CrashArm, Incarnation};
+use crate::entropy::SeededEntropy;
 use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
 use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
 use crate::replay::{
@@ -19,13 +21,12 @@ use crate::schedule::ScheduleTracker;
 use crate::swarm::apply_swarm_mask;
 use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, facts};
 use patina_dst_abi::ClockKind;
-use patina_dst_driver_api::{ClockDriver, EntropyDriver, FsDriver, NetDriver, SchedulerDriver};
+use patina_dst_driver_api::{FsDriver, NetDriver, SchedulerDriver};
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::MemFs;
 use patina_dst_net_sim::SimNet;
-use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
+use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 use patina_dst_sched_det::{DetScheduler, SchedulePolicy};
-use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle};
 use patina_dst_wrapper_fault::FaultFs;
 use std::collections::BTreeMap;
@@ -53,8 +54,8 @@ pub struct RuntimeBuilder {
     /// `config.faults`. A pre-installed `filesystem` and an `fs_image` are
     /// mutually exclusive.
     fs_image: Option<MemFs>,
-    clock: Option<Box<dyn ClockDriver>>,
-    entropy: Option<Box<dyn EntropyDriver>>,
+    clock: Option<VirtualClock>,
+    entropy: Option<SeededEntropy>,
     scheduler: Option<Box<dyn SchedulerDriver>>,
     network: Option<Box<dyn NetDriver>>,
     /// Byte channel for the run's structured facts document, for embedders whose
@@ -134,13 +135,8 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_clock(mut self, driver: impl ClockDriver + 'static) -> Self {
-        self.clock = Some(Box::new(driver));
-        self
-    }
-
-    pub fn with_entropy(mut self, driver: impl EntropyDriver + 'static) -> Self {
-        self.entropy = Some(Box::new(driver));
+    pub fn with_clock(mut self, clock: VirtualClock) -> Self {
+        self.clock = Some(clock);
         self
     }
 
@@ -166,7 +162,7 @@ impl RuntimeBuilder {
         // the epoch the run really reads and a configured epoch that the
         // installed clock would silently ignore is refused.
         let installed_clock_epoch = match self.clock.as_mut() {
-            Some(clock) => Some(installed_clock_epoch(clock.as_mut())?),
+            Some(clock) => Some(installed_clock_epoch(clock)?),
             None => None,
         };
         if let (Some(installed), Some(configured)) =
@@ -606,14 +602,10 @@ impl RuntimeBuilder {
                         .latency_live(self.config.faults.fs.latency_nanos.is_some()),
                 ));
             }
-            self.clock.get_or_insert_with(|| {
-                Box::new(VirtualClock::at(boot_origin_nanos, realtime_epoch))
-            });
+            self.clock
+                .get_or_insert_with(|| VirtualClock::at(boot_origin_nanos, realtime_epoch));
             self.entropy.get_or_insert_with(|| {
-                Box::new(SeededEntropy::new(domain_seed(
-                    root_seed,
-                    fault_domain::ENTROPY,
-                )))
+                SeededEntropy::new(domain_seed(root_seed, fault_domain::ENTROPY))
             });
             self.scheduler.get_or_insert_with(|| {
                 Box::new(DetScheduler::with_policy(
@@ -806,11 +798,12 @@ impl RuntimeBuilder {
 mod tests {
     use crate::builder::RuntimeBuilder;
     use crate::config::RuntimeConfig;
+    use crate::entropy::SeededEntropy;
     use crate::{Context, EntropyWait, RuntimeError};
     use patina_dst_abi::{ClockKind, EffectError, ErrorCode, SendDisposition};
-    use patina_dst_driver_api::{EntropyDriver, NetDriver};
+    use patina_dst_driver_api::NetDriver;
     use patina_dst_net_sim::SimNet;
-    use patina_dst_rng_seeded::{SeededEntropy, SplitMix64, domain_seed, fault_domain};
+    use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
     #[test]
     fn default_driver_streams_are_domain_separated() {
@@ -822,12 +815,12 @@ mod tests {
 
         let mut expected_entropy = SeededEntropy::new(domain_seed(seed, fault_domain::ENTROPY));
         let mut expected = [0; 24];
-        expected_entropy.fill(&mut expected).unwrap();
+        expected_entropy.fill(&mut expected);
         assert_eq!(actual_entropy, expected);
 
         let mut old_aliased_entropy = SeededEntropy::new(seed);
         let mut old = [0; 24];
-        old_aliased_entropy.fill(&mut old).unwrap();
+        old_aliased_entropy.fill(&mut old);
         assert_ne!(
             actual_entropy, old,
             "RED-before-GREEN: old runtime entropy used SplitMix64::new(root_seed)"

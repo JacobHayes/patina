@@ -504,7 +504,7 @@ fn std_runs_seeded_and_replayable_but_not_standalone() {
     );
     assert_soon_after(
         fields["epoch_ns"],
-        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+        patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
             + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
     assert_lower_hex(fields["first_hash"], 16);
@@ -550,7 +550,7 @@ fn realtime_epoch_defaults_overrides_and_replays_flag_free() {
     );
     assert_soon_after(
         fields["epoch_ns"],
-        patina_dst_time_virtual::DEFAULT_REALTIME_EPOCH_NANOS
+        patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
             + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS,
     );
     let flags = ["--realtime-epoch", TEXT];

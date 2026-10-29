@@ -11,7 +11,7 @@ use crate::{
 };
 use patina_dst_abi::{ClockKind, OpenFlags, Operation};
 
-use patina_dst_time_virtual::VirtualClock;
+use crate::VirtualClock;
 use patina_dst_trace::{TraceBundle, TraceError};
 use std::ffi::OsString;
 use std::fs;

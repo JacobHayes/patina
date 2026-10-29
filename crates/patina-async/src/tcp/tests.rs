@@ -5,7 +5,6 @@ use crate::{block_on, spawn, yield_now};
 use patina_dst_abi::ClockKind;
 use patina_dst_net_sim::SimNet;
 use patina_dst_runtime::{RuntimeBuilder, RuntimeConfig};
-use patina_dst_wrapper_latency::LatencyNet;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -73,7 +72,7 @@ fn async_tcp_echo_over_simnet() {
 fn tcp_latency_uses_timed_net_delivery() {
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(9))
         .with_default_drivers()
-        .with_network(LatencyNet::new(SimNet::new(), 1).latency_nanos(75))
+        .with_network(SimNet::builder().base_latency_nanos(75).build().unwrap())
         .build()
         .unwrap();
     block_on(&mut ctx, async {

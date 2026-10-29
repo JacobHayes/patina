@@ -3,7 +3,7 @@
 //! Concrete drivers keep rich builders in their own crates. These traits only
 //! describe effects required by the runtime boundary.
 
-use patina_dst_abi::{ClockKind, EffectError};
+use patina_dst_abi::EffectError;
 
 mod address;
 mod faults;
@@ -26,12 +26,3 @@ pub use network::{NetDriver, NetReadiness};
 pub use scheduler::{SchedulePolicyReport, SchedulerDriver};
 
 pub type DriverResult<T> = Result<T, EffectError>;
-
-pub trait ClockDriver: Send {
-    fn now(&mut self, clock: ClockKind) -> DriverResult<u64>;
-    fn sleep_until(&mut self, clock: ClockKind, deadline_nanos: u64) -> DriverResult<()>;
-}
-
-pub trait EntropyDriver: Send {
-    fn fill(&mut self, destination: &mut [u8]) -> DriverResult<()>;
-}

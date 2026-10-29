@@ -2,7 +2,7 @@
 //!
 //! An installed `cargo-patina` must be able to build a guest's linked shim with
 //! no Patina checkout on disk. To do that it carries the shim's whole workspace
-//! dependency closure — 12 crates — embedded as source, and unpacks it into a
+//! dependency closure embedded as source, and unpacks it into a
 //! per-user cache at guest-build time (the shim must be compiled by the exact
 //! rustc that compiles the guest, so a prebuilt staticlib is not an option).
 //!
@@ -11,7 +11,7 @@
 //! `links = "<package-name>"` and a build script that publishes its
 //! `CARGO_MANIFEST_DIR`, and cargo hands that value to the build script of every
 //! DIRECT dependent as `DEP_<UPPER_SNAKE>_SRC_DIR`. `cargo-patina` therefore
-//! depends directly on all 12 (see its Cargo.toml comment). This channel works
+//! depends directly on every one (see its Cargo.toml comment). This channel works
 //! identically in-tree, from the crates.io registry checkout, and from a git
 //! checkout — the one documented way for a dependent's build script to learn a
 //! dependency's source directory.
@@ -46,7 +46,6 @@ const SHIM_PACKAGES: &[&str] = &[
     "patina-dst-rng-seeded",
     "patina-dst-runtime",
     "patina-dst-sched-det",
-    "patina-dst-time-virtual",
     "patina-dst-trace",
     "patina-dst-wrapper-fault",
     "patina-dst-native-shim",
@@ -71,7 +70,7 @@ fn main() {
         let dir = env::var_os(&var).unwrap_or_else(|| {
             panic!(
                 "missing {var}: cargo-patina must depend directly on {pkg}; the native-shim \
-                 source bundle needs all 12 closure crates as direct dependencies so cargo \
+                 source bundle needs every closure crate as a direct dependency so cargo \
                  exposes their DEP_*_SRC_DIR to this build script"
             )
         });

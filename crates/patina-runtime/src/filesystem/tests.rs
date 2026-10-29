@@ -10,9 +10,9 @@ use patina_dst_abi::{
 };
 use patina_dst_driver_api::FsDriver;
 
+use crate::VirtualClock;
 use patina_dst_fs_host::HostCaptureFs;
 use patina_dst_fs_mem::MemFs;
-use patina_dst_time_virtual::VirtualClock;
 use patina_dst_trace::{TraceBundle, TraceError};
 use patina_dst_wrapper_fault::FaultFs;
 

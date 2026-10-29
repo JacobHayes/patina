@@ -15,16 +15,13 @@ members = [
     "crates/patina-minimize",
     "crates/patina-native-shim",
     "crates/patina-net-sim",
-    "crates/patina-proptest",
     "crates/patina-rng-seeded",
     "crates/patina-runtime",
     "crates/patina-sched-det",
     "crates/patina-syscalls",
     "crates/patina-target",
-    "crates/patina-time-virtual",
     "crates/patina-trace",
     "crates/patina-wrapper-fault",
-    "crates/patina-wrapper-latency",
 ]
 resolver = "2"
 
@@ -97,16 +94,13 @@ patina-dst-macros = { path = "crates/patina-macros", version = "0.1.0" }
 patina-dst-minimize = { path = "crates/patina-minimize", version = "0.1.0" }
 patina-dst-native-shim = { path = "crates/patina-native-shim", version = "0.1.0" }
 patina-dst-net-sim = { path = "crates/patina-net-sim", version = "0.1.0" }
-patina-dst-proptest = { path = "crates/patina-proptest", version = "0.1.0" }
 patina-dst-rng-seeded = { path = "crates/patina-rng-seeded", version = "0.1.0" }
 patina-dst-runtime = { path = "crates/patina-runtime", version = "0.1.0" }
 patina-dst-sched-det = { path = "crates/patina-sched-det", version = "0.1.0" }
 patina-dst-syscalls = { path = "crates/patina-syscalls", version = "0.1.0" }
 patina-dst-target = { path = "crates/patina-target", version = "0.1.0" }
-patina-dst-time-virtual = { path = "crates/patina-time-virtual", version = "0.1.0" }
 patina-dst-trace = { path = "crates/patina-trace", version = "0.1.0" }
 patina-dst-wrapper-fault = { path = "crates/patina-wrapper-fault", version = "0.1.0" }
-patina-dst-wrapper-latency = { path = "crates/patina-wrapper-latency", version = "0.1.0" }
 # The CLI's token engine. Minor upgrades are deliberate because parser error
 # wording is user-visible. Default features are off: the CLI renders its own
 # help and usage from the flag registry, and `color` would make error output
@@ -127,7 +121,6 @@ memchr = "2.8.3"
 object = { version = "0.39.1", default-features = false, features = ["read", "std"] }
 # Read ELF unwind ranges without implementing another DWARF pointer decoder.
 gimli = { version = "0.32.3", default-features = false, features = ["read", "std"] }
-proptest = { version = "1.11.0", default-features = false, features = ["std", "bit-set"] }
 proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
 rustc-demangle = "0.1.26"
 serde = { version = "1.0.229", features = ["derive"] }

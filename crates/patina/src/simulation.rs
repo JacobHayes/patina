@@ -36,9 +36,6 @@ pub fn is_simulated() -> bool {
 /// Outside Patina it is a plainly-seeded per-thread fallback stream, so callers
 /// still get reproducible values without touching OS entropy.
 ///
-/// This is the hook `patina-dst-proptest` builds on to make property-test case
-/// generation a pure function of the run seed.
-///
 /// ```
 /// let a = patina_dst::rng();
 /// let b = patina_dst::rng();
