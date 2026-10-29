@@ -39,6 +39,8 @@ impl AlwaysFamily {
     /// result. `detail` is only formatted on failure.
     #[track_caller]
     pub fn check(&self, condition: bool, detail: impl Display) {
+        // Only a Patina build reports the detail; elsewhere it is never formatted.
+        #[cfg(patina_shim)]
         if !condition {
             crate::verdict(
                 crate::VerdictKind::Violation,
@@ -46,6 +48,8 @@ impl AlwaysFamily {
                 &detail.to_string(),
             );
         }
+        #[cfg(not(patina_shim))]
+        let _ = &detail;
         crate::__rt::always(condition, self.label, self.site);
     }
 }

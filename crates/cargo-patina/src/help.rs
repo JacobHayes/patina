@@ -402,8 +402,7 @@ pub enum Topic {
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &CAMPAIGN, &COVERAGE, &TRACE, &MINIMIZE,
-    &SYSCALLS,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &CAMPAIGN, &COVERAGE, &TRACE, &MINIMIZE, &SYSCALLS,
 ];
 
 // ===========================================================================

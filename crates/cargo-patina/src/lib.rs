@@ -1,7 +1,7 @@
 //! Process-level implementation behind the `cargo-patina` binary.
 //!
 //! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
-//! `test`, `audit`, `replay`, `campaign`, `minimize`, `sites`, `trace`), artifact
+//! `test`, `audit`, `replay`, `campaign`, `minimize`, `trace`), artifact
 //! resolution (a shim-linked native binary, or a source built into one),
 //! build orchestration, the supervisor protocol that hands the `PATINA_*`
 //! control plane to a guest, and result rendering (`--format json`,

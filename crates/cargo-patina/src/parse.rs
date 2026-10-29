@@ -5,8 +5,8 @@ use crate::{
     ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, HarnessFeatures, HarnessSeeds,
     KnobValues, NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
     NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
-    UnsupportedPolicy, campaign, cli, coverage, help, minimize, syscalls, trace_cmd,
-    trace_view, values,
+    UnsupportedPolicy, campaign, cli, coverage, help, minimize, syscalls, trace_cmd, trace_view,
+    values,
 };
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
@@ -101,7 +101,7 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, campaign, build, audit, replay, minimize, coverage, sites, syscalls, or trace)",
+            "missing command (expected run, test, campaign, build, audit, replay, minimize, coverage, syscalls, or trace)",
         ));
     }
     // The routed verb (if any). Every known verb records itself so a usage error
@@ -151,7 +151,7 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, campaign, build, audit, replay, minimize, coverage, sites, syscalls, or trace",
+            "unsupported command {:?}; expected run, test, campaign, build, audit, replay, minimize, coverage, syscalls, or trace",
             arguments[0].to_string_lossy()
         ))),
     }
