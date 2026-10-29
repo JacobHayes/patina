@@ -106,8 +106,7 @@ pub(crate) fn init_from_env() -> c_int {
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }
-        // The structured run-facts channel. A `PATINA_RT_FACTS` path alongside it is
-        // refused by `build` rather than silently losing one document.
+        // The structured run-facts channel.
         if let Some(fd) = control_facts_fd()? {
             builder = builder.with_facts_sink(FdFactsSink { fd });
         }

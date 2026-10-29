@@ -119,9 +119,8 @@ report_registry! {
 /// default; a false-y value (`0`, `off`, `false`, `no`) for a [`Report`]'s
 /// variable turns that one off.
 ///
-/// Resolved ONCE, at configuration time, from whatever control plane the family
-/// supplies — the native shim's pre-scrub environment snapshot, or the process
-/// environment for the cargo family.
+/// Resolved ONCE, at configuration time, from the native shim's pre-scrub
+/// control-plane snapshot.
 /// Nothing consults the process environment at finalization: on native the
 /// public `getenv` is interposed and the deterministic environment is long gone
 /// by then, so a late read returns NULL and every knob reads as absent.

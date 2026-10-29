@@ -486,7 +486,7 @@ impl Context {
         };
         bytes.push(b'\n');
         if let Some(output) = self.facts.as_mut()
-            && let Err(error) = output.write(&bytes)
+            && let Err(error) = output.write_facts(&bytes)
         {
             crate::reports::diagnostic!("PATINA_INFRA run_facts write_failed reason={error:?}");
         }
@@ -520,8 +520,8 @@ a recorded result or a replay fetch",
         }
         // Any runtime diagnostic no embedder drained. The shim
         // drains after each SDK entry point so the lines interleave with guest
-        // output; an in-process (cargo-family) guest has no embedder, and this is
-        // where its verdicts reach stderr. Drained, so nothing can print twice.
+        // output; this catches what a direct context's caller left. Drained, so
+        // nothing can print twice.
         // Deliberately not gated by `ReportConfig`: a verdict is the run's
         // result, not a diagnostic, and a suppressible result is a silent hole.
         for line in self.take_pending_diagnostics() {

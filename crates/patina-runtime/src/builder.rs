@@ -71,8 +71,7 @@ impl RuntimeBuilder {
     }
 
     /// Install the byte channel the run's structured facts document is written
-    /// to. Mutually exclusive with [`RuntimeConfig::with_facts_path`]: two live
-    /// destinations would mean one silently wins, so `build` refuses both.
+    /// to.
     pub fn with_facts_sink(mut self, sink: impl FactsSink + 'static) -> Self {
         self.facts_sink = Some(Box::new(sink));
         self
@@ -672,18 +671,7 @@ impl RuntimeBuilder {
             ),
         );
 
-        // The facts channel: exactly one destination, or none. Two live
-        // destinations would silently drop one document, so refuse.
-        let facts = match (self.facts_sink.take(), self.config.facts_path.take()) {
-            (None, None) => None,
-            (Some(sink), None) => Some(facts::FactsOutput::Sink(sink)),
-            (None, Some(path)) => Some(facts::FactsOutput::Path(path)),
-            (Some(_), Some(_)) => {
-                return Err(RuntimeError::Config(
-                    "a run-facts sink and a facts path were both installed; use exactly one".into(),
-                ));
-            }
-        };
+        let facts = self.facts_sink.take();
 
         let compute_stop = match &execution {
             Execution::Replay(replayer) => replayer.compute_stop(),

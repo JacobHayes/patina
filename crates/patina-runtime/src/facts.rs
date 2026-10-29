@@ -7,9 +7,9 @@
 //! into the `patina.result/v1` envelope.
 //!
 //! The document is emitted only when the embedder installs an output channel
-//! (`RuntimeConfig::with_facts_path`, `RuntimeBuilder::with_facts_sink`, or the
-//! [`ENV_FACTS_FD`](crate::ENV_FACTS_FD) control-plane variable), so a run that nobody asked facts of behaves exactly
-//! as before.
+//! (`RuntimeBuilder::with_facts_sink`, which the native shim backs with the
+//! [`ENV_FACTS_FD`](crate::ENV_FACTS_FD) descriptor), so a run that nobody asked
+//! facts of behaves exactly as before.
 //!
 //! Deliberately independent of the report-suppression knobs
 //! ([`ReportConfig`](crate::ReportConfig)): those decide what *prints*, and the
@@ -21,7 +21,6 @@
 //! facts on a repeat.
 
 use std::io;
-use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
@@ -44,36 +43,10 @@ pub trait FactsSink: Send {
     fn write_facts(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
-/// Where a run's facts document goes: a path the runtime writes with `std::fs`
-/// (the cargo family and other in-process embedders), or an
-/// embedder-installed byte sink (the native shim's host descriptor).
-pub(crate) enum FactsOutput {
-    Path(PathBuf),
-    Sink(Box<dyn FactsSink>),
-}
-
 /// The next process-unique context number for the facts channel.
 pub(crate) fn next_context() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-impl FactsOutput {
-    /// Append one document. Appending, never truncating, so a write the
-    /// process does not live to finish leaves every earlier document whole.
-    pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        match self {
-            FactsOutput::Path(path) => {
-                use std::io::Write;
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)?
-                    .write_all(bytes)
-            }
-            FactsOutput::Sink(sink) => sink.write_facts(bytes),
-        }
-    }
 }
 
 /// Build the facts document from the per-plane report structs and findings the

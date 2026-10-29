@@ -138,7 +138,7 @@ fn render_overview() -> String {
 every family. A flag with an OPTIONAL value (e.g. --buggify, --sched-pct, \
 --liveness-watchdog, --converge-within) accepts only the bare `--flag` or `--flag=VALUE` — the \
 space form is ambiguous with a positional. Everything after a `--` separator is the \
-guest's argv (or the oracle's), passed untouched in every family.",
+guest's argv (or the minimized command's), passed untouched.",
     );
 
     out.push_str("\nArtifact inference:\n");
@@ -147,16 +147,13 @@ guest's argv (or the oracle's), passed untouched in every family.",
         "`run`, `audit`, and `replay` are source-first with artifacts accepted uniformly. A \
 built native binary is recognized by its leading Mach-O/ELF magic bytes and used as-is; a \
 <SOURCE.rs|DIR|Cargo.toml> is built on the fly through the same pipeline as `build`. For \
-`test`, no source positional stays the Cargo package family, while a <DIR|Cargo.toml> \
-positional selects native libtest harness mode. A positional that names a file path \
-(.rs/Cargo.toml, or with a separator) but does not exist is a hard error.\n\
+`test`, a <DIR|Cargo.toml> positional names the package whose libtest target is rebuilt. \
+A positional that does not exist is a hard error.\n\
 \n\
 Options and the artifact may appear in any order, like `cargo build`/`cargo run` — \
 `run --seed 5 ./app` and `run ./app --seed 5` are identical. Only known options are \
-skipped when scanning for the artifact; an UNKNOWN option (a forwarded cargo flag) stops the \
-scan, since its value could otherwise be misread as the artifact. Past that stop an unknown \
-option is only forwarded silently in the Cargo package family — if a real artifact stands \
-behind it the routing is a hard error, never a surprising Cargo fallthrough.",
+skipped when scanning for the artifact; an UNKNOWN option stops the scan, since its value \
+could otherwise be misread as the artifact, and is then refused by name.",
     );
 
     out.push_str("\nENVIRONMENT:\n");

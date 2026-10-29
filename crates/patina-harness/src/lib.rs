@@ -4,10 +4,8 @@
 //! the deterministic runtime and then calls **ordinary application code** whose
 //! `std::fs`, `std::net`, clock, thread, and entropy effects are interposed by
 //! Patina's native shim — the same global runtime context the shim installs for a
-//! transparent run. Unlike the low-level explicit-context API (mode 3,
-//! `patina_dst_runtime::Context`), the application body never touches a second
-//! effect context: it uses plain `std`, and those effects flow through the one
-//! installed runtime.
+//! transparent run. The application body uses plain `std`, and those effects
+//! flow through the one installed runtime.
 //!
 //! ```no_run
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {

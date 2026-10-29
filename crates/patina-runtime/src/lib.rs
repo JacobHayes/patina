@@ -660,8 +660,7 @@ pub struct Context {
     /// [`SiteOutcome`] follows — so the embedder drains this after each entry
     /// point and writes the lines into its own captured stderr, where they
     /// interleave with guest output and survive an abort's flush. Whatever is
-    /// still pending at [`Context::finish`] is printed there, which is what makes
-    /// the in-process (cargo-family) path work with no embedder to drain it.
+    /// still pending at [`Context::finish`] is printed there.
     pending_diagnostics: Vec<String>,
     /// Virtual-time liveness watchdog. Inert (`active == false`) unless a budget is
     /// configured on a record/seeded run, so a run that does not opt in — and every
@@ -678,14 +677,14 @@ pub struct Context {
     reports: ReportConfig,
     /// Where this run's structured facts document goes, or `None` when nobody
     /// asked for one. Like `reports`, it reaches no recorded byte.
-    facts: Option<facts::FactsOutput>,
+    facts: Option<Box<dyn FactsSink>>,
     /// Whether a compute-bound stop wrote the run's terminal facts document.
     /// Every other write is a fresh, complete document the reader takes the
     /// last of; after that one nothing more is written.
     facts_sealed: bool,
     /// This context's process-unique number on the facts channel. A process
-    /// that runs several contexts (a cargo-family test binary) writes each
-    /// one's documents to the same channel; the reader tells them apart by it.
+    /// that runs several contexts writes each one's documents to the same
+    /// channel; the reader tells them apart by it.
     facts_context: u64,
     /// The first replay divergence the trace layer reported, as its typed kind
     /// ([`patina_dst_trace::TraceError::replay_divergence`]). Carried on the

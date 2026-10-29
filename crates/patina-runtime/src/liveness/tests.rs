@@ -526,10 +526,10 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
         computing
     };
     let facts_path = directory.path().join("compute-facts.json");
-    let mut record = Context::from_config(
-        RuntimeConfig::record(1, &path, "timed-compute-v1").with_facts_path(&facts_path),
-    )
-    .unwrap();
+    let mut record = crate::tests::with_facts_file(
+        RuntimeConfig::record(1, &path, "timed-compute-v1"),
+        &facts_path,
+    );
     let task = setup(&mut record);
     let steps = record.steps();
     assert_eq!(record.compute_watchdog_candidate(), Some((steps, task)));

@@ -182,7 +182,7 @@ pub fn emit_build(family: &str, output_path: &Path) {
 }
 
 /// Emit a generic envelope for a verb that produced no rich structured result
-/// (explore/minimize), or for a CLI error surfaced under `--output json`.
+/// (minimize), or for a CLI error surfaced under `--output json`.
 pub fn emit_simple(verb: &str, result: &str, exit_code: i32, message: Option<String>) {
     if !options().is_json() {
         return;

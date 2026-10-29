@@ -114,8 +114,7 @@ answered from the recording. Underlying trace error: {error}"
 
 impl Context {
     /// Announce a custom operation and learn whether to run it — the opening
-    /// half of the custom-op ABI (`patina_custom_op_begin` natively, this
-    /// method directly for an in-process cargo-family guest).
+    /// half of the custom-op ABI (`patina_custom_op_begin` in the native shim).
     ///
     /// `label` names the operation class and `key` is its logical input; both are
     /// recorded, so a replay asserts the guest asked the *same* question of the
@@ -135,9 +134,9 @@ impl Context {
     /// itself inject anything: with the knob off (the default) an eligible call
     /// behaves exactly like an ineligible one.
     ///
-    /// Prefer [`Context::custom_op`], which drives this protocol correctly and
-    /// types the key and result; these three methods are the raw ABI shape the
-    /// embedders lower to.
+    /// These three methods are the ABI shape the shim's custom-op doors lower
+    /// to; the SDK's `patina_dst::custom_op` types the key and result on the
+    /// guest side.
     pub fn custom_op_begin(
         &mut self,
         label: &str,
@@ -356,110 +355,6 @@ recorded bytes without running `perform` and could never reproduce those operati
         self.complete(operation, Outcome::Bytes(result));
         Ok(())
     }
-
-    /// Perform one custom operation: a guest-declared effect Patina does not
-    /// model, recorded on the record pass and reproduced from the recording on
-    /// replay. The cargo-family mirror of the SDK's `patina_dst::custom_op`.
-    ///
-    /// On a record or plain seeded pass `perform` runs and its value is encoded
-    /// and recorded. On replay `perform` is **not** run — the recorded bytes are
-    /// decoded and returned — so the operation is deterministic by construction
-    /// even though the real effect is not.
-    ///
-    /// `key` is the operation's logical input. It is recorded alongside the
-    /// result and checked on replay, so a guest that asks a different question
-    /// under the same label is refused rather than handed a stale answer.
-    ///
-    /// Values are encoded with `serde_json`, matching the SDK. That choice is
-    /// **build-owned, not ABI-owned**: the boundary and the trace carry opaque
-    /// bytes (see [`Operation::CustomOp`]), and a trace only ever replays against
-    /// the guest binary that recorded it, which the fingerprint already enforces.
-    /// JSON over a denser format because a custom op's whole value is triage: the
-    /// key and result stay legible in `cargo patina trace`, which a
-    /// non-self-describing encoding would make opaque.
-    pub fn custom_op<T, K>(
-        &mut self,
-        label: &str,
-        key: &K,
-        perform: impl FnOnce() -> T,
-    ) -> Result<T, RuntimeError>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned,
-        K: serde::Serialize + ?Sized,
-    {
-        self.custom_op_typed(label, key, None::<fn() -> T>, perform)
-    }
-
-    /// Perform one custom operation that declares a failure shape, so
-    /// `--custom-op-fail-permille` can fail it. The cargo-family mirror of the
-    /// SDK's `patina_dst::custom_op_faultable`.
-    ///
-    /// `on_fault` produces the value the guest receives when a seeded fault
-    /// fires. It is the guest's own declaration of what "this operation failed"
-    /// looks like — typically the `Err` variant of a `Result` result type — and
-    /// the runtime never invents one, because only the guest's type knows which
-    /// values it admits. On a fault `perform` does not run, and the fault is
-    /// recorded, so replay reproduces it without redrawing.
-    ///
-    /// Everything else matches [`Context::custom_op`]: same label namespace,
-    /// same key contract, same encoding.
-    pub fn custom_op_faultable<T, K>(
-        &mut self,
-        label: &str,
-        key: &K,
-        on_fault: impl FnOnce() -> T,
-        perform: impl FnOnce() -> T,
-    ) -> Result<T, RuntimeError>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned,
-        K: serde::Serialize + ?Sized,
-    {
-        self.custom_op_typed(label, key, Some(on_fault), perform)
-    }
-
-    /// The one typed custom-op driver both public surfaces lower to: `on_fault`
-    /// present is the eligibility declaration, so the two differ in exactly the
-    /// bit the ABI carries and cannot drift in anything else.
-    fn custom_op_typed<T, K>(
-        &mut self,
-        label: &str,
-        key: &K,
-        on_fault: Option<impl FnOnce() -> T>,
-        perform: impl FnOnce() -> T,
-    ) -> Result<T, RuntimeError>
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned,
-        K: serde::Serialize + ?Sized,
-    {
-        let key_bytes = serde_json::to_vec(key).map_err(|error| RuntimeError::CustomOp {
-            label: label.to_string(),
-            detail: format!("custom op {label:?} could not encode its key: {error}"),
-        })?;
-        match self.custom_op_begin(label, &key_bytes, on_fault.is_some())? {
-            CustomOpMode::Replay { .. } => {
-                let bytes = self.custom_op_replay_result()?;
-                serde_json::from_slice(&bytes).map_err(|error| RuntimeError::CustomOp {
-                    label: label.to_string(),
-                    detail: format!(
-                        "custom op {label:?} could not decode its recorded result: {error}; the \
-recording was produced by a guest whose result type no longer matches this one"
-                    ),
-                })
-            }
-            // `custom_op_begin` only answers `Fault` when eligibility was
-            // declared, which is exactly when `on_fault` is `Some`.
-            CustomOpMode::Fault => Ok(on_fault.expect("a fault needs a declared failure")()),
-            CustomOpMode::Record => {
-                let value = perform();
-                let bytes = serde_json::to_vec(&value).map_err(|error| RuntimeError::CustomOp {
-                    label: label.to_string(),
-                    detail: format!("custom op {label:?} could not encode its result: {error}"),
-                })?;
-                self.custom_op_record(bytes)?;
-                Ok(value)
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -472,6 +367,24 @@ mod tests {
     use patina_dst_trace::TraceBundle;
     use tempfile::tempdir;
 
+    /// One custom operation through the byte protocol the shim drives.
+    fn op(
+        context: &mut Context,
+        label: &str,
+        key: &[u8],
+        perform: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        match context.custom_op_begin(label, key, false)? {
+            CustomOpMode::Replay { .. } => context.custom_op_replay_result(),
+            CustomOpMode::Record => {
+                let value = perform();
+                context.custom_op_record(value.clone())?;
+                Ok(value)
+            }
+            CustomOpMode::Fault => unreachable!("no failure was declared"),
+        }
+    }
+
     // The custom-op record/replay contract end to end at the runtime layer: the
     // typed entry records a `CustomOp` event carrying the encoded key and result,
     // and a replay returns the recorded value WITHOUT running `perform` — proven
@@ -482,14 +395,13 @@ mod tests {
         let trace = directory.path().join("custom-op.patina");
 
         let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
-        let recorded: Vec<String> = context
-            .custom_op("s3.get_object", "bucket/key", || {
-                vec!["alpha".to_string(), "beta".to_string()]
-            })
-            .unwrap();
-        assert_eq!(recorded, vec!["alpha".to_string(), "beta".to_string()]);
-        let count: u64 = context.custom_op("host.pid", &7u32, || 4242u64).unwrap();
-        assert_eq!(count, 4242);
+        let recorded = op(&mut context, "s3.get_object", b"bucket/key", || {
+            b"alpha,beta".to_vec()
+        })
+        .unwrap();
+        assert_eq!(recorded, b"alpha,beta");
+        let count = op(&mut context, "host.pid", b"7", || b"4242".to_vec()).unwrap();
+        assert_eq!(count, b"4242");
         context.finish().unwrap();
 
         // Both calls are trace events carrying the label and the encoded key.
@@ -505,26 +417,26 @@ mod tests {
             .collect();
         assert_eq!(events.len(), 2, "{events:?}");
         assert_eq!(events[0].0, "s3.get_object");
-        assert_eq!(events[0].1, br#""bucket/key""#.to_vec());
+        assert_eq!(events[0].1, b"bucket/key".to_vec());
         assert_eq!(
             events[0].2,
-            Outcome::Bytes(br#"["alpha","beta"]"#.to_vec()),
-            "the recorded outcome is the SDK-encoded result"
+            Outcome::Bytes(b"alpha,beta".to_vec()),
+            "the recorded outcome is the guest's result bytes"
         );
         assert_eq!(events[1].0, "host.pid");
 
         // Replay: `perform` must not run, and the recorded values come back typed.
         let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-        let replayed: Vec<String> = replay
-            .custom_op("s3.get_object", "bucket/key", || {
-                panic!("replay must not run perform")
-            })
-            .unwrap();
+        let replayed = op(&mut replay, "s3.get_object", b"bucket/key", || {
+            panic!("replay must not run perform")
+        })
+        .unwrap();
         assert_eq!(replayed, recorded);
-        let replayed_count: u64 = replay
-            .custom_op("host.pid", &7u32, || panic!("replay must not run perform"))
-            .unwrap();
-        assert_eq!(replayed_count, 4242);
+        let replayed_count = op(&mut replay, "host.pid", b"7", || {
+            panic!("replay must not run perform")
+        })
+        .unwrap();
+        assert_eq!(replayed_count, b"4242");
         replay.finish().unwrap();
     }
 
@@ -535,16 +447,18 @@ mod tests {
         let directory = tempdir().unwrap();
         let trace = directory.path().join("custom-op-key.patina");
         let mut context = Context::from_config(RuntimeConfig::record(3, &trace, "fp")).unwrap();
-        let _: u32 = context
-            .custom_op("dns.lookup", "example.com", || 1)
-            .unwrap();
+        op(&mut context, "dns.lookup", b"example.com", || b"1".to_vec()).unwrap();
         context.finish().unwrap();
 
         // Same label, different key.
         let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-        let error = replay
-            .custom_op::<u32, str>("dns.lookup", "elsewhere.com", || unreachable!())
-            .expect_err("a changed key must be refused");
+        let error = op(
+            &mut replay,
+            "dns.lookup",
+            b"elsewhere.com",
+            || unreachable!(),
+        )
+        .expect_err("a changed key must be refused");
         let message = error.to_string();
         assert!(
             message.contains("dns.lookup") && message.contains("elsewhere.com"),
@@ -554,9 +468,13 @@ mod tests {
 
         // Same key, different label.
         let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-        let error = replay
-            .custom_op::<u32, str>("dns.reverse", "example.com", || unreachable!())
-            .expect_err("a changed label must be refused");
+        let error = op(
+            &mut replay,
+            "dns.reverse",
+            b"example.com",
+            || unreachable!(),
+        )
+        .expect_err("a changed label must be refused");
         let message = error.to_string();
         assert!(
             message.contains("dns.reverse") && message.contains("dns.lookup"),
@@ -566,10 +484,8 @@ mod tests {
         // The clean replay still works, so the two refusals above are not a
         // trace that simply cannot be replayed at all.
         let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
-        let value: u32 = replay
-            .custom_op("dns.lookup", "example.com", || unreachable!())
-            .unwrap();
-        assert_eq!(value, 1);
+        let value = op(&mut replay, "dns.lookup", b"example.com", || unreachable!()).unwrap();
+        assert_eq!(value, b"1");
         replay.finish().unwrap();
     }
 

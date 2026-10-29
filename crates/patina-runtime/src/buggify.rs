@@ -595,8 +595,7 @@ impl Context {
     }
 
     /// Report one guest verdict — the runtime half of the verdict ABI
-    /// (`patina_verdict` natively, this method directly for an in-process
-    /// cargo-family guest).
+    /// (`patina_verdict` in the native shim).
     ///
     /// The call is recorded as an [`Operation::Verdict`] boundary event, so a
     /// replay whose verdict stream diverges from the recording fails closed like

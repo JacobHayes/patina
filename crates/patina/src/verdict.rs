@@ -58,10 +58,6 @@ impl VerdictKind {
 /// // Outside Patina this compiles to nothing.
 /// patina_dst::verdict(patina_dst::VerdictKind::Pass, "queue-drained", "");
 /// ```
-///
-/// In the cargo family (a package that links `patina-dst-runtime` and drives its
-/// own `Context`) this function has no runtime handle to call, exactly like
-/// [`crate::buggify!`]; report through `patina_dst_runtime::Context::verdict` there.
 #[inline]
 pub fn verdict(kind: VerdictKind, label: &str, detail: &str) {
     #[cfg(patina_shim)]

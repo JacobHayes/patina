@@ -53,8 +53,7 @@ pub fn facts_active() -> bool {
 /// LAST complete (newline-terminated) document is the run's state; a torn final
 /// line is a write the process did not live to finish and is ignored.
 ///
-/// A process may run several runtime contexts (a cargo-family test binary),
-/// each writing its own documents (`context`). The run's `verdicts` are every
+/// A process may run several runtime contexts, each writing its own documents (`context`). The run's `verdicts` are every
 /// context's latest list, in the order the contexts first wrote, so a later
 /// context finishing cleanly cannot erase an earlier one's violation, and a
 /// document that carries no verdicts (a compute-bound stop's) does not either.

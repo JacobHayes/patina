@@ -229,7 +229,7 @@ fn campaign_locates_the_artifact_around_options() {
         assert_eq!(got.out_dir, base.out_dir);
     }
     // A leading UNKNOWN flag with no artifact is the unsupported-option error
-    // naming the flag (campaign has no Cargo family to forward to).
+    // naming the flag.
     let error = |values: &[&str]| match parse(args(values)) {
         Err(error) => error.to_string(),
         Ok(_) => panic!("expected a usage error for {values:?}"),

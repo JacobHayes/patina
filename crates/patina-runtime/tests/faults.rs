@@ -9,7 +9,8 @@ use patina_dst_driver_api::{
     ClockFaultReport, CustomOpFaultReport, DnsFaultReport, FsFaultReport, NetFaultReport,
 };
 use patina_dst_runtime::{
-    Context, CrashKind, DEFAULT_REALTIME_EPOCH_NANOS, InjectedCrash, RuntimeConfig, RuntimeError,
+    Context, CrashKind, CustomOpMode, DEFAULT_REALTIME_EPOCH_NANOS, InjectedCrash, RuntimeConfig,
+    RuntimeError,
 };
 use tempfile::tempdir;
 
@@ -1060,27 +1061,20 @@ fn custom_ops(
     let mut performed = 0;
     let mut failed = Vec::new();
     for index in 0..count {
-        let value: String = if eligible {
-            context
-                .custom_op_faultable(
-                    label,
-                    &index,
-                    || "FAILED".to_string(),
-                    || {
-                        performed += 1;
-                        "ok".to_string()
-                    },
-                )
-                .unwrap()
-        } else {
-            context
-                .custom_op(label, &index, || {
-                    performed += 1;
-                    "ok".to_string()
-                })
-                .unwrap()
+        let key = index.to_string();
+        let value = match context
+            .custom_op_begin(label, key.as_bytes(), eligible)
+            .unwrap()
+        {
+            CustomOpMode::Replay { .. } => context.custom_op_replay_result().unwrap(),
+            CustomOpMode::Fault => b"FAILED".to_vec(),
+            CustomOpMode::Record => {
+                performed += 1;
+                context.custom_op_record(b"ok".to_vec()).unwrap();
+                b"ok".to_vec()
+            }
         };
-        failed.push(value == "FAILED");
+        failed.push(value == b"FAILED");
     }
     let report = context.custom_op_fault_report();
     context.finish().unwrap();
@@ -1259,7 +1253,7 @@ fn a_recorded_fault_replays_without_consulting_eligibility() {
 
     let mut context = Context::from_config(RuntimeConfig::replay(&path, "patina-test")).unwrap();
     let error = context
-        .custom_op::<String, usize>("s3.get", &0, || "ok".to_string())
+        .custom_op_begin("s3.get", b"0", false)
         .expect_err("a recorded fault needs a declared failure shape");
     assert!(
         error.to_string().contains("s3.get") && error.to_string().contains("declares no failure"),

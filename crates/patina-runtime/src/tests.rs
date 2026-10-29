@@ -8,6 +8,25 @@ use patina_dst_trace::TraceBundle;
 use std::env;
 use tempfile::tempdir;
 
+/// A context over `config` whose facts documents append to `path`.
+pub(super) fn with_facts_file(config: RuntimeConfig, path: &std::path::Path) -> Context {
+    struct FileSink(std::path::PathBuf);
+    impl crate::FactsSink for FileSink {
+        fn write_facts(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.0)?
+                .write_all(bytes)
+        }
+    }
+    crate::RuntimeBuilder::new(config)
+        .with_facts_sink(FileSink(path.to_owned()))
+        .build()
+        .unwrap()
+}
+
 pub(super) fn exercise(context: &mut Context) -> Result<Vec<u8>, RuntimeError> {
     let entropy = context.entropy_bytes(12, EntropyWait::UntilReady)?;
     context.write_file("/state/value", &entropy)?;

@@ -10,14 +10,10 @@
 //!
 //! What clap does NOT own, and why:
 //!
-//! * **Positional location.** A `run` positional decides which family parses the
-//!   rest (a native binary by its magic bytes, else the Cargo family), so the
-//!   artifact must be found BEFORE a `Command` exists. `crate::locate_positionals` does that, using the
-//!   registry for arity, and hands each family a flags-only token list.
-//! * **Cargo passthrough.** The Cargo family forwards every unrecognized option
-//!   to Cargo verbatim, interleaved, order-preserving, and non-UTF-8-safe. clap
-//!   has no such mode, so [`partition`] splits the token list first — again from
-//!   the registry, so the split cannot disagree with the parser about arity.
+//! * **Positional location.** A verb's positionals (an artifact or source, a
+//!   trace) may sit anywhere among its flags and decide what is built before a
+//!   `Command` exists. `crate::locate_positionals` finds them, using the
+//!   registry for arity, and hands the parser a flags-only token list.
 //!
 //! **Environment defaults.** Every registry flag except help/version can be
 //! defaulted from `PATINA_<FLAG>` ([`Flag::env_name`]) through clap's own `env`
@@ -509,8 +505,7 @@ pub(crate) type Stripped = BTreeMap<&'static str, Vec<OsString>>;
 /// Some flags are settled before a family parser can exist, because each one
 /// changes which parser that is: the global output/config switches (parsed once
 /// before routing) and `--package`/`--bin`/`--release` (apply to the build a
-/// source positional implies, and are forwarded to Cargo in the Cargo family
-/// instead). One registry-driven pre-pass serves them all, so their idea of
+/// source positional implies). One registry-driven pre-pass serves them all, so their idea of
 /// arity cannot drift from the parser's.
 ///
 /// A `--` and everything after it belongs to the guest program and is left

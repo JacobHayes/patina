@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What a guest asserts about its own run through the verdict ABI — the single
-/// verb `patina_verdict` (native shim) / `Context::verdict` (in-process).
+/// verb `patina_verdict` (native shim), served by `Context::verdict`.
 ///
 /// A **closed** enum owned by the runtime: kinds are data, never new symbols, so
 /// a new kind is one enum value the compiler walks to every consumer. The `u32`

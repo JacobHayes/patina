@@ -491,7 +491,10 @@ impl Context {
                     facts::write_compute_bound_facts(self.facts_context, stop, &mut cursor);
                 let newline = cursor.write_all(b"\n");
                 let length = cursor.position() as usize;
-                if encoded.is_err() || newline.is_err() || output.write(&bytes[..length]).is_err() {
+                if encoded.is_err()
+                    || newline.is_err()
+                    || output.write_facts(&bytes[..length]).is_err()
+                {
                     return RuntimeError::ComputeStopExport;
                 }
             }

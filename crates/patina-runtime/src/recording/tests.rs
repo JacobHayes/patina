@@ -6,8 +6,7 @@ use crate::config::RuntimeConfig;
 use crate::recording::TraceTransport;
 use crate::reports::fs_fault_report_line;
 use crate::{
-    Context, DEFAULT_BOOT_ORIGIN_NANOS, ENV_FS_ERROR_PERMILLE, FACTS_SCHEMA, FactsSink,
-    RuntimeError,
+    Context, DEFAULT_BOOT_ORIGIN_NANOS, ENV_FS_ERROR_PERMILLE, FACTS_SCHEMA, RuntimeError,
 };
 use patina_dst_abi::{ClockKind, OpenFlags, Operation};
 
@@ -19,7 +18,7 @@ use tempfile::tempdir;
 
 use crate::filesystem::tests::WrongHandleFs;
 
-use crate::tests::exercise;
+use crate::tests::{exercise, with_facts_file};
 
 /// The facts channel is sourced from the same structs the report lines are
 /// formatted from. Red before the channel existed: the document is absent
@@ -29,10 +28,9 @@ fn a_run_writes_its_fault_planes_to_the_facts_channel() {
     let directory = tempdir().unwrap();
     let facts = directory.path().join("facts.json");
     let config = RuntimeConfig::seeded(9)
-        .with_facts_path(&facts)
         .apply_fault_env(|name| (name == ENV_FS_ERROR_PERMILLE).then(|| "300".to_string()))
         .unwrap();
-    let mut context = Context::from_config(config).unwrap();
+    let mut context = with_facts_file(config, &facts);
     for index in 0..40u32 {
         let _ = context.write_file(&format!("/entry-{index}"), b"payload");
     }
@@ -62,27 +60,6 @@ fn a_run_writes_its_fault_planes_to_the_facts_channel() {
             .map(|value| value.as_u64().unwrap())
             .sum::<u64>(),
         report.errors_injected
-    );
-}
-
-/// Two live destinations would silently drop one document.
-#[test]
-fn a_path_and_a_sink_together_are_refused() {
-    struct Discard;
-    impl FactsSink for Discard {
-        fn write_facts(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let built = RuntimeBuilder::new(RuntimeConfig::seeded(1).with_facts_path("/facts.json"))
-        .with_facts_sink(Discard)
-        .build();
-    let Err(error) = built else {
-        panic!("both destinations must be refused");
-    };
-    assert!(
-        error.to_string().contains("use exactly one"),
-        "unexpected error: {error}"
     );
 }
 
@@ -345,8 +322,7 @@ fn a_replay_divergence_reaches_the_facts_channel_as_its_kind() {
 
     let replay = |name: &str, paths: &[&str]| -> serde_json::Value {
         let facts = directory.path().join(name);
-        let config = RuntimeConfig::replay(&trace, "fp").with_facts_path(&facts);
-        let mut replay = Context::from_config(config).unwrap();
+        let mut replay = with_facts_file(RuntimeConfig::replay(&trace, "fp"), &facts);
         for path in paths {
             let _ = replay.write_file(path, b"payload");
         }
@@ -381,8 +357,7 @@ fn a_time_model_divergence_reaches_the_facts_channel() {
     record.finish().unwrap();
 
     let facts = directory.path().join("facts.json");
-    let config = RuntimeConfig::replay(&trace, "fp").with_facts_path(&facts);
-    let mut replay = Context::from_config(config).unwrap();
+    let mut replay = with_facts_file(RuntimeConfig::replay(&trace, "fp"), &facts);
     let mut counts = ChargeCounts::new();
     counts.count(ChargeClass::Clock);
     replay.charge_calls(None, counts).unwrap();

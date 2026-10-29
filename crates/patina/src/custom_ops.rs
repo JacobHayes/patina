@@ -37,9 +37,7 @@ use crate::verdict;
 /// operations could never be reproduced, and the runtime refuses at record time
 /// rather than writing a trace that cannot replay.
 ///
-/// Outside Patina — and in the cargo family, which has no shim to call — this is
-/// just `perform()`; report through `patina_dst_runtime::Context::custom_op`
-/// there.
+/// Outside Patina this is just `perform()`.
 ///
 /// ```
 /// // Outside Patina the closure simply runs and its bytes come straight back.

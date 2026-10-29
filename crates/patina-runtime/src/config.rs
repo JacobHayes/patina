@@ -203,13 +203,8 @@ pub struct RuntimeConfig {
     /// reconciled on replay. `None` when no supervisor controlled it
     /// (standalone launches, other families).
     pub(super) address_layout: Option<patina_dst_trace::AddressLayout>,
-    /// Where the runtime writes this run's structured facts document, or `None`
-    /// (the default) to produce none. Presentation-adjacent like `reports`: it
-    /// reaches no recorded byte, is never fingerprinted, and is never reconciled
-    /// on replay.
-    pub(super) facts_path: Option<std::path::PathBuf>,
-    /// Which boot of a native crash-restart run this is. Direct and cargo
-    /// contexts are always the first.
+    /// Which boot of a native crash-restart run this is. A directly built
+    /// context is always the first.
     pub(super) incarnation: Incarnation,
     /// Whether a crash supervisor takes this incarnation's crash over: the
     /// native supervisor, which gave it a handoff channel. Only a supervised
@@ -246,7 +241,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -278,7 +272,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -315,7 +308,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -353,7 +345,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -392,7 +383,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -437,7 +427,6 @@ impl RuntimeConfig {
             sud: None,
             tsc: None,
             address_layout: None,
-            facts_path: None,
             incarnation: Incarnation::First,
             crash_supervised: false,
             replayed_crash_kind: None,
@@ -808,17 +797,6 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn with_reports(mut self, reports: ReportConfig) -> Self {
         self.reports = reports;
-        self
-    }
-
-    /// Write this run's structured [`patina.runfacts/v1`](FACTS_SCHEMA) document
-    /// to `path` at finalization. The document carries the same per-plane
-    /// accounting the `PATINA_*_REPORT` lines carry, built from the report
-    /// structs; the lines still print. Independent of [`ReportConfig`], which
-    /// governs printing only.
-    #[must_use]
-    pub fn with_facts_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
-        self.facts_path = Some(path.into());
         self
     }
 
