@@ -139,6 +139,11 @@ impl BranchSession {
         self.bundle.metadata.guest_env.as_ref()
     }
 
+    /// The recorded run parameters (empty when the run had none).
+    pub fn params(&self) -> &BTreeMap<String, String> {
+        &self.bundle.metadata.params
+    }
+
     /// The guest's initial working directory inherited from the parent trace.
     pub fn guest_cwd(&self) -> Option<&str> {
         self.bundle.metadata.guest_cwd.as_deref()

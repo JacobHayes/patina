@@ -862,6 +862,9 @@ int32_t patina_sometimes(int32_t condition, const uint8_t *label, size_t label_l
 int32_t patina_reachable(const uint8_t *label, size_t label_len,
                          const uint8_t *site, size_t site_len);
 uint64_t patina_rng(void);
+/* The run parameter `key`'s byte length, copied into `out` when it fits in
+ * `out_cap`; -1 when the run has no such parameter. */
+intptr_t patina_param(const uint8_t *key, size_t key_len, uint8_t *out, size_t out_cap);
 int32_t patina_lifecycle_setup_complete(void);
 int32_t patina_lifecycle_event(const uint8_t *label, size_t label_len);
 

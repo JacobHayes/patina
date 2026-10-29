@@ -145,6 +145,8 @@ struct NativeHarnessInvocation {
     hostname: Option<String>,
     /// The `--cpus` count, re-emitted onto each seed's child `run`.
     cpus: Option<u32>,
+    /// The `--param` run parameters, re-emitted onto each seed's child `run`.
+    params: BTreeMap<String, String>,
     /// Every fault knob this invocation set, re-emitted onto each seed's child
     /// `run` command line by [`knob_flag_pairs`].
     knobs: KnobValues,
@@ -282,6 +284,10 @@ struct NativeRunInvocation {
     /// Deterministic guest environment values injected by native `run --env`.
     /// Recorded into trace metadata on `--record` and restored by replay.
     environment: BTreeMap<String, String>,
+    /// Run parameters (`run --param`), forwarded as [`ENV_PARAMS_JSON`] and read
+    /// by the guest through `patina_dst::param`. Recorded into trace metadata
+    /// on `--record` and restored by replay.
+    params: BTreeMap<String, String>,
     /// The guest's initial working directory (`run --cwd`), an absolute path in
     /// the deterministic filesystem; `None` is `/`. Recorded into trace
     /// metadata on `--record` and restored by replay like the environment.

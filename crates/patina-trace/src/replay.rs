@@ -115,6 +115,11 @@ impl Replayer {
         self.metadata.guest_env.as_ref()
     }
 
+    /// The recorded run parameters (empty when the run had none).
+    pub fn params(&self) -> &BTreeMap<String, String> {
+        &self.metadata.params
+    }
+
     /// The guest's initial working directory recorded into the trace. `None`
     /// for a run that started at `/` or a trace recorded before cwd capture.
     pub fn guest_cwd(&self) -> Option<&str> {

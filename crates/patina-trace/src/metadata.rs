@@ -339,6 +339,13 @@ pub struct RunMetadata {
     /// default). `chdir` is guest-driven and unrecorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_cwd: Option<String>,
+    /// The run parameters (`run --param KEY=VALUE`, or a harness's
+    /// `.param()` defaults) the guest reads through `patina_dst::param`,
+    /// authoritative on replay so a flag-free replay reproduces
+    /// parameter-dependent guest behavior. Empty when the run had none. Not a
+    /// fingerprint input: the recorded op-stream already reflects them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
     /// The run's exploration scheduling policy (PCT), authoritative
     /// on replay. Additive exactly like [`faults`](RunMetadata::faults): absent
     /// (`None`) in traces recorded under the default uniform policy, which the
@@ -491,6 +498,7 @@ impl RunMetadata {
             guest_argv: None,
             guest_env: None,
             guest_cwd: None,
+            params: BTreeMap::new(),
             schedule_policy: None,
             swarm: None,
             watchdog: None,
@@ -547,15 +555,16 @@ impl RunMetadata {
         self
     }
 
-    /// Attach deterministic guest environment values recorded into the trace.
-    /// `None` records nothing; `Some(map)` records exactly the supplied values.
-    #[must_use]
     /// Record the run's DNS host table. `None` records nothing.
+    #[must_use]
     pub fn with_dns(mut self, dns: Option<DnsConfigRecord>) -> Self {
         self.dns = dns;
         self
     }
 
+    /// Attach deterministic guest environment values recorded into the trace.
+    /// `None` records nothing; `Some(map)` records exactly the supplied values.
+    #[must_use]
     pub fn with_guest_env(mut self, guest_env: Option<BTreeMap<String, String>>) -> Self {
         self.guest_env = guest_env;
         self
@@ -566,6 +575,13 @@ impl RunMetadata {
     #[must_use]
     pub fn with_guest_cwd(mut self, guest_cwd: Option<String>) -> Self {
         self.guest_cwd = guest_cwd;
+        self
+    }
+
+    /// Attach the run parameters recorded into the trace.
+    #[must_use]
+    pub fn with_params(mut self, params: BTreeMap<String, String>) -> Self {
+        self.params = params;
         self
     }
 

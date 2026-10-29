@@ -136,7 +136,7 @@ mod verdict;
 
 pub use custom_ops::{custom_op, custom_op_faultable};
 pub use custom_ops::{custom_op_bytes, custom_op_bytes_faultable};
-pub use simulation::{is_simulated, rng};
+pub use simulation::{is_simulated, param, rng};
 pub use verdict::{VerdictKind, verdict};
 
 /// Lifecycle markers for cooperating with the simulator's run phases.

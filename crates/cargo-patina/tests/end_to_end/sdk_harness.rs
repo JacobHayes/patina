@@ -14,6 +14,8 @@ use super::*;
 /// * `dns-thread`: a wildcard-bound listener thread served through the name a
 ///   `dns_service` registered;
 /// * `knobs`: the `round_trip` body under buggify and PCT enabled in code;
+/// * `params`: `.param()` defaults for `naps` and `label`, read back through
+///   `patina_dst::param`, with `naps` sleeps;
 /// * `boundary`: an interposed `std::fs` effect before the harness installs;
 /// * `early-write`: captured output before the harness installs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -117,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .dns_entry("pinned.internal", "10.9.9.9")
                         .dns_service("db.internal"),
                     "dns-thread" => harness.dns_service("db.internal"),
+                    "params" => harness.param("naps", "1").param("label", "default"),
                     _ => harness,
                 })
             },
@@ -127,6 +130,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         resolve("db.internal"),
                         resolve("pinned.internal"),
                         resolve("absent.internal"),
+                    );
+                    Ok(())
+                }
+                "params" => {
+                    let naps = patina_dst::param("naps");
+                    for _ in 0..naps.as_deref().map_or(0, |naps| naps.parse::<u32>().unwrap()) {
+                        std::thread::sleep(Duration::from_nanos(1));
+                    }
+                    // A stack address: the parameters must not move the
+                    // stack between a recording and its replay.
+                    let local = 0u8;
+                    println!(
+                        "HARNESS_OUT naps={naps:?} label={:?} absent={:?} stack={:p}",
+                        patina_dst::param("label"),
+                        patina_dst::param("absent"),
+                        std::hint::black_box(&local),
                     );
                     Ok(())
                 }
@@ -362,6 +381,38 @@ mod tests {
             served.contains("served_request=ping") && served.contains("reply=pong"),
             "the wildcard-bound listener thread did not serve the named request: {served}"
         );
+    }
+
+    // A harness's `.param()` defaults reach the application through
+    // `patina_dst::param`, a `run --param` for the same key overrides its
+    // default, and the merged set records and replays from the trace alone,
+    // stack addresses included.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn harness_params_merge_under_the_cli_and_replay_from_the_trace() {
+        let bin = harness_guest();
+        let directory = tempdir().unwrap();
+        let params = |line: String| line.split(" stack=").next().unwrap().to_owned();
+        let defaults = harness_out_line(&assert_success(harness_run(&bin, "params", &[])));
+        assert_eq!(
+            params(defaults),
+            r#"HARNESS_OUT naps=Some("1") label=Some("default") absent=None"#
+        );
+        let trace = directory.path().join("params.patina");
+        let recorded = harness_out_line(&assert_success(harness_run(
+            &bin,
+            "params",
+            &["--param", "naps=4", "--record", trace.to_str().unwrap()],
+        )));
+        assert_eq!(
+            params(recorded.clone()),
+            r#"HARNESS_OUT naps=Some("4") label=Some("default") absent=None"#
+        );
+        let replayed = invoke(
+            native_workspace(),
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(harness_out_line(&replayed), recorded);
     }
 
     // An effect before the harness installs the runtime fails closed. Under deferred

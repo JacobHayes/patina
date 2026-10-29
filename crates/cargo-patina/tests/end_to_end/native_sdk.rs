@@ -8,7 +8,8 @@ use super::*;
 /// macro sits behind a branch no run takes: invisible to lazy registration,
 /// visible through the linked table. The `no-setup` argument skips
 /// `setup_complete`, a declared-but-never-called harness bug under
-/// `--buggify-after-setup`.
+/// `--buggify-after-setup`. The `naps` run parameter sets how many sleeps the
+/// run makes.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sdk_main() -> String {
     let registry = patina_dst::SDK_SITE_MACROS
@@ -32,7 +33,13 @@ fn sdk_main() -> String {
         patina_dst::sometimes!(i == 3, "index-is-three");
     }}
     patina_dst::always!(fired <= 8, "fired-in-bounds");
-    println!("RESULT knob={{knob}} fired={{fired}} rng={{}}", patina_dst::rng());
+    // A run parameter that decides how many boundary operations the run makes,
+    // so a replay that lost it would diverge from its recording.
+    let naps = patina_dst::param("naps");
+    for _ in 0..naps.as_deref().map_or(0, |naps| naps.parse::<u32>().unwrap()) {{
+        std::thread::sleep(std::time::Duration::from_nanos(1));
+    }}
+    println!("RESULT knob={{knob}} fired={{fired}} rng={{}} naps={{naps:?}}", patina_dst::rng());
 }}
 "#
     )

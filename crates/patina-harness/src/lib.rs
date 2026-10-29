@@ -231,8 +231,9 @@ impl HarnessBuilder {
         self.set(rt::ENV_NET_LATENCY, nanos.to_string())
     }
 
-    /// A typed-builder parameter exposed to the application through the runtime.
-    /// Accumulated and encoded as the `PATINA_RT_PARAMS_JSON` control-plane value.
+    /// A run parameter default, read by the application through
+    /// `patina_dst::param(key)`. A `cargo patina run --param` for the same key
+    /// overrides it; the merged set is recorded and restored on replay.
     #[must_use]
     pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.params.insert(key.into(), value.into());

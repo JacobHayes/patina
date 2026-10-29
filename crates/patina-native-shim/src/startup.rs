@@ -47,9 +47,31 @@ pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
     if !name.starts_with("PATINA_") {
         return;
     }
-    control_plane()
-        .lock()
-        .insert(name.to_owned(), value.to_owned());
+    let mut plane = control_plane().lock();
+    let value = match plane.get(name) {
+        // A later entry for the run parameters (a harness's `.param()`
+        // defaults) merges under the captured one (`run --param`): the operator's
+        // value wins per key.
+        Some(existing) if name == patina_dst_runtime::ENV_PARAMS_JSON => {
+            merge_params_json(value, existing)
+        }
+        _ => value.to_owned(),
+    };
+    plane.insert(name.to_owned(), value);
+}
+
+/// Merge two `PATINA_RT_PARAMS_JSON` objects, `winning` taking precedence per
+/// key. A malformed side is kept verbatim so the runtime's parser reports it.
+fn merge_params_json(defaults: &str, winning: &str) -> String {
+    let parse = |json: &str| serde_json::from_str::<BTreeMap<String, String>>(json);
+    match (parse(defaults), parse(winning)) {
+        (Ok(mut merged), Ok(winning)) => {
+            merged.extend(winning);
+            serde_json::to_string(&merged).unwrap_or_else(|_| defaults.to_owned())
+        }
+        (Err(_), _) => defaults.to_owned(),
+        (_, Err(_)) => winning.to_owned(),
+    }
 }
 
 #[unsafe(no_mangle)]

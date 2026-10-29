@@ -87,6 +87,39 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
     );
 }
 
+// `run --param` reaches the guest through `patina_dst::param`, and the trace
+// carries it: the parameter changes how many boundary operations the run makes,
+// and a flag-free replay reproduces the recording.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
+    let (_, binary) = sdk_guest();
+    let guest = Guest {
+        dir: tempdir().unwrap(),
+        binary,
+    };
+    let result = |output: &Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.starts_with("RESULT"))
+            .unwrap_or_else(|| panic!("missing RESULT: {output:?}"))
+            .to_owned()
+    };
+    let (recorded, trace) = guest.assert_recorded(4, &["--param", "naps=3"]);
+    assert!(
+        result(&recorded).ends_with("naps=Some(\"3\")"),
+        "{}",
+        result(&recorded)
+    );
+    let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
+    assert_eq!(
+        bundle.metadata.params.get("naps").map(String::as_str),
+        Some("3")
+    );
+    let unset = guest.assert_run_success(4, &[]);
+    assert!(result(&unset).ends_with("naps=None"), "{}", result(&unset));
+}
+
 // Class pairing: the SDK declaration generates macros and literal descriptors
 // together. Every declared macro, a newly added registry row included, emits a
 // linked descriptor at its own source line though no run reaches it, and a

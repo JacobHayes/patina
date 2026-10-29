@@ -633,10 +633,12 @@ pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
     fs::create_dir_all(dir.join("src")).unwrap();
     let harness_path = native_workspace().join("crates/patina-harness");
     let harness_path = harness_path.to_string_lossy().replace('\\', "\\\\");
+    let sdk_path = native_workspace().join("crates/patina");
+    let sdk_path = sdk_path.to_string_lossy().replace('\\', "\\\\");
     fs::write(
         dir.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-harness = {{ path = \"{harness_path}\" }}\n"
+            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-harness = {{ path = \"{harness_path}\" }}\npatina-dst = {{ path = \"{sdk_path}\" }}\n"
         ),
     )
     .unwrap();

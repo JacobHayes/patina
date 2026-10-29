@@ -21,7 +21,7 @@ use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
     ENV_COVERAGE_FD, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV,
     ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_INITIAL_STACK, ENV_MODE,
-    ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
+    ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
     NATIVE_INITIAL_STACK_TRAILER_SLOTS,
 };
 use patina_dst_target::{
@@ -352,6 +352,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The run's own inputs as the control plane carries them: its environment
     // map and its arguments, the same size in every mode, so the fixed address
     // layout can reserve room for them beside the rest of the control plane.
+    // Run parameters are not among them: a recording carries only the CLI's
+    // while its trace holds those merged with a harness's defaults, so they
+    // ride the control plane's own reservation, which the padding evens out.
     let guest_payload = {
         let environment = replay_trace
             .as_ref()
@@ -434,6 +437,12 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 ))
             })?;
             command.env(ENV_GUEST_ENV, encoded);
+        }
+        if !invocation.params.is_empty() {
+            let encoded = serde_json::to_string(&invocation.params).map_err(|error| {
+                CliError(format!("failed to encode run parameters: {error}"))
+            })?;
+            command.env(ENV_PARAMS_JSON, encoded);
         }
         if let Some(cwd) = &invocation.cwd {
             command.env(ENV_GUEST_CWD, cwd);

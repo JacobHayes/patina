@@ -460,6 +460,37 @@ pub extern "C" fn patina_rng() -> u64 {
 }
 
 #[unsafe(no_mangle)]
+/// `patina_dst::param(key)`: the run parameter's byte length, copying it into
+/// `out` when it fits in `out_cap` bytes; `-1` when the run has no such
+/// parameter (or no runtime is installed). A pure configuration read: no
+/// boundary, no recording — replay restores the parameters from the trace.
+///
+/// # Safety
+/// `key` must describe a live UTF-8 slice of `key_len` bytes and `out` must be
+/// writable for `out_cap` bytes (or null when `out_cap == 0`).
+pub unsafe extern "C" fn patina_param(
+    key: *const u8,
+    key_len: usize,
+    out: *mut u8,
+    out_cap: usize,
+) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the caller passes a live slice.
+    let Some(key) = (unsafe { buggify_label(key, key_len) }) else {
+        return fail(EINVAL) as isize;
+    };
+    let value = with_bookkeeping(|context| Ok(context.param(key).map(str::to_owned)));
+    let Ok(Some(value)) = value else {
+        return -1;
+    };
+    if value.len() <= out_cap && !out.is_null() {
+        // SAFETY: `out` is writable for `out_cap >= value.len()` bytes by contract.
+        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), out, value.len()) };
+    }
+    value.len() as isize
+}
+
+#[unsafe(no_mangle)]
 /// `patina_dst::lifecycle::setup_complete()`: mark the setup boundary and emit a marker.
 pub extern "C" fn patina_lifecycle_setup_complete() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

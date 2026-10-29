@@ -961,6 +961,8 @@ impl Context {
         self.steps
     }
 
+    /// The run parameter `key` (`run --param KEY=VALUE` or a harness's
+    /// `.param()`), restored from the trace on replay.
     pub fn param(&self, key: &str) -> Option<&str> {
         self.params.get(key).map(String::as_str)
     }

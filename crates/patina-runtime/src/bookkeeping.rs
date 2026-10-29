@@ -34,6 +34,11 @@ macro_rules! delegate {
 }
 
 impl Bookkeeping<'_> {
+    /// [`Context::param`].
+    pub fn param(&self, key: &str) -> Option<&str> {
+        self.context.param(key)
+    }
+
     delegate! {
         fn fs_metadata_unrecorded(&mut self, path: &str) -> Result<FsMetadata, RuntimeError>;
         fn fs_fd_metadata_unrecorded(&mut self, fd: Fd) -> Result<FsMetadata, RuntimeError>;

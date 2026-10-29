@@ -45,6 +45,7 @@ unsafe extern "C" {
         site_len: usize,
     ) -> i32;
     pub fn patina_rng() -> u64;
+    pub fn patina_param(key: *const u8, key_len: usize, out: *mut u8, out_cap: usize) -> isize;
     pub fn patina_lifecycle_setup_complete() -> i32;
     pub fn patina_lifecycle_event(label: *const u8, label_len: usize) -> i32;
     pub fn patina_verdict(

@@ -50,6 +50,41 @@ pub fn rng() -> u64 {
     }
 }
 
+/// The run parameter `key`, from `cargo patina run --param KEY=VALUE` or a
+/// harness's `.param()` default (the CLI value wins). Recorded into the trace
+/// and restored on replay, so parameter-dependent behavior reproduces from the
+/// trace alone. `None` when the run has no such parameter, and always outside
+/// Patina.
+///
+/// ```
+/// // Under a plain `cargo build`/`cargo test` there are no run parameters.
+/// assert_eq!(patina_dst::param("clients"), None);
+/// ```
+#[inline]
+pub fn param(key: &str) -> Option<String> {
+    #[cfg(patina_shim)]
+    {
+        let mut buffer = vec![0_u8; 256];
+        loop {
+            // SAFETY: `key` is a live slice and `buffer` is writable for its length.
+            let len = unsafe {
+                ffi::patina_param(key.as_ptr(), key.len(), buffer.as_mut_ptr(), buffer.len())
+            };
+            let len = usize::try_from(len).ok()?;
+            if len <= buffer.len() {
+                buffer.truncate(len);
+                return String::from_utf8(buffer).ok();
+            }
+            buffer.resize(len, 0);
+        }
+    }
+    #[cfg(not(patina_shim))]
+    {
+        let _ = key;
+        None
+    }
+}
+
 /// Plainly-seeded fallback entropy for [`rng`] outside a shim-linked build. A process-local SplitMix64 with a
 /// fixed seed, so it is reproducible without contacting any host source.
 #[cfg(not(patina_shim))]

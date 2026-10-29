@@ -56,6 +56,7 @@ pub(crate) fn parse_native_harness_from(
         realtime_epoch: args.string("--realtime-epoch"),
         hostname: args.string("--hostname"),
         cpus: args.u32("--cpus"),
+        params: key_values(&args, "--param")?,
         knobs: knobs_of(&args)?,
         buggify: buggify_of(&args),
         schedule: schedule_of(&args),
@@ -280,6 +281,7 @@ pub(crate) fn parse_native_run_from(
         },
         program_args,
         environment: key_values(&args, "--env")?,
+        params: key_values(&args, "--param")?,
         cwd: args.string("--cwd"),
         step_budget: args.u64("--budget"),
         realtime_epoch_nanos: realtime_epoch_of(&args),
@@ -332,6 +334,8 @@ pub(crate) fn parse_native_replay(
         },
         program_args,
         environment: BTreeMap::new(),
+        // Nor --param: the trace restores the run parameters.
+        params: BTreeMap::new(),
         // `replay` registers no --cwd either: the trace is authoritative.
         cwd: None,
         // `replay` registers no --budget: it re-executes a recorded operation

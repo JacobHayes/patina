@@ -104,6 +104,7 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
             families: SOLE,
             flags: &[
                 CPUS_FLAG,
+                PARAM_FLAG,
                 f(
                     "--mount",
                     None,
@@ -229,6 +230,7 @@ child's readable-trace receipt.",
                     "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
                     false,
                 ),
+                PARAM_FLAG,
             ],
         },
         Group {
@@ -531,6 +533,7 @@ only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
                 "--seed",
                 "--record",
                 "--env",
+                "--param",
                 "--cwd",
                 "--realtime-epoch",
                 "--hostname",

@@ -43,7 +43,9 @@ pub use flags::HELP_FLAGS;
 use flags::LIVENESS_FLAGS_OPTIONAL;
 use flags::NATIVE_SCHEDULE_FLAGS;
 use flags::SOURCE_SELECT;
-use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG};
+use flags::{
+    ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG, PARAM_FLAG,
+};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;

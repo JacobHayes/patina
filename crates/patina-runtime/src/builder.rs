@@ -227,6 +227,10 @@ impl RuntimeBuilder {
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the guest's initial working directory.
         let mut replay_guest_cwd_override: Option<String> = None;
+        // The recorded run parameters replace whatever the replaying process
+        // supplied: a harness re-installs its `.param()` defaults on replay, and
+        // the recording already holds those merged with the run's overrides.
+        let mut replay_params_override: Option<BTreeMap<String, String>> = None;
         // Same contract for clock origins and the node name.
         let mut replay_realtime_epoch_override: Option<u64> = None;
         let mut replay_boot_origin_override = None;
@@ -257,6 +261,7 @@ impl RuntimeBuilder {
                         .with_guest_argv(self.config.guest_argv.clone())
                         .with_guest_env(guest_env_record(&self.config))
                         .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_params(self.config.params.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
                         .with_tsc(self.config.tsc)
@@ -289,6 +294,7 @@ impl RuntimeBuilder {
                         .with_guest_argv(self.config.guest_argv.clone())
                         .with_guest_env(guest_env_record(&self.config))
                         .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_params(self.config.params.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
                         .with_tsc(self.config.tsc)
@@ -325,6 +331,7 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_params_override = Some(replayer.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
                     installed_clock_epoch,
@@ -381,6 +388,7 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_params_override = Some(replayer.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
                     installed_clock_epoch,
@@ -442,6 +450,7 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
+                replay_params_override = Some(session.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
                     installed_clock_epoch,
@@ -500,6 +509,9 @@ impl RuntimeBuilder {
         // resolves the recording's relative paths against the same directory.
         if let Some(guest_cwd) = replay_guest_cwd_override {
             self.config.guest_cwd = Some(guest_cwd);
+        }
+        if let Some(params) = replay_params_override {
+            self.config.params = params;
         }
         // Adopt both clock origins, including for unrecorded filesystem stamps
         // and elapsed-run fault windows. An installed clock owns its epoch, so

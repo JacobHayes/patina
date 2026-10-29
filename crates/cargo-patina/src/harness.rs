@@ -634,6 +634,10 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
         args.push(OsString::from("--cpus"));
         args.push(OsString::from(cpus.to_string()));
     }
+    for (key, value) in &invocation.params {
+        args.push(OsString::from("--param"));
+        args.push(OsString::from(format!("{key}={value}")));
+    }
     // Every knob the registry defines, from the shared table: a flag the harness
     // parsed but did not re-emit would be silently inert here. That includes the
     // repeatable ones (`--dns-entry`, `--net-partition`), which the harness
@@ -829,6 +833,7 @@ mod tests {
         HarnessFeatures, HarnessSeeds, NativeHarnessInvocation, NativeLiveness, NativeSchedule, cli,
     };
     use patina_dst_runtime::FaultKnob;
+    use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
 
@@ -989,6 +994,7 @@ mod tests {
             realtime_epoch: args.string("--realtime-epoch"),
             hostname: args.string("--hostname"),
             cpus: args.u32("--cpus"),
+            params: BTreeMap::from([("k".to_owned(), "v=w".to_owned())]),
             knobs: knobs_of(&args).expect("harness knob parse"),
             buggify: None,
             schedule: NativeSchedule::default(),
@@ -1016,6 +1022,12 @@ mod tests {
             );
         }
         assert!(emitted.iter().any(|token| token == "--budget"));
+        assert!(
+            emitted
+                .windows(2)
+                .any(|pair| pair[0] == "--param" && pair[1] == "k=v=w"),
+            "native harness dropped --param: {emitted:?}"
+        );
         assert!(
             emitted
                 .iter()

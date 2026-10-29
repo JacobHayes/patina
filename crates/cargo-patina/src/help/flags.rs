@@ -334,6 +334,14 @@ pub(super) const ALLOW_FLAG: Flag = f(
     true,
 );
 
+pub(super) const PARAM_FLAG: Flag = f(
+    "--param",
+    None,
+    Value::Required("K=V", Kind::KeyValue),
+    "A run parameter the guest reads through `patina_dst::param(K)`; overrides a harness `.param()` default for the same key. Recorded and restored on replay.",
+    true,
+);
+
 pub(super) const CPUS_FLAG: Flag = f(
     "--cpus",
     None,
