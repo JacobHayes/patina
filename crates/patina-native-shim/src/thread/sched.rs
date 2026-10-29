@@ -99,9 +99,12 @@ pub(super) struct Attrs {
     util_max: u32,
     /// The I/O priority it set (`IOPRIO_CLASS_NONE` until it sets one).
     ioprio: i32,
-    /// The identity of its I/O context (`task->io_context`), `None` until
-    /// it has one (see [`SchedRuntime::set_ioprio`], [`SchedRuntime::spawn`]).
-    io_context: Option<u64>,
+    /// Whether it has an I/O context (`task->io_context`), which it gets from
+    /// its first I/O priority (see [`SchedRuntime::set_ioprio`],
+    /// [`SchedRuntime::spawn`]).
+    io_context: bool,
+    /// Its memory policy (`task->mempolicy`), which a new thread inherits.
+    mempolicy: crate::numa::Policy,
     persona: u32,
     /// The thread's name (`comm`), NUL-padded.
     comm: [u8; COMM_LEN],
@@ -154,7 +157,8 @@ impl Default for Attrs {
             util_min: 0,
             util_max: CAPACITY,
             ioprio: 0,
-            io_context: None,
+            io_context: false,
+            mempolicy: crate::numa::Policy::DEFAULT,
             persona: 0,
             comm: PROGRAM_COMM.get().copied().unwrap_or([0; COMM_LEN]),
             affinity: None,
@@ -186,8 +190,6 @@ fn nice_allowed(nice: i32) -> bool {
 #[derive(Default)]
 pub(super) struct SchedRuntime {
     tasks: BTreeMap<i32, Attrs>,
-    /// The I/O contexts made so far, the next one's identity.
-    io_contexts: u64,
     /// Each managed thread's [`CpuSlot`], and the slots of finished ones.
     slots: BTreeMap<i32, &'static CpuSlot>,
     free_slots: Vec<&'static CpuSlot>,
@@ -204,21 +206,13 @@ impl SchedRuntime {
         self.tasks.insert(tid, attrs);
     }
 
-    /// A new I/O context's identity (`alloc_io_context`).
-    fn new_io_context(&mut self) -> u64 {
-        self.io_contexts += 1;
-        self.io_contexts
-    }
-
     /// `set_task_ioprio`: the thread's I/O context takes the priority, the
     /// thread getting one first if it has none. The context keeps 16 bits
     /// (`io_context.ioprio` is an `unsigned short`).
     fn set_ioprio(&mut self, tid: i32, ioprio: i32) {
         let mut attrs = self.get(tid);
         attrs.ioprio = i32::from(ioprio as u16);
-        if attrs.io_context.is_none() {
-            attrs.io_context = Some(self.new_io_context());
-        }
+        attrs.io_context = true;
         self.set(tid, attrs);
     }
 
@@ -232,10 +226,7 @@ impl SchedRuntime {
     pub(super) fn spawn(&mut self, child: TaskId, parent: TaskId) {
         let mut attrs = self.get(tid_of(parent));
         let valid = attrs.ioprio >> IOPRIO_CLASS_SHIFT != IOPRIO_CLASS_NONE;
-        attrs.io_context = attrs
-            .io_context
-            .filter(|_| valid)
-            .map(|_| self.new_io_context());
+        attrs.io_context &= valid;
         if attrs.reset_on_fork {
             if rt_policy(attrs.policy) || attrs.policy == SCHED_DEADLINE {
                 attrs.policy = SCHED_OTHER;
@@ -924,7 +915,7 @@ pub(crate) unsafe fn setattr(pid: i32, attr: *mut u8, flags: u32) -> SysResult<i
 /// selectors read `__get_task_ioprio`, where a context whose class is `NONE`
 /// follows the thread's CPU scheduling instead.
 fn read_ioprio(attrs: Attrs, raw: bool) -> i32 {
-    if attrs.io_context.is_none() {
+    if !attrs.io_context {
         return IOPRIO_DEFAULT;
     }
     if raw || attrs.ioprio >> IOPRIO_CLASS_SHIFT != IOPRIO_CLASS_NONE {
@@ -1010,6 +1001,20 @@ pub(crate) fn persona() -> u32 {
     lock_state().sched.get(current_tid()).persona
 }
 
+/// The calling thread's memory policy (`current->mempolicy`).
+pub(crate) fn current_mempolicy() -> crate::numa::Policy {
+    lock_state().sched.get(current_tid()).mempolicy
+}
+
+/// Set the calling thread's memory policy.
+pub(crate) fn set_current_mempolicy(policy: crate::numa::Policy) {
+    let mut state = lock_state();
+    let tid = current_tid();
+    let mut attrs = state.sched.get(tid);
+    attrs.mempolicy = policy;
+    state.sched.set(tid, attrs);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,24 +1044,63 @@ mod tests {
         runtime.spawn(TaskId(3), parent);
         assert_eq!(runtime.get(tid_of(TaskId(3))), runtime.get(tid_of(parent)));
 
-        // A thread gets an I/O context of its own from its first I/O
-        // priority and keeps it; a thread it creates gets another only while
-        // that priority is valid.
+        // A thread gets an I/O context from its first I/O priority and keeps
+        // it; a thread it creates has one only while that priority is valid.
         let mut runtime = SchedRuntime::default();
         let parent = TaskId(1);
         let context = |runtime: &SchedRuntime, task| runtime.get(tid_of(task)).io_context;
         runtime.spawn(TaskId(2), parent);
-        assert_eq!(context(&runtime, TaskId(2)), None);
+        assert!(!context(&runtime, TaskId(2)));
         runtime.set_ioprio(tid_of(parent), IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT);
-        let own = context(&runtime, parent);
-        assert!(own.is_some());
+        assert!(context(&runtime, parent));
         runtime.spawn(TaskId(3), parent);
-        assert_eq!(context(&runtime, TaskId(3)), None);
+        assert!(!context(&runtime, TaskId(3)));
         runtime.set_ioprio(tid_of(parent), (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4);
-        assert_eq!(context(&runtime, parent), own);
         runtime.spawn(TaskId(4), parent);
-        let child = context(&runtime, TaskId(4));
-        assert!(child.is_some() && child != own);
+        assert!(context(&runtime, TaskId(4)));
+    }
+
+    #[test]
+    fn a_child_inherits_its_creators_memory_policy() {
+        let mut runtime = SchedRuntime::default();
+        let parent = TaskId(1);
+        let mut attrs = runtime.get(tid_of(parent));
+        attrs.mempolicy = crate::numa::Policy::bound_to_node_zero();
+        runtime.set(tid_of(parent), attrs);
+        runtime.spawn(TaskId(2), parent);
+        assert_eq!(runtime.get(tid_of(TaskId(2))).mempolicy, attrs.mempolicy);
+        assert_ne!(attrs.mempolicy, crate::numa::Policy::DEFAULT);
+    }
+
+    #[test]
+    fn get_mempolicy_reads_back_what_set_mempolicy_set() {
+        crate::thread::signals::tests::isolated(|| {
+            const MPOL_BIND: i32 = 2;
+            const STATIC_NODES: i32 = 1 << 15;
+            let read = |flags: u64| {
+                let (mut mode, mut mask) = (-1i32, [9u64; 2]);
+                // SAFETY: the outputs are writable for what the call names.
+                let result = unsafe {
+                    crate::numa::get_mempolicy(&mut mode, mask.as_mut_ptr(), 65, 0, flags)
+                };
+                (result, mode, mask[0])
+            };
+            assert_eq!(read(0), (0, 0, 0));
+            let node0 = 1u64;
+            // SAFETY: the mask is readable for the 64 bits named.
+            let set = |mode: i32, mask: &u64| unsafe { crate::numa::set_mempolicy(mode, mask, 65) };
+            assert_eq!(set(MPOL_BIND | STATIC_NODES, &node0), 0);
+            assert_eq!(read(0), (0, MPOL_BIND | STATIC_NODES, 1));
+            // A refused request leaves the policy as it was.
+            assert_eq!(set(MPOL_BIND, &2), -i64::from(crate::EINVAL));
+            assert_eq!(read(0), (0, MPOL_BIND | STATIC_NODES, 1));
+            // An address range has no policy of its own, whatever the thread's.
+            assert_eq!(read(2), (0, 0, 0));
+            // The allowed nodes are the machine's, whatever the thread's policy.
+            assert_eq!(read(4), (0, 0, 1));
+            assert_eq!(set(0, &0), 0);
+            assert_eq!(read(0), (0, 0, 0));
+        });
     }
 
     /// Init is another user's process (root's): outside the caller's user,
@@ -1126,7 +1170,7 @@ mod tests {
         assert_eq!(read_ioprio(unset, true), IOPRIO_DEFAULT);
         assert_eq!(read_ioprio(unset, false), IOPRIO_DEFAULT);
         let none = Attrs {
-            io_context: Some(1),
+            io_context: true,
             nice: 10,
             ..Attrs::default()
         };

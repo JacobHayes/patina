@@ -1855,42 +1855,6 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
-        "posix_openpt",
-        Platform::Linux,
-        Serves::Syscalls(&["openat"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "grantpt",
-        Platform::Linux,
-        Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "unlockpt",
-        Platform::Linux,
-        Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "ptsname",
-        Platform::Linux,
-        Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "ptsname_r",
-        Platform::Linux,
-        Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "__ptsname_r_chk",
-        Platform::Linux,
-        Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
         "ttyname",
         Platform::Linux,
         Serves::Syscalls(&["ioctl"]),
@@ -1906,12 +1870,6 @@ symbol_rows! {
         "__ttyname_r_chk",
         Platform::Linux,
         Serves::Syscalls(&["ioctl"]),
-        SymbolStatus::Modeled,
-    ),
-    s(
-        "openpty",
-        Platform::Linux,
-        Serves::Syscalls(&["openat", "ioctl"]),
         SymbolStatus::Modeled,
     ),
     s(

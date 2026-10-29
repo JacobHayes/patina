@@ -502,7 +502,7 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_msgctl, |_, a| unsafe {
         crate::thread::ipc::msgctl(a[0] as i32, a[1] as i32, a[2] as *mut _)
     }),
-    // ---- memory policy on the one memory node (`crate::numa`, constants) ----
+    // ---- memory policy on the one memory node (`crate::numa`) ----
     // SAFETY: set_mempolicy validates and copies the guest node mask through uaccess.
     (Syscall::N_set_mempolicy, |_, a| unsafe {
         crate::numa::set_mempolicy(a[0] as i32, a[1] as *const u64, a[2])

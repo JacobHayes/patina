@@ -413,7 +413,7 @@ const ZSTD_TRACE_HOOK: &str = "no native definition (a third-party weak hook): o
 const TRAPPED: &str = "unmodeled by design: no target workload exercises it, so the registry traps it as a named stop (`Trap(privileged|unmodeled)`) instead of a model. The stop is asserted by the raw-guest tests (cargo-patina native_raw), not compared against a native oracle, because the native side is a privileged or host-mutating call";
 const TRAPPED_SYMBOL: &str = "the libc spelling of a row the registry traps as a named stop (see the syscall exclusions); the shim forwards it to the trapped row, so there is no modeled behaviour to compare with a native oracle";
 const PTY_SPELLING: &str = "pseudo-terminal spelling: patina models no pseudo-terminals. A /dev/ptmx open is a named stop, the stdio descriptors answer ENOTTY and /dev/tty answers ENXIO (fd/dev_tty, fd/termios); there is no pty behaviour to compare with a native oracle";
-const NUMA_CONSTANTS: &str = "answered with constants: the virtual machine has one NUMA node, so get_mempolicy reports MPOL_DEFAULT with the node-0 mask, node-0 policies succeed and other nodes are EINVAL (numa.rs unit tests). A native oracle would report the host's topology";
+const NUMA_CONSTANTS: &str = "answered by a one-node model: get_mempolicy reads back the calling thread's policy (inherited by new threads), node-0 policies succeed, other nodes are EINVAL and a non-default mbind is a named stop (numa.rs and sched.rs unit tests, raw probes). A native oracle would report the host's topology";
 
 /// Registry entries excluded from conformance coverage, with their reasons.
 pub const EXCLUSIONS: &[Exclusion] = &[
@@ -636,10 +636,6 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         reason: TRAPPED,
     },
     Exclusion {
-        entry: Entry::Symbol("__ptsname_r_chk"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
         entry: Entry::Symbol("__ttyname_r_chk"),
         reason: PTY_SPELLING,
     },
@@ -672,10 +668,6 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         reason: TRAPPED_SYMBOL,
     },
     Exclusion {
-        entry: Entry::Symbol("grantpt"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
         entry: Entry::Symbol("init_module"),
         reason: TRAPPED_SYMBOL,
     },
@@ -704,16 +696,8 @@ pub const EXCLUSIONS: &[Exclusion] = &[
         reason: TRAPPED_SYMBOL,
     },
     Exclusion {
-        entry: Entry::Symbol("openpty"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
         entry: Entry::Symbol("pivot_root"),
         reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("posix_openpt"),
-        reason: PTY_SPELLING,
     },
     Exclusion {
         entry: Entry::Symbol("process_vm_readv"),
@@ -726,14 +710,6 @@ pub const EXCLUSIONS: &[Exclusion] = &[
     Exclusion {
         entry: Entry::Symbol("ptrace"),
         reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ptsname"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ptsname_r"),
-        reason: PTY_SPELLING,
     },
     Exclusion {
         entry: Entry::Symbol("quotactl"),
@@ -774,10 +750,6 @@ pub const EXCLUSIONS: &[Exclusion] = &[
     Exclusion {
         entry: Entry::Symbol("umount2"),
         reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("unlockpt"),
-        reason: PTY_SPELLING,
     },
     Exclusion {
         entry: Entry::Symbol("unshare"),

@@ -54,5 +54,15 @@ fn main() {
     assert_eq!((policy, mode), (0, 0), "get_mempolicy");
     assert_eq!(bind_other, -EINVAL, "set_mempolicy other node");
     assert_eq!(bind_node0, 0, "set_mempolicy node 0");
+    // The policy set is the policy read back, mode and node mask.
+    let mut set_mode = -1i32;
+    let mut set_mask = 0u64;
+    let reread = unsafe {
+        sc(
+            239,
+            [&mut set_mode as *mut i32 as i64, &mut set_mask as *mut u64 as i64, 64, 0, 0, 0],
+        )
+    };
+    assert_eq!((reread, set_mode, set_mask), (0, 2, 1), "get_mempolicy after set");
     println!("RAW_PROBES landlock+seccomp+prctl+tty+stdio+mempolicy ok");
 }

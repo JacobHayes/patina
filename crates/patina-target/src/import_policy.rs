@@ -859,6 +859,16 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // (f) Filesystem: path and descriptor I/O. Routed through the deterministic
     // filesystem when interposed; a raw import is a host filesystem escape.
     const FILESYSTEM: &[&str] = &[
+        // Pseudoterminals are not modeled and the shim defines none of these,
+        // so a weak reference would bind libc's, which opens the host's
+        // `/dev/ptmx`: classified so even a weak import is refused.
+        "posix_openpt",
+        "openpty",
+        "grantpt",
+        "unlockpt",
+        "ptsname",
+        "ptsname_r",
+        "ptsname_r_chk",
         "open",
         "open64",
         "openat",

@@ -1,4 +1,7 @@
-//! Linux terminal/PTY adapters. All requests reach the virtual machine.
+//! Linux terminal adapters. All requests reach the virtual machine. The
+//! pseudoterminal calls (`posix_openpt`, `openpty`, `grantpt`, ...) are not
+//! defined: pseudoterminals are not modeled, so a guest importing one meets
+//! the pre-run audit, and a raw `/dev/ptmx` open is a named stop.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use crate::posix::{cancel, errno, error, get_errno, model_result};
@@ -181,99 +184,10 @@ extern "C" fn tcdrain(fd: c_int) -> c_int {
         ))
     }
 }
-#[unsafe(no_mangle)]
-extern "C" fn posix_openpt(flags: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the path is a static NUL-terminated string and openat reads it for the duration of the call.
-    unsafe {
-        crate::variadic::open::patina_openat_impl(libc::AT_FDCWD, c"/dev/ptmx".as_ptr(), flags, 0)
-    }
-}
-unsafe fn master_request(fd: c_int, request: u64, arg: *mut c_void) -> c_int {
-    // SAFETY: callers pass the valid argument buffer required by each PTY ioctl request.
-    unsafe {
-        if crate::ioctl::patina_ioctl(fd, request, arg) == 0 {
-            return 0;
-        }
-        let value = crate::patina_errno();
-        error(if value == libc::ENOTTY {
-            libc::EINVAL
-        } else {
-            value
-        })
-    }
-}
-#[unsafe(no_mangle)]
-extern "C" fn grantpt(fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let mut index = MaybeUninit::<libc::c_uint>::uninit();
-    // SAFETY: TIOCGPTN writes its result to this local output slot.
-    unsafe { master_request(fd, libc::TIOCGPTN, index.as_mut_ptr().cast()) }
-}
-#[unsafe(no_mangle)]
-extern "C" fn unlockpt(fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let mut unlock: c_int = 0;
-    // SAFETY: TIOCSPTLCK reads this initialized local integer argument.
-    unsafe { master_request(fd, libc::TIOCSPTLCK, (&raw mut unlock).cast()) }
-}
 fn ioctl_error() -> c_int {
     let value = crate::patina_errno();
     errno(value);
     value
-}
-unsafe fn ptsname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
-    // SAFETY: callers guarantee `buf` is writable for `buflen`; this function checks the needed length before writing.
-    unsafe {
-        let saved = get_errno();
-        let mut index = MaybeUninit::<libc::c_uint>::uninit();
-        if crate::ioctl::patina_ioctl(fd, libc::TIOCGPTN, index.as_mut_ptr().cast()) != 0 {
-            return ioctl_error();
-        }
-        let mut index = index.assume_init();
-        let mut digits = [0u8; 10];
-        let mut count = 0;
-        loop {
-            digits[count] = b'0' + (index % 10) as u8;
-            count += 1;
-            index /= 10;
-            if index == 0 {
-                break;
-            }
-        }
-        let prefix = b"/dev/pts/";
-        if buflen < prefix.len() + count + 1 {
-            errno(libc::ERANGE);
-            return libc::ERANGE;
-        }
-        core::ptr::copy_nonoverlapping(prefix.as_ptr(), buf.cast(), prefix.len());
-        for i in 0..count {
-            *buf.add(prefix.len() + i) = digits[count - 1 - i] as c_char;
-        }
-        *buf.add(prefix.len() + count) = 0;
-        errno(saved);
-        0
-    }
-}
-/// # Safety
-/// `buf` is writable for `buflen` bytes.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn ptsname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: this forwards the caller's documented writable buffer and length to the implementation.
-    unsafe { ptsname_into(fd, buf, buflen) }
-}
-static mut PTS_NAME: [c_char; 30] = [0; 30];
-#[unsafe(no_mangle)]
-extern "C" fn ptsname(fd: c_int) -> *mut c_char {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let name = (&raw mut PTS_NAME).cast::<c_char>();
-    // SAFETY: `name` points to the 30-byte static return buffer; ptsname_into writes only after checking its length.
-    if unsafe { ptsname_into(fd, name, 30) } == 0 {
-        name
-    } else {
-        core::ptr::null_mut()
-    }
 }
 unsafe fn ttyname_into(fd: c_int, buf: *mut c_char, buflen: usize) -> c_int {
     // SAFETY: callers guarantee writable storage for `buflen`; null and minimum length are checked before writing.
@@ -306,22 +220,6 @@ unsafe extern "C" fn ttyname_r(fd: c_int, buf: *mut c_char, buflen: usize) -> c_
 /// # Safety
 /// `buf` is writable for `nreal` bytes.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn __ptsname_r_chk(
-    fd: c_int,
-    buf: *mut c_char,
-    buflen: usize,
-    nreal: usize,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if buflen > nreal {
-        crate::posix::chk_fail();
-    }
-    // SAFETY: the caller guarantees `nreal` writable bytes and the check ensures `buflen` fits that allocation.
-    unsafe { ptsname_into(fd, buf, buflen) }
-}
-/// # Safety
-/// `buf` is writable for `nreal` bytes.
-#[unsafe(no_mangle)]
 unsafe extern "C" fn __ttyname_r_chk(
     fd: c_int,
     buf: *mut c_char,
@@ -345,86 +243,5 @@ extern "C" fn ttyname(fd: c_int) -> *mut c_char {
         name
     } else {
         core::ptr::null_mut()
-    }
-}
-/// # Safety
-/// Out parameters are writable; optional settings are readable.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn openpty(
-    amaster: *mut c_int,
-    aslave: *mut c_int,
-    name: *mut c_char,
-    termp: *const libc::termios,
-    winp: *const libc::winsize,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the caller supplies writable output pointers and readable optional settings; local ioctl buffers are valid.
-    unsafe {
-        let mut path = [0 as c_char; 30];
-        let master = crate::variadic::open::patina_openat_impl(
-            libc::AT_FDCWD,
-            c"/dev/ptmx".as_ptr(),
-            libc::O_RDWR,
-            0,
-        );
-        if master == -1 {
-            return -1;
-        }
-        let mut slave = -1;
-        let mut index = MaybeUninit::<libc::c_uint>::uninit();
-        let mut unlock: c_int = 0;
-        let result = (|| {
-            if master_request(master, libc::TIOCGPTN, index.as_mut_ptr().cast()) != 0 {
-                return -1;
-            }
-            if master_request(master, libc::TIOCSPTLCK, (&raw mut unlock).cast()) != 0 {
-                return -1;
-            }
-            slave = model_result(crate::ioctl::patina_ioctl(
-                master,
-                libc::TIOCGPTPEER,
-                (libc::O_RDWR | libc::O_NOCTTY) as isize as *mut c_void,
-            ));
-            if slave == -1 {
-                if ptsname_into(master, path.as_mut_ptr(), path.len()) != 0 {
-                    return -1;
-                }
-                slave = crate::variadic::open::patina_openat_impl(
-                    libc::AT_FDCWD,
-                    path.as_ptr(),
-                    libc::O_RDWR | libc::O_NOCTTY,
-                    0,
-                );
-                if slave == -1 {
-                    return -1;
-                }
-            }
-            if !termp.is_null() {
-                let _ = setattr_impl(slave, libc::TCSAFLUSH, termp);
-            }
-            if !winp.is_null() {
-                let _ = crate::ioctl::patina_ioctl(slave, libc::TIOCSWINSZ, winp.cast_mut().cast());
-            }
-            if !name.is_null() {
-                if ptsname_into(master, path.as_mut_ptr(), path.len()) != 0 {
-                    return -1;
-                }
-                core::ptr::copy_nonoverlapping(
-                    path.as_ptr(),
-                    name,
-                    libc::strlen(path.as_ptr()) + 1,
-                );
-            }
-            *amaster = master;
-            *aslave = slave;
-            0
-        })();
-        if result != 0 {
-            let _ = crate::patina_close(master);
-            if slave != -1 {
-                let _ = crate::patina_close(slave);
-            }
-        }
-        result
     }
 }
