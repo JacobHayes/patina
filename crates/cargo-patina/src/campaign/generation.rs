@@ -32,6 +32,11 @@ impl GenerationRun {
         self.facts.facts.timed_out
     }
 
+    /// The classifier's structured facts for the run.
+    pub(crate) fn facts(&self) -> &RunFacts {
+        &self.facts.facts
+    }
+
     pub(crate) fn streams(&self) -> (&str, &str) {
         (&self.stdout, &self.stderr)
     }

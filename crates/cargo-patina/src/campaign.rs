@@ -50,11 +50,15 @@ pub use classify::{
     CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,
     recognize_verdicts, signature,
 };
-pub(crate) use generation::{GenerationRun, child_facts, run_envelope};
+pub(crate) use generation::GenerationRun;
+#[cfg(test)]
+pub(crate) use generation::child_facts;
 pub use parse::{CampaignInvocation, parse};
 pub(crate) use planes::FAULT_PLANE_NAMES;
 pub use planes::{FaultPlane, FaultPlanes};
-pub(crate) use repro::{GenerationRepro, generation_repro, run_reduced_generation};
+pub(crate) use repro::{
+    GenerationRepro, generation_repro, run_reduced_generation, run_reduced_replay,
+};
 pub(crate) use spec::DEFAULT_OUT_DIR;
 pub use spec::{AllowUnmetSometimes, CampaignSpec};
 

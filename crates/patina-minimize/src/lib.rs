@@ -54,6 +54,24 @@ pub trait FailureOracle {
         }
         Ok(verdicts)
     }
+
+    /// Whether this oracle rejects every unbranched candidate a strict replay
+    /// cannot follow to its end.
+    ///
+    /// A strict replay hands the program the candidate's next decision only
+    /// when its operation is the one the program requests, and diverges
+    /// otherwise, including when no decision is left. Every candidate a
+    /// deletion reducer proposes is cut from a trace the oracle accepted, so up
+    /// to the deleted chunk it is that trace, and the program, deterministic,
+    /// requests there exactly the operation the trace held at the chunk's
+    /// start. A candidate whose decision there is another operation, or none, is
+    /// therefore rejected without being run. Only a bundle with no branches is
+    /// pruned this way, since a branch the replay does not follow can lose any
+    /// decision. The default `false` keeps every other oracle judging every
+    /// candidate.
+    fn replays_strictly(&self) -> bool {
+        false
+    }
 }
 
 impl<F, E> FailureOracle for F

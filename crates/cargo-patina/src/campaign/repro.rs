@@ -1,6 +1,6 @@
 //! Failure artifacts and recorded generation reproduction.
 
-use super::generation::{GenerationFiles, run_generation};
+use super::generation::{GenerationFiles, run_generation, run_replay};
 use super::state::{load_campaign_state, verify_campaign_build};
 use super::{GenerationRun, VerdictFacts, invocation_flags};
 use crate::CliError;
@@ -226,6 +226,23 @@ pub(crate) fn run_reduced_generation(
         guest_args,
         timeout_secs,
     )
+}
+
+/// Replay one candidate trace exactly as reproduction verification replays a
+/// generation's own trace, for a caller reducing that trace: same child shape,
+/// same scrubbed environment, and the same wall-clock backstop the generation
+/// ran under. A candidate cut from a recording can wedge where the recording
+/// did not (a deletion changes what the guest is told, and a guest spinning on
+/// an atomic never reaches another recorded operation), so a reducer without
+/// the backstop waits on such a candidate forever.
+pub(crate) fn run_reduced_replay(
+    self_exe: &Path,
+    artifact: &Path,
+    trace: &Path,
+    invocation: &[String],
+    timeout_secs: u64,
+) -> Result<GenerationRun, CliError> {
+    run_replay(self_exe, artifact, trace, invocation, timeout_secs)
 }
 
 #[cfg(test)]

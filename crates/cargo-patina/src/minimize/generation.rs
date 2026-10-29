@@ -174,6 +174,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
             invocation: repro.pinned.clone(),
             target: target.clone(),
             recorded_exit,
+            timeout_secs: repro.timeout_secs,
             jobs,
             calls: AtomicU64::new(0),
         };

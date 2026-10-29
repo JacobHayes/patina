@@ -364,3 +364,162 @@ fn a_crash_restart_trace_shrinks_each_incarnation_around_the_crash() {
     let segments = entry_points[0].1.crash_restart_segments().unwrap().unwrap();
     assert_eq!(segments.snapshot_digest, Sha256Digest([7; 32]));
 }
+
+/// A deterministic program under strict replay, as the oracle. It reads a
+/// counter that only steps forward by 1-5, and which operation it issues next
+/// depends on the value it just read. The crashed incarnation runs until the
+/// crash and must have read 999; the restarted one exits once it reads 777, so
+/// a replay that leaves decisions unread diverged.
+struct StrictProgram {
+    strict: bool,
+    runs: usize,
+}
+
+impl StrictProgram {
+    fn operation_after(value: u64) -> Operation {
+        match value % 4 {
+            0 => Operation::ClockNow {
+                clock: ClockKind::Monotonic,
+            },
+            1 => Operation::ClockNow {
+                clock: ClockKind::Realtime,
+            },
+            task => Operation::TaskYield {
+                task: patina_dst_abi::TaskId(task),
+            },
+        }
+    }
+
+    fn follows(decisions: &[&TraceEvent], target: u64, exits: bool) -> bool {
+        let mut operation = Self::operation_after(0);
+        let mut last = 0;
+        let mut seen = false;
+        for event in decisions {
+            let Outcome::U64(value) = event.outcome else {
+                return false;
+            };
+            let stepped = value > last && (value - last <= 5 || value == target);
+            if (exits && seen) || event.operation != operation || !stepped {
+                return false;
+            }
+            last = value;
+            seen |= value == target;
+            operation = Self::operation_after(value);
+        }
+        // The crash, or a program that exits on its last decision.
+        seen
+    }
+
+    /// The program's recording: `reads` steps, the `at`th of them to `target`.
+    fn recording(reads: usize, target: u64, at: usize) -> Vec<TraceEvent> {
+        let mut operation = Self::operation_after(0);
+        let mut value = 0;
+        (0..reads)
+            .map(|index| {
+                value = if index == at {
+                    target
+                } else {
+                    value + 1 + (index as u64 * 7 + 3) % 5
+                };
+                let next = Self::operation_after(value);
+                TraceEvent::new(
+                    index as u64,
+                    std::mem::replace(&mut operation, next),
+                    Outcome::U64(value),
+                )
+            })
+            .collect()
+    }
+}
+
+impl FailureOracle for StrictProgram {
+    type Error = Infallible;
+
+    fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
+        self.runs += 1;
+        let incarnation = |number| -> Vec<&TraceEvent> {
+            candidate.timelines[0]
+                .decisions
+                .iter()
+                .filter(|event| event.incarnation == number)
+                .collect()
+        };
+        Ok(Self::follows(&incarnation(0), 999, false) && Self::follows(&incarnation(1), 777, true))
+    }
+
+    fn replays_strictly(&self) -> bool {
+        self.strict
+    }
+}
+
+/// Against a strict-replay oracle a crash trace minimizes in fewer oracle runs
+/// than it has decisions, to the same trace a run-everything search reaches.
+#[test]
+fn a_strict_replay_oracle_skips_candidates_that_cannot_be_followed() {
+    use patina_dst_trace::{CrashRestartSegments, Sha256Digest};
+    let metadata = RunMetadata::new(1, "fixture", 0, "patina");
+    let bundle = CrashRestartSegments {
+        crashed: TraceBundle::linear(metadata.clone(), 0, StrictProgram::recording(120, 999, 60)),
+        snapshot_digest: Sha256Digest([7; 32]),
+        restarted: TraceBundle::linear(metadata, 1, StrictProgram::recording(140, 777, 139)),
+    }
+    .join()
+    .unwrap();
+    let decisions = bundle.timelines[0].decisions.len();
+
+    let mut strict = StrictProgram {
+        strict: true,
+        runs: 0,
+    };
+    let minimized = minimize_main(&bundle, &mut strict).unwrap();
+    assert!(minimized.timelines[0].decisions.len() < decisions);
+    assert!(StrictProgram::preserves_failure(&mut strict, &minimized).unwrap());
+    let mut lenient = StrictProgram {
+        strict: false,
+        runs: 0,
+    };
+    assert_eq!(minimize_main(&bundle, &mut lenient).unwrap(), minimized);
+    assert!(
+        strict.runs < decisions && strict.runs < lenient.runs,
+        "{} strict runs, {} lenient runs, {decisions} decisions",
+        strict.runs,
+        lenient.runs
+    );
+}
+
+/// A strict oracle follows one timeline, so a branch it does not replay can
+/// lose decisions whatever their operations.
+#[test]
+fn a_strict_replay_oracle_prunes_nothing_in_a_branched_bundle() {
+    struct MainOnly {
+        strict: bool,
+    }
+    impl FailureOracle for MainOnly {
+        type Error = Infallible;
+        fn preserves_failure(&mut self, candidate: &TraceBundle) -> Result<bool, Infallible> {
+            Ok(candidate.timelines[0].decisions.len() == 2)
+        }
+        fn replays_strictly(&self) -> bool {
+            self.strict
+        }
+    }
+    let mut bundle = TraceBundle::new(
+        RunMetadata::new(1, "fixture", 0, "patina"),
+        vec![clock_event(0, 0), clock_event(1, 1)],
+    );
+    let mut realtime = clock_event(3, 3);
+    realtime.operation = Operation::ClockNow {
+        clock: ClockKind::Realtime,
+    };
+    bundle.timelines.push(test_timeline(
+        "side",
+        "main",
+        2,
+        7,
+        vec![clock_event(2, 2), realtime, clock_event(4, 4)],
+    ));
+    let strict = minimize_branch_tree(&bundle, &mut MainOnly { strict: true }).unwrap();
+    let lenient = minimize_branch_tree(&bundle, &mut MainOnly { strict: false }).unwrap();
+    assert_eq!(strict, lenient);
+    assert!(strict.timelines[1].decisions.len() < 3);
+}

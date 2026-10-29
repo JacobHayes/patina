@@ -345,11 +345,20 @@ fn minimize_index<O: FailureOracle>(
             // the accepted sequence - and therefore the result - is the serial
             // one whatever the width.
             let width = oracle.batch_width().max(1);
+            // Only an unbranched bundle: a strict oracle follows one timeline,
+            // and a deletion in a branch it does not replay cannot diverge.
+            let strict = oracle.replays_strictly() && current.timelines.len() == 1;
             let mut candidates = Vec::with_capacity(width);
             let mut starts = Vec::with_capacity(width);
             let mut cursor = start;
             while candidates.len() < width && cursor < live {
                 let end = (cursor + chunk_size).min(live);
+                let decisions = &current.timelines[timeline_index].decisions;
+                if strict && !strict_replay_may_follow(decisions, first + cursor, first + end) {
+                    // Certain to diverge, so judged rejected without a run.
+                    cursor = end;
+                    continue;
+                }
                 let mut candidate = current.clone();
                 candidate.timelines[timeline_index]
                     .decisions
@@ -385,6 +394,15 @@ fn minimize_index<O: FailureOracle>(
         }
     }
     Ok(current)
+}
+
+/// Whether a strict replay could follow `decisions` with `start..end` deleted:
+/// the decision that slides into `start` must be the operation the program
+/// requests there, the one `decisions` held ([`FailureOracle::replays_strictly`]).
+fn strict_replay_may_follow(decisions: &[TraceEvent], start: usize, end: usize) -> bool {
+    decisions
+        .get(end)
+        .is_some_and(|next| next.operation == decisions[start].operation)
 }
 
 /// The decisions of a timeline one reduction may delete.

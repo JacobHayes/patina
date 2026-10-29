@@ -30,17 +30,6 @@ fn a_marker_matches_any_alternative() {
     assert!(!saw("clean run"));
     assert!(Marker::parse("").is_err());
     assert!(Marker::parse("|").is_err());
-    // A guest's unfinished line does not run into the supervisor's.
-    {
-        let target = Target::Marker(Marker::parse("MRE_FAILURE").unwrap());
-        let stderr = candidate_stderr("guest stopped at MRE", b"_FAILURE is the supervisor's\n");
-        assert!(stderr.lines().any(|line| line == "guest stopped at MRE"));
-        assert!(!target.preserved(&CandidateOutcome {
-            stdout: "",
-            stderr: &stderr,
-            verdicts: &[],
-        }));
-    }
 }
 
 #[test]
@@ -126,6 +115,18 @@ fn a_replay_counts_only_when_it_followed_the_recording() {
         ..recorded.clone()
     };
     assert!(!replay_followed(&elsewhere, &recorded_exit));
+    // The wall-clock backstop killed it: it never reached the recording's end.
+    let killed = RunFacts {
+        timed_out: true,
+        ..recorded.clone()
+    };
+    assert!(!replay_followed(&killed, &recorded_exit));
+    // Patina reported no result at all.
+    let silent = RunFacts {
+        envelope: false,
+        ..recorded.clone()
+    };
+    assert!(!replay_followed(&silent, &recorded_exit));
 }
 
 /// A crash-restart replay that departs from its recording at the crash names

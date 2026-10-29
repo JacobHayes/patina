@@ -171,6 +171,8 @@ pub(super) struct ReplayOracle {
     /// How the recording the candidates are cut from ended
     /// ([`crate::campaign::RunFacts::exit_status`]).
     pub(super) recorded_exit: String,
+    /// The generation's wall-clock backstop, per candidate replay.
+    pub(super) timeout_secs: u64,
     pub(super) jobs: usize,
     pub(super) calls: AtomicU64,
 }
@@ -182,69 +184,39 @@ impl ReplayOracle {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("candidate.patina");
         candidate.write_atomic(&path).map_err(io::Error::other)?;
-        let mut command = Command::new(&self.self_exe);
         // The envelope is the only channel that carries the replay's typed
         // divergence, and the one the knob phase judged the same target on.
-        command.arg("replay").arg("--format").arg("json");
-        command.arg(&self.artifact).arg(&path);
-        for flag in &self.invocation {
-            command.arg(flag);
-        }
-        crate::supervisor_identity::expect_this_supervisor(&mut command)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        crate::lifeline::tie(&mut command).map_err(|error| io::Error::other(error.to_string()))?;
-        let output = command.output()?;
-        let child_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if let Some(refusal) =
-            crate::supervisor_identity::supervisor_mismatch(&child_stdout, &child_stderr)
-        {
-            return Err(io::Error::other(format!(
-                "stopping: a candidate replay ran another supervisor build than this \
-                 reduction. {refusal}"
-            )));
-        }
-
-        // A candidate counts only on positive evidence that its replay followed
-        // it: a run envelope (patina refused to replay at all otherwise), no
-        // divergence on the typed facts channel, and the exit the recording
-        // reached. No text on a stream can stand in for that: a replay that
-        // stops before its trace does ends in an ordinary exit and prints no
-        // shim-fatal line.
-        let Some(envelope) = crate::campaign::run_envelope(&child_stdout) else {
-            return Ok(false);
-        };
-        let facts = crate::campaign::child_facts(Some(&envelope), output.status);
-        if !replay_followed(&facts, &self.recorded_exit) {
+        let run = crate::campaign::run_reduced_replay(
+            &self.self_exe,
+            &self.artifact,
+            &path,
+            &self.invocation,
+            self.timeout_secs,
+        )
+        .map_err(|error| io::Error::other(error.0))?;
+        if !replay_followed(run.facts(), &self.recorded_exit) {
             return Ok(false);
         }
-        let stream = |key: &str| {
-            envelope
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-        };
+        let (stdout, stderr) = run.streams();
         Ok(self.target.preserved(&CandidateOutcome {
-            stdout: stream("stdout"),
-            stderr: &candidate_stderr(stream("stderr"), &output.stderr),
-            verdicts: &facts.verdicts,
+            stdout,
+            stderr,
+            verdicts: run.verdicts(),
         }))
     }
 }
 
-/// Whether a replay's facts show it followed its candidate: no divergence on
-/// the typed facts channel, and the exit status the recording reached.
+/// Whether a replay's facts show it followed its candidate: a run envelope
+/// (patina refused to replay at all otherwise), a run the wall-clock backstop
+/// did not kill, no divergence on the typed facts channel, and the exit status
+/// the recording reached. No text on a stream can stand in for that: a replay
+/// that stops before its trace does ends in an ordinary exit and prints no
+/// shim-fatal line.
 fn replay_followed(facts: &crate::campaign::RunFacts, recorded_exit: &str) -> bool {
-    !facts.replay_diverged && facts.exit_status() == recorded_exit
-}
-
-/// A replayed candidate's stderr: the guest's, then the supervisor's own
-/// diagnostics, which ride the child's stderr, starting on a line of their own.
-fn candidate_stderr(guest: &str, supervisor: &[u8]) -> String {
-    let mut stderr = guest.as_bytes().to_vec();
-    output::end_guest_line(&mut stderr);
-    stderr.extend_from_slice(supervisor);
-    String::from_utf8_lossy(&stderr).into_owned()
+    facts.envelope
+        && !facts.timed_out
+        && !facts.replay_diverged
+        && facts.exit_status() == recorded_exit
 }
 
 impl FailureOracle for ReplayOracle {
@@ -260,6 +232,10 @@ impl FailureOracle for ReplayOracle {
 
     fn judge_batch(&mut self, candidates: &[&TraceBundle]) -> io::Result<Vec<bool>> {
         judge_concurrently(candidates, |candidate| self.judge(candidate))
+    }
+
+    fn replays_strictly(&self) -> bool {
+        true
     }
 }
 
