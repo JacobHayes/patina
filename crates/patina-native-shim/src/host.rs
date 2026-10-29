@@ -39,12 +39,14 @@ unsafe fn unresolved_symbol_diagnostic(write: *mut c_void, name: &std::ffi::CStr
     }
 }
 
-/// The host's definition of the door `name`, for the sealed engine's host
-/// bindings (ARCHITECTURE.md, "The sealed shim"): the seal binds every
-/// reference engine code makes to a door, std's included, to a stub that
-/// resolves the host's definition through here on its first call. The seal
-/// keeps this name out of the engine's exports. An unresolvable name is a
-/// named fatal, as for the alias table.
+/// The host's definition of the door `name`, or null where the host has
+/// none, for the sealed engine's host bindings (ARCHITECTURE.md, "The sealed
+/// shim"): the seal binds every reference engine code makes to a door, std's
+/// included, to a stub that jumps through a slot its binder fills through
+/// here at startup. Some doors are the shim's alone (zstd's tracing hooks,
+/// glibc's internal timer names), so a name the host lacks is no fault until
+/// engine code calls it ([`patina_host_unbound`]). The seal keeps this name
+/// out of the engine's exports.
 ///
 /// # Safety
 /// `name` is a NUL-terminated string.
@@ -52,7 +54,31 @@ unsafe fn unresolved_symbol_diagnostic(write: *mut c_void, name: &std::ffi::CStr
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn patina_host_symbol(name: *const c_char) -> *mut c_void {
     // SAFETY: NUL-terminated, per the contract.
-    hostapi::resolve(unsafe { std::ffi::CStr::from_ptr(name) })
+    hostapi::symbol(unsafe { std::ffi::CStr::from_ptr(name) })
+}
+
+/// A call through a host binding whose slot is empty: the host does not
+/// define the door `name`, or startup has not bound the engine's bindings
+/// yet. A named fatal through the alias table, which a signal handler may
+/// reach. The seal keeps this name out of the engine's exports.
+///
+/// # Safety
+/// `name` is a NUL-terminated string.
+#[cfg(patina_posix_exports)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_host_unbound(name: *const c_char) -> ! {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: NUL-terminated, per the contract.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) };
+    let parts: [&[u8]; 3] = [
+        b"patina native shim fatal: engine code called the host's ",
+        name.to_bytes(),
+        b", which the host does not define or startup had not bound\n",
+    ];
+    for part in parts {
+        let _ = host_write_all(2, part);
+    }
+    crate::host_abort()
 }
 
 #[cfg(target_os = "macos")]
@@ -245,6 +271,14 @@ pub(crate) mod hostapi {
             }
         }
         ptr
+    }
+
+    /// A host symbol by name, from the images after the main executable, or
+    /// null where none defines it.
+    #[cfg(patina_posix_exports)]
+    pub fn symbol(name: &CStr) -> *mut c_void {
+        // SAFETY: as in `resolve`.
+        unsafe { dlsym(RTLD_NEXT, name.as_ptr()) }
     }
 
     fn build() -> HostApi {

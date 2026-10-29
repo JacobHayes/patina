@@ -22,6 +22,43 @@ pub(super) fn program_path() -> *const core::ffi::c_char {
     linux::patina_program_path.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+unsafe extern "C" {
+    /// The sealed engine's binder (`cargo-patina` `seal.rs`): fills every
+    /// host binding's slot with the host's definition of its door, through
+    /// `patina_host_symbol`.
+    fn patina_bind_hosts();
+}
+
+// The binder's stand-in in an archive linked without the seal, which has no
+// host bindings to fill: weak, so the seal's binder takes the name.
+#[cfg(target_os = "linux")]
+core::arch::global_asm!(
+    ".pushsection .text.patina_bind_hosts,\"ax\",%progbits",
+    ".weak patina_bind_hosts",
+    ".type patina_bind_hosts, %function",
+    "patina_bind_hosts:",
+    "ret",
+    ".size patina_bind_hosts, .-patina_bind_hosts",
+    ".popsection",
+);
+#[cfg(target_os = "macos")]
+core::arch::global_asm!(
+    ".globl _patina_bind_hosts",
+    ".weak_definition _patina_bind_hosts",
+    ".p2align 2",
+    "_patina_bind_hosts:",
+    "ret",
+);
+
+/// Bind the engine's host bindings, the first thing the process runs of the
+/// shim: no engine code reaches the host through one before, and none
+/// resolves anything after, so a signal handler may take any of them.
+pub(super) fn bind_hosts() {
+    // SAFETY: the seal links the binder into every engine; startup is single
+    // threaded, and no binding is reached before this.
+    unsafe { patina_bind_hosts() }
+}
+
 /// Priority 101 runs before default-priority constructors on toolchains that
 /// honor constructor priorities, minimizing false early-init failures while
 /// still letting deliberately earlier constructors (the e2e uses
@@ -38,6 +75,9 @@ static NATIVE_START: extern "C" fn() = native_start;
 
 extern "C" fn native_start() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // Darwin has no earlier entry: this constructor is the shim's first.
+    #[cfg(target_os = "macos")]
+    bind_hosts();
     // Idempotent on Linux; also serves platforms without __libc_start_main.
     crate::panic_boundary::install();
     // SAFETY: registers a process-lifetime function.

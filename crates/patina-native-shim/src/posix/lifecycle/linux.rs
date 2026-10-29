@@ -66,6 +66,7 @@ pub unsafe extern "C" fn patina_start_prepare(
     sud_probe: c_int,
 ) -> LibcStartMain {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    super::bind_hosts();
     let envp = unsafe { argv.add(argc as usize + 1) };
     unsafe { crate::posix_env::save_host(envp) };
     // The POSIX link supplies host aliases; install panic containment before

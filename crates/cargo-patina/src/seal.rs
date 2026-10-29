@@ -17,10 +17,12 @@
 //! Every other reference engine code makes to a door is the engine's own use
 //! of the host, not a guest's call: `std`'s I/O, locks and panic machinery,
 //! and anything a workspace crate does through them. The seal binds each one
-//! to a **host binding**, a stub it links into the engine that resolves the
-//! host's definition of the name on its first call (`patina_host_symbol`, the
-//! alias table's resolver) and jumps there, so no engine code re-enters a
-//! door. A door's own code naming another door is refused instead: a door
+//! to a **host binding**, a stub it links into the engine that jumps through a
+//! slot holding the host's definition of the name, so no engine code re-enters
+//! a door. The engine's binder fills every slot (`patina_host_symbol`, the
+//! alias table's resolver) when the shim starts, before any guest code runs,
+//! so a stub never resolves anything; one whose slot the host left empty is a
+//! named fatal. A door's own code naming another door is refused instead: a door
 //! shares its model with another through an ordinary function, never through
 //! the symbol, which the host binding would take.
 //!
@@ -65,9 +67,13 @@ const IMPL: &str = "patina_impl_";
 const ROUTE: &str = "patina_route_";
 /// The prefix of a door's host binding.
 const HOST: &str = "patina_bound_";
-/// The shim's resolver of a door's host definition, which the host bindings
-/// call: the engine's own, never exported.
+/// The shim's resolver of a door's host definition, which the binder calls,
+/// and its fatal for a stub whose slot is empty: the engine's own, never
+/// exported.
 const HOST_SYMBOL: &str = "patina_host_symbol";
+const HOST_UNBOUND: &str = "patina_host_unbound";
+/// The binder of every host binding, which the shim calls at startup.
+const BIND_HOSTS: &str = "patina_bind_hosts";
 
 /// A digest of the seal's own source and of the linker it runs, which decide
 /// its outputs' bytes as much as its inputs do.
@@ -295,11 +301,14 @@ impl Inventory {
             }
         }
         // A door's route alias is a reference to the door, not ABI, and
-        // the host bindings' resolver is the engine's own.
+        // the binder's resolver is the engine's own.
         for door in &inventory.doors {
             inventory.abi.remove(&route(door));
         }
         inventory.abi.remove(HOST_SYMBOL);
+        inventory.abi.remove(HOST_UNBOUND);
+        // The shim's weak stand-in for the binder, which the seal's replaces.
+        inventory.abi.remove(BIND_HOSTS);
         let undefined: BTreeSet<&str> = rows
             .iter()
             .copied()
@@ -614,116 +623,118 @@ impl Platform {
     }
 
     /// The engine's host bindings: per bindable door, a stub that jumps
-    /// through its slot to the host's definition of the name, filling the
-    /// slot on its first call through one shared binder. The binder keeps
-    /// every argument register across the resolver call, so a stub is
-    /// transparent to any signature, a variadic one's included, and a racing
-    /// first call only stores the same address twice. The stubs are global
-    /// so the rewrite can find them; it makes them local.
+    /// through its slot to the host's definition of the name, and the binder
+    /// (`BIND_HOSTS`) that fills every slot through the resolver. The shim
+    /// calls the binder first thing at startup, before any guest code or
+    /// signal handler runs, so no stub resolves anything: a stub is one load
+    /// and a jump, safe in a signal handler and transparent to any signature,
+    /// a variadic one's included. A slot stays empty for a name the host does
+    /// not define (some doors are the shim's alone), and a stub whose slot is
+    /// empty is a named fatal (`HOST_UNBOUND`). The stubs are global so the
+    /// rewrite can find them; it makes them local.
     fn host_bindings(self, bound: &BTreeSet<String>) -> String {
         // Local names outside the stubs' `patina_bound_<door>` space.
-        let binder = self.symbol("patina_bind_host");
+        let binder = self.symbol(BIND_HOSTS);
         let resolver = self.symbol(HOST_SYMBOL);
+        let unbound = self.symbol(HOST_UNBOUND);
+        let text_section = |name: &str| {
+            if self.macho {
+                "__TEXT,__text,regular,pure_instructions".to_owned()
+            } else {
+                format!(".text.{name},\"ax\",%progbits")
+            }
+        };
+        let typed = |name: &str| {
+            if self.macho {
+                (String::new(), String::new())
+            } else {
+                (
+                    format!("\t.type {name}, %function\n"),
+                    format!("\t.size {name}, .-{name}\n"),
+                )
+            }
+        };
         let mut text = String::new();
+        let mut binds = String::new();
         for door in bound {
             let stub = self.symbol(&host(door));
             let slot = self.symbol(&format!("patina_slot_{door}"));
             let name = self.symbol(&format!("patina_name_{door}"));
-            let (text_section, slot_section, name_section) = if self.macho {
+            let (slot_section, name_section) = if self.macho {
                 (
-                    "__TEXT,__text,regular,pure_instructions".to_owned(),
                     "__DATA,__data".to_owned(),
                     "__TEXT,__cstring,cstring_literals".to_owned(),
                 )
             } else {
                 (
-                    format!(".text.{stub},\"ax\",%progbits"),
                     format!(".bss.{slot},\"aw\",%nobits"),
                     format!(".rodata.{name},\"a\",%progbits"),
                 )
             };
-            let body = match (self.macho, self.aarch64) {
-                (false, false) | (true, false) => format!(
-                    "{landing}\tmovq {slot}(%rip), %r11\n\ttestq %r11, %r11\n\tjz 1f\n\tjmp *%r11\n\
-                     1:\tleaq {slot}(%rip), %r11\n\tleaq {name}(%rip), %r10\n\tjmp {binder}\n",
-                    landing = if self.macho { "" } else { "\tendbr64\n" },
+            let (body, bind) = match (self.macho, self.aarch64) {
+                (macho, false) => (
+                    format!(
+                        "{landing}\tmovq {slot}(%rip), %r11\n\ttestq %r11, %r11\n\tjz 1f\n\tjmp *%r11\n\
+                         1:\tleaq {name}(%rip), %rdi\n\tjmp {unbound}\n",
+                        landing = if macho { "" } else { "\tendbr64\n" },
+                    ),
+                    format!(
+                        "\tleaq {name}(%rip), %rdi\n\tcall {resolver}\n\tmovq %rax, {slot}(%rip)\n"
+                    ),
                 ),
-                (false, true) => format!(
-                    "\thint 34\n\tadrp x16, {slot}\n\tadd x16, x16, :lo12:{slot}\n\tldr x17, [x16]\n\
-                     \tcbz x17, 1f\n\tbr x17\n\
-                     1:\tadrp x17, {name}\n\tadd x17, x17, :lo12:{name}\n\tb {binder}\n"
+                (false, true) => (
+                    format!(
+                        "\thint 34\n\tadrp x16, {slot}\n\tldr x16, [x16, :lo12:{slot}]\n\
+                         \tcbz x16, 1f\n\tbr x16\n\
+                         1:\tadrp x0, {name}\n\tadd x0, x0, :lo12:{name}\n\tb {unbound}\n"
+                    ),
+                    format!(
+                        "\tadrp x0, {name}\n\tadd x0, x0, :lo12:{name}\n\tbl {resolver}\n\
+                         \tadrp x16, {slot}\n\tstr x0, [x16, :lo12:{slot}]\n"
+                    ),
                 ),
-                (true, true) => format!(
-                    "\tadrp x16, {slot}@PAGE\n\tadd x16, x16, {slot}@PAGEOFF\n\tldr x17, [x16]\n\
-                     \tcbz x17, 1f\n\tbr x17\n\
-                     1:\tadrp x17, {name}@PAGE\n\tadd x17, x17, {name}@PAGEOFF\n\tb {binder}\n"
+                (true, true) => (
+                    format!(
+                        "\tadrp x16, {slot}@PAGE\n\tldr x16, [x16, {slot}@PAGEOFF]\n\
+                         \tcbz x16, 1f\n\tbr x16\n\
+                         1:\tadrp x0, {name}@PAGE\n\tadd x0, x0, {name}@PAGEOFF\n\tb {unbound}\n"
+                    ),
+                    format!(
+                        "\tadrp x0, {name}@PAGE\n\tadd x0, x0, {name}@PAGEOFF\n\tbl {resolver}\n\
+                         \tadrp x16, {slot}@PAGE\n\tstr x0, [x16, {slot}@PAGEOFF]\n"
+                    ),
                 ),
             };
-            let (function, size) = if self.macho {
-                (String::new(), String::new())
-            } else {
-                (
-                    format!("\t.type {stub}, %function\n"),
-                    format!("\t.size {stub}, .-{stub}\n"),
-                )
-            };
+            binds.push_str(&bind);
+            let (function, size) = typed(&stub);
             write!(
                 text,
-                "\t.section {text_section}\n\t.globl {stub}\n{function}\t.p2align 4\n{stub}:\n{body}{size}\
+                "\t.section {}\n\t.globl {stub}\n{function}\t.p2align 4\n{stub}:\n{body}{size}\
                  \t.section {slot_section}\n\t.p2align 3\n{slot}:\n\t.quad 0\n\
-                 \t.section {name_section}\n{name}:\n\t.asciz \"{door}\"\n"
+                 \t.section {name_section}\n{name}:\n\t.asciz \"{door}\"\n",
+                text_section(&stub)
             )
             .expect("writing to a string");
         }
-        // The binder: the stub's slot and the name in two scratch registers
-        // no argument uses (x86_64 %r11 and %r10, aarch64 x16 and x17).
-        let section = if self.macho {
-            "__TEXT,__text,regular,pure_instructions".to_owned()
-        } else {
-            format!(".text.{binder},\"ax\",%progbits")
-        };
-        let body = if self.aarch64 {
-            format!(
-                "\tstp x29, x30, [sp, #-224]!\n\tmov x29, sp\n\
-                 \tstp x0, x1, [sp, #16]\n\tstp x2, x3, [sp, #32]\n\
-                 \tstp x4, x5, [sp, #48]\n\tstp x6, x7, [sp, #64]\n\
-                 \tstp x8, x16, [sp, #80]\n\
-                 \tstp q0, q1, [sp, #96]\n\tstp q2, q3, [sp, #128]\n\
-                 \tstp q4, q5, [sp, #160]\n\tstp q6, q7, [sp, #192]\n\
-                 \tmov x0, x17\n\tbl {resolver}\n\tmov x17, x0\n\
-                 \tldp x8, x16, [sp, #80]\n\tstr x17, [x16]\n\
-                 \tldp q6, q7, [sp, #192]\n\tldp q4, q5, [sp, #160]\n\
-                 \tldp q2, q3, [sp, #128]\n\tldp q0, q1, [sp, #96]\n\
-                 \tldp x6, x7, [sp, #64]\n\tldp x4, x5, [sp, #48]\n\
-                 \tldp x2, x3, [sp, #32]\n\tldp x0, x1, [sp, #16]\n\
-                 \tldp x29, x30, [sp], #224\n\tbr x17\n"
+        // The binder, an ordinary function of no arguments: one resolver call
+        // per slot. One push (a frame record on aarch64) aligns the stack for
+        // the calls.
+        let (prologue, epilogue) = if self.aarch64 {
+            (
+                "\tstp x29, x30, [sp, #-16]!\n\tmov x29, sp\n",
+                "\tldp x29, x30, [sp], #16\n\tret\n",
             )
+        } else if self.macho {
+            ("\tpushq %rbx\n", "\tpopq %rbx\n\tret\n")
         } else {
-            // Eight pushes and 136 bytes leave the stack aligned for the
-            // call, as the stub's caller left it.
-            let mut body = String::from(
-                "\tpushq %rdi\n\tpushq %rsi\n\tpushq %rdx\n\tpushq %rcx\n\
-                 \tpushq %r8\n\tpushq %r9\n\tpushq %rax\n\tpushq %r11\n\tsubq $136, %rsp\n",
-            );
-            for register in 0..8 {
-                writeln!(body, "\tmovdqu %xmm{register}, {}(%rsp)", register * 16)
-                    .expect("writing to a string");
-            }
-            writeln!(body, "\tmovq %r10, %rdi\n\tcall {resolver}").expect("writing to a string");
-            for register in 0..8 {
-                writeln!(body, "\tmovdqu {}(%rsp), %xmm{register}", register * 16)
-                    .expect("writing to a string");
-            }
-            body.push_str(
-                "\taddq $136, %rsp\n\tpopq %r10\n\tmovq %rax, (%r10)\n\tmovq %rax, %r11\n\
-                 \tpopq %rax\n\tpopq %r9\n\tpopq %r8\n\tpopq %rcx\n\
-                 \tpopq %rdx\n\tpopq %rsi\n\tpopq %rdi\n\tjmp *%r11\n",
-            );
-            body
+            ("\tendbr64\n\tpushq %rbx\n", "\tpopq %rbx\n\tret\n")
         };
+        let (function, size) = typed(&binder);
         write!(
             text,
-            "\t.section {section}\n\t.p2align 4\n{binder}:\n{body}"
+            "\t.section {}\n\t.globl {binder}\n{function}\t.p2align 4\n{binder}:\n\
+             {prologue}{binds}{epilogue}{size}",
+            text_section(&binder)
         )
         .expect("writing to a string");
         text.push_str(&self.object_notes());

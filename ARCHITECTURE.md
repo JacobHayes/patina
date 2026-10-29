@@ -154,8 +154,11 @@ A door therefore has one public address, whether the guest or `dlsym`
 reaches it. Engine code never reaches a door: every other reference it makes
 to a door's name (`std`'s I/O, locks, entropy and panic machinery, and what a
 workspace crate does through them) is bound to a **host binding**, a stub the
-seal links into the engine that resolves the host's definition on its first
-call and jumps there. A door's own code naming another door is refused. The
+seal links into the engine that jumps through a slot holding the host's
+definition. The shim fills every slot first thing at startup, before any guest
+code or signal handler runs, so no stub resolves anything and a signal handler
+may take any of them; a call through a slot the host left empty is a named
+fatal. A door's own code naming another door is refused. The
 seal is also a gate: it refuses an engine whose
 exports differ from the registry inventory and the `patina_*` ABI, a row both
 or neither side defines, workspace code naming a host symbol the audit would
