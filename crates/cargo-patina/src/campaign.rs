@@ -15,9 +15,8 @@
 //!     conventions), plus the runtime's own `PATINA_VIOLATION liveness` /
 //!     `PATINA_SCHEDULE_POLICY` diagnostics;
 //!   * the [`classify`] pure classifier assigns each generation one
-//!     [`CampaignClass`] — a finding, harness or catch-all class, or the
-//!     `VACUOUS_*` coverage class of one fault or exploration plane, one class
-//!     per plane — in the precedence `built_in_class` encodes, with
+//!     [`CampaignClass`] — a finding, harness or catch-all class, or a
+//!     `VACUOUS` coverage class naming the inert planes — in the precedence `built_in_class` encodes, with
 //!     a strict discipline (an explicit finding is never
 //!     downgraded, a nonzero exit is never silently OK, and an unrecognized outcome
 //!     lands loudly in `UNCLASSIFIED`);
@@ -271,43 +270,39 @@ fn band_byte(hash: &gen_byte::Bands, knob: FaultKnob, nth: usize) -> u8 {
     hash.read(band[nth])
 }
 
-/// The outcome class a knob's vacuity — its fault plane reporting that a rate
-/// which should have fired repeatedly applied zero effects — is filed under, or
-/// `None` for a knob whose inertness no class names.
+/// The `fault_reports{}` plane a knob's vacuity — its fault plane reporting
+/// that a rate which should have fired repeatedly applied zero effects — is
+/// reported under, or `None` for a knob whose inertness no plane reports.
 ///
 /// Like [`campaign_policy`], this facet belongs to the campaign rather than the
-/// runtime, and like it, the exhaustive match turns a missing class into a
+/// runtime, and like it, the exhaustive match turns a missing plane into a
 /// decision instead of an omission.
 #[cfg(test)]
-fn vacuity_class(knob: FaultKnob) -> Option<CampaignClass> {
+fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
     match knob {
         FaultKnob::FsErrorPermille | FaultKnob::FsShortPermille | FaultKnob::FsLatencyNanos => {
-            Some(CampaignClass::VacuousFsFault)
+            Some("fs")
         }
-        FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => {
-            Some(CampaignClass::VacuousDnsFault)
-        }
-        FaultKnob::EntropyFailPermille => Some(CampaignClass::VacuousEntropyFault),
-        FaultKnob::EpochJumpNanos => Some(CampaignClass::VacuousClockFault),
-        FaultKnob::CustomOpFailPermille => Some(CampaignClass::VacuousCustomOpFault),
+        FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => Some("dns"),
+        FaultKnob::EntropyFailPermille => Some("entropy"),
+        FaultKnob::EpochJumpNanos => Some("clock"),
+        FaultKnob::CustomOpFailPermille => Some("custom_op"),
         // `NetFaultReport` carries one combined `vacuous=` bit over all seven of
         // these classes (drop/jitter/latency/duplicate/connect-refuse/reset/
-        // partition all share one report line), so they share the one
-        // `VacuousNetFault` class rather than each naming its own — the report
-        // itself cannot tell them apart.
+        // partition all share one report line), so they share the one plane.
         FaultKnob::NetJitterNanos
         | FaultKnob::NetDropPermille
         | FaultKnob::NetLatencyNanos
         | FaultKnob::NetDuplicatePermille
         | FaultKnob::NetConnectRefusePermille
         | FaultKnob::NetResetPermille
-        | FaultKnob::NetPartition => Some(CampaignClass::VacuousNetFault),
+        | FaultKnob::NetPartition => Some("net"),
         // No rate to judge inert: a crash fires at most once and says whether
         // it did in the run's `crash_restart` record, a crash kind is a model
         // rather than a rate, a buffer size is a capacity, a delayed sleep is
         // indistinguishable from a longer one, and the host table is workload.
         // Each of these reports nothing, which
-        // `vacuity_classes_match_the_classifier` pins against the knob table.
+        // `vacuity_planes_match_the_classifier` pins against the knob table.
         FaultKnob::CrashPermille
         | FaultKnob::CrashKind
         | FaultKnob::SleepJitterNanos
@@ -552,7 +547,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         // Runtime-level like the fs/net bands above: no host-table-shaped gate
         // needed. It fails only `GRND_NONBLOCK` reads of a pool not yet known
         // ready, so a guest without one (any Darwin guest, Rust's std) leaves the plane
-        // absent: undiagnosable, never `VACUOUS_ENTROPY_FAULT`.
+        // absent: undiagnosable, never a vacuous entropy plane.
         let entropy_fail = scale_intensity(
             u64::from(band_byte(hash, FaultKnob::EntropyFailPermille, 0)) * 200 / 255, // [0, 200] permille
             scale,

@@ -75,8 +75,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
 /// `--swarm` on a run with no fault class enabled is an inert knob: the draw
 /// has nothing to keep or drop, the run explores what a plain run explores,
 /// and the report must SAY so rather than reading like covered swarm
-/// exploration. This is the signature the campaign/sweep `VACUOUS_SWARM`
-/// classes key on, so the wire shape is pinned here.
+/// exploration.
 #[test]
 fn swarm_with_no_enabled_fault_class_reports_vacuous() {
     let directory = tempdir().unwrap();

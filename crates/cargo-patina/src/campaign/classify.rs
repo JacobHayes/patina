@@ -35,53 +35,13 @@ pub enum CampaignClass {
     /// A liveness-watchdog violation: a `runtime_findings[]` entry with
     /// `source=liveness` — a virtual-time no-progress wedge.
     Liveness,
-    /// A configured filesystem fault class was vacuous: eligible filesystem I/O
-    /// occurred, but an enabled fs error/short-I/O fault class applied zero
-    /// effects. This is a coverage failure, not a SUT finding.
-    VacuousFsFault,
-    /// A configured DNS fault class was vacuous: the guest resolved defined names
-    /// often enough for an enabled failure/latency class to have fired several
-    /// times over, yet it applied zero effects. A coverage failure, not a SUT
-    /// finding — and its own class rather than a shared "vacuous fault" bucket so
-    /// a campaign report says which fault plane went inert.
-    VacuousDnsFault,
-    /// A configured network fault class was vacuous: fault-eligible traffic
-    /// (sends, connects, or stream ops) occurred often enough for an enabled
-    /// drop/jitter/latency/duplicate/connect-refuse/reset/partition class to have
-    /// fired several times over, yet it applied zero effects. A coverage
-    /// failure, not a SUT finding, and its own class for the same reason
-    /// [`CampaignClass::VacuousDnsFault`] is not folded into
-    /// [`CampaignClass::VacuousFsFault`].
-    VacuousNetFault,
-    /// A configured entropy fault class was vacuous: fault-eligible entropy
-    /// requests occurred often enough for the enabled failure knob to have fired
-    /// several times over, yet it applied zero effects. A coverage failure, not a
-    /// SUT finding, and its own class for the same reason
-    /// [`CampaignClass::VacuousDnsFault`] is not folded into
-    /// [`CampaignClass::VacuousFsFault`].
-    VacuousEntropyFault,
-    /// A configured clock fault class was vacuous: fault-eligible realtime-epoch
-    /// reads occurred often enough for the enabled jump knob to have applied a
-    /// non-zero offset several times over, yet it applied zero effects. A
-    /// coverage failure, not a SUT finding, and its own class for the same
-    /// reason [`CampaignClass::VacuousDnsFault`] is not folded into
-    /// [`CampaignClass::VacuousFsFault`].
-    VacuousClockFault,
-    /// A configured custom-op fault class was vacuous: either the generation
-    /// executed no fault-eligible custom operation at all, or it executed enough
-    /// of them for the enabled failure knob to have fired several times over yet
-    /// it applied zero faults. The zero-opportunity half has no analogue in the
-    /// classes above, and that is the point — a fault-eligible custom op exists
-    /// only because the guest declared one, so arming the knob over a guest or a
-    /// path that offers none is a coverage claim with nothing behind it.
-    VacuousCustomOpFault,
-    /// `--swarm` was requested for a generation with no swarm-maskable fault class
-    /// enabled, so the draw had zero candidates: it neither kept nor dropped
-    /// anything and the generation explored exactly what a non-swarm generation
-    /// explores. A coverage failure like [`CampaignClass::VacuousFsFault`] — a
-    /// campaign that asked for fault-subset exploration and got none must not
-    /// read as a clean covered run.
-    VacuousSwarm,
+    /// A fault or exploration plane went inert: a configured fault class saw
+    /// eligible work often enough to have fired several times over yet applied
+    /// zero effects, a custom-op knob reached no eligible operation, or a swarm
+    /// draw had nothing to select. The plane names come from the run's
+    /// `fault_reports{}` and travel in the signature. A coverage failure, not a
+    /// SUT finding.
+    Vacuous,
     /// The guest aborted itself: a SIGABRT (or exit 134) that the envelope did
     /// NOT attribute to a patina refusal, so it is the guest's own doing — a
     /// `panic = "abort"` invariant failure, an `assert!`, a bare `abort()`. A
@@ -127,13 +87,7 @@ impl CampaignClass {
         CampaignClass::Nondeterminism,
         CampaignClass::Violation,
         CampaignClass::Liveness,
-        CampaignClass::VacuousFsFault,
-        CampaignClass::VacuousDnsFault,
-        CampaignClass::VacuousNetFault,
-        CampaignClass::VacuousEntropyFault,
-        CampaignClass::VacuousClockFault,
-        CampaignClass::VacuousCustomOpFault,
-        CampaignClass::VacuousSwarm,
+        CampaignClass::Vacuous,
         CampaignClass::GuestAbort,
         CampaignClass::FailClosedAbort,
         CampaignClass::StarvationStall,
@@ -147,13 +101,7 @@ impl CampaignClass {
             CampaignClass::Nondeterminism => "NONDETERMINISM",
             CampaignClass::Violation => "VIOLATION",
             CampaignClass::Liveness => "LIVENESS",
-            CampaignClass::VacuousFsFault => "VACUOUS_FS_FAULT",
-            CampaignClass::VacuousSwarm => "VACUOUS_SWARM",
-            CampaignClass::VacuousDnsFault => "VACUOUS_DNS_FAULT",
-            CampaignClass::VacuousNetFault => "VACUOUS_NET_FAULT",
-            CampaignClass::VacuousEntropyFault => "VACUOUS_ENTROPY_FAULT",
-            CampaignClass::VacuousClockFault => "VACUOUS_CLOCK_FAULT",
-            CampaignClass::VacuousCustomOpFault => "VACUOUS_CUSTOM_OP_FAULT",
+            CampaignClass::Vacuous => "VACUOUS",
             CampaignClass::GuestAbort => "GUEST_ABORT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
             CampaignClass::StarvationStall => "STARVATION_STALL",
@@ -167,21 +115,6 @@ impl CampaignClass {
             .iter()
             .copied()
             .find(|class| class.as_str() == value)
-    }
-
-    /// The `fault_reports{}` plane whose `vacuous` bit fires this class, for the
-    /// per-plane coverage-failure classes.
-    const fn vacuous_plane(&self) -> Option<&'static str> {
-        match self {
-            CampaignClass::VacuousFsFault => Some("fs"),
-            CampaignClass::VacuousDnsFault => Some("dns"),
-            CampaignClass::VacuousNetFault => Some("net"),
-            CampaignClass::VacuousEntropyFault => Some("entropy"),
-            CampaignClass::VacuousClockFault => Some("clock"),
-            CampaignClass::VacuousCustomOpFault => Some("custom_op"),
-            CampaignClass::VacuousSwarm => Some("swarm"),
-            _ => None,
-        }
     }
 
     /// Whether only comparing two runs of a generation can reach this class, so
@@ -247,18 +180,12 @@ const _: () = {
             CampaignClass::Nondeterminism => 1,
             CampaignClass::Violation => 2,
             CampaignClass::Liveness => 3,
-            CampaignClass::VacuousFsFault => 4,
-            CampaignClass::VacuousDnsFault => 5,
-            CampaignClass::VacuousNetFault => 6,
-            CampaignClass::VacuousEntropyFault => 7,
-            CampaignClass::VacuousClockFault => 8,
-            CampaignClass::VacuousCustomOpFault => 9,
-            CampaignClass::VacuousSwarm => 10,
-            CampaignClass::GuestAbort => 11,
-            CampaignClass::FailClosedAbort => 12,
-            CampaignClass::StarvationStall => 13,
-            CampaignClass::Infra => 14,
-            CampaignClass::Unclassified => 15,
+            CampaignClass::Vacuous => 4,
+            CampaignClass::GuestAbort => 5,
+            CampaignClass::FailClosedAbort => 6,
+            CampaignClass::StarvationStall => 7,
+            CampaignClass::Infra => 8,
+            CampaignClass::Unclassified => 9,
         }
     }
     let all = CampaignClass::ALL;
@@ -268,6 +195,11 @@ const _: () = {
         index += 1;
     }
 };
+
+/// The `fault_reports{}` planes whose `vacuous` bit is a coverage failure. The
+/// schedule plane is not one: its vacuity is a runtime finding of its own.
+pub(super) const VACUITY_PLANES: &[&str] =
+    &["fs", "dns", "net", "entropy", "clock", "custom_op", "swarm"];
 
 /// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). A guest that dies
 /// on SIGABRT has either hit a patina refusal (the shim aborts fail-closed via
@@ -481,10 +413,6 @@ impl RunFacts {
         self.findings
             .iter()
             .find(|finding| finding.source == source)
-    }
-
-    fn plane_vacuous(&self, plane: &str) -> bool {
-        self.vacuous_planes.iter().any(|name| name == plane)
     }
 
     /// Whether this generation was killed from outside the guest. Only a real
@@ -735,24 +663,16 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         return CampaignClass::GuestAbort;
     }
     // 9. A clean exit with no finding is OK, unless a fault or exploration plane
-    //    went inert: then it is that plane's coverage failure, one class per
-    //    plane so a campaign report names WHICH plane went inert. Each plane's
-    //    `vacuous` bit is its own field of `fault_reports{}`, so one plane's
-    //    vacuity can never be filed under another's class. Checked in a fixed
-    //    order, so a generation with two vacuous planes always gets the same one
-    //    class. Vacuity is judged only here, on a run that otherwise passed: a
+    //    went inert: then it is a coverage failure, and the signature names the
+    //    planes. Vacuity is judged only here, on a run that otherwise passed: a
     //    run that failed on its own (every rule above, and the nonzero exit
     //    below) keeps that failure as its headline, exactly as it would without
     //    the fault knobs that went inert.
     if facts.exit_code == 0 {
-        for class in CampaignClass::ALL {
-            if let Some(plane) = class.vacuous_plane()
-                && facts.plane_vacuous(plane)
-            {
-                return *class;
-            }
+        if facts.vacuous_planes.is_empty() {
+            return CampaignClass::Ok;
         }
-        return CampaignClass::Ok;
+        return CampaignClass::Vacuous;
     }
     // 10. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
     //    loudly for triage, never silently dropped as OK or mislabeled. A guest
@@ -857,18 +777,19 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
         // A hardware/OS fault: the guest died executing bad code without ever
         // reaching `abort()`. Name the signal — it is the whole finding — and
         // keep the guest's last words after it for triage.
-        // A vacuous plane is a fact about THIS class and keeps precedence; a
-        // fault signal is the fallback for the classes that carry no fact.
-        _ => class
-            .vacuous_plane()
-            .map(|plane| format!("vacuous plane={plane}"))
-            .or_else(|| {
-                facts
-                    .fault_signal()
-                    .map(|signal| match death_attribution(generation) {
-                        Some(evidence) => format!("guest_fault signal={signal} {evidence}"),
-                        None => format!("guest_fault signal={signal}"),
-                    })
+        // The inert planes are the whole finding, in a fixed order so two
+        // generations with the same planes share a signature.
+        CampaignClass::Vacuous => {
+            let mut planes = facts.vacuous_planes.clone();
+            planes.sort();
+            Some(format!("vacuous planes={}", planes.join(",")))
+        }
+        // A fault signal is the fallback for the classes that carry no fact.
+        _ => facts
+            .fault_signal()
+            .map(|signal| match death_attribution(generation) {
+                Some(evidence) => format!("guest_fault signal={signal} {evidence}"),
+                None => format!("guest_fault signal={signal}"),
             }),
     };
     if let Some(shape) = structured {
@@ -1130,7 +1051,7 @@ fn policy_annotation(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::selftest::{declared_rules_fixture, planted};
-    use super::super::vacuity_class;
+    use super::super::vacuity_plane;
     use super::*;
     use patina_dst_runtime::FaultKnob;
 
@@ -1168,12 +1089,6 @@ mod tests {
                 &rules,
             ),
             classify(&planted(RunFacts::ok().vacuous("fs"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("dns"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("net"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("entropy"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("clock"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("custom_op"), ""), &rules),
-            classify(&planted(RunFacts::ok().vacuous("swarm"), ""), &rules),
             classify(
                 &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
                 &rules,
@@ -1264,36 +1179,32 @@ mod tests {
         );
     }
 
-    /// A knob whose vacuity has an outcome class must have a report to read it
-    /// off, that class must name a `fault_reports{}` plane, and a run whose plane
-    /// reports `vacuous` must actually classify as it. The network fault-plane
-    /// gap this test used to pin — a report with no class, silently classifying
-    /// `OK` — is now closed: every knob with a report has a matching class, which
-    /// is what the `Some` branch below proves for each of them.
+    /// A knob that reports vacuity must name the `fault_reports{}` plane it
+    /// reports under, and a run whose plane reports `vacuous` must classify
+    /// `VACUOUS` with that plane in its signature; a knob with no report names
+    /// no plane.
     #[test]
-    fn vacuity_classes_match_the_classifier() {
+    fn vacuity_planes_match_the_classifier() {
         let rules = ClassifyRules::default();
         let mut with_report = 0;
         for knob in FaultKnob::ALL {
-            let class = vacuity_class(*knob);
+            let plane = vacuity_plane(*knob);
             if knob.meta().report.is_none() {
                 assert_eq!(
-                    class, None,
-                    "{knob:?} has a vacuity class but no report to read it off"
+                    plane, None,
+                    "{knob:?} names a vacuity plane but has no report to read it off"
                 );
                 continue;
             };
             with_report += 1;
-            let expected = class.unwrap_or_else(|| {
-                panic!("{knob:?} has a report but no vacuity_class — give it one, or its class")
-            });
-            let plane = expected.vacuous_plane().unwrap_or_else(|| {
-                panic!("{expected:?} is a vacuity class with no fault_reports plane to read")
-            });
-            let actual = classify(&planted(RunFacts::ok().vacuous(plane), ""), &rules);
-            assert_eq!(
-                actual, expected,
-                "{knob:?} declares {expected:?} but a vacuous {plane:?} plane classifies as {actual:?}"
+            let plane =
+                plane.unwrap_or_else(|| panic!("{knob:?} has a report but no vacuity plane"));
+            let generation = planted(RunFacts::ok().vacuous(plane), "");
+            let class = classify(&generation, &rules);
+            assert_eq!(class, CampaignClass::Vacuous, "{knob:?} on plane {plane:?}");
+            assert!(
+                signature(class, &generation).shape.ends_with(plane),
+                "{knob:?}: the signature must name plane {plane:?}"
             );
         }
         assert!(

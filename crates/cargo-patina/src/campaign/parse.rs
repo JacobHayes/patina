@@ -3,6 +3,7 @@
 use super::spec::DEFAULT_PROGRESS_EVERY;
 use super::{AllowUnmetSometimes, CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes};
 use crate::{CliError, cli, help};
+use patina_dst_runtime::FaultKnob;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::PathBuf;
@@ -227,6 +228,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         ));
     }
     validate_exclusions(&spec)?;
+    validate_swarm(&spec)?;
     Ok(CampaignInvocation {
         artifact: Some(
             artifact.ok_or_else(|| CliError::usage("campaign requires a native binary path"))?,
@@ -281,6 +283,23 @@ fn reject_continuation_override(name: &str) -> CliError {
 
 #[cfg(test)]
 mod tests;
+
+/// `--swarm` masks the classes a generation enables; with no buggify and no
+/// drawn fault knob (crash included) there is nothing to mask, and every
+/// generation would explore exactly what a non-swarm one does.
+fn validate_swarm(spec: &CampaignSpec) -> Result<(), CliError> {
+    let maskable = spec.buggify
+        || FaultKnob::ALL
+            .iter()
+            .any(|knob| spec.faults.draws(*knob) && !spec.exclude_knobs.contains(knob));
+    if spec.swarm && !maskable {
+        return Err(CliError::usage(
+            "--swarm masks fault classes and buggify, but the campaign enables none; \
+             add --buggify or --faults, or drop --swarm",
+        ));
+    }
+    Ok(())
+}
 
 /// An excluded knob must belong to a plane the merged campaign selects: an
 /// exclusion from a plane that is never drawn would record a choice that

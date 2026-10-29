@@ -200,7 +200,7 @@ wired.
   service-side registration — and a harness can name its own services with
   `HarnessBuilder::dns_service`, which allocates the virtual address for you.
   `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
-  per generation and classifies an inert one as `VACUOUS_DNS_FAULT`.
+  per generation and classifies an inert one as `VACUOUS` with the dns plane in its signature.
 - **Entropy**: `--entropy-fail-permille` models a guest that starts before the
   kernel's random pool is initialized: a `GRND_NONBLOCK` `getrandom` answers
   `EAGAIN` until a read shows the pool ready. No other entropy API can fail, so

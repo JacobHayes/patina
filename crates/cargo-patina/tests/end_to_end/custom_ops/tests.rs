@@ -294,7 +294,7 @@ fn campaign_finds_a_planted_mishandling(directory: &Path, bin: &str) {
         "the finding must be classified through the guest's own verdict:\n{stdout}"
     );
     assert!(
-        !stdout.contains("VACUOUS_CUSTOM_OP_FAULT"),
+        !stdout.contains("class=VACUOUS"),
         "no generation may report an inert custom-op plane over a guest that \
          declares one on every fetch:\n{stdout}"
     );

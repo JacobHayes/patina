@@ -226,22 +226,11 @@ fn classifier_and_detector_checks() {
         ),
     );
 
-    // -- per-plane coverage failures -----------------------------------------
-    // Each plane carries its own `vacuous` bit in `fault_reports{}`, so one
-    // plane's vacuity can never be filed under another's class — the whole
-    // reason these are separate classes.
-    for (name, class) in [
-        ("fs", CampaignClass::VacuousFsFault),
-        ("dns", CampaignClass::VacuousDnsFault),
-        ("net", CampaignClass::VacuousNetFault),
-        ("entropy", CampaignClass::VacuousEntropyFault),
-        ("clock", CampaignClass::VacuousClockFault),
-        ("custom_op", CampaignClass::VacuousCustomOpFault),
-        ("swarm", CampaignClass::VacuousSwarm),
-    ] {
+    // -- inert-plane coverage failures ---------------------------------------
+    for name in ["fs", "dns", "net", "entropy", "clock", "custom_op", "swarm"] {
         check(
             &format!("vacuous-{name}-plane"),
-            class,
+            CampaignClass::Vacuous,
             classify(&planted(RunFacts::ok().vacuous(name), ""), &no_rules),
         );
     }
@@ -251,20 +240,18 @@ fn classifier_and_detector_checks() {
         CampaignClass::Ok,
         classify(&planted(RunFacts::ok(), ""), &no_rules),
     );
-    // Per-plane attribution, both directions: a vacuous DNS plane alongside a
-    // healthy fs plane is the DNS class, never the fs one.
+    // A vacuous schedule plane is a runtime finding, not a coverage plane.
     check(
-        "dns-vacuity-is-not-filed-under-the-fs-class",
-        CampaignClass::VacuousDnsFault,
-        classify(&planted(RunFacts::ok().vacuous("dns"), ""), &no_rules),
-    );
-    // Two vacuous planes get ONE class, and which one is pinned rather than left
-    // to whichever check runs first, so the same run always dedups the same way.
-    check(
-        "both-planes-vacuous-reports-the-fs-class",
-        CampaignClass::VacuousFsFault,
+        "a-vacuous-schedule-plane-is-not-an-inert-fault-plane",
+        CampaignClass::Ok,
         classify(
-            &planted(RunFacts::ok().vacuous("dns").vacuous("fs"), ""),
+            &planted(
+                facts_from_envelope(&serde_json::json!({
+                    "exit_code": 0,
+                    "fault_reports": {"schedule": {"vacuous": true}}
+                })),
+                "",
+            ),
             &no_rules,
         ),
     );
@@ -694,6 +681,27 @@ fn classifier_and_detector_checks() {
 
     // Signature dedup + novelty, from the same structured facts.
     println!("-- signature dedup --");
+    // The signature names the inert planes: the same planes in any report
+    // order share one signature, and different planes do not.
+    let vacuous_signature = |facts: RunFacts| {
+        let generation = planted(facts, "");
+        signature(classify(&generation, &no_rules), &generation)
+    };
+    let dns_fs = vacuous_signature(RunFacts::ok().vacuous("dns").vacuous("fs"));
+    let fs_dns = vacuous_signature(RunFacts::ok().vacuous("fs").vacuous("dns"));
+    let dns = vacuous_signature(RunFacts::ok().vacuous("dns"));
+    let fs = vacuous_signature(RunFacts::ok().vacuous("fs"));
+    if dns_fs == fs_dns && dns != fs && dns != dns_fs {
+        println!(
+            "  ok   vacuous-signature-names-the-planes    -> {}",
+            dns_fs.shape
+        );
+    } else {
+        println!(
+            "  FAIL vacuous-signature-names-the-planes    -> {dns_fs:?} {fs_dns:?} {dns:?} {fs:?}"
+        );
+        failures += 1;
+    }
     // A guest finding recovered from under a recorder failure keeps the guest's
     // own shape, plus the standing note that its trace was never written — so
     // the printed `reproduce` command cannot promise a replay that has no

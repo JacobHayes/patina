@@ -85,11 +85,12 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
         .map(|planes| {
             planes
                 .iter()
-                .filter(|(_, plane)| {
-                    plane
-                        .get("vacuous")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
+                .filter(|(name, plane)| {
+                    super::classify::VACUITY_PLANES.contains(&name.as_str())
+                        && plane
+                            .get("vacuous")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
                 })
                 .map(|(name, _)| name.clone())
                 .collect()

@@ -108,7 +108,7 @@ elsewhere.
 buggify knob is recorded in the trace, authoritative on replay, folded into the
 fingerprint where it changes behavior, and accepted by every family or refused by
 name. Each knob emits a report, and a knob that never fired is a warning or a
-`VACUOUS_*` campaign class. Oracle: table-driven per-knob tests from the one
+`VACUOUS` campaign class naming its plane. Oracle: table-driven per-knob tests from the one
 knob declaration, and vacuity tests per class.
 
 **Crash consistency.** `CrashFs` rolls back to the durable image with seeded torn

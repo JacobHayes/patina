@@ -293,9 +293,9 @@ mod tests {
     //
     // And the other end of the draw: a run that enabled NO class has nothing to
     // select from, so `--swarm` is an inert knob, and an inert knob must not read
-    // as coverage. The runtime reports `vacuous=1` and warns, and the campaign
-    // classifies the generation `VACUOUS_SWARM` and fails, while the armed runs
-    // above report `vacuous=0`, so the detector is not always-on.
+    // as coverage. The runtime reports `vacuous=1` and warns, while the armed
+    // runs above report `vacuous=0`, so the detector is not always-on; a
+    // campaign that enables nothing for swarm to mask is refused up front.
     #[test]
     fn swarm_deselection_stays_coherent_and_an_empty_draw_is_vacuous() {
         let workspace = native_workspace();
@@ -494,8 +494,8 @@ mod tests {
             "an inert --swarm must warn\nstderr:\n{stderr}"
         );
 
-        // A campaign that asked for fault-subset exploration and got none is not
-        // a covered clean run.
+        // A campaign that asks for fault-subset exploration with nothing to
+        // subset is a usage error, before any generation runs.
         let out = directory.path().join("swarm-zero-campaign");
         let ran = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
@@ -512,14 +512,12 @@ mod tests {
                 out.to_str().unwrap(),
             ],
         );
-        let stdout = String::from_utf8_lossy(&ran.stdout).to_string();
-        assert!(
-            stdout.contains("class=VACUOUS_SWARM"),
-            "a zero-candidate --swarm generation must be classified\nstdout:\n{stdout}"
+        assert_eq!(
+            ran.status.code(),
+            Some(2),
+            "a campaign whose --swarm has nothing to mask must be refused\nstderr:\n{}",
+            String::from_utf8_lossy(&ran.stderr)
         );
-        assert!(
-            !ran.status.success(),
-            "a campaign whose --swarm explored nothing must fail\nstdout:\n{stdout}"
-        );
+        assert!(!out.exists(), "a refused campaign runs no generation");
     }
 }

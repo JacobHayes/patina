@@ -154,7 +154,7 @@ fn main() {
         }
         let classes = extended["classes"].as_object().unwrap();
         assert!(
-            classes.keys().all(|class| !class.starts_with("VACUOUS_")),
+            classes.keys().all(|class| !class.starts_with("VACUOUS")),
             "a plane counted as vacuous: {classes:?}"
         );
 

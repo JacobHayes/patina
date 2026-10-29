@@ -56,9 +56,9 @@ Each generation runs with --format json and is classified from its \
 patina.result/v1 envelope ALONE — verdicts, per-plane fault_reports vacuity, \
 runtime_findings, refusal, guest_exit — into one outcome class: a finding \
 (VIOLATION, LIVENESS, GUEST_ABORT), a harness class (FAIL_CLOSED_ABORT, \
-STARVATION_STALL, INFRA), OK, the loud UNCLASSIFIED catch-all, or one VACUOUS_* \
-coverage class per fault or exploration plane; nothing in the classifier reads \
-guest output. An unattributed SIGABRT is \
+STARVATION_STALL, INFRA), OK, the loud UNCLASSIFIED catch-all, or VACUOUS, the \
+coverage class whose signature names the inert fault or exploration planes; \
+nothing in the classifier reads guest output. An unattributed SIGABRT is \
 GUEST_ABORT (the guest's own doing); the same abort carrying a patina refusal is \
 FAIL_CLOSED_ABORT. A guest that never calls the verdict ABI declares its own \
 rules in the spec (\"classify\": {\"patterns\": {CLASS: [substring, ...]}, \
