@@ -123,8 +123,8 @@ small stack) and parked/single-task controls that must not fire.
 
 **Campaign classification.** The campaign classifier reads only the structured
 `patina.result/v1` envelope, never guest text, and a reproduction it prints must
-reproduce (`NONDETERMINISM` otherwise). Oracle: `cargo patina campaign --selftest`,
-which fires every class from planted envelopes.
+reproduce (`NONDETERMINISM` otherwise). Oracle: the campaign classifier unit tests,
+which fire every class from planted envelopes.
 
 **SDK inertness.** Outside a Patina build every SDK macro is a no-op, and with
 buggify off a rebuilt guest reproduces its canonical result. Oracle: the

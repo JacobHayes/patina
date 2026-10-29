@@ -23,7 +23,7 @@ mod tests {
         })
     }
 
-    /// The class pairing of these tests: `campaign --selftest`'s verification
+    /// The class pairing of these tests: the campaign unit tests' verification
     /// checks prove every comparison axis and the infra rule on planted
     /// outcomes; these prove the campaign actually runs the comparison.
     fn campaign(
@@ -159,7 +159,7 @@ mod tests {
         // The campaign seed picks which generation of each stride is sampled;
         // seed base 2 samples generation 1, so two generations hold one
         // sampled generation and one that is not. That one sample per stride
-        // is the selftest's `clean-rerun-sample-is-one-per-stride` check.
+        // is the unit tests' `clean-rerun-sample-is-one-per-stride` check.
         let gens = 2;
         let (code, envelope) = campaign(
             &address_leak(),

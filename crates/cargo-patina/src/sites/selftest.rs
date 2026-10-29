@@ -1,34 +1,8 @@
-//! Site recognizer detector fixtures and selftests.
+//! Site recognizer fixture: every recognizer fires on a planted crate.
 
 use super::*;
 
-pub(super) fn run_selftest() -> Result<i32, CliError> {
-    let result = run_selftest_inner()?;
-    println!("== sites recognizer selftest ==");
-    println!(
-        "fixture_sites={} files_scanned={} files_unparsed={} recognizers={}",
-        result.sites.len(),
-        result.files_scanned,
-        result.files_unparsed,
-        recognizer_count()
-    );
-    for kind in KIND_ORDER {
-        let count = result
-            .sites
-            .iter()
-            .filter(|site| site.kind == *kind)
-            .count();
-        if count > 0 {
-            println!("  {kind}: {count}");
-        }
-    }
-    println!(
-        "sites selftest passed: recognizers fired and wrapper macro stayed an expected static miss"
-    );
-    Ok(0)
-}
-
-fn run_selftest_inner() -> Result<StaticScan, CliError> {
+fn scan_planted_fixture() -> Result<StaticScan, CliError> {
     let dir = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create sites selftest fixture: {error}")))?;
     let root = dir.path().to_path_buf();
@@ -206,5 +180,7 @@ fn assert_selftest_counts(scan: &StaticScan) -> Result<(), CliError> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;
+#[test]
+fn planted_fixture_fires_every_recognizer() {
+    scan_planted_fixture().expect("the planted fixture's sites must all be recognized");
+}

@@ -52,7 +52,7 @@ pub(super) enum ParseResult {
     Run(Invocation),
     Campaign(campaign::CampaignInvocation),
     Coverage(coverage::CoverageInvocation),
-    Sites(sites::SitesInvocation),
+    Sites(sites::SitesOptions),
     Syscalls(syscalls::SyscallsInvocation),
     Explore(ExploreInvocation),
     NativeAudit(NativeAuditInvocation),

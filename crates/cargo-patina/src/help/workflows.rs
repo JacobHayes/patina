@@ -47,7 +47,6 @@ pub(super) const CAMPAIGN: Verb = Verb {
         "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--faults[=PLANE,...]] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
-        "cargo patina campaign --selftest",
     ],
     prose: "\
 A campaign runs `--gens` independent child `cargo patina run` processes over one \
@@ -86,8 +85,7 @@ when a `sometimes!`/`reachable!` oracle is never satisfied. Literal-label SDK \
 macro sites are declared through the link-time table, so never-reached oracles \
 appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
 waives that gate (unconditionally or only below the observed generation \
-threshold). `--selftest` proves every classifier class and the coverage gate \
-classes. `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
+threshold). `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
 named planes, for a guest that needs one plane always off (a store that must \
 open on the simulated disk, say), and is recorded and pinned like every spec \
 flag. The spec key `\"exclude_knobs\": [\"--net-reset-permille\"]` turns single \
@@ -304,13 +302,6 @@ refused by name.",
                     "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
                     false,
                 ),
-                f(
-                    "--selftest",
-                    None,
-                    Value::None,
-                    "Prove every classifier class and the signature store, then exit.",
-                    false,
-                ),
             ],
         },
         Group {
@@ -522,7 +513,6 @@ pub(super) const SITES: Verb = Verb {
     summary: "Inventory static assertion/oracle sites in the current workspace.",
     synopsis: &[
         "cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
-        "cargo patina sites --selftest",
     ],
     prose: "\
 `sites` scans the current Cargo workspace with a syn-based static analyzer and reports \
@@ -534,8 +524,7 @@ dynamic-label file:line; declared-but-never-evaluated rows carry registered_gens
 Invisible sites remain inventory rows rather than coverage claims. The default output is a \
 crate/module index; scoped flags \
 or --all opt into per-site drill-down rows. Results are cached per file under \
-.patina/out/sites-cache.json unless --no-cache is set. `--selftest` scans a \
-planted fixture and proves every recognizer class fires.",
+.patina/out/sites-cache.json unless --no-cache is set.",
     families: &[fam(Family::Sole, "`sites`", None)],
     groups: &[Group {
         title: "Sites options",
@@ -618,13 +607,6 @@ planted fixture and proves every recognizer class fires.",
                 None,
                 Value::None,
                 "Rescan files and do not read or write .patina/out/sites-cache.json.",
-                false,
-            ),
-            f(
-                "--selftest",
-                None,
-                Value::None,
-                "Prove the static recognizers fire on a planted fixture, then exit.",
                 false,
             ),
         ],

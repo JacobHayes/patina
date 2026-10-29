@@ -25,7 +25,8 @@ use crate::rollup::{Rollup, RollupLeaf, build_rollup};
 mod campaign;
 mod covmap;
 pub(crate) use campaign::*;
-mod detectors;
+#[cfg(test)]
+pub(crate) mod detectors;
 mod input;
 mod report;
 mod symbols;
@@ -43,7 +44,6 @@ pub(crate) use covmap::coverage_summary_from_map;
 #[cfg(test)]
 use covmap::parse_covmap_bytes;
 pub(crate) use covmap::read_covmap;
-pub(crate) use detectors::campaign_detector_selftest;
 #[cfg(test)]
 use detectors::synthetic_covmap;
 use input::CoverageData;

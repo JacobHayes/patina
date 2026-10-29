@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Measure whether `campaign --guided` reaches a hard target in FEWER generations
 # than uniform sampling. This is an efficacy gate, not a correctness gate: Wave E's
-# determinism and tear-safety are proven by `campaign --selftest` and the e2e
+# determinism and tear-safety are proven by the campaign unit and e2e
 # suite, whereas this answers the separate question of whether the selection
 # policy earns its keep.
 #

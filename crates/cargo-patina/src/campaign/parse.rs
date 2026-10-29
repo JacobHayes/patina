@@ -21,7 +21,6 @@ pub struct CampaignInvocation {
     pub(super) out_dir: PathBuf,
     pub(super) spec: CampaignSpec,
     pub(super) mode: CampaignMode,
-    pub(super) selftest: bool,
     /// A continuation-only host-side timeout override. It does not rewrite the
     /// out-dir's recorded spec; the effective value is recorded on the invocation
     /// audit record.
@@ -39,7 +38,7 @@ pub struct CampaignInvocation {
 // Parsing + dispatch
 // ===========================================================================
 
-/// Parse `campaign [--selftest] | campaign <ARTIFACT> [flags] [-- GUEST_ARGS…] |
+/// Parse `campaign <ARTIFACT> [flags] [-- GUEST_ARGS…] |
 /// campaign --extend N [--out-dir DIR] | campaign --resume [--out-dir DIR]`.
 pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliError> {
     let cli_line = campaign_cli(&arguments);
@@ -53,20 +52,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                     .map_err(|_| CliError("campaign guest arguments must be UTF-8".into()))?,
             );
         }
-    }
-
-    // `campaign --selftest` proves every classifier class + the signature store.
-    if arguments.iter().any(|a| a == "--selftest") {
-        return Ok(CampaignInvocation {
-            artifact: None,
-            out_dir: PathBuf::new(),
-            spec: CampaignSpec::default(),
-            mode: CampaignMode::Fresh,
-            selftest: true,
-            timeout_secs_override: None,
-            progress_every: DEFAULT_PROGRESS_EVERY,
-            cli: cli_line,
-        });
     }
 
     let continuation_requested = has_continuation_flag(&arguments);
@@ -198,7 +183,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             out_dir,
             spec,
             mode,
-            selftest: false,
             timeout_secs_override: timeout_secs,
             progress_every,
             cli: cli_line,
@@ -244,13 +228,12 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     validate_exclusions(&spec)?;
     Ok(CampaignInvocation {
-        artifact: Some(artifact.ok_or_else(|| {
-            CliError::usage("campaign requires a native binary path, or --selftest")
-        })?),
+        artifact: Some(
+            artifact.ok_or_else(|| CliError::usage("campaign requires a native binary path"))?,
+        ),
         out_dir,
         spec,
         mode,
-        selftest: false,
         timeout_secs_override: None,
         progress_every,
         cli: cli_line,
@@ -265,7 +248,6 @@ const CONTINUATION_FLAGS: &[&str] = &[
     "--out-dir",
     "--timeout-secs",
     "--progress-every",
-    "--selftest",
 ];
 
 fn has_continuation_flag(arguments: &[OsString]) -> bool {

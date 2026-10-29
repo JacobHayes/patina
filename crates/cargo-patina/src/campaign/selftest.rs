@@ -1,4 +1,4 @@
-//! Planted campaign classifier and exploration detector selftests.
+//! Planted campaign classifier and exploration detector checks.
 
 mod scaling;
 
@@ -14,7 +14,6 @@ use super::{
     AllowUnmetSometimes, CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts,
     VerdictFacts, classify, signature,
 };
-use crate::CliError;
 use crate::sdk_report::CoverageTally;
 use scaling::{fault_scale_selftest, starve_scale_selftest};
 
@@ -109,10 +108,11 @@ pub(super) fn declared_rules_fixture() -> ClassifyRules {
     .expect("the selftest's declared rules must parse")
 }
 
-/// Prove every classifier class is reachable from the structured envelope facts
-/// (with the spec-declared rules as the only text-reading path), and that the
+/// Every classifier class is reachable from the structured envelope facts
+/// (with the spec-declared rules as the only text-reading path), and the
 /// signature store dedups repeats and flags novel signatures.
-pub(super) fn selftest() -> Result<i32, CliError> {
+#[test]
+fn classifier_and_detector_checks() {
     let mut failures = 0u32;
     let mut fired: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
     let mut check = |name: &str, want: CampaignClass, got: CampaignClass| {
@@ -129,7 +129,6 @@ pub(super) fn selftest() -> Result<i32, CliError> {
         }
     };
 
-    println!("== campaign classifier selftest ==");
     // Every class must be proven fireable through the STRUCTURED channel, and
     // every class-deciding fact must be proven load-bearing: each check below is
     // paired with a red twin that removes exactly the one fact and lands
@@ -1316,7 +1315,7 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     }
 
     println!("-- native edge coverage store --");
-    for (name, ok, detail) in crate::coverage::campaign_detector_selftest() {
+    for (name, ok, detail) in crate::coverage::detectors::campaign_detector_selftest() {
         if ok {
             println!("  ok   {name:<40} -> {detail}");
         } else {
@@ -1365,14 +1364,10 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
         }
     }
 
-    println!();
-    if failures == 0 {
-        println!("CAMPAIGN SELFTEST PASSED");
-        Ok(0)
-    } else {
-        println!("CAMPAIGN SELFTEST FAILED ({failures} checks)");
-        Ok(1)
-    }
+    assert_eq!(
+        failures, 0,
+        "failing checks are marked FAIL in the output above"
+    );
 }
 
 fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
@@ -1401,14 +1396,4 @@ fn declared_reachable_fixture() -> Result<CoverageTally, String> {
         "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=1 declared_site=never|reachable|@src/main.rs:12",
     )?;
     Ok(tally)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selftest_passes() {
-        assert_eq!(selftest().unwrap(), 0);
-    }
 }

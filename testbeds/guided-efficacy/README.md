@@ -2,7 +2,7 @@
 
 An **efficacy** gate for `cargo patina campaign --guided` (coverage-depth arc,
 wave E). Wave E's *correctness* — determinism, resume/tear reproducibility,
-fail-closed refusals — is proven by `campaign --selftest` and the end-to-end
+fail-closed refusals — is proven by the campaign unit tests and the end-to-end
 suite. This testbed answers the separate question those cannot: does the
 selection policy actually reach a hard target in fewer generations than uniform
 sampling?

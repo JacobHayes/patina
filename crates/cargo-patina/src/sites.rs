@@ -24,12 +24,13 @@ use crate::{CliError, output};
 mod recognize;
 mod report;
 mod scan;
+#[cfg(test)]
 mod selftest;
 
 use recognize::recognizer_count;
 use recognize::scan_file;
-use report::KIND_ORDER;
 use report::build_report;
+#[cfg(test)]
 use report::count_by_kind;
 use report::duplicate_label_marker_line;
 use report::find_duplicate_labels;
@@ -37,24 +38,21 @@ use report::print_human;
 #[cfg(test)]
 use scan::CacheState;
 use scan::CachedFile;
+#[cfg(test)]
 use scan::ContextKind;
 use scan::RECOGNIZER_TABLE_VERSION;
+#[cfg(test)]
 use scan::ScanPackage;
 use scan::SourceFile;
 use scan::StaticScan;
+#[cfg(test)]
 use scan::TargetHint;
 use scan::hex_digest;
 use scan::scan_current_workspace;
+#[cfg(test)]
 use scan::scan_packages;
-use selftest::run_selftest;
 
 pub(crate) const SITES_SCHEMA: &str = "patina.sites/v1";
-
-/// Parsed `sites` invocation.
-pub(crate) enum SitesInvocation {
-    Selftest,
-    Scan(SitesOptions),
-}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SitesOptions {
@@ -81,8 +79,8 @@ impl SitesOptions {
 
 /// Parse `sites [--crate NAME] [--module PATH] [--site LABEL]
 /// [--all] [--exercised FILE] [--kind KIND]
-/// [--runtime driven|observed|invisible] [--no-cache] [--selftest]`.
-pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliError> {
+/// [--runtime driven|observed|invisible] [--no-cache]`.
+pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesOptions, CliError> {
     if arguments.iter().any(|argument| argument == "--") {
         return Err(CliError::usage(
             "sites takes no guest arguments or `--` separator",
@@ -99,40 +97,10 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesInvocation, CliErro
         runtime_filter: args.string("--runtime"),
         no_cache: args.flag("--no-cache"),
     };
-    if !args.flag("--selftest") {
-        return Ok(SitesInvocation::Scan(options));
-    }
-    if options != SitesOptions::default() {
-        return Err(CliError::usage(
-            "sites --selftest does not accept report filters",
-        ));
-    }
-    Ok(SitesInvocation::Selftest)
+    Ok(options)
 }
 
-impl PartialEq for SitesOptions {
-    fn eq(&self, other: &Self) -> bool {
-        self.crate_filter == other.crate_filter
-            && self.module_filter == other.module_filter
-            && self.site_filter == other.site_filter
-            && self.all == other.all
-            && self.exercised == other.exercised
-            && self.kind_filter == other.kind_filter
-            && self.runtime_filter == other.runtime_filter
-            && self.no_cache == other.no_cache
-    }
-}
-
-impl Eq for SitesOptions {}
-
-pub(crate) fn execute(invocation: SitesInvocation) -> Result<i32, CliError> {
-    match invocation {
-        SitesInvocation::Selftest => run_selftest(),
-        SitesInvocation::Scan(options) => run_scan(options),
-    }
-}
-
-fn run_scan(options: SitesOptions) -> Result<i32, CliError> {
+pub(crate) fn execute(options: SitesOptions) -> Result<i32, CliError> {
     let scan = scan_current_workspace(!options.no_cache)?;
     let duplicate_labels = find_duplicate_labels(&scan.sites);
     let exercised = options

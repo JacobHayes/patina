@@ -1,4 +1,4 @@
-//! Campaign coverage detector selftests.
+//! Campaign coverage detectors.
 
 use super::*;
 

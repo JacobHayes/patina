@@ -25,7 +25,9 @@
 //! class it was observed with.
 
 use super::classify::primary_finding;
-use super::generation::{GenerationFiles, facts_from_envelope, run_generation, run_replay};
+#[cfg(test)]
+use super::generation::facts_from_envelope;
+use super::generation::{GenerationFiles, run_generation, run_replay};
 use super::state::{CampaignState, json_optional_str, json_required_str};
 use super::{CampaignClass, ClassifyRules, GenerationFacts, GenerationRun, Signature};
 use super::{classify, signature};
@@ -542,11 +544,12 @@ impl Verifier<'_> {
     }
 }
 
-/// The verification outcomes `campaign --selftest` proves, as
+/// The verification outcome checks, as
 /// `(name, want, got)` class checks: every comparison axis is load-bearing (a
 /// red twin that differs only there), a replay divergence is nondeterminism
 /// whatever class carries it, any other reproduction patina could not finish
 /// keeps the observed class, and only a rerun is held to the policy annotation.
+#[cfg(test)]
 pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, CampaignClass)> {
     let failure = || Observation {
         class: CampaignClass::Violation,
@@ -694,8 +697,9 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
     ]
 }
 
-/// The clean-rerun sample's `campaign --selftest` detectors, in the
-/// `(name, ok, detail)` shape the other detector selftests use.
+/// The clean-rerun sample's detectors, in the `(name, ok, detail)` shape the
+/// other detectors use.
+#[cfg(test)]
 pub(super) fn selftest_sampling() -> Vec<(&'static str, bool, String)> {
     let window = 0..CLEAN_RERUN_STRIDE * 8;
     let sampled = |seed_base| -> Vec<u64> {

@@ -55,6 +55,7 @@ pub(crate) enum GuidanceDecision {
 }
 
 impl GuidanceDecision {
+    #[cfg(test)]
     pub(crate) fn is_exploit(self) -> bool {
         matches!(self, Self::Exploit { .. })
     }
@@ -257,8 +258,9 @@ impl GuidanceTally {
     }
 }
 
-/// The guided detectors reported by `cargo patina campaign --selftest`, in the
+/// The guided-scheduling detectors, in the
 /// `(name, passed, detail)` shape the coverage store uses.
+#[cfg(test)]
 pub(crate) fn campaign_detector_selftest() -> Vec<(&'static str, bool, String)> {
     vec![
         detector_no_ancestors_matches_unguided(),
@@ -270,6 +272,7 @@ pub(crate) fn campaign_detector_selftest() -> Vec<(&'static str, bool, String)> 
     ]
 }
 
+#[cfg(test)]
 fn log(entries: &[(u64, u64)]) -> Vec<NoveltyEntry> {
     entries
         .iter()
@@ -280,6 +283,7 @@ fn log(entries: &[(u64, u64)]) -> Vec<NoveltyEntry> {
         .collect()
 }
 
+#[cfg(test)]
 fn detector_no_ancestors_matches_unguided() -> (&'static str, bool, String) {
     const NAME: &str = "guided-no-ancestors-matches-unguided";
     let plan = GuidancePlan::new(0, 200, &[]);
@@ -296,6 +300,7 @@ fn detector_no_ancestors_matches_unguided() -> (&'static str, bool, String) {
     )
 }
 
+#[cfg(test)]
 fn detector_guidance_changes_the_stream() -> (&'static str, bool, String) {
     const NAME: &str = "guided-changes-the-generation-stream";
     // A campaign with real novelty must derive a materially different stream from
@@ -321,6 +326,7 @@ fn detector_guidance_changes_the_stream() -> (&'static str, bool, String) {
     )
 }
 
+#[cfg(test)]
 fn detector_exploit_inherits_its_ancestor() -> (&'static str, bool, String) {
     const NAME: &str = "guided-exploit-inherits-ancestor-bytes";
     // Exploitation must stay NEAR its ancestor: a child that shares no more with
@@ -362,6 +368,7 @@ fn detector_exploit_inherits_its_ancestor() -> (&'static str, bool, String) {
     )
 }
 
+#[cfg(test)]
 fn detector_prefix_determinism() -> (&'static str, bool, String) {
     const NAME: &str = "guided-prefix-determinism-tear-safe";
     // The checkpoint-tear invariant: a resumed campaign re-deriving generation N
@@ -383,6 +390,7 @@ fn detector_prefix_determinism() -> (&'static str, bool, String) {
     )
 }
 
+#[cfg(test)]
 fn detector_bootstrap_generation_is_not_an_ancestor() -> (&'static str, bool, String) {
     const NAME: &str = "guided-bootstrap-excluded-from-pool";
     // The first novel generation opens the program's baseline, not a discovery.
@@ -418,6 +426,7 @@ fn detector_bootstrap_generation_is_not_an_ancestor() -> (&'static str, bool, St
     )
 }
 
+#[cfg(test)]
 fn detector_drought_broadens_exploration() -> (&'static str, bool, String) {
     const NAME: &str = "guided-drought-broadens-exploration";
     let fresh = exploit_permille(0, 200);

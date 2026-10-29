@@ -655,24 +655,6 @@ fn campaign_continuation_refusals_are_loud() {
     );
 }
 
-// The campaign classifier `--selftest` proves every outcome class is reachable
-// and the signature store dedups/novelty logic bites.
-#[test]
-fn campaign_selftest_passes() {
-    let ran = invoke(native_workspace(), &["campaign", "--selftest"]);
-    assert!(
-        ran.status.success(),
-        "campaign --selftest failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&ran.stdout),
-        String::from_utf8_lossy(&ran.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&ran.stdout).contains("CAMPAIGN SELFTEST PASSED"),
-        "missing pass marker:\n{}",
-        String::from_utf8_lossy(&ran.stdout)
-    );
-}
-
 /// A campaign killed outright (SIGKILL, so nothing of it runs on the way out)
 /// takes its in-flight generation with it. The generation runs in its own
 /// process group, outside the campaign's, and its guest here would spin

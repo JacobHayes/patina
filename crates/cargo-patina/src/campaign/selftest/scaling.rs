@@ -1,4 +1,4 @@
-//! Fault- and starvation-intensity campaign selftest detectors.
+//! Fault- and starvation-intensity campaign detectors.
 
 use super::super::repro::reproduce_command;
 use super::super::state::{spec_from_state_json, spec_to_json};
@@ -9,16 +9,14 @@ use super::super::{
 use std::ffi::OsString;
 use std::path::Path;
 
-/// The `--fault-scale-permille` checks the classifier selftest runs, in the same
-/// `(name, ok, detail)` shape as the coverage/guided detector selftests.
+/// The `--fault-scale-permille` checks, in the same `(name, ok, detail)` shape
+/// as the coverage/guided detectors.
 ///
 /// The flag exists to make the fault plane RARER, and a knob that changes the
 /// sweep is only safe because four properties hold: the scaled draw is a pure
 /// function of the generation, the setting is recorded in the out-dir spec, a
 /// continuation cannot change it out from under a half-finished campaign, and the
-/// scaled values reach the reproduce command. Each is checked here rather than
-/// only in `#[cfg(test)]`, so `campaign --selftest` proves them against the
-/// shipped binary the operator is actually running.
+/// scaled values reach the reproduce command.
 pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut out: Vec<(&'static str, bool, String)> = Vec::new();
     let scaled = |permille: u64| CampaignSpec {
@@ -183,17 +181,15 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     out
 }
 
-/// The `--starve-scale-permille` checks the classifier selftest runs, in the
-/// same `(name, ok, detail)` shape as [`fault_scale_selftest`].
+/// The `--starve-scale-permille` checks, in the same `(name, ok, detail)` shape
+/// as [`fault_scale_selftest`].
 ///
 /// The same four properties any sweep-changing knob has to hold — the scaled
 /// draw is a pure function of the generation, the setting is recorded in the
 /// out-dir spec, a continuation cannot change it under a half-finished
 /// campaign, and the scaled values reach the reproduce command — plus the one
 /// this dial has and the fault dial did not: each axis moves in the RIGHT
-/// DIRECTION, including the one that is deliberately not moved at all. Proved
-/// here rather than only under `#[cfg(test)]`, so `campaign --selftest` proves
-/// them against the shipped binary the operator is actually running.
+/// DIRECTION, including the one that is deliberately not moved at all.
 pub(super) fn starve_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut out: Vec<(&'static str, bool, String)> = Vec::new();
     let scaled = |permille: u64| CampaignSpec {

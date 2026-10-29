@@ -197,7 +197,7 @@ unknown option.
   up by crate/module/function, refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
   `patina.coverage/v1` JSON envelope.
-- `cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]` / `sites --selftest`
+- `cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]`
   Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
   proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
   JSON output is schema `patina.sites/v1`; per-file cache is

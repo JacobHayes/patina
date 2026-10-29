@@ -155,6 +155,7 @@ impl Hash {
         Self(out)
     }
 
+    #[cfg(test)]
     pub(crate) fn shared_bytes(self, other: Self) -> usize {
         self.0
             .iter()

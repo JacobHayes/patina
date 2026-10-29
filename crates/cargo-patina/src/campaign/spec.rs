@@ -109,7 +109,7 @@ pub struct CampaignSpec {
     ///   for the other, so it keeps its full log sweep and a dampened campaign
     ///   still explores where a hold lands — the same call
     ///   `--net-tcp-buffer-bytes` got from the fault dial, for a sharper reason.
-    ///   Pinned by the `campaign --selftest` detector
+    ///   Pinned by the campaign detector
     ///   `each-starvation-axis-scales-in-its-own-direction`.
     pub starve_scale_permille: u64,
     /// The fault planes whose knobs are randomized per generation: none (the

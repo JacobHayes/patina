@@ -4,8 +4,7 @@
 //! A campaign runs `generations` independent child `cargo patina run` processes
 //! over one artifact. Everything is a pure function of the generation number, so a
 //! re-run with the same spec reproduces the same seeds, the same per-generation
-//! knobs, the same outcomes, and the same failure signatures — the determinism the
-//! `--selftest` and the deterministic-re-run test prove.
+//! knobs, the same outcomes, and the same failure signatures.
 //!
 //! Per generation:
 //!   * the run seed and every randomized knob derive from `SHA-256("patina-campaign
@@ -44,6 +43,7 @@ mod parse;
 mod planes;
 mod report;
 mod repro;
+#[cfg(test)]
 mod selftest;
 mod spec;
 mod state;
@@ -64,7 +64,6 @@ pub use spec::{AllowUnmetSometimes, CampaignSpec};
 use crate::CliError;
 use driver::run_campaign;
 use patina_dst_runtime::FaultKnob;
-use selftest::selftest;
 
 /// The `--fault-scale-permille` value that leaves every seed-drawn fault band
 /// exactly as it was before the flag existed: 1000 per-mille = 1.0 = full
@@ -86,9 +85,6 @@ const STARVE_SCALE_FULL: u64 = FAULT_SCALE_FULL;
 
 /// Route the `campaign` verb.
 pub fn execute(invocation: CampaignInvocation) -> Result<i32, CliError> {
-    if invocation.selftest {
-        return selftest();
-    }
     run_campaign(invocation)
 }
 

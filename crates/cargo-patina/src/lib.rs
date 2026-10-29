@@ -666,7 +666,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::Run(invocation) => execute(invocation),
         ParseResult::Campaign(invocation) => campaign::execute(invocation),
         ParseResult::Coverage(invocation) => coverage::execute(invocation),
-        ParseResult::Sites(invocation) => sites::execute(invocation),
+        ParseResult::Sites(options) => sites::execute(options),
         ParseResult::Syscalls(invocation) => syscalls::execute(invocation),
         ParseResult::Explore(invocation) => execute_explore(invocation),
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
