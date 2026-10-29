@@ -1291,6 +1291,59 @@ mod early_init {
     }
 }
 
+/// Kernel calls no interposer sees: glibc's own internal ones (`getloadavg`'s
+/// read of `/proc/loadavg`, reached through a weak import and from a shared
+/// library) and a shared library's inline syscall. Where
+/// syscall-user-dispatch arms, each traps into the virtual kernel wherever
+/// its code lies, so it answers what the same question asked through an
+/// interposed call answers.
+#[cfg(target_os = "linux")]
+#[test]
+fn calls_no_interposer_sees_reach_the_virtual_kernel() {
+    if !kernel_supports(KernelFeature::Sud) {
+        eprintln!("glibc internals: no syscall-user-dispatch here, not run");
+        return;
+    }
+    let libs = tempfile::tempdir().unwrap();
+    let library = assert_build_c_library("glibc_internal_library.c", libs.path(), &[]);
+    let rpath = format!("-Wl,-rpath,{}", libs.path().display());
+    let flags = [library.to_str().unwrap(), rpath.as_str()];
+    let g = assert_build_c_guest_with_flags("glibc_internal_probe.c", CLink::PosixShim, &flags);
+    // The library's own functions, which the import audit cannot see into
+    // (a replay does not take the allowances, so the run is a plain one).
+    let run = |mode: &str| {
+        assert_success(g.command(
+            "run",
+            &[
+                "--seed",
+                "1",
+                "--allow",
+                "probe_library_loadavg",
+                "--allow",
+                "probe_library_raw_getpid",
+                "--allow",
+                "getloadavg",
+                "--",
+                mode,
+            ],
+        ))
+    };
+    for mode in ["weak", "library"] {
+        let out = run(mode);
+        let fields = assert_fields(
+            &out.stdout,
+            "GLIBC_INTERNAL ",
+            &["mode", "glibc", "internal", "door", "loads"],
+        );
+        assert_eq!(fields["glibc"], "3", "{mode}: {}", text(&out.stdout));
+        assert_eq!(fields["door"], "3", "{mode}: {}", text(&out.stdout));
+        assert_eq!(fields["internal"], fields["loads"], "{mode}: {}", text(&out.stdout));
+    }
+    let out = run("library-raw");
+    let fields = assert_fields(&out.stdout, "GLIBC_INTERNAL ", &["mode", "raw", "door"]);
+    assert_eq!(fields["raw"], fields["door"], "{}", text(&out.stdout));
+}
+
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;
