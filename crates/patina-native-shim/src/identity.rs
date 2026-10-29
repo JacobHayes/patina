@@ -22,8 +22,7 @@
 //! ([`ptrace_may_access`]), `PRIO_USER`'s members, the scheduling rows'
 //! owner checks (`thread::sched`) and `prlimit64`'s (`crate::limits`). The
 //! shim's other capability refusals answer for the guest's credential
-//! without consulting it yet (ARCHITECTURE lists what an identity setting
-//! still needs). So the `set*id` rows succeed exactly when every id they
+//! without consulting it. So the `set*id` rows succeed exactly when every id they
 //! name is that one id (the kernel's rule for a caller without
 //! `CAP_SETUID`/`CAP_SETGID`), which changes nothing; anything else is
 //! `EPERM`.

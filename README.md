@@ -136,17 +136,9 @@ source-first native libtest harness mode for one exact test target.
 Native harness mode is the tight point-solution loop: `cargo patina test
 <DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
 same Cargo libtest target under the native shim with a single libtest thread.
-Use a bare harness target name when unique, or `lib:NAME`, `bin:NAME`, or
-`test:NAME` when target kinds share a name (as a library and binary commonly do).
-`--package` disambiguates workspace members, not target kinds.
-Artifacts land under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, keyed on the
-resolved target, not the selector's spelling. A failing seed is re-run with
-`--record`, except a pre-run audit/import refusal: no guest executed and a retry
-cannot record anything. Before an actual retry the older per-seed trace is removed.
-The failure block always includes a `cargo patina test` repro; the JSON result's
-`trace` field and a `cargo patina replay` repro are included only when the recorded
-child's receipt supplies readable trace facts. A pre-run refusal leaves old files
-untouched but never reports them as this run's trace.
+Use `lib:NAME`, `bin:NAME` or `test:NAME` when target kinds share a name. A
+failing seed is re-run with `--record`, and the failure block carries the repro
+commands.
 
 For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
@@ -170,10 +162,7 @@ and `--render out.html` writes a self-contained HTML timeline of any traced run.
 ### Fault injection and schedule exploration
 
 Faults are seed-driven and default-off. Fault configurations are recorded
-into the trace so replay reproduces them flag-free. A crash has
-fresh-incarnation semantics on native runs, and its record/replay carries both
-incarnations; Cargo-family crash refuses by name until its restart path is
-wired.
+into the trace so replay reproduces them flag-free.
 
 - **Crash restart**: native `--crash-permille N` gives every successful
   side-effecting operation (a filesystem change or a network send) an N
@@ -181,11 +170,8 @@ wired.
   incarnation and restarts it once. `--crash-kind process` keeps the page
   cache; `--crash-kind machine` (the default) restarts from the recovered
   durable image, where any subset of unsynced blocks may survive and a new name
-  in an unsynced directory is lost. The Cargo family refuses crash restart
-  rather than emulate it with rollback-and-continue.
-- **Filesystem faults**: the fs
-  faults are
-  rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
+  in an unsynced directory is lost. The Cargo family refuses crash restart.
+- **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
   (seeded delay before every eligible fs op, so slow I/O reorders against timers
   and peers).
@@ -219,13 +205,9 @@ wired.
   `campaign --guided` work without paying for preemption at all.
 - **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
   detector) and `--converge-within` (heal-then-converge budget).
-  Native call-free compute that starves another managed thread, runnable or
-  waiting on a timed park, stops by name after 10 host seconds
-  (`--compute-watchdog-ms MS` overrides `PATINA_COMPUTE_WATCHDOG_MS` and the default).
-  Lone compute and compute with only untimed parked peers remain unlimited.
-  Timed parks need virtual time to advance, which call-free compute prevents.
-  This is a known cooperative-runtime limit, not a guest bug; its terminal trace
-  replays the same boundary prefix and stop. See [the design and limits](ARCHITECTURE.md#native-compute-only-starvation).
+  Native call-free compute that starves another managed thread stops by name
+  after 10 host seconds (`--compute-watchdog-ms MS`): a known cooperative-runtime
+  limit, not a guest bug ([details](ARCHITECTURE.md#native-compute-only-starvation)).
 
 ### The buggify SDK
 
@@ -276,52 +258,14 @@ different seeded suffix from that moment
 
 ### Debug vs release guest builds
 
-Guests build **debug by default**, and debug is the right profile for *finding*
-bugs — release is for measuring a guest you already trust. The profile applies to
-whichever guest Patina builds on the fly (`run`, `test`); an already-built
-artifact carries the profile it was built with.
-
-Why debug finds more bugs:
-
-- **Free failure oracles.** `debug_assert!` in your guest *and every dependency*,
-  plus arithmetic overflow checks, are live in debug and compiled out in release.
-  They are extra invariants the same seed sweep can trip, so a release build finds
-  strictly fewer bugs on the identical seeds.
-- **Sharper triage.** Un-inlined frames and exact line numbers keep the
-  minimize → replay → backtrace loop pointed at the real culprit instead of an
-  optimized-away frame.
-- **Denser schedule exploration.** `cargo patina build --yield-points` (or
-  `--coverage-points=N`) plants a
-  scheduling point at each basic-block coverage guard; optimization collapses
-  basic blocks, so a release guest hands the seeded scheduler *fewer* windows to
-  preempt an atomics-only race. Yield-point binaries also emit
-  `PATINA_COVERAGE_REPORT`; use `run`/`replay --coverage-out PATH` to save a
-  `patina.covmap/v1` edge-counter map, then inspect it with
-  `cargo patina coverage <binary> <map>`. Campaigns over yield-point native
-  binaries persist the union under `<out-dir>/coverage/`, and the offline
-  coverage report refuses a campaign store if `<binary>` does not hash to the
-  recorded campaign artifact. Campaigns report plateau with `--plateau-after`.
-  `campaign --guided` closes the loop: generations are biased toward
-  configurations that previously found new coverage, while staying a
-  pure function of the seed base and the persisted novelty log.
-- **Faster inner loop.** Debug compiles quicker, which dominates when you rebuild
-  between every edit.
-
-When release earns its place:
-
-- **Performance measurement.** Timing and throughput numbers are only meaningful
-  on an optimized build.
-- **Long campaigns.** Debug guests are slow; a multi-thousand-generation sweep or
-  a soak run finishes far sooner on a release guest once the bug hunt is over.
-- **Release-only codegen.** Optimization changes which code paths — and even which
-  machine instructions — the guest takes, so a bug can live only on the release
-  path. Release also surfaces CPU-feature backends the audit's instruction scanner
-  must handle (the `sha2` crate's x86 SSSE3/SHA-NI path — `pshufb`,
-  `sha256rnds2`, … — is the in-repo example).
-
-Build release with `cargo patina run --release <source|package>` (the on-the-fly
-guest is compiled optimized), or in two steps — `cargo patina build --release …`
-then `run` the resulting artifact.
+Guests build **debug by default**: `debug_assert!` and overflow checks in the
+guest and every dependency are extra oracles, frames stay exact for triage,
+and `--yield-points`/`--coverage-points=N` see more basic blocks to preempt.
+Use `--release` (on `run`, or `build --release` then `run`) for performance
+measurement, long campaigns once the hunt is over, and release-only codegen
+paths. Yield-point binaries also emit edge coverage (`--coverage-out`,
+`cargo patina coverage`), which campaigns accumulate and `campaign --guided`
+uses to bias generations toward new coverage.
 
 ## Supported today
 
@@ -340,8 +284,8 @@ then `run` the resulting artifact.
   and raw syscall/clock/entropy instructions are refusals
   (`--allow-unsupported-symbols` is the loud, recorded escape hatch).
 - **Campaigns**: deterministic multi-generation sweeps with an outcome
-  classifier (finding, harness and catch-all classes, plus one vacuity class per
-  fault plane), failure-signature dedup, and per-failure repro commands.
+  classifier (finding, harness, vacuity and catch-all classes),
+  failure-signature dedup, and per-failure repro commands.
 - **Three adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
   (`patina-dst`), a configure-then-run harness (`patina-dst-harness`), and the
   explicit-context simulator API (`patina-dst-runtime`, with deterministic
@@ -356,14 +300,10 @@ then `run` the resulting artifact.
 | Linux x86_64 | Supported; adds syscall-user-dispatch, which traps raw inline syscalls (e.g. rustix's default `linux_raw` backend) into the runtime, plus a whole-run `strace` containment gate in CI. |
 | Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
 
-On Linux the virtual kernel is pinned to Ubuntu 24.04's GA kernel (Ubuntu's
-Linux 6.8 build; `cargo patina --version` names it): `uname` reports 6.8, a
-syscall first added later answers `ENOSYS` as 6.8 does, and the syscall
-conformance scenarios assert the answers of Ubuntu 24.04 — its 6.8 kernel and
-its glibc 2.39 — authoritatively only on a host with both. Ubuntu backports
-changes within the 6.8.0 series (`statmount`/`listmount` carry later
-releases' answers), so the pin is effectively the 6.8.0-139 build the oracle
-host runs: a host kernel update that moves an answer is a pin question. Moving to a newer kernel is an explicit, wholesale migration.
+On Linux the virtual kernel is pinned to Ubuntu 24.04's 6.8 kernel and glibc
+2.39 (`cargo patina --version` names it): `uname` reports 6.8 and a syscall
+added later answers `ENOSYS`. The conformance scenarios are authoritative only
+on a host running that pin.
 
 If you use [mise](https://mise.jdx.dev/): `mise run check` is
 the local landing gate, and `mise run demo` runs a small end-to-end demo. For focused shim ABI

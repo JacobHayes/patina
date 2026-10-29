@@ -511,7 +511,7 @@ the compiled ABI acceptance cases.
 shim's whole workspace dependency closure (this crate and the eleven runtime
 crates beneath it) at its own build time and unpacks it into a per-user cache
 when a guest is built, so an installed binary is self-sufficient (see
-ARCHITECTURE.md "Native (linked shim)" and `crates/cargo-patina/build.rs`).
+ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
 
 - Every closure crate declares `links = "<package-name>"` and carries a build
   script whose only job is `cargo:src_dir=$CARGO_MANIFEST_DIR`. Cargo exposes
