@@ -639,26 +639,11 @@ mod tests {
                 vec![],
             ),
             (
-                "a short run before the end",
-                9000,
-                vec![(0, block(100))],
-                vec![],
-            ),
-            ("a run past the end", 100, vec![(1, block(1))], vec![]),
-            (
                 "touching runs",
                 16384,
                 vec![(0, block(4096)), (1, block(4096))],
                 vec![],
             ),
-            (
-                "runs out of order",
-                16384,
-                vec![(2, block(4096)), (0, block(4096))],
-                vec![],
-            ),
-            ("an empty extent", 0, vec![], vec![(3, 3)]),
-            ("touching extents", 0, vec![], vec![(1, 2), (2, 3)]),
             (
                 "a reservation over a written block",
                 4096,

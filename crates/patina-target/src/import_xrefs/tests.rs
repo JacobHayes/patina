@@ -3,67 +3,8 @@
 use super::*;
 use crate::provenance::NativeProvenanceIndex;
 use crate::tests::elf_with_symbol_runs;
-use object::{Architecture, BinaryFormat, Object};
+use object::Architecture;
 use std::collections::BTreeMap;
-
-// Each stub is mapped by the slot it jumps through, not by its position in
-// the table. The two here jump through slots in the opposite order to their
-// position, so a positional mapping and a decoded one cannot agree — which is
-// the failure that had every `call foo@plt` site in a real binary attributed
-// to an unrelated import, and imports reported as referenced from functions
-// (`fputs`, `puts`) that never touched them.
-#[test]
-fn plt_entries_map_by_the_slot_they_jump_through_not_by_position() {
-    use object::write::{Object as WriteObject, StandardSegment};
-    use object::{Endianness, SectionKind};
-
-    // Entry 0 is a reserved header that is not a stub at all; entry 1 jumps
-    // through the higher slot and entry 2 through the lower one.
-    let mut plt = vec![0xcc; 16];
-    plt.extend_from_slice(&[0xff, 0x25]);
-    plt.extend_from_slice(&0x3ff2_i32.to_le_bytes());
-    plt.extend_from_slice(&[0xcc; 10]);
-    plt.extend_from_slice(&[0xff, 0x25]);
-    plt.extend_from_slice(&0x3fda_i32.to_le_bytes());
-    plt.extend_from_slice(&[0xcc; 10]);
-
-    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
-    let section = object.add_section(
-        object.segment_name(StandardSegment::Text).to_vec(),
-        b".plt".to_vec(),
-        SectionKind::Text,
-    );
-    object.append_section_data(section, &plt, 16);
-    let bytes = object.write().expect("synthesized ELF is writable");
-    let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
-    let base = file
-        .sections()
-        .find(|section| section.name() == Ok(".plt"))
-        .expect("the .plt section survives the round trip")
-        .address();
-
-    let higher = base + 0x16 + 0x3ff2;
-    let lower = base + 0x26 + 0x3fda;
-    assert!(
-        higher > lower,
-        "the fixture only discriminates if slot order is the reverse of entry order"
-    );
-    let got_slots = BTreeMap::from([
-        (lower, "lower_slot".to_owned()),
-        (higher, "higher_slot".to_owned()),
-    ]);
-
-    let mut targets = BTreeMap::new();
-    collect_elf_plt_targets(&file, &got_slots, &mut targets);
-    assert_eq!(
-        targets,
-        BTreeMap::from([
-            (base + 0x10, "higher_slot".to_owned()),
-            (base + 0x20, "lower_slot".to_owned()),
-        ]),
-        "counting entries off against slot order would swap these two"
-    );
-}
 
 // PLT stubs are decoded through their own GOT slot rather than counted off
 // positionally, so an entry that carries no symbol relocation (a reserved

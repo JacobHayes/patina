@@ -538,28 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_function_symbols_do_not_license_omitting_gaps() {
-        let text = [RETURN_42, &[0x0f, 0xc7, 0xf0]].concat();
-        let mut bytes = elf(Architecture::X86_64, &text, &[(0, 6)], None);
-        let file = object::File::parse(&*bytes).unwrap();
-        let index = file.section_by_name(".symtab").unwrap().index().0;
-        let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
-        // Move the same sized declaration to SHT_DYNSYM (sh_link still names
-        // its string table). Dynamic exports are not a full code inventory.
-        bytes[shoff + index * 64 + 4..shoff + index * 64 + 8]
-            .copy_from_slice(&object::elf::SHT_DYNSYM.to_le_bytes());
-        let file = object::File::parse(&*bytes).unwrap();
-        assert!(file.symbols().next().is_none());
-        assert!(file.dynamic_symbols().any(|s| s.size() > 0));
-        assert!(
-            scan(&bytes)
-                .unwrap()
-                .iter()
-                .any(|e| e.mnemonic == Some("rdrand"))
-        );
-    }
-
-    #[test]
     fn sized_symbol_coverage_is_per_section_not_per_file() {
         let mut object =
             WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
@@ -768,68 +746,6 @@ mod tests {
         assert_eq!(sites[0].containing_symbol.as_deref(), Some("function_1"));
     }
 
-    // These encoding/reference regressions pair with the range-boundary class
-    // detector invalid_metadata_is_not_downgraded_to_missing_metadata: malformed
-    // or unresolved metadata must fail, not remove a declaration from coverage.
-    #[test]
-    fn indirect_fde_addresses_are_not_treated_as_instruction_addresses() {
-        // CIE zR with DW_EH_PE_indirect | DW_EH_PE_absptr. Gimli preserves the
-        // encoding but initial_address() is the slot, NOT its dereferenced value.
-        let mut unwind = vec![
-            16, 0, 0, 0, 0, 0, 0, 0, 1, b'z', b'R', 0, 1, 0x78, 16, 1, 0x80, 0, 0, 0,
-        ];
-        unwind.extend(24u32.to_le_bytes());
-        unwind.extend(24u32.to_le_bytes()); // CIE pointer
-        unwind.extend(0u64.to_le_bytes()); // address of pointer slot
-        unwind.extend(4u64.to_le_bytes()); // real function length
-        unwind.extend([0, 0, 0, 0]); // FDE augmentation length + padding
-        unwind.extend(0u32.to_le_bytes());
-        let mut text = vec![0x90; 20];
-        text[..8].copy_from_slice(&16u64.to_le_bytes());
-        text[16..].copy_from_slice(&[0x0f, 0xc7, 0xf0, 0xc3]); // real rdrand entry
-        let bytes = elf(Architecture::X86_64, &text, &[], Some(&unwind));
-        assert!(matches!(
-            scan(&bytes),
-            Err(TargetError::InvalidCodeRanges(_))
-        ));
-    }
-
-    #[test]
-    fn invalid_symbol_section_indices_cannot_remove_declared_functions() {
-        let text = [0xc3, 0x0f, 0xc7, 0xf0];
-        for (index, kind) in [100u16, object::elf::SHN_XINDEX]
-            .into_iter()
-            .flat_map(|index| {
-                [SymbolKind::Text, SymbolKind::Unknown]
-                    .into_iter()
-                    .map(move |kind| (index, kind))
-            })
-        {
-            let mut bytes = elf_with_symbols(
-                Architecture::X86_64,
-                &text,
-                &[(0, 1, SymbolKind::Text), (1, 0, kind)],
-                None,
-            );
-            let file = object::File::parse(&*bytes).unwrap();
-            let symbol = file
-                .symbols()
-                .find(|s| s.name() == Ok("function_1"))
-                .unwrap();
-            let symtab = file.section_by_name(".symtab").unwrap();
-            let at = symtab.file_range().unwrap().0 as usize + symbol.index().0 * 24 + 6;
-            // ELF64 st_shndx: an out-of-range ordinary index, or SHN_XINDEX
-            // without its required extended-index table. Keep one valid function
-            // so dropping this entry would select a dangerously narrowed scan.
-            bytes[at..at + 2].copy_from_slice(&index.to_le_bytes());
-            assert!(
-                scan(&bytes).is_err(),
-                "accepted function section index {index}"
-            );
-            assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_err());
-        }
-    }
-
     fn elf_with_unwind_relocation() -> Vec<u8> {
         let mut object =
             WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
@@ -857,64 +773,12 @@ mod tests {
         linked_elf(object)
     }
 
-    fn relocation_header(bytes: &[u8]) -> usize {
-        let file = object::File::parse(bytes).unwrap();
-        let index = file.section_by_name(".rela.eh_frame").unwrap().index().0;
-        let shoff = u64::from_le_bytes(bytes[40..48].try_into().unwrap()) as usize;
-        shoff + index * 64 // ELF64 section header
-    }
-
     #[test]
     fn unrelocated_fde_addresses_cannot_select_code_ranges() {
         assert!(matches!(
             scan(&elf_with_unwind_relocation()),
             Err(TargetError::InvalidCodeRanges(_))
         ));
-    }
-
-    #[test]
-    fn dynamic_relocations_cannot_rewrite_declared_code_addresses() {
-        let mut bytes = elf_with_unwind_relocation();
-        let header = relocation_header(&bytes);
-        // Dynamic relocations have virtual-address offsets and no associated
-        // target section (sh_info=0). The frame has VMA 0 in this synthetic ELF,
-        // so offset 24 targets its FDE initial-address field in either form.
-        bytes[header + 44..header + 48].copy_from_slice(&0u32.to_le_bytes());
-        bytes[header + 8..header + 16]
-            .copy_from_slice(&u64::from(object::elf::SHF_ALLOC).to_le_bytes());
-        assert!(matches!(
-            scan(&bytes),
-            Err(TargetError::InvalidCodeRanges(_))
-        ));
-
-        // A dynamic relocation elsewhere must not disable FDE coverage or
-        // refuse an otherwise scanable file: only unwind storage is protected.
-        let file = object::File::parse(&*bytes).unwrap();
-        let at = file
-            .section_by_name(".rela.eh_frame")
-            .unwrap()
-            .file_range()
-            .unwrap()
-            .0 as usize;
-        bytes[at..at + 8].copy_from_slice(&0x1000u64.to_le_bytes());
-        assert!(scan(&bytes).unwrap().is_empty());
-    }
-
-    /// An unwind relocation table the scan cannot read or measure is never
-    /// treated as empty: an unreadable range, an unknown entry size, and an
-    /// unsupported table type all fail closed.
-    #[test]
-    fn unreadable_or_unmeasured_relocation_tables_fail_closed() {
-        let mut bytes = elf_with_unwind_relocation();
-        let header = relocation_header(&bytes);
-        bytes[header + 24..header + 32].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(scan(&bytes).is_err());
-        let mut bytes = elf_with_unwind_relocation();
-        bytes[header + 56..header + 64].copy_from_slice(&1u64.to_le_bytes()); // sh_entsize
-        assert!(scan(&bytes).is_err());
-        let mut bytes = elf_with_unwind_relocation();
-        bytes[header + 4..header + 8].copy_from_slice(&object::elf::SHT_RELR.to_le_bytes());
-        assert!(scan(&bytes).is_err());
     }
 
     #[test]

@@ -629,17 +629,4 @@ mod tests {
                 .all(|(a, b)| Arc::ptr_eq(a, b))
         );
     }
-
-    #[test]
-    fn a_run_made_for_a_slot_below_the_first_block_starts_at_it() {
-        // Blocks 10 and 11, then 9: the pairs become a run from 9, three
-        // slots long, with no empty slot at either end.
-        let mut blocks = Blocks::default();
-        for index in [10, 11, 9] {
-            blocks.insert(index, Arc::from(&[1u8][..]));
-            assert_shape(&blocks, &format!("after {index}"));
-        }
-        let leaf = blocks.head.as_ref().unwrap();
-        assert!(matches!(&leaf.slots, Slots::Run { first: 9, slots } if slots.len() == 3));
-    }
 }

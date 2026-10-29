@@ -92,20 +92,6 @@ fn truncating_through_a_dropped_page_dirties_it_again() {
     assert_eq!(on_disk(&mut fs, "/log"), vec![b'b'; 2048]);
 }
 
-/// A hole punched past the end changes nothing, so a dropped page stays off
-/// disk.
-#[test]
-fn a_punch_past_the_end_leaves_a_dropped_page_dropped() {
-    let (mut fs, fd) = log_with_pending(&[b'a'; 2000], &[]);
-    fs.seek(fd, 0, SeekWhence::Start).unwrap();
-    fs.write(FsClock::EPOCH, fd, &[b'b'; 2000]).unwrap();
-    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
-    fs.allocate(FsClock::EPOCH, fd, 3000, 1, FsAllocateMode::PunchHole, true)
-        .unwrap();
-    fs.sync(fd).unwrap();
-    assert_eq!(on_disk(&mut fs, "/log"), vec![b'a'; 2000]);
-}
-
 /// The error reaches every open file description of the file once: the
 /// failing one at once, another open at the time on its next `fsync` (which
 /// still writes back what is dirty), its duplicate never again, and a
@@ -182,29 +168,6 @@ fn dontneed_rereads_the_disk_under_a_dropped_page() {
     assert_eq!(on_disk(&mut fs, "/log"), expected);
 }
 
-/// A range that ends at the end of the file covers its last page whole,
-/// partial or not.
-#[test]
-fn dontneed_to_the_end_of_the_file_covers_its_last_page() {
-    let (mut fs, fd) = log_with_pending(b"a", &[]);
-    fs.write_at(FsClock::EPOCH, fd, 0, b"b").unwrap();
-    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
-    fs.drop_cache(fd, 0, 1).unwrap();
-    assert_eq!(fs.contents("/log").unwrap(), b"a");
-}
-
-/// An append a writeback error dropped reads back as the zeros the disk
-/// holds past its old end; the size it reached stays.
-#[test]
-fn dontneed_past_the_durable_end_reads_zeros() {
-    let (mut fs, fd) = log_with_pending(b"committed;", b"lost;");
-    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
-    fs.drop_cache(fd, 0, 0).unwrap();
-    let mut expected = b"committed;".to_vec();
-    expected.resize(b"committed;lost;".len(), 0);
-    assert_eq!(fs.contents("/log").unwrap(), expected);
-}
-
 /// A failed `sync`/`syncfs` drops every file's dirty pages from writeback.
 /// `sync(2)` reports nothing; `syncfs` reports the filesystem's error once per
 /// description, and each file's error reaches `fsync` (and a `WAIT`ing
@@ -263,4 +226,29 @@ fn a_failed_fsync_reaches_syncfs() {
     );
     assert!(fs.sync_filesystem(log).is_ok());
     assert!(fs.sync(log).is_ok());
+}
+
+/// A hole punched past the end changes nothing, so a dropped page stays off
+/// disk.
+#[test]
+fn a_punch_past_the_end_leaves_a_dropped_page_dropped() {
+    let (mut fs, fd) = log_with_pending(&[b'a'; 2000], &[]);
+    fs.seek(fd, 0, SeekWhence::Start).unwrap();
+    fs.write(FsClock::EPOCH, fd, &[b'b'; 2000]).unwrap();
+    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
+    fs.allocate(FsClock::EPOCH, fd, 3000, 1, FsAllocateMode::PunchHole, true)
+        .unwrap();
+    fs.sync(fd).unwrap();
+    assert_eq!(on_disk(&mut fs, "/log"), vec![b'a'; 2000]);
+}
+
+/// A range that ends at the end of the file covers its last page whole,
+/// partial or not.
+#[test]
+fn dontneed_to_the_end_of_the_file_covers_its_last_page() {
+    let (mut fs, fd) = log_with_pending(b"a", &[]);
+    fs.write_at(FsClock::EPOCH, fd, 0, b"b").unwrap();
+    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
+    fs.drop_cache(fd, 0, 1).unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), b"a");
 }

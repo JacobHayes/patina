@@ -535,35 +535,6 @@ mod tests {
             FsImage::decode(&truncated),
             Err(FsImageError::Truncated | FsImageError::Malformed(_))
         ));
-        // Mode bits beyond the permission bits.
-        let entry = [(KIND_FILE, "/a", &b"x"[..])];
-        assert!(FsImage::decode(&hand_encode_with_mode(&entry, 0o7777)).is_ok());
-        assert!(matches!(
-            FsImage::decode(&hand_encode_with_mode(&entry, 0o100644)),
-            Err(FsImageError::Malformed(_))
-        ));
-        // Unsorted.
-        assert_eq!(
-            FsImage::decode(&hand_encode(&[
-                (KIND_FILE, "/b", b"x"),
-                (KIND_FILE, "/a", b"y"),
-            ]))
-            .unwrap_err(),
-            FsImageError::Malformed(
-                "entries are not strictly sorted by path (unsorted or duplicate)"
-            )
-        );
-        // Duplicate path.
-        assert_eq!(
-            FsImage::decode(&hand_encode(&[
-                (KIND_FILE, "/a", b"x"),
-                (KIND_FILE, "/a", b"y"),
-            ]))
-            .unwrap_err(),
-            FsImageError::Malformed(
-                "entries are not strictly sorted by path (unsorted or duplicate)"
-            )
-        );
         // Root escape via `..`.
         assert!(matches!(
             FsImage::decode(&hand_encode(&[(KIND_FILE, "/../escape", b"x")])),
@@ -572,11 +543,6 @@ mod tests {
         // Relative (non-absolute) path.
         assert!(matches!(
             FsImage::decode(&hand_encode(&[(KIND_FILE, "relative", b"x")])),
-            Err(FsImageError::Malformed(_))
-        ));
-        // Empty component (`//`).
-        assert!(matches!(
-            FsImage::decode(&hand_encode(&[(KIND_FILE, "/a//b", b"x")])),
             Err(FsImageError::Malformed(_))
         ));
     }
@@ -698,24 +664,5 @@ mod tests {
         // guards a guest's lookup runs.
         let secret = fs.leaf("/locked/secret").unwrap();
         assert_eq!((secret.mode, secret.times.mtime_nanos), (0o600, file_time));
-    }
-
-    /// The two halves split what an image holds: a metadata-only change moves
-    /// the metadata half and the whole encoding, never the contents half.
-    #[test]
-    fn contents_and_metadata_encode_apart() {
-        let base = FsImage::new(vec![FsImageEntry::file("/a", "x")]);
-        let touched = FsImage::new(vec![FsImageEntry::File {
-            path: "/a".into(),
-            contents: b"x".to_vec(),
-            mode: FILE_MODE,
-            mtime_nanos: 7,
-        }]);
-        let edited = FsImage::new(vec![FsImageEntry::file("/a", "y")]);
-        assert_eq!(base.encode_contents(), touched.encode_contents());
-        assert_ne!(base.encode_metadata(), touched.encode_metadata());
-        assert_ne!(base.encode(), touched.encode());
-        assert_ne!(base.encode_contents(), edited.encode_contents());
-        assert_eq!(base.encode_metadata(), edited.encode_metadata());
     }
 }

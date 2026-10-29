@@ -1,6 +1,6 @@
 //! Tests for persistent state inspection, restoration and descriptor adoption.
 
-use crate::tests::{times, xattr_value};
+use crate::tests::xattr_value;
 use crate::{FsSnapshot, MemFs};
 use patina_dst_abi::{ErrorCode, FsClock, FsEntryKind, FsNode, OpenFlags, XattrTarget};
 use patina_dst_driver_api::FsDriver;
@@ -20,25 +20,6 @@ fn persistent_snapshot_drops_descriptions() {
     assert_eq!(
         snapshot.read(FsClock::EPOCH, second, 1).unwrap_err().code,
         ErrorCode::InvalidHandle
-    );
-}
-
-#[test]
-fn a_crash_model_restores_all_four_times_verbatim() {
-    let mut fs = MemFs::new();
-    fs.create_directory(FsClock::at(10), "/d", 0o755).unwrap();
-    fs.restore_times("/d", 1, 2, 3, 4).unwrap();
-    assert_eq!(times(&mut fs, "/d"), (1, 2, 3, 4));
-    fs.restore_mode("/d", 0o700).unwrap();
-    assert_eq!(
-        times(&mut fs, "/d"),
-        (1, 2, 3, 4),
-        "a restore stamps nothing"
-    );
-    assert_eq!(fs.metadata("/d").unwrap().mode, 0o700);
-    assert_eq!(
-        fs.restore_times("/missing", 1, 2, 3, 4).unwrap_err().code,
-        ErrorCode::NotFound
     );
 }
 

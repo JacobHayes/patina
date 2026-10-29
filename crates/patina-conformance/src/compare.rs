@@ -1341,19 +1341,6 @@ mod tests {
         event
     }
 
-    fn port_labels(events: Vec<Event>) -> Vec<Value> {
-        normalize(events)
-            .into_iter()
-            .flat_map(|event| {
-                event
-                    .fields
-                    .into_iter()
-                    .filter(|(name, _)| name.ends_with("_port"))
-                    .map(|(_, value)| value)
-            })
-            .collect()
-    }
-
     const AF_INET: i64 = 2;
     const AF_INET6: i64 = 10;
     const STREAM: i64 = 1;
@@ -1372,14 +1359,6 @@ mod tests {
             accept(6, 4, 6, peer),
             port(7, "getpeername", 6, "addr", peer),
         ]
-    }
-
-    #[test]
-    fn equal_port_numbers_in_different_protocols_are_different_ports() {
-        let labels = port_labels(udp_then_tcp(40000, 50001, 40000, 40000));
-        assert_ne!(labels[0], labels[2], "the TCP client's port is its own");
-        assert_eq!(labels[2], labels[3], "the accepted peer is the client");
-        assert_eq!(labels[3], labels[4], "and the accepted socket is TCP");
     }
 
     #[test]

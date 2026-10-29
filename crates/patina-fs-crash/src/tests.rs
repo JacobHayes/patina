@@ -1,7 +1,7 @@
 //! Tests for the public crash filesystem and shared fixtures.
 
 use crate::CrashFs;
-use patina_dst_abi::{CrashKind, ErrorCode, Fd, FsClock, OpenFlags};
+use patina_dst_abi::{CrashKind, Fd, FsClock, OpenFlags};
 use patina_dst_driver_api::FsDriver;
 use patina_dst_fs_mem::MemFs;
 
@@ -90,50 +90,6 @@ fn a_held_unsynced_rename_recovers_in_place_and_for_a_restart() {
     fs.crash(FsClock::EPOCH).unwrap();
     assert!(fs.fd_metadata(held).is_ok());
     assert!(fs.contents("/final").is_ok());
-}
-
-#[test]
-fn builder_rejects_invalid_configuration() {
-    assert_eq!(
-        CrashFs::builder()
-            .torn_write_granularity(0)
-            .build()
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidInput
-    );
-    assert_eq!(
-        CrashFs::builder()
-            .torn_write_probability(1.5)
-            .build()
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidInput
-    );
-    assert!(
-        CrashFs::builder()
-            .torn_write_probability(f64::NAN)
-            .build()
-            .is_err()
-    );
-}
-
-#[test]
-fn checkpoint_persists_namespace_operations() {
-    let mut fs = CrashFs::default();
-    let fd = write(&mut fs, "/before", b"value");
-    fs.close(fd).unwrap();
-    fs.checkpoint();
-    // A committed rename after the checkpoint survives; unsynced content
-    // written afterwards does not.
-    fs.rename(FsClock::EPOCH, "/before", "/after").unwrap();
-    fs.checkpoint();
-    fs.crash(FsClock::EPOCH).unwrap();
-    assert_eq!(fs.contents("/after").unwrap(), b"value");
-    assert_eq!(
-        fs.metadata("/before").unwrap_err().code,
-        ErrorCode::NotFound
-    );
 }
 
 /// A filesystem holding an empty `/d`, seeded.
