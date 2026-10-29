@@ -1,19 +1,15 @@
-//! Native test harnesses and bounded seed exploration.
+//! Native libtest harnesses (`test <DIR|Cargo.toml>`).
 
 use crate::native_build::{
     NATIVE_AUDIT_METADATA_ARGS, host_target_triple, native_package_link_args,
-    native_package_rustflags, resolve_artifact, stage_sancov_stub,
+    native_package_rustflags, stage_sancov_stub,
 };
-use crate::native_run::execute_native_run;
 use crate::parse::knob_flag_pairs;
 use crate::shim_build::{
     RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
     lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
 };
-use crate::{
-    ArtifactRef, CliError, ExploreInvocation, ExploreTarget, Mode, NativeHarnessInvocation,
-    NativeRunMode, cli, execute, exit_code, output,
-};
+use crate::{CliError, NativeHarnessInvocation, cli, exit_code, output};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -24,55 +20,6 @@ fn command_line(prefix: &str, args: &[OsString]) -> String {
     let mut parts = vec![prefix.to_string()];
     parts.extend(args.iter().map(|arg| cli::shell_quote(arg)));
     parts.join(" ")
-}
-
-fn command_with_seed(args: &[OsString], seed: u64) -> Vec<OsString> {
-    let seed_text = seed.to_string();
-    let mut out = Vec::with_capacity(args.len() + 2);
-    let mut inserted = false;
-    let mut index = 0;
-    while index < args.len() {
-        if args[index] == "--" {
-            if !inserted {
-                out.push(OsString::from("--seed"));
-                out.push(OsString::from(&seed_text));
-            }
-            out.extend_from_slice(&args[index..]);
-            return out;
-        }
-        if let Some(text) = args[index].to_str() {
-            if text == "--seed" {
-                out.push(OsString::from("--seed"));
-                out.push(OsString::from(&seed_text));
-                inserted = true;
-                index += 2;
-                continue;
-            }
-            if text.starts_with("--seed=") {
-                out.push(OsString::from("--seed"));
-                out.push(OsString::from(&seed_text));
-                inserted = true;
-                index += 1;
-                continue;
-            }
-        }
-        out.push(args[index].clone());
-        index += 1;
-    }
-    if !inserted {
-        out.push(OsString::from("--seed"));
-        out.push(OsString::from(seed_text));
-    }
-    out
-}
-
-/// Explore ran the wrapped command in this process, so the flag defaults in
-/// its environment shaped every seed; the repro carries them.
-fn exploration_repro(wrapped_command: &[OsString], seed: u64) -> String {
-    cli::with_env_defaults(command_line(
-        "cargo patina",
-        &command_with_seed(wrapped_command, seed),
-    ))
 }
 
 struct BuiltNativeHarness {
@@ -875,76 +822,6 @@ fn indent_tail(text: &str, max_lines: usize) -> String {
         .join("\n")
 }
 
-pub(super) fn execute_explore(exploration: ExploreInvocation) -> Result<i32, CliError> {
-    // Explore drives many child runs and reports once, so per-seed run
-    // finalization (capture/envelope/render) is suppressed here: each child
-    // streams normally and this verb emits a single campaign-level envelope.
-    output::suppress_run_finalize();
-    let start = exploration.start_seed;
-    let count = exploration.seed_count;
-    // The native family builds the artifact once, then runs that SAME
-    // built artifact across every seed — a source/package is never rebuilt per
-    // seed. The resolved artifact (and its build workspace) is held for the whole
-    // sweep so the built file outlives every run. The Cargo family instead re-runs
-    // the whole command per seed (cargo caches the build).
-    let prebuilt = match &exploration.target {
-        ExploreTarget::Cargo(_) => None,
-        ExploreTarget::Native(invocation) => Some(resolve_artifact(invocation.binary.clone())?),
-    };
-    let seed_at = |offset: u64| {
-        start
-            .checked_add(offset)
-            .expect("exploration range was validated")
-    };
-    for offset in 0..count {
-        let seed = seed_at(offset);
-        let exit = match &exploration.target {
-            ExploreTarget::Cargo(invocation) => {
-                let mut invocation = (**invocation).clone();
-                invocation.mode = Mode::Seeded { seed };
-                execute(invocation)?
-            }
-            ExploreTarget::Native(invocation) => {
-                let mut invocation = (**invocation).clone();
-                invocation.binary = ArtifactRef::Prebuilt(
-                    prebuilt
-                        .as_ref()
-                        .expect("native explore resolved")
-                        .path
-                        .clone(),
-                );
-                invocation.mode = NativeRunMode::Seeded { seed };
-                execute_native_run(invocation)?
-            }
-        };
-        if exit != 0 {
-            let repro = exploration_repro(&exploration.wrapped_command, seed);
-            eprintln!(
-                "PATINA_EXPLORE_FAILURE seed={seed} exit={exit} repro={:?}",
-                repro
-            );
-            output::emit_simple(
-                "explore",
-                "failure",
-                exit,
-                Some(format!("seed {seed} exited {exit}; repro: {repro}")),
-            );
-            return Ok(exit);
-        }
-    }
-    if output::options().is_json() {
-        output::emit_simple(
-            "explore",
-            "ok",
-            0,
-            Some(format!("start={start} seeds={count}")),
-        );
-    } else {
-        println!("PATINA_EXPLORE_COMPLETE start={start} seeds={count}");
-    }
-    Ok(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1097,7 +974,7 @@ mod tests {
         ]);
         tokens.push(OsString::from("--allow-randomized-address-layout"));
 
-        let args = cli::parse("test", help::Family::Harness, tokens).expect("harness parse");
+        let args = cli::parse("test", help::Family::Sole, tokens).expect("harness parse");
         let invocation = NativeHarnessInvocation {
             origin: PathBuf::new(),
             manifest: PathBuf::new(),

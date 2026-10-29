@@ -58,27 +58,11 @@ pub(super) enum ArgKind {
     Other,
 }
 
-/// Whether a positional token is unmistakably a filesystem path (so a
-/// nonexistent one is a mistake to surface, not a plausible bare Cargo argument):
-/// it names a `.rs`/`Cargo.toml`, or contains a path separator.
-fn looks_like_path(raw: &OsStr) -> bool {
-    let Some(text) = raw.to_str() else {
-        // A non-UTF-8 token is never a bare Cargo argument; treat it as a path.
-        return true;
-    };
-    text.ends_with(".rs")
-        || Path::new(text).file_name() == Some(OsStr::new("Cargo.toml"))
-        || text.contains('/')
-        || text.contains(std::path::MAIN_SEPARATOR)
-}
-
-/// Classify a run/audit/replay positional argument. A built artifact is
+/// Classify a run/audit/replay/test positional argument. A built artifact is
 /// recognized by leading magic bytes (used directly); an existing `.rs`,
-/// directory, or `Cargo.toml` is a source/package to build; a bare name that does
-/// not exist is `Other` (a plausible Cargo argument, left to the cargo family).
-/// A token that clearly names a file path (`.rs`/`Cargo.toml`, or with a
-/// separator) but does not exist is a hard error — fail closed rather than let
-/// `run ./nonexistent` fall through to a confusing `cargo run` failure.
+/// directory, or `Cargo.toml` is a source/package to build; an existing file that
+/// is neither, or a flag, is `Other`. A token that does not exist is a hard
+/// error: every positional these verbs take names a file.
 pub(super) fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
     if raw.to_str().is_some_and(|value| value.starts_with('-')) {
         return Ok(ArgKind::Other);
@@ -87,24 +71,19 @@ pub(super) fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
     if path.is_dir() {
         return Ok(ArgKind::SourcePackage(native_manifest_path(path)));
     }
-    if path.is_file() {
-        if is_native_binary(path)? {
-            return Ok(ArgKind::Artifact);
-        }
-        if path.file_name() == Some(OsStr::new("Cargo.toml")) {
-            return Ok(ArgKind::SourcePackage(path.to_path_buf()));
-        }
-        if path.extension().and_then(OsStr::to_str) == Some("rs") {
-            return Ok(ArgKind::SourceFile(path.to_path_buf()));
-        }
-        // An existing file that is neither an artifact nor a source: not ours.
-        return Ok(ArgKind::Other);
-    }
-    // The token does not exist. If it plainly names a file path, fail closed;
-    // otherwise it is a bare name the cargo family may interpret.
-    if looks_like_path(raw) {
+    if !path.is_file() {
         return Err(CliError::usage(format!("no such file: {}", path.display())));
     }
+    if is_native_binary(path)? {
+        return Ok(ArgKind::Artifact);
+    }
+    if path.file_name() == Some(OsStr::new("Cargo.toml")) {
+        return Ok(ArgKind::SourcePackage(path.to_path_buf()));
+    }
+    if path.extension().and_then(OsStr::to_str) == Some("rs") {
+        return Ok(ArgKind::SourceFile(path.to_path_buf()));
+    }
+    // An existing file that is neither an artifact nor a source: not ours.
     Ok(ArgKind::Other)
 }
 
@@ -281,80 +260,24 @@ pub(super) fn apply_release(artifact: &mut ArtifactRef, release: bool) -> Result
 }
 
 /// Resolve a run/audit/replay positional to an [`ArtifactRef`], building a
-/// source/package on the fly. A directory/`Cargo.toml` resolves to a native
-/// build-on-the-fly exactly like a `.rs` source — the SAME path `audit` uses, so
-/// a positional naming an existing package is never silently reinterpreted as
-/// guest argv. `None` is returned only when the positional is neither an
-/// artifact nor a source (a leading flag or a plain file); the caller then falls
-/// through to its no-artifact behavior. Whether a runtime-linked package is
-/// instead kept on the cargo-family path is a routing decision the `run`/`replay`
-/// callers make up front via [`package_integrates_patina`]; this resolver is pure
-/// classification.
-pub(super) fn resolve_positional(raw: &OsStr) -> Result<Option<ArtifactRef>, CliError> {
+/// source/package on the fly: a directory/`Cargo.toml` resolves to a native
+/// build-on-the-fly exactly like a `.rs` source, so a positional naming an
+/// existing package is never reinterpreted as guest argv. Anything else is a
+/// usage error naming the offending path.
+pub(super) fn resolve_positional(verb: &str, raw: &OsStr) -> Result<ArtifactRef, CliError> {
     Ok(match classify_arg(raw)? {
-        ArgKind::Artifact => Some(ArtifactRef::Prebuilt(PathBuf::from(raw))),
-        ArgKind::SourceFile(source) => {
-            Some(ArtifactRef::Build(Box::new(native_source_spec(source))))
+        ArgKind::Artifact => ArtifactRef::Prebuilt(PathBuf::from(raw)),
+        ArgKind::SourceFile(source) => ArtifactRef::Build(Box::new(native_source_spec(source))),
+        ArgKind::SourcePackage(manifest) => {
+            ArtifactRef::Build(Box::new(native_package_spec(PathBuf::from(raw), manifest)))
         }
-        ArgKind::SourcePackage(manifest) => Some(ArtifactRef::Build(Box::new(
-            native_package_spec(PathBuf::from(raw), manifest),
-        ))),
-        ArgKind::Other => None,
+        ArgKind::Other => {
+            return Err(CliError::usage(format!(
+                "{verb} target {} is neither a native binary nor a source/package to build",
+                Path::new(raw).display()
+            )));
+        }
     })
-}
-
-/// Does the Cargo package integrate the Patina runtime? True iff `cargo metadata
-/// --no-deps` reports a declared dependency in [`PATINA_RUNTIME_CRATES`]. This is
-/// the routing predicate that keeps a runtime-linked package on the cargo-family
-/// path (where the linked runtime provides seeding, recording, replay, and
-/// library-level determinism) while a plain package is built shim-linked and run
-/// under the native pre-run gate. Any failure to resolve the metadata (no cargo,
-/// an unreadable or invalid manifest, ...) answers `false`: a package we cannot
-/// prove integrates the runtime is treated as plain — routed to the gated native
-/// path or refused loudly — never silently trusted to a no-op cargo-family run.
-///
-/// `manifest` scopes the query to a positional package path; `cwd` scopes it to a
-/// working directory (the cwd-package `run`). At most one is set.
-pub(crate) fn package_integrates_patina(manifest: Option<&Path>, cwd: Option<&Path>) -> bool {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(&cargo);
-    command
-        .arg("metadata")
-        .arg("--no-deps")
-        .arg("--format-version")
-        .arg("1")
-        .stderr(Stdio::null());
-    if let Some(manifest) = manifest {
-        command.arg("--manifest-path").arg(manifest);
-    }
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    let stdout = match command.output() {
-        Ok(output) if output.status.success() => output.stdout,
-        _ => return false,
-    };
-    let metadata: serde_json::Value = match serde_json::from_slice(&stdout) {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    metadata
-        .get("packages")
-        .and_then(|value| value.as_array())
-        .is_some_and(|packages| {
-            packages.iter().any(|package| {
-                package
-                    .get("dependencies")
-                    .and_then(|value| value.as_array())
-                    .is_some_and(|deps| {
-                        deps.iter().any(|dep| {
-                            dep.get("name")
-                                .and_then(|value| value.as_str())
-                                .is_some_and(|name| PATINA_RUNTIME_CRATES.contains(&name))
-                        })
-                    })
-            })
-        })
 }
 
 /// The result of scanning a verb's leading region for its positional
@@ -378,10 +301,9 @@ pub(crate) struct PositionalScan {
 /// The scan walks the pre-`--` region left-to-right: a flag REGISTERED for
 /// `verb` is skipped, and its value token too when the registry says the value
 /// is `Required` and no inline `=` is present; the first UNREGISTERED
-/// flag-looking token stops the scan conservatively — beyond it a token may be
-/// the value of an unknown passthrough flag (a forwarded cargo flag like
-/// `--manifest-path ./x/Cargo.toml`), and misreading a value as the artifact
-/// would corrupt routing. Non-flag tokens are the positionals, collected in
+/// flag-looking token stops the scan — its arity is unknown, so the token after
+/// it may be its value, and the verb's error names the flag instead of
+/// misreading that value as the artifact. Non-flag tokens are the positionals, collected in
 /// order until `wanted` are found. The registry stays authoritative: arity comes
 /// only from it, never a second table.
 pub(crate) fn locate_positionals(
@@ -437,108 +359,6 @@ pub(crate) fn locate_positionals(
         rest,
         stop,
     }
-}
-
-/// Whether `raw` is an existing file whose magic bytes identify it as a native
-/// binary. Such a file is NEVER the value of a cargo flag, so an unknown flag
-/// standing in front of it is a misuse, not a forwarded flag with a value.
-fn existing_compiled_artifact(raw: &OsStr) -> bool {
-    let path = Path::new(raw);
-    path.is_file() && matches!(is_native_binary(path), Ok(true))
-}
-
-/// Whether `raw` names an existing artifact or source/package (a compiled
-/// binary, a `.rs` source, a `Cargo.toml`, or a directory) — anything the
-/// positional resolver would route to a real family.
-fn existing_artifact_or_source(raw: &OsStr) -> bool {
-    matches!(
-        classify_arg(raw),
-        Ok(ArgKind::Artifact | ArgKind::SourceFile(_) | ArgKind::SourcePackage(_))
-    )
-}
-
-/// Whether `raw` is a path-like token (`.rs`/`Cargo.toml`, or with a
-/// separator) that does not exist — the same shape [`classify_arg`] fails closed
-/// on. Behind an unknown flag it is a clearly-named artifact path the user
-/// misplaced, not a plausible bare cargo argument.
-fn stranded_path_like(raw: &OsStr) -> bool {
-    !Path::new(raw).exists()
-        && looks_like_path(raw)
-        && !raw.to_str().is_some_and(|text| text.starts_with('-'))
-}
-
-/// The loud routing error raised when a genuine artifact is stranded behind an
-/// unknown flag.
-fn stranded_artifact_error(verb: &str, unknown_flag: &OsStr, artifact: &OsStr) -> CliError {
-    CliError::usage(format!(
-        "unknown option {:?} ahead of artifact {:?}; options and the artifact may appear in any \
-order, but an unknown option is only forwarded in the Cargo package family — check the flag name \
-(run `cargo patina {verb} --help`)",
-        unknown_flag.to_string_lossy(),
-        artifact.to_string_lossy(),
-    ))
-}
-
-/// After [`locate_positionals`] halted on an unregistered flag without locating
-/// the artifact, decide the honest outcome — never a silent surprise. `tail`
-/// begins at that unknown flag. A genuine artifact/path stranded behind it is a
-/// loud routing error (an unknown option only ever forwards in the Cargo family,
-/// and the native family rejects an unknown flag anyway, so a real artifact
-/// after it can only be a misuse); otherwise `Ok(())` lets the caller forward the
-/// list to its no-artifact family. The token immediately after an unknown flag is
-/// that flag's presumed value (`--manifest-path ./x/Cargo.toml`) and is exempt
-/// UNLESS it is a compiled artifact, which is never a flag value. Only the
-/// verbs with a Cargo package family (`run`, `test`) forward unknown flags, so
-/// only they need this; every other verb's parser refuses the flag by name.
-pub(crate) fn reject_stranded_artifact(verb: &str, tail: &[OsString]) -> Result<(), CliError> {
-    let unknown = tail.first().cloned().unwrap_or_default();
-    let mut index = 0;
-    let mut after_unknown_flag = false;
-    while index < tail.len() {
-        let argument = &tail[index];
-        if argument == "--" {
-            break;
-        }
-        if let Some(text) = argument.to_str()
-            && text.starts_with('-')
-        {
-            let name = cli::split_name(text);
-            match help::flag_arity(verb, name) {
-                Some(help::Value::Required(..)) if name == text => {
-                    index += 2;
-                    after_unknown_flag = false;
-                    continue;
-                }
-                Some(_) => {
-                    index += 1;
-                    after_unknown_flag = false;
-                    continue;
-                }
-                None => {
-                    after_unknown_flag = true;
-                    index += 1;
-                    continue;
-                }
-            }
-        }
-        if after_unknown_flag {
-            // The presumed value of the preceding unknown flag: exempt unless it
-            // is a compiled artifact (never a flag value).
-            if existing_compiled_artifact(argument) {
-                return Err(stranded_artifact_error(verb, &unknown, argument));
-            }
-            after_unknown_flag = false;
-            index += 1;
-            continue;
-        }
-        // A "free" token beyond any flag's value: an existing artifact/source or a
-        // path-like nonexistent token here is a misplaced artifact.
-        if existing_artifact_or_source(argument) || stranded_path_like(argument) {
-            return Err(stranded_artifact_error(verb, &unknown, argument));
-        }
-        index += 1;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

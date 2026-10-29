@@ -42,14 +42,12 @@ pub use flags::GLOBAL_OUTPUT;
 pub use flags::HELP_FLAGS;
 use flags::LIVENESS_FLAGS_OPTIONAL;
 use flags::NATIVE_SCHEDULE_FLAGS;
-use flags::REPLAY_TIMELINE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;
 use workflows::COVERAGE;
-use workflows::EXPLORE;
 use workflows::MINIMIZE;
 use workflows::SITES;
 use workflows::SYSCALLS;
@@ -207,12 +205,6 @@ pub struct Flag {
     /// loudly — and the generic grammar walk knows to supply the parent when it
     /// exercises the child.
     pub requires: Option<&'static str>,
-    /// The families that accept this flag, when they are narrower than its
-    /// [`Group`]'s. `None` — the common case — means "exactly the group's".
-    /// [`only`] sets it for the few flags that share a group with flags of wider
-    /// reach: `--budget`/`--param` are Cargo-family knobs sitting beside
-    /// `--seed`/`--record`, which every family of `run` accepts.
-    pub families: Option<&'static [Family]>,
 }
 
 /// The prefix of every flag's environment default (`--seed` → `PATINA_SEED`).
@@ -263,7 +255,6 @@ const fn f(
         doc,
         repeatable,
         requires: None,
-        families: None,
     }
 }
 
@@ -275,18 +266,10 @@ const fn needs(flag: Flag, parent: &'static str) -> Flag {
     }
 }
 
-/// Narrow one flag to a subset of its group's families.
-const fn only(flag: Flag, families: &'static [Family]) -> Flag {
-    Flag {
-        families: Some(families),
-        ..flag
-    }
-}
-
-/// A parsing family within a verb: one verb and one positional shape, but
-/// several disjoint flag sets, chosen at routing time from an artifact's magic
-/// bytes, a subcommand token, or a mode switch. Families are why `--param` is
-/// valid on the Cargo package `run` and invalid on `run <BINARY>`.
+/// A parsing family within a verb: one verb, but several disjoint flag sets,
+/// chosen at routing time from a subcommand token or a mode switch. Families
+/// are why `--marker` is valid on `minimize --generation` and invalid on
+/// `trace info`.
 ///
 /// The registry is the single declaration of that mapping. It builds each
 /// family's parser, decides which flags a family refuses and in what words, and
@@ -294,16 +277,8 @@ const fn only(flag: Flag, families: &'static [Family]) -> Flag {
 /// does not advertise for it, and cannot advertise one it does not accept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
-    /// A verb with one form: `campaign`, `coverage`, `sites`, `explore`, and
     /// A verb with a single argument surface.
     Sole,
-    /// The Cargo package family: an in-process `cargo run`/`cargo test` that
-    /// forwards every unrecognized option to Cargo verbatim.
-    Cargo,
-    /// A shim-linked native binary under the native supervisor.
-    Native,
-    /// `test <DIR|Cargo.toml>`: native libtest harness mode.
-    Harness,
     /// `minimize --scenario`: seed/parameter reduction.
     Scenario,
     /// `minimize --generation N`: reduce a recorded campaign generation's knobs.
@@ -323,9 +298,6 @@ impl Family {
     pub fn tag(self) -> &'static str {
         match self {
             Family::Sole => "sole",
-            Family::Cargo => "cargo",
-            Family::Native => "native",
-            Family::Harness => "harness",
             Family::Scenario => "scenario",
             Family::Generation => "generation",
             Family::Info => "info",
@@ -429,8 +401,8 @@ pub enum Topic {
 
 /// Every verb, in overview order.
 pub const VERBS: &[&Verb] = &[
-    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &EXPLORE, &CAMPAIGN, &COVERAGE, &SITES, &TRACE,
-    &MINIMIZE, &SYSCALLS,
+    &RUN, &TEST, &BUILD, &AUDIT, &REPLAY, &CAMPAIGN, &COVERAGE, &SITES, &TRACE, &MINIMIZE,
+    &SYSCALLS,
 ];
 
 // ===========================================================================
@@ -467,14 +439,6 @@ pub fn flag_by_cli_name(verb_name: &str, name: &str) -> Option<&'static Flag> {
         .find(|flag| flag.name == name || flag.short == Some(name))
 }
 
-impl Group {
-    /// The families that accept `flag` within this group — the flag's own
-    /// narrowing if it has one, else the group's.
-    fn families_of(&self, flag: &Flag) -> &'static [Family] {
-        flag.families.unwrap_or(self.families)
-    }
-}
-
 impl Verb {
     /// The spec of one of this verb's families.
     pub fn family(&self, family: Family) -> &'static FamilySpec {
@@ -488,12 +452,10 @@ impl Verb {
     /// one call, so a family cannot accept a flag its help omits, nor advertise
     /// one it rejects.
     pub fn family_flags(&self, family: Family) -> impl Iterator<Item = &'static Flag> + use<'_> {
-        self.groups.iter().flat_map(move |group| {
-            group
-                .flags
-                .iter()
-                .filter(move |flag| group.families_of(flag).contains(&family))
-        })
+        self.groups
+            .iter()
+            .filter(move |group| group.families.contains(&family))
+            .flat_map(|group| group.flags.iter())
     }
 
     /// Flags registered for this verb but NOT accepted by `family` — a sibling
@@ -506,12 +468,8 @@ impl Verb {
         let spec = self.family(family);
         self.groups
             .iter()
-            .flat_map(move |group| {
-                group
-                    .flags
-                    .iter()
-                    .filter(move |flag| !group.families_of(flag).contains(&family))
-            })
+            .filter(move |group| !group.families.contains(&family))
+            .flat_map(|group| group.flags.iter())
             .map(move |flag| (flag, refusal_message(spec, flag.name)))
     }
 
@@ -541,8 +499,7 @@ fn refusal_message(spec: &FamilySpec, flag: &str) -> String {
     }
 }
 
-/// The canonical `Topic` for a routed verb token. `explore run`/`explore test`
-/// all map to the `explore` overview; `test` has its own section.
+/// The canonical `Topic` for a routed verb token.
 pub fn topic_for(verb_token: &str) -> Topic {
     match verb_token {
         name if verb(name).is_some() => Topic::Verb(verb(name).unwrap().name),
@@ -550,19 +507,9 @@ pub fn topic_for(verb_token: &str) -> Topic {
     }
 }
 
-// Every group/flag family must belong to its verb, and every declared form must
-// receive flags (except the sole flagless form). This gate evaluates at build time.
+// Every group's families must belong to its verb, and a verb with no flags has
+// only the sole form. This gate evaluates at build time.
 const _: () = {
-    const fn contains(families: &[Family], family: Family) -> bool {
-        let mut i = 0;
-        while i < families.len() {
-            if families[i] as usize == family as usize {
-                return true;
-            }
-            i += 1;
-        }
-        false
-    }
     let mut v = 0;
     while v < VERBS.len() {
         let verb = &VERBS[v];
@@ -576,59 +523,20 @@ const _: () = {
         let mut g = 0;
         while g < verb.groups.len() {
             let group = &verb.groups[g];
-            let mut f = 0;
-            // Validate both the group declaration and each narrowed flag list.
-            while f <= group.flags.len() {
-                let families = if f == group.flags.len() {
-                    group.families
-                } else {
-                    match group.flags[f].families {
-                        Some(rows) => rows,
-                        None => group.families,
+            let mut i = 0;
+            while i < group.families.len() {
+                let mut declared = false;
+                let mut j = 0;
+                while j < verb.families.len() {
+                    if verb.families[j].family as usize == group.families[i] as usize {
+                        declared = true;
                     }
-                };
-                let mut i = 0;
-                while i < families.len() {
-                    let mut declared = false;
-                    let mut j = 0;
-                    while j < verb.families.len() {
-                        if verb.families[j].family as usize == families[i] as usize {
-                            declared = true;
-                        }
-                        j += 1;
-                    }
-                    assert!(declared, "undeclared registry family");
-                    i += 1;
+                    j += 1;
                 }
-                f += 1;
+                assert!(declared, "undeclared registry family");
+                i += 1;
             }
             g += 1;
-        }
-        let mut i = 0;
-        while i < verb.families.len() {
-            let family = verb.families[i].family;
-            let mut populated = verb.groups.is_empty();
-            g = 0;
-            while g < verb.groups.len() {
-                let group = &verb.groups[g];
-                let mut f = 0;
-                while f < group.flags.len() {
-                    if contains(group.families, family) {
-                        match group.flags[f].families {
-                            None => populated = true,
-                            Some(rows) => {
-                                if contains(rows, family) {
-                                    populated = true;
-                                }
-                            }
-                        }
-                    }
-                    f += 1;
-                }
-                g += 1;
-            }
-            assert!(populated, "registry family has no flags");
-            i += 1;
         }
         v += 1;
     }

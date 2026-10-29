@@ -114,20 +114,14 @@
 //! The `cfg(patina)`/`cfg(patina_shim)` markers this crate compiles against are
 //! injected by `cargo patina build` — an adopter never sets them.
 //!
-//! - To configure Patina in code and then drive normal application code through
-//!   the same shims, use the shim-backed harness crate `patina-dst-harness`
-//!   (mode 2).
-//! - For the low-level explicit-`Context` API — `run`/`run_with`, `Context`,
-//!   `RuntimeBuilder`, `RuntimeConfig`, and ABI types — depend on
-//!   [`patina-dst-runtime`] directly (mode 3); the deterministic async surface
-//!   lives in `patina-dst-async` over that same `Context`. This API creates an
-//!   explicit context and does not control unrelated `std` calls.
+//! To configure Patina in code and then drive normal application code through
+//! the same shims, use the shim-backed harness crate `patina-dst-harness`
+//! (mode 2).
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
 //! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
 //! [TUTORIAL]: https://github.com/JacobHayes/patina/blob/main/TUTORIAL.md
 //! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
-//! [`patina-dst-runtime`]: https://docs.rs/patina-dst-runtime
 
 #[cfg(feature = "macros")]
 pub use patina_dst_macros::test;
@@ -176,8 +170,8 @@ pub mod __rt;
 
 /// FFI into the native shim. Present only when the shim is actually linked
 /// (`cfg(patina_shim)`, injected by `cargo patina build`). Under a plain
-/// `cargo build` or `cargo patina run`, these symbols are never
-/// referenced, so nothing is left unresolved at link time.
+/// `cargo build` these symbols are never referenced, so nothing is left
+/// unresolved at link time.
 #[cfg(patina_shim)]
 mod ffi;
 

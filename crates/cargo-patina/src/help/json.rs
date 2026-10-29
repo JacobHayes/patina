@@ -62,17 +62,8 @@ fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
     if flag.repeatable {
         m.insert("repeatable".into(), J::from(true));
     }
-    // Present only when this flag reaches fewer families than its group, which
-    // is how an agent learns that `--budget` is Cargo-family-only while the
-    // `--seed` beside it is universal.
     if let Some(parent) = flag.requires {
         m.insert("requires".into(), J::from(parent));
-    }
-    if let Some(families) = flag.families {
-        m.insert(
-            "families".into(),
-            J::from(families.iter().map(|f| f.tag()).collect::<Vec<_>>()),
-        );
     }
     let _ = group;
     J::Object(m)

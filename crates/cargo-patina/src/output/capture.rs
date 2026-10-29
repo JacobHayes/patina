@@ -29,20 +29,15 @@ pub fn end_guest_line(stream: &mut Vec<u8>) {
     }
 }
 
-/// Run a fully-configured child command, capturing its output when the installed
-/// options require it (JSON / render / report) and otherwise inheriting the
-/// caller's streams unchanged (the human default). Signal death maps to a
-/// `CliError` exactly like [`crate::exit_code`].
-/// Whether guest output will be captured (JSON / render / report active and not
-/// suppressed).
+/// Whether guest output will be captured (JSON / render / report active).
 pub fn capture_active() -> bool {
-    options().wants_capture() && !suppressed()
+    options().wants_capture()
 }
 
 /// Whether this invocation emits a JSON envelope (and so answers a refused
 /// run with one rather than with an error).
 pub fn json_active() -> bool {
-    options().is_json() && !suppressed()
+    options().is_json()
 }
 
 /// Whether this invocation wants the runtime's structured `patina.runfacts/v1`
@@ -119,34 +114,6 @@ fn parse_facts_document(line: &[u8]) -> Result<serde_json::Value, CliError> {
             "the run-facts channel carried schema {other:?}; expected {}",
             patina_dst_runtime::FACTS_SCHEMA
         ))),
-    }
-}
-
-pub fn execute_command(command: &mut Command) -> Result<Captured, CliError> {
-    if capture_active() {
-        let output = command
-            .output()
-            .map_err(|error| CliError(format!("failed to execute child process: {error}")))?;
-        Ok(Captured {
-            exit_code: exit_code(output.status)?,
-            stdout: output.stdout,
-            stderr: output.stderr,
-            captured: true,
-            signal: None,
-            core: false,
-        })
-    } else {
-        let status: ExitStatus = command
-            .status()
-            .map_err(|error| CliError(format!("failed to execute child process: {error}")))?;
-        Ok(Captured {
-            exit_code: exit_code(status)?,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            captured: false,
-            signal: None,
-            core: false,
-        })
     }
 }
 

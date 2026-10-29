@@ -57,18 +57,3 @@ run = "cargo test -p cargo-patina --test native_conformance --locked"
 description = "List registry entries no conformance scenario covers and no exclusion accounts for; exits 1 while any remain"
 run = "cargo run -q -p patina-dst-conformance --bin conformance-coverage --locked"
 
-[tasks.demo]
-description = "Run the explicit-context vertical-slice demo"
-run = '''
-set -euo pipefail
-cargo build -p cargo-patina
-export PATH="$PWD/target/debug:$PATH"
-rm -f /tmp/demo.patina
-cargo patina run -p patina-dst-runtime --example deterministic --seed 123
-cargo patina run -p patina-dst-runtime --example deterministic --seed 123 --record /tmp/demo.patina
-cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic
-cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --branch --from 1 --branch-seed 456 --branch-id branch-456
-cargo patina replay . /tmp/demo.patina -p patina-dst-runtime --example deterministic --timeline branch-456
-cargo patina run -p patina-dst-runtime --example simulation --seed 321
-cargo patina explore run --seeds 10 -p patina-dst-runtime --example deterministic
-'''

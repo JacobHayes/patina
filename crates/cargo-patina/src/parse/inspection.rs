@@ -27,7 +27,7 @@ pub(crate) fn parse_trace(
 
 fn parse_trace_info(arguments: Vec<OsString>) -> Result<trace_cmd::TraceInfo, CliError> {
     let scan = locate_positionals("trace", &arguments, 1);
-    let args = cli::parse("trace", help::Family::Info, scan.rest)?;
+    cli::parse("trace", help::Family::Info, scan.rest)?;
     Ok(trace_cmd::TraceInfo {
         path: scan
             .positionals
@@ -35,7 +35,6 @@ fn parse_trace_info(arguments: Vec<OsString>) -> Result<trace_cmd::TraceInfo, Cl
             .next()
             .map(PathBuf::from)
             .ok_or_else(|| CliError::usage("trace info requires a trace path"))?,
-        timeline: timeline_or_main(&args),
     })
 }
 
@@ -80,14 +79,13 @@ fn parse_trace_events(arguments: Vec<OsString>) -> Result<trace_cmd::TraceEvents
             .next()
             .map(PathBuf::from)
             .ok_or_else(|| CliError::usage("trace events requires a trace path"))?,
-        timeline: timeline_or_main(&args),
         filters,
     })
 }
 
 fn parse_trace_stats(arguments: Vec<OsString>) -> Result<trace_cmd::TraceStats, CliError> {
     let scan = locate_positionals("trace", &arguments, 1);
-    let args = cli::parse("trace", help::Family::Stats, scan.rest)?;
+    cli::parse("trace", help::Family::Stats, scan.rest)?;
     Ok(trace_cmd::TraceStats {
         path: scan
             .positionals
@@ -95,7 +93,6 @@ fn parse_trace_stats(arguments: Vec<OsString>) -> Result<trace_cmd::TraceStats, 
             .next()
             .map(PathBuf::from)
             .ok_or_else(|| CliError::usage("trace stats requires a trace path"))?,
-        timeline: timeline_or_main(&args),
     })
 }
 
@@ -112,7 +109,6 @@ fn parse_trace_diff(arguments: Vec<OsString>) -> Result<trace_cmd::TraceDiff, Cl
     Ok(trace_cmd::TraceDiff {
         a: PathBuf::from(&scan.positionals[0]),
         b: PathBuf::from(&scan.positionals[1]),
-        timeline: timeline_or_main(&args),
         context: args.usize("--context").unwrap_or(3),
     })
 }

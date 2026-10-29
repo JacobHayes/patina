@@ -50,8 +50,7 @@ mod tests {
         );
 
         // `run` honors the identical selection (source-first uniformity) and executes
-        // the chosen member, built native on the fly (a package that integrates the
-        // Patina runtime would stay the cargo family instead).
+        // the chosen member, built native on the fly.
         let ran = invoke(
             build_workspace,
             &[
@@ -101,9 +100,8 @@ mod tests {
     // * `--record` in package mode produces a trace, and `replay <dir>` reproduces it.
     // * `replay <dir>` with a missing trace hard-errors before any guest runs.
     // * `build .` from inside the package directory succeeds.
-    // * A bare `run` from inside a package that does not integrate the Patina
-    //   runtime is refused loudly, pointing at the native path, instead of
-    //   degrading to a plain `cargo run` that bypasses the gate.
+    // * A bare `run` from inside a package names no artifact and is refused,
+    //   never run.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn package_dir_positional_is_a_source_for_run_record_replay_and_build() {
@@ -184,17 +182,51 @@ mod tests {
             &pkg,
             &["run", "--seed", "1"],
         );
-        let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
             !out.status.success()
                 && !String::from_utf8_lossy(&out.stdout).contains("TARGET_PKG_MARKER"),
-            "cwd-mode run of a non-Patina package must not run the guest:\n{stderr}"
+            "a run naming no artifact must not run the guest:\n{}",
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert!(
-            stderr.contains("does not depend on the Patina runtime")
-                && stderr.contains("cargo patina run <DIR"),
-            "missing loud refusal pointing at the native path:\n{stderr}"
+    }
+
+    // A package that depends on the Patina SDK is an ordinary program: `run
+    // <dir>` builds it shim-linked and interposes its std effects. Its file
+    // write lands in the deterministic filesystem, not on the host, and its
+    // clock reads are virtual, so two runs of one seed agree to the nanosecond.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_package_path_runs_interposed() {
+        let directory = tempdir().unwrap();
+        let pkg = directory.path().join("sdk-pkg");
+        let probe = directory.path().join("host-probe");
+        write_sdk_fixture(
+            &pkg,
+            &format!(
+                "fn main() {{\n\
+                 let probe = std::path::Path::new({probe:?});\n\
+                 std::fs::create_dir_all(probe.parent().unwrap()).unwrap();\n\
+                 std::fs::write(probe, b\"x\").unwrap();\n\
+                 let read = std::fs::read(probe).unwrap();\n\
+                 let wall = std::time::SystemTime::now()\n\
+                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();\n\
+                 let start = std::time::Instant::now();\n\
+                 std::thread::sleep(std::time::Duration::from_secs(3600));\n\
+                 println!(\"PROBE simulated={{}} read={{read:?}} wall={{wall}} slept={{}}\",\n\
+                     patina_dst::is_simulated(), start.elapsed().as_secs());\n\
+                 }}\n"
+            ),
         );
+        let run = || {
+            let out = invoke(&pkg, &["run", pkg.to_str().unwrap(), "--seed", "3"]);
+            stdout_line_with(&out, "PROBE")
+        };
+        let first = run();
+        assert!(first.contains("simulated=true"), "{first}");
+        // An hour of sleep took no wall time and the write never reached the host.
+        assert!(first.contains("slept=3600"), "{first}");
+        assert!(!probe.exists(), "the guest's write escaped to the host");
+        assert_eq!(first, run(), "two runs of one seed diverged");
     }
 
     // `run <package dir>` builds on the fly and must reach the same pre-run gate

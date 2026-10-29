@@ -212,14 +212,8 @@ pub(super) fn key_values(
     Ok(map)
 }
 
-/// The `--timeline` selector, defaulting to `main`.
-pub(super) fn timeline_or_main(args: &cli::Args) -> String {
-    args.string("--timeline")
-        .unwrap_or_else(|| "main".to_string())
-}
-
-/// The cooperative-SUT (buggify) control-plane pairs the native and cargo
-/// families forward to their subprocess. Presence of `PATINA_RT_BUGGIFY` (its value, possibly empty, being the firing
+/// The cooperative-SUT (buggify) control-plane pairs a run forwards to its
+/// guest. Presence of `PATINA_RT_BUGGIFY` (its value, possibly empty, being the firing
 /// per-mille) enables buggify; the optional knobs follow.
 pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, String)> {
     let mut pairs = vec![(
@@ -241,8 +235,8 @@ pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, S
 /// The exploration scheduling-policy and swarm control-plane pairs. Presence of
 /// `PATINA_RT_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
 /// depth); `PATINA_RT_SWARM` enables
-/// swarm fault-class selection. Mirrors [`knob_env_pairs`]: the native family
-/// forwards them to its subprocess through the same protocol.
+/// swarm fault-class selection. Mirrors [`knob_env_pairs`]: a run forwards them
+/// to its guest through the same protocol.
 pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> {
     let mut pairs = Vec::new();
     if let Some(depth) = &schedule.pct {

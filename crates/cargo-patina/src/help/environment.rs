@@ -12,22 +12,17 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_RT_*",
         scope: "protocol",
-        doc: "The runtime's supervisor↔guest control plane, below. Set only by the supervisor: an inherited PATINA_RT_* is removed from every Cargo-family child, and a native guest starts from an empty environment.",
-    },
-    EnvVar {
-        name: "PATINA_RT_SEED",
-        scope: "user",
-        doc: "The seed the runtime reads; a scenario-minimize oracle receives its candidate seed here. To seed a cargo-patina invocation use --seed (or PATINA_SEED).",
+        doc: "The runtime's supervisor↔guest control plane, below. Set only by the supervisor: a native guest starts from an empty environment.",
     },
     EnvVar {
         name: patina_dst_runtime::Report::ENV_NAMES,
         scope: "user",
-        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. The structured run facts a campaign classifies do not depend on them.",
+        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. The structured run facts a campaign classifies do not depend on them.",
     },
     EnvVar {
         name: "PATINA_RT_PARAMS_JSON",
-        scope: "user",
-        doc: "Typed --param values as a JSON object (the scenario-minimize oracle protocol).",
+        scope: "protocol",
+        doc: "Run parameters as a JSON object (mirrors --param); recorded and restored on replay.",
     },
     EnvVar {
         name: "PATINA_CLI",
@@ -37,7 +32,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_RT_MODE",
         scope: "protocol",
-        doc: "Run mode (seeded/record/replay/branch); set by the supervisor for the guest.",
+        doc: "Run mode (seeded/record/replay); set by the supervisor for the guest.",
     },
     EnvVar {
         name: "PATINA_RT_TRACE",
@@ -55,14 +50,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Native coverage dump descriptor for --coverage-out.",
     },
     EnvVar {
-        name: "PATINA_RT_FACTS",
-        scope: "protocol",
-        doc: "Path the runtime writes its patina.runfacts/v1 document to (cargo family). Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
-    },
-    EnvVar {
         name: "PATINA_RT_FACTS_FD",
         scope: "protocol",
-        doc: "Inherited descriptor carrying the same patina.runfacts/v1 document on the native family, so a fully interposed guest never writes it through the deterministic FS.",
+        doc: "Inherited descriptor carrying the run's patina.runfacts/v1 document, so a fully interposed guest never writes it through the deterministic FS. Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
     },
     EnvVar {
         name: "PATINA_RT_FS_IMAGE_FD",
@@ -88,11 +78,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         name: "PATINA_RT_EXPECTED_SUPERVISOR_SHA256",
         scope: "protocol",
         doc: "Digest of the cargo-patina that launched this one (campaign and reduction children); a cargo-patina of another build refuses before running anything.",
-    },
-    EnvVar {
-        name: "PATINA_RT_TIMELINE / PATINA_RT_PARENT_TIMELINE / PATINA_RT_BRANCH_FROM / PATINA_RT_BRANCH_SEED / PATINA_RT_BRANCH_ID",
-        scope: "protocol",
-        doc: "Timeline and branch-append controls (mirror the replay --timeline/--branch flags).",
     },
     EnvVar {
         name: "PATINA_RT_GUEST_ARGV",

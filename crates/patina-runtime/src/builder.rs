@@ -1,5 +1,4 @@
 //! Runtime construction and deterministic driver assembly.
-use crate::ENV_FACTS;
 
 use crate::buggify::Buggify;
 use crate::clock::VirtualClock;
@@ -34,8 +33,8 @@ use std::collections::BTreeMap;
 /// family (filesystem, clock, entropy, scheduler, network).
 ///
 /// Every slot gets the standard deterministic driver unless a `with_*` call
-/// supplies one — this is how [`run_with`] callers add fault wrapper drivers
-/// or a custom network. [`build`](RuntimeBuilder::build) validates the combination
+/// supplies one — this is how tests add fault wrapper drivers or a custom
+/// network. [`build`](RuntimeBuilder::build) validates the combination
 /// and is the single choke point that wires config-driven fault injection
 /// (e.g. the crash filesystem) so a parsed knob can never be silently dropped.
 pub struct RuntimeBuilder {
@@ -668,9 +667,9 @@ impl RuntimeBuilder {
             (Some(sink), None) => Some(facts::FactsOutput::Sink(sink)),
             (None, Some(path)) => Some(facts::FactsOutput::Path(path)),
             (Some(_), Some(_)) => {
-                return Err(RuntimeError::Config(format!(
-                    "a run-facts sink and a facts path ({ENV_FACTS}) were both installed; use exactly one"
-                )));
+                return Err(RuntimeError::Config(
+                    "a run-facts sink and a facts path were both installed; use exactly one".into(),
+                ));
             }
         };
 

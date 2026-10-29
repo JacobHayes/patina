@@ -77,25 +77,23 @@ fn classifies_and_resolves_positional_arguments() {
 
     // Resolution: a prebuilt binary is used as-is and a lone `.rs` builds.
     assert!(matches!(
-        resolve_positional(elf.as_os_str()).unwrap(),
-        Some(ArtifactRef::Prebuilt(_))
+        resolve_positional("run", elf.as_os_str()).unwrap(),
+        ArtifactRef::Prebuilt(_)
     ));
     assert!(matches!(
-        resolve_positional(source.as_os_str()).unwrap(),
-        Some(ArtifactRef::Build(_))
+        resolve_positional("run", source.as_os_str()).unwrap(),
+        ArtifactRef::Build(_)
     ));
 
-    // A package directory resolves to a native build-on-the-fly — the SAME path
-    // `audit` uses, so an existing directory is never reinterpreted as guest
-    // argv. (Keeping a runtime-linked package on the cargo family is a
-    // `run`/`replay` routing decision made upstream via
-    // `package_integrates_patina`, not by this pure resolver.)
+    // A package directory resolves to a native build-on-the-fly, so an existing
+    // directory is never reinterpreted as guest argv.
     assert!(matches!(
-        resolve_positional(pkg.as_os_str()).unwrap(),
-        Some(ArtifactRef::Build(_))
+        resolve_positional("run", pkg.as_os_str()).unwrap(),
+        ArtifactRef::Build(_)
     ));
-    // A leading flag resolves to nothing (the caller's no-artifact path).
-    assert!(resolve_positional(OsStr::new("--seed")).unwrap().is_none());
+    // A leading flag or a plain file is neither.
+    assert!(resolve_positional("run", OsStr::new("--seed")).is_err());
+    assert!(resolve_positional("run", plain.as_os_str()).is_err());
 }
 
 #[test]

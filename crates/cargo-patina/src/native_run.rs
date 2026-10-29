@@ -10,7 +10,7 @@ use crate::native_build::{
     instrumentation_fingerprint, native_run_fingerprint, resolve_artifact,
 };
 use crate::output;
-use crate::parse::{knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
+use crate::parse::{buggify_env_pairs, knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
 use crate::run_cache::Image;
 use crate::{
     CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
@@ -19,7 +19,6 @@ use crate::{
 use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
-    ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
     ENV_COVERAGE_FD, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV,
     ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_INITIAL_STACK, ENV_MODE,
     ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
@@ -467,15 +466,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         // and restored from the trace on native replay, rather than re-supplied
         // as semantic flags.
         if let Some(buggify) = &invocation.buggify {
-            command.env(ENV_BUGGIFY, buggify.fire_permille.as_deref().unwrap_or(""));
-            if let Some(value) = &buggify.activation_permille {
-                command.env(ENV_BUGGIFY_ACTIVATION, value);
-            }
-            if let Some(value) = &buggify.cutoff_nanos {
-                command.env(ENV_BUGGIFY_CUTOFF, value);
-            }
-            if buggify.after_setup {
-                command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
+            for (name, value) in buggify_env_pairs(buggify) {
+                command.env(name, value);
             }
         }
         // Forward the exploration scheduling-policy (PCT) and swarm

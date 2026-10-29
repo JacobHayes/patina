@@ -18,7 +18,7 @@ pub(crate) fn parse_native_harness_from(
             "--bin does not select a libtest harness; use --harness-target with the Cargo test target name",
         ));
     }
-    let args = cli::parse("test", help::Family::Harness, selection.rest)?;
+    let args = cli::parse("test", help::Family::Sole, selection.rest)?;
     let (seed, seeds) = args.exclusive(
         "--seed",
         "--seeds",
@@ -242,7 +242,7 @@ pub(crate) fn parse_native_run(
 /// The `--realtime-epoch` timestamp as Unix-time nanoseconds, or `None` when
 /// the flag is absent. The registry's `UtcTimestamp` grammar has already
 /// validated the text, so the conversion cannot fail here.
-pub(super) fn realtime_epoch_of(args: &cli::Args) -> Option<u64> {
+fn realtime_epoch_of(args: &cli::Args) -> Option<u64> {
     args.string("--realtime-epoch").map(|text| {
         values::utc_timestamp_nanos("--realtime-epoch", &text)
             .expect("the registry validated --realtime-epoch as a UtcTimestamp")
@@ -257,7 +257,7 @@ pub(crate) fn parse_native_run_from(
     mut arguments: Vec<OsString>,
 ) -> Result<NativeRunInvocation, CliError> {
     let program_args = split_trailing_args(&mut arguments);
-    let args = cli::parse("run", help::Family::Native, arguments)?;
+    let args = cli::parse("run", help::Family::Sole, arguments)?;
     let seed = args.u64("--seed").unwrap_or(0);
     let record = args.path("--record");
     // The label is only ever read back off a recorded trace, and the seeded
@@ -321,7 +321,7 @@ pub(crate) fn parse_native_replay(
     mut arguments: Vec<OsString>,
 ) -> Result<NativeRunInvocation, CliError> {
     let program_args = split_trailing_args(&mut arguments);
-    let args = cli::parse("replay", help::Family::Native, arguments)?;
+    let args = cli::parse("replay", help::Family::Sole, arguments)?;
     Ok(NativeRunInvocation {
         binary,
         mode: NativeRunMode::Replay {

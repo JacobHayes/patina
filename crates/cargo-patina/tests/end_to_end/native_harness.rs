@@ -6,52 +6,6 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn explore_failure_reports_copy_paste_repro_in_line_and_json() {
-        let directory = tempdir().unwrap();
-        let source = directory.path().join("explore_fail.rs");
-        fs::write(
-            &source,
-            "fn main() { eprintln!(\"GUEST_FAILED explore planted\"); std::process::exit(3); }\n",
-        )
-        .unwrap();
-        let output = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &[
-                "explore",
-                "run",
-                source.to_str().unwrap(),
-                "--seeds",
-                "1",
-                "--format",
-                "json",
-            ],
-        );
-        assert_eq!(output.status.code(), Some(3));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("PATINA_EXPLORE_FAILURE seed=0 exit=3 repro="),
-            "missing explore repro line:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("cargo patina run") && stderr.contains("--seed 0"),
-            "repro line should be copy-pasteable:\n{stderr}"
-        );
-        let value: serde_json::Value =
-            serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
-        assert_eq!(value["verb"], "explore");
-        assert_eq!(value["result"], "failure");
-        assert!(
-            value["message"]
-                .as_str()
-                .unwrap()
-                .contains("repro: cargo patina run"),
-            "JSON envelope should carry the repro: {value}"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
     fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         let directory = tempdir().unwrap();
         create_native_harness_fixture(directory.path());

@@ -3,7 +3,6 @@ members = [
     "crates/cargo-patina",
     "crates/patina",
     "crates/patina-abi",
-    "crates/patina-async",
     "crates/patina-conformance",
     "crates/patina-driver-api",
     "crates/patina-fs-crash",
@@ -81,7 +80,6 @@ repository = "https://github.com/JacobHayes/patina"
 # Keep these in lockstep with `workspace.package.version` above.
 patina-dst = { path = "crates/patina", version = "0.1.0" }
 patina-dst-abi = { path = "crates/patina-abi", version = "0.1.0" }
-patina-dst-async = { path = "crates/patina-async", version = "0.1.0" }
 patina-dst-driver-api = { path = "crates/patina-driver-api", version = "0.1.0" }
 patina-dst-fs-crash = { path = "crates/patina-fs-crash", version = "0.1.0" }
 patina-dst-fs-mem = { path = "crates/patina-fs-mem", version = "0.1.0" }

@@ -2,44 +2,6 @@
 
 use super::*;
 
-pub(super) const EXPLORE: Verb = Verb {
-    name: "explore",
-    summary: "Sweep a seed range of `run`/`test`, reporting per-seed outcomes.",
-    synopsis: &[
-        "cargo patina explore run <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--seeds N] [--seed-start N] [RUN OPTIONS]",
-        "cargo patina explore test [--seeds N] [--seed-start N] [PATINA/CARGO OPTIONS]",
-    ],
-    prose: "\
-`explore run`/`explore test` sweeps a contiguous seed range over one artifact or \
-Cargo target, running each seed as a child and reporting per-seed outcomes. The \
-wrapped command must be in a plain seeded mode — record/replay/branch pin a single \
-run and have nothing to sweep. Every option after the seed controls is the wrapped \
-`run`/`test` command's; run `cargo patina run --help` or `cargo patina test --help` \
-for those.",
-    families: &[fam(Family::Sole, "`explore`", None)],
-    groups: &[Group {
-        title: "Explore options",
-        families: SOLE,
-        flags: &[
-            f(
-                "--seeds",
-                None,
-                Value::Required("N", Kind::PositiveU64),
-                "Number of seeds to sweep (1..=1000000, default 100).",
-                false,
-            ),
-            f(
-                "--seed-start",
-                None,
-                Value::Required("N", Kind::U64),
-                "First seed in the range (default: the wrapped command's seed).",
-                false,
-            ),
-        ],
-    }],
-    refusals: NO_REFUSALS,
-};
-
 pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
@@ -366,20 +328,20 @@ pub(super) const TRACE: Verb = Verb {
     name: "trace",
     summary: "Inspect a recorded trace: metadata, filtered events, aggregates, or a two-trace diff.",
     synopsis: &[
-        "cargo patina trace info <TRACE> [--timeline ID]",
-        "cargo patina trace events <TRACE> [--timeline ID] [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
-        "cargo patina trace stats <TRACE> [--timeline ID]",
-        "cargo patina trace diff <A.patina> <B.patina> [--timeline ID] [--context N]",
+        "cargo patina trace info <TRACE>",
+        "cargo patina trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
+        "cargo patina trace stats <TRACE>",
+        "cargo patina trace diff <A.patina> <B.patina> [--context N]",
     ],
     prose: "\
 `trace` strictly loads and validates an existing .patina trace, then inspects it \n\
-without executing a guest. `trace info` is the cheap index: metadata, timelines, \n\
-resolved event count, and the virtual-time span. `trace events` runs the shared \n\
+without executing a guest. `trace info` is the cheap index: metadata, event \n\
+count, and the virtual-time span. `trace events` runs the shared \n\
 semantic walk used by the HTML renderer, so task attribution, operation \n\
 categories, virtual time, summaries, and notable-event detection match the \n\
 rendered timeline. `trace stats` aggregates that same walk by kind, category, \n\
-task, notable class, and virtual time. `trace diff` compares two resolved \n\
-timelines operation-first, then outcome, mirroring replay mismatch semantics and \n\
+task, notable class, and virtual time. `trace diff` compares two traces \n\
+operation-first, then outcome, mirroring replay mismatch semantics and \n\
 reporting the first divergence without attempting LCS/re-sync alignment.\n\
 \n\
 `trace info --format json` follows the normal result-envelope contract: one \n\
@@ -405,26 +367,15 @@ metadata.",
         fam(
             Family::Stats,
             "trace stats",
-            Some("trace stats aggregates the whole resolved timeline"),
+            Some("trace stats aggregates the whole trace"),
         ),
         fam(
             Family::Diff,
             "trace diff",
-            Some("trace diff compares full resolved timelines"),
+            Some("trace diff compares whole traces"),
         ),
     ],
     groups: &[
-        Group {
-            title: "Trace options (trace info/events/stats/diff)",
-            families: &[Family::Info, Family::Events, Family::Stats, Family::Diff],
-            flags: &[f(
-                "--timeline",
-                None,
-                Value::Required("ID", Kind::Str),
-                "Resolved timeline to inspect (default main). For diff, applies to both traces.",
-                false,
-            )],
-        },
         Group {
             title: "Events options (trace events)",
             families: &[Family::Events],

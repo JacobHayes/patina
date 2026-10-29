@@ -1,6 +1,5 @@
-//! Control-plane environment parsing and runtime configuration overlays.
-// Process-environment reads are confined to configuration, before installation.
-#![allow(clippy::disallowed_methods)]
+//! Control-plane parsing: runtime configuration overlays read through an
+//! embedder-supplied accessor (the native shim's captured control plane).
 use crate::config::{
     RuntimeConfig, validate_cpus, validate_dns_entry, validate_guest_cwd, validate_guest_env,
     validate_hostname, validate_partition,
@@ -9,42 +8,13 @@ use crate::config::{
 use crate::scheduler::PctConfig;
 use crate::{
     DEFAULT_CONVERGE_BUDGET_NANOS, DEFAULT_LIVENESS_BUDGET_NANOS, DEFAULT_PCT_DEPTH,
-    DEFAULT_PCT_STEPS, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY,
-    ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN,
-    ENV_FACTS, ENV_FACTS_FD, ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD,
-    ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
-    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT,
-    ENV_SCHED_PCT_STEPS, ENV_SCHED_YIELD_STRIDE, ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM,
-    ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError,
+    DEFAULT_PCT_STEPS, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP,
+    ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD,
+    ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG,
+    ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS, ENV_SCHED_YIELD_STRIDE,
+    ENV_SWARM, FaultKnob, Plane, RuntimeError,
 };
 use std::collections::BTreeMap;
-use std::env;
-use std::path::PathBuf;
-
-/// Parse the documented `PATINA_RT_TRACE_FD` variable into a raw descriptor.
-///
-/// Embedders that can service the descriptor (for example the native shim)
-/// use this to build a [`TraceTransport`]; `RuntimeConfig::from_env` uses it
-/// to select the transport execution modes.
-pub fn trace_fd_from_env() -> Result<Option<i32>, RuntimeError> {
-    match env::var(ENV_TRACE_FD) {
-        Ok(value) => {
-            let fd: i32 = value.parse().map_err(|_| {
-                RuntimeError::Config(format!("{ENV_TRACE_FD} must be a non-negative descriptor"))
-            })?;
-            if fd < 0 {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_TRACE_FD} must be a non-negative descriptor"
-                )));
-            }
-            Ok(Some(fd))
-        }
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(RuntimeError::Config(format!(
-            "{ENV_TRACE_FD} must be valid UTF-8"
-        ))),
-    }
-}
 
 /// Parse a per-mille probability, requiring an integer in [0, 1000].
 fn parse_permille(name: &str, value: &str) -> Result<u16, RuntimeError> {
@@ -78,33 +48,6 @@ fn parse_nanos_range(name: &str, value: &str) -> Result<(u64, u64), RuntimeError
     Ok((min, max))
 }
 
-fn parse_seed(value: Option<String>) -> Result<u64, RuntimeError> {
-    value.map_or(Ok(0), |value| {
-        value.parse().map_err(|_| {
-            RuntimeError::Config(format!("{ENV_SEED} must be an unsigned 64-bit integer"))
-        })
-    })
-}
-
-fn required_u64(name: &str) -> Result<u64, RuntimeError> {
-    required_string(name)?
-        .parse()
-        .map_err(|_| RuntimeError::Config(format!("{name} must be an unsigned 64-bit integer")))
-}
-
-fn required_path(name: &str) -> Result<PathBuf, RuntimeError> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| RuntimeError::Config(format!("{name} is required for this mode")))
-}
-
-fn required_string(name: &str) -> Result<String, RuntimeError> {
-    env::var(name)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| RuntimeError::Config(format!("{name} is required for this mode")))
-}
 impl RuntimeConfig {
     /// Apply the DNS host table from a control-plane accessor, mirroring
     /// [`RuntimeConfig::apply_fault_env`]. The table is a JSON object; a
@@ -476,19 +419,6 @@ impl RuntimeConfig {
         Ok(self)
     }
 
-    /// Read the facts-document path from the control plane ([`ENV_FACTS`]).
-    pub fn apply_facts_env<F>(mut self, get: F) -> Self
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        if let Some(value) = get(ENV_FACTS)
-            && !value.trim().is_empty()
-        {
-            self.facts_path = Some(std::path::PathBuf::from(value));
-        }
-        self
-    }
-
     /// Apply the end-of-run report-suppression knobs from a control-plane
     /// accessor, mirroring [`RuntimeConfig::apply_fault_env`]. Every [`Report`]'s
     /// variable is resolved here, ONCE, because finalization has no usable view
@@ -551,114 +481,6 @@ impl RuntimeConfig {
             }
         }
         Ok(self)
-    }
-
-    pub fn from_env() -> Result<Self, RuntimeError> {
-        let mode = env::var(ENV_MODE).unwrap_or_else(|_| "seeded".into());
-        let seed = parse_seed(env::var(ENV_SEED).ok())?;
-        let trace_fd = trace_fd_from_env()?;
-        if trace_fd.is_some() && env::var_os(ENV_TRACE).is_some_and(|value| !value.is_empty()) {
-            return Err(RuntimeError::Config(format!(
-                "{ENV_TRACE} and {ENV_TRACE_FD} must not both be set"
-            )));
-        }
-        let config = match (mode.as_str(), trace_fd) {
-            ("seeded", None) => Self::seeded(seed),
-            ("seeded", Some(_)) => {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_TRACE_FD} is only meaningful in record or replay mode"
-                )));
-            }
-            ("record", None) => Self::record(
-                seed,
-                required_path(ENV_TRACE)?,
-                required_string(ENV_FINGERPRINT)?,
-            ),
-            ("record", Some(_)) => Self::record_transport(seed, required_string(ENV_FINGERPRINT)?),
-            ("replay", None) => Self::replay_timeline(
-                required_path(ENV_TRACE)?,
-                env::var(ENV_TIMELINE).unwrap_or_else(|_| "main".into()),
-                required_string(ENV_FINGERPRINT)?,
-            ),
-            ("replay", Some(_)) => Self::replay_transport_timeline(
-                env::var(ENV_TIMELINE).unwrap_or_else(|_| "main".into()),
-                required_string(ENV_FINGERPRINT)?,
-            ),
-            ("branch", None) => Self::branch(
-                required_path(ENV_TRACE)?,
-                env::var(ENV_PARENT_TIMELINE).unwrap_or_else(|_| "main".into()),
-                required_u64(ENV_BRANCH_FROM)?,
-                required_string(ENV_BRANCH_ID)?,
-                required_u64(ENV_BRANCH_SEED)?,
-                required_string(ENV_FINGERPRINT)?,
-            ),
-            ("branch", Some(_)) => {
-                return Err(RuntimeError::Config(format!(
-                    "branch mode requires a {ENV_TRACE} path; {ENV_TRACE_FD} is unsupported"
-                )));
-            }
-            (value, _) => {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_MODE} must be seeded, record, replay, or branch; got {value:?}"
-                )));
-            }
-        };
-        let mut config = match env::var(ENV_STEP_BUDGET) {
-            Ok(value) => config.with_step_budget(value.parse().map_err(|_| {
-                RuntimeError::Config(format!(
-                    "{ENV_STEP_BUDGET} must be an unsigned 64-bit integer"
-                ))
-            })?),
-            Err(env::VarError::NotPresent) => config,
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_STEP_BUDGET} must be valid UTF-8"
-                )));
-            }
-        };
-        if let Some(value) = env::var_os(ENV_PARAMS_JSON) {
-            let value = value.into_string().map_err(|_| {
-                RuntimeError::Config(format!("{ENV_PARAMS_JSON} must be valid UTF-8"))
-            })?;
-            let params: BTreeMap<String, String> =
-                serde_json::from_str(&value).map_err(|error| {
-                    RuntimeError::Config(format!("{ENV_PARAMS_JSON} is invalid: {error}"))
-                })?;
-            if params.keys().any(String::is_empty) {
-                return Err(RuntimeError::Config(
-                    "runtime parameter key must not be empty".into(),
-                ));
-            }
-            config.params = params;
-        }
-        let config = config.apply_fault_env(|name| env::var(name).ok())?;
-        let config = config.apply_dns_env(|name| env::var(name).ok())?;
-        let config = config.apply_buggify_env(|name| env::var(name).ok())?;
-        let config = config.apply_schedule_env(|name| env::var(name).ok())?;
-        let config = config.apply_swarm_env(|name| env::var(name).ok())?;
-        let config = config.apply_liveness_env(|name| env::var(name).ok())?;
-        let config = config.apply_guest_argv_env(|name| env::var(name).ok())?;
-        let config = config.apply_guest_env_env(|name| env::var(name).ok())?;
-        let config = config.apply_guest_cwd_env(|name| env::var(name).ok())?;
-        let config = config.apply_realtime_epoch_env(|name| env::var(name).ok())?;
-        let config = config.apply_hostname_env(|name| env::var(name).ok())?;
-        let config = config.apply_cpus_env(|name| env::var(name).ok())?;
-        // The report-suppression knobs are resolved HERE, with every other knob,
-        // and never again: finalization must not reach for the process
-        // environment (see `ReportConfig`).
-        let config = config.apply_report_env(|name| env::var(name).ok());
-        // The facts channel, resolved with every other knob. A descriptor
-        // channel ([`ENV_FACTS_FD`]) is installed by the embedder that owns the
-        // descriptor (the native shim), so the two must never both be live.
-        if env::var_os(ENV_FACTS_FD).is_some_and(|value| !value.is_empty())
-            && env::var_os(ENV_FACTS).is_some_and(|value| !value.is_empty())
-        {
-            return Err(RuntimeError::Config(format!(
-                "{ENV_FACTS} and {ENV_FACTS_FD} must not both be set"
-            )));
-        }
-        let config = config.apply_facts_env(|name| env::var(name).ok());
-        Ok(config)
     }
 }
 

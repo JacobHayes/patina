@@ -4,76 +4,12 @@
 mod tests {
     use super::super::*;
 
-    #[test]
-    fn the_cargo_family_accepts_buggify_flags_and_scrubs_an_ambient_control_plane() {
-        // Buggify was reachable from the Cargo family only through PATINA_RT_BUGGIFY* in
-        // the caller's environment: the runtime path was always family-neutral, but
-        // the parser omitted the flags. Now `run`/`test` carry them like every other
-        // family — and, like the fault knobs, scrub the ambient control plane so a
-        // stale variable cannot enable buggify in a run that did not ask for it.
-        let directory = tempdir().unwrap();
-        let fixture = directory.path().join("fixture");
-        create_fixture(&fixture);
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
-
-        let enabled = invoke_unchecked_clean_env(
-            patina,
-            &fixture,
-            &[
-                "run",
-                "--seed",
-                "7",
-                "--buggify=400",
-                "--buggify-cutoff-nanos",
-                "5000",
-            ],
-            &[],
-        );
-        let stderr = String::from_utf8_lossy(&enabled.stderr);
-        assert!(
-            stderr.contains("PATINA_SDK_REPORT enabled=1") && stderr.contains("fire_permille=400"),
-            "cargo-family --buggify did not reach the guest runtime:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("cutoff_nanos=5000"),
-            "cargo-family buggify detail knobs did not reach the guest:\n{stderr}"
-        );
-
-        // `replay` registers no buggify flag — the trace is authoritative — so an
-        // ambient PATINA_RT_BUGGIFY has no CLI meaning there. Before the scrub it would
-        // still have reached the guest's own control-plane read and buggified a
-        // replay of a buggify-free recording, which is a corrupted reproduction.
-        let trace = directory.path().join("clean.patina");
-        let recorded = invoke_unchecked_clean_env(
-            patina,
-            &fixture,
-            &["run", "--seed", "7", "--record", trace.to_str().unwrap()],
-            &[],
-        );
-        assert!(recorded.status.success());
-        let replayed = invoke_unchecked_clean_env(
-            patina,
-            &fixture,
-            &["replay", ".", trace.to_str().unwrap()],
-            &[("PATINA_RT_BUGGIFY", "900")],
-        );
-        let stderr = String::from_utf8_lossy(&replayed.stderr);
-        assert!(
-            replayed.status.success(),
-            "replay under an ambient PATINA_RT_BUGGIFY failed:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("PATINA_SDK_REPORT enabled=1"),
-            "an ambient PATINA_RT_BUGGIFY buggified a replay of a buggify-free trace:\n{stderr}"
-        );
-    }
-
     // `run` and `audit` recognize a native binary by its leading magic bytes.
     // Options and the artifact may appear in any order (the `cargo run`
     // ergonomic): a registered flag before the binary runs identically to the
-    // binary-leading spelling; a real artifact stranded behind an UNKNOWN flag is
-    // a loud routing error; and a nonexistent path-like artifact fails closed with
-    // a usage error rather than falling through to a confusing `cargo run`. A
+    // binary-leading spelling; a real artifact behind an UNKNOWN flag is a usage
+    // error naming the flag; and a nonexistent artifact fails closed with a usage
+    // error. A
     // `--help` after `--` is guest argv and runs the guest; before `--` it is
     // Patina help. `--budget` bounds recorded boundary operations, and one
     // operation is below any real guest's needs, so an honored budget shows up as
@@ -131,8 +67,7 @@ mod tests {
             String::from_utf8_lossy(&flag_first.stderr)
         );
 
-        // A real artifact stranded behind an unknown flag is a loud routing error
-        // naming the flag, never a silent Cargo fallthrough.
+        // A real artifact behind an unknown flag is a usage error naming the flag.
         let stranded = run(&["run", "--frob", module]);
         assert!(!stranded.status.success());
         assert!(
@@ -253,7 +188,7 @@ mod tests {
         );
         let verbs = index["verbs"].as_object().expect("verbs object");
         for verb in [
-            "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize",
+            "run", "test", "build", "audit", "replay", "campaign", "minimize",
         ] {
             assert!(
                 verbs.contains_key(verb),
@@ -269,7 +204,7 @@ mod tests {
         // `cargo patina run --help --format json` emits ONLY run's detail: run's own
         // flags (its unique --mount) but NOT another verb's unique flag (campaign's
         // --gens), and no environment block. Absent-field defaults hold: --release is
-        // native to build; run's repeatable --param carries `repeatable: true`.
+        // native to build; run's repeatable --env carries `repeatable: true`.
         let run_out = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             directory.path(),
@@ -297,13 +232,13 @@ mod tests {
             !run_flags.contains("--gens"),
             "run's payload leaked campaign's unique --gens flag"
         );
-        let param = e2e_find_flag(&run["verb"]["flag_groups"], "--param").expect("run has --param");
+        let env = e2e_find_flag(&run["verb"]["flag_groups"], "--env").expect("run has --env");
         assert_eq!(
-            param["repeatable"], true,
+            env["repeatable"], true,
             "a repeatable flag emits repeatable: true"
         );
         assert!(
-            param.get("short").is_none(),
+            env.get("short").is_none(),
             "a short-less flag omits the `short` key entirely (absent means none)"
         );
     }

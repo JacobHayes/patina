@@ -21,11 +21,7 @@ pub fn is_simulated() -> bool {
         // Authoritative: ask the linked shim whether the runtime is installed.
         unsafe { ffi::patina_is_simulated() != 0 }
     }
-    #[cfg(all(patina, not(patina_shim)))]
-    {
-        true
-    }
-    #[cfg(not(patina))]
+    #[cfg(not(patina_shim))]
     {
         false
     }

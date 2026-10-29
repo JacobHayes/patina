@@ -326,51 +326,6 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
     ),
 ];
 
-pub(super) const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
-    f(
-        "--timeline",
-        None,
-        Value::Required("ID", Kind::Str),
-        "Replay a named timeline (default main).",
-        false,
-    ),
-    f(
-        "--branch",
-        None,
-        Value::None,
-        "Replay the parent prefix then append a new branch timeline.",
-        false,
-    ),
-    f(
-        "--from",
-        None,
-        Value::Required("N", Kind::U64),
-        "Branch point sequence number. Requires --branch.",
-        false,
-    ),
-    f(
-        "--branch-seed",
-        None,
-        Value::Required("S", Kind::U64),
-        "Seed for the appended branch. Requires --branch.",
-        false,
-    ),
-    f(
-        "--branch-id",
-        None,
-        Value::Required("ID", Kind::Str),
-        "Id for the appended branch timeline. Requires --branch.",
-        false,
-    ),
-    f(
-        "--parent",
-        None,
-        Value::Required("ID", Kind::Str),
-        "Parent timeline to branch from (default main). Requires --branch.",
-        false,
-    ),
-];
-
 pub(super) const ALLOW_FLAG: Flag = f(
     "--allow",
     None,

@@ -31,8 +31,6 @@ mod campaign_guided;
 mod campaign_outcomes;
 #[path = "end_to_end/campaign_verify.rs"]
 mod campaign_verify;
-#[path = "end_to_end/cargo_replay.rs"]
-mod cargo_replay;
 #[path = "end_to_end/crash_restart.rs"]
 mod crash_restart;
 #[path = "end_to_end/custom_ops.rs"]

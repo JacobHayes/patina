@@ -1,163 +1,10 @@
 //! Argument parsing regression tests.
 
 use super::*;
-use crate::tests::{invocation, parse_error, strings};
-use crate::{
-    ArtifactRef, ExploreTarget, Mode, NativeBuildTarget, NativeRunInvocation, NativeRunMode,
-};
-use patina_dst_runtime::FaultKnob;
+use crate::tests::strings;
+use crate::{ArtifactRef, NativeBuildTarget, NativeRunInvocation, NativeRunMode};
 use std::ffi::OsStr;
 use std::path::PathBuf;
-
-#[test]
-fn strips_cargo_plugin_name_and_forwards_unknown_arguments() {
-    let parsed = invocation(&[
-        "patina",
-        "run",
-        "--seed",
-        "42",
-        "--budget",
-        "100",
-        "--param",
-        "zone=a",
-        "--release",
-        "--example=demo",
-    ]);
-    assert_eq!(parsed.cargo_command, "run");
-    assert_eq!(parsed.mode, Mode::Seeded { seed: 42 });
-    assert_eq!(parsed.step_budget, Some(100));
-    assert_eq!(parsed.params.get("zone").map(String::as_str), Some("a"));
-    assert_eq!(parsed.cargo_args, strings(&["--release", "--example=demo"]));
-}
-
-#[test]
-fn does_not_consume_program_arguments_after_separator() {
-    let parsed = invocation(&["run", "--seed=1", "--", "--seed", "application"]);
-    assert_eq!(parsed.mode, Mode::Seeded { seed: 1 });
-    assert_eq!(parsed.cargo_args, strings(&["--", "--seed", "application"]));
-    // The artifact scan never crosses `--` either: an artifact-looking token
-    // there is the guest's, so it is neither routed nor failed closed.
-    let tail = invocation(&["run", "--seed", "5", "--", "./nonexistent"]);
-    assert_eq!(tail.cargo_args, strings(&["--", "./nonexistent"]));
-}
-
-#[test]
-fn parses_record_and_replay_and_rejects_conflicts() {
-    assert_eq!(
-        invocation(&["test", "--record", "run.patina"]).mode,
-        Mode::Record {
-            seed: 0,
-            path: "run.patina".into()
-        }
-    );
-    // Replaying a Cargo-family recording is the `replay` verb's job. The `.`
-    // package positional routes to the Cargo family (the crate directory the
-    // test runs in) and the trace positional replaces the old `--replay` PATH.
-    let replayed = invocation(&["replay", ".", "run.patina"]);
-    assert_eq!(
-        replayed.mode,
-        Mode::Replay {
-            path: "run.patina".into(),
-            timeline: "main".into(),
-        }
-    );
-    // A recording is produced by `run`, so replay reproduces the `run`
-    // program under the runtime; its package directory is threaded through.
-    assert_eq!(replayed.cargo_command, "run");
-    assert!(replayed.working_dir.is_some());
-    assert_eq!(
-        invocation(&[
-            "replay",
-            ".",
-            "run.patina",
-            "--branch",
-            "--from",
-            "4",
-            "--branch-seed",
-            "99",
-            "--branch-id",
-            "branch-99",
-            "--parent",
-            "main",
-        ])
-        .mode,
-        Mode::Branch {
-            path: "run.patina".into(),
-            parent: "main".into(),
-            from_sequence: 4,
-            branch_seed: 99,
-            branch_id: "branch-99".into(),
-        }
-    );
-    // `--timeline` selects a timeline to replay and cannot combine with the
-    // branch controls; branch controls without `--branch` are also rejected.
-    assert!(
-        parse(strings(&[
-            "replay",
-            ".",
-            "run.patina",
-            "--branch",
-            "--from",
-            "1",
-            "--branch-seed",
-            "2",
-            "--branch-id",
-            "b",
-            "--timeline",
-            "x",
-        ]))
-        .is_err()
-    );
-    assert!(parse(strings(&["replay", ".", "run.patina", "--from", "1"])).is_err());
-    // `run`/`test` no longer parse the replay/branch flags: an unknown flag is
-    // forwarded to Cargo, leaving the Patina mode plainly seeded.
-    assert_eq!(
-        invocation(&["test", "--seed", "1"]).mode,
-        Mode::Seeded { seed: 1 }
-    );
-}
-
-#[test]
-fn cargo_family_parses_fault_knobs_and_explore_run_native() {
-    // The Cargo family accepts the seed-driven fault knobs on run/test.
-    let parsed = invocation(&[
-        "run",
-        "--process-crash-permille",
-        "2",
-        "--net-drop-permille",
-        "300",
-        "--",
-        "app-arg",
-    ]);
-    assert_eq!(parsed.knobs.get(FaultKnob::ProcessCrashPermille), ["2"]);
-    assert_eq!(parsed.knobs.get(FaultKnob::NetDropPermille), ["300"]);
-    // The `--` tail is forwarded to Cargo, unaffected by fault parsing.
-    assert_eq!(parsed.cargo_args, strings(&["--", "app-arg"]));
-
-    // `explore run <BINARY>` sweeps the native family (build once, run the same
-    // artifact across seeds). The binary is recognized by magic bytes; here a
-    // real ELF-headed file exercises the routing.
-    let directory = tempfile::tempdir().unwrap();
-    let module = native_fixture(&directory, "app");
-    match parse(strings(&[
-        "explore",
-        "run",
-        module.to_str().unwrap(),
-        "--seeds",
-        "4",
-        "--seed-start",
-        "2",
-    ]))
-    .unwrap()
-    {
-        ParseResult::Explore(exploration) => {
-            assert_eq!(exploration.start_seed, 2);
-            assert_eq!(exploration.seed_count, 4);
-            assert!(matches!(exploration.target, ExploreTarget::Native(_)));
-        }
-        _ => panic!("expected a native exploration"),
-    }
-}
 
 fn is_help(values: &[&str]) -> bool {
     matches!(parse(strings(values)), Ok(ParseResult::Help(_)))
@@ -169,17 +16,15 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     // routes to Help — never consumed as a positional, never an error.
     let is_version = |values: &[&str]| matches!(parse(strings(values)), Ok(ParseResult::Version));
     for verb in [
-        "run", "test", "build", "audit", "replay", "explore", "campaign", "minimize", "coverage",
-        "sites", "syscalls", "trace",
+        "run", "test", "build", "audit", "replay", "campaign", "minimize", "coverage", "sites",
+        "syscalls", "trace",
     ] {
         assert!(is_help(&[verb, "--help"]), "{verb} --help");
         assert!(is_help(&[verb, "-h"]), "{verb} -h");
         assert!(is_version(&[verb, "--version"]), "{verb} --version");
         assert!(is_version(&[verb, "-V"]), "{verb} -V");
     }
-    // Explore/trace subcommands.
-    assert!(is_help(&["explore", "run", "--help"]));
-    assert!(is_help(&["explore", "test", "--help"]));
+    // Trace subcommands.
     assert!(is_help(&["trace", "info", "--help"]));
     assert!(is_help(&["trace", "events", "--help"]));
     // After a positional (the old bug: `--help` swallowed as an artifact/trace
@@ -190,7 +35,6 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
     assert!(is_help(&["audit", "artifact", "--help"]));
     assert!(is_help(&["build", "src.rs", "--help"]));
     assert!(is_help(&["minimize", "trace.patina", "--help"]));
-    assert!(is_help(&["explore", "run", "artifact", "--help"]));
     assert!(is_help(&["trace", "events", "trace.patina", "--help"]));
     // Top-level.
     assert!(is_help(&["--help"]));
@@ -206,17 +50,16 @@ fn help_and_version_are_intercepted_for_every_verb_and_position() {
 
 #[test]
 fn nonexistent_pathlike_positional_fails_closed() {
-    // A token that clearly names a file path but does not exist is a hard
-    // error, not a silent cargo-family fallthrough.
-    assert!(classify_arg(OsStr::new("./nonexistent")).is_err());
-    assert!(classify_arg(OsStr::new("missing.rs")).is_err());
-    assert!(classify_arg(OsStr::new("sub/dir/thing")).is_err());
-    assert!(classify_arg(OsStr::new("no/such/Cargo.toml")).is_err());
-    // A bare name (no extension, no separator) stays a cargo argument.
-    assert!(matches!(
-        classify_arg(OsStr::new("mycrate")).unwrap(),
-        ArgKind::Other
-    ));
+    // A positional that does not exist is a hard error.
+    for missing in [
+        "./nonexistent",
+        "missing.rs",
+        "sub/dir/thing",
+        "no/such/Cargo.toml",
+        "mycrate",
+    ] {
+        assert!(classify_arg(OsStr::new(missing)).is_err(), "{missing}");
+    }
     // Routed through the verbs.
     assert!(parse(strings(&["run", "./nope"])).is_err());
     assert!(parse(strings(&["audit", "./nope"])).is_err());
@@ -381,58 +224,24 @@ fn fingerprint_on_a_seeded_native_run_is_refused_not_ignored() {
 }
 
 #[test]
-fn conservative_stop_keeps_unknown_flag_runs_in_the_cargo_family() {
-    // `--bin` is registered (source-first selection), so its value `server` is
-    // skipped by the scan: no artifact, Cargo family.
-    assert!(matches!(
-        parse(strings(&["run", "--bin", "server"])).unwrap(),
-        ParseResult::Run(_)
-    ));
-    assert!(matches!(
-        parse(strings(&["run", "--seed", "5", "--bin", "server"])).unwrap(),
-        ParseResult::Run(_)
-    ));
-    // An UNKNOWN flag stops the scan; `./thing` after it is path-like but does
-    // NOT exist, so it is presumed the unknown flag's value (never an artifact)
-    // and the run stays the Cargo family.
-    assert!(matches!(
-        parse(strings(&[
-            "run",
-            "--seed",
-            "5",
-            "--some-unknown",
-            "./thing"
-        ]))
-        .unwrap(),
-        ParseResult::Run(_)
-    ));
-    // A forwarded cargo flag with a (nonexistent) manifest value, no artifact
-    // token present: the whole list forwards to Cargo.
-    assert!(matches!(
-        parse(strings(&["run", "--manifest-path", "./x/Cargo.toml"])).unwrap(),
-        ParseResult::Run(_)
-    ));
-    // `--release` is not a `run` flag; with no artifact it is a forwarded cargo
-    // flag (like `cargo run --release`), and the run stays the Cargo family.
-    match parse(strings(&["run", "--release", "--seed", "5"])).unwrap() {
-        ParseResult::Run(inv) => {
-            assert_eq!(inv.mode, Mode::Seeded { seed: 5 });
-            assert!(inv.cargo_args.iter().any(|a| a == "--release"));
-        }
-        _ => panic!("expected a Cargo-family run"),
-    }
-    // A real compiled artifact stranded behind an unknown flag is a loud routing error naming both,
-    // never a silent Cargo fallthrough.
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let module = native_fixture(&dir, "app");
-        let m = module.to_str().unwrap();
-        // `--frob` is unknown and `app` is a real compiled artifact (never a
-        // flag value): a loud routing error naming both, never a silent Cargo
-        // fallthrough.
-        let message = parse_error(&["run", "--frob", m]);
-        assert!(message.contains("--frob"), "{message}");
-        assert!(message.contains(m), "{message}");
+fn run_and_test_without_an_artifact_are_usage_errors() {
+    // There is no implicit current package: every form names its artifact or
+    // package, so a missing one (or one hidden behind an unknown flag) is
+    // refused rather than run as something else.
+    let dir = tempfile::tempdir().unwrap();
+    let module = native_fixture(&dir, "app");
+    let m = module.to_str().unwrap();
+    for argv in [
+        &["run"][..],
+        &["run", "--bin", "server"],
+        &["run", "--release", "--seed", "5"],
+        &["run", "--seed", "5", "--some-unknown", "./thing"],
+        &["run", "--frob", m],
+        &["test"],
+        &["test", "--seed", "1"],
+        &["test", m],
+    ] {
+        assert!(parse(strings(argv)).is_err(), "{argv:?}");
     }
 }
 

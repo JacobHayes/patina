@@ -8,8 +8,7 @@
 //!
 //! The document is emitted only when the embedder installs an output channel
 //! (`RuntimeConfig::with_facts_path`, `RuntimeBuilder::with_facts_sink`, or the
-//! [`ENV_FACTS`](crate::ENV_FACTS) / [`ENV_FACTS_FD`](crate::ENV_FACTS_FD)
-//! control-plane variables), so a run that nobody asked facts of behaves exactly
+//! [`ENV_FACTS_FD`](crate::ENV_FACTS_FD) control-plane variable), so a run that nobody asked facts of behaves exactly
 //! as before.
 //!
 //! Deliberately independent of the report-suppression knobs

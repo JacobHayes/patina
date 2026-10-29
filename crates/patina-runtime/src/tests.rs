@@ -1,8 +1,8 @@
 //! Tests spanning runtime modules and crate entry points.
 
 use crate::config::RuntimeConfig;
-use crate::{Context, EntropyWait, RuntimeError, run_with_context};
-use patina_dst_abi::{ClockKind, EffectError, ErrorCode, TaskId};
+use crate::{Context, EntropyWait, RuntimeError};
+use patina_dst_abi::{ClockKind, TaskId};
 
 use patina_dst_trace::TraceBundle;
 use std::env;
@@ -49,20 +49,6 @@ fn record_and_replay_cross_scheduler_network_clock_and_filesystem() {
     let mut replay = Context::from_config(RuntimeConfig::replay(&path, "simulation-v1")).unwrap();
     assert_eq!(simulation(&mut replay).unwrap(), expected);
     replay.finish().unwrap();
-}
-
-#[test]
-fn run_with_context_finalizes_recording_when_the_application_returns_an_error() {
-    // The explicit-context `run` path always finalizes: a recorded run whose
-    // closure fails still flushes the trace and surfaces the closure error.
-    let directory = tempdir().unwrap();
-    let trace = directory.path().join("failed-run.patina");
-    let context = Context::from_config(RuntimeConfig::record(5, &trace, "fixture-v1")).unwrap();
-    let result = run_with_context(context, |_| {
-        Err::<(), _>(EffectError::new(ErrorCode::Denied, "application failed").into())
-    });
-    assert!(matches!(result, Err(RuntimeError::Effect(_))));
-    assert!(trace.is_file());
 }
 
 /// A process that dies without unwinding — an abort, a kill, `exit`, a

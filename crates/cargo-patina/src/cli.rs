@@ -239,20 +239,6 @@ pub(crate) fn without_env_defaults(command: String) -> String {
     }
 }
 
-/// A printed command built from the operator's own argv, carrying the flag
-/// defaults this process ran it with so it reproduces in any environment.
-pub(crate) fn with_env_defaults(command: String) -> String {
-    let set: Vec<String> = set_env_defaults()
-        .into_iter()
-        .map(|(name, value)| format!("{name}={}", shell_quote(&value)))
-        .collect();
-    if set.is_empty() {
-        command
-    } else {
-        format!("{} {command}", set.join(" "))
-    }
-}
-
 /// Quote one word for a POSIX shell, leaving a plain word bare.
 pub(crate) fn shell_quote(value: &OsStr) -> String {
     let text = value.to_string_lossy();
@@ -503,80 +489,6 @@ fn parsed<T: std::str::FromStr>(name: &str, value: &str) -> T {
         .unwrap_or_else(|_| panic!("{name} passed its registry grammar but did not reparse"))
 }
 
-/// Split a token list into the tokens `family` owns and the tokens forwarded
-/// verbatim — the Cargo family's conservative passthrough, and `explore`'s
-/// wrapping of a whole `run`/`test` command.
-///
-/// Arity comes from the registry, so the split and the parser can never disagree
-/// about whether a flag swallows the next token. Everything else keeps its
-/// original `OsString`: order is preserved, and a non-UTF-8 token — never a
-/// Patina flag — is forwarded untouched. A `--` and everything after it is
-/// forwarded whole.
-///
-/// The family's DECLARED refusals are kept too, so `replay <pkg> <trace>
-/// --machine-crash-permille 5` is answered with "the trace is authoritative" rather
-/// than handed to Cargo as an unknown flag. Sibling-family flags are NOT: they
-/// are exactly the names a legitimate Cargo argument might share (`--bin`,
-/// `--release`), and forwarding them is the passthrough's whole purpose.
-pub(crate) fn partition(
-    verb: &'static help::Verb,
-    family: Family,
-    arguments: Vec<OsString>,
-) -> (Vec<OsString>, Vec<OsString>) {
-    let mut arity: BTreeMap<&'static str, Value> = BTreeMap::new();
-    for (name, _) in verb.declared_refusals(family) {
-        // A refused flag's value, if any, is discarded with it, so it is treated
-        // as taking no separate token.
-        arity.insert(name, Value::None);
-    }
-    for flag in verb.family_flags(family) {
-        arity.insert(flag.name, flag.value);
-        if let Some(short) = flag.short {
-            arity.insert(short, flag.value);
-        }
-    }
-    let mut owned = Vec::new();
-    let mut forwarded = Vec::new();
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        if argument == "--" {
-            forwarded.extend_from_slice(&arguments[index..]);
-            break;
-        }
-        let name = argument.to_str().map(split_name);
-        match name.and_then(|name| arity.get(name).copied()) {
-            Some(Value::Required(..)) if !is_inline(argument) => {
-                owned.push(argument.clone());
-                if let Some(value) = arguments.get(index + 1) {
-                    owned.push(value.clone());
-                    index += 1;
-                }
-            }
-            Some(Value::Optional(..)) if !is_inline(argument) => {
-                owned.push(argument.clone());
-                // An optional-value flag takes its value ONLY inline, so a plain
-                // token after the bare form is not its value. Keep that token on
-                // the owned side rather than forwarding it to Cargo: the family
-                // parser then rejects it as a stray positional, instead of the
-                // operator's `--buggify 500` silently meaning "buggify at the
-                // default rate, and 500 is a Cargo test filter".
-                if let Some(next) = arguments.get(index + 1)
-                    && next != "--"
-                    && !next.to_string_lossy().starts_with('-')
-                {
-                    owned.push(next.clone());
-                    index += 1;
-                }
-            }
-            Some(_) => owned.push(argument.clone()),
-            None => forwarded.push(argument.clone()),
-        }
-        index += 1;
-    }
-    (owned, forwarded)
-}
-
 /// The flag name of a token, without any inline `=VALUE`. A non-flag token is
 /// returned whole, so a positional like `zone=a` is never read as a flag.
 pub(crate) fn split_name(token: &str) -> &str {
@@ -584,12 +496,6 @@ pub(crate) fn split_name(token: &str) -> &str {
         Some((name, _)) if name.starts_with('-') => name,
         _ => token,
     }
-}
-
-fn is_inline(argument: &OsStr) -> bool {
-    argument
-        .to_str()
-        .is_some_and(|text| split_name(text) != text)
 }
 
 /// The values a pre-pass stripped, keyed by canonical flag name and in the order

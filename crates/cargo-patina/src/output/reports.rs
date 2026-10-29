@@ -60,9 +60,6 @@ pub struct Qualification {
 /// human format, render the timeline/failure report if requested, emit the JSON
 /// envelope if requested, and return the process exit code.
 pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, CliError> {
-    if suppressed() {
-        return Ok(captured.exit_code);
-    }
     let opts = options();
     let stdout_text = String::from_utf8_lossy(&captured.stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&captured.stderr).into_owned();

@@ -317,7 +317,6 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         | RuntimeError::Io { .. }
         | RuntimeError::Trace(_)
         | RuntimeError::InvalidOutcome { .. }
-        | RuntimeError::RunAndFinalize { .. }
         | RuntimeError::ScheduleDivergence { .. } => return false,
     }
     true
@@ -1187,10 +1186,6 @@ pub(crate) fn runtime_config_from_control_plane()
     // and the interposed `getenv` returns NULL for everything, so a knob read then
     // would silently report "not set" and every suppression request would be inert.
     config = config.with_reports(control_reports());
-    // The run-facts path travels the same control plane. On this family the
-    // supervisor uses the descriptor channel instead, so a path AND a descriptor
-    // together are refused by `RuntimeBuilder::build` — never silently dropped.
-    config = config.apply_facts_env(control_env);
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.

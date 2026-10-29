@@ -19,11 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-use patina_dst_runtime::{
-    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_FINGERPRINT, ENV_GUEST_HOSTNAME, ENV_MODE,
-    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET,
-    ENV_TIMELINE, ENV_TRACE, FaultKnob,
-};
+use patina_dst_runtime::{ENV_MODE, ENV_PARAMS_JSON, ENV_SEED, FaultKnob};
 use patina_dst_trace::remove_dead_scratch;
 use sha2::{Digest, Sha256};
 
@@ -64,42 +60,14 @@ mod trace_view;
 mod values;
 
 use audit::execute_native_audit;
-use harness::{execute_explore, execute_native_harness};
+use harness::execute_native_harness;
 use native_build::{
     binary_instrumented, execute_native_build, instrumentation_fingerprint, resolve_artifact,
 };
 use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
-use parse::{
-    ParseResult, buggify_env_pairs, current_verb, knob_env_pairs, locate_positionals,
-    package_integrates_patina, parse,
-};
+use parse::{ParseResult, current_verb, locate_positionals, parse};
 use shim_build::lock_target_dir;
 
-/// Remove every inherited runtime control-plane variable
-/// ([`patina_dst_runtime::RUNTIME_ENV_PREFIX`]) from `command`'s environment,
-/// so only what the supervisor itself sets reaches the child.
-pub(crate) fn strip_runtime_env(command: &mut Command) {
-    for (name, _) in env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(patina_dst_runtime::RUNTIME_ENV_PREFIX))
-        {
-            command.env_remove(name);
-        }
-    }
-}
-
-const PATINA_CFG_FLAGS: &str = "--cfg patina --cfg dst";
-
-/// Crate names whose presence in a package's declared dependencies means the
-/// package integrates the Patina deterministic runtime at the library level. This
-/// is the routing pivot between the two execution models a `run`/`replay` of a
-/// Cargo package can take: a runtime-linked package stays on the cargo-family
-/// path (seed/param/budget/branch and record/replay honored by the linked
-/// runtime), while a plain package is built shim-linked and run under the native
-/// pre-run gate. `patina-dst` (the SDK) re-exports the runtime, so either name
-/// counts.
-const PATINA_RUNTIME_CRATES: &[&str] = &["patina-dst-runtime", "patina-dst"];
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
 /// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
 /// resolves the guest binary to an absolute host path (tempdir-specific,
@@ -141,28 +109,6 @@ unsafe extern "C" {
 #[cfg(target_os = "linux")]
 const _: unsafe extern "C" fn(std::ffi::c_int, ...) -> std::ffi::c_int = prctl;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Mode {
-    Seeded {
-        seed: u64,
-    },
-    Record {
-        seed: u64,
-        path: PathBuf,
-    },
-    Replay {
-        path: PathBuf,
-        timeline: String,
-    },
-    Branch {
-        path: PathBuf,
-        parent: String,
-        from_sequence: u64,
-        branch_seed: u64,
-        branch_id: String,
-    },
-}
-
 struct NativeAuditInvocation {
     binary: ArtifactRef,
     allow: BTreeSet<String>,
@@ -176,57 +122,6 @@ struct NativeAuditInvocation {
 
 /// Default number of candidate seeds tried when reducing a scenario's seed.
 const DEFAULT_SEED_BUDGET: u64 = 256;
-
-#[derive(Clone)]
-struct Invocation {
-    cargo_command: String,
-    cargo_args: Vec<OsString>,
-    mode: Mode,
-    step_budget: Option<u64>,
-    /// The run's virtual realtime epoch in Unix-time nanoseconds
-    /// (`--realtime-epoch`), forwarded as [`ENV_REALTIME_EPOCH_NANOS`]; `None`
-    /// leaves the runtime default. Recorded into the trace on `--record`; the
-    /// `replay` verb carries `None` and the trace restores it.
-    realtime_epoch_nanos: Option<u64>,
-    /// The guest's node name (`--hostname`), forwarded as
-    /// [`ENV_GUEST_HOSTNAME`] and observable through `Context::hostname`;
-    /// `None` leaves the runtime default. Recorded and restored like the epoch.
-    hostname: Option<String>,
-    params: BTreeMap<String, String>,
-    /// Seed-driven fault-injection knobs forwarded to the guest through the
-    /// `PATINA_*` control plane (the same knobs the native family accepts).
-    /// Recorded into the trace metadata on `--record`; restored from the trace
-    /// on the `replay` verb, so a cargo-family replay is flag-free. Default
-    /// (all `None`) leaves faults off.
-    knobs: KnobValues,
-    /// Cooperative-SUT (buggify) knobs, or `None` when `--buggify` was not
-    /// passed. Forwarded over the same `PATINA_RT_BUGGIFY*` control plane the other
-    /// families use; the guest's `apply_buggify_env` is family-neutral, so only
-    /// the parser ever omitted them.
-    buggify: Option<NativeBuggify>,
-    /// Working directory the cargo subprocess runs in, or `None` to inherit the
-    /// caller's. Set by the cargo-family `replay` verb from its `<pkg>` positional
-    /// so a replay can run from anywhere while its fingerprint (which walks the
-    /// package's own source tree) still matches the recording.
-    working_dir: Option<PathBuf>,
-}
-
-struct ExploreInvocation {
-    target: ExploreTarget,
-    start_seed: u64,
-    seed_count: u64,
-    wrapped_command: Vec<OsString>,
-}
-
-/// What `explore` sweeps across seeds. The Cargo package family re-runs the whole
-/// `run`/`test` command per seed (each cargo invocation is cheap next to the
-/// build it caches). The native family instead builds the artifact once and runs
-/// that SAME artifact across every seed, so a source/package is never rebuilt
-/// per seed.
-enum ExploreTarget {
-    Cargo(Box<Invocation>),
-    Native(Box<NativeRunInvocation>),
-}
 
 struct NativeHarnessInvocation {
     origin: PathBuf,
@@ -653,12 +548,10 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
             );
             Ok(0)
         }
-        ParseResult::Run(invocation) => execute(invocation),
         ParseResult::Campaign(invocation) => campaign::execute(invocation),
         ParseResult::Coverage(invocation) => coverage::execute(invocation),
         ParseResult::Sites(options) => sites::execute(options),
         ParseResult::Syscalls(invocation) => syscalls::execute(invocation),
-        ParseResult::Explore(invocation) => execute_explore(invocation),
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
@@ -666,398 +559,6 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::Minimize(invocation) => minimize::execute(invocation),
         ParseResult::Trace(invocation) => trace_cmd::execute(invocation),
     }
-}
-
-fn execute(invocation: Invocation) -> Result<i32, CliError> {
-    for knob in [
-        FaultKnob::MachineCrashPermille,
-        FaultKnob::ProcessCrashPermille,
-    ] {
-        if !invocation.knobs.get(knob).is_empty() {
-            return Err(CliError::usage(format!(
-                "cargo-family {} crash-restart is not implemented; refusing rather than running a crash with no restart",
-                knob.meta().flag
-            )));
-        }
-    }
-    let workspace = workspace_root_in(invocation.working_dir.as_deref(), &invocation.cargo_args)?;
-
-    // The cargo-family `run` (and its cargo-family `replay`, which reuses the
-    // `run` command) derives ALL of its determinism — seeding, recording, replay,
-    // and the escape surface — from the runtime the guest package LINKS. A package
-    // that does not integrate the Patina runtime links no such runtime, so this
-    // path would silently degrade to a plain `cargo run`: no pre-run gate, a
-    // no-op `--record`, and a fail-open `replay`. Refuse it loudly here — before
-    // any guest executes — and point at the native path, which builds the package
-    // shim-linked and runs it under the pre-run default-deny gate. `test` is left
-    // to Cargo (a plain `cargo test` is a legitimate thing to ask for).
-    if invocation.cargo_command == "run"
-        && !package_integrates_patina(None, invocation.working_dir.as_deref())
-    {
-        let where_ = match &invocation.working_dir {
-            Some(dir) => format!("the package at {}", dir.display()),
-            None => "the current package".to_string(),
-        };
-        return Err(CliError(format!(
-            "refusing to run {where_}: it does not depend on the Patina runtime \
-(patina-dst / patina-dst-runtime), so a cargo-family run links no deterministic \
-runtime and CANNOT apply the pre-run escape gate, record a trace, or replay — it \
-would run the guest as a plain `cargo run`. Run it under the native deterministic \
-runtime instead, which builds it shim-linked and applies the pre-run default-deny \
-gate:\n  cargo patina run <DIR|Cargo.toml> [--seed N] [--record <PATH>]\nor build it \
-and run/audit the artifact (cargo patina build <DIR|Cargo.toml> --output <PATH>)."
-        )));
-    }
-
-    // Replay/branch read a recorded trace; a missing or unreadable one must fail
-    // closed BEFORE the guest runs, never fall through to a plain run (the
-    // cargo-family fail-open replay defect). The native replay path validates the
-    // trace the same way via `reconcile_replay_argv`.
-    if let Mode::Replay { path, .. } | Mode::Branch { path, .. } = &invocation.mode {
-        fs::read(path).map_err(|error| {
-            CliError(format!(
-                "failed to read trace {} for replay: {error}",
-                path.display()
-            ))
-        })?;
-    }
-
-    ensure_lockfile(&workspace)?;
-    let fingerprint = compatibility_fingerprint(&workspace, &invocation)?;
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(cargo);
-    // The cargo-family `replay` verb runs from anywhere: run cargo in the
-    // package's directory so its build and workspace resolution match the
-    // recording (whose fingerprint walks that same source tree), without adding a
-    // `--manifest-path` to the arguments, which would perturb the fingerprint.
-    if let Some(working_dir) = &invocation.working_dir {
-        command.current_dir(working_dir);
-    }
-    command
-        .arg(&invocation.cargo_command)
-        .args(&invocation.cargo_args)
-        .env("RUSTFLAGS", patina_rustflags());
-    // Only the control plane this invocation sets reaches the child: an
-    // ambient `PATINA_RT_*` in the caller's environment must never perturb a
-    // run. Stripped before anything is set.
-    strip_runtime_env(&mut command);
-    command.env(ENV_FINGERPRINT, fingerprint.clone());
-    // Forward this run's fault knobs. On a `--record` run the child's runtime
-    // captures them into the trace metadata; on the `replay` verb none are set
-    // (the trace is authoritative and the runtime restores them), so replay is
-    // flag-free.
-    for (name, value) in knob_env_pairs(&invocation.knobs)? {
-        command.env(name, value);
-    }
-    // Cooperative-SUT (buggify) knobs ride the same control plane.
-    if let Some(buggify) = &invocation.buggify {
-        for (name, value) in buggify_env_pairs(buggify) {
-            command.env(name, value);
-        }
-    }
-    if let Some(budget) = invocation.step_budget {
-        command.env(ENV_STEP_BUDGET, budget.to_string());
-    }
-    if let Some(nanos) = invocation.realtime_epoch_nanos {
-        command.env(ENV_REALTIME_EPOCH_NANOS, nanos.to_string());
-    }
-    if let Some(hostname) = &invocation.hostname {
-        command.env(ENV_GUEST_HOSTNAME, hostname);
-    }
-    if !invocation.params.is_empty() {
-        command.env(
-            ENV_PARAMS_JSON,
-            serde_json::to_string(&invocation.params)
-                .map_err(|error| CliError(format!("failed to encode parameters: {error}")))?,
-        );
-    }
-
-    match &invocation.mode {
-        Mode::Seeded { seed } => {
-            command
-                .env(ENV_MODE, "seeded")
-                .env(ENV_SEED, seed.to_string());
-        }
-        Mode::Record { seed, path } => {
-            command
-                .env(ENV_MODE, "record")
-                .env(ENV_SEED, seed.to_string())
-                .env(ENV_TRACE, path);
-        }
-        Mode::Replay { path, timeline } => {
-            command
-                .env(ENV_MODE, "replay")
-                .env(ENV_TRACE, path)
-                .env(ENV_TIMELINE, timeline);
-        }
-        Mode::Branch {
-            path,
-            parent,
-            from_sequence,
-            branch_seed,
-            branch_id,
-        } => {
-            command
-                .env(ENV_MODE, "branch")
-                .env(ENV_TRACE, path)
-                .env(ENV_PARENT_TIMELINE, parent)
-                .env(ENV_BRANCH_FROM, from_sequence.to_string())
-                .env(ENV_BRANCH_SEED, branch_seed.to_string())
-                .env(ENV_BRANCH_ID, branch_id);
-        }
-    }
-    if invocation.cargo_command == "test" {
-        command.env("RUST_TEST_THREADS", "1");
-    }
-    // The structured run-facts channel. A cargo-family guest is not interposed,
-    // so it writes the document to a plain path like it writes its trace.
-    let facts_file = if output::facts_active() {
-        Some(tempfile::NamedTempFile::new().map_err(|error| {
-            CliError(format!("failed to create the run-facts channel: {error}"))
-        })?)
-    } else {
-        None
-    };
-    if let Some(file) = &facts_file {
-        command.env(patina_dst_runtime::ENV_FACTS, file.path());
-    }
-
-    let captured = output::execute_command(&mut command)?;
-
-    // A successful `--record` run MUST have produced the trace. If the guest exited
-    // 0 but wrote nothing, its runtime never engaged the recorder — a silent no-op
-    // `--record` (exit 0, no file, no error), the worst outcome. Fail closed so the
-    // caller cannot mistake it for a recording. (Only on success: a guest that
-    // failed legitimately may not have reached the point of writing a trace.)
-    if let Mode::Record { path, .. } = &invocation.mode
-        && captured.exit_code == 0
-        && !path.is_file()
-    {
-        return Err(CliError(format!(
-            "record run exited 0 but wrote no trace to {}: the guest's runtime did \
-not engage the recorder, so `--record` was a silent no-op. Ensure the package \
-integrates the Patina runtime, or record under the native runtime: cargo patina run \
-<DIR|Cargo.toml> --record <PATH>.",
-            path.display()
-        )));
-    }
-    let (trace_path, seed, timeline) = match &invocation.mode {
-        Mode::Seeded { seed } => (None, Some(*seed), "main".to_string()),
-        Mode::Record { seed, path } => (Some(path.clone()), Some(*seed), "main".to_string()),
-        Mode::Replay { path, timeline } => (Some(path.clone()), None, timeline.clone()),
-        Mode::Branch {
-            path, branch_id, ..
-        } => (Some(path.clone()), None, branch_id.clone()),
-    };
-    let artifact = format!("cargo {}", invocation.cargo_command);
-    let facts = read_facts_channel(facts_file.as_ref().map(tempfile::NamedTempFile::path))?;
-    output::finalize_run(
-        output::RunReport {
-            verb: &invocation.cargo_command,
-            family: "cargo",
-            artifact: &artifact,
-            trace_path,
-            trace_facts: None,
-            timeline: &timeline,
-            fingerprint: Some(fingerprint),
-            seed,
-            coverage: None,
-            crash_restart: None,
-            facts,
-            supervisor_infra: false,
-            qualifications: Vec::new(),
-        },
-        captured,
-    )
-}
-
-/// Locate the Cargo workspace root, optionally resolving from `working_dir`
-/// (the cargo-family `replay` verb's package directory) rather than the inherited
-/// current directory. An explicit `--manifest-path` in `cargo_args` still wins.
-fn workspace_root_in(
-    working_dir: Option<&Path>,
-    cargo_args: &[OsString],
-) -> Result<PathBuf, CliError> {
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let mut command = Command::new(cargo);
-    command.args(["locate-project", "--workspace", "--message-format", "plain"]);
-    if let Some(working_dir) = working_dir {
-        command.current_dir(working_dir);
-    }
-    if let Some(path) = manifest_path(cargo_args)? {
-        command.arg("--manifest-path").arg(path);
-    }
-    let output = command
-        .output()
-        .map_err(|error| CliError(format!("failed to locate Cargo workspace: {error}")))?;
-    if !output.status.success() {
-        return Err(CliError(format!(
-            "cargo locate-project failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let manifest = String::from_utf8(output.stdout)
-        .map_err(|_| CliError("cargo locate-project returned a non-UTF-8 path".into()))?;
-    let manifest = PathBuf::from(manifest.trim());
-    manifest.parent().map(Path::to_path_buf).ok_or_else(|| {
-        CliError(format!(
-            "workspace manifest has no parent: {}",
-            manifest.display()
-        ))
-    })
-}
-
-fn manifest_path(arguments: &[OsString]) -> Result<Option<&OsStr>, CliError> {
-    let mut index = 0;
-    while index < arguments.len() {
-        if arguments[index] == "--" {
-            break;
-        }
-        if arguments[index] == "--manifest-path" {
-            return arguments
-                .get(index + 1)
-                .map(|value| Some(value.as_os_str()))
-                .ok_or_else(|| CliError::usage("--manifest-path requires a path"));
-        }
-        if let Some(value) = arguments[index]
-            .to_str()
-            .and_then(|value| value.strip_prefix("--manifest-path="))
-        {
-            return Ok(Some(OsStr::new(value)));
-        }
-        index += 1;
-    }
-    Ok(None)
-}
-
-fn patina_rustflags() -> OsString {
-    let mut flags = env::var_os("RUSTFLAGS").unwrap_or_default();
-    if !flags.is_empty() {
-        flags.push(" ");
-    }
-    flags.push(PATINA_CFG_FLAGS);
-    flags
-}
-
-/// Materialize `Cargo.lock` before the fingerprint is computed. The lockfile is
-/// a fingerprint input, but a fresh workspace has none until the first build
-/// writes one. Recording would then hash the pre-build state, while replay —
-/// run after the build materialized the lockfile — hashes a file the recording
-/// never saw and aborts with a spurious `FingerprintMismatch`. Generating it up
-/// front (only when absent, so an existing lockfile's pins are never disturbed)
-/// makes the record- and replay-time fingerprints observe the same lockfile.
-fn ensure_lockfile(workspace: &Path) -> Result<(), CliError> {
-    if workspace.join("Cargo.lock").exists() {
-        return Ok(());
-    }
-    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-    let status = Command::new(cargo)
-        .arg("generate-lockfile")
-        .arg("--manifest-path")
-        .arg(workspace.join("Cargo.toml"))
-        .status()
-        .map_err(|error| CliError(format!("failed to materialize Cargo.lock: {error}")))?;
-    if !status.success() {
-        return Err(CliError(
-            "cargo generate-lockfile failed to materialize Cargo.lock".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn compatibility_fingerprint(
-    workspace: &Path,
-    invocation: &Invocation,
-) -> Result<String, CliError> {
-    let mut hasher = Sha256::new();
-    hash_bytes(&mut hasher, b"patina-fingerprint-v1");
-    hash_bytes(&mut hasher, env!("CARGO_PKG_VERSION").as_bytes());
-
-    let rustc = Command::new("rustc")
-        .arg("-vV")
-        .output()
-        .map_err(|error| CliError(format!("failed to query rustc identity: {error}")))?;
-    if !rustc.status.success() {
-        return Err(CliError(format!(
-            "rustc -vV failed: {}",
-            String::from_utf8_lossy(&rustc.stderr).trim()
-        )));
-    }
-    hash_bytes(&mut hasher, &rustc.stdout);
-    hash_bytes(&mut hasher, invocation.cargo_command.as_bytes());
-    hash_os(&mut hasher, &patina_rustflags());
-    for argument in &invocation.cargo_args {
-        hash_os(&mut hasher, argument);
-    }
-    for (key, value) in &invocation.params {
-        hash_bytes(&mut hasher, key.as_bytes());
-        hash_bytes(&mut hasher, value.as_bytes());
-    }
-
-    let mut inputs = Vec::new();
-    collect_inputs(workspace, workspace, &mut inputs)?;
-    inputs.sort();
-    for relative in inputs {
-        hash_os(&mut hasher, relative.as_os_str());
-        let contents = fs::read(workspace.join(&relative)).map_err(|error| {
-            CliError(format!(
-                "failed to read fingerprint input {}: {error}",
-                workspace.join(&relative).display()
-            ))
-        })?;
-        hash_bytes(&mut hasher, &contents);
-    }
-
-    Ok(format!("sha256:{}", hex(&hasher.finalize())))
-}
-
-fn collect_inputs(
-    root: &Path,
-    directory: &Path,
-    inputs: &mut Vec<PathBuf>,
-) -> Result<(), CliError> {
-    let entries = fs::read_dir(directory).map_err(|error| {
-        CliError(format!(
-            "failed to read workspace directory {}: {error}",
-            directory.display()
-        ))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            CliError(format!(
-                "failed to inspect workspace directory {}: {error}",
-                directory.display()
-            ))
-        })?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| CliError(format!("failed to inspect {}: {error}", path.display())))?;
-        if file_type.is_dir() {
-            if matches!(entry.file_name().to_str(), Some("target" | ".git" | ".jj")) {
-                continue;
-            }
-            collect_inputs(root, &path, inputs)?;
-        } else if file_type.is_file() && is_fingerprint_input(&path) {
-            let relative = path.strip_prefix(root).map_err(|error| {
-                CliError(format!(
-                    "failed to make {} relative to {}: {error}",
-                    path.display(),
-                    root.display()
-                ))
-            })?;
-            inputs.push(relative.to_path_buf());
-        }
-    }
-    Ok(())
-}
-
-fn is_fingerprint_input(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("Cargo.lock"))
-        || matches!(
-            path.extension().and_then(|value| value.to_str()),
-            Some("rs" | "toml")
-        )
 }
 
 fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
@@ -1087,24 +588,6 @@ fn hex(bytes: &[u8]) -> String {
         write!(output, "{byte:02x}").expect("writing to a String cannot fail");
         output
     })
-}
-
-/// Read back the structured `patina.runfacts/v1` document the run wrote to its
-/// facts channel, or `None` when no channel was installed. A channel that was
-/// installed but never written (the guest aborted before finalization) reads as
-/// an empty file, which is `None` too — absent means "the run did not get that
-/// far", never "zero".
-fn read_facts_channel(path: Option<&Path>) -> Result<Option<serde_json::Value>, CliError> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let bytes = fs::read(path).map_err(|error| {
-        CliError(format!(
-            "failed to read the run-facts channel {}: {error}",
-            path.display()
-        ))
-    })?;
-    output::parse_facts(&bytes)
 }
 
 fn exit_code(status: ExitStatus) -> Result<i32, CliError> {

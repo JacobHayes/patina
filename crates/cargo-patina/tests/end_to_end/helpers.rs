@@ -24,9 +24,7 @@ pub(super) fn active_toolchain_binary(name: &str) -> PathBuf {
 }
 
 // Write a minimal plain Cargo package (no Patina dependency) with a single
-// binary that prints `body`. Such a package integrates no runtime, so `run`/
-// `replay` must build it shim-linked and run it under the native pre-run gate —
-// never fall through to a toothless cargo-family `cargo run`.
+// binary whose `main.rs` is `main`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn write_plain_package(root: &Path, name: &str, main: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
@@ -420,60 +418,6 @@ pub(super) fn result_line(output: &Output) -> String {
         .to_owned()
 }
 
-pub(super) fn create_fixture(path: &Path) {
-    fs::create_dir_all(path.join("src")).unwrap();
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let runtime_path = workspace.join("crates/patina-runtime");
-    let runtime_path = runtime_path.to_string_lossy().replace('\\', "\\\\");
-    let abi_path = workspace.join("crates/patina-abi");
-    let abi_path = abi_path.to_string_lossy().replace('\\', "\\\\");
-    fs::write(
-        path.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"patina-e2e-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-runtime = {{ path = \"{runtime_path}\" }}\npatina-dst-abi = {{ path = \"{abi_path}\" }}\n"
-        ),
-    )
-    .unwrap();
-    fs::write(
-        path.join("src/main.rs"),
-        r#"use patina_dst_abi::ClockKind;
-use patina_dst_runtime::RuntimeError;
-
-fn scenario() -> Result<String, RuntimeError> {
-    patina_dst_runtime::run(|context| {
-        let prefix = context.entropy_bytes(8, patina_dst_runtime::EntropyWait::UntilReady)?;
-        let suffix = context.entropy_bytes(8, patina_dst_runtime::EntropyWait::UntilReady)?;
-        context.write_file("/state/value", &suffix)?;
-        context.sleep_for(10)?;
-        let stored = context.read_file("/state/value")?;
-        let time = context.now(ClockKind::Monotonic)?;
-        let wall = context.now(ClockKind::Realtime)?;
-        Ok(format!("PATINA_RESULT seed={} prefix={prefix:?} suffix={stored:?} time={time} wall={wall} host={} zone={:?} cfg={}", context.root_seed(), context.hostname(), context.param("zone"), cfg!(all(patina, dst))))
-    })
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", scenario()?);
-    Ok(())
-}
-
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn deterministic_scenario_runs_under_cargo_patina_test() {
-        assert!(super::scenario().unwrap().starts_with("PATINA_RESULT"));
-    }
-}
-"#,
-    )
-    .unwrap();
-}
-
 // ---- Cooperative-SUT (buggify) SDK, end to end -------------------------------
 //
 // A whole package depending on the `patina` crate's default-feature SDK, built
@@ -681,14 +625,9 @@ pub(super) fn assert_native_harness_prerun_refusal(
 // through `cargo patina run`; ordinary `std` effects in the application
 // closure are interposed by the native shim, and the harness's `HarnessBuilder`
 // overlay flows through the same `RuntimeConfig` fields the CLI env path sets.
-// Gate 7 (SDK dependency-lightness) belongs to the facade builder; gate 8
-// (explicit-context separateness) is out of scope here — the explicit `Context`
-// API lives in `patina-dst-runtime` and is exercised by `create_fixture`'s
-// `patina_dst::run` scenarios, which never install the shim's global context.
 
 /// Write a harness fixture crate at `dir` whose `main.rs` is `main_rs`, with a
-/// path dependency on the workspace `patina-dst-harness`. Modeled on
-/// `create_fixture`, but the dependency is the harness crate, not the SDK.
+/// path dependency on the workspace `patina-dst-harness`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
     fs::create_dir_all(dir.join("src")).unwrap();

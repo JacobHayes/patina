@@ -15,6 +15,10 @@ mod events;
 mod info;
 mod stats;
 
+/// The timeline every inspection reads: traces the CLI records are
+/// single-timeline.
+const MAIN_TIMELINE: &str = "main";
+
 use diff::diff_report;
 use diff::print_diff_human;
 pub(crate) use events::EventFilters;
@@ -44,27 +48,23 @@ pub(crate) enum TraceInvocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TraceInfo {
     pub(crate) path: PathBuf,
-    pub(crate) timeline: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TraceEvents {
     pub(crate) path: PathBuf,
-    pub(crate) timeline: String,
     pub(crate) filters: EventFilters,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TraceStats {
     pub(crate) path: PathBuf,
-    pub(crate) timeline: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TraceDiff {
     pub(crate) a: PathBuf,
     pub(crate) b: PathBuf,
-    pub(crate) timeline: String,
     pub(crate) context: usize,
 }
 
@@ -90,7 +90,7 @@ fn reject_render_report() -> Result<(), CliError> {
 
 fn execute_info(info: &TraceInfo) -> Result<i32, CliError> {
     let (bundle, raw) = load_trace(&info.path)?;
-    let facts = info_value(&info.path, &info.timeline, &bundle, &raw)?;
+    let facts = info_value(&info.path, MAIN_TIMELINE, &bundle, &raw)?;
     match output::options().format {
         OutputFormat::Human => print_info_human(&facts),
         OutputFormat::Json => println!("{}", compact_json(&info_envelope(facts))?),
@@ -100,9 +100,9 @@ fn execute_info(info: &TraceInfo) -> Result<i32, CliError> {
 
 fn execute_stats(stats: &TraceStats) -> Result<i32, CliError> {
     let (bundle, raw) = load_trace(&stats.path)?;
-    let flat = trace_view::flatten(&bundle, &raw, &stats.timeline)
+    let flat = trace_view::flatten(&bundle, &raw, MAIN_TIMELINE)
         .map_err(|error| trace_error(&stats.path, error))?;
-    let payload = stats_value(&stats.path, &stats.timeline, &flat);
+    let payload = stats_value(&stats.path, MAIN_TIMELINE, &flat);
     match output::options().format {
         OutputFormat::Human => print_stats_human(&payload),
         OutputFormat::Json => println!("{}", compact_json(&stats_envelope(payload))?),
@@ -113,14 +113,14 @@ fn execute_stats(stats: &TraceStats) -> Result<i32, CliError> {
 fn execute_diff(diff: &TraceDiff) -> Result<i32, CliError> {
     let (a_bundle, a_raw) = load_trace(&diff.a)?;
     let (b_bundle, b_raw) = load_trace(&diff.b)?;
-    let a_flat = trace_view::flatten(&a_bundle, &a_raw, &diff.timeline)
+    let a_flat = trace_view::flatten(&a_bundle, &a_raw, MAIN_TIMELINE)
         .map_err(|error| trace_error(&diff.a, error))?;
-    let b_flat = trace_view::flatten(&b_bundle, &b_raw, &diff.timeline)
+    let b_flat = trace_view::flatten(&b_bundle, &b_raw, MAIN_TIMELINE)
         .map_err(|error| trace_error(&diff.b, error))?;
     let report = diff_report(
         &diff.a,
         &diff.b,
-        &diff.timeline,
+        MAIN_TIMELINE,
         &a_bundle,
         &b_bundle,
         &a_raw,
@@ -142,7 +142,7 @@ fn execute_diff(diff: &TraceDiff) -> Result<i32, CliError> {
 
 fn execute_events(events: &TraceEvents) -> Result<i32, CliError> {
     let (bundle, raw) = load_trace(&events.path)?;
-    let flat = trace_view::flatten(&bundle, &raw, &events.timeline)
+    let flat = trace_view::flatten(&bundle, &raw, MAIN_TIMELINE)
         .map_err(|error| trace_error(&events.path, error))?;
     debug_assert_eq!(
         flat.kind_counts
@@ -157,14 +157,14 @@ fn execute_events(events: &TraceEvents) -> Result<i32, CliError> {
         OutputFormat::Human => write_events_human(
             &mut out,
             &events.path,
-            &events.timeline,
+            MAIN_TIMELINE,
             &flat,
             &events.filters,
         )?,
         OutputFormat::Json => write_events_jsonl(
             &mut out,
             &events.path,
-            &events.timeline,
+            MAIN_TIMELINE,
             &flat,
             &events.filters,
         )?,

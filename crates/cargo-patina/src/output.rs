@@ -11,14 +11,13 @@
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
+use crate::CliError;
 use crate::help::{self, Flag};
 use crate::render::{self, FailureSummary};
-use crate::{CliError, exit_code};
 
 mod capture;
 mod envelope;
@@ -29,7 +28,6 @@ mod reports;
 pub use capture::Captured;
 pub use capture::capture_active;
 pub use capture::end_guest_line;
-pub use capture::execute_command;
 pub use capture::facts_active;
 pub use capture::json_active;
 pub use capture::parse_facts;
@@ -87,21 +85,6 @@ impl OutputOptions {
 }
 
 static OPTIONS: OnceLock<OutputOptions> = OnceLock::new();
-
-/// When set, per-run finalization (capture, envelope, render) is suppressed.
-/// `explore` sets this so its per-seed child runs stream normally and it emits a
-/// single campaign-level envelope of its own instead of one per seed.
-static SUPPRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Suppress per-run finalization for the remainder of the process (used by
-/// `explore`, which drives many child runs and reports once).
-pub fn suppress_run_finalize() {
-    SUPPRESS.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-fn suppressed() -> bool {
-    SUPPRESS.load(std::sync::atomic::Ordering::SeqCst)
-}
 
 /// Install the parsed options once, at the top of `entrypoint`. A second call is
 /// ignored (the first install wins); unit tests that never install get defaults.

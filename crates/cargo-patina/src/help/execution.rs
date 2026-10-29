@@ -10,7 +10,6 @@ pub(super) const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "cargo patina run [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
         "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
@@ -18,10 +17,7 @@ pub(super) const RUN: Verb = Verb {
 `run` is source-first with artifacts accepted uniformly. A built artifact \
 (recognized by its leading magic bytes) is used as-is; a <SOURCE.rs|DIR|Cargo.toml> \
 is built on the fly through the same pipeline as `build` and its product is run \
-(a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash). A \
-`run` with no artifact, or with a directory or Cargo.toml whose package depends on \
-the Patina runtime, stays the Cargo package family (the same \
-seed/record/param/budget machinery as `test`).\n\
+(a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash).\n\
 \n\
 `run <BINARY>` runs a shim-linked native binary under a pre-run default-deny audit: every externally resolved symbol must \
 be interposed or known-safe, and any unsupported symbol on the \
@@ -34,14 +30,11 @@ A `patina-dst-harness` (configure-then-run) binary is recognised by the marker i
 embeds and defers runtime installation on its own; no flag is needed on `run` or \
 `replay`. Reproduce a recorded run with \
 `cargo patina replay`.",
-    families: &[
-        fam(Family::Cargo, "`run`", None),
-        fam(Family::Native, "`run` of a native binary", None),
-    ],
+    families: &[fam(Family::Sole, "`run`", None)],
     groups: &[
         Group {
-            title: "Patina options (run/test)",
-            families: &[Family::Cargo, Family::Native],
+            title: "Patina options",
+            families: SOLE,
             flags: &[
                 f(
                     "--seed",
@@ -78,26 +71,16 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
                     "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
                     false,
                 ),
-                only(
-                    f(
-                        "--param",
-                        None,
-                        Value::Required("K=V", Kind::KeyValue),
-                        "Typed-builder parameter exposed through Context (cargo family).",
-                        true,
-                    ),
-                    &[Family::Cargo],
-                ),
             ],
         },
         Group {
             title: "Source-first selection (building a source/package on the fly)",
-            families: &[Family::Native],
+            families: SOLE,
             flags: SOURCE_SELECT,
         },
         Group {
             title: "Build profile (source-first)",
-            families: &[Family::Native],
+            families: SOLE,
             flags: &[f(
                 "--release",
                 None,
@@ -108,17 +91,17 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
         },
         Group {
             title: "Fault options (seed-driven, default off)",
-            families: &[Family::Cargo, Family::Native],
+            families: SOLE,
             flags: FAULT_FLAGS,
         },
         Group {
             title: "DNS options",
-            families: &[Family::Cargo, Family::Native],
+            families: SOLE,
             flags: DNS_FLAGS,
         },
         Group {
-            title: "Native run options (run <BINARY>)",
-            families: &[Family::Native],
+            title: "Native run options",
+            families: SOLE,
             flags: &[
                 CPUS_FLAG,
                 f(
@@ -173,23 +156,23 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
             ],
         },
         Group {
-            title: "Native scheduling options (run <BINARY>)",
-            families: &[Family::Native],
+            title: "Scheduling options",
+            families: SOLE,
             flags: NATIVE_SCHEDULE_FLAGS,
         },
         Group {
             title: "Buggify options",
-            families: &[Family::Cargo, Family::Native],
+            families: SOLE,
             flags: BUGGIFY_FLAGS,
         },
         Group {
             title: "Native compute liveness (host-time terminal bound)",
-            families: &[Family::Native],
+            families: SOLE,
             flags: &[COMPUTE_WATCHDOG_FLAG],
         },
         Group {
-            title: "Liveness options (run <BINARY>)",
-            families: &[Family::Native],
+            title: "Liveness options",
+            families: SOLE,
             flags: LIVENESS_FLAGS_OPTIONAL,
         },
     ],
@@ -198,21 +181,12 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
 
 pub(super) const TEST: Verb = Verb {
     name: "test",
-    summary: "Run tests under Patina: Cargo-family by default, or a shim-linked native libtest harness for a source package.",
+    summary: "Run one libtest test of a source package shim-linked, across seeds.",
     synopsis: &[
-        "cargo patina test [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
         "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
     ],
     prose: "\
-With no source positional, `test` is the Cargo package family: the seed/record \
-machinery, seed-driven fault knobs, and typed --param values, with every \
-unrecognized option forwarded to Cargo. Reproducing a recording is the `replay` \
-verb's job, so the Cargo-family form carries no replay/branch/timeline flags. A \
---record run captures its seed and fault knobs into the trace metadata so \
-`replay` restores them.\n\
-\n\
-A directory or Cargo.toml positional selects native harness mode: Patina rebuilds \
-the requested Cargo libtest target shim-linked with `cargo rustc`, stages \
+Patina rebuilds the requested Cargo libtest target shim-linked with `cargo rustc`, stages \
 the harness under target/patina/dst, and runs only the `--exact` test with \
 `--test-threads=1`. `--seeds N` sweeps 0..N (default 20); `--seed N` runs one \
 seed. Qualify a shared target name as lib:NAME, bin:NAME, or test:NAME; \
@@ -221,31 +195,18 @@ On the first failure Patina re-runs that seed with --record, except pre-run \
 audit/import refusals (nothing executed). A `test` repro is always printed; \
 the JSON `trace` field and a `replay` command come only from the recorded \
 child's readable-trace receipt.",
-    families: &[
-        fam(Family::Cargo, "`test`", None),
-        fam(Family::Harness, "`test` native harness mode", None),
-    ],
+    families: &[fam(Family::Sole, "`test`", None)],
     groups: &[
         Group {
-            title: "Patina options (Cargo-family run/test)",
-            families: &[Family::Cargo, Family::Harness],
+            title: "Patina options",
+            families: SOLE,
             flags: &[
                 f(
                     "--seed",
                     None,
                     Value::Required("U64", Kind::U64),
-                    "Deterministic root seed (default 0). In native harness mode, run exactly this seed instead of a sweep.",
+                    "Run exactly this seed instead of a sweep.",
                     false,
-                ),
-                only(
-                    f(
-                        "--record",
-                        None,
-                        Value::Required("PATH", Kind::Path),
-                        "Record boundary operations and outcomes to PATH (Cargo-family form; native harness mode records failures automatically).",
-                        false,
-                    ),
-                    &[Family::Cargo],
                 ),
                 f(
                     "--budget",
@@ -268,41 +229,31 @@ child's readable-trace receipt.",
                     "The node name the guest's virtual kernel reports through uname/gethostname (default patina; at most 64 bytes, no NUL; recorded and restored on replay).",
                     false,
                 ),
-                only(
-                    f(
-                        "--param",
-                        None,
-                        Value::Required("K=V", Kind::KeyValue),
-                        "Typed-builder parameter exposed through Context (Cargo-family form).",
-                        true,
-                    ),
-                    &[Family::Cargo],
-                ),
             ],
         },
         Group {
-            title: "Native libtest harness selection (test <DIR|Cargo.toml>)",
-            families: &[Family::Harness],
+            title: "Libtest harness selection",
+            families: SOLE,
             flags: &[
                 f(
                     "--harness-target",
                     None,
                     Value::Required("NAME", Kind::Symbol),
-                    "Cargo libtest target to rebuild shim-linked. Use NAME when unique, or lib:NAME, bin:NAME, test:NAME to disambiguate target kinds; --package selects the workspace member. Required in native harness mode.",
+                    "Cargo libtest target to rebuild shim-linked. Use NAME when unique, or lib:NAME, bin:NAME, test:NAME to disambiguate target kinds; --package selects the workspace member. Required.",
                     false,
                 ),
                 f(
                     "--exact",
                     None,
                     Value::Required("MOD::test", Kind::Symbol),
-                    "Exact libtest filter to run inside the shim-linked harness. Required in native harness mode.",
+                    "Exact libtest filter to run inside the shim-linked harness. Required.",
                     false,
                 ),
                 f(
                     "--seeds",
                     None,
                     Value::Required("N", Kind::PositiveU64),
-                    "Run seeds 0..N in native harness mode (default 20; mutually exclusive with --seed).",
+                    "Run seeds 0..N (default 20; mutually exclusive with --seed).",
                     false,
                 ),
                 f(
@@ -337,48 +288,48 @@ child's readable-trace receipt.",
         },
         Group {
             title: "Fault options (seed-driven, default off)",
-            families: &[Family::Cargo, Family::Harness],
+            families: SOLE,
             flags: FAULT_FLAGS,
         },
         Group {
             title: "DNS options",
-            families: &[Family::Cargo, Family::Harness],
+            families: SOLE,
             flags: DNS_FLAGS,
         },
         Group {
             title: "Buggify options",
-            families: &[Family::Cargo, Family::Harness],
+            families: SOLE,
             flags: BUGGIFY_FLAGS,
         },
         Group {
-            title: "Native scheduling options (native harness mode)",
-            families: &[Family::Harness],
+            title: "Native scheduling options",
+            families: SOLE,
             flags: NATIVE_SCHEDULE_FLAGS,
         },
         Group {
             title: "Native compute liveness (host-time terminal bound)",
-            families: &[Family::Harness],
+            families: SOLE,
             flags: &[COMPUTE_WATCHDOG_FLAG],
         },
         Group {
-            title: "Virtual machine (native harness mode)",
-            families: &[Family::Harness],
+            title: "Virtual machine",
+            families: SOLE,
             flags: &[Flag {
                 doc: "The number of CPUs every seed's guest sees (default 4, at most 1024), re-emitted onto each seed's child run.",
                 ..CPUS_FLAG
             }],
         },
         Group {
-            title: "Native address layout (native harness mode)",
-            families: &[Family::Harness],
+            title: "Native address layout",
+            families: SOLE,
             flags: &[Flag {
                 doc: "Run every seed, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each seed's determinism is qualified and the replay repro carries the flag.",
                 ..ALLOW_RANDOMIZED_LAYOUT_FLAG
             }],
         },
         Group {
-            title: "Liveness options (native harness mode)",
-            families: &[Family::Harness],
+            title: "Liveness options",
+            families: SOLE,
             flags: LIVENESS_FLAGS_OPTIONAL,
         },
     ],
@@ -517,80 +468,64 @@ and runs the full audit anyway under a loud banner.",
 
 pub(super) const REPLAY: Verb = Verb {
     name: "replay",
-    summary: "Reproduce a recorded run; routes by the same inference as `run`.",
+    summary: "Reproduce a recorded run of an artifact, source, or package.",
     synopsis: &["cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [REPLAY OPTIONS]"],
     prose: "\
-`replay <ARTIFACT|SOURCE|PKG> <TRACE>` is the sole replay entry point for both \
-families: a native binary (or a source/package built on the fly) replays under the \
-native supervisor, and a directory/Cargo.toml whose package depends on the Patina \
-runtime under the Cargo package family. Each restores every recorded semantic input (seed, fault knobs, buggify, \
+`replay <ARTIFACT|SOURCE|PKG> <TRACE>` replays a native binary (or a \
+source/package built on the fly) under the native supervisor. It restores every recorded semantic input (seed, fault knobs, buggify, \
 realtime epoch, boot origin, hostname, native CPU count, guest argv, and native `--env` values) from the trace — the trace is authoritative \
 — so replay exposes no semantic flags; any re-supplied value must match the \
 recording or the replay is refused.\n\
 \n\
-Only host/build inputs the trace cannot carry stay as flags. The Cargo family \
-carries the timeline/branch controls (--timeline, and --branch --from \
---branch-seed --branch-id [--parent]). Native traces restore \
-`run --env` values from metadata and reject re-supplied native `--env`; native \
-traces are single-timeline (native runs cannot branch), so native replay accepts \
+Only host/build inputs the trace cannot carry stay as flags: replay accepts \
 only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
 --allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
-    families: &[
-        fam(Family::Cargo, "`replay` of a Cargo package", None),
-        fam(Family::Native, "`replay` of a native binary", None),
-    ],
-    groups: &[
-        Group {
-            title: "Native replay options (host/build facts the trace cannot carry)",
-            families: &[Family::Native],
-            flags: &[
-                COMPUTE_WATCHDOG_FLAG,
-                f(
-                    "--fingerprint",
-                    None,
-                    Value::Required("STR", Kind::Str),
-                    "Compatibility fingerprint label (default patina-native).",
-                    false,
-                ),
-                f(
-                    "--mount",
-                    None,
-                    Value::Required("HOST_DIR", Kind::Path),
-                    "Re-supply the host corpus whose hash (contents, then modes and mtimes) the fingerprint verifies.",
-                    false,
-                ),
-                f(
-                    "--coverage-out",
-                    None,
-                    Value::Required("PATH", Kind::Path),
-                    "Write a patina.covmap/v1 edge-counter map for the replayed native run.",
-                    false,
-                ),
-                ALLOW_FLAG,
-                ALLOW_UNSUPPORTED_FLAG,
-                Flag {
-                    doc: "Replay a trace recorded with --allow-randomized-address-layout, keeping the host's address-space randomization; required exactly when the recording used it.",
-                    ..ALLOW_RANDOMIZED_LAYOUT_FLAG
-                },
-                Flag {
-                    doc: "The trace's CPU count, which replay restores without it; a count that differs from the recording's is refused.",
-                    ..CPUS_FLAG
-                },
-            ],
-        },
-        Group {
-            title: "Timeline/branch replay (Cargo package family)",
-            families: &[Family::Cargo],
-            flags: REPLAY_TIMELINE_FLAGS,
-        },
-    ],
+    families: &[fam(Family::Sole, "`replay`", None)],
+    groups: &[Group {
+        title: "Replay options (host/build facts the trace cannot carry)",
+        families: SOLE,
+        flags: &[
+            COMPUTE_WATCHDOG_FLAG,
+            f(
+                "--fingerprint",
+                None,
+                Value::Required("STR", Kind::Str),
+                "Compatibility fingerprint label (default patina-native).",
+                false,
+            ),
+            f(
+                "--mount",
+                None,
+                Value::Required("HOST_DIR", Kind::Path),
+                "Re-supply the host corpus whose hash (contents, then modes and mtimes) the fingerprint verifies.",
+                false,
+            ),
+            f(
+                "--coverage-out",
+                None,
+                Value::Required("PATH", Kind::Path),
+                "Write a patina.covmap/v1 edge-counter map for the replayed native run.",
+                false,
+            ),
+            ALLOW_FLAG,
+            ALLOW_UNSUPPORTED_FLAG,
+            Flag {
+                doc: "Replay a trace recorded with --allow-randomized-address-layout, keeping the host's address-space randomization; required exactly when the recording used it.",
+                ..ALLOW_RANDOMIZED_LAYOUT_FLAG
+            },
+            Flag {
+                doc: "The trace's CPU count, which replay restores without it; a count that differs from the recording's is refused.",
+                ..CPUS_FLAG
+            },
+        ],
+    }],
     refusals: &[
         // Every semantic input is recorded in the trace and restored from it, so
         // re-supplying one could only diverge the replay. Declared by reference
         // to the shared slices: a knob added to FAULT_FLAGS or BUGGIFY_FLAGS is
         // refused here the day it is added, with no second list to remember.
         Refusal {
-            families: &[Family::Cargo, Family::Native],
+            families: SOLE,
             flags: &[FAULT_FLAGS, DNS_FLAGS, BUGGIFY_FLAGS, NATIVE_SCHEDULE_FLAGS],
             names: &[
                 "--seed",
@@ -601,13 +536,6 @@ only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
                 "--hostname",
             ],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
-        },
-        // Native traces are single-timeline and a native run cannot branch.
-        Refusal {
-            families: &[Family::Native],
-            flags: &[REPLAY_TIMELINE_FLAGS],
-            names: &[],
-            message: "{flag} is not supported for native replay: native traces are single-timeline and native runs cannot branch; branch/timeline replay is the Cargo package family's",
         },
     ],
 };

@@ -2,25 +2,18 @@
 
 use super::*;
 use crate::parse::{
-    ParseResult, knob_env_pairs, knobs_of, parse, parse_cargo, parse_cargo_replay, parse_explore,
-    parse_minimize, parse_native_audit_from, parse_native_build, parse_native_harness_from,
-    parse_native_replay, parse_native_run, parse_native_run_from, parse_trace, repeatable_payload,
+    knob_env_pairs, knobs_of, parse, parse_minimize, parse_native_audit_from, parse_native_build,
+    parse_native_harness_from, parse_native_replay, parse_native_run, parse_native_run_from,
+    parse_trace, repeatable_payload,
 };
 use crate::{campaign, cli, coverage, help, output, sites, syscalls, values};
 use patina_dst_runtime::{FaultKnob, Plumbing};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub(super) fn strings(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
-}
-
-pub(super) fn invocation(values: &[&str]) -> Invocation {
-    match parse(strings(values)).unwrap() {
-        ParseResult::Run(value) => value,
-        _ => panic!("expected invocation"),
-    }
 }
 
 // `run`/`audit` recognize a native binary by its magic bytes at the routing
@@ -225,11 +218,10 @@ mod registry {
             output.get("repeatable").is_none(),
             "non-repeatable --output should omit `repeatable`"
         );
-        // A repeatable flag emits `repeatable: true`; a `--param` is repeatable.
+        // A repeatable flag emits `repeatable: true`; `--env` is repeatable.
         let run = verb_json("run");
-        let param =
-            find_flag(&run["verb"]["flag_groups"], "--param").expect("run registers --param");
-        assert_eq!(param["repeatable"], true);
+        let env = find_flag(&run["verb"]["flag_groups"], "--env").expect("run registers --env");
+        assert_eq!(env["repeatable"], true);
         // An enum-valued flag emits its choices; `--format` (global) is native|json.
         let format = find_flag(&run["global_flags"], "--format").expect("global --format");
         assert_eq!(format["value_grammar"], "enum");
@@ -458,23 +450,6 @@ mod registry {
                 tokens.iter().map(|t| t.to_string()).collect()
             }
         };
-        // The branch quorum is all-or-nothing and conflicts with `--timeline`, so
-        // it is supplied only when the flag under test is part of it.
-        let quorum = |names: &[&'static str]| -> Vec<String> {
-            if !names.contains(&flag) && flag != "--parent" {
-                return Vec::new();
-            }
-            names
-                .iter()
-                .filter(|name| **name != flag)
-                .map(|name| match *name {
-                    "--branch" => "--branch".to_string(),
-                    "--from" => "--from=0".to_string(),
-                    "--branch-seed" => "--branch-seed=1".to_string(),
-                    other => format!("{other}=b"),
-                })
-                .collect()
-        };
         let with = |prefix: Vec<String>, suffix: &[&str]| -> Vec<OsString> {
             prefix
                 .iter()
@@ -488,13 +463,10 @@ mod registry {
         let prebuilt = |name: &str| ArtifactRef::Prebuilt(PathBuf::from(name));
         let trace = || PathBuf::from("t.patina");
         match (verb, family) {
-            ("run" | "test", help::Family::Cargo) => {
-                parse_cargo(verb.to_string(), with(none, &[])).map(|_| ())
-            }
-            ("run", help::Family::Native) => {
+            ("run", help::Family::Sole) => {
                 parse_native_run_from(prebuilt("bin"), with(none, &[])).map(|_| ())
             }
-            ("test", help::Family::Harness) => {
+            ("test", help::Family::Sole) => {
                 let mut prefix = unless("--harness-target", &["--harness-target=harness"]);
                 prefix.extend(unless("--exact", &["--exact=module::test"]));
                 parse_native_harness_from(
@@ -519,22 +491,8 @@ mod registry {
             ("audit", help::Family::Sole) => {
                 parse_native_audit_from(prebuilt("bin"), with(none, &[])).map(|_| ())
             }
-            ("replay", help::Family::Cargo) => parse_cargo_replay(
-                PathBuf::from("."),
-                trace(),
-                with(
-                    quorum(&["--branch", "--from", "--branch-seed", "--branch-id"]),
-                    &[],
-                ),
-            )
-            .map(|_| ()),
-            ("replay", help::Family::Native) => {
+            ("replay", help::Family::Sole) => {
                 parse_native_replay(prebuilt("bin"), trace(), with(none, &[])).map(|_| ())
-            }
-            // `--seed-start` pins `--seeds 1` so a max-u64 start never overflows
-            // the swept range.
-            ("explore", _) => {
-                parse_explore(with(unless("--seeds", &["--seeds=1"]), &["test"])).map(|_| ())
             }
             // A continuation takes no artifact; every other campaign flag needs
             // one. `--spec` reads its file while parsing, so the driver makes
@@ -662,67 +620,6 @@ mod registry {
     }
 
     #[test]
-    fn cargo_refuses_a_crash_without_restart_semantics() {
-        let mut knobs = KnobValues::default();
-        knobs
-            .0
-            .insert(FaultKnob::ProcessCrashPermille, vec!["1".into()]);
-        let cargo = execute(Invocation {
-            cargo_command: "run".into(),
-            cargo_args: Vec::new(),
-            mode: Mode::Seeded { seed: 0 },
-            step_budget: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            params: BTreeMap::new(),
-            knobs,
-            buggify: None,
-            working_dir: None,
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(cargo.contains("--process-crash-permille"), "{cargo}");
-    }
-
-    /// The Cargo family forwards every unrecognized token verbatim, in place,
-    /// including one that is not valid UTF-8 — such a token can never be a
-    /// Patina flag, and dropping or re-encoding it would corrupt a legitimate
-    /// cargo argument (a path under a non-UTF-8 locale). The `--` section is
-    /// the guest's and is passed through whole, so a `--seed` after it stays a
-    /// guest argument.
-    #[cfg(unix)]
-    #[test]
-    fn cargo_passthrough_preserves_order_and_non_utf8_tokens() {
-        use std::os::unix::ffi::OsStringExt;
-        let raw = OsString::from_vec(vec![b'-', b'-', b'p', b'=', 0xff, 0xfe]);
-        let forwarded = [
-            OsString::from("--manifest-path"),
-            OsString::from("./x/Cargo.toml"),
-            raw.clone(),
-            OsString::from("--example"),
-            OsString::from("demo"),
-            OsString::from("--"),
-            OsString::from("--seed=99"),
-        ];
-        let mut argv = vec![
-            OsString::from("--manifest-path"),
-            OsString::from("./x/Cargo.toml"),
-        ];
-        argv.push(OsString::from("--seed=7"));
-        argv.extend(forwarded[2..].iter().cloned());
-
-        let ParseResult::Run(invocation) = parse_cargo("run".to_string(), argv).unwrap() else {
-            panic!("expected a Cargo-family run");
-        };
-        assert_eq!(invocation.mode, Mode::Seeded { seed: 7 });
-        assert_eq!(
-            invocation.cargo_args,
-            forwarded.to_vec(),
-            "forwarded tokens keep their order and bytes; only the Patina flag is taken"
-        );
-    }
-
-    #[test]
     fn no_verb_redeclares_a_global_flag() {
         let globals: BTreeSet<&str> = help::GLOBAL_OUTPUT
             .iter()
@@ -747,8 +644,8 @@ mod registry {
     #[test]
     fn every_fault_knob_reaches_every_family_and_is_refused_by_replay() {
         // Each knob, set to a valid value, must survive parsing into the same
-        // control-plane variable for the Cargo and native families, and must
-        // be REFUSED by `replay` — which derives its refusal list from the same
+        // control-plane variable for `run` and `test`, and must be REFUSED by
+        // `replay` — which derives its refusal list from the same
         // registry slice, so a new knob is refused the day it is registered.
         for knob in FaultKnob::ALL {
             let meta = knob.meta();
@@ -762,55 +659,19 @@ mod registry {
                 Plumbing::Repeatable(_) => repeatable_payload(*knob, &[value.to_string()])
                     .expect("every repeatable knob encodes its sample"),
             };
-            for (verb, family) in [
-                ("run", help::Family::Cargo),
-                ("run", help::Family::Native),
-                ("test", help::Family::Cargo),
-                ("test", help::Family::Harness),
-            ] {
-                let args = cli::parse(verb, family, strings(&[flag, value]))
-                    .unwrap_or_else(|error| panic!("{verb} {family:?} rejected {flag}: {error}"));
+            for verb in ["run", "test"] {
+                let args = cli::parse(verb, help::Family::Sole, strings(&[flag, value]))
+                    .unwrap_or_else(|error| panic!("{verb} rejected {flag}: {error}"));
                 let pairs = knob_env_pairs(&knobs_of(&args).expect("knob parse")).expect("encode");
                 assert!(
                     pairs.contains(&(meta.env, expected.clone())),
-                    "{verb} {family:?} did not carry {flag} to {}: {pairs:?}",
+                    "{verb} did not carry {flag} to {}: {pairs:?}",
                     meta.env
                 );
             }
-            for family in [help::Family::Cargo, help::Family::Native] {
-                let message = match cli::parse("replay", family, strings(&[flag, value])) {
-                    Err(error) => error.to_string(),
-                    Ok(_) => panic!("replay accepted a re-supplied {flag}"),
-                };
-                assert!(
-                    message.contains(flag) && message.contains("the trace is authoritative"),
-                    "replay refusal for {flag} should explain itself: {message}"
-                );
-            }
-        }
-        // A Cargo-family replay refuses run controls by name instead of forwarding them to Cargo
-        // alongside its own arguments.
-        for flag in [
-            "--machine-crash-permille",
-            "--seed",
-            "--buggify",
-            "--sched-pct",
-        ] {
-            let argv = vec![
-                OsString::from(flag),
-                OsString::from("close"),
-                OsString::from("--example"),
-                OsString::from("demo"),
-            ];
-            let Err(error) =
-                parse_cargo_replay(PathBuf::from("."), PathBuf::from("t.patina"), argv)
-            else {
-                panic!("{flag} should be refused, not forwarded to Cargo");
-            };
-            let message = error.to_string();
             assert!(
-                message.contains(flag) && message.contains("trace is authoritative"),
-                "{flag}: {message}"
+                cli::parse("replay", help::Family::Sole, strings(&[flag, value])).is_err(),
+                "replay accepted a re-supplied {flag}"
             );
         }
     }
@@ -846,19 +707,11 @@ mod registry {
     }
 
     #[test]
-    fn run_facts_reach_every_family_that_can_observe_them_and_replay_refuses_them() {
+    fn run_facts_reach_the_run_and_replay_refuses_them() {
         const TEXT: &str = "2001-09-09T01:46:40Z";
         const NANOS: u64 = 1_000_000_000_000_000_000;
         let native = parse_native_run(strings(&["guest", "--realtime-epoch", TEXT])).unwrap();
         assert_eq!(native.realtime_epoch_nanos, Some(NANOS));
-        for command in ["run", "test"] {
-            let ParseResult::Run(cargo) =
-                parse_cargo(command.into(), strings(&["--realtime-epoch", TEXT])).unwrap()
-            else {
-                panic!("the Cargo family parses to a Run invocation");
-            };
-            assert_eq!(cargo.realtime_epoch_nanos, Some(NANOS), "{command}");
-        }
         // Absent means the runtime default, not an explicit value.
         assert_eq!(
             parse_native_run(strings(&["guest"]))
@@ -878,14 +731,6 @@ mod registry {
             const NAME: &str = "db-1.internal";
             let native = parse_native_run(strings(&["guest", "--hostname", NAME])).unwrap();
             assert_eq!(native.hostname.as_deref(), Some(NAME));
-            for command in ["run", "test"] {
-                let ParseResult::Run(cargo) =
-                    parse_cargo(command.into(), strings(&["--hostname", NAME])).unwrap()
-                else {
-                    panic!("the Cargo family parses to a Run invocation");
-                };
-                assert_eq!(cargo.hostname.as_deref(), Some(NAME), "{command}");
-            }
             assert_eq!(
                 parse_native_run(strings(&["guest"])).unwrap().hostname,
                 None
@@ -910,14 +755,12 @@ mod registry {
         }
     }
 
-    /// `replay` refuses a re-supplied run fact in every family, by name.
+    /// `replay` refuses a re-supplied run fact.
     fn assert_replay_refuses(flag: &str, value: &str) {
-        for family in [help::Family::Cargo, help::Family::Native] {
-            match cli::parse("replay", family, strings(&[flag, value])) {
-                Err(error) => assert!(error.to_string().contains(flag), "{family:?}: {error}"),
-                Ok(_) => panic!("{family:?} replay accepted a re-supplied {flag}"),
-            }
-        }
+        assert!(
+            cli::parse("replay", help::Family::Sole, strings(&[flag, value])).is_err(),
+            "replay accepted a re-supplied {flag}"
+        );
     }
 
     #[test]

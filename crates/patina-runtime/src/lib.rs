@@ -1,66 +1,41 @@
 //! The [Patina] deterministic runtime: seeded drivers, record/replay traces,
-//! and the explicit [`Context`] API.
+//! and the [`Context`] they are assembled behind.
 //!
 //! This crate *is* the simulator. It assembles the deterministic drivers —
 //! virtual clock, in-memory filesystem, simulated network, seeded entropy, and
 //! the deterministic scheduler — behind one [`Context`], makes every effect a
 //! pure function of a root seed, and records/replays those effects as traces.
-//! Every Patina usage mode ultimately drives this runtime: the native shim
-//! routes interposed `std` calls into it, and this crate's own API
-//! exposes it directly.
 //!
-//! # Where this crate sits (the SDK / runtime split)
+//! # Where this crate sits
 //!
-//! Application code should *not* depend on this crate. The crate an application
-//! ships is `patina-dst` — dependency-light, every macro a no-op outside a
-//! Patina build. `patina-dst-runtime` is the other side of the split: the
-//! simulator itself, for code that *knows* it is simulator-shaped —
+//! Application code does not depend on this crate. Programs run under
+//! `cargo patina run`, where the native shim installs one [`Context`] for the
+//! process and routes interposed `std` calls into it; the crate an application
+//! ships is the dependency-light SDK, `patina-dst`, and `patina-dst-harness`
+//! configures a run in code. See [USAGE-MODES.md] for the map and
+//! [ARCHITECTURE.md] for the design.
 //!
-//! - **Mode 3 (this crate):** tests and simulators written against the
-//!   explicit-context API. [`run`]/[`run_with`] build a [`Context`] and the code
-//!   performs effects *through it* — nothing is interposed, so plain
-//!   `std::fs`/`std::net` calls in the same program do **not** go through
-//!   Patina. Ordinary code called from this mode must stay deterministic from
-//!   the simulator's inputs, or have its effects injected by the simulator; host
-//!   files, host sockets, host time/randomness, real-thread schedules, tokio
-//!   reactors, FFI, and syscalls are outside this explicit boundary. Use the
-//!   native shim/harness path for ordinary applications that perform those
-//!   effects directly. Deterministic async ([`block_on`]/`spawn`, virtual-time
-//!   sleep/timeout) layers over the same `Context` in `patina-dst-async`.
-//! - **Modes 1–2 (via `cargo patina`):** unmodified programs run under the
-//!   native shim, which drives this same runtime below ordinary
-//!   `std` calls; `patina-dst-harness` configures such a run in code.
-//!
-//! See [USAGE-MODES.md] for the full map and [ARCHITECTURE.md] for the design.
-//!
-//! # Example
-//!
-//! Effects performed through the `Context` are deterministic and free of host
-//! I/O — the filesystem is in-memory, and time is virtual:
+//! The [`Context`] methods are the boundary operations the shim performs on
+//! the guest's behalf, and the surface this crate's own tests drive directly:
 //!
 //! ```
-//! use patina_dst_runtime::run;
+//! use patina_dst_runtime::{Context, RuntimeConfig};
 //!
-//! let contents = run(|ctx| {
-//!     ctx.write_file("/greeting", b"hello")?; // deterministic in-memory fs
-//!     ctx.sleep_for(3_600_000_000_000)?; // an hour of virtual time, instantly
-//!     ctx.read_file("/greeting")
-//! })?;
-//! assert_eq!(contents, b"hello");
+//! let mut ctx = Context::from_config(RuntimeConfig::seeded(7))?;
+//! ctx.write_file("/greeting", b"hello")?; // deterministic in-memory fs
+//! ctx.sleep_for(3_600_000_000_000)?; // an hour of virtual time, instantly
+//! assert_eq!(ctx.read_file("/greeting")?, b"hello");
+//! ctx.finish()?;
 //! # Ok::<(), patina_dst_runtime::RuntimeError>(())
 //! ```
 //!
 //! # Configuration and the `PATINA_*` control plane
 //!
-//! [`run`] configures itself from [`RuntimeConfig::from_env`]: the `PATINA_*`
-//! environment variables documented on the `ENV_*` constants in this crate
-//! (seed, record/replay mode, fault knobs, buggify, schedule exploration,
-//! liveness watchdogs). `cargo patina run`/`test` set exactly these variables
-//! from its CLI flags, so an in-process test picks up `--seed`, `--record`,
-//! `--machine-crash-permille`, and friends with no extra plumbing. With nothing set, the
-//! default is a seeded run with seed 0. For full control, build a
-//! [`RuntimeConfig`] directly (e.g. [`RuntimeConfig::seeded`]) and hand it to a
-//! [`RuntimeBuilder`], which can also swap individual drivers.
+//! A [`RuntimeConfig`] (e.g. [`RuntimeConfig::seeded`]) refined with its
+//! `with_*` methods describes a run; a [`RuntimeBuilder`] turns it into a
+//! [`Context`] and can swap individual drivers. The supervisor hands the shim
+//! its configuration as the `PATINA_RT_*` variables documented on the `ENV_*`
+//! constants here, which the shim folds in with the `apply_*_env` overlays.
 //!
 //! # Record, replay, fail closed
 //!
@@ -73,7 +48,6 @@
 //! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
 //! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
 //! [ARCHITECTURE.md]: https://github.com/JacobHayes/patina/blob/main/ARCHITECTURE.md
-//! [`block_on`]: https://docs.rs/patina-dst-async
 
 #![deny(clippy::disallowed_methods)]
 
@@ -124,7 +98,6 @@ pub use clock::VirtualClock;
 pub use recording::TraceTransport;
 pub use scheduler::{DetScheduler, PctConfig, SchedulePolicy, SchedulePolicyReport};
 
-pub use config_env::trace_fd_from_env;
 pub use crash::{CrashAttemptSink, Incarnation, RESTART_DOWNTIME_NANOS};
 pub use filesystem::FsTime;
 
@@ -187,21 +160,11 @@ pub const ENV_TRACE_FD: &str = "PATINA_RT_TRACE_FD";
 /// supervisor-owned host descriptor rather than through the deterministic FS.
 pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 
-/// Path the runtime writes this run's structured
-/// [`patina.runfacts/v1`](FACTS_SCHEMA) document to at finalization. Set by
-/// `cargo patina` for the families whose guest can write host files directly
-/// (the cargo family), and by any in-process embedder that wants the facts. The
-/// document carries the same per-plane accounting the `PATINA_*_REPORT` lines
-/// carry, built from the report structs rather than from the lines. Unset =
-/// no document is produced and the run is byte-for-byte unchanged.
-pub const ENV_FACTS: &str = "PATINA_RT_FACTS";
-
-/// Inherited host descriptor receiving the same [`patina.runfacts/v1`](FACTS_SCHEMA)
-/// document as [`ENV_FACTS`]. Used by the native family, whose guest filesystem
-/// is fully interposed, so the shim writes the document through a
+/// Inherited host descriptor receiving this run's structured
+/// [`patina.runfacts/v1`](FACTS_SCHEMA) document. The guest filesystem is fully
+/// interposed, so the shim writes the document through a
 /// supervisor-owned host descriptor rather than through the deterministic FS —
-/// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`]. Setting both
-/// [`ENV_FACTS`] and this variable is refused.
+/// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`].
 pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
 
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
@@ -554,53 +517,6 @@ pub const DEFAULT_BUGGIFY_ACTIVATION_PERMILLE: u16 = 250;
 /// Default buggify damage-control cutoff: 300 virtual seconds, in nanoseconds.
 pub const DEFAULT_BUGGIFY_CUTOFF_NANOS: u64 = 300_000_000_000;
 
-/// Low-level explicit-context entry point: run a closure against a [`Context`]
-/// with deterministic default drivers configured from `PATINA_*`.
-///
-/// This is the mode-3 explicit-context API of `USAGE-MODES.md`. It creates an
-/// explicit context and does **not** control unrelated `std::fs`/`std::net`/clock
-/// calls in the rest of the program — those are interposed by the native shim
-/// under `cargo patina build`/`run`. To configure Patina and then drive
-/// ordinary application code, use the shim-backed `patina-dst-harness` crate.
-///
-/// The context is always finalized. If both the closure and finalization fail,
-/// the returned error retains both failures.
-pub fn run<T>(
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    run_with(|builder| builder, operation)
-}
-
-/// Like [`run`] but allows typed driver replacement before the context is built.
-///
-/// The builder starts from [`RuntimeConfig::from_env`] with the default drivers
-/// installed; `configure` may swap in alternative drivers (network, filesystem,
-/// clock, …) before the context runs.
-pub fn run_with<T>(
-    configure: impl FnOnce(RuntimeBuilder) -> RuntimeBuilder,
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    let builder = RuntimeBuilder::new(RuntimeConfig::from_env()?);
-    run_with_context(configure(builder).build()?, operation)
-}
-
-fn run_with_context<T>(
-    mut context: Context,
-    operation: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, RuntimeError> {
-    let run_result = operation(&mut context);
-    let finish_result = context.finish();
-    match (run_result, finish_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(run), Err(finalize)) => Err(RuntimeError::RunAndFinalize {
-            run: Box::new(run),
-            finalize: Box::new(finalize),
-        }),
-    }
-}
-
 /// The runtime context through which initial Patina effects are performed.
 /// The installed deterministic world: one seeded run's clock, filesystem,
 /// network, entropy, scheduler, and (in record/replay modes) its trace.
@@ -615,9 +531,8 @@ fn run_with_context<T>(
 /// [`sleep_until`](Context::sleep_until) for the virtual clock, and
 /// [`entropy_bytes`](Context::entropy_bytes).
 ///
-/// Obtain one through [`run`]/[`run_with`] (which also finalize it) or
-/// [`Context::from_config`]; when managing it manually, call
-/// [`finish`](Context::finish) so diagnostics and any recorded trace are
+/// Obtain one through [`Context::from_config`] or a [`RuntimeBuilder`], and
+/// call [`finish`](Context::finish) so diagnostics and any recorded trace are
 /// written. A `Context` controls only effects performed through its own
 /// methods — it does not interpose the rest of the process.
 pub struct Context {
@@ -859,10 +774,6 @@ pub enum RuntimeError {
         operation: Box<Operation>,
         outcome: Box<Outcome>,
     },
-    RunAndFinalize {
-        run: Box<RuntimeError>,
-        finalize: Box<RuntimeError>,
-    },
     /// A replayed scheduler-op stream diverged from the recording at a
     /// `TaskYield` (see [`classify_yield_divergence`]). `detail` carries the
     /// full record-vs-replay yield accounting and the underlying trace error.
@@ -933,9 +844,6 @@ impl RuntimeError {
             // A recorded compute stop the strictly replayed scheduler state does
             // not reach.
             Self::ComputeStopState => Some("compute_stop_state"),
-            Self::RunAndFinalize { run, finalize } => run
-                .replay_divergence()
-                .or_else(|| finalize.replay_divergence()),
             // A changed label or key, or an op past the trace, is a trace
             // divergence noted where the replayer reports it; a recorded fault
             // this call cannot take is noted where it is refused
@@ -988,10 +896,6 @@ impl fmt::Display for RuntimeError {
                 f,
                 "invalid outcome {outcome:?} for Patina operation {operation:?}"
             ),
-            Self::RunAndFinalize { run, finalize } => write!(
-                f,
-                "Patina run failed ({run}) and trace finalization also failed ({finalize})"
-            ),
             Self::ScheduleDivergence { detail } => f.write_str(detail),
             Self::CustomOp { detail, .. } => f.write_str(detail),
             Self::FrozenClockChurn { detail } => {
@@ -1020,7 +924,6 @@ impl std::error::Error for RuntimeError {
             Self::Io { source, .. } => Some(source),
             Self::Effect(error) => Some(error),
             Self::Trace(error) => Some(error),
-            Self::RunAndFinalize { run, .. } => Some(run),
             _ => None,
         }
     }
@@ -1040,16 +943,9 @@ impl From<TraceError> for RuntimeError {
 
 impl Context {
     /// A context over `config` with the default deterministic drivers. The
-    /// caller owns finalization: call [`Context::finish`] when done (or use
-    /// [`run`]/[`run_with`], which do).
+    /// caller owns finalization: call [`Context::finish`] when done.
     pub fn from_config(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         RuntimeBuilder::new(config).build()
-    }
-
-    /// Like [`Context::from_config`] with a config read from the `PATINA_*`
-    /// control plane ([`RuntimeConfig::from_env`]).
-    pub fn from_env() -> Result<Self, RuntimeError> {
-        Self::from_config(RuntimeConfig::from_env()?)
     }
 
     /// The run's root seed — with the incarnation number of a crash-restart

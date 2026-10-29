@@ -7,18 +7,9 @@ use std::path::PathBuf;
 
 #[test]
 fn parses_trace_subcommands_and_events_filters() {
-    match parse(strings(&[
-        "trace",
-        "info",
-        "--timeline",
-        "b1",
-        "run.patina",
-    ]))
-    .unwrap()
-    {
+    match parse(strings(&["trace", "info", "run.patina"])).unwrap() {
         ParseResult::Trace(trace_cmd::TraceInvocation::Info(info)) => {
             assert_eq!(info.path, PathBuf::from("run.patina"));
-            assert_eq!(info.timeline, "b1");
         }
         _ => panic!("expected trace info"),
     }
@@ -41,7 +32,6 @@ fn parses_trace_subcommands_and_events_filters() {
     {
         ParseResult::Trace(trace_cmd::TraceInvocation::Events(events)) => {
             assert_eq!(events.path, PathBuf::from("run.patina"));
-            assert_eq!(events.timeline, "main");
             assert!(events.filters.op_kinds.contains("fs_write"));
             assert!(
                 events
@@ -73,10 +63,9 @@ fn parses_trace_subcommands_and_events_filters() {
         ])
         .contains("mutually exclusive")
     );
-    match parse(strings(&["trace", "stats", "run.patina", "--timeline=b2"])).unwrap() {
+    match parse(strings(&["trace", "stats", "run.patina"])).unwrap() {
         ParseResult::Trace(trace_cmd::TraceInvocation::Stats(stats)) => {
             assert_eq!(stats.path, PathBuf::from("run.patina"));
-            assert_eq!(stats.timeline, "b2");
         }
         _ => panic!("expected trace stats"),
     }
@@ -88,8 +77,6 @@ fn parses_trace_subcommands_and_events_filters() {
         "--context",
         "0",
         "b.patina",
-        "--timeline",
-        "main",
     ]))
     .unwrap()
     {
@@ -97,7 +84,6 @@ fn parses_trace_subcommands_and_events_filters() {
             assert_eq!(diff.a, PathBuf::from("a.patina"));
             assert_eq!(diff.b, PathBuf::from("b.patina"));
             assert_eq!(diff.context, 0);
-            assert_eq!(diff.timeline, "main");
         }
         _ => panic!("expected trace diff"),
     }

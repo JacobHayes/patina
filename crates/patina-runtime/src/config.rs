@@ -111,8 +111,8 @@ impl LivenessConfig {
 /// Construct one with [`RuntimeConfig::seeded`] (or
 /// [`record`](RuntimeConfig::record)/[`replay`](RuntimeConfig::replay)/
 /// [`branch`](RuntimeConfig::branch)) and refine it with the `with_*` builder
-/// methods, or read the whole thing from the `PATINA_*` control plane with
-/// [`RuntimeConfig::from_env`]. Two runs with equal configs (and an identical
+/// methods (an embedder overlays the `PATINA_*` control plane with the
+/// `apply_*_env` methods). Two runs with equal configs (and an identical
 /// guest) produce byte-identical effect sequences.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfig {

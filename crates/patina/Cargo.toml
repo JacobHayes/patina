@@ -1,6 +1,6 @@
 [package]
 name = "patina-dst"
-description = "Patina cooperative-SUT SDK and public deterministic-execution facade"
+description = "Patina cooperative-SUT SDK: fault sites, oracles, and run parameters"
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -13,8 +13,7 @@ repository.workspace = true
 # `sometimes!`, `reachable!`, and lifecycle macros plus `is_simulated`/`rng`.
 # Outside a Patina build every macro compiles to a no-op or a plain fallback, so
 # a plain `cargo build` of an adopter stays lightweight and warning-free and
-# links no runtime. The explicit-context runtime surface lives in the separate
-# `patina-dst-runtime` crate; this crate carries no runtime deps.
+# links no runtime; this crate carries no runtime deps.
 default = []
 
 # Test-only point-solution DST attribute. Keep this feature default-off so

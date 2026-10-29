@@ -103,12 +103,7 @@ mod calls {
                 );
             }
         }
-        #[cfg(all(patina, not(patina_shim)))]
-        {
-            let _ = site;
-            assert!(condition, "patina always! invariant violated: {label}");
-        }
-        #[cfg(not(patina))]
+        #[cfg(not(patina_shim))]
         {
             let _ = site;
             debug_assert!(condition, "always! invariant violated: {label}");

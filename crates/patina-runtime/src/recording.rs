@@ -494,8 +494,7 @@ impl Context {
 
     /// Finalize the run: emit the end-of-run diagnostics (schedule, buggify,
     /// liveness, net-fault), enforce end-of-run oracles, and — in record mode —
-    /// write the trace. Consumes the context; [`run`]/[`run_with`] call this
-    /// automatically, on error paths too.
+    /// write the trace. Consumes the context.
     pub fn finish(mut self) -> Result<(), RuntimeError> {
         if let Some(stop) = self.replay_compute_stop_due() {
             {

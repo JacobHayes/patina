@@ -3,11 +3,10 @@
 use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::{
     ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, DEFAULT_SEED_BUDGET,
-    ExploreInvocation, ExploreTarget, HarnessFeatures, HarnessSeeds, Invocation, KnobValues, Mode,
-    NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
-    NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
-    PATINA_RUNTIME_CRATES, UnsupportedPolicy, campaign, cli, coverage, help, minimize, sites,
-    syscalls, trace_cmd, trace_view, values,
+    HarnessFeatures, HarnessSeeds, KnobValues, NativeAuditInvocation, NativeBuggify,
+    NativeBuildInvocation, NativeBuildTarget, NativeHarnessInvocation, NativeLiveness,
+    NativeRunInvocation, NativeRunMode, NativeSchedule, UnsupportedPolicy, campaign, cli, coverage,
+    help, minimize, sites, syscalls, trace_cmd, trace_view, values,
 };
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
@@ -16,23 +15,17 @@ use patina_dst_runtime::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::{env, fs};
 
 mod artifact;
 pub(crate) use artifact::*;
-mod cargo;
 mod control;
 mod native;
 pub(super) use control::*;
 mod inspection;
 mod minimization;
 
-use cargo::cargo_package_dir;
-pub(super) use cargo::parse_cargo;
-pub(super) use cargo::parse_cargo_replay;
-pub(super) use cargo::parse_explore;
 pub(super) use inspection::parse_trace;
 pub(super) use minimization::parse_minimize;
 use native::native_manifest_path;
@@ -43,17 +36,14 @@ pub(super) use native::parse_native_replay;
 #[cfg(test)]
 pub(super) use native::parse_native_run;
 pub(super) use native::parse_native_run_from;
-use native::realtime_epoch_of;
 
 pub(super) enum ParseResult {
     Help(help::Topic),
     Version,
-    Run(Invocation),
     Campaign(campaign::CampaignInvocation),
     Coverage(coverage::CoverageInvocation),
     Sites(sites::SitesOptions),
     Syscalls(syscalls::SyscallsInvocation),
-    Explore(ExploreInvocation),
     NativeAudit(NativeAuditInvocation),
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
@@ -112,7 +102,7 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
     }
     if arguments.is_empty() {
         return Err(CliError::usage(
-            "missing command (expected run, test, campaign, explore, build, audit, replay, minimize, coverage, sites, syscalls, or trace)",
+            "missing command (expected run, test, campaign, build, audit, replay, minimize, coverage, sites, syscalls, or trace)",
         ));
     }
     // The routed verb (if any). Every known verb records itself so a usage error
@@ -137,8 +127,7 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
             return Ok(ParseResult::Help(topic));
         }
         // `-V`/`--version` is intercepted everywhere before `--`, exactly like
-        // `--help`, so every verb honors it (not just the top level and the
-        // cargo family).
+        // `--help`, so every verb honors it.
         if version_requested(&arguments) {
             return Ok(ParseResult::Version);
         }
@@ -147,15 +136,13 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
             "coverage" => coverage::parse(arguments).map(ParseResult::Coverage),
             "sites" => sites::parse(arguments).map(ParseResult::Sites),
             "syscalls" => syscalls::parse(arguments).map(ParseResult::Syscalls),
-            "explore" => parse_explore(arguments).map(ParseResult::Explore),
             "build" => parse_native_build(arguments).map(ParseResult::NativeBuild),
             "audit" => parse_audit(arguments),
             "run" => parse_run(arguments),
             "test" => parse_test(arguments),
-            // `replay` is the sole replay entry point for both families,
-            // routed by the same artifact inference as `run`: it restores each
-            // family's semantic config (seed, fault knobs, buggify, guest argv)
-            // from the trace and exposes no semantic flags.
+            // `replay` is routed by the same artifact inference as `run`: it
+            // restores the semantic config (seed, fault knobs, buggify, guest
+            // argv) from the trace and exposes no semantic flags.
             "replay" => parse_replay(arguments),
             "minimize" => parse_minimize(arguments).map(ParseResult::Minimize),
             "trace" => parse_trace(arguments).map(ParseResult::Trace),
@@ -166,109 +153,88 @@ pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliErro
         Some("-h" | "--help") => Ok(ParseResult::Help(help::Topic::Overview)),
         Some("-V" | "--version") => Ok(ParseResult::Version),
         _ => Err(CliError::usage(format!(
-            "unsupported command {:?}; expected run, test, campaign, explore, build, audit, replay, minimize, coverage, sites, syscalls, or trace",
+            "unsupported command {:?}; expected run, test, campaign, build, audit, replay, minimize, coverage, sites, syscalls, or trace",
             arguments[0].to_string_lossy()
         ))),
     }
 }
 
+/// The usage error for a verb whose leading region held no artifact: name the
+/// unregistered flag the scan stopped at, if any, rather than a bare "requires".
+fn missing_artifact(
+    verb: &str,
+    arguments: &[OsString],
+    stop: Option<usize>,
+    what: &str,
+) -> CliError {
+    match stop {
+        Some(stop) => CliError::usage(format!(
+            "unsupported option {:?} for `{verb}`; {verb} requires {what}",
+            arguments[stop].to_string_lossy()
+        )),
+        None => CliError::usage(format!("{verb} requires {what}")),
+    }
+}
+
 /// Route `run`: source-first with artifacts accepted uniformly. A built
-/// artifact runs as-is; a `.rs` source builds on the fly then runs; a
-/// dir/`Cargo.toml` that integrates the Patina runtime, a leading flag, or no
-/// artifact is the Cargo package family — the same machinery as `test` — and any
-/// other dir/`Cargo.toml` builds shim-linked on the fly then runs.
+/// artifact runs as-is; a `.rs` source or a dir/`Cargo.toml` package is built
+/// shim-linked on the fly, then run under the pre-run gate.
 fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // Options may lead the artifact: locate it registry-arity-aware rather than
     // insisting it be the first token.
     let scan = locate_positionals("run", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
-        // No artifact located. If the scan stopped at an unknown flag, refuse
-        // loudly when a real artifact is stranded behind it; otherwise the
-        // unknown flag is a genuine forwarded cargo flag (`run --manifest-path X`)
-        // and the whole list stays the Cargo package family.
-        if let Some(stop) = scan.stop {
-            reject_stranded_artifact("run", &arguments[stop..])?;
-        }
-        return parse_cargo("run".to_string(), arguments);
+        return Err(missing_artifact(
+            "run",
+            &arguments,
+            scan.stop,
+            "an artifact, source, or package path",
+        ));
     };
-    // A directory/`Cargo.toml` positional that integrates the Patina runtime
-    // stays the cargo-family path — the linked runtime owns seeding, recording,
-    // replay, and `--param`/`--budget`. A plain package has no such runtime, so it
-    // falls through to `resolve_positional`, which builds it shim-linked and runs
-    // it under the native pre-run gate exactly like `audit` (and exactly like a
-    // prebuilt binary). Either way an existing directory resolves as a source and
-    // is NEVER passed through as guest argv.
-    if let ArgKind::SourcePackage(manifest) = classify_arg(&first)?
-        && package_integrates_patina(Some(&manifest), None)
-    {
-        return parse_cargo("run".to_string(), arguments);
-    }
-    match resolve_positional(&first)? {
-        Some(mut binary) => {
-            let selection = take_package_bin(scan.rest)?;
-            apply_package_selection(&mut binary, selection.package, selection.bin)?;
-            apply_env_package_selection(&mut binary)?;
-            let (release, rest) = take_release(selection.rest)?;
-            apply_release(&mut binary, release)?;
-            apply_env_release(&mut binary)?;
-            parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
-        }
-        // Cargo package family: forward the whole argument list (including the
-        // positional dir/Cargo.toml, which Cargo interprets) to `parse_cargo`.
-        None => parse_cargo("run".to_string(), arguments),
-    }
+    let mut binary = resolve_positional("run", &first)?;
+    let selection = take_package_bin(scan.rest)?;
+    apply_package_selection(&mut binary, selection.package, selection.bin)?;
+    apply_env_package_selection(&mut binary)?;
+    let (release, rest) = take_release(selection.rest)?;
+    apply_release(&mut binary, release)?;
+    apply_env_release(&mut binary)?;
+    parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
 }
 
-/// Route `test`: with no source positional this remains the Cargo package
-/// family; a directory or `Cargo.toml` positional selects the native libtest
-/// harness mode used by point-solution DST tests.
+/// Route `test <DIR|Cargo.toml>`: the native libtest harness mode used by
+/// point-solution DST tests.
 fn parse_test(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
+    const WHAT: &str = "a Cargo package (directory or Cargo.toml)";
     let scan = locate_positionals("test", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
-        if let Some(stop) = scan.stop {
-            reject_stranded_artifact("test", &arguments[stop..])?;
-        }
-        return parse_cargo("test".to_string(), arguments);
+        return Err(missing_artifact("test", &arguments, scan.stop, WHAT));
     };
     match classify_arg(&first)? {
         ArgKind::SourcePackage(manifest) => {
             parse_native_harness_from(PathBuf::from(&first), manifest, scan.rest)
                 .map(ParseResult::NativeHarness)
         }
-        ArgKind::SourceFile(_) => Err(CliError::usage(
-            "test native harness mode requires a Cargo package (directory or Cargo.toml), not a single .rs source",
-        )),
-        ArgKind::Artifact => Err(CliError::usage(
-            "test native harness mode requires a Cargo package (directory or Cargo.toml), not a prebuilt artifact",
-        )),
-        ArgKind::Other => parse_cargo("test".to_string(), arguments),
+        _ => Err(CliError::usage(format!(
+            "test requires {WHAT}, not {}",
+            Path::new(&first).display()
+        ))),
     }
 }
 
 /// Route `audit`: source-first, artifacts accepted. A native binary (built or
-/// built on the fly) goes to the symbol audit; a dir/`Cargo.toml` builds
-/// shim-linked (audit has no Cargo package family).
+/// built on the fly) goes to the symbol audit.
 fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // Options may lead the artifact.
     let scan = locate_positionals("audit", &arguments, 1);
     let Some(first) = scan.positionals.first().cloned() else {
-        // `audit` has no Cargo package family, so a missing artifact is always an
-        // error — but name the offending unknown flag rather than a bare
-        // "requires an artifact".
-        if let Some(stop) = scan.stop {
-            return Err(CliError::usage(format!(
-                "unsupported option {:?} for `audit`; audit requires an artifact or source path",
-                arguments[stop].to_string_lossy()
-            )));
-        }
-        return Err(CliError::usage("audit requires an artifact or source path"));
+        return Err(missing_artifact(
+            "audit",
+            &arguments,
+            scan.stop,
+            "an artifact or source path",
+        ));
     };
-    let mut artifact = resolve_positional(&first)?.ok_or_else(|| {
-        CliError::usage(format!(
-            "audit target {} is neither a native binary nor a source/package to build",
-            Path::new(&first).display()
-        ))
-    })?;
+    let mut artifact = resolve_positional("audit", &first)?;
     // Source-first `--package`/`--bin` select the workspace member/binary to build
     // before the audit — the help advertises the form, so it must not be rejected.
     // Consumed here so the audit parser sees only its own flags.
@@ -278,58 +244,28 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     parse_native_audit_from(artifact, selection.rest).map(ParseResult::NativeAudit)
 }
 
-/// Route `replay <ARTIFACT|SOURCE|PKG> <TRACE>` by the same artifact inference as
-/// `run`: a native binary (or a source/plain package built on the fly) replays
-/// under the native supervisor, and a runtime-linked directory/`Cargo.toml` under
-/// the Cargo package family. Each restores its recorded semantic config from the
-/// trace and exposes only that family's genuine host inputs. The two positionals
-/// (artifact/source/package, then trace) always lead; per-family flags and any
-/// `--` section follow and are handled by the family parser.
+/// Route `replay <ARTIFACT|SOURCE|PKG> <TRACE>` by the same artifact inference
+/// as `run`: a native binary (or a source/package built on the fly) replays
+/// under the native supervisor, which restores the recorded semantic config from
+/// the trace and loads it fail-closed BEFORE any guest execution.
 fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    // `replay` is source-first like `run`/`audit`: the artifact may be built or a
-    // source/package built on the fly. A rebuilt binary is judged against the
-    // trace by the fail-closed machinery (fingerprint + operation-mismatch), so no
-    // special-casing. The two positionals (artifact/source/package, then trace)
-    // may be interleaved with options in any order, e.g.
-    // `replay --fingerprint f app trace`; their relative order is preserved: the
-    // first is the origin, the second the trace.
+    // The two positionals (artifact/source/package, then trace) may be
+    // interleaved with options in any order, e.g. `replay --fingerprint f app
+    // trace`; their relative order is preserved: the first is the origin, the
+    // second the trace. A rebuilt binary is judged against the trace by the
+    // fail-closed machinery (fingerprint + operation-mismatch).
     let scan = locate_positionals("replay", &arguments, 2);
     if scan.positionals.len() < 2 {
-        if let Some(stop) = scan.stop {
-            return Err(CliError::usage(format!(
-                "unsupported option {:?} for `replay`",
-                arguments[stop].to_string_lossy()
-            )));
-        }
-        return Err(CliError::usage(if scan.positionals.is_empty() {
-            "replay requires an artifact/source/package path and a trace path"
+        let what = if scan.positionals.is_empty() {
+            "an artifact/source/package path and a trace path"
         } else {
-            "replay requires a trace path"
-        }));
+            "a trace path"
+        };
+        return Err(missing_artifact("replay", &arguments, scan.stop, what));
     }
-    let origin = scan.positionals[0].clone();
+    let binary = resolve_positional("replay", &scan.positionals[0])?;
     let trace = PathBuf::from(&scan.positionals[1]);
-    let flags = scan.rest;
-    // A package that integrates the Patina runtime replays through the cargo
-    // family (the linked runtime restores seed/faults/timeline and honors
-    // `--branch`/`--timeline`); a plain package rebuilds shim-linked and replays
-    // through the native path, where the trace is loaded and fail-closed BEFORE
-    // any guest execution.
-    if let ArgKind::SourcePackage(manifest) = classify_arg(&origin)?
-        && package_integrates_patina(Some(&manifest), None)
-    {
-        let package_dir = cargo_package_dir(&origin)?;
-        return parse_cargo_replay(package_dir, trace, flags);
-    }
-    match resolve_positional(&origin)? {
-        Some(binary) => parse_native_replay(binary, trace, flags).map(ParseResult::NativeRun),
-        // Neither an artifact nor a source/package (a leading flag or a plain
-        // file): let `cargo_package_dir` produce the precise "neither ..." error.
-        None => {
-            let package_dir = cargo_package_dir(&origin)?;
-            parse_cargo_replay(package_dir, trace, flags)
-        }
-    }
+    parse_native_replay(binary, trace, scan.rest).map(ParseResult::NativeRun)
 }
 
 #[cfg(test)]
