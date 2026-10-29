@@ -198,8 +198,9 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   reuses a recorded decision), records the per-generation decision on the
   `PATINA_CAMPAIGN_GEN` line as `guided=exploit:<gen>|explore|none`, and is
   refused when the artifact supplies no novelty signal. Guidance has no
-  consistent measured advantage over the default sweep, so prefer the default
-  sweep unless you are experimenting with the policy.
+  measured advantage over the default sweep (`mise run bench:guided` compares
+  them, paired, over many seed bases), so prefer the default sweep unless you
+  are experimenting with the policy.
 - `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native `--instrument` coverage. Resolves
   covmap PCs from the `patina_yield_point` anchor, demangles symbols, rolls edges
