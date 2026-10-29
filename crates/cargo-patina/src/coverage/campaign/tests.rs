@@ -168,3 +168,65 @@ fn plateau_rule_is_exact_and_zero_disables() {
     disabled.fold_covmap(2, &no_new).unwrap();
     assert!(!disabled.meta().unwrap().plateaued);
 }
+
+/// A generation that covers no new edge but hits a covered edge often enough to
+/// land in a new hit-count bucket is novel; the same count again is not. The
+/// first-reach record is generation-ordered, so the reach state as of any
+/// earlier generation is recoverable, and it survives a checkpoint round trip.
+#[test]
+fn a_hit_count_bucket_change_is_novel_and_rewindable() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path().join("coverage");
+    let artifact = CoverageArtifact {
+        path: "guest".into(),
+        sha256: "abc".into(),
+    };
+    let map = |counters: &[u32]| {
+        parse_covmap_bytes(&covmap_bytes(counters, &[10, 20]), Path::new("m")).unwrap()
+    };
+    let fingerprint = || "patina-native+instrumented".to_string();
+    let mut store = CampaignCoverageStore::fresh(dir.clone(), artifact.clone(), fingerprint(), 0);
+    let first = store.fold_covmap(0, &map(&[1, 0])).unwrap();
+    assert_eq!((first.new_edges, first.new_features), (1, 1));
+    let same = store.fold_covmap(1, &map(&[1, 0])).unwrap();
+    assert_eq!((same.new_edges, same.new_features), (0, 0));
+    let deeper = store.fold_covmap(2, &map(&[5, 0])).unwrap();
+    assert_eq!(
+        (deeper.new_edges, deeper.new_features),
+        (0, 1),
+        "a new bucket on a covered edge is a new feature, not a new edge"
+    );
+    let again = store.fold_covmap(3, &map(&[6, 0])).unwrap();
+    assert_eq!(again.new_features, 0, "6 is in the same bucket as 5");
+
+    let novel = |store: &CampaignCoverageStore| -> Vec<u64> {
+        store
+            .novelty_log()
+            .iter()
+            .map(|entry| entry.generation)
+            .collect()
+    };
+    assert_eq!(novel(&store), [0, 2]);
+    assert_eq!(
+        store.features_below(2).len(),
+        1,
+        "rewound before generation 2"
+    );
+    assert_eq!(store.features_below(3).len(), 2);
+
+    store.write_checkpoint().unwrap();
+    let loaded = CampaignCoverageStore::load(dir.clone(), artifact.clone(), fingerprint(), 0, 4)
+        .expect("round trip");
+    assert_eq!(novel(&loaded), [0, 2]);
+    assert_eq!(loaded.features_below(3), store.features_below(3));
+
+    // A feature log that disagrees with the rest of the store is refused.
+    let features = dir.join("features.u64le");
+    let mut bytes = fs::read(&features).unwrap();
+    // Edge 1 was never covered, so no generation can have reached a bucket of it.
+    bytes.extend_from_slice(&3u64.to_le_bytes());
+    bytes.extend_from_slice(&8u64.to_le_bytes());
+    fs::write(&features, &bytes).unwrap();
+    let error = CampaignCoverageStore::load(dir, artifact, fingerprint(), 0, 4).unwrap_err();
+    assert!(error.0.contains("feature log"), "unexpected error: {error}");
+}

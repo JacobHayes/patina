@@ -248,7 +248,44 @@ impl CampaignCoverageMeta {
 pub(crate) struct FoldOutcome {
     pub(crate) generation: u64,
     pub(crate) new_edges: u64,
+    /// Hit-count features this generation reached first (see [`hit_bucket`]).
+    /// A newly covered edge is always a new feature too.
+    pub(crate) new_features: u64,
     pub(crate) skipped_by_watermark: bool,
+}
+
+/// The AFL hit-count bucket of an edge counter: 1, 2, 3, 4-7, 8-15, 16-31,
+/// 32-127, 128+ map to 0..=7, and an unhit edge has none.
+///
+/// A (edge, bucket) pair is one coverage FEATURE. Novelty is reaching a feature
+/// for the first time, so a run that takes a covered loop or retry path more
+/// often than any run before it is novel even though it covers no new edge:
+/// threshold logic (count >= N, the k-th retry) gets a gradient instead of a
+/// single step.
+pub(crate) fn hit_bucket(count: u32) -> Option<u8> {
+    match count {
+        0 => None,
+        1 => Some(0),
+        2 => Some(1),
+        3 => Some(2),
+        4..=7 => Some(3),
+        8..=15 => Some(4),
+        16..=31 => Some(5),
+        32..=127 => Some(6),
+        _ => Some(7),
+    }
+}
+
+/// The buckets per edge, and so the stride of a feature id (`edge * 8 + bucket`).
+const BUCKETS: u64 = 8;
+
+/// A feature and the generation that first reached it. The store keeps these
+/// in generation order, so the coverage state as of any generation boundary
+/// is a prefix: that is what keeps guidance rewindable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FeatureRecord {
+    pub(crate) generation: u64,
+    pub(crate) feature: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +296,11 @@ pub(crate) struct CampaignCoverageStore {
     plateau_window: u64,
     meta: Option<CampaignCoverageMeta>,
     union_bits: Vec<u8>,
+    /// Per edge, a bitmask of the hit-count buckets any generation reached.
+    /// Derived from `features`, which is what is persisted.
+    reached: Vec<u8>,
+    /// Every feature ever reached, in first-reached order.
+    features: Vec<FeatureRecord>,
     pub(super) hits: Vec<u64>,
     sites: Vec<i64>,
     /// Watermark floor contributed by generations that produced NO coverage map
@@ -283,6 +325,8 @@ impl CampaignCoverageStore {
             plateau_window,
             meta: None,
             union_bits: Vec::new(),
+            reached: Vec::new(),
+            features: Vec::new(),
             hits: Vec::new(),
             sites: Vec::new(),
             skipped_watermark: 0,
@@ -367,6 +411,20 @@ impl CampaignCoverageStore {
                 meta.edges_covered
             )));
         }
+        let features_path = dir.join("features.u64le");
+        let features_bytes = fs::read(&features_path).map_err(|error| {
+            CliError(format!(
+                "failed to read coverage feature log {}: {error}",
+                features_path.display()
+            ))
+        })?;
+        let (features, reached) = decode_features(&features_bytes, &meta, &union_bits, edge_count)
+            .map_err(|error| {
+                CliError(format!(
+                    "coverage feature log {} is corrupt: {error}; refusing corrupt out-dir",
+                    features_path.display()
+                ))
+            })?;
         Ok(Self {
             dir,
             artifact,
@@ -374,6 +432,8 @@ impl CampaignCoverageStore {
             plateau_window,
             meta: Some(meta),
             union_bits,
+            reached,
+            features,
             hits,
             sites,
             skipped_watermark: 0,
@@ -388,21 +448,30 @@ impl CampaignCoverageStore {
         self.meta.as_ref()
     }
 
-    /// The novelty log as guidance ancestors: each generation that turned at
-    /// least one guard from unseen to seen, weighted by how many it opened.
+    /// The novelty log as guidance ancestors: each generation that reached at
+    /// least one feature first, weighted by how many it reached.
     pub(crate) fn novelty_log(&self) -> Vec<crate::guided::NoveltyEntry> {
-        self.meta
-            .as_ref()
-            .map(|meta| {
-                meta.new_edge_log
-                    .iter()
-                    .map(|(generation, new_edges)| crate::guided::NoveltyEntry {
-                        generation: *generation,
-                        weight: *new_edges,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut log: Vec<crate::guided::NoveltyEntry> = Vec::new();
+        for record in &self.features {
+            match log.last_mut() {
+                Some(entry) if entry.generation == record.generation => entry.weight += 1,
+                _ => log.push(crate::guided::NoveltyEntry {
+                    generation: record.generation,
+                    weight: 1,
+                }),
+            }
+        }
+        log
+    }
+
+    /// The features first reached by generations below `generation`: the
+    /// store's reach state rewound to that generation boundary.
+    #[cfg(test)]
+    pub(crate) fn features_below(&self, generation: u64) -> &[FeatureRecord] {
+        let cut = self
+            .features
+            .partition_point(|record| record.generation < generation);
+        &self.features[..cut]
     }
 
     pub(crate) fn generation_covmap_path(&self, generation: u64) -> PathBuf {
@@ -448,18 +517,32 @@ impl CampaignCoverageStore {
             return Ok(FoldOutcome {
                 generation,
                 new_edges: 0,
+                new_features: 0,
                 skipped_by_watermark: true,
             });
         }
         let meta = self.meta.as_mut().expect("initialized above");
         validate_covmap_compatible(meta, &self.sites, covmap)?;
         let mut new_edges = 0u64;
+        let mut new_features = 0u64;
         for (index, &counter) in covmap.counters.iter().enumerate() {
-            if counter != 0 && !bit_is_set(&self.union_bits, index) {
+            self.hits[index] = self.hits[index].saturating_add(u64::from(counter));
+            let Some(bucket) = hit_bucket(counter) else {
+                continue;
+            };
+            if !bit_is_set(&self.union_bits, index) {
                 set_bit(&mut self.union_bits, index);
                 new_edges += 1;
             }
-            self.hits[index] = self.hits[index].saturating_add(u64::from(counter));
+            let mask = 1u8 << bucket;
+            if self.reached[index] & mask == 0 {
+                self.reached[index] |= mask;
+                self.features.push(FeatureRecord {
+                    generation,
+                    feature: index as u64 * BUCKETS + u64::from(bucket),
+                });
+                new_features += 1;
+            }
         }
         if new_edges > 0 {
             meta.edges_covered += new_edges;
@@ -471,6 +554,7 @@ impl CampaignCoverageStore {
         Ok(FoldOutcome {
             generation,
             new_edges,
+            new_features,
             skipped_by_watermark: false,
         })
     }
@@ -486,6 +570,11 @@ impl CampaignCoverageStore {
             &self.dir.join("union.bits"),
             &self.union_bits,
             "coverage union bitset",
+        )?;
+        atomic_write(
+            &self.dir.join("features.u64le"),
+            &encode_features(&self.features),
+            "coverage feature log",
         )?;
         atomic_write(
             &self.dir.join("hits.u64le"),
@@ -545,6 +634,8 @@ impl CampaignCoverageStore {
             self.plateau_window,
         ));
         self.union_bits = vec![0; bit_len(edge_count)];
+        self.reached = vec![0; edge_count];
+        self.features = Vec::new();
         self.hits = vec![0; edge_count];
         self.sites = covmap.deltas.clone();
         Ok(())
@@ -619,6 +710,75 @@ pub(super) fn read_campaign_meta(path: &Path) -> Result<CampaignCoverageMeta, Cl
             path.display()
         ))
     })
+}
+
+fn encode_features(features: &[FeatureRecord]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(features.len() * 16);
+    for record in features {
+        bytes.extend_from_slice(&record.generation.to_le_bytes());
+        bytes.extend_from_slice(&record.feature.to_le_bytes());
+    }
+    bytes
+}
+
+/// Decode the feature log and rebuild the per-edge reached masks, checking it
+/// against the rest of the store: generation order, no repeats, every
+/// generation already applied, and the edges it covers matching `union.bits`
+/// and the meta's per-generation new-edge log.
+fn decode_features(
+    bytes: &[u8],
+    meta: &CampaignCoverageMeta,
+    union_bits: &[u8],
+    edge_count: usize,
+) -> Result<(Vec<FeatureRecord>, Vec<u8>), String> {
+    if bytes.len() % 16 != 0 {
+        return Err(format!(
+            "{} bytes is not a whole number of records",
+            bytes.len()
+        ));
+    }
+    let words = decode_u64_vec(bytes);
+    let mut reached = vec![0u8; edge_count];
+    let mut features = Vec::with_capacity(words.len() / 2);
+    let mut first_reach: BTreeMap<u64, u64> = BTreeMap::new();
+    for pair in words.chunks_exact(2) {
+        let record = FeatureRecord {
+            generation: pair[0],
+            feature: pair[1],
+        };
+        if features
+            .last()
+            .is_some_and(|last: &FeatureRecord| record.generation < last.generation)
+        {
+            return Err("records are not in generation order".to_string());
+        }
+        if record.generation >= meta.generations_applied {
+            return Err(format!(
+                "generation {} is beyond generations_applied={}",
+                record.generation, meta.generations_applied
+            ));
+        }
+        let edge = usize::try_from(record.feature / BUCKETS)
+            .ok()
+            .filter(|&edge| edge < edge_count)
+            .ok_or_else(|| format!("feature {} is outside the edge table", record.feature))?;
+        let mask = 1u8 << (record.feature % BUCKETS);
+        if reached[edge] & mask != 0 {
+            return Err(format!("feature {} is recorded twice", record.feature));
+        }
+        if reached[edge] == 0 {
+            *first_reach.entry(record.generation).or_default() += 1;
+        }
+        reached[edge] |= mask;
+        features.push(record);
+    }
+    if (0..edge_count).any(|edge| (reached[edge] != 0) != bit_is_set(union_bits, edge)) {
+        return Err("the edges it covers do not match union.bits".to_string());
+    }
+    if first_reach.into_iter().collect::<Vec<_>>() != meta.new_edge_log {
+        return Err("its first-covered edges do not match new_edge_log".to_string());
+    }
+    Ok((features, reached))
 }
 
 pub(super) fn read_exact_len(

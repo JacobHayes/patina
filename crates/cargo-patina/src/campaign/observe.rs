@@ -187,6 +187,7 @@ pub(super) fn fold_edge_coverage_generation(
         return Ok(Some(FoldOutcome {
             generation,
             new_edges: 0,
+            new_features: 0,
             skipped_by_watermark: true,
         }));
     }

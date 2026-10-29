@@ -183,7 +183,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
   `patina.campaign.sites/v1`), and native `--instrument` edge coverage is folded
-  into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v1`) with a
+  into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v2`) with a
   plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
   `registered_gens=0`, fail the campaign by default unless explicitly waived.
