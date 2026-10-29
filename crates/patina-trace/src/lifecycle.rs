@@ -181,7 +181,7 @@ pub(super) fn validate_lifecycle_events(
     Ok(())
 }
 
-fn active_incarnation_at_order(lifecycle: &[LifecycleEvent], order: u64) -> Option<u64> {
+pub(super) fn active_incarnation_at_order(lifecycle: &[LifecycleEvent], order: u64) -> Option<u64> {
     let mut active = None;
     let mut pending_restart_start = None;
     for marker in lifecycle {

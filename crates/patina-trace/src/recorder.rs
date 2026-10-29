@@ -7,6 +7,7 @@ use std::path::Path;
 use patina_dst_abi::{Operation, Outcome};
 use serde::Serialize;
 
+use crate::bundle::{Decision, Decisions};
 use crate::{
     BuggifyConfigRecord, ComputeStop, LifecycleEvent, LifecycleEventKind, MAIN_TIMELINE,
     MAX_TIMELINE_EVENTS, MAX_TRACE_BYTES, RunMetadata, TRACE_FORMAT_VERSION, TraceBundle,
@@ -38,7 +39,12 @@ impl Write for ByteCounter {
 /// fail the run (see [`EventLedger::admit`]).
 fn serialized_event_len(event: &TraceEvent) -> Option<u64> {
     let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, event).ok()?;
+    // A recorder's events follow one another, so none carries its order.
+    serde_json::to_writer(
+        &mut counter,
+        &Decision::of(event, event.order.wrapping_sub(1)),
+    )
+    .ok()?;
     Some(counter.0)
 }
 
@@ -311,7 +317,7 @@ impl Recorder {
             from_sequence: Option<u64>,
             branch_seed: Option<u64>,
             lifecycle: [LifecycleEvent; 2],
-            decisions: &'a [TraceEvent],
+            decisions: Decisions<'a>,
         }
         if self.ledger.overflowed() {
             return Err(PrefixWriteError::Overflow);
@@ -348,7 +354,10 @@ impl Recorder {
                             },
                         },
                     ],
-                    decisions: &self.decisions,
+                    decisions: Decisions {
+                        start_order: start,
+                        events: &self.decisions,
+                    },
                 }],
             },
         )

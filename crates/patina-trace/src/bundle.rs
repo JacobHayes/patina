@@ -6,11 +6,12 @@ use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use patina_dst_abi::{Operation, Outcome};
-use serde::{Deserialize, Serialize};
+use serde::ser::{SerializeSeq, SerializeStruct, SerializeTuple};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::lifecycle::{
-    linear_lifecycle_from_start_and_incarnation, validate_lifecycle_events,
-    validate_timeline_lifecycle,
+    active_incarnation_at_order, linear_lifecycle_from_start_and_incarnation,
+    validate_lifecycle_events, validate_timeline_lifecycle,
 };
 use crate::{
     ABANDONED_TRACE_KEY, AbandonedTrace, LifecycleEvent, LifecycleEventKind, MAIN_TIMELINE,
@@ -18,8 +19,13 @@ use crate::{
     create_scratch, remove_dead_scratch,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// One recorded boundary operation and its outcome.
+///
+/// A bundle stores only `operation` and `outcome` per event: `sequence`,
+/// `order` and `incarnation` follow from the event's position and its
+/// timeline's lifecycle markers, so they are derived on load (see
+/// [`Decision`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceEvent {
     /// Operation sequence number, contiguous among boundary operations only.
     pub sequence: u64,
@@ -43,8 +49,8 @@ impl TraceEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "TimelineRecord")]
 pub struct Timeline {
     pub id: String,
     pub parent: Option<String>,
@@ -52,6 +58,174 @@ pub struct Timeline {
     pub branch_seed: Option<u64>,
     pub lifecycle: Vec<LifecycleEvent>,
     pub decisions: Vec<TraceEvent>,
+}
+
+impl Serialize for Timeline {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut timeline = serializer.serialize_struct("Timeline", 6)?;
+        timeline.serialize_field("id", &self.id)?;
+        timeline.serialize_field("parent", &self.parent)?;
+        timeline.serialize_field("from_sequence", &self.from_sequence)?;
+        timeline.serialize_field("branch_seed", &self.branch_seed)?;
+        timeline.serialize_field("lifecycle", &self.lifecycle)?;
+        timeline.serialize_field(
+            "decisions",
+            &Decisions {
+                start_order: self.lifecycle.first().map_or(0, |marker| marker.order),
+                events: &self.decisions,
+            },
+        )?;
+        timeline.end()
+    }
+}
+
+/// A timeline's decisions as a bundle stores them: one [`Decision`] per event,
+/// borrowed, so serializing needs no copy and no allocation.
+pub(super) struct Decisions<'a> {
+    /// The order of the timeline's first lifecycle marker, which the first
+    /// decision's order follows.
+    pub(super) start_order: u64,
+    pub(super) events: &'a [TraceEvent],
+}
+
+impl Serialize for Decisions<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(self.events.len()))?;
+        let mut previous = self.start_order;
+        for event in self.events {
+            seq.serialize_element(&Decision::of(event, previous))?;
+            previous = event.order;
+        }
+        seq.end()
+    }
+}
+
+/// One event as a bundle stores it: `[operation, outcome]`, or
+/// `[operation, outcome, order]` when its order is not the one after the
+/// previous decision's (the first decision's: the timeline's first lifecycle
+/// marker's), which is only where lifecycle markers sit between them.
+///
+/// Nothing else is stored, because nothing else is free: an event's sequence is
+/// its timeline's `from_sequence` plus its index, and its incarnation is the
+/// one the lifecycle markers have active at its order, both of which
+/// [`TraceBundle::validate`] already requires.
+pub(super) struct Decision<'a> {
+    event: &'a TraceEvent,
+    order: Option<u64>,
+}
+
+impl<'a> Decision<'a> {
+    pub(super) fn of(event: &'a TraceEvent, previous_order: u64) -> Self {
+        Self {
+            event,
+            order: (event.order != previous_order.wrapping_add(1)).then_some(event.order),
+        }
+    }
+}
+
+impl Serialize for Decision<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut tuple = serializer.serialize_tuple(2 + usize::from(self.order.is_some()))?;
+        tuple.serialize_element(&self.event.operation)?;
+        tuple.serialize_element(&self.event.outcome)?;
+        if let Some(order) = self.order {
+            tuple.serialize_element(&order)?;
+        }
+        tuple.end()
+    }
+}
+
+/// A [`Decision`] as read back, before its derived fields are filled in.
+struct DecisionRecord {
+    operation: Operation,
+    outcome: Outcome,
+    order: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for DecisionRecord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = DecisionRecord;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter
+                    .write_str("a decision [operation, outcome] or [operation, outcome, order]")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<DecisionRecord, A::Error> {
+                use serde::de::Error;
+                let operation = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let outcome = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(1, &self))?;
+                let order = seq.next_element()?;
+                if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(A::Error::invalid_length(4, &self));
+                }
+                Ok(DecisionRecord {
+                    operation,
+                    outcome,
+                    order,
+                })
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+
+/// A [`Timeline`] as a bundle stores it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TimelineRecord {
+    id: String,
+    parent: Option<String>,
+    from_sequence: Option<u64>,
+    branch_seed: Option<u64>,
+    lifecycle: Vec<LifecycleEvent>,
+    decisions: Vec<DecisionRecord>,
+}
+
+impl TryFrom<TimelineRecord> for Timeline {
+    type Error = String;
+
+    fn try_from(record: TimelineRecord) -> Result<Self, String> {
+        let start = record.from_sequence.unwrap_or(0);
+        let mut previous = record.lifecycle.first().map_or(0, |marker| marker.order);
+        let mut decisions = Vec::with_capacity(record.decisions.len());
+        for (index, decision) in record.decisions.into_iter().enumerate() {
+            let order = decision.order.unwrap_or(previous.wrapping_add(1));
+            let incarnation =
+                active_incarnation_at_order(&record.lifecycle, order).ok_or_else(|| {
+                    format!(
+                        "timeline {} decision {index} at order {order} is outside any active \
+                         incarnation",
+                        record.id
+                    )
+                })?;
+            decisions.push(TraceEvent {
+                sequence: start + index as u64,
+                order,
+                incarnation,
+                operation: decision.operation,
+                outcome: decision.outcome,
+            });
+            previous = order;
+        }
+        Ok(Self {
+            id: record.id,
+            parent: record.parent,
+            from_sequence: record.from_sequence,
+            branch_seed: record.branch_seed,
+            lifecycle: record.lifecycle,
+            decisions,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

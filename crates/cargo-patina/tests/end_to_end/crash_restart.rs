@@ -327,14 +327,16 @@ fn main() {
         // `/pid0`); only a replay of incarnation 1's own segment can notice. The
         // diverged operation fails in the guest and the runtime reports the
         // unconsumed remainder of the segment.
+        let first_restarted = patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .timelines[0]
+            .decisions
+            .iter()
+            .position(|event| event.incarnation == 1)
+            .expect("incarnation 1 recorded operations");
         let restarted = tamper_trace(&trace, |bundle| {
-            let first_restarted = bundle["timelines"][0]["decisions"]
-                .as_array_mut()
-                .unwrap()
-                .iter_mut()
-                .find(|event| event["incarnation"] == 1)
-                .expect("incarnation 1 recorded operations");
-            let handle = &mut first_restarted["outcome"]["value"];
+            let decision = &mut bundle["timelines"][0]["decisions"][first_restarted];
+            let handle = &mut decision[1]["value"];
             *handle = (handle.as_u64().expect("a handle outcome") + 1).into();
         });
         let replayed = canary.command("replay", &[restarted.to_str().unwrap()]);

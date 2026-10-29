@@ -205,16 +205,17 @@ fn an_under_budget_recording_is_byte_identical_and_exactly_tallied() {
     }
 
     let tallied = recorder.ledger.bytes;
-    let expected: u64 = events
-        .iter()
-        .map(|event| serde_json::to_vec(event).unwrap().len() as u64)
-        .sum::<u64>()
-        + events.len() as u64
-        - 1;
-    assert_eq!(tallied, expected, "the ledger must tally events exactly");
-
     let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), events);
     let expected_bytes = bundle.to_bytes().unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(&expected_bytes).unwrap();
+    // The decisions array as the file holds it, less its two brackets.
+    let decisions = serde_json::to_vec(&decoded["timelines"][0]["decisions"]).unwrap();
+    assert_eq!(
+        tallied,
+        decisions.len() as u64 - 2,
+        "the ledger must tally events exactly"
+    );
+
     assert!(
         tallied < expected_bytes.len() as u64,
         "the tally must stay under the size of the file it bounds"

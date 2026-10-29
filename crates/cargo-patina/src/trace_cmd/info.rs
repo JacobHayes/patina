@@ -8,7 +8,9 @@ pub(crate) fn info_value(
     bundle: &TraceBundle,
     raw: &Value,
 ) -> Result<Value, CliError> {
-    let events = raw_resolved_events(raw, timeline)?;
+    let events = bundle
+        .resolved_timeline(timeline)
+        .map_err(|_| CliError(format!("trace has no timeline named {timeline:?}")))?;
     let (vt_min, vt_max) = vtime_span(&events);
     let timelines: Vec<Value> = bundle
         .timelines
@@ -51,52 +53,14 @@ pub(crate) fn info_value(
     }))
 }
 
-fn raw_resolved_events<'a>(raw: &'a Value, id: &str) -> Result<Vec<&'a Value>, CliError> {
-    let timelines = raw
-        .get("timelines")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CliError("trace JSON is missing a timelines array".into()))?;
-    let index = timelines
-        .iter()
-        .position(|timeline| timeline.get("id").and_then(Value::as_str) == Some(id))
-        .ok_or_else(|| CliError(format!("trace has no timeline named {id:?}")))?;
-    raw_resolved_events_by_index(timelines, index)
-}
-
-fn raw_resolved_events_by_index(
-    timelines: &[Value],
-    index: usize,
-) -> Result<Vec<&Value>, CliError> {
-    let timeline = &timelines[index];
-    let decisions = timeline
-        .get("decisions")
-        .and_then(Value::as_array)
-        .ok_or_else(|| CliError("trace timeline is missing a decisions array".into()))?;
-    let Some(parent) = timeline.get("parent").and_then(Value::as_str) else {
-        return Ok(decisions.iter().collect());
-    };
-    let parent_index = timelines[..index]
-        .iter()
-        .position(|candidate| candidate.get("id").and_then(Value::as_str) == Some(parent))
-        .ok_or_else(|| CliError(format!("trace has no timeline named {parent:?}")))?;
-    let mut resolved = raw_resolved_events_by_index(timelines, parent_index)?;
-    let from = timeline
-        .get("from_sequence")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    resolved.truncate(from);
-    resolved.extend(decisions.iter());
-    Ok(resolved)
-}
-
-fn vtime_span(events: &[&Value]) -> (Option<u64>, Option<u64>) {
+fn vtime_span(events: &[TraceEvent]) -> (Option<u64>, Option<u64>) {
     let mut current: Option<u64> = None;
     let mut min: Option<u64> = None;
     let mut max: Option<u64> = None;
     for event in events {
-        let op = event.get("operation").unwrap_or(&Value::Null);
-        let out = event.get("outcome").unwrap_or(&Value::Null);
-        if let Some(value) = trace_view::virtual_time_reading(op, out) {
+        let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
+        let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
+        if let Some(value) = trace_view::virtual_time_reading(&op, &out) {
             current = Some(value);
         }
         if let Some(value) = current {

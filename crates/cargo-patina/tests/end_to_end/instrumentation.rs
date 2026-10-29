@@ -379,12 +379,12 @@ fn main() {
         let decisions = timeline["decisions"].as_array_mut().unwrap();
         let next = decisions.pop().unwrap();
         assert_eq!(
-            next["operation"]["kind"], "scheduler_next",
+            next[0]["kind"], "scheduler_next",
             "expected the recording to end with a scheduler_next decision"
         );
         let yielded = decisions.pop().unwrap();
         assert_eq!(
-            yielded["operation"]["kind"], "task_yield",
+            yielded[0]["kind"], "task_yield",
             "expected a trailing task_yield decision before the final scheduler_next"
         );
         fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();

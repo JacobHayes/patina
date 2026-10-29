@@ -78,6 +78,62 @@ fn save_paths_refuse_an_over_budget_trace_classifiably_and_write_nothing() {
     assert!(!TraceError::Invalid("something is wrong".into()).is_resource_limit());
 }
 
+/// A bundle stores no event's sequence, order or incarnation unless it must,
+/// and every one survives the round trip: an order that does not follow the
+/// previous decision's, a branch's sequences and orders after its parent's
+/// prefix, and the incarnation its lifecycle has active.
+#[test]
+fn derived_event_fields_survive_a_round_trip() {
+    let mut bundle = TraceBundle::linear(
+        RunMetadata::new(1, "fingerprint", 0, "patina"),
+        3,
+        (0..4)
+            .map(|index| TraceEvent::new(index, operation(), Outcome::U64(index)))
+            .collect(),
+    );
+    // Leave a gap after the second decision, and before the end marker.
+    for event in &mut bundle.timelines[0].decisions[2..] {
+        event.order += 5;
+    }
+    bundle.timelines[0].lifecycle[1].order += 7;
+    let mut branch = bundle.timelines[0].clone();
+    branch.id = "branch".into();
+    branch.parent = Some(MAIN_TIMELINE.into());
+    branch.from_sequence = Some(2);
+    branch.branch_seed = Some(9);
+    branch.decisions.truncate(2);
+    for (index, event) in branch.decisions.iter_mut().enumerate() {
+        event.sequence = 2 + index as u64;
+        event.order = 20 + index as u64;
+    }
+    branch.lifecycle[0].order = 19;
+    branch.lifecycle[1].order = 22;
+    bundle.timelines.push(branch);
+    bundle.validate().unwrap();
+
+    let decoded = TraceBundle::from_slice(&bundle.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, bundle);
+}
+
+/// A stored order that puts a decision outside every incarnation its
+/// lifecycle starts is refused, not given some incarnation.
+#[test]
+fn a_decision_outside_every_incarnation_is_refused() {
+    let bundle = TraceBundle::new(
+        RunMetadata::new(1, "fingerprint", 0, "patina"),
+        vec![TraceEvent::new(0, operation(), Outcome::U64(0))],
+    );
+    let mut value: serde_json::Value = serde_json::from_slice(&bundle.to_bytes().unwrap()).unwrap();
+    let end = value["timelines"][0]["lifecycle"][1]["order"]
+        .as_u64()
+        .unwrap();
+    value["timelines"][0]["decisions"][0]
+        .as_array_mut()
+        .unwrap()
+        .push((end + 1).into());
+    assert!(TraceBundle::from_slice(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
 #[test]
 fn rejects_non_contiguous_sequences() {
     let mut bundle = TraceBundle::new(

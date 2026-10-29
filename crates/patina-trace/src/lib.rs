@@ -123,7 +123,11 @@ pub use replay::Replayer;
 ///   the crash took down (`crash_kind`).
 /// - 26: no `starvation` in the schedule policy metadata; the starvation
 ///   policy is gone, so a format 25 trace that names it is refused.
-pub const TRACE_FORMAT_VERSION: u32 = 26;
+/// - 27: each decision is `[operation, outcome]`, with no `sequence`,
+///   `incarnation` or `order`: all three follow from its position and its
+///   timeline's lifecycle markers. An order is stored, as a third element,
+///   only where it does not follow the previous decision's.
+pub const TRACE_FORMAT_VERSION: u32 = 27;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

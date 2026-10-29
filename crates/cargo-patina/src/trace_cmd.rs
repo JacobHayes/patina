@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use patina_dst_trace::{TraceBundle, TraceError};
+use patina_dst_trace::{TraceBundle, TraceError, TraceEvent};
 use serde_json::{Map, Value};
 
 use crate::CliError;

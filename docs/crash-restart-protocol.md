@@ -19,9 +19,9 @@ The kind of the crash decides what the restarted incarnation finds on disk:
 
 ## Trace contract
 
-The trace records incarnation state explicitly:
+The trace records incarnation state through its lifecycle markers:
 
-- every operation has an operation `sequence`, a global logical `order`, and an `incarnation` id;
+- every operation has an operation `sequence`, a global logical `order`, and an `incarnation` id. The file stores none of them unless it must: `sequence` is the operation's position, `order` follows the previous operation's (a decision stores its own only where lifecycle markers sit before it), and `incarnation` is the one the markers have active at that order;
 - every timeline has lifecycle markers in the same `order` namespace;
 - structural validation rejects duplicate orders, operations outside an active incarnation, mismatched operation and lifecycle incarnation ids, restarts without a preceding crash, digest mismatches between `Crash` and `Restart`, and unended lifecycles.
 
@@ -67,7 +67,7 @@ Both incarnations get the same configuration and run seed. A run whose rate neve
 
 A restarted incarnation boots as a fresh process would, on a machine that may itself have rebooted:
 
-- **Seeded streams.** Every stream of an incarnation derives from its stream root, `incarnation_seed(run_seed, incarnation)` in `patina-rng-seeded`. That is the run seed itself for incarnation 0, and the run seed keyed by the incarnation number for a restart. Incarnation 1 therefore draws its own entropy, `AT_RANDOM` bytes, scheduler choices, buggify firings, delays and `patina_dst::rng()` values. It also draws its own filesystem, network, DNS, clock, entropy and custom-op fault decisions, each still a pure function of the run seed. The handoff carries no seed: the trace records the run seed and stamps every operation with its incarnation, so a replay re-derives each incarnation's streams from those alone.
+- **Seeded streams.** Every stream of an incarnation derives from its stream root, `incarnation_seed(run_seed, incarnation)` in `patina-rng-seeded`. That is the run seed itself for incarnation 0, and the run seed keyed by the incarnation number for a restart. Incarnation 1 therefore draws its own entropy, `AT_RANDOM` bytes, scheduler choices, buggify firings, delays and `patina_dst::rng()` values. It also draws its own filesystem, network, DNS, clock, entropy and custom-op fault decisions, each still a pure function of the run seed. The handoff carries no seed: the trace records the run seed and places every operation in an incarnation, so a replay re-derives each incarnation's streams from those alone.
 - **Per-run decisions.** Swarm deselection, buggify site activation and buggify knob values are picks for the run, drawn from the run seed. They are the same in every incarnation: both incarnations run one fault configuration, and the joined trace's metadata must agree on it.
 - **Realtime carries forward.** The handoff records the realtime the crashed incarnation's clock had reached. That value is at or after every unperturbed realtime read and every timestamp that clock stamped. The restarted incarnation's realtime starts there plus a seeded downtime, uniform over one second to one minute and drawn from its own stream root, so realtime never runs backwards across a restart. `--epoch-jump-nanos` perturbs individual reads around the clock in either incarnation and does not move it.
 - **Monotonic time is per boot.** The restarted incarnation's monotonic clock starts again at the run's boot origin, as `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` do after a real reboot.
