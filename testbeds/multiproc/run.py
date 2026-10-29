@@ -21,7 +21,7 @@ EXPECTED = {
     "fanout": ("runtime", "posix_spawnattr_init"),
     "pipeline": ("runtime", "posix_spawnattr_init"),
     "forkwait-c": ("runtime", "fork"),
-    "forkwait-cxx": ("audit", "_ZSt4cout"),
+    "forkwait-cxx": ("audit", "setlocale"),
     "buildlike": ("runtime", "posix_spawnattr_init"),
     "sigchld": ("runtime", "fork"),
     "failed-exec-enoent": ("runtime", "execvp"),

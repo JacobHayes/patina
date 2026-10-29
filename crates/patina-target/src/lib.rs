@@ -13,11 +13,13 @@ use crate::provenance::normalize_provenance;
 use object::{Architecture, BinaryFormat};
 use std::fmt;
 
+mod bindings;
 mod code_ranges;
 mod early_init;
 mod import_policy;
 mod import_xrefs;
 mod instruction_scan;
+mod load_set;
 mod native_audit;
 mod provenance;
 mod report;
@@ -146,6 +148,7 @@ pub use instruction_scan::{
     THREAD_POINTER_CATEGORY, native_escape_is_go_build_marker, native_escape_is_host_identity,
     native_go_build_marker_sites, native_host_identity_sites, relocatable_raw_opcode_sites,
 };
+pub use load_set::{ElfLoadRequest, ImageRole, LoadSet, LoadedImage, elf_load_request};
 pub use native_audit::NativeAudit;
 pub use provenance::NativeProvenance;
 use provenance::NativeProvenanceIndex;
@@ -180,6 +183,45 @@ pub struct NativeEscape {
     /// field to keep the two apart, so an escape carrying no mnemonic is never
     /// downgraded.
     pub mnemonic: Option<&'static str>,
+    /// The library the reference or site is in; `None` for the executable.
+    pub image: Option<String>,
+    /// For a reference that binds into a host image, where it binds.
+    pub binding: Option<HostBinding>,
+}
+
+/// Where a reference the audit refused binds: a host image's definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostBinding {
+    /// The version the reference requires, if any.
+    pub version: Option<String>,
+    /// The host image that defines it (`libc.so.6`).
+    pub provider: String,
+    /// The executable defines the name too, but the reference binds past that
+    /// definition (the shim's door) to the host's.
+    pub around_executable: bool,
+}
+
+impl NativeEscape {
+    /// One line naming the finding: where it is, what it is, and for a
+    /// binding, what it binds to.
+    pub fn summary(&self) -> String {
+        let mut line = String::new();
+        if let Some(image) = &self.image {
+            line.push_str(&format!("{image}: "));
+        }
+        line.push_str(&format!("{} ({})", self.symbol, self.category));
+        if let Some(binding) = &self.binding {
+            line.push_str(" binds to ");
+            if let Some(version) = &binding.version {
+                line.push_str(&format!("{}@{version} in ", self.symbol));
+            }
+            line.push_str(&binding.provider);
+            if binding.around_executable {
+                line.push_str(", around the executable's own definition");
+            }
+        }
+        line
+    }
 }
 
 impl NativeEscape {
@@ -189,6 +231,8 @@ impl NativeEscape {
             category,
             provenance: normalize_provenance(provenance),
             mnemonic: None,
+            image: None,
+            binding: None,
         }
     }
 
@@ -213,6 +257,9 @@ pub enum TargetError {
     UnauditableElf,
     UnsupportedArchitecture(Architecture),
     UnsupportedImports(Vec<NativeEscape>),
+    /// The images the loader would map could not be established, or one asks
+    /// the loader for something that runs before the audit could judge it.
+    UnreadableLoadSet(String),
 }
 
 impl fmt::Display for TargetError {
@@ -247,6 +294,12 @@ fails closed"
             Self::UnsupportedImports(imports) => {
                 f.write_str(&render_native_escapes_grouped(imports))
             }
+            Self::UnreadableLoadSet(reason) => write!(
+                f,
+                "refusing to certify native binary: the images its loader maps cannot be \
+established ({reason}), and a reference is judged by the image it binds to, so nothing could be \
+certified"
+            ),
         }
     }
 }
@@ -261,7 +314,8 @@ impl std::error::Error for TargetError {
             | Self::RelocatableElf
             | Self::UnauditableElf
             | Self::UnsupportedArchitecture(_)
-            | Self::UnsupportedImports(_) => None,
+            | Self::UnsupportedImports(_)
+            | Self::UnreadableLoadSet(_) => None,
         }
     }
 }

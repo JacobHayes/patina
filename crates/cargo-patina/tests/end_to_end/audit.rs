@@ -143,23 +143,22 @@ mod tests {
                     "json",
                 ],
             );
-            assert_eq!(
-                audit.status.code(),
-                Some(if denied { 2 } else { 0 }),
-                "{name}: {}",
-                String::from_utf8_lossy(&audit.stderr)
-            );
-            if denied {
-                let result: serde_json::Value = serde_json::from_slice(&audit.stdout).unwrap();
-                assert!(
-                    result["finding_details"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|f| f["mnemonic"] == "rdrand"),
-                    "{name}: {result}"
-                );
-            }
+            // A raw binary's own libc imports bind into libc and are refused by
+            // name; what each case decides is whether the scan reached the
+            // planted instruction.
+            let result: serde_json::Value =
+                serde_json::from_slice(&audit.stdout).unwrap_or_else(|error| {
+                    panic!(
+                        "{name}: {error}: {}",
+                        String::from_utf8_lossy(&audit.stderr)
+                    )
+                });
+            let scanned_rdrand = result["finding_details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["mnemonic"] == "rdrand");
+            assert_eq!(scanned_rdrand, denied, "{name}: {result}");
         }
     }
 

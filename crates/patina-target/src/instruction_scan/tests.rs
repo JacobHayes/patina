@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::TargetError;
-use crate::native_audit::NativeAudit;
 use crate::provenance::NativeProvenanceIndex;
 use crate::report::{
     render_cpu_nondeterminism_note, render_host_identity_note, render_thread_pointer_note,
@@ -153,7 +152,7 @@ fn refuses_binaries_of_undecodable_architectures() {
         );
 
         // Public gate refuses end to end.
-        let err = NativeAudit::audit(&elf, &BTreeSet::new())
+        let err = crate::tests::audit_with_libc(&elf, &BTreeSet::new())
             .expect_err("audit must fail closed on an undecodable arch");
         assert!(
             matches!(err, TargetError::UnsupportedArchitecture(_)),
@@ -208,7 +207,7 @@ fn cpuid_sites_are_reported_without_refusing_the_binary() {
     // cpuid; ret; cpuid; ret; nop; nop
     let elf =
         minimal_executable_elf64(EM_X86_64, &[0x0f, 0xa2, 0xc3, 0x0f, 0xa2, 0xc3, 0x90, 0x90]);
-    let audit = NativeAudit::audit(&elf, &BTreeSet::new())
+    let audit = crate::tests::audit_with_libc(&elf, &BTreeSet::new())
         .expect("a host-identity read must not refuse the binary");
     assert!(
         audit.imports.is_empty(),
@@ -242,7 +241,7 @@ fn cpuid_sites_are_reported_without_refusing_the_binary() {
     // site is still reported rather than folded into the refusal.
     let with_rdtsc =
         minimal_executable_elf64(EM_X86_64, &[0x0f, 0xa2, 0x0f, 0x31, 0xc3, 0x90, 0x90, 0x90]);
-    let error = NativeAudit::audit(&with_rdtsc, &BTreeSet::new())
+    let error = crate::tests::audit_with_libc(&with_rdtsc, &BTreeSet::new())
         .expect_err("an rdtsc site still fails closed");
     let TargetError::UnsupportedImports(denied) = error else {
         panic!("expected an unsupported-imports refusal, got {error:?}");
@@ -343,7 +342,8 @@ fn aarch64_thread_pointer_write_is_refused_by_name() {
         0xd51b_d0bf, // msr tpidr2_el0, xzr
     ]);
     let elf = minimal_executable_elf64(EM_AARCH64, &text);
-    let Err(TargetError::UnsupportedImports(denied)) = NativeAudit::audit(&elf, &BTreeSet::new())
+    let Err(TargetError::UnsupportedImports(denied)) =
+        crate::tests::audit_with_libc(&elf, &BTreeSet::new())
     else {
         panic!("a thread-pointer write must refuse the binary");
     };

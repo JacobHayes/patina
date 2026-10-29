@@ -14,9 +14,8 @@
 //!   the deny-trap list; the load-bearing live interposers are rows the shim
 //!   defines;
 //! * every group of imports the audit allows says how libc's implementation
-//!   reaches the kernel, and the claim agrees with the rows: a group declared
-//!   `Interposed` is defined by the shim on its platform, and a symbol the
-//!   shim defines is never declared to reach libc's text.
+//!   reaches the kernel, and the claim agrees with the rows: a symbol the shim
+//!   defines is never declared to reach libc's text.
 //!
 //! The comparisons are pure functions over sets, and the `planted_*` tests
 //! feed them doctored inputs so no gate can silently pass.
@@ -283,50 +282,28 @@ fn unprotected_cancellation_imports(
         .collect()
 }
 
-/// The allowlist claims that disagree with the rows for `os`: an
-/// `Interposed` name no row defines there under that exact name (the
-/// interposer binds its own linker name, never an alias that normalizes onto
-/// it), or a `Never`/`HostPassthrough` name the shim defines under any
-/// spelling the audit admits for it (its import would bind to the
-/// interposer, so the claim describes code that never runs).
+/// The allowlist claims that disagree with the rows for `os`: a name the shim
+/// defines there under any spelling the audit admits for it. A reference to it
+/// binds to the shim's definition, so a claim about libc's text describes code
+/// that never runs.
 fn misdeclared_allowlist<'a>(
     groups: impl IntoIterator<Item = &'a AllowedImports>,
     rows: &[SymbolRow],
     os: Os,
 ) -> Vec<String> {
-    let defined = |group: &AllowedImports| -> BTreeSet<&'static str> {
-        rows.iter()
-            .filter(|row| row.platform.defines_on(os))
-            .filter(|row| !matches!(row.status, SymbolStatus::Deny(_)))
-            .filter_map(|row| match group.entry {
-                KernelEntry::Interposed => Some(row.name).filter(|name| group.lists(name)),
-                KernelEntry::Never | KernelEntry::HostPassthrough(_) => {
+    let mut misdeclared = Vec::new();
+    for group in groups {
+        misdeclared.extend(
+            rows.iter()
+                .filter(|row| row.platform.defines_on(os))
+                .filter(|row| !matches!(row.status, SymbolStatus::Deny(_)))
+                .filter_map(|row| {
                     [row.name, row.name.trim_start_matches('_')]
                         .into_iter()
                         .find(|name| group.lists(name))
-                }
-            })
-            .collect()
-    };
-    let mut misdeclared = Vec::new();
-    for group in groups {
-        let defined = defined(group);
-        match group.entry {
-            KernelEntry::Interposed => misdeclared.extend(
-                group
-                    .names
-                    .iter()
-                    .filter(|name| !defined.contains(*name))
-                    .map(|name| {
-                        format!("{name}: declared interposed, not defined on {}", os.name())
-                    }),
-            ),
-            KernelEntry::Never | KernelEntry::HostPassthrough(_) => {
-                misdeclared.extend(defined.iter().map(|name| {
-                    format!("{name}: defined on {}, declared to reach libc", os.name())
-                }))
-            }
-        }
+                })
+                .map(|name| format!("{name}: defined on {}, declared to reach libc", os.name())),
+        );
     }
     misdeclared
 }
@@ -351,13 +328,8 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
             "allowlisted imports whose kernel entry disagrees with the registry: {misdeclared:?}"
         );
     }
-    // Non-vacuity: a lost interposer behind an `Interposed` group, and a shim
-    // definition behind a group that claims libc's text, are each reported.
-    let interposed = [AllowedImports {
-        names: &["read"],
-        prefix: false,
-        entry: KernelEntry::Interposed,
-    }];
+    // Non-vacuity: a shim definition behind a group that claims libc's text
+    // is reported.
     let passthrough = [AllowedImports {
         names: &["read"],
         prefix: false,
@@ -368,33 +340,13 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
         prefix: true,
         entry: KernelEntry::Never,
     }];
-    assert!(misdeclared_allowlist(&interposed, SYMBOLS, Os::Linux).is_empty());
     let without_read: Vec<SymbolRow> = SYMBOLS
         .iter()
         .copied()
         .filter(|row| row.name.trim_start_matches('_') != "read")
         .collect();
-    assert_eq!(
-        misdeclared_allowlist(&interposed, &without_read, Os::Linux).len(),
-        1
-    );
-    assert_eq!(
-        misdeclared_allowlist(&passthrough, SYMBOLS, Os::Linux).len(),
-        1
-    );
+    assert!(!misdeclared_allowlist(&passthrough, SYMBOLS, Os::Linux).is_empty());
     assert!(!misdeclared_allowlist(&pure, SYMBOLS, Os::Linux).is_empty());
-    // Interposition is proved by the exact linker name: the shim defines
-    // `__libc_start_main`, so a claim spelled as its normalized form names a
-    // symbol the shim does not define, and is reported.
-    let normalized = [AllowedImports {
-        names: &["libc_start_main"],
-        prefix: false,
-        entry: KernelEntry::Interposed,
-    }];
-    assert_eq!(
-        misdeclared_allowlist(&normalized, SYMBOLS, Os::Linux).len(),
-        1
-    );
     assert!(misdeclared_allowlist(&passthrough, &without_read, Os::Linux).is_empty());
     // A name listed as itself is judged as itself: a shim that defined
     // `_exit` would contradict the allowlist's passthrough claim for it.

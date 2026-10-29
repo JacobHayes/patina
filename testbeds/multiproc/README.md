@@ -28,7 +28,7 @@ honors the check runner's target isolation without selecting a target directory.
 | `fanout` | parallel children produce checked stdout and stderr through pipes | `posix_spawnattr_init` |
 | `pipeline` | producer, transformer and consumer transfer and check the complete payload | `posix_spawnattr_init` |
 | `forkwait-c` | C fork-per-test exit and abort statuses survive wait | `fork` |
-| `forkwait-cxx` | real iostream initialization and C++ exit/abort status checks | pre-run audit: `_ZSt4cout` (`unknown-import`) |
+| `forkwait-cxx` | real iostream initialization and C++ exit/abort status checks | pre-run audit: the shared libstdc++'s own `setlocale` (`unknown-import`), one of its host bindings |
 | `buildlike` | workers read source files and write derived objects; parent checks digests | `posix_spawnattr_init` |
 | `sigchld` | SIGCHLD handler reaps with WNOHANG; timer kills a parked process group | `fork` |
 | `failed-exec-enoent` | ENOENT preserves CLOEXEC fds, signal disposition and sibling thread | `execvp` |

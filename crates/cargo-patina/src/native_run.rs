@@ -127,10 +127,22 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // against another build is refused here, by component, before the guest
     // starts: past this point it could only fail as an operation mismatch at
     // some later boundary, or not fail at all.
+    // The images the loader maps beside the executable. The gate judges every
+    // reference by the image it binds to, and a recording names each image, so
+    // a replay against a different libc is refused like one against a
+    // different executable.
+    let load_set = match crate::load_set::discover(&binary, image.bytes()) {
+        Ok(load_set) => load_set,
+        Err(error) if output::json_active() => {
+            output::emit_native_refusal(&binary, output::NATIVE_PRERUN_REFUSAL, error.to_string());
+            return Ok(2);
+        }
+        Err(error) => return Err(error),
+    };
     let identity = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
         NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
-            Some(native_identity(&image)?)
+            Some(native_identity(&image, &load_set)?)
         }
     };
     if let (NativeRunMode::Replay { path, .. }, Some(bundle), Some(identity)) =
@@ -176,6 +188,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let downgraded = match native_prerun_gate(
         &binary,
         &image,
+        &load_set,
         &invocation.allow,
         &invocation.allow_unsupported,
     ) {

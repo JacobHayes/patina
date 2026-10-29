@@ -1,37 +1,52 @@
-//! Native import auditing and inert undefined-weak bindings.
+//! Native import auditing over a program's load set.
 
-use crate::early_init::early_init_escapes;
+use crate::bindings::{Binding, ElfImage, bind, is_host, parse_images};
+use crate::early_init::{EARLY_INIT_CATEGORY, early_init_escapes};
 use crate::import_policy::{
-    NativeFormat, NativeImportDecision, UNKNOWN_IMPORT_CATEGORY, elf_interposed_import,
-    elf_shim_dlsym_vehicle, elf_wrapped_resolver, native_import_decision, normalize_native_symbol,
+    NativeFormat, NativeImportDecision, SHIM_DLSYM_VERSION, native_import_decision,
 };
 use crate::import_xrefs::collect_import_provenance;
 use crate::instruction_scan::{
     native_escape_is_go_build_marker, native_escape_is_host_identity, scan_instruction_ranges,
 };
+use crate::load_set::{ImageRole, LoadSet, LoadedImage, elf_load_request};
 use crate::provenance::{NativeProvenance, NativeProvenanceIndex};
 use crate::shim::native_binary_is_shim_linked;
-use crate::{NativeEscape, TargetError, code_ranges};
-use object::read::elf::Sym as _;
+use crate::{HostBinding, NativeEscape, TargetError, code_ranges};
 use object::{Object, ObjectSymbol};
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 
-/// The category of a versioned undefined ELF import that reached around a shim
-/// interposer or the `-Wl,--wrap=dlsym` wrap (see [`versioned_bypass_escapes`]).
-pub(super) const VERSIONED_BYPASS_CATEGORY: &str = "versioned-bypass";
+/// The category of a strong reference no image in the load set defines.
+pub(super) const UNRESOLVED_CATEGORY: &str = "unresolved-import";
+
+/// The category of a reference whose provider defines the name outside the
+/// symbol-version subset the audit models (see [`crate::bindings`]).
+pub(super) const UNDECIDABLE_CATEGORY: &str = "undecidable-binding";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeAudit {
+    /// The executable's undefined dynamic symbols.
     pub imports: Vec<String>,
-    /// Imports the undefined-weak rule cleared: see [`render_inert_weak_imports`].
+    /// Weak references no image in the load set defines: NULL at load, see
+    /// [`render_inert_weak_imports`](crate::render_inert_weak_imports). A
+    /// library's are prefixed with its name.
     pub inert_weak_imports: Vec<String>,
 }
 
 impl NativeAudit {
-    /// Audit native imports and reject every symbol that is not explicitly
-    /// caller-allowed or classified as safe for the binary's native format.
-    pub fn audit(bytes: &[u8], allow: &BTreeSet<String>) -> Result<Self, TargetError> {
+    /// Audit a program over the images its loader maps.
+    ///
+    /// Each reference is judged by where it binds at load: one that binds to
+    /// an audited image (the executable, the shim's doors in it, or an
+    /// application library) is contained; a weak one nothing defines is
+    /// inert; one that binds into a host image (the loader, glibc, the vDSO)
+    /// runs host code and is admitted only by the effect policy, by name;
+    /// anything else is refused by name. Every audited image's code is
+    /// scanned, and the early-execution hazards the loader runs before the
+    /// shim's preinit entry are refused.
+    pub fn audit(load_set: &LoadSet<'_>, allow: &BTreeSet<String>) -> Result<Self, TargetError> {
+        let bytes: &[u8] = &load_set.executable().bytes;
         let file = object::File::parse(bytes).map_err(TargetError::Parse)?;
         let format = NativeFormat::from_binary(file.format())?;
         if unauditable_elf(&file) {
@@ -47,10 +62,10 @@ impl NativeAudit {
         imports.dedup();
         let provenance = NativeProvenanceIndex::new(&file);
         let code_ranges = code_ranges::CodeRanges::new(&file)?;
-        // Attribution and the undefined-weak rule each walk the whole binary
-        // (relocations, code cross-references, every symbol), and only a
-        // denied import consults them, so each is computed on first use: a
-        // clean binary, the common case before every run, never pays for them.
+        // Attribution walks the whole binary (relocations, code
+        // cross-references), and only a denied import consults it, so it is
+        // computed on first use: a clean binary, the common case before every
+        // run, never pays for it.
         let import_provenance = OnceCell::new();
         let provenance_of = |symbol: &str| {
             import_provenance
@@ -59,55 +74,58 @@ impl NativeAudit {
                 .cloned()
                 .unwrap_or_else(|| vec![NativeProvenance::unknown()])
         };
-        let inert_weak = OnceCell::new();
-        let mut inert_weak_imports = Vec::new();
-        let mut denied = Vec::new();
-        for symbol in &imports {
-            let NativeImportDecision::Denied(category) =
-                native_import_decision(symbol, format, allow)
-            else {
-                continue;
-            };
-            if category == UNKNOWN_IMPORT_CATEGORY
-                && inert_weak
-                    .get_or_init(|| inert_weak_symbols(&file))
-                    .contains(normalize_native_symbol(symbol))
-            {
-                inert_weak_imports.push(symbol.clone());
-                continue;
-            }
-            denied.push(NativeEscape::new(
-                symbol.clone(),
-                category,
-                provenance_of(symbol),
-            ));
-        }
         // Host-identity reads and Go build markers are informational, so they
         // are dropped here rather than joining the refusal set
         // (`render_host_identity_note` over `native_host_identity_sites`, and
         // its Go-marker twin, are what report them, on every outcome).
         // The scan still classifies them in one place; only the disposition
         // differs.
+        let mut inert_weak_imports = Vec::new();
+        // The scan runs first: it refuses an architecture it cannot decode,
+        // whose relocations the binding pass could not read either.
+        let mut denied: Vec<NativeEscape> = Vec::new();
         denied.extend(
             scan_instruction_ranges(&file, &provenance, &code_ranges)?
                 .into_iter()
-                .filter(|escape| {
-                    !native_escape_is_host_identity(escape)
-                        && !native_escape_is_go_build_marker(escape)
-                }),
+                .filter(informative_only),
         );
-        denied.extend(early_init_escapes(&file, &provenance));
-        // A versioned reference pins a glibc symbol version that the shim's own
-        // unversioned definition/wrap cannot satisfy, so the link leaves it an
-        // undefined import the loader binds to libc — around the interposer.
-        // This only means anything for a shim-linked binary: without the shim,
-        // the allowlist already governs an ordinary libc call, versioned or not.
-        if native_binary_is_shim_linked(bytes).unwrap_or(false) {
-            denied.extend(versioned_bypass_escapes(&file, allow, &provenance_of));
+        match format {
+            NativeFormat::Elf => judge_elf_bindings(
+                load_set,
+                &file,
+                allow,
+                &provenance_of,
+                &mut denied,
+                &mut inert_weak_imports,
+            )?,
+            // Mach-O libraries are not resolved yet: every import binds into
+            // a dylib and is judged by name.
+            NativeFormat::MachO => {
+                for symbol in &imports {
+                    if let NativeImportDecision::Denied(category) =
+                        native_import_decision(symbol, format, allow)
+                    {
+                        denied.push(NativeEscape::new(
+                            symbol.clone(),
+                            category,
+                            provenance_of(symbol),
+                        ));
+                    }
+                }
+            }
         }
+        denied.extend(early_init_escapes(&file, &provenance));
+        for image in load_set.images() {
+            if image.role == ImageRole::Library {
+                denied.extend(library_code_escapes(image)?);
+            }
+        }
+        denied.dedup();
         if !denied.is_empty() {
             return Err(TargetError::UnsupportedImports(denied));
         }
+        inert_weak_imports.sort();
+        inert_weak_imports.dedup();
         Ok(Self {
             imports,
             inert_weak_imports,
@@ -115,127 +133,224 @@ impl NativeAudit {
     }
 }
 
-/// One undefined ELF dynamic symbol that carries a symbol-version requirement.
-struct VersionedImport {
-    /// The symbol name as spelled in `.dynsym` (version suffix excluded; the
-    /// version is carried separately through `.gnu.version`).
-    name: String,
-    /// The version requirement name from `.gnu.version_r` (e.g. `GLIBC_2.2.5`).
-    version: String,
-    /// A weak binding: the shim's host-alias `dlsym` vehicle is weak by its own
-    /// `.weak __real_dlsym` directive (see `elf_shim_dlsym_vehicle`).
-    weak: bool,
+/// Whether a scan finding refuses: host-identity reads and Go build markers
+/// are reported, never refused.
+fn informative_only(escape: &NativeEscape) -> bool {
+    !native_escape_is_host_identity(escape) && !native_escape_is_go_build_marker(escape)
 }
 
-/// The executable's dynamic symbols as the loader resolves versioned imports
-/// against them: every undefined symbol that carries a symbol-version
-/// requirement, and every name the executable itself exports a definition of.
-#[derive(Default)]
-struct DynamicVersions {
-    imports: Vec<VersionedImport>,
-    /// Names defined in `.dynsym` at the global version index. The executable
-    /// is first in the loader's lookup scope, and glibc's `check_match` lets a
-    /// definition at the global index satisfy a reference of any version, so a
-    /// versioned import of one of these names binds to the executable's own
-    /// definition, never to libc's. Both GNU ld and lld export an executable
-    /// definition of every name a linked library also defines, so the shim's
-    /// interposers are here.
-    exported: BTreeSet<String>,
-}
-
-/// Read [`DynamicVersions`] from `.dynsym`, `.gnu.version` and
-/// `.gnu.version_r`. Empty for a non-ELF binary (Mach-O has no symbol
-/// versioning) or an ELF with no version sections.
-fn dynamic_versions(file: &object::File<'_>) -> DynamicVersions {
-    let object::File::Elf64(elf) = file else {
-        return DynamicVersions::default();
-    };
-    let endian = elf.endian();
-    let data = elf.data();
-    let Ok(Some(versions)) = elf.elf_section_table().versions(endian, data) else {
-        return DynamicVersions::default();
-    };
-    let symbols = elf.elf_dynamic_symbol_table();
-    let strings = symbols.strings();
-    let mut out = DynamicVersions::default();
-    for (index, symbol) in symbols.enumerate() {
-        let Ok(name) = symbol.name(endian, strings) else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
-        }
-        let name = String::from_utf8_lossy(name).into_owned();
-        let version_index = versions.version_index(endian, index);
-        if !symbol.is_undefined(endian) {
-            if version_index.is_global() {
-                out.exported.insert(name);
-            }
-            continue;
-        }
-        // `version` is `Ok(None)` for the local and global (unversioned) indices,
-        // so only a real version requirement reaches the push.
-        let Ok(Some(version)) = versions.version(version_index) else {
-            continue;
-        };
-        out.imports.push(VersionedImport {
-            name,
-            version: String::from_utf8_lossy(version.name()).into_owned(),
-            weak: symbol.st_bind() == object::elf::STB_WEAK,
-        });
-    }
-    out
-}
-
-/// Refuse every undefined versioned import that reaches glibc's own text for a
-/// name the shim relies on catching: an interposed name, or the
-/// `dlsym`/`dlvsym` resolver behind `-Wl,--wrap=dlsym`.
-///
-/// `--wrap` rewrites only *unversioned* references, so a `.symver`-pinned
-/// `dlsym@GLIBC_2.2.5` stays an undefined import, and since the executable
-/// defines `__wrap_dlsym` rather than `dlsym`, the loader binds it to libc's
-/// real resolver, past the restricted one. A versioned reference to an
-/// interposed name (`mmap@GLIBC_2.2.5`) is different: the linker either binds
-/// it to the shim's definition outright (GNU ld) or leaves an import the loader
-/// binds to the executable's exported definition (lld), the shim's either way.
-/// So the signal is a versioned import of such a name that the executable does
-/// not itself export ([`DynamicVersions::exported`]): only that one reaches
-/// libc.
-///
-/// The one legitimate versioned import is the shim's host-alias `dlsym` vehicle
-/// (`__real_dlsym`: weak, at glibc's default `dlsym` version); it is admitted,
-/// and only it. A caller may still clear a specific finding with an exact
-/// `--allow name@version`.
-fn versioned_bypass_escapes(
-    file: &object::File<'_>,
+/// Judge every reference of every audited ELF image by where it binds.
+fn judge_elf_bindings(
+    load_set: &LoadSet<'_>,
+    executable: &object::File<'_>,
     allow: &BTreeSet<String>,
     provenance_of: &dyn Fn(&str) -> Vec<NativeProvenance>,
-) -> Vec<NativeEscape> {
-    let dynamic = dynamic_versions(file);
-    let mut escapes = Vec::new();
-    for import in dynamic.imports {
-        if !import.version.starts_with("GLIBC_") || dynamic.exported.contains(&import.name) {
+    denied: &mut Vec<NativeEscape>,
+    inert: &mut Vec<String>,
+) -> Result<(), TargetError> {
+    let images = parse_images(load_set)?;
+    let shim_linked = native_binary_is_shim_linked(&load_set.executable().bytes).unwrap_or(false);
+    // What the executable defines in any symbol table: a reference that binds
+    // past one of these to a host image went around the executable's own
+    // definition, which for a shim-linked guest is the shim's door.
+    let executable_defines: BTreeSet<&str> = executable
+        .symbols()
+        .chain(executable.dynamic_symbols())
+        .filter(|symbol| symbol.is_definition())
+        .filter_map(|symbol| symbol.name().ok())
+        .collect();
+    for (index, image) in load_set.images().iter().enumerate() {
+        let request = elf_load_request(&image.bytes)?.unwrap_or_default();
+        if request.audit_modules || request.filters {
+            return Err(TargetError::UnreadableLoadSet(format!(
+                "{} names loader audit modules or filter objects, which run or redirect before \
+                 the audit could judge them",
+                image.name
+            )));
+        }
+        if index == 0 {
+            for (present, name) in [
+                (request.init_first, "DF_1_INITFIRST"),
+                (images[0].runs_resolvers(), "ifunc-resolver"),
+            ] {
+                if present {
+                    denied.push(NativeEscape::new(
+                        name.into(),
+                        EARLY_INIT_CATEGORY,
+                        vec![NativeProvenance::unknown()],
+                    ));
+                }
+            }
+        }
+    }
+    for (from, image) in images.iter().enumerate() {
+        if is_host(load_set, from) {
             continue;
         }
-        let bypass = if elf_wrapped_resolver(&import.name) {
-            !elf_shim_dlsym_vehicle(&import.name, &import.version, import.weak)
-        } else {
-            elf_interposed_import(&import.name)
-        };
-        if !bypass {
+        let site = Site::new(load_set, from, provenance_of);
+        if image.has_hidden_requirement() {
+            denied.push(site.escape("version requirement".into(), UNDECIDABLE_CATEGORY));
             continue;
         }
-        let versioned = format!("{}@{}", import.name, import.version);
-        if allow.contains(&versioned) {
-            continue;
+        for reference in image.references()? {
+            let name = String::from_utf8_lossy(reference.name).into_owned();
+            let version = reference
+                .version
+                .map(|version| String::from_utf8_lossy(version).into_owned());
+            match bind(&images, from, &reference) {
+                Binding::Image(to) if !is_host(load_set, to) => {}
+                Binding::Absent => inert.push(site.label(&name)),
+                Binding::Unresolved | Binding::Undecidable
+                    if allow.contains(&name) || allow.contains(&site.label(&name)) => {}
+                Binding::Unresolved => denied.push(site.escape(name, UNRESOLVED_CATEGORY)),
+                Binding::Undecidable => {
+                    let mut escape = site.escape(name, UNDECIDABLE_CATEGORY);
+                    escape.binding = version.map(|version| HostBinding {
+                        version: Some(version),
+                        provider: "a definition at another version".into(),
+                        around_executable: false,
+                    });
+                    denied.push(escape);
+                }
+                Binding::Image(to) => {
+                    // The shim's own host-alias resolver: the executable's weak
+                    // `dlsym` at glibc's default version (see
+                    // `SHIM_DLSYM_VERSION`). Only the executable's: a library's
+                    // `dlsym` is a guest resolver like any other.
+                    if from == 0
+                        && shim_linked
+                        && reference.weak
+                        && name == "dlsym"
+                        && version.as_deref() == Some(SHIM_DLSYM_VERSION)
+                    {
+                        continue;
+                    }
+                    if let Some(version) = &version
+                        && allow.contains(&format!("{name}@{version}"))
+                    {
+                        continue;
+                    }
+                    let NativeImportDecision::Denied(category) =
+                        native_import_decision(&name, NativeFormat::Elf, allow)
+                    else {
+                        continue;
+                    };
+                    let around_executable = executable_defines.contains(name.as_str());
+                    let mut escape = site.escape(name, category);
+                    escape.binding = Some(HostBinding {
+                        version,
+                        provider: load_set.images()[to].name.clone(),
+                        around_executable,
+                    });
+                    denied.push(escape);
+                }
+            }
         }
-        escapes.push(NativeEscape::new(
-            versioned,
-            VERSIONED_BYPASS_CATEGORY,
-            provenance_of(&import.name),
+    }
+    Ok(())
+}
+
+/// Where a reference is made: the executable, attributed by its own
+/// provenance, or a library, named.
+struct Site<'a> {
+    library: Option<&'a str>,
+    provenance_of: &'a dyn Fn(&str) -> Vec<NativeProvenance>,
+}
+
+impl<'a> Site<'a> {
+    fn new(
+        load_set: &'a LoadSet<'_>,
+        index: usize,
+        provenance_of: &'a dyn Fn(&str) -> Vec<NativeProvenance>,
+    ) -> Self {
+        let image = &load_set.images()[index];
+        Self {
+            library: (image.role == ImageRole::Library).then_some(image.name.as_str()),
+            provenance_of,
+        }
+    }
+
+    /// The name a finding at this site is listed under: a library's carries
+    /// the library's name.
+    fn label(&self, name: &str) -> String {
+        match self.library {
+            Some(library) => format!("{library}: {name}"),
+            None => name.to_owned(),
+        }
+    }
+
+    fn escape(&self, name: String, category: &'static str) -> NativeEscape {
+        match self.library {
+            Some(library) => library_escape(name, category, library),
+            None => {
+                let provenance = (self.provenance_of)(&name);
+                NativeEscape::new(name, category, provenance)
+            }
+        }
+    }
+}
+
+/// A finding in a library, attributed to the library.
+fn library_escape(name: String, category: &'static str, library: &str) -> NativeEscape {
+    let mut escape = NativeEscape::new(name, category, vec![library_provenance(library)]);
+    escape.image = Some(library.to_owned());
+    escape
+}
+
+fn library_provenance(library: &str) -> NativeProvenance {
+    NativeProvenance {
+        object: library.to_owned(),
+        ..NativeProvenance::unknown()
+    }
+}
+
+/// What an application library's own code and loader metadata refuse: its
+/// forbidden instructions, and anything the loader runs before the
+/// executable's preinit array (an `INITFIRST` initializer, an IFUNC resolver).
+/// A library's own preinit array is ignored by glibc, so it is not read.
+fn library_code_escapes(image: &LoadedImage<'_>) -> Result<Vec<NativeEscape>, TargetError> {
+    let in_library = |error: TargetError| match error {
+        TargetError::UnauditableElf => TargetError::UnreadableLoadSet(format!(
+            "{} has no section headers or dynamic symbol table to audit",
+            image.name
+        )),
+        other => other,
+    };
+    let file = object::File::parse(&*image.bytes).map_err(TargetError::Parse)?;
+    if unauditable_elf(&file) {
+        return Err(in_library(TargetError::UnauditableElf));
+    }
+    let provenance = NativeProvenanceIndex::new(&file);
+    let code_ranges = code_ranges::CodeRanges::new(&file)?;
+    let mut escapes: Vec<NativeEscape> = scan_instruction_ranges(&file, &provenance, &code_ranges)?
+        .into_iter()
+        .filter(informative_only)
+        .map(|mut escape| {
+            for origin in &mut escape.provenance {
+                if origin.is_unknown() {
+                    origin.object = image.name.clone();
+                }
+            }
+            escape.image = Some(image.name.clone());
+            escape
+        })
+        .collect();
+    let request = elf_load_request(&image.bytes)?.unwrap_or_default();
+    if request.init_first {
+        escapes.push(library_escape(
+            "DF_1_INITFIRST".into(),
+            EARLY_INIT_CATEGORY,
+            &image.name,
         ));
     }
-    escapes
+    if ElfImage::parse(&image.bytes)?.runs_resolvers() {
+        escapes.push(library_escape(
+            "ifunc-resolver".into(),
+            EARLY_INIT_CATEGORY,
+            &image.name,
+        ));
+    }
+    Ok(escapes)
 }
 
 /// Whether an ELF lacks what the audit reads: imports come from the dynamic
@@ -243,10 +358,10 @@ fn versioned_bypass_escapes(
 /// section, and code ranges from the section headers, while the loader needs
 /// none of them. A binary whose section headers were removed would otherwise
 /// pass with no imports and no scanned code, and one whose dynamic table names
-/// a version table (`DT_VERSYM`) the sections do not carry would pass the
-/// versioned-bypass check with no versions read. An `ET_REL` object is refused
+/// a version table (`DT_VERSYM`) the sections do not carry would have its
+/// versioned references bound with no versions read. An `ET_REL` object is refused
 /// later, by name, and a Mach-O is never judged here.
-fn unauditable_elf(file: &object::File<'_>) -> bool {
+pub(crate) fn unauditable_elf(file: &object::File<'_>) -> bool {
     use object::read::elf::ProgramHeader;
     let object::File::Elf64(elf) = file else {
         return false;
@@ -269,56 +384,6 @@ fn unauditable_elf(file: &object::File<'_>) -> bool {
         && (file.sections().next().is_none()
             || dynamic && file.dynamic_symbol_table().is_none()
             || names_versions && !versions_readable)
-}
-
-/// The normalized names this binary references *only* through undefined weak
-/// bindings — the references an undefined-weak import can be judged inert on.
-///
-/// An undefined weak reference is the C way of asking "is this hook present?":
-/// if nothing supplies a definition it resolves to NULL and the referencing code
-/// takes its guarded fallback path (aws-lc's `OPENSSL_memory_alloc`/`_free`/
-/// `_get_size`/`_realloc` allocator-override hooks and `sdallocx`). A NULL that
-/// is never called is not a door to the host, so refusing one is a false
-/// positive.
-///
-/// The rule is only as sound as its disqualifiers, and both are computed over the
-/// WHOLE audited closure — every static and dynamic symbol, definitions included:
-///
-/// * a name the closure **defines** anywhere is removed. The weak reference then
-///   binds to that real code, which is exactly the classification path's job.
-/// * a name with any **strong** undefined reference is removed. A strong
-///   reference must be bound for the process to start, so the weak sibling rides
-///   along to whatever definition satisfies it.
-///
-/// Callers apply this only to imports that match no named escape class (see
-/// [`UNKNOWN_IMPORT_CATEGORY`]); that narrowing is load-bearing, not cosmetic.
-/// "Undefined" means undefined *in this image*, and the dynamic linker still
-/// searches the loaded libraries — so a weak undefined `open` binds to libc's
-/// `open` at load time and runs. The classified names are precisely the ones a
-/// loaded library defines, so a weak binding may never rescue one.
-fn inert_weak_symbols(file: &object::File<'_>) -> BTreeSet<String> {
-    let mut weak_undefined: BTreeSet<String> = BTreeSet::new();
-    let mut disqualified: BTreeSet<String> = BTreeSet::new();
-    for symbol in file.symbols().chain(file.dynamic_symbols()) {
-        let Ok(name) = symbol.name() else { continue };
-        if name.is_empty() {
-            continue;
-        }
-        let normalized = normalize_native_symbol(name).to_owned();
-        // Anything that is not an undefined *weak* reference disqualifies the
-        // name: a definition binds it, and a strong reference forces a binding.
-        // Judged on the negative so an exotic binding (common, absolute, a format
-        // the reader classifies as neither) also disqualifies — fail closed.
-        if symbol.is_undefined() && symbol.is_weak() {
-            weak_undefined.insert(normalized);
-        } else {
-            disqualified.insert(normalized);
-        }
-    }
-    weak_undefined
-        .difference(&disqualified)
-        .cloned()
-        .collect::<BTreeSet<_>>()
 }
 
 #[cfg(test)]

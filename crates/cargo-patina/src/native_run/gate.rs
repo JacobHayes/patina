@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::run_cache::{self, Image};
+use patina_dst_target::LoadSet;
 #[cfg(unix)]
 /// Does `policy` downgrade the denied import `escape` from a hard error to a
 /// warning? Matches the raw import name and its underscore-stripped alias so an
@@ -89,9 +90,13 @@ fn platform_supports_tsc_trap() -> bool {
     false
 }
 
-/// The effective symbol allow set the native gate audits against: the shim's own
-/// control-plane vehicle (auto-allowed on every `cargo patina build` binary —
-/// `dlsym` on both platforms) plus the operator's explicit `--allow` symbols.
+/// The effective symbol allow set the native gate audits against: the
+/// operator's explicit `--allow` symbols, and on macOS the shim's control-plane
+/// vehicle `dlsym`. On Linux the audit admits the shim's own resolver
+/// reference by its binding (the executable's weak `dlsym` at glibc's default
+/// version), so no name is allowed for it and a library's `dlsym` stays a
+/// `dynamic-loading` refusal. On macOS a guest's own `dlsym` rides the same
+/// allowance: a named gap until Mach-O references are resolved by binding.
 ///
 /// Constructed in exactly ONE place and called by BOTH the standalone `audit`
 /// (`execute_native_audit`) and the pre-run `run` gate (`native_prerun_gate`), so
@@ -100,8 +105,10 @@ fn platform_supports_tsc_trap() -> bool {
 /// reported disparity where `audit` reported `_dlsym (dynamic-loading)` as denied
 /// while `run` silently permitted it as the shim control-plane vehicle.
 pub(crate) fn effective_native_allow(user_allow: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut allow = shim_control_plane_symbols();
-    allow.extend(user_allow.iter().cloned());
+    let mut allow = user_allow.clone();
+    if cfg!(target_os = "macos") {
+        allow.extend(shim_control_plane_symbols());
+    }
     allow
 }
 
@@ -154,13 +161,15 @@ pub(crate) fn target_has_sud(target: &str) -> bool {
 ///
 /// A verdict that lets the run proceed with nothing downgraded is remembered
 /// in the run cache, with the notes it printed, under the bytes' digest and
-/// every other input it read: the program's path (the notes name it), the
-/// effective allow set and the two host capabilities. The policy is not among
+/// every other input it read: the program's path (the notes name it), each
+/// library the loader maps (by name and digest), the effective allow set and
+/// the two host capabilities. The policy is not among
 /// them: it only splits findings into downgraded and blocked ones, and such a
 /// verdict has neither. Any other verdict is judged afresh on every run.
 pub(super) fn native_prerun_gate(
     binary: &Path,
     image: &Image,
+    load_set: &LoadSet<'_>,
     allow: &BTreeSet<String>,
     policy: &UnsupportedPolicy,
 ) -> Result<Vec<NativeEscape>, CliError> {
@@ -169,13 +178,13 @@ pub(super) fn native_prerun_gate(
         sud: kernel_supports_sud(),
         tsc: platform_supports_tsc_trap(),
     };
-    let entry = verdict_entry(binary, image, &effective, host);
+    let entry = verdict_entry(binary, image, load_set, &effective, host);
     if let Some(notes) = run_cache::load(&entry) {
         eprint!("{notes}");
         return Ok(Vec::new());
     }
     let mut notes = String::new();
-    let outcome = judge(binary, image.bytes(), &effective, policy, host, &mut notes);
+    let outcome = judge(binary, load_set, &effective, policy, host, &mut notes);
     eprint!("{notes}");
     if matches!(&outcome, Ok(downgraded) if downgraded.is_empty()) {
         image.store_unchanged(&entry, &notes);
@@ -194,12 +203,19 @@ struct HostTraps {
 fn verdict_entry(
     binary: &Path,
     image: &Image,
+    load_set: &LoadSet<'_>,
     allow: &BTreeSet<String>,
     host: HostTraps,
 ) -> String {
     let mut inputs = blake3::Hasher::new();
     inputs.update(&[u8::from(host.sud), u8::from(host.tsc)]);
+    let libraries = crate::load_set::library_digests(load_set)
+        .into_iter()
+        .map(|(name, digest)| format!("{name} {digest}"))
+        .collect::<Vec<_>>();
     for part in std::iter::once(binary.as_os_str().as_encoded_bytes())
+        .chain(libraries.iter().map(String::as_bytes))
+        .chain([&b"--"[..]])
         .chain(allow.iter().map(String::as_bytes))
     {
         inputs.update(&(part.len() as u64).to_le_bytes());
@@ -212,7 +228,7 @@ fn verdict_entry(
 /// before its refusal) to `notes`.
 fn judge(
     binary: &Path,
-    bytes: &[u8],
+    load_set: &LoadSet<'_>,
     effective: &BTreeSet<String>,
     policy: &UnsupportedPolicy,
     host: HostTraps,
@@ -222,7 +238,8 @@ fn judge(
         notes.push_str(text);
         notes.push('\n');
     };
-    let denied = match NativeAudit::audit(bytes, effective) {
+    let bytes: &[u8] = &load_set.executable().bytes;
+    let denied = match NativeAudit::audit(load_set, effective) {
         Ok(_) => {
             // Clean import audit: the run proceeds. Surface the "fails later"
             // deny-trap note once, up front, before the guest is launched.

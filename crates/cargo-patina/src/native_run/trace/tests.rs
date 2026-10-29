@@ -8,6 +8,7 @@ use patina_dst_trace::{RunMetadata, Sha256Digest, remove_dead_scratch};
 
 fn identity() -> NativeIdentityRecord {
     NativeIdentityRecord {
+        libraries: Vec::new(),
         executable_sha256: Sha256Digest([1; 32]),
         supervisor_sha256: Sha256Digest([2; 32]),
         patina_version: "1.0.0".into(),

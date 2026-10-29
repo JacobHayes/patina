@@ -45,8 +45,8 @@ pub(super) fn native_import_decision(
     if allow.contains(symbol) || allow.contains(normalized) {
         return NativeImportDecision::Allowed;
     }
-    // Host timer effects cannot ride a known-safe allowance or an inert weak
-    // binding. Only an explicit caller allowance can bypass this refusal.
+    // Host timer effects cannot ride a known-safe allowance. Only an explicit
+    // caller allowance can bypass this refusal.
     if timer_symbol(normalized) {
         return NativeImportDecision::Denied("signals-timers");
     }
@@ -58,22 +58,14 @@ pub(super) fn native_import_decision(
     )
 }
 
-/// Whether a group admits the import `symbol`. A group whose members the
-/// shim interposes admits only the exact names it lists: the shim's
-/// definition of `mmap` binds `mmap` alone, so glibc's `__mmap`, which
-/// normalizes onto an interposed name, would run libc's own text and is
-/// refused. Every other group judges the normalized name, whose aliases
-/// share its effect, or the exact C name for a name it spells with its
-/// leading underscore (`_exit`, a different function from `exit`).
+/// Whether a group admits the host binding `symbol`. A group judges the
+/// normalized name, whose aliases share its effect, or the exact C name for a
+/// name it spells with its leading underscore (`_exit`, a different function
+/// from `exit`).
 fn native_allowlisted_import(symbol: &str, format: NativeFormat) -> bool {
     let normalized = normalize_native_symbol(symbol);
     let linked = linked_c_name(symbol, format);
-    native_import_allowlist(format).any(|group| match group.entry {
-        KernelEntry::Interposed => group.lists(linked),
-        KernelEntry::Never | KernelEntry::HostPassthrough(_) => {
-            group.lists(normalized) || group.lists(linked)
-        }
-    })
+    native_import_allowlist(format).any(|group| group.lists(normalized) || group.lists(linked))
 }
 
 /// The C name an import binds: Mach-O prefixes C names with one underscore,
@@ -104,31 +96,6 @@ pub fn macho_import_allowlist() -> impl Iterator<Item = &'static AllowedImports>
     native_import_allowlist(NativeFormat::MachO)
 }
 
-/// Whether `name` (an ELF undefined-symbol name, spelled as it appears in the
-/// dynamic symbol table) is one the shim *interposes* with its own strong
-/// definition — the `Interposed` groups of the ELF allowlist. A shim-linked
-/// guest binds these names to the shim's definition in the executable, which
-/// the link also exports; a versioned reference to one that the executable does
-/// NOT export a definition of reaches glibc's, and is the bypass
-/// [`crate::native_audit`] refuses. Spelled exactly like
-/// `native_allowlisted_import`'s `Interposed` arm so the two agree on what
-/// "interposed" means.
-pub(crate) fn elf_interposed_import(name: &str) -> bool {
-    native_import_allowlist(NativeFormat::Elf)
-        .filter(|group| matches!(group.entry, KernelEntry::Interposed))
-        .any(|group| group.lists(linked_c_name(name, NativeFormat::Elf)))
-}
-
-/// Whether `name` is the host-alias control-plane resolver the shim reaches
-/// through `-Wl,--wrap=dlsym` (`dlsym`), or the explicit-version resolver
-/// (`dlvsym`) the shim neither wraps nor defines. `--wrap` rewrites only
-/// *unversioned* `dlsym` references to the shim's `__wrap_dlsym`; a versioned
-/// reference slips past it, so every versioned import of either name is a
-/// bypass except the shim's own vehicle ([`elf_shim_dlsym_vehicle`]).
-pub(crate) fn elf_wrapped_resolver(name: &str) -> bool {
-    matches!(normalize_native_symbol(name), "dlsym" | "dlvsym")
-}
-
 /// The symbol version the shim's own host-alias `dlsym` import carries. The
 /// shim's `__real_dlsym` reference is unversioned, so the link binds it to
 /// glibc's default `dlsym`, and glibc 2.34 (which moved `dlsym` from libdl into
@@ -140,45 +107,28 @@ pub(crate) fn elf_wrapped_resolver(name: &str) -> bool {
 /// version and is refused by name rather than admitted on a guess.
 pub(crate) const SHIM_DLSYM_VERSION: &str = "GLIBC_2.34";
 
-/// Whether a versioned undefined import is the shim's own host-alias vehicle:
-/// a *weak* `dlsym` (the shim declares `.weak __real_dlsym`) at exactly
-/// [`SHIM_DLSYM_VERSION`]. Any other version, or a strong binding, is a
-/// reference that reached around the wrap. A guest's weak reference pinned to
-/// that very version merges with the shim's at link time into one dynamic
-/// symbol, which nothing in the image can tell apart afterwards; reaching it
-/// takes deliberately pinning the default version weakly, outside the
-/// accidental-escape threat model.
-pub(crate) fn elf_shim_dlsym_vehicle(name: &str, version: &str, weak: bool) -> bool {
-    weak && name == "dlsym" && version == SHIM_DLSYM_VERSION
-}
-
 /// How the platform libc's implementation of an allowlisted import reaches
 /// the kernel. An import is a call into libc's own text, which syscall user
 /// dispatch leaves to the host kernel, so an allowlisted import that enters
 /// the kernel there is a host effect unless the shim defines the symbol
 /// itself. Every group says which it is; `cargo-patina/tests/syscall_registry.rs`
-/// checks `Interposed` against the symbol registry, both ways.
+/// checks that no group lists a name the shim defines, whose claim would
+/// describe code that never runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KernelEntry {
     /// The implementation never enters the kernel itself: pure compute,
     /// caller-owned memory, process-local data. Memory it allocates comes
     /// from the allocator, whose entry is the allocator group's.
     Never,
-    /// The shim defines the symbol on this format's platform: a guest linked
-    /// with the POSIX layer binds to the interposer and never reaches libc's
-    /// text. The names are exact C names, never normalized: an alias libc
-    /// exports beside an interposed name is a different symbol the shim
-    /// does not define, and the audit refuses it.
-    Interposed,
     /// libc's own text enters the host kernel, accepted for this reason.
     HostPassthrough(&'static str),
 }
 
 /// One reasoned group of allowlisted imports: names (or name prefixes) and
-/// how their implementation reaches the kernel. An `Interposed` group's names
-/// are exact C names; the others are normalized, and admit every alias,
-/// except a name spelled with a leading underscore, which is that exact C
-/// name (normalization strips the underscore, so no alias can spell it).
+/// how their implementation reaches the kernel. The names are normalized, and
+/// admit every alias, except a name spelled with a leading underscore, which
+/// is that exact C name (normalization strips the underscore, so no alias can
+/// spell it).
 #[derive(Clone, Copy, Debug)]
 pub struct AllowedImports {
     pub names: &'static [&'static str],
@@ -204,8 +154,7 @@ impl AllowedImports {
     }
 
     /// Whether this group lists `symbol`, spelled as the group's names are:
-    /// exact for an `Interposed` group, normalized (or exact, for an
-    /// underscore-spelled name) for the others.
+    /// normalized, or exact for an underscore-spelled name.
     pub fn lists(&self, symbol: &str) -> bool {
         if self.prefix {
             self.names.iter().any(|prefix| symbol.starts_with(prefix))
@@ -215,7 +164,7 @@ impl AllowedImports {
     }
 }
 
-use KernelEntry::{HostPassthrough, Interposed, Never};
+use KernelEntry::{HostPassthrough, Never};
 
 /// The process heap: glibc's and libSystem's allocators grow and trim it with
 /// `brk`/`mmap`/`munmap`/`madvise`/`mremap` from their own text. That is this
@@ -366,10 +315,6 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "udivti3",
         "umodti3",
     ];
-    // Abort/exit paths terminate the process rather than observing host state;
-    // they are used by Rust panic/abort and explicit process-exit glue.
-    // `exit` is the shim's on both platforms; `abort` is listed per format.
-    const TERMINATION: &[&str] = &["exit"];
     // `_exit` is not an alias of `exit`: it skips atexit handlers and stdio
     // flushing, and the shim does not define it (process.rs). A guest calls it
     // to end at once, skipping its own teardown.
@@ -591,7 +536,6 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(ALLOCATOR_QUERIES, Never),
         AllowedImports::exact(MEMORY_AND_STRING, Never),
         AllowedImports::exact(COMPILER_ARITHMETIC, Never),
-        AllowedImports::exact(TERMINATION, Interposed),
         AllowedImports::exact(
             IMMEDIATE_EXIT,
             HostPassthrough(
@@ -638,12 +582,6 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
     // static init reaches it). Registration only records a callback in
     // process-local storage; nothing crosses the boundary Patina models.
     const FINALIZERS: &[&str] = &["atexit", "cxa_atexit"];
-    // Process-local memory extent: Darwin's 64-bit `mmap` backs the allocator
-    // and thread stacks, with `mprotect`/`munmap` for guard pages. With the
-    // POSIX layer the shim's strong definitions take these names off the
-    // import table and the mapping model answers them; the entries cover a
-    // guest linked WITHOUT it (the C-ABI staticlib mode).
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["mmap", "mprotect", "munmap"];
     // `madvise` hints on process-local pages: libSystem's, as the shim does
     // not define it on Darwin.
     const PROCESS_LOCAL_ADVICE: &[&str] = &["madvise"];
@@ -711,7 +649,6 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(MEMORY_FILL, Never),
         AllowedImports::exact(STARTUP_AND_IMAGE_GLUE, Never),
         AllowedImports::exact(FINALIZERS, Never),
-        AllowedImports::exact(PROCESS_LOCAL_MEMORY, Interposed),
         AllowedImports::exact(PROCESS_LOCAL_ADVICE, HEAP),
         AllowedImports::exact(ZONE_ALLOCATOR, HEAP),
         AllowedImports::exact(PRNG_STATE, Never),
@@ -749,32 +686,25 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
         "gmon_start__",
         "tls_get_addr",
     ];
-    // The process entry, which the shim wraps to start the runtime first.
-    const PROCESS_ENTRY: &[&str] = &["__libc_start_main"];
     // Optional transactional-memory clone-table hooks are weak process startup
     // glue emitted by GCC/LLVM; absence or no-op presence has no boundary effect.
     const CLONE_TABLE_GLUE: &[&str] = &["deregisterTMCloneTable", "registerTMCloneTable"];
-    // Fixed-at-process-start metadata reads: the auxiliary vector and the
-    // running glibc's version string. Constant for a given host+binary, and the
-    // trace fingerprint already pins the toolchain/host pairing.
-    const FIXED_PROCESS_METADATA: &[&str] = &["getauxval", "gnu_get_libc_version"];
+    // Fixed-at-process-start metadata reads: the auxiliary vector, the page
+    // size the loader read from it (libgcc_s sizes its unwinder's emergency
+    // pool by it), and the running glibc's version string. Constant for a
+    // given host+binary, and the trace fingerprint already pins the
+    // toolchain/host pairing.
+    const FIXED_PROCESS_METADATA: &[&str] = &["getauxval", "getpagesize", "gnu_get_libc_version"];
     // Backtrace metadata walks already-loaded ELF program headers.
     const BACKTRACE_IMAGE_GLUE: &[&str] = &["dl_iterate_phdr"];
-    // Process-local memory extent: `mmap`/`mmap64` (the same 64-bit mapping on an
-    // LP64 glibc), `munmap`, `mprotect` and `madvise`. With the POSIX layer the
-    // shim's strong definitions take these names off the import table and the
-    // mapping model answers them; the entries cover a guest linked WITHOUT it
-    // (the C-ABI staticlib mode), whose ordinary libc calls are not interposed.
-    const PROCESS_LOCAL_MEMORY: &[&str] = &["madvise", "mmap", "mmap64", "mprotect", "munmap"];
+    // The loader's lookup of the loaded object containing an address, which
+    // libgcc_s's unwinder calls for every frame: a read of the loader's own
+    // lock-free object table.
+    const UNWIND_OBJECT_LOOKUP: &[&str] = &["dl_find_object"];
     // glibc's `sbrk` moves the program break from its own text, as its
     // allocator does, so it is the heap's entry rather than the modeled `brk`
     // row (which also keeps the break out of the runtime arena).
     const PROGRAM_BREAK: &[&str] = &["sbrk"];
-    // Signal registration for Rust's panic/stack-overflow diagnostics, and
-    // the abort path: the shim's on Linux.
-    const SIGNALS_AND_ABORT: &[&str] = &["abort", "sigaction", "sigaltstack", "signal"];
-    // Rust names its spawned threads; the shim's on Linux.
-    const THREAD_NAME: &[&str] = &["pthread_setname_np"];
     // Pure in-register byte-order conversion; referenced by the shim's own
     // sockaddr translation.
     const BYTE_ORDER: &[&str] = &["htonl", "htons", "ntohl", "ntohs"];
@@ -804,7 +734,6 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::prefixed(&["ITM_"], Never),
         AllowedImports::exact(ERRNO, Never),
         AllowedImports::exact(STARTUP_AND_TLS_GLUE, Never),
-        AllowedImports::exact(PROCESS_ENTRY, Interposed),
         AllowedImports::exact(CLONE_TABLE_GLUE, Never),
         AllowedImports::exact(FIXED_PROCESS_METADATA, Never),
         AllowedImports::exact(
@@ -813,10 +742,8 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
                 "takes the loader's lock, a host futex wait only while another thread holds it",
             ),
         ),
-        AllowedImports::exact(PROCESS_LOCAL_MEMORY, Interposed),
+        AllowedImports::exact(UNWIND_OBJECT_LOOKUP, Never),
         AllowedImports::exact(PROGRAM_BREAK, HEAP),
-        AllowedImports::exact(SIGNALS_AND_ABORT, Interposed),
-        AllowedImports::exact(THREAD_NAME, Interposed),
         AllowedImports::exact(BYTE_ORDER, Never),
         AllowedImports::exact(PURE_COMPUTE, Never),
         AllowedImports::exact(
@@ -859,16 +786,6 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // (f) Filesystem: path and descriptor I/O. Routed through the deterministic
     // filesystem when interposed; a raw import is a host filesystem escape.
     const FILESYSTEM: &[&str] = &[
-        // Pseudoterminals are not modeled and the shim defines none of these,
-        // so a weak reference would bind libc's, which opens the host's
-        // `/dev/ptmx`: classified so even a weak import is refused.
-        "posix_openpt",
-        "openpty",
-        "grantpt",
-        "unlockpt",
-        "ptsname",
-        "ptsname_r",
-        "ptsname_r_chk",
         "open",
         "open64",
         "openat",
@@ -1206,7 +1123,14 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
     // shim-linked guest never imports `dlopen`/`dlclose` (they are deny-traps)
     // nor `dlsym` (interposed on Linux, the control plane on macOS); the rest
     // stay refused imports.
-    const DYNAMIC: &[&str] = &["dlopen", "dlsym", "dlclose", "dlmopen", "dlopen_preflight"];
+    const DYNAMIC: &[&str] = &[
+        "dlopen",
+        "dlsym",
+        "dlvsym",
+        "dlclose",
+        "dlmopen",
+        "dlopen_preflight",
+    ];
     // (d) Thread lifecycle: anything that mints a new runnable host context must
     // go through the managed `pthread_create` vehicle, not these.
     const THREADING: &[&str] = &[

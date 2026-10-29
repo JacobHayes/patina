@@ -93,7 +93,8 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     if let Some(note) = render_go_build_marker_note(&go_markers) {
         eprintln!("{note}");
     }
-    let audit = match NativeAudit::audit(&bytes, &effective) {
+    let load_set = crate::load_set::discover(&resolved.path, &bytes)?;
+    let audit = match NativeAudit::audit(&load_set, &effective) {
         Ok(audit) => audit,
         Err(TargetError::UnsupportedImports(denied)) => {
             let sud_marker = native_binary_has_sud_marker(&bytes)
@@ -269,7 +270,7 @@ fn emit_native_audit_violation(
 }
 
 pub(super) fn native_escape_summary(escape: &NativeEscape) -> String {
-    format!("{} ({})", escape.symbol, escape.category)
+    escape.summary()
 }
 
 pub(super) fn push_native_escape_provenance_lines(

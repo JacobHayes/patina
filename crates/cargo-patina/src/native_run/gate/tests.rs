@@ -25,6 +25,8 @@ fn unsupported_only_matches_an_instruction_finding_by_its_containing_symbol() {
         category: "cpu-nondeterminism",
         provenance: vec![provenance(Some("simd::kernel::avx512_sum"))],
         mnemonic: None,
+        image: None,
+        binding: None,
     };
     let only = |names: &[&str]| {
         UnsupportedPolicy::Only(names.iter().map(|name| name.to_string()).collect())

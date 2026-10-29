@@ -43,7 +43,7 @@ pub use metadata::{
     PctPolicyRecord, RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, WatchdogConfigRecord,
     policy_fingerprint_suffix,
 };
-pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord};
+pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord, NativeLibraryIdentity};
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;
 

@@ -283,7 +283,7 @@ pub fn render_native_escapes_grouped(escapes: &[NativeEscape]) -> String {
         ));
         for (finding, origin) in findings {
             output.push('\n');
-            output.push_str(&format!("    {} ({})", finding.symbol, finding.category));
+            output.push_str(&format!("    {}", finding.summary()));
             if let Some(site) = origin.site_label() {
                 output.push_str(&format!(" [{site}]"));
             }

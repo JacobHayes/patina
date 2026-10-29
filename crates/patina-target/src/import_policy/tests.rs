@@ -84,7 +84,6 @@ fn the_pure_compute_allowlist_does_not_capture_effectful_neighbours() {
         ("memset_pattern4", MachO),
         ("_malloc_zone_malloc", MachO),
         ("_random", MachO),
-        ("mmap", Elf),
         ("__ctype_b_loc", Elf),
     ] {
         assert_eq!(
@@ -272,54 +271,22 @@ fn an_imported_assert_failure_hook_is_refused() {
     }
 }
 
-// A name the shim interposes is admitted only as itself: an alias libc
-// exports beside it normalizes onto it but is a different linker symbol the
-// shim does not define, so it would run libc's own text. Aliases of the
-// pure entries share their effect and stay admitted; `_exit` is its own
-// listed entry, not an alias of `exit`.
+/// An underscore-spelled name is admitted as exactly that C name: Mach-O spells
+/// C `_exit` as `__exit`, which the immediate-exit group lists, while C `exit`
+/// (`_exit`) and `__exit` (`___exit`) are other functions.
 #[test]
-fn aliases_of_interposed_names_are_refused() {
+fn an_underscore_spelled_name_admits_only_that_c_name() {
     let empty = BTreeSet::new();
     let decide = |symbol, format| native_import_decision(symbol, format, &empty);
-    for alias in [
-        "__mmap",
-        "__munmap",
-        "__mprotect",
-        "__madvise",
-        "__sigaction",
-        "__exit",
-        "libc_start_main",
-    ] {
-        assert_ne!(
-            decide(alias, NativeFormat::Elf),
-            NativeImportDecision::Allowed,
-            "{alias}"
-        );
-    }
-    for name in [
-        "mmap",
-        "munmap",
-        "sigaction",
-        "exit",
-        "_exit",
-        "__libc_start_main",
-        "__errno_location",
-        "__isoc23_sscanf",
-        "__stack_chk_fail",
-    ] {
-        assert_eq!(
-            decide(name, NativeFormat::Elf),
-            NativeImportDecision::Allowed,
-            "{name}"
-        );
-    }
-    // Mach-O spells C `exit` as `_exit` and C `_exit` as `__exit`; `_exit`
-    // is listed as itself, so only its exact C name is admitted.
-    for (name, admitted) in [("_exit", true), ("__exit", true), ("___exit", false)] {
+    for (name, admitted) in [("_exit", false), ("__exit", true), ("___exit", false)] {
         assert_eq!(
             decide(name, NativeFormat::MachO) == NativeImportDecision::Allowed,
             admitted,
             "{name}"
         );
     }
+    assert_eq!(
+        decide("_exit", NativeFormat::Elf),
+        NativeImportDecision::Allowed
+    );
 }

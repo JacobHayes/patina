@@ -25,6 +25,11 @@ pub struct NativeIdentityRecord {
     /// the runtime, the guest's crate graph and the compiler's output are all
     /// linked into it, so any byte that differs may change what the guest does.
     pub executable_sha256: Sha256Digest,
+    /// Identity. Every library the loader mapped beside the executable, in
+    /// its search order, by the SHA-256 of the bytes the pre-run audit judged:
+    /// the guest runs their code too, and binds its references by what they
+    /// define, so a replay against another libc is another program.
+    pub libraries: Vec<NativeLibraryIdentity>,
     /// Identity. The SHA-256 of the `cargo-patina` executable that launched the
     /// guest. The supervisor builds the guest's initial state (its stack,
     /// environment block, inherited descriptors and filesystem image) and
@@ -47,6 +52,15 @@ pub struct NativeIdentityRecord {
     pub target: String,
 }
 
+/// One library a native recording ran with.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeLibraryIdentity {
+    /// The dependency name the loader mapped it under (`libc.so.6`).
+    pub name: String,
+    pub sha256: Sha256Digest,
+}
+
 /// One identity component that differs between a recording and a replay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeIdentityDifference {
@@ -65,6 +79,7 @@ impl NativeIdentityRecord {
     pub fn differences(&self, current: &Self) -> Vec<NativeIdentityDifference> {
         let Self {
             executable_sha256,
+            libraries,
             supervisor_sha256,
             patina_version: _,
             shim_bundle_sha256: _,
@@ -76,6 +91,20 @@ impl NativeIdentityRecord {
                 component: "executable",
                 recorded: executable_sha256.to_string(),
                 current: current.executable_sha256.to_string(),
+            });
+        }
+        if *libraries != current.libraries {
+            let render = |libraries: &[NativeLibraryIdentity]| {
+                libraries
+                    .iter()
+                    .map(|library| format!("{} {}", library.name, library.sha256))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            differences.push(NativeIdentityDifference {
+                component: "libraries",
+                recorded: render(libraries),
+                current: render(&current.libraries),
             });
         }
         if *supervisor_sha256 != current.supervisor_sha256 {
@@ -96,6 +125,10 @@ mod tests {
     fn identity() -> NativeIdentityRecord {
         NativeIdentityRecord {
             executable_sha256: Sha256Digest([1; 32]),
+            libraries: vec![NativeLibraryIdentity {
+                name: "libc.so.6".into(),
+                sha256: Sha256Digest([7; 32]),
+            }],
             supervisor_sha256: Sha256Digest([5; 32]),
             patina_version: "1.0.0".into(),
             shim_bundle_sha256: Sha256Digest([2; 32]),
@@ -115,10 +148,11 @@ mod tests {
         assert!(identity().differences(&current).is_empty());
 
         current.executable_sha256 = Sha256Digest([3; 32]);
+        current.libraries[0].sha256 = Sha256Digest([8; 32]);
         current.supervisor_sha256 = Sha256Digest([6; 32]);
         let differences = identity().differences(&current);
         let named: Vec<_> = differences.iter().map(|d| d.component).collect();
-        assert_eq!(named, ["executable", "supervisor"]);
+        assert_eq!(named, ["executable", "libraries", "supervisor"]);
         assert_eq!(
             differences[0].recorded,
             identity().executable_sha256.to_string()

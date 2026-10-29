@@ -40,6 +40,7 @@ mod guided;
 mod harness;
 mod help;
 mod lifeline;
+mod load_set;
 mod minimize;
 mod native_build;
 mod native_run;

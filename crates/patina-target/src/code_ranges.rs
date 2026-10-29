@@ -409,7 +409,7 @@ mod tests {
                 bytes[16..18].copy_from_slice(&object::elf::ET_REL.to_le_bytes());
                 let parsed = object::File::parse(&*bytes).unwrap();
                 assert_eq!(parsed.kind(), object::ObjectKind::Relocatable);
-                let error = crate::NativeAudit::audit(&bytes, &BTreeSet::new())
+                let error = crate::tests::audit_with_libc(&bytes, &BTreeSet::new())
                     .expect_err("a relocatable object is not a runnable guest");
                 assert!(matches!(error, TargetError::RelocatableElf), "{error}");
                 assert!(error.to_string().contains("ET_REL"), "{error}");
@@ -426,7 +426,7 @@ mod tests {
         for (symbols, fdes) in [(&ranges[..], None), (&ranges[..], Some(&unwind[..]))] {
             let bytes = elf(Architecture::X86_64, &text, symbols, fdes);
             assert!(scan(&bytes).unwrap().is_empty());
-            assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_ok());
+            assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_ok());
         }
     }
 
@@ -462,7 +462,7 @@ mod tests {
                     symbols.is_empty()
                 );
                 assert!(matches!(
-                    crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
+                    crate::tests::audit_with_libc(&bytes, &BTreeSet::new()),
                     Err(TargetError::UnsupportedImports(_))
                 ));
             }
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].category, "undecodable-instruction");
         assert!(matches!(
-            crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
+            crate::tests::audit_with_libc(&bytes, &BTreeSet::new()),
             Err(TargetError::UnsupportedImports(_))
         ));
         // Neither symbol nor FDE may shrink the other's declared code extent.
@@ -493,7 +493,7 @@ mod tests {
             );
             assert!(found.iter().any(|e| e.mnemonic == Some("rdrand")));
             assert!(matches!(
-                crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
+                crate::tests::audit_with_libc(&bytes, &BTreeSet::new()),
                 Err(TargetError::UnsupportedImports(_))
             ));
         }
@@ -533,7 +533,7 @@ mod tests {
                 found.iter().any(|e| e.mnemonic == Some("rdrand")),
                 "{found:?}"
             );
-            assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_err());
+            assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
         }
     }
 
@@ -617,7 +617,7 @@ mod tests {
                             && e.category != "undecodable-instruction"),
                     "{found:?}"
                 );
-                assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_err());
+                assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
             }
         }
     }
@@ -636,7 +636,7 @@ mod tests {
             None,
         );
         assert!(scan(&bytes).unwrap().is_empty());
-        assert!(crate::NativeAudit::audit(&bytes, &BTreeSet::new()).is_ok());
+        assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_ok());
         let file = object::File::parse(&*bytes).unwrap();
         let ranges = CodeRanges::new(&file).unwrap();
         assert!(
@@ -701,7 +701,7 @@ mod tests {
         ));
         assert!(matches!(scan(&bytes), Err(TargetError::Unwind(_))));
         assert!(matches!(
-            crate::NativeAudit::audit(&bytes, &BTreeSet::new()),
+            crate::tests::audit_with_libc(&bytes, &BTreeSet::new()),
             Err(TargetError::Unwind(_))
         ));
     }
