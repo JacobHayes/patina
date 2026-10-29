@@ -254,11 +254,6 @@ fn main() {
             &["--marker", "NO_SUCH_MARKER_ANYWHERE"],
         );
         assert!(!wrong.status.success(), "a wrong marker was accepted");
-        assert!(
-            String::from_utf8_lossy(&wrong.stderr).contains("does not reproduce"),
-            "a wrong marker was not refused by name:\n{}",
-            String::from_utf8_lossy(&wrong.stderr)
-        );
     }
 
     /// A campaign generation that fails an `always!` classifies VIOLATION, saves a

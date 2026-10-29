@@ -228,7 +228,10 @@ fn cpuid_sites_are_reported_without_refusing_the_binary() {
     }
 
     let note = render_host_identity_note(&sites).expect("a non-empty list renders");
-    assert!(note.contains("cpuid"), "the note must name the class: {note}");
+    assert!(
+        note.contains("cpuid"),
+        "the note must name the class: {note}"
+    );
     assert_eq!(
         render_host_identity_note(&[]),
         None,

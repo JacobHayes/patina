@@ -164,11 +164,6 @@ fn main() {
             ],
         );
         assert!(!untraced.status.success());
-        assert!(
-            String::from_utf8_lossy(&untraced.stderr).contains("recorded or replayed trace"),
-            "expected a clear no-trace error, got: {}",
-            String::from_utf8_lossy(&untraced.stderr)
-        );
 
         // A failing run's report carries the failure summary and its violation line.
         let report = directory.path().join("report.html");

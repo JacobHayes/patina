@@ -249,8 +249,7 @@ fn main() {
         ]);
         assert_eq!(toggled.status.code(), Some(2));
         assert!(
-            String::from_utf8_lossy(&toggled.stderr)
-                .contains("--guided cannot be used with --extend/--resume"),
+            String::from_utf8_lossy(&toggled.stderr).contains("--guided"),
             "toggling guidance on a continuation must be refused:\n{}",
             String::from_utf8_lossy(&toggled.stderr)
         );

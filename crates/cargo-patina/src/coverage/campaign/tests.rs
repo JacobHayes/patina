@@ -54,17 +54,17 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
         0,
     )
     .expect("one-generation tear ahead is resumable");
-    let behind = CampaignCoverageStore::load(
-        dir.clone(),
-        artifact.clone(),
-        "patina-native+instrumented".into(),
-        200,
-        2,
-    )
-    .unwrap_err();
+    // The watermark rule itself is tested in `aux_store`; this is the wiring.
     assert!(
-        behind.0.contains("missing coverage folds"),
-        "unexpected error: {behind}"
+        CampaignCoverageStore::load(
+            dir.clone(),
+            artifact.clone(),
+            "patina-native+instrumented".into(),
+            200,
+            2,
+        )
+        .is_err(),
+        "a store behind the campaign cursor must be refused"
     );
 
     let meta_path = dir.join("meta.json");
@@ -75,32 +75,26 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
         fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
     };
     rewrite_meta(&|meta| meta["generations_applied"] = 3.into());
-    let ahead = CampaignCoverageStore::load(
-        dir.clone(),
-        artifact.clone(),
-        "patina-native+instrumented".into(),
-        200,
-        1,
-    )
-    .unwrap_err();
     assert!(
-        ahead
-            .0
-            .contains("at most one checkpoint-tear generation ahead"),
-        "unexpected error: {ahead}"
+        CampaignCoverageStore::load(
+            dir.clone(),
+            artifact.clone(),
+            "patina-native+instrumented".into(),
+            200,
+            1,
+        )
+        .is_err(),
+        "a store too far ahead of the campaign cursor must be refused"
     );
 
     rewrite_meta(&|meta| {
         meta["generations_applied"] = 1.into();
         meta["fingerprint"] = "other".into();
     });
-    let error =
-        CampaignCoverageStore::load(dir, artifact, "patina-native+instrumented".into(), 200, 1)
-            .unwrap_err();
     assert!(
-        error.0.contains("fingerprint mismatch"),
-        "unexpected error: {}",
-        error.0
+        CampaignCoverageStore::load(dir, artifact, "patina-native+instrumented".into(), 200, 1)
+            .is_err(),
+        "a store of another fingerprint must be refused"
     );
     // An unknown schema or a covmap of a different size is refused.
     {
@@ -116,21 +110,15 @@ fn campaign_meta_refuses_a_torn_or_mismatched_store() {
         )
         .to_json();
 
+        assert!(CampaignCoverageMeta::from_json(&meta).is_ok());
+
         let mut bad_schema = meta.clone();
         bad_schema["schema"] = "patina.coverage.campaign/v999".into();
-        assert!(
-            CampaignCoverageMeta::from_json(&bad_schema)
-                .unwrap_err()
-                .contains("unsupported schema")
-        );
+        assert!(CampaignCoverageMeta::from_json(&bad_schema).is_err());
 
         let mut bad_edges = meta;
         bad_edges["edges_total"] = 2.into();
-        let error = CampaignCoverageMeta::from_json(&bad_edges).unwrap_err();
-        assert!(
-            error.contains("expected edges_total=2"),
-            "unexpected error: {error}"
-        );
+        assert!(CampaignCoverageMeta::from_json(&bad_edges).is_err());
     }
 }
 

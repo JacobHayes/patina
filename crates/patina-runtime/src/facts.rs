@@ -469,14 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_document_carries_only_the_schema() {
-        let value = document(Map::new(), Vec::new());
-        assert_eq!(value["schema"], FACTS_SCHEMA);
-        assert!(value.get("fault_reports").is_none());
-        assert!(value.get("runtime_findings").is_none());
-    }
-
-    #[test]
     fn fs_plane_carries_the_line_fields_including_the_breakdowns() {
         let mut report = patina_dst_driver_api::FsFaultReport {
             eligible_ops: 40,

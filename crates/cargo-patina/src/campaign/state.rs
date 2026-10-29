@@ -1035,34 +1035,20 @@ mod tests {
         load_coverage_tally(&path, 1).expect("one-generation tear ahead is resumable");
         load_coverage_tally(&path, 2).expect("aligned cursor is resumable");
 
-        let behind = load_coverage_tally(&path, 3).unwrap_err();
+        // The watermark rule itself is tested in `aux_store`; this is the wiring.
+        assert!(load_coverage_tally(&path, 3).is_err(), "store is behind");
         assert!(
-            behind.0.contains("missing sites folds"),
-            "unexpected error: {behind}"
-        );
-        let ahead = load_coverage_tally(&path, 0).unwrap_err();
-        assert!(
-            ahead
-                .0
-                .contains("at most one checkpoint-tear generation ahead"),
-            "unexpected error: {ahead}"
+            load_coverage_tally(&path, 0).is_err(),
+            "store is too far ahead"
         );
 
         let mut bad_schema = coverage.to_json();
         bad_schema["schema"] = "patina.campaign.sites/v999".into();
         fs::write(&path, serde_json::to_string_pretty(&bad_schema).unwrap()).unwrap();
-        let schema = load_coverage_tally(&path, 2).unwrap_err();
-        assert!(
-            schema.0.contains("unsupported schema"),
-            "unexpected error: {schema}"
-        );
+        assert!(load_coverage_tally(&path, 2).is_err(), "unknown schema");
 
         fs::remove_file(&path).unwrap();
-        let missing = load_coverage_tally(&path, 0).unwrap_err();
-        assert!(
-            missing.0.contains("missing sites store"),
-            "unexpected error: {missing}"
-        );
+        assert!(load_coverage_tally(&path, 0).is_err(), "missing store");
     }
 
     #[test]

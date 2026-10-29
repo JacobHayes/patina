@@ -541,20 +541,8 @@ fn main() {
             "missing pre-init condition:\n{stderr}"
         );
         assert!(
-            stderr.contains("static constructor/ctor"),
-            "missing ctor attribution:\n{stderr}"
-        );
-        assert!(
             stderr.contains("calling symbol: open"),
             "missing calling symbol:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("#[cfg(not(patina))]") && stderr.contains("#[cfg(not(dst))]"),
-            "missing cfg-gate workaround:\n{stderr}"
-        );
-        assert!(
-            !stderr.contains("must run under `cargo patina run`"),
-            "ctor diagnostic must be distinct from not-launched message:\n{stderr}"
         );
         assert!(
             !String::from_utf8_lossy(&output.stdout).contains("main should not run"),

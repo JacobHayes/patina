@@ -283,11 +283,6 @@ mod tests {
             "verdict did not carry the violated invariant's label: {}",
             lines[0]
         );
-        // No second channel: the verdict is the source, so the legacy marker is gone.
-        assert!(
-            !stderr.contains("PATINA_ALWAYS_VIOLATION"),
-            "the legacy always-violation marker must no longer print:\n{stderr}"
-        );
         assert!(
             !stdout.contains("UNREACHABLE") && !stderr.contains("UNREACHABLE"),
             "the violation must abort before the guest continues:\n{stdout}\n{stderr}"

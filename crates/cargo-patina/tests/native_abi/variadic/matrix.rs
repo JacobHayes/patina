@@ -5,14 +5,26 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-fn every_variadic_family_contains_panics_and_detects_wrong_arguments() {
+fn every_variadic_family_contains_panics_under_unwind() {
+    every_variadic_family_contains_panics_and_detects_wrong_arguments("unwind", 0);
+}
+
+#[test]
+fn every_variadic_family_contains_panics_and_detects_wrong_arguments_under_abort() {
+    every_variadic_family_contains_panics_and_detects_wrong_arguments("abort", 3);
+}
+
+fn every_variadic_family_contains_panics_and_detects_wrong_arguments(
+    strategy: &str,
+    opt_level: u8,
+) {
     // Class pairing: exported-boundary ownership is enforced by ast-grep;
     // real C calls detect operand-decoding errors through model behavior.
     // Failpoints are explicitly armed after startup, never source patches.
     // Ownership and every family's panic containment are inspected in a debug
     // and an optimized build; operand decoding, which the panic strategy does
     // not touch, in the optimized one.
-    for (strategy, opt_level) in [("unwind", 0), ("abort", 3)] {
+    {
         let dir = tempfile::tempdir().unwrap();
         let archive = common::test_panic_shim(strategy, opt_level).archive;
         let object = common::compile_posix_object(dir.path());

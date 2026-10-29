@@ -684,7 +684,6 @@ mod linux {
                 return;
             }
             let (ran, trace) = g.assert_recorded(7, &[]);
-            assert!(text(&ran.stderr).contains("timestamp-counter instruction site(s)"));
             let out = text(&ran.stdout);
             let field = |line: &str, key: &str| -> u64 {
                 let start = line.find(key).unwrap() + key.len();

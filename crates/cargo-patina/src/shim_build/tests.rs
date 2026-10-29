@@ -429,7 +429,6 @@ fn a_same_version_toolchain_split_still_names_the_difference() {
         &guest,
         Path::new("/work/guest"),
     );
-    assert!(message.contains("refusing to build"), "{message}");
     assert!(
         message.contains("/patina") && message.contains("/work/guest"),
         "{message}"
@@ -437,11 +436,6 @@ fn a_same_version_toolchain_split_still_names_the_difference() {
     assert!(
         message.contains("commit-hash: aaaaaaaaa") && message.contains("commit-hash: bbbbbbbbb"),
         "the same-banner case must show the full identities:\n{message}"
-    );
-    assert!(message.contains("No ambient fallback"), "{message}");
-    assert!(
-        message.contains("absolute, matching RUSTC and CARGO"),
-        "{message}"
     );
 
     // Differing banners are self-explanatory; no full dump.

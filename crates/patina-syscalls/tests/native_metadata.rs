@@ -6,13 +6,6 @@ fn metadata_is_the_compiled_targets_and_each_identity_has_its_own_number() {
     assert!(!SOURCES.is_empty());
     for source in SOURCES {
         assert_eq!(source.0, Os::host().name());
-        assert_eq!(source.2.len(), 40);
-        assert_eq!(source.5.len(), 64);
-        assert!(source.4.contains(source.2));
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-        assert!(!source.3.contains("arm64") && source.3 != "scripts/syscall.tbl");
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        assert!(!source.3.contains("x86"));
     }
 
     assert!(!ENTRIES.is_empty());

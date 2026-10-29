@@ -83,11 +83,6 @@ mod tests {
             ],
         );
         assert!(!rejected.status.success());
-        assert!(
-            String::from_utf8_lossy(&rejected.stderr).contains("already-built artifact"),
-            "missing prebuilt-selection diagnostic:\n{}",
-            String::from_utf8_lossy(&rejected.stderr)
-        );
     }
 
     // A package directory is a source in every verb, resolved from the

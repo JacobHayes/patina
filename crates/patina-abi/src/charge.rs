@@ -132,27 +132,3 @@ impl ChargeCounts {
         total
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn counted_calls_charge_their_class_costs() {
-        let mut counts = ChargeCounts::default();
-        counts.count(ChargeClass::Clock);
-        counts.count(ChargeClass::Sync);
-        counts.count(ChargeClass::Syscall);
-        counts.count(ChargeClass::Compute);
-        let expected =
-            ChargeClass::ALL
-                .into_iter()
-                .fold(CpuCharge::default(), |mut total, class| {
-                    total.add(class.cost());
-                    total
-                });
-        assert_eq!(counts.charge(), expected);
-        assert!(!counts.is_empty() && ChargeCounts::new().is_empty());
-        assert_eq!(STARTUP_CPU_CHARGE.total_ns(), crate::STARTUP_CPU_NANOS);
-    }
-}

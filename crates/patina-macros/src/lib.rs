@@ -346,15 +346,10 @@ fn compile_error(message: &str) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{flag_name, literal_to_cli_value, rust_string_literal};
+    use super::{literal_to_cli_value, rust_string_literal};
 
     #[test]
-    fn flag_names_and_expansion_strings_are_mechanical() {
-        assert_eq!(
-            flag_name("machine_crash_permille"),
-            "--machine-crash-permille"
-        );
-        assert_eq!(flag_name("yield_points"), "--yield-points");
+    fn expansion_strings_escape_quotes_backslashes_and_newlines() {
         assert_eq!(rust_string_literal("a\\b\n\"c\""), "\"a\\\\b\\n\\\"c\\\"\"");
     }
 

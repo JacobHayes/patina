@@ -190,8 +190,7 @@ fn fingerprint_on_a_seeded_native_run_is_refused_not_ignored() {
     let Err(error) = parse(strings(&["run", b, "--seed", "5", "--fingerprint", "fp"])) else {
         panic!("a seeded run must refuse a fingerprint it cannot record");
     };
-    let text = format!("{error}");
-    assert!(text.contains("--record"), "{text}");
+    assert!(format!("{error}").contains("--record"));
 
     // With a recording the same label is accepted and carried into the trace.
     match parse(strings(&[
@@ -241,7 +240,7 @@ fn run_and_test_without_an_artifact_are_usage_errors() {
         &["test", "--seed", "1"],
         &["test", m],
     ] {
-        assert!(parse(strings(argv)).is_err(), "{argv:?}");
+        crate::tests::parse_error(argv);
     }
 }
 

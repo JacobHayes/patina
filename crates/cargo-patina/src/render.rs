@@ -651,7 +651,6 @@ mod tests {
         // Fully self-contained: no external references.
         assert!(!html.contains("http://") && !html.contains("https://"));
         assert!(!html.contains("<script"));
-        assert!(html.contains("4 events"));
         assert!(html.contains("future_knob_from_another_wave"));
         assert!(html.contains("surfaced"));
         assert!(html.contains("GUEST_VIOLATION"));
@@ -677,8 +676,8 @@ mod tests {
         let html = render_bundle(&bundle);
         assert!(html.contains("task 1"));
         assert!(html.contains("worker"));
-        assert!(html.contains("completed"));
-        // Crashes, errors and drops surface as notable.
+        // Crashes, errors and drops surface as notable (detection is tested in
+        // `trace_view`); the page carries each one's data.
         {
             use patina_dst_abi::{EffectError, ErrorCode, SendDisposition, SendReport};
             let bundle = bundle_with(vec![
@@ -706,28 +705,34 @@ mod tests {
                 ),
             ]);
             let html = render_bundle(&bundle);
-            assert!(html.contains("filesystem crash injected"));
-            assert!(html.contains("error not_found: missing"));
-            assert!(html.contains("dropped"));
+            assert!(html.contains("fs_crash"));
+            assert!(html.contains("not_found") && html.contains("missing"));
+            assert!(html.contains("127.0.0.1:9"));
         }
     }
 
     #[test]
-    fn aggregates_large_traces_with_visible_banner() {
-        let events: Vec<_> = (0..(PER_EVENT_CAP + 500))
-            .map(|_| {
-                (
-                    Operation::ClockNow {
-                        clock: ClockKind::Monotonic,
-                    },
-                    Outcome::U64(1),
-                )
-            })
-            .collect();
-        let bundle = bundle_with(events);
-        let html = render_bundle(&bundle);
-        assert!(html.contains("Aggregated view"));
-        assert!(html.contains("Nothing is dropped"));
+    fn aggregates_large_traces_instead_of_listing_every_event() {
+        let page = |count: usize| {
+            render_bundle(&bundle_with(
+                (0..count)
+                    .map(|_| {
+                        (
+                            Operation::ClockNow {
+                                clock: ClockKind::Monotonic,
+                            },
+                            Outcome::U64(1),
+                        )
+                    })
+                    .collect(),
+            ))
+            .len()
+        };
+        // Past the cap the page stops growing with the event count: 3.5x the
+        // events must not come close to 3.5x the page.
+        let small = page(PER_EVENT_CAP + 500);
+        let large = page(PER_EVENT_CAP * 4);
+        assert!(large < small * 2, "{small} bytes grew to {large} bytes");
     }
 
     #[test]

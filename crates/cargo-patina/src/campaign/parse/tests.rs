@@ -66,6 +66,14 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     }
 }
 
+/// The usage-error message of a campaign parse that must fail.
+fn refusal(values: &[&str]) -> String {
+    match parse(values.iter().map(OsString::from).collect::<Vec<_>>()) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("expected a usage error for {values:?}"),
+    }
+}
+
 #[test]
 fn declared_rules_are_grammar_validated_and_loud() {
     let cross_run = CampaignClass::ALL
@@ -85,10 +93,8 @@ fn declared_rules_are_grammar_validated_and_loud() {
         // No rule over one run's output can say that run would not reproduce.
         serde_json::json!({"patterns": {cross_run.as_str(): ["token"]}}),
     ] {
-        assert!(
-            json_classify_rules(&bad).is_err(),
-            "malformed classify rules must be refused: {bad}"
-        );
+        let error = json_classify_rules(&bad).expect_err("malformed classify rules are refused");
+        assert!(error.to_string().contains("classify"), "{bad}: {error}");
     }
     let rules = declared_rules_fixture();
     assert_eq!(
@@ -184,10 +190,10 @@ fn faults_selects_every_plane_bare_or_the_named_subset() {
         assert!(error.contains(plane), "{error}");
     }
 
-    assert!(parse(args(&["art", "--faults=net,dns"])).is_err());
+    assert!(refusal(&["art", "--faults=net,dns"]).contains("--dns-entry"));
     assert!(parse(args(&["art", "--faults=dns", "--dns-entry", "db=10.0.0.5"])).is_ok());
     assert!(parse(args(&["art", "--faults"])).is_ok());
-    assert!(parse(args(&["--extend", "1", "--faults=net"])).is_err());
+    assert!(refusal(&["--extend", "1", "--faults=net"]).contains("--faults"));
 }
 
 /// A spec's knob exclusion applies once the flags are merged, and is refused
@@ -203,7 +209,7 @@ fn an_exclusion_needs_its_plane_selected_after_the_merge() {
         br#"{"faults": ["sleep"], "exclude_knobs": ["--net-reset-permille"]}"#,
     )
     .expect("write");
-    assert!(parse(args(&["art", "--spec", &spec_flag])).is_err());
+    assert!(refusal(&["art", "--spec", &spec_flag]).contains("--net-reset-permille"));
     let merged = parse(args(&["art", "--spec", &spec_flag, "--faults=net"]))
         .expect("the flag selects the excluded knob's plane")
         .spec;
@@ -255,14 +261,14 @@ fn allow_unmet_sometimes_parses_flag_and_spec_shapes() {
         threshold.spec.allow_unmet_sometimes,
         Some(AllowUnmetSometimes::BelowGenerations(10))
     );
-    assert!(parse(args(&["art", "--allow-unmet-sometimes=0"])).is_err());
+    assert!(refusal(&["art", "--allow-unmet-sometimes=0"]).contains("--allow-unmet-sometimes"));
     assert!(
-        parse(args(&[
+        refusal(&[
             "art",
             "--allow-unmet-sometimes=1",
             "--allow-unmet-sometimes=2",
-        ]))
-        .is_err()
+        ])
+        .contains("--allow-unmet-sometimes")
     );
 
     let mut spec = CampaignSpec::default();
@@ -283,7 +289,10 @@ fn allow_unmet_sometimes_parses_flag_and_spec_shapes() {
         serde_json::json!({"allow_unmet_sometimes": 0}),
         serde_json::json!({"allow_unmet_sometimes": "yes"}),
     ] {
-        assert!(CampaignSpec::default().apply_json(&bad).is_err());
+        let error = CampaignSpec::default()
+            .apply_json(&bad)
+            .expect_err("a malformed allow_unmet_sometimes is refused");
+        assert!(error.to_string().contains("allow_unmet_sometimes"), "{bad}");
     }
 }
 
@@ -306,10 +315,10 @@ fn continuation_modes_parse_and_reject_resupplied_spec() {
     assert_eq!(resume.timeout_secs_override, Some(120));
     assert_eq!(resume.progress_every, 2);
 
-    assert!(parse(args(&["--extend", "0"])).is_err());
-    assert!(parse(args(&["--extend", "1", "--resume"])).is_err());
-    assert!(parse(args(&["guest", "--extend", "1"])).is_err());
-    assert!(parse(args(&["--extend", "1", "--", "guest-arg"])).is_err());
+    assert!(refusal(&["--extend", "0"]).contains("--extend"));
+    assert!(refusal(&["--extend", "1", "--resume"]).contains("--resume"));
+    assert!(refusal(&["guest", "--extend", "1"]).contains("--extend"));
+    assert!(refusal(&["--extend", "1", "--", "guest-arg"]).contains("--extend"));
     for flag in [
         "--gens",
         "--seed-start",
@@ -333,11 +342,7 @@ fn continuation_modes_parse_and_reject_resupplied_spec() {
             | "--allow-unmet-sometimes" => vec!["--extend", "1", flag],
             _ => vec!["--extend", "1", flag, "1"],
         };
-        let message = parse(args(&values)).unwrap_err().to_string();
-        assert!(
-            message.contains("out-dir's recorded spec is authoritative"),
-            "{message}"
-        );
+        let message = refusal(&values);
         assert!(message.contains(flag), "{message}");
     }
 }
@@ -358,13 +363,16 @@ fn the_native_invocation_flags_parse_into_the_spec() {
     assert_eq!(inv.spec.allow_symbols, ["dlsym", "semaphore_wait"]);
     assert_eq!(inv.spec.allow_unsupported_symbols.as_deref(), Some("all"));
     // The value grammars are the registry's, enforced at parse time.
-    assert!(parse(args(&["art", "--allow-unsupported-symbols", ""])).is_err());
-    assert!(parse(args(&["art", "--allow"])).is_err());
+    assert!(
+        refusal(&["art", "--allow-unsupported-symbols", ""])
+            .contains("--allow-unsupported-symbols")
+    );
+    assert!(refusal(&["art", "--allow"]).contains("--allow"));
     // They describe the campaign's shape, so a continuation cannot change them.
     for flag in ["--allow=dlsym", "--allow-unsupported-symbols=all"] {
-        let error = parse(args(&["--resume", flag])).unwrap_err().to_string();
+        let error = refusal(&["--resume", flag]);
         assert!(
-            error.contains("recorded spec is authoritative"),
+            error.contains(flag.split('=').next().unwrap()),
             "{flag} must be refused on a continuation, got {error}"
         );
     }

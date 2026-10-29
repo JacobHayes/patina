@@ -1072,96 +1072,64 @@ mod tests {
             .unwrap_or_else(|| panic!("{} has no registry row", row.name()))
     }
 
+    /// The catalog table lints, in one pass: scenario names, what each
+    /// scenario covers and asserts absent against the registry, the symbols it
+    /// names, its gaps and their vehicles, hang bounds, and the exclusions.
     #[test]
-    fn scenario_names_are_unique_family_slash_name() {
+    fn the_catalog_is_internally_consistent() {
         let mut seen = BTreeSet::new();
         for scenario in SCENARIOS {
-            assert!(seen.insert(scenario.name), "duplicate {}", scenario.name);
-            let (family, name) = scenario.name.split_once('/').expect("family/name");
-            assert!(!family.is_empty() && !name.is_empty(), "{}", scenario.name);
-        }
-    }
-
-    #[test]
-    fn every_scenario_exercises_a_row() {
-        for scenario in SCENARIOS {
+            let name = scenario.name;
+            assert!(seen.insert(name), "duplicate {name}");
+            let (family, short) = name.split_once('/').expect("family/name");
+            assert!(!family.is_empty() && !short.is_empty(), "{name}");
             assert!(
                 !scenario.covers.is_empty() || !scenario.asserts_absent.is_empty(),
-                "{} covers nothing",
-                scenario.name
+                "{name} covers nothing"
             );
-        }
-    }
-
-    #[test]
-    fn covered_rows_are_in_the_virtual_abi() {
-        for scenario in SCENARIOS {
             for row in scenario.covers {
                 assert_ne!(
                     disposition(*row),
                     Disposition::Absent,
-                    "{} covers {}, which is past the virtual ABI level (assert it absent)",
-                    scenario.name,
+                    "{name} covers {}, which is past the virtual ABI level (assert it absent)",
                     row.name()
                 );
             }
-        }
-    }
-
-    #[test]
-    fn asserted_absent_rows_are_past_the_virtual_abi() {
-        for scenario in SCENARIOS {
             for row in scenario.asserts_absent {
                 assert_eq!(
                     disposition(*row),
                     Disposition::Absent,
-                    "{} asserts {} absent",
-                    scenario.name,
+                    "{name} asserts {} absent",
                     row.name()
                 );
             }
-        }
-    }
-
-    #[test]
-    fn named_symbols_are_registry_rows_of_this_os() {
-        for scenario in SCENARIOS {
             for symbol in scenario.symbols {
                 assert!(
                     SYMBOLS
                         .iter()
                         .any(|row| row.name == *symbol && row.platform.defines_on(Os::host())),
-                    "{} names symbol {symbol}, which has no registry row",
-                    scenario.name
+                    "{name} names symbol {symbol}, which has no registry row"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn gaps_name_vehicles_the_scenario_has() {
-        for scenario in SCENARIOS {
             for gap in scenario.gaps {
-                assert!(
-                    !gap.vehicles.is_empty(),
-                    "{}: a gap with no vehicle",
-                    scenario.name
-                );
+                assert!(!gap.vehicles.is_empty(), "{name}: a gap with no vehicle");
                 for vehicle in gap.vehicles {
                     assert!(
                         scenario.vehicles.contains(vehicle),
-                        "{}: gap for {} it has no shape through",
-                        scenario.name,
+                        "{name}: gap for {} it has no shape through",
                         vehicle.name()
                     );
                 }
+                if let Some(within) = gap.failure.hang_deadline() {
+                    assert!(
+                        !within.is_zero() && within <= MAX_HANG_WITHIN,
+                        "{name}: a hang watched from {within:?} (at most {MAX_HANG_WITHIN:?})"
+                    );
+                }
+                if let Failure::Differs(differences) = gap.failure {
+                    assert!(!differences.is_empty(), "{name}: {}", gap.what);
+                }
             }
-        }
-    }
-
-    #[test]
-    fn a_vehicle_has_at_most_one_stopping_gap() {
-        for scenario in SCENARIOS {
             for vehicle in scenario.vehicles {
                 let stops = scenario
                     .gaps_for(*vehicle)
@@ -1169,65 +1137,27 @@ mod tests {
                     .count();
                 assert!(
                     stops <= 1,
-                    "{}[{}]: {stops} stopping gaps",
-                    scenario.name,
+                    "{name}[{}]: {stops} stopping gaps",
                     vehicle.name()
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn a_declared_hang_is_watched_within_the_bound() {
-        for scenario in SCENARIOS {
-            for gap in scenario.gaps {
-                if let Some(within) = gap.failure.hang_deadline() {
-                    assert!(
-                        !within.is_zero() && within <= MAX_HANG_WITHIN,
-                        "{}: a hang watched from {within:?} (at most {MAX_HANG_WITHIN:?})",
-                        scenario.name
-                    );
-                }
-            }
-        }
-    }
-
-    /// A stopped run records no complete trace, so trace facts beside a stop
-    /// would go unchecked.
-    #[test]
-    fn trace_facts_never_share_a_vehicle_with_a_stop() {
-        for scenario in SCENARIOS.iter().filter(|scenario| scenario.trace.is_some()) {
-            for vehicle in scenario.vehicles {
+                // A stopped run records no complete trace, so trace facts
+                // beside a stop would go unchecked.
                 assert!(
-                    !scenario
-                        .gaps_for(*vehicle)
-                        .any(|gap| gap.failure.ends_early()),
-                    "{}[{}]: trace facts and a stopping gap",
-                    scenario.name,
+                    scenario.trace.is_none() || stops == 0,
+                    "{name}[{}]: trace facts and a stopping gap",
                     vehicle.name()
                 );
             }
         }
-    }
 
-    #[test]
-    fn a_differing_gap_names_its_differences() {
-        for scenario in SCENARIOS {
-            for gap in scenario.gaps {
-                if let Failure::Differs(differences) = gap.failure {
-                    assert!(!differences.is_empty(), "{}: {}", scenario.name, gap.what);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn exclusions_are_unique_and_uncovered() {
-        let mut seen = Vec::new();
+        let mut excluded = Vec::new();
         for exclusion in EXCLUSIONS {
-            assert!(!exclusion.reason.is_empty());
-            assert!(!seen.contains(&exclusion.entry), "{:?}", exclusion.entry);
-            seen.push(exclusion.entry);
+            assert!(
+                !excluded.contains(&exclusion.entry),
+                "{:?}",
+                exclusion.entry
+            );
+            excluded.push(exclusion.entry);
             for scenario in SCENARIOS {
                 let covered = match exclusion.entry {
                     Entry::Syscall(row) => {

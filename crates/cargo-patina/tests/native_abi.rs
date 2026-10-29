@@ -583,10 +583,7 @@ mod stdio_lifecycle {
         let cin = seeded(&g.binary, "cin", 1);
         assert_eq!(cin.status.signal(), Some(6), "{}", text(&cin.stderr));
         let refusal = text(&cin.stderr);
-        assert!(
-            refusal.contains("not the shim's stdout or stderr: getc"),
-            "{refusal}"
-        );
+        assert!(refusal.contains("getc"), "{refusal}");
     }
 }
 

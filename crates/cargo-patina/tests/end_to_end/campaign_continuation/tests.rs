@@ -495,44 +495,8 @@ fn campaign_continuation_refusals_are_loud() {
         run(&["campaign", "--resume", "--out-dir", out_dir]),
         "campaign complete at 1/1",
     );
-    assert_refuses(
-        run(&[
-            "campaign",
-            "--extend",
-            "1",
-            "--out-dir",
-            out_dir,
-            "--gens",
-            "2",
-        ]),
-        "out-dir's recorded spec is authoritative",
-    );
-    assert_refuses(
-        run(&[
-            "campaign",
-            module_arg,
-            "--extend",
-            "1",
-            "--out-dir",
-            out_dir,
-        ]),
-        "artifact positional cannot be used with --extend/--resume",
-    );
-    assert_refuses(
-        run(&[
-            "campaign",
-            "--extend",
-            "1",
-            "--resume",
-            "--out-dir",
-            out_dir,
-        ]),
-        "choose exactly one continuation mode",
-    );
-    assert_refuses(
-        run(&["campaign", "--extend", "0", "--out-dir", out_dir]),
-        "--extend must be >= 1",
-    );
+    // Flag combinations a continuation refuses are parse-level, tested in
+    // `campaign::parse`.
 
     // Each edit to the recorded state is refused, then undone.
     let extend: &[&str] = &["campaign", "--extend", "1", "--out-dir", out_dir];
