@@ -37,6 +37,7 @@ fn native_custom_ops_record_replay_fault_and_drive_a_campaign() {
     let bin = bin.to_str().unwrap();
     record_replay_and_key_mismatch(directory.path(), bin);
     faults_fire_report_and_replay(directory.path(), bin);
+    typed_ops_record_replay_and_fault(directory.path(), bin);
     campaign_finds_a_planted_mishandling(directory.path(), bin);
 }
 
@@ -140,6 +141,62 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     assert!(
         !String::from_utf8_lossy(&refused.stdout).contains("PATINA_RESULT"),
         "the guest must not carry on past a refused custom op"
+    );
+}
+
+/// The typed API over the same substrate: a struct result is recorded and
+/// replayed identically without running `perform`, and a faultable typed op
+/// hands the guest its declared `Err` under the knob and replays it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
+    let workspace = native_workspace();
+    let run = |args: &[&str]| invoke(workspace, args);
+
+    let trace = directory.join("typed.patina");
+    let recorded = run(&[
+        "run",
+        bin,
+        "--seed",
+        "4",
+        "--record",
+        trace.to_str().unwrap(),
+        "--",
+        "typed",
+    ]);
+    assert_eq!(
+        result_line(&recorded),
+        "PATINA_RESULT performed=2 head=etag-9:4096 fetched=etag-7"
+    );
+    let replayed = run(&["replay", bin, trace.to_str().unwrap()]);
+    assert_eq!(
+        result_line(&replayed),
+        "PATINA_RESULT performed=0 head=etag-9:4096 fetched=etag-7",
+        "replay must reproduce typed results without running either closure"
+    );
+
+    let faulted_trace = directory.join("typed-fault.patina");
+    let faulted = run(&[
+        "run",
+        bin,
+        "--seed",
+        "4",
+        "--custom-op-fail-permille",
+        "1000",
+        "--record",
+        faulted_trace.to_str().unwrap(),
+        "--",
+        "typed",
+    ]);
+    assert_eq!(
+        result_line(&faulted),
+        "PATINA_RESULT performed=1 head=etag-9:4096 fetched=UNAVAILABLE",
+        "only the faultable typed op may fault, and it must not perform"
+    );
+    let replayed = run(&["replay", bin, faulted_trace.to_str().unwrap()]);
+    assert_eq!(
+        result_line(&replayed),
+        "PATINA_RESULT performed=0 head=etag-9:4096 fetched=UNAVAILABLE",
+        "replay must reproduce the injected typed fault"
     );
 }
 

@@ -249,6 +249,10 @@ code. `verdict()` is the machine-readable outcome channel: one ABI verb whose
 kind is data, recorded as a trace event (so replay reproduces the verdict stream
 and a divergent one fails closed) and surfaced in `--format json` as `verdicts[]`
 rather than as text to grep; an `always!` violation reports one automatically.
+Effects Patina does not model (RPC, S3, devices) go through
+`patina_dst::custom_op` / `custom_op_faultable`: recorded, replayed without
+re-running, and, for the faultable form, failed on demand with
+`--custom-op-fail-permille`.
 Enable at run time with `cargo patina run --buggify`; decisions are pure
 functions of the seed, and the run's `sdk` facts (and its human
 `PATINA_SDK_REPORT` line) prove sites actually fired (no vacuous "all clean").

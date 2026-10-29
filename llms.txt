@@ -391,6 +391,13 @@ dev-dependency use under plain `cargo test`.
   `AbortIntent` attributes an abort the guest performs itself. Labels share the
   `sites.json` namespace but register no site, so the duplicate-label rule does
   not apply and repeating a label is how verdicts aggregate.
+- `patina_dst::custom_op("label", &key, || perform()) -> T` and
+  `patina_dst::custom_op_faultable("label", &key, || failure_value, || perform()) -> T`
+  (`T`, `K`: serde): route an effect Patina does not model (RPC, S3, devices) through
+  it. `perform` runs on record only; replay returns the recorded value (JSON-encoded
+  in the trace) without running it. The faultable form's `failure_value` is what
+  `--custom-op-fail-permille` hands back instead of running `perform`. Untyped
+  `custom_op_bytes`/`custom_op_bytes_faultable` take and return raw bytes.
 - `patina_dst::sometimes!(cond, "label")`, `patina_dst::reachable!("label")`: coverage.
 - `patina_dst::lifecycle::setup_complete()`, `patina_dst::lifecycle::event!("name")`.
 - `patina_dst::rng()`: seed-bridged deterministic entropy. `patina_dst::is_simulated()`.

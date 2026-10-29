@@ -24,6 +24,9 @@ use super::*;
 // `probe`  — one faultable op next to one that declares nothing, which is the
 //            control: eligibility is the guest's call, so the knob must pass
 //            the undeclared one by even at a certain rate.
+// `typed`  — the serde-typed API: a tuple result through `custom_op` and a
+//            `Result` through `custom_op_faultable`, whose declared failure is
+//            the `Err` variant the guest already handles.
 // `bare`   — no custom operations at all, for the vacuity leg.
 // default  — a read-through cache whose retry policy has an off-by-one: it
 //            treats a SECOND consecutive fetch failure as "upstream unchanged"
@@ -33,6 +36,10 @@ use super::*;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CUSTOM_OP_SDK_MAIN: &str = r#"
 use std::sync::atomic::{AtomicU32, Ordering};
+
+// (etag, size): a serde-native struct stand-in, so the fixture needs no serde
+// dependency of its own.
+type Object = (String, u64);
 
 static PERFORMED: AtomicU32 = AtomicU32::new(0);
 
@@ -70,6 +77,31 @@ fn main() {
                 PERFORMED.load(Ordering::SeqCst),
                 String::from_utf8_lossy(&object),
                 empty.len()
+            );
+        }
+        Some("typed") => {
+            let object: Object = patina_dst::custom_op("s3.head_object", &"bucket/key", || {
+                PERFORMED.fetch_add(1, Ordering::SeqCst);
+                ("etag-9".to_string(), 4096)
+            });
+            let fetched: Result<Object, String> = patina_dst::custom_op_faultable(
+                "s3.get_object",
+                &7u32,
+                || Err("UNAVAILABLE".to_string()),
+                || {
+                    PERFORMED.fetch_add(1, Ordering::SeqCst);
+                    Ok(("etag-7".to_string(), 7))
+                },
+            );
+            println!(
+                "PATINA_RESULT performed={} head={}:{} fetched={}",
+                PERFORMED.load(Ordering::SeqCst),
+                object.0,
+                object.1,
+                match &fetched {
+                    Ok(object) => object.0.clone(),
+                    Err(error) => error.clone(),
+                }
             );
         }
         Some("bare") => {

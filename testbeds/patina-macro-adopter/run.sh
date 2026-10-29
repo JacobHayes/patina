@@ -51,8 +51,11 @@ fi
 
 cargo tree -p patina-dst --locked >"$OUT/tree-patina-dst.txt"
 cargo tree -p patina-dst-macros --locked >"$OUT/tree-patina-dst-macros.txt"
-if [[ $(wc -l <"$OUT/tree-patina-dst.txt" | tr -d ' ') != 1 ]]; then
-  echo "patina-macro-adopter: patina-dst default feature tree is not dependency-free" >&2
+# The SDK's only dependencies are serde and serde_json (typed custom ops); no
+# runtime or driver crate may leak into an adopter's default tree.
+if cargo tree -p patina-dst --locked --depth 1 --prefix none | tail -n +2 \
+  | grep -Ev '^(serde|serde_json) '; then
+  echo "patina-macro-adopter: patina-dst default feature tree gained dependencies" >&2
   cat "$OUT/tree-patina-dst.txt" >&2
   exit 1
 fi

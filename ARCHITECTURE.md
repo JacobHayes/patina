@@ -426,7 +426,8 @@ its result bytes are recorded; on replay the bytes are returned and the
 wrapper does not run. Three verbs, one per phase:
 `patina_custom_op_begin` (record, replay or fault), `patina_custom_op_record`,
 `patina_custom_op_replay_result`. Label, key and result are opaque bytes at
-the ABI and in `patina_dst::custom_op_bytes`. Each
+the ABI and in `patina_dst::custom_op_bytes`; `patina_dst::custom_op` and
+`custom_op_faultable` type them with serde (JSON). Each
 call is a recorded operation. The runtime refuses, at record time, a wrapper
 that performs effects Patina models, and nested or unclosed operations.
 

@@ -18,8 +18,11 @@ Ordinary application code instrumented with the cooperative-SUT SDK:
 `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
 `always!`/`sometimes!`/`reachable!` oracles, `verdict()` for structured run
 outcomes, the `lifecycle` markers (`setup_complete()`, `event!`), and
-`patina_dst::rng()`/`is_simulated()`. The
-crate is dependency-free by default; every macro is a no-op or plain fallback
+`patina_dst::rng()`/`is_simulated()`, and `custom_op`/`custom_op_faultable`
+to route an unmodeled effect (RPC, S3, a device) through Patina so it is
+recorded, replayed, and optionally faulted. The
+crate links no runtime and depends only on serde for typed custom ops; every
+macro is a no-op or plain fallback
 outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
 in their code. The default-off `macros` feature re-exports
 `#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
@@ -128,7 +131,7 @@ Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
 
 | Crate | Directory | Role |
 |---|---|---|
-| `patina-dst` | `crates/patina` | mode-1 SDK; dependency-free by default; used as `patina_dst::` |
+| `patina-dst` | `crates/patina` | mode-1 SDK; depends only on serde/serde_json; used as `patina_dst::` |
 | `patina-dst-macros` | `crates/patina-macros` | default-off `#[patina_dst::test]` proc macro; no external deps |
 | `patina-dst-harness` | `crates/patina-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
 | `patina-dst-runtime` | `crates/patina-runtime` | mode-3 explicit-context API; also the runtime every other mode drives |
