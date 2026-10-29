@@ -95,6 +95,20 @@ fn run_worker(context: &mut Context, worker: TaskId, yields: u32) {
 }
 
 #[test]
+fn a_metered_runtimes_idle_thread_is_not_flagged_vacuous() {
+    // Under a compute meter (a Go guest) a thread with no scheduling point ran
+    // no guest code, an idle runtime thread, so it is no vacuity signal.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    context.note_metered_runtime();
+    let _main = context.task_spawn("main").unwrap();
+    let worker = context.task_spawn("worker").unwrap();
+    run_worker(&mut context, worker, 0);
+    let diagnostics = context.schedule_diagnostics();
+    assert!(diagnostics.had_concurrency());
+    assert!(diagnostics.vacuous.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
 fn only_a_concurrent_worker_that_never_yields_is_flagged_vacuous() {
     // RED: a spawned worker that runs from first scheduled to completion with
     // zero scheduling boundaries (like a lost-update race on an atomics-only

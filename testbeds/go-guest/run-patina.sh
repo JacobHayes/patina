@@ -16,7 +16,8 @@
 # It asserts:
 #   [1] the pre-run audit is CLEAN with no allowance, and reports the Go build
 #       marker as a marker, not as a far-transfer refusal;
-#   [2] the guest runs with the expected GO_GUEST_RESULT;
+#   [2] the guest runs with the expected GO_GUEST_RESULT, and the schedule
+#       report flags none of the Go runtime's threads as vacuous;
 #   [3] two same-seed runs are byte-identical (stdout AND captured stderr,
 #       virtual elapsed time included);
 #   [4] a recorded run replays byte-identically (stdout and stderr);
@@ -98,6 +99,12 @@ expected='^GO_GUEST_RESULT sha=3411092e total=4950 data="hello from go\\n" mode=
 if ! grep -Eq "$expected" "$out/run1.out"; then
   echo "go-guest: FAIL [2] unexpected GO_GUEST_RESULT:" >&2
   cat "$out/run1.out" >&2; exit 1
+fi
+# The runtime's idle Ms take no scheduling point; under the meter that is no
+# vacuity signal, so the schedule report flags no thread.
+if ! grep -Eq '^PATINA_SCHEDULE_REPORT .* vacuous_threads=0( |$)' "$out/run1.err"; then
+  echo "go-guest: FAIL [2] the schedule report flags a Go runtime thread as vacuous" >&2
+  grep PATINA_SCHEDULE_REPORT "$out/run1.err" >&2; exit 1
 fi
 if ! grep -q '^GO_GUEST_STDERR ' "$out/run1.err"; then
   echo "go-guest: FAIL [2] the guest's stderr line did not reach stderr" >&2

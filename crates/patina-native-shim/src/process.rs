@@ -53,6 +53,20 @@ pub extern "C" fn patina_compute_point(units: u64) {
     let _ = thread::sched_point();
 }
 
+/// Whether a compute meter announced itself ([`patina_note_metered_runtime`]).
+pub(crate) static METERED_RUNTIME: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+/// A compute meter announces that the guest's threads are its language
+/// runtime's own (a Go guest's Ms; `patina_go_meter.c`, from the runtime's
+/// start-up call). The end-of-run schedule report then reports no thread as
+/// vacuous: under a meter a thread with no scheduling point ran no guest code.
+pub extern "C" fn patina_note_metered_runtime() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    METERED_RUNTIME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[unsafe(no_mangle)]
 /// The runtime side of the packaged `exit` interposer (patina_posix.c). It runs
 /// at the process's main-return / `exit(3)` boundary — the one point that

@@ -61,7 +61,7 @@ pub(crate) fn shutdown_run() -> c_int {
     // before the runtime is taken away to be finalized.
     crate::charge::flush_now();
     thread::deactivate();
-    let context = {
+    let mut context = {
         let mut guard = slot().lock();
         match guard.take() {
             Some(context) => context,
@@ -77,6 +77,9 @@ pub(crate) fn shutdown_run() -> c_int {
     // process fails loudly — a `--buggify-after-setup` run whose guest never
     // called `setup_complete()` is a harness bug, not a silent no-fault run.
     let setup_violation = context.buggify_setup_violation();
+    if crate::process::METERED_RUNTIME.load(std::sync::atomic::Ordering::Relaxed) {
+        context.note_metered_runtime();
+    }
     let finished = context.finish();
     let coverage = finalize_coverage();
     let flushed = flush_captured_stdio();

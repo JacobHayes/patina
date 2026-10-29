@@ -161,6 +161,12 @@ pub(super) struct ScheduleTracker {
     /// task's spawn and completion to derive its lifetime. Driven entirely by the
     /// recorded ops, so it advances identically on record and replay.
     steps: u64,
+    /// The guest's threads are a compute-metered language runtime's own (a Go
+    /// guest's Ms), so a thread's boundary count is no vacuity signal: the
+    /// meter takes a scheduling point in any thread running guest code, so a
+    /// thread without one ran none (an idle M), and the guest's concurrency
+    /// lives in goroutines, which the language runtime schedules across them.
+    metered: bool,
 }
 
 impl ScheduleTracker {
@@ -288,7 +294,7 @@ impl ScheduleTracker {
                 // clippy::absurd_extreme_comparisons; newer clippy flags this
                 // form as nonminimal_bool instead, hence the scoped allow.
                 #[allow(clippy::nonminimal_bool)]
-                let is_vacuous = order > 0 && !(yields > SCAFFOLDING_YIELD_FLOOR);
+                let is_vacuous = !self.metered && order > 0 && !(yields > SCAFFOLDING_YIELD_FLOOR);
                 if is_vacuous {
                     vacuous.push(task);
                 }
@@ -375,6 +381,12 @@ impl Context {
     /// Also emitted to stderr by [`Context::finish`] for multithreaded runs.
     pub fn schedule_diagnostics(&self) -> ScheduleDiagnostics {
         self.schedule.diagnostics()
+    }
+
+    /// Note that the guest's threads belong to a compute-metered language
+    /// runtime (a Go guest), so no thread is reported as vacuous.
+    pub fn note_metered_runtime(&mut self) {
+        self.schedule.metered = true;
     }
 
     pub fn task_spawn(&mut self, label: &str) -> Result<TaskId, RuntimeError> {

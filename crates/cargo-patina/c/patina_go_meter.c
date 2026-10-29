@@ -34,6 +34,7 @@
 /* Provided by the patina-dst-native-shim staticlib. */
 extern void patina_compute_point(uint64_t units);
 extern void patina_coverage_register_u8(uint8_t *start, uint8_t *stop);
+extern void patina_note_metered_runtime(void);
 
 /* Comparisons between two scheduling points. */
 #define PATINA_GO_METER_STRIDE 4096
@@ -74,6 +75,9 @@ void __sanitizer_weak_hook_strcmp(void *caller_pc, const char *s1, const char *s
 /* The runtime registers its edge counters and pc table at start-up. */
 void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
     patina_coverage_register_u8(start, stop);
+    /* Every Go guest's runtime makes this call once at start-up, so it is
+     * where the meter tells the shim its threads are the runtime's Ms. */
+    patina_note_metered_runtime();
     patina_go_meter_anchor = PATINA_GO_METER_MARKER;
 }
 

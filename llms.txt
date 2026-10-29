@@ -413,7 +413,9 @@ dev-dependency use under plain `cargo test`.
 - `PATINA_SCHEDULE_REPORT` (stderr) reports per-task scheduling boundaries and
   warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
   its interleavings were not actually explored (use `build --instrument` and
-  `run --yield-stride N`).
+  `run --yield-stride N`). A Go guest's threads are never flagged: its meter
+  takes scheduling points in any thread running Go code, so a thread without
+  one is an idle runtime thread.
 - `PATINA_COVERAGE_REPORT` (stderr) reports native edge coverage (`--instrument`, or a Go guest)
   (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
   `PATINA_COVERAGE_REPORT=0`.
