@@ -289,8 +289,7 @@ uses to bias generations toward new coverage.
 - **Three adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
   (`patina-dst`), a configure-then-run harness (`patina-dst-harness`), and the
   explicit-context simulator API (`patina-dst-runtime`, with deterministic
-  async in `patina-dst-async`; see `testbeds/checkout-retry-idempotency` for a
-  user-facing checkout retry/idempotency example).
+  async in `patina-dst-async`).
 
 ### Platforms
 

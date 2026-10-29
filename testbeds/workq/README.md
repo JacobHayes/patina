@@ -62,13 +62,6 @@ the program also prints are a human echo of it.
 
 ## Running it
 
-Natively, on your real OS (a quick sanity check — not deterministic, because
-real threads and real UDP are involved):
-
-```sh
-./run-native.sh
-```
-
 Under Patina — the real gate. This builds the queue, then runs a short campaign
 (below), the fail-closed recovery self-test, and the seeded-bug demo:
 

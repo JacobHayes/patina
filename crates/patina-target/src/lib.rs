@@ -127,8 +127,7 @@ mod shim;
 /// memory, `lret`, `iret`); the direct far forms (`9a`/`ea`) are invalid in
 /// 64-bit mode and fail closed as undecodable. The length decoder is compared
 /// with objdump boundaries over Patina-authored assembly in
-/// `x86_decoder_matches_objdump_corpus`, and over optional real binaries in
-/// `x86_decoder_matches_objdump_external_corpus`.
+/// `x86_decoder_matches_objdump_corpus`.
 mod x86_scan;
 
 #[cfg(test)]

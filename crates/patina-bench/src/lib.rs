@@ -30,16 +30,6 @@ use patina_dst_runtime::{Context, RuntimeBuilder, RuntimeConfig, RuntimeError, T
 /// arrays or pretty printing.
 pub const MAX_TRACE_BYTES_PER_EVENT: f64 = 160.0;
 
-/// A generous per-operation ceiling for seeded execution, in nanoseconds. Used
-/// only by the opt-in timing guard; sized to catch pathological regressions
-/// (orders of magnitude), not to police normal variance.
-pub const MAX_SEEDED_NANOS_PER_OP: f64 = 50_000.0;
-
-/// A generous ceiling on how many times slower record mode may be than seeded
-/// mode. Recording appends one in-memory event per boundary op, so the ratio
-/// is expected to stay small.
-pub const MAX_RECORD_OVERHEAD_RATIO: f64 = 12.0;
-
 /// Captures a serialized trace bundle in memory so trace growth can be measured
 /// and replayed without touching the filesystem.
 #[derive(Clone, Default)]
@@ -299,30 +289,6 @@ mod tests {
         assert!(
             bytes_per_event <= MAX_TRACE_BYTES_PER_EVENT,
             "trace grew to {bytes_per_event:.1} bytes/event, budget is {MAX_TRACE_BYTES_PER_EVENT:.0}"
-        );
-    }
-
-    // Timing guards are opt-in: they depend on the host and would flake as
-    // hard CI gates. Run with `cargo test -p patina-dst-bench -- --ignored`.
-    #[test]
-    #[ignore = "machine-dependent timing guard"]
-    fn seeded_overhead_within_sanity_ceiling() {
-        let report = qualify(2000, 1).unwrap();
-        assert!(
-            report.seeded_nanos_per_op() <= MAX_SEEDED_NANOS_PER_OP,
-            "{}",
-            report.render()
-        );
-    }
-
-    #[test]
-    #[ignore = "machine-dependent timing guard"]
-    fn record_overhead_within_sanity_ceiling() {
-        let report = qualify(2000, 1).unwrap();
-        assert!(
-            report.record_overhead_ratio() <= MAX_RECORD_OVERHEAD_RATIO,
-            "{}",
-            report.render()
         );
     }
 }

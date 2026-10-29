@@ -140,11 +140,6 @@ impl RuntimeBuilder {
         self
     }
 
-    pub fn with_scheduler(mut self, driver: impl SchedulerDriver + 'static) -> Self {
-        self.scheduler = Some(Box::new(driver));
-        self
-    }
-
     pub fn with_network(mut self, driver: impl NetDriver + 'static) -> Self {
         self.network = Some(Box::new(driver));
         self

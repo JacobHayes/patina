@@ -1,4 +1,4 @@
-//! Byte and typed custom operations and their record/replay protocol.
+//! Custom operations and their record/replay protocol.
 
 #[cfg(patina_shim)]
 use crate::ffi;
@@ -23,9 +23,7 @@ use crate::verdict;
 ///   checked on replay, so a guest that asks a *different* question under the
 ///   same label is refused rather than handed a stale answer.
 ///
-/// This is the untyped surface: it lowers directly to the shim ABI with no
-/// encoding of its own. With the default-off `custom-ops` feature, `custom_op`
-/// adds serde-typed keys and results over exactly this call.
+/// It lowers directly to the shim ABI with no encoding of its own.
 ///
 /// # Honest limits
 ///
@@ -147,124 +145,5 @@ label or key argument is malformed"
     {
         let _ = (label, key, on_fault);
         perform()
-    }
-}
-
-/// A typed [`custom_op_bytes`]: the same record/replay contract with the key and
-/// the result carried as ordinary Rust values.
-///
-/// Requires the default-off `custom-ops` feature, which is the only thing in this
-/// crate that pulls in a dependency (`serde` + `serde_json`); the untyped
-/// [`custom_op_bytes`] is always available and needs nothing extra.
-///
-/// ```ignore
-/// #[derive(serde::Serialize, serde::Deserialize)]
-/// struct Object { etag: String, body: Vec<u8> }
-///
-/// let object: Object = patina_dst::custom_op("s3.get_object", &request_key, || {
-///     real_s3_client.get(&request_key) // runs on record only
-/// });
-/// ```
-///
-/// # The encoding is build-owned, not ABI-owned
-///
-/// Values are encoded with `serde_json`. The shim ABI and the trace carry opaque
-/// bytes precisely so no serialization format is pinned into the boundary
-/// contract, and a recorded trace only ever replays against the guest binary
-/// that produced it — which the run fingerprint already enforces. So the choice
-/// lives here, in the guest's build. JSON rather than a denser binary format
-/// because a custom op's value is triage: the key and result stay legible in
-/// `cargo patina trace`, which a non-self-describing encoding would reduce to a
-/// blob. It is also already in the workspace, so it adds no third-party crate.
-///
-/// # Panics
-///
-/// If the value cannot be encoded, or a recorded result cannot be decoded into
-/// `T` — the latter means the trace was recorded by a guest whose result type no
-/// longer matches this one, which is a fail-closed refusal, not a value to guess
-/// at.
-#[cfg(feature = "custom-ops")]
-pub fn custom_op<T, K>(label: &str, key: &K, perform: impl FnOnce() -> T) -> T
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-    K: serde::Serialize + ?Sized,
-{
-    let key = serde_json::to_vec(key)
-        .unwrap_or_else(|error| panic!("patina custom op {label:?}: cannot encode key: {error}"));
-    // `performed` carries the record pass's value out of the closure so the
-    // caller gets exactly what `perform` returned, not a re-decoded copy of it.
-    let mut performed = None;
-    let bytes = custom_op_bytes(label, &key, || {
-        let value = perform();
-        let bytes = serde_json::to_vec(&value).unwrap_or_else(|error| {
-            panic!("patina custom op {label:?}: cannot encode result: {error}")
-        });
-        performed = Some(value);
-        bytes
-    });
-    match performed {
-        Some(value) => value,
-        None => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            panic!(
-                "patina custom op {label:?}: cannot decode the recorded result: {error}; the \
-recording was produced by a guest whose result type no longer matches this one"
-            )
-        }),
-    }
-}
-
-/// A typed [`custom_op_bytes_faultable`]: [`custom_op`] plus a declared failure
-/// shape, so `--custom-op-fail-permille` can fail the operation and the guest
-/// exercises its own error path.
-///
-/// `on_fault` returns the value a failure produces — for a `Result`-shaped `T`,
-/// the `Err` variant the caller already handles. It runs *instead of* `perform`
-/// when a seeded fault fires, and never otherwise.
-///
-/// ```ignore
-/// let object: Result<Object, FetchError> = patina_dst::custom_op_faultable(
-///     "s3.get_object",
-///     &request_key,
-///     || Err(FetchError::Timeout),        // what failure means here
-///     || real_s3_client.get(&request_key), // runs on record only
-/// );
-/// ```
-///
-/// # Panics
-///
-/// As [`custom_op`]: an unencodable value or an undecodable recorded result.
-#[cfg(feature = "custom-ops")]
-pub fn custom_op_faultable<T, K>(
-    label: &str,
-    key: &K,
-    on_fault: impl FnOnce() -> T,
-    perform: impl FnOnce() -> T,
-) -> T
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-    K: serde::Serialize + ?Sized,
-{
-    let key = serde_json::to_vec(key)
-        .unwrap_or_else(|error| panic!("patina custom op {label:?}: cannot encode key: {error}"));
-    // A `RefCell` rather than `custom_op`'s plain `&mut`: both closures are
-    // handed over at once and exactly one of them runs, so they must share the
-    // slot the produced value comes back through.
-    let produced: core::cell::RefCell<Option<T>> = core::cell::RefCell::new(None);
-    let encode = |value: T| -> Vec<u8> {
-        let bytes = serde_json::to_vec(&value).unwrap_or_else(|error| {
-            panic!("patina custom op {label:?}: cannot encode result: {error}")
-        });
-        *produced.borrow_mut() = Some(value);
-        bytes
-    };
-    let bytes = custom_op_bytes_faultable(label, &key, || encode(on_fault()), || encode(perform()));
-    match produced.into_inner() {
-        Some(value) => value,
-        None => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-            panic!(
-                "patina custom op {label:?}: cannot decode the recorded result: {error}; the \
-recording was produced by a guest whose result type no longer matches this one"
-            )
-        }),
     }
 }

@@ -22,7 +22,7 @@
 //! the record/seeded selection path (`next()`); on replay the recorded task is
 //! applied directly through `select()`, so replay is independent of the policy.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use patina_dst_abi::{EffectError, ErrorCode, TaskId};
 use patina_dst_driver_api::{DriverResult, SchedulePolicyReport, SchedulerDriver};
@@ -632,14 +632,6 @@ impl SchedulerDriver for DetScheduler {
     }
 }
 
-/// The set of task ids currently known to the scheduler. Exposed for the runtime
-/// to reason about starvation subsets when composing diagnostics.
-impl DetScheduler {
-    pub fn known_tasks(&self) -> BTreeSet<TaskId> {
-        self.tasks.keys().copied().collect()
-    }
-}
-
 fn invalid_transition(task: TaskId, action: &str, state: &TaskState) -> EffectError {
     EffectError::new(
         ErrorCode::InvalidState,
@@ -653,6 +645,7 @@ fn invalid_transition(task: TaskId, action: &str, state: &TaskState) -> EffectEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn schedule(seed: u64, rounds: usize) -> Vec<TaskId> {
         let mut scheduler = DetScheduler::new(seed);

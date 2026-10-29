@@ -207,10 +207,6 @@ const O_CLOEXEC: u64 = uapi::O_CLOEXEC as u64;
 /// description and reports it through `F_GETFL`.
 const O_LARGEFILE: u64 = uapi::O_LARGEFILE as u64;
 
-/// `O_LARGEFILE` for the C `fcntl(F_GETFL)`, whose libc spells the macro 0.
-#[unsafe(no_mangle)]
-pub static PATINA_KERNEL_O_LARGEFILE: c_int = O_LARGEFILE as c_int;
-
 /// `O_DIRECT` on a pipe asks for packet mode, which is not modeled.
 const O_DIRECT: u64 = uapi::O_DIRECT as u64;
 

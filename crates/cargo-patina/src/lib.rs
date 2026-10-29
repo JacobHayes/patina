@@ -223,8 +223,7 @@ struct NativeHarnessInvocation {
     exact: String,
     seeds: HarnessSeeds,
     release: bool,
-    /// Cargo feature selection forwarded verbatim to the harness build
-    /// (`--features`, `--all-features`, `--no-default-features`).
+    /// Cargo features (`--features`) forwarded verbatim to the harness build.
     features: HarnessFeatures,
     /// How the native libtest harness is instrumented (see
     /// [`GuestInstrumentation`]). Off by default.
@@ -253,8 +252,6 @@ struct NativeHarnessInvocation {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct HarnessFeatures {
     features: Option<String>,
-    all_features: bool,
-    no_default_features: bool,
 }
 
 impl HarnessFeatures {
@@ -264,12 +261,6 @@ impl HarnessFeatures {
         if let Some(features) = &self.features {
             args.push(OsString::from("--features"));
             args.push(OsString::from(features));
-        }
-        if self.all_features {
-            args.push(OsString::from("--all-features"));
-        }
-        if self.no_default_features {
-            args.push(OsString::from("--no-default-features"));
         }
         args
     }

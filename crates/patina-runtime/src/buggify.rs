@@ -439,11 +439,6 @@ impl Buggify {
 }
 
 impl Context {
-    /// Whether cooperative-SUT fault injection is enabled this run.
-    pub const fn buggify_enabled(&self) -> bool {
-        self.buggify.config.enabled
-    }
-
     /// Declare one SDK site discovered from a link-time site table. Declarations
     /// make never-reached sites visible in diagnostics but do not evaluate the
     /// site, compute activation, advance counters, or enter the trace.

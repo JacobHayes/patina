@@ -308,14 +308,6 @@ impl HarnessBuilder {
             .set(rt::ENV_BUGGIFY_ACTIVATION, permille.to_string())
     }
 
-    /// Set the damage-control cutoff in elapsed virtual nanoseconds since
-    /// guest start. Enables buggify.
-    #[must_use]
-    pub fn buggify_cutoff_nanos(self, nanos: u64) -> Self {
-        self.enable_buggify()
-            .set(rt::ENV_BUGGIFY_CUTOFF, nanos.to_string())
-    }
-
     /// Gate buggify off until the guest calls
     /// `patina_dst::lifecycle::setup_complete()`. Enables buggify.
     #[must_use]

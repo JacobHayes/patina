@@ -403,7 +403,7 @@ faults_injected={} vacuous={}",
             "PATINA WARNING: custom-op fault knob inert — the run armed \
 --custom-op-fail-permille and executed ZERO fault-eligible custom operations, so nothing could \
 have been failed. A clean result here does NOT mean custom-op failure was tested. Verify the \
-guest declares a failure shape on the operations it wraps (`custom_op_faultable`), and that the \
+guest declares a failure shape on the operations it wraps (`custom_op_bytes_faultable`), and that the \
 exercised path reaches them.",
         );
     } else if report.is_vacuous() {

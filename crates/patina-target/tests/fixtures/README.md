@@ -26,10 +26,3 @@ objdump -d -z -j .text --insn-width=16 /tmp/patina-evex.o
 Keep the section heading, labels and instruction rows; omit the filename header.
 The test asserts coverage and boundaries, not a fixed corpus size. The checked-in
 dump is an oracle output, not output from Patina's decoder.
-
-For broader local evidence, the ignored
-`x86_decoder_matches_objdump_external_corpus` test accepts
-`PATINA_X86_CORPUS_ELF` and `PATINA_X86_CORPUS_OBJDUMP` pointing to any real
-x86-64 ELF and its `objdump -d -z -j .text` output. It compares whole-section
-boundaries and exact syscall sites and reports the number of EVEX instructions.
-These optional inputs are not dependencies of the checked-in corpus test.

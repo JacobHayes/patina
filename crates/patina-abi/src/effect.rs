@@ -468,12 +468,9 @@ pub enum Operation {
     /// record pass, and it is the authority on replay — replay returns these
     /// bytes and never runs `perform`.
     ///
-    /// Both fields are opaque at this layer by deliberate design (custom-ops arc
-    /// §6, "typed at the SDK, raw bytes at the ABI"): pinning a serialization
-    /// format into the boundary contract would couple every non-Rust consumer of
-    /// a trace to a Rust-side encoding. The SDK owns the encoding, and the guest
-    /// binary that produced a trace is already the fingerprint contract for
-    /// replaying it.
+    /// Both fields are opaque bytes: pinning a serialization format into the
+    /// boundary contract would couple every trace consumer to a Rust-side
+    /// encoding.
     ///
     /// A replay whose custom-op stream diverges from the recording — a different
     /// label, a different key, a missing or extra call — fails closed as an

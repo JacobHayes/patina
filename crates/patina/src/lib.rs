@@ -51,9 +51,7 @@
 //! - [`custom_op_bytes`] — wrap an effect Patina does not model so it is
 //!   recorded on the record pass and reproduced from the recording on replay.
 //!   [`custom_op_bytes_faultable`] additionally declares what failure means for
-//!   the operation, which is what `--custom-op-fail-permille` acts on. With the
-//!   default-off `custom-ops` feature, `custom_op` and `custom_op_faultable` are
-//!   the same two with serde-typed keys and results.
+//!   the operation, which is what `--custom-op-fail-permille` acts on.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
 //! - With the default-off `macros` feature, `#[patina_dst::test]` rebuilds the
 //!   same libtest harness shim-linked and sweeps the annotated test under plain
@@ -140,8 +138,6 @@ mod static_sites;
 mod test_harness;
 mod verdict;
 
-#[cfg(feature = "custom-ops")]
-pub use custom_ops::{custom_op, custom_op_faultable};
 pub use custom_ops::{custom_op_bytes, custom_op_bytes_faultable};
 pub use simulation::{is_simulated, rng};
 pub use verdict::{VerdictKind, verdict};

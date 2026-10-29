@@ -132,8 +132,7 @@ impl GuidancePlan {
     /// was `[[0, 88], [4, 13], [24, 1], [41, 40]]` and the bootstrap generation
     /// was chosen as the ancestor 34 times out of 42 exploits, so ~81% of the
     /// exploitation budget resampled around one arbitrary configuration —
-    /// strictly worse than sampling independently, and `--guided` measurably lost
-    /// to the default sweep (`testbeds/guided-efficacy/`). The pool now holds only
+    /// strictly worse than sampling independently. The pool holds only
     /// generations that found something the baseline did not.
     ///
     /// Dropping the first entry is prefix-stable, so the tear-safety argument in

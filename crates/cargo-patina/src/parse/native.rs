@@ -45,8 +45,6 @@ pub(crate) fn parse_native_harness_from(
         release: args.flag("--release"),
         features: HarnessFeatures {
             features: args.string("--features"),
-            all_features: args.flag("--all-features"),
-            no_default_features: args.flag("--no-default-features"),
         },
         instrumentation: instrumentation_of(&args)?,
         step_budget: args.u64("--budget"),

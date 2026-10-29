@@ -650,17 +650,6 @@ pub use symbol_types::{Os, Platform, Serves, SymbolRow, SymbolStatus};
 
 #[cfg(target_os = "macos")]
 const _: () = darwin::validate_associations(SYMBOLS, ENTRIES);
-/// The symbol rows that serve a syscall name.
-pub fn symbols_serving(name: &str) -> Vec<&'static SymbolRow> {
-    SYMBOLS
-        .iter()
-        .filter(|symbol| match symbol.serves {
-            Serves::Syscalls(ids) => ids.contains(&name),
-            Serves::Dispatcher => true,
-            Serves::Darwin(_) | Serves::LibcOnly => false,
-        })
-        .collect()
-}
 
 /// A symbol is part of the runtime's own C ABI (declared in
 /// `include/patina_native.h` and defined in Rust or in the C slices) rather

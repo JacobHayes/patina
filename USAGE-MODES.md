@@ -117,12 +117,9 @@ use the shim/harness mode instead. `patina-dst-async` layers the deterministic
 futures executor (`block_on`, `spawn`, virtual-time timers, TCP/UDP futures)
 over the same `Context`.
 
-A user-facing example is `testbeds/checkout-retry-idempotency`: ordinary
-checkout ledger code is called from an explicit-context virtual client/service
-simulation. The virtual network latency and virtual client timeout force a
-retry, and the test asserts that the idempotency key prevents a duplicate
-charge. That is the intended shape for mode 3: model a small world around a
-component or protocol when the whole application is not the thing under test.
+`crates/patina-runtime/examples/simulation.rs` (run by `mise run demo`) is the
+shape for mode 3: model a small world around a component or protocol when the
+whole application is not the thing under test.
 
 ## Crate map
 

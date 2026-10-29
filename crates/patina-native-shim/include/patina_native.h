@@ -444,12 +444,6 @@ int32_t patina_fd_setfd(int32_t fd, int32_t cloexec);
 int32_t patina_fd_getfl(int32_t fd);
 int32_t patina_fd_setfl(int32_t fd, uint32_t flags);
 int32_t patina_fd_set_nonblocking(int32_t fd, int32_t nonblocking);
-#ifdef __linux__
-/* The kernel's O_LARGEFILE bit for the target architecture (the uapi value the
- * SUD dispatcher reports), which F_GETFL carries for a PATINA_O_OPENED
- * description. glibc defines its O_LARGEFILE macro as 0 on 64-bit targets. */
-extern const int32_t PATINA_KERNEL_O_LARGEFILE;
-#endif
 /*
  * Duplication and closing, kernel semantics: dup binds the lowest free number;
  * F_DUPFD[_CLOEXEC] the lowest free at or above `minimum` (EINVAL outside the
