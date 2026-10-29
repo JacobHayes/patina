@@ -73,7 +73,7 @@ supply.
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,
 latency, and jitter; name resolution failure and latency; sleep jitter; scheduler
-preemption and task starvation; liveness watchdogs. Native
+preemption; liveness watchdogs. Native
 `--machine-crash-permille` and `--process-crash-permille` crash at a seeded
 side-effecting operation and perform a real fresh-process restart (a process
 crash keeps the page cache, a machine crash keeps only what the disk holds), recording and replaying across both incarnations, while the Cargo family

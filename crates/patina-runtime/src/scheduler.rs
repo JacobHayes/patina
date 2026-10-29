@@ -2,25 +2,20 @@
 //!
 //! The default policy selects one runnable task uniformly at random from a
 //! stable, sorted set — the historical behavior, preserved byte-for-byte so
-//! every canonical seed sequence is unchanged. Two opt-in *exploration policies*
-//! layer over the same runnable set to steer which interleavings are reached:
+//! every canonical seed sequence is unchanged. One opt-in *exploration policy*
+//! layers over the same runnable set to steer which interleavings are reached:
 //!
 //! - **PCT** (Probabilistic Concurrency Testing, Burckhardt et al., PLDI 2010):
 //!   each task is assigned a random priority; `d-1` seed-placed priority-change
 //!   points demote the running task as the schedule advances; the highest-priority
 //!   runnable task always runs. This gives a probabilistic guarantee of finding
 //!   bugs of ordering-depth `d`.
-//! - **Starvation intervals**: bounded, seed-chosen windows during which a
-//!   seed-chosen subset of tasks is deliberately not selected, to surface
-//!   liveness/starvation assumptions. Intervals always end (bounded length), and
-//!   a step that would starve *every* runnable task falls back to the full set
-//!   (liveness safety) while counting the vacuous hit for diagnosis.
 //!
-//! Both policies draw exclusively from their own domain-separated `SplitMix64`
-//! streams, never the default selection generator, so enabling one leaves the
-//! other's stream — and the default stream — untouched. The policies affect only
-//! the record/seeded selection path (`next()`); on replay the recorded task is
-//! applied directly through `select()`, so replay is independent of the policy.
+//! The policy draws exclusively from its own domain-separated `SplitMix64`
+//! stream, never the default selection generator, so enabling it leaves the
+//! default stream untouched. It affects only the record/seeded selection path
+//! (`next()`); on replay the recorded task is applied directly through
+//! `select()`, so replay is independent of the policy.
 
 use std::collections::BTreeMap;
 
@@ -29,7 +24,7 @@ use patina_dst_driver_api::DriverResult;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
 /// End-of-run summary of an exploration scheduling policy (PCT priority-change
-/// points, starvation intervals). Populated only during a live selection run
+/// points). Populated only during a live selection run
 /// (`next()` decisions), so it reflects the record/seeded schedule; on replay the
 /// recorded task selections are consumed through `select()` and `next()` is not
 /// called, so a replay reports the inert default. The runtime folds these counts
@@ -48,16 +43,6 @@ pub struct SchedulePolicyReport {
     /// schedule (a live change point demoted a running task). This is the PCT
     /// contribution to the bug-depth estimate of a schedule.
     pub pct_change_points_hit: u32,
-    /// Whether the starvation-interval policy was active.
-    pub starvation: bool,
-    /// Number of scheduling decisions where the starvation policy actually
-    /// excluded at least one runnable task from selection.
-    pub starve_events: u64,
-    /// Number of scheduling decisions where honoring the starvation set would
-    /// have left no schedulable task (every runnable task starved). The policy
-    /// falls back to the full runnable set at those steps (liveness safety) and
-    /// counts them here so a vacuous starvation configuration is diagnosed.
-    pub starve_vacuous: u64,
     /// Total scheduling decisions (`next()` calls) observed under the policy.
     pub decisions: u64,
 }
@@ -65,15 +50,15 @@ pub struct SchedulePolicyReport {
 impl SchedulePolicyReport {
     /// Whether any exploration policy was active this run.
     pub fn is_active(&self) -> bool {
-        self.pct || self.starvation
+        self.pct
     }
 
     /// The bug-depth estimate for the realized schedule: the number of ordering
-    /// decisions (priority-change points hit plus starvation exclusions) that
+    /// decisions (priority-change points hit) that
     /// were live in the schedule. A failure found under a schedule with a higher
     /// estimate exercised a deeper interleaving.
     pub fn bug_depth(&self) -> u64 {
-        u64::from(self.pct_change_points_hit) + self.starve_events
+        u64::from(self.pct_change_points_hit)
     }
 }
 
@@ -90,31 +75,17 @@ pub struct PctConfig {
     pub steps: u64,
 }
 
-/// Configuration for the starvation-interval policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StarvationConfig {
-    /// Number of bounded starvation intervals to place over the schedule.
-    pub intervals: u32,
-    /// Maximum length (in scheduling decisions) of any interval. Every interval
-    /// is at least one step and at most this many, so it always ends — the
-    /// bound is what keeps starvation liveness-safe.
-    pub max_len: u64,
-    /// Interval starts are placed uniformly in `[1, window]`.
-    pub window: u64,
-}
-
-/// The exploration scheduling policy. `Default` (both `None`) is the historical
+/// The exploration scheduling policy. `Default` (`pct` is `None`) is the historical
 /// uniform-random policy and is byte-for-byte identical to the pre-policy
 /// scheduler.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchedulePolicy {
     pub pct: Option<PctConfig>,
-    pub starvation: Option<StarvationConfig>,
 }
 
 impl SchedulePolicy {
     pub fn is_default(&self) -> bool {
-        self.pct.is_none() && self.starvation.is_none()
+        self.pct.is_none()
     }
 }
 
@@ -249,131 +220,15 @@ impl PctState {
     }
 }
 
-/// A single bounded starvation interval: during `[start, end)` (decision steps)
-/// the tasks whose id satisfies `id % modulus == residue` are not selected.
-#[derive(Clone, Copy, Debug)]
-struct StarveInterval {
-    start: u64,
-    end: u64,
-    modulus: u64,
-    residue: u64,
-}
-
-impl StarveInterval {
-    fn contains(&self, step: u64) -> bool {
-        step >= self.start && step < self.end
-    }
-
-    fn starves(&self, task: TaskId) -> bool {
-        self.modulus >= 2 && task.0 % self.modulus == self.residue
-    }
-}
-
-/// Starvation live state: the seed-generated intervals and the running counters.
-struct StarvationState {
-    intervals: Vec<StarveInterval>,
-    step: u64,
-    starve_events: u64,
-    starve_vacuous: u64,
-    warned_vacuous: bool,
-    /// Per-task count of *consecutive* scheduling decisions the task was runnable
-    /// but excluded by starvation. Reset to zero when the task is scheduled or is
-    /// not in any starving interval. Backs the aging guarantee below.
-    skips: BTreeMap<TaskId, u64>,
-    /// Aging cap: a task skipped this many consecutive decisions becomes
-    /// force-eligible for one decision regardless of the interval, guaranteeing
-    /// liveness. Without it a *non-starved* task that merely spins at a scheduling
-    /// boundary (e.g. a macOS `sched_yield` lock backoff) would be selected
-    /// forever while the starved lock holder it waits on never runs — a livelock.
-    /// The cap bounds any task's starvation to at most this many decisions, which
-    /// is exactly "the interval must end" expressed in decision space.
-    aging_cap: u64,
-}
-
-impl StarvationState {
-    fn new(config: StarvationConfig, seed: u64) -> Self {
-        let mut rng = SplitMix64::new(domain_seed(seed, fault_domain::SCHED_STARVE));
-        let window = config.window.max(1);
-        let max_len = config.max_len.max(1);
-        let intervals = (0..config.intervals)
-            .map(|_| {
-                let start = 1 + (rng.next_u64() % window);
-                // Length in [1, max_len] — strictly positive and bounded, so the
-                // interval always ends.
-                let len = 1 + (rng.next_u64() % max_len);
-                // A seed-chosen subset: starve one residue class of task ids. The
-                // modulus is 2 or 3, so an interval starves roughly a half or a
-                // third of tasks — never all of them by construction (the other
-                // residue classes stay schedulable), and the runtime fallback
-                // covers any step where only starved tasks are runnable.
-                let modulus = 2 + (rng.next_u64() % 2); // 2 or 3
-                let residue = rng.next_u64() % modulus;
-                StarveInterval {
-                    start,
-                    end: start + len,
-                    modulus,
-                    residue,
-                }
-            })
-            .collect();
-        Self {
-            intervals,
-            step: 0,
-            starve_events: 0,
-            starve_vacuous: 0,
-            warned_vacuous: false,
-            skips: BTreeMap::new(),
-            aging_cap: max_len,
-        }
-    }
-
-    fn advance(&mut self) {
-        self.step += 1;
-    }
-
-    fn interval_starves(&self, task: TaskId) -> bool {
-        self.intervals
-            .iter()
-            .any(|interval| interval.contains(self.step) && interval.starves(task))
-    }
-
-    /// Record the outcome of a decision and advance aging. Every runnable task
-    /// that is interval-starved and was NOT selected has its consecutive-skip
-    /// counter incremented (in every path, including the vacuous fallback, so
-    /// aging always progresses toward the cap); the selected task and every
-    /// currently-unstarved task reset to zero. Counts a `starve_events` whenever
-    /// at least one starved task was deferred this decision.
-    fn record_decision(&mut self, runnable: &[TaskId], selected: TaskId) {
-        let mut any_deferred = false;
-        for &task in runnable {
-            if task == selected || !self.interval_starves(task) {
-                self.skips.insert(task, 0);
-            } else {
-                *self.skips.entry(task).or_insert(0) += 1;
-                any_deferred = true;
-            }
-        }
-        if any_deferred {
-            self.starve_events += 1;
-        }
-    }
-
-    fn on_complete(&mut self, task: TaskId) {
-        self.skips.remove(&task);
-    }
-}
-
 /// A scheduler that chooses one runnable task from a stable, sorted set.
 pub struct DetScheduler {
     generator: SplitMix64,
     tasks: BTreeMap<TaskId, TaskState>,
     next_task: u64,
     pct: Option<PctState>,
-    starvation: Option<StarvationState>,
     /// Whether the most recent `choose` deliberately withheld a runnable task
-    /// from selection under an active exploration policy (a starvation interval
-    /// excluding a runnable task, or PCT priority ordering deferring a
-    /// lower-priority runnable task). Exposed through
+    /// from selection under an active exploration policy (PCT priority ordering
+    /// deferring a lower-priority runnable task). Exposed through
     /// [`DetScheduler::liveness_deferring`] so the liveness watchdog never
     /// misreports a policy-explained non-progress window. Reset to `false` before
     /// every default (policy-free) selection.
@@ -391,9 +246,6 @@ impl DetScheduler {
             tasks: BTreeMap::new(),
             next_task: 1,
             pct: policy.pct.map(|config| PctState::new(config, seed)),
-            starvation: policy
-                .starvation
-                .map(|config| StarvationState::new(config, seed)),
             last_decision_deferred: false,
         }
     }
@@ -421,7 +273,7 @@ impl DetScheduler {
         // Default (no policy): byte-for-byte the historical uniform-random draw
         // over the full runnable set, consuming the selection generator exactly
         // as before so every canonical seed sequence is unchanged.
-        if self.pct.is_none() && self.starvation.is_none() {
+        if self.pct.is_none() {
             self.last_decision_deferred = false;
             let index = (self.generator.next_u64() % runnable.len() as u64) as usize;
             return runnable[index];
@@ -432,103 +284,16 @@ impl DetScheduler {
         if let Some(pct) = self.pct.as_mut() {
             pct.advance();
         }
-        if let Some(starve) = self.starvation.as_mut() {
-            starve.advance();
-        }
-
-        // Starvation partitions the runnable set into three groups:
-        //   * `free`    — not in any starving interval this decision;
-        //   * `aged`    — interval-starved but skipped `aging_cap` consecutive
-        //                 decisions, so force-eligible (the liveness guarantee);
-        //   * `excluded`— interval-starved and not yet aged out.
-        // A `forced` flag records whether an aged task must run this decision. If
-        // it must, it is selected preferentially (highest skip count, ties by
-        // lowest id), overriding PCT/uniform so no task is starved unboundedly —
-        // aging alone (making a task merely eligible) is not enough, since a
-        // uniform pick could keep choosing a spinner over the starved holder.
-        let mut forced: Option<TaskId> = None;
-        let candidates: Vec<TaskId> = if let Some(starve) = self.starvation.as_ref() {
-            let mut free = Vec::new();
-            let mut aged: Vec<TaskId> = Vec::new();
-            let mut excluded = 0usize;
-            for &task in runnable {
-                if !starve.interval_starves(task) {
-                    free.push(task);
-                } else if starve.skips.get(&task).copied().unwrap_or(0) >= starve.aging_cap {
-                    aged.push(task);
-                } else {
-                    excluded += 1;
-                }
-            }
-            if let Some(&must) = aged.iter().max_by(|a, b| {
-                let sa = starve.skips.get(*a).copied().unwrap_or(0);
-                let sb = starve.skips.get(*b).copied().unwrap_or(0);
-                sa.cmp(&sb).then_with(|| b.0.cmp(&a.0))
-            }) {
-                // An aged-out task must run now (liveness override).
-                forced = Some(must);
-                vec![must]
-            } else if !free.is_empty() {
-                free
-            } else {
-                // Every runnable task is interval-starved and none has aged out
-                // yet: fall back to the full set for this decision so the run
-                // never wedges, recording the vacuous hit and warning once.
-                let _ = excluded;
-                let (warn, step) = {
-                    let starve = self.starvation.as_mut().expect("checked");
-                    starve.starve_vacuous += 1;
-                    let first = !starve.warned_vacuous;
-                    starve.warned_vacuous = true;
-                    (first, starve.step)
-                };
-                if warn {
-                    eprintln!(
-                        "PATINA WARNING: vacuous starvation interval — at scheduling decision {step} every \
-runnable task was in the starved subset, so no task could be scheduled without deadlocking the run. \
-The interval is being ignored for this step to preserve liveness; a starvation configuration that \
-routinely starves the only runnable task is testing nothing. Narrow the starved subset or the \
-interval window.",
-                    );
-                }
-                runnable.to_vec()
-            }
-        } else {
-            runnable.to_vec()
-        };
-
-        // A starvation interval that excludes at least one currently-runnable task
-        // is an active policy deferral this decision (whichever branch selects the
-        // task: free pool, forced aging, or vacuous fallback). The step counter has
-        // already advanced, so `interval_starves` keys on the correct decision.
-        let starve_deferring = self
-            .starvation
-            .as_ref()
-            .map(|starve| runnable.iter().any(|task| starve.interval_starves(*task)))
-            .unwrap_or(false);
+        let candidates = runnable;
         let pct_deferring = self
             .pct
             .as_ref()
-            .map(|pct| pct.defers(&candidates))
+            .map(|pct| pct.defers(candidates))
             .unwrap_or(false);
-        self.last_decision_deferred = starve_deferring || pct_deferring;
+        self.last_decision_deferred = pct_deferring;
 
-        let selected = if let Some(task) = forced {
-            task
-        } else if let Some(pct) = self.pct.as_mut() {
-            pct.pick(&candidates)
-        } else {
-            // Starvation-only: uniform random over the surviving candidates,
-            // using the selection generator. Enabling starvation is an opt-in,
-            // fingerprinted policy, so a differing generator consumption here is
-            // expected and isolated from default runs.
-            let index = (self.generator.next_u64() % candidates.len() as u64) as usize;
-            candidates[index]
-        };
-        if let Some(starve) = self.starvation.as_mut() {
-            starve.record_decision(runnable, selected);
-        }
-        selected
+        let pct = self.pct.as_mut().expect("checked: policy is active");
+        pct.pick(candidates)
     }
 }
 
@@ -584,9 +349,6 @@ impl DetScheduler {
         self.tasks.remove(&task);
         if let Some(pct) = self.pct.as_mut() {
             pct.on_complete(task);
-        }
-        if let Some(starve) = self.starvation.as_mut() {
-            starve.on_complete(task);
         }
         Ok(())
     }
@@ -659,24 +421,14 @@ impl DetScheduler {
     }
 
     pub fn policy_report(&self) -> Option<SchedulePolicyReport> {
-        if self.pct.is_none() && self.starvation.is_none() {
-            return None;
-        }
-        let mut report = SchedulePolicyReport::default();
-        if let Some(pct) = self.pct.as_ref() {
-            report.pct = true;
-            report.pct_depth = pct.depth;
-            report.pct_change_points = pct.change_points.len() as u32;
-            report.pct_change_points_hit = pct.change_points_hit;
-            report.decisions = report.decisions.max(pct.step);
-        }
-        if let Some(starve) = self.starvation.as_ref() {
-            report.starvation = true;
-            report.starve_events = starve.starve_events;
-            report.starve_vacuous = starve.starve_vacuous;
-            report.decisions = report.decisions.max(starve.step);
-        }
-        Some(report)
+        let pct = self.pct.as_ref()?;
+        Some(SchedulePolicyReport {
+            pct: true,
+            pct_depth: pct.depth,
+            pct_change_points: pct.change_points.len() as u32,
+            pct_change_points_hit: pct.change_points_hit,
+            decisions: pct.step,
+        })
     }
 
     pub fn liveness_deferring(&self) -> bool {
@@ -697,7 +449,6 @@ fn invalid_transition(task: TaskId, action: &str, state: &TaskState) -> EffectEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     fn schedule(seed: u64, rounds: usize) -> Vec<TaskId> {
         let mut scheduler = DetScheduler::new(seed);
@@ -772,7 +523,6 @@ mod tests {
                 depth: 1,
                 steps: 100,
             }),
-            starvation: None,
         };
         let mut sched = DetScheduler::with_policy(5, policy);
         let order = drive(&mut sched, 4, 20);
@@ -798,7 +548,6 @@ mod tests {
                 depth: 2,
                 steps: 10,
             }),
-            starvation: None,
         };
         let mut sched = DetScheduler::with_policy(4, policy);
         let order = drive(&mut sched, 3, 30);
@@ -814,142 +563,6 @@ mod tests {
             order.iter().any(|task| *task != order[0]),
             "a live change point must preempt: {order:?}"
         );
-    }
-
-    #[test]
-    fn starvation_excludes_defers_liveness_and_ends() {
-        // A wide interval starving one residue class must skip those tasks while
-        // active, report a liveness deferral so the watchdog excuses that window,
-        // then release them once the bounded interval ends.
-        let policy = SchedulePolicy {
-            pct: None,
-            starvation: Some(StarvationConfig {
-                intervals: 1,
-                max_len: 6,
-                window: 2,
-            }),
-        };
-        let mut sched = DetScheduler::with_policy(9, policy);
-        for label in 0..4u64 {
-            sched.spawn(&format!("t{label}")).unwrap();
-        }
-        let mut order = Vec::new();
-        let mut saw_deferral = false;
-        for _ in 0..60 {
-            let task = sched.next().unwrap().unwrap();
-            order.push(task);
-            saw_deferral |= sched.liveness_deferring();
-            sched.yield_task(task).unwrap();
-        }
-        assert!(saw_deferral, "an active interval must report a deferral");
-        let report = sched.policy_report().unwrap();
-        assert!(report.starvation);
-        assert!(
-            report.starve_events > 0,
-            "the interval must exclude at least one runnable task"
-        );
-        // Every task is still runnable throughout, and the interval is bounded, so
-        // by the end of the 60-round run every task has been scheduled at least
-        // once (starvation ended and released the starved class).
-        let mut seen = BTreeSet::new();
-        for task in &order {
-            seen.insert(*task);
-        }
-        assert_eq!(seen.len(), 4, "starvation must end and release every task");
-    }
-
-    #[test]
-    fn starving_the_only_runnable_task_falls_back_and_warns() {
-        // Only one task exists, and a very wide interval with modulus that starves
-        // it. Every step would starve the only runnable task; the policy must fall
-        // back to scheduling it (liveness) and count the vacuous hits.
-        let policy = SchedulePolicy {
-            pct: None,
-            starvation: Some(StarvationConfig {
-                intervals: 8,
-                max_len: 50,
-                window: 4,
-            }),
-        };
-        // Search a few seeds for one that actually starves task 1 at some step;
-        // the fallback and vacuous accounting must engage without deadlocking.
-        let mut any_vacuous = false;
-        for seed in 0..64 {
-            let mut sched = DetScheduler::with_policy(seed, policy);
-            sched.spawn("solo").unwrap();
-            for _ in 0..40 {
-                // Must never deadlock: the only task is always eventually returned.
-                let task = sched.next().unwrap().unwrap();
-                assert_eq!(task, TaskId(1));
-                sched.yield_task(task).unwrap();
-            }
-            if sched.policy_report().unwrap().starve_vacuous > 0 {
-                any_vacuous = true;
-            }
-        }
-        assert!(
-            any_vacuous,
-            "at least one seed must exercise the vacuous-starvation fallback"
-        );
-    }
-
-    #[test]
-    fn starvation_aging_bounds_consecutive_skips_guaranteeing_liveness() {
-        // Model exactly the livelock the aging guarantee prevents: task B spins
-        // forever at a scheduling boundary (always runnable, never starved), while
-        // task A — the resource holder another task needs — is starved by an
-        // interval that never ends on its own. Without aging the scheduler would
-        // pick the sole free candidate B forever and A would never run (the real
-        // starvation hang). A deterministic always-starve-A interval isolates the
-        // guarantee: A must be force-scheduled at least once every `aging_cap + 1`
-        // decisions.
-        let aging_cap = 6;
-        let mut sched = DetScheduler::new(1);
-        // Inject a deterministic starvation state: an unbounded interval starving
-        // odd task ids (modulus 2, residue 1 → task 1 = A), never task 2 = B.
-        sched.starvation = Some(StarvationState {
-            intervals: vec![StarveInterval {
-                start: 0,
-                end: u64::MAX,
-                modulus: 2,
-                residue: 1,
-            }],
-            step: 0,
-            starve_events: 0,
-            starve_vacuous: 0,
-            warned_vacuous: false,
-            skips: BTreeMap::new(),
-            aging_cap,
-        });
-        let a = sched.spawn("holder").unwrap();
-        let b = sched.spawn("spinner").unwrap();
-        assert_eq!(a, TaskId(1));
-        assert_eq!(b, TaskId(2));
-        let mut consecutive_a_missing = 0u64;
-        let mut a_runs = 0u64;
-        for round in 0..500 {
-            let task = sched.next().unwrap().unwrap();
-            if task == a {
-                consecutive_a_missing = 0;
-                a_runs += 1;
-            } else {
-                consecutive_a_missing += 1;
-            }
-            assert!(
-                consecutive_a_missing <= aging_cap,
-                "round {round}: task A starved {consecutive_a_missing} decisions > aging_cap {aging_cap}"
-            );
-            // Both stay runnable (spinner semantics).
-            sched.yield_task(task).unwrap();
-        }
-        // A ran roughly once per (aging_cap + 1) decisions — real, bounded progress
-        // despite a never-ending starvation interval.
-        assert!(
-            a_runs >= 500 / (aging_cap + 2),
-            "A made too little progress: {a_runs}"
-        );
-        let report = sched.policy_report().unwrap();
-        assert!(report.starve_events > 0);
     }
 
     #[test]
@@ -980,7 +593,6 @@ mod tests {
                 depth: 3,
                 steps: 40,
             }),
-            starvation: None,
         };
         let mut sched = DetScheduler::with_policy(3, policy);
         for label in 0..4u64 {

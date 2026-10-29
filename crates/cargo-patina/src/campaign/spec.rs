@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use patina_dst_runtime::FaultKnob;
 
 use super::planes::{FAULT_PLANE_NAMES, FaultPlanes};
-use super::{CampaignClass, ClassifyRules, FAULT_SCALE_FULL, STARVE_SCALE_FULL};
+use super::{CampaignClass, ClassifyRules, FAULT_SCALE_FULL};
 use crate::{CliError, help};
 
 pub(super) const DEFAULT_PLATEAU_AFTER: u64 = 200;
@@ -51,74 +51,10 @@ pub struct CampaignSpec {
     /// Randomize the edge-hook yield stride (`run --yield-stride`) per
     /// generation, over powers of two from 1 (every edge) to 1024, so a sweep of
     /// an `--instrument` artifact varies how densely atomics-only code is
-    /// preempted. Opt-in like [`Self::starve`]: a dense stride multiplies a
+    /// preempted. Opt-in: a dense stride multiplies a
     /// generation's cost, and an artifact without the hook has no stride to
     /// honour.
     pub yield_stride: bool,
-    /// Randomize a bounded starvation-interval policy per generation: how many
-    /// intervals, how deep into the schedule they may start, and how long they
-    /// may last.
-    ///
-    /// WHY IT IS ITS OWN SWITCH. Starvation is the one exploration policy that
-    /// deliberately holds a RUNNABLE task off, which is what several liveness and
-    /// lost-wakeup bugs need and what a uniform-random scheduler will not produce
-    /// at any seed count. It is also the one policy that can WEDGE a guest whose
-    /// synchronization is invisible to the scheduler (an atomics-only spinlock
-    /// held across a boundary), so it must be asked for rather than inherited —
-    /// the same reason `run` refuses to turn it on implicitly. The supervisor's
-    /// stall backstop turns a wedge into a classified `STARVATION_STALL` rather
-    /// than a hung campaign.
-    pub starve: bool,
-    /// Scale (per-mille) applied to the seed-drawn starvation policy under
-    /// [`Self::starve`]: `1000` (the default) leaves the sweep exactly as it has
-    /// always been; `100` makes a generation starve a tenth as often, with a
-    /// tenth as many holds and a tenth the hold length when it does.
-    ///
-    /// WHY A DIAL AT ALL. Measured over turso's `turso_stress` at 10,000
-    /// iterations, four campaigns came out 8 of 15, 1 of 11, 4 of 12 and 5 of 14
-    /// generations OK — 60 to 80 per cent of the budget spent on runs the stall
-    /// backstop killed before the workload finished. A wedged generation never
-    /// reaches the checkpoint and recovery sequences the campaign exists to
-    /// exercise, so it is not a harsh sample of the guest, it is no sample at
-    /// all. Exactly the shape `--faults` had before
-    /// [`Self::fault_scale_permille`]: the aggressive policy is a legitimate
-    /// option, and it was wrong only as the ONLY option.
-    ///
-    /// WHICH AXES SCALE, AND IN WHICH DIRECTION. This is the interesting half,
-    /// because the policy's three fields do not all point the same way:
-    ///
-    /// * HOW OFTEN A GENERATION STARVES AT ALL scales, through
-    ///   [`starve_band_fires`], on its own claimed band byte so the decision is
-    ///   independent of the policy's shape. It is
-    ///   the dominant lever and the honest one: a generation that does not starve
-    ///   is still a full sample of the guest under every other knob the campaign
-    ///   is sweeping, which is more than a wedged one gives.
-    /// * THE INTERVAL COUNT scales DOWN — 8 holds at full scale, 1 at a tenth.
-    ///   More holds is unambiguously harsher, so a plain dampen is the right way
-    ///   round.
-    /// * THE MAXIMUM HOLD LENGTH scales DOWN, floored at one decision. Longer
-    ///   holds are harsher, and this is also the scheduler's AGING CAP, so it is
-    ///   literally the bound on how long a task can be held off. The floor is not
-    ///   cosmetic: `--starve-max-len` is a positive integer, and a zero-length
-    ///   hold is not a gentler hold, it is no hold — which is the gate's job to
-    ///   express, not this axis's.
-    /// * THE START WINDOW IS DELIBERATELY NOT SCALED, and this is the axis a
-    ///   naive uniform multiply gets wrong. It is a PLACEMENT axis — WHERE the
-    ///   holds land — and which end of it is harsh is a property of the guest,
-    ///   not of the dial. Measured on `turso_stress`: at 512 every hold lands in
-    ///   the startup prefix, the policy defers nothing at all
-    ///   (`starve_events=0`) and the run completes in 26 s; at 65536 the same
-    ///   shaped holds land in the concurrent phase and the run never finishes.
-    ///   The small end was the GENTLE one there, the opposite of the reading that
-    ///   "less is less". For a short guest it inverts again: a large window puts
-    ///   starts past the end of the schedule, so the plane goes silently INERT
-    ///   rather than rare. Scaling it either way is right for one guest and wrong
-    ///   for the other, so it keeps its full log sweep and a dampened campaign
-    ///   still explores where a hold lands — the same call
-    ///   `--net-tcp-buffer-bytes` got from the fault dial, for a sharper reason.
-    ///   Pinned by the campaign detector
-    ///   `each-starvation-axis-scales-in-its-own-direction`.
-    pub starve_scale_permille: u64,
     /// The fault planes whose knobs are randomized per generation: none (the
     /// default), every plane (bare `--faults`), or the subset `--faults=PLANE,...`
     /// names.
@@ -259,8 +195,6 @@ impl Default for CampaignSpec {
             swarm: false,
             pct: false,
             yield_stride: false,
-            starve: false,
-            starve_scale_permille: STARVE_SCALE_FULL,
             faults: FaultPlanes::NONE,
             exclude_knobs: BTreeSet::new(),
             custom_op_faults: false,
@@ -286,17 +220,6 @@ impl Default for CampaignSpec {
 }
 
 impl CampaignSpec {
-    /// Whether generations draw a crash: the crash plane is selected and at
-    /// least one of its rates is not excluded.
-    pub(super) fn draws_crashes(&self) -> bool {
-        [
-            FaultKnob::MachineCrashPermille,
-            FaultKnob::ProcessCrashPermille,
-        ]
-        .into_iter()
-        .any(|knob| self.faults.draws(knob) && !self.exclude_knobs.contains(&knob))
-    }
-
     /// Merge a JSON spec object over the defaults. Unknown keys are rejected so a
     /// typo in a spec file fails loudly rather than being silently ignored.
     pub(super) fn apply_json(&mut self, value: &serde_json::Value) -> Result<(), CliError> {
@@ -325,21 +248,6 @@ impl CampaignSpec {
                 "swarm" => self.swarm = json_bool(key, val)?,
                 "pct" => self.pct = json_bool(key, val)?,
                 "yield_stride" => self.yield_stride = json_bool(key, val)?,
-                "starve" => self.starve = json_bool(key, val)?,
-                "starve_scale_permille" => {
-                    // A spec file bypasses the CLI value grammar, so hold it to
-                    // the same `[0, 1000]` bound here rather than letting an
-                    // out-of-range scale amplify the policy past its tuned
-                    // ceilings.
-                    let value = json_u64(key, val)?;
-                    if value > STARVE_SCALE_FULL {
-                        return Err(CliError(format!(
-                            "campaign spec \"starve_scale_permille\" must be in [0, {STARVE_SCALE_FULL}] \
-                             (1000 = the default policy bands); got {value}"
-                        )));
-                    }
-                    self.starve_scale_permille = value;
-                }
                 "faults" => self.faults = json_fault_planes(key, val)?,
                 "exclude_knobs" => self.exclude_knobs = json_exclude_knobs(key, val)?,
                 "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
@@ -445,7 +353,7 @@ impl CampaignSpec {
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, yield_stride, faults, exclude_knobs, \
                          custom_op_faults, \
-                         fault_scale_permille, starve, starve_scale_permille, \
+                         fault_scale_permille, \
                          dns_entries, \
                          harness, allow_symbols, allow_unsupported_symbols, address_layout, \
                          cpus, watchdog_nanos, \
@@ -724,7 +632,7 @@ mod tests {
             .unwrap();
         let specs = [
             CampaignSpec {
-                starve: true,
+                pct: true,
                 ..CampaignSpec::default()
             },
             classified,
@@ -764,7 +672,6 @@ mod tests {
         }
         let bare = spec_to_json(&CampaignSpec::default());
         for key in [
-            "starve",
             "classify",
             "verify",
             "dns_entries",
@@ -784,14 +691,14 @@ mod tests {
             FaultPlanes::ALL
         );
         // The exploration policy is part of the coverage store's compatibility
-        // fingerprint, so a starvation campaign never pools coverage with a
-        // non-starvation one.
-        let starving = CampaignSpec {
-            starve: true,
+        // fingerprint, so a PCT campaign never pools coverage with a non-PCT
+        // one.
+        let exploring = CampaignSpec {
+            pct: true,
             ..CampaignSpec::default()
         };
         assert_ne!(
-            campaign_coverage_fingerprint(&starving, true),
+            campaign_coverage_fingerprint(&exploring, true),
             campaign_coverage_fingerprint(&CampaignSpec::default(), true)
         );
     }

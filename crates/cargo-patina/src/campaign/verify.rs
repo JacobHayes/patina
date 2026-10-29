@@ -10,8 +10,8 @@
 //! way, so a leak that never fails a run is caught too. A mismatch is
 //! [`CampaignClass::Nondeterminism`], and both outcomes travel with it.
 //!
-//! The signature's policy annotation (`bug_depth=N`, the PCT change points and
-//! starvation exclusions the seeded schedule hit) describes how the run
+//! The signature's policy annotation (`bug_depth=N`, the PCT change points
+//! the seeded schedule hit) describes how the run
 //! explored, not what it reached. A rerun explores again and must hit the same
 //! ones; a replay follows the recorded selections, makes no scheduling
 //! decisions and reports none, so a replay leaves the annotation out of the

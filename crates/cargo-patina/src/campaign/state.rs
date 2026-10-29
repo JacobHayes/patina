@@ -3,10 +3,7 @@
 use super::observe::EdgeCoverageState;
 use super::spec::classify_rules_to_json;
 use super::verify::{CleanReruns, Verification};
-use super::{
-    AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_SCALE_FULL, STARVE_SCALE_FULL,
-    VerdictFacts,
-};
+use super::{AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_SCALE_FULL, VerdictFacts};
 use crate::CliError;
 use crate::aux_store::validate_resume_watermark;
 use crate::sdk_report::CoverageTally;
@@ -554,17 +551,8 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if spec.custom_op_faults {
         map.insert("custom_op_faults".into(), true.into());
     }
-    if spec.starve {
-        map.insert("starve".into(), true.into());
-    }
     if spec.yield_stride {
         map.insert("yield_stride".into(), true.into());
-    }
-    if spec.starve_scale_permille != STARVE_SCALE_FULL {
-        map.insert(
-            "starve_scale_permille".into(),
-            spec.starve_scale_permille.into(),
-        );
     }
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());

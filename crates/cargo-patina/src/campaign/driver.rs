@@ -109,16 +109,6 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     let artifact_path = PathBuf::from(&state.artifact.path);
     verify_campaign_build(&state)?;
 
-    // `run` refuses crash restart under starvation, so a campaign that asked
-    // for both would refuse identically in every generation.
-    if state.spec.draws_crashes() && state.spec.starve {
-        return Err(CliError::usage(
-            "the crash fault plane and --starve cannot be combined: native crash restart is not \
-             implemented under --starve, so every generation would be refused; drop crash from \
-             --faults or exclude both crash rates",
-        ));
-    }
-
     if let CampaignMode::Resume = mode
         && state.generations_done == state.spec.generations
     {

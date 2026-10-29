@@ -6,7 +6,7 @@ use crate::config::{
     EntropyFaultConfig, FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
 };
 use crate::liveness::resolve_heal_after;
-use crate::scheduler::{PctConfig, SchedulePolicy, StarvationConfig};
+use crate::scheduler::{PctConfig, SchedulePolicy};
 use crate::{FINGERPRINT_BUGGIFY, RuntimeError};
 use patina_dst_abi::ClockKind;
 use patina_dst_trace::AddressLayout;
@@ -406,13 +406,6 @@ pub(super) fn schedule_policy_record(
             depth: pct.depth,
             steps: pct.steps,
         }),
-        starvation: policy
-            .starvation
-            .map(|starve| patina_dst_trace::StarvationPolicyRecord {
-                intervals: starve.intervals,
-                max_len: starve.max_len,
-                window: starve.window,
-            }),
         yield_stride: config.yield_stride,
     })
 }
@@ -425,11 +418,6 @@ fn schedule_policy_from_record(record: &patina_dst_trace::SchedulePolicyRecord) 
             depth: pct.depth,
             steps: pct.steps,
         }),
-        starvation: record.starvation.map(|starve| StarvationConfig {
-            intervals: starve.intervals,
-            max_len: starve.max_len,
-            window: starve.window,
-        }),
     }
 }
 
@@ -439,7 +427,7 @@ fn schedule_policy_from_record(record: &patina_dst_trace::SchedulePolicyRecord) 
 /// supplied the stored one is adopted verbatim; a conflicting supplied policy
 /// fails closed. A trace recorded under the default policy (`None`) leaves the
 /// operator's configuration in place — and an operator trying to *enable* a
-/// policy on a default trace is caught earlier by the `+pct`/`+starve`
+/// policy on a default trace is caught earlier by the `+pct`
 /// fingerprint mismatch.
 pub(super) fn reconcile_replay_schedule_policy(
     config: &RuntimeConfig,
@@ -707,7 +695,6 @@ mod tests {
                 depth: 3,
                 steps: 100,
             }),
-            starvation: None,
             yield_stride: 0,
         };
         let conflicting = RuntimeConfig::seeded(0).with_schedule_policy(SchedulePolicy {
@@ -715,7 +702,6 @@ mod tests {
                 depth: 9,
                 steps: 100,
             }),
-            starvation: None,
         });
         assert!(reconcile_replay_schedule_policy(&conflicting, Some(&stored_policy)).is_err());
 

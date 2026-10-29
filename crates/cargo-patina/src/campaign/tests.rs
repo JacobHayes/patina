@@ -1,61 +1,7 @@
 //! Tests for campaign generation derivation and invocation flags.
 
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
-
-/// The starvation sweep is the campaign's one adversarial-deferral knob, so
-/// its three sub-values must (a) be a pure function of the generation, (b)
-/// actually MOVE across generations — a sweep pinned to one configuration
-/// explores nothing — and (c) stay inside the ranges the run parser and the
-/// scheduler's liveness bound accept.
-#[test]
-fn the_starvation_sweep_is_deterministic_and_actually_sweeps() {
-    let spec = CampaignSpec {
-        starve: true,
-        ..CampaignSpec::default()
-    };
-    let value = |flags: &[String], name: &str| -> u64 {
-        let at = flags
-            .iter()
-            .position(|flag| flag == name || flag.starts_with(&format!("{name}=")))
-            .unwrap_or_else(|| panic!("{name} missing from {flags:?}"));
-        let text = flags[at]
-            .strip_prefix(&format!("{name}="))
-            .map(str::to_string)
-            .unwrap_or_else(|| flags[at + 1].clone());
-        text.parse().expect("an integer starvation value")
-    };
-    let mut seen: BTreeMap<(u64, u64, u64), u64> = BTreeMap::new();
-    for generation in 0..256 {
-        let hash = generation_hash(0, generation);
-        let flags = derive_flags(&spec, &hash);
-        // Pure: the same generation derives the same configuration.
-        assert_eq!(flags, derive_flags(&spec, &generation_hash(0, generation)));
-        let intervals = value(&flags, "--starve");
-        let window = value(&flags, "--starve-window");
-        let max_len = value(&flags, "--starve-max-len");
-        assert!((1..=8).contains(&intervals), "intervals {intervals}");
-        assert!(
-            (512..=65_536).contains(&window) && window.is_power_of_two(),
-            "window {window}"
-        );
-        assert!(
-            (16..=128).contains(&max_len) && max_len.is_power_of_two(),
-            "max_len {max_len}"
-        );
-        *seen.entry((intervals, window, max_len)).or_default() += 1;
-    }
-    // The byte is bit-sliced into 8 x 8 x 4 = 256 configurations; 256
-    // generations must reach a large fraction of them, not one corner.
-    assert!(
-        seen.len() > 100,
-        "the starvation sweep collapsed to {} configuration(s)",
-        seen.len()
-    );
-    // Off by default: a spec that did not ask for starvation emits none of it.
-    let quiet = derive_flags(&CampaignSpec::default(), &generation_hash(0, 3));
-    assert!(!quiet.iter().any(|flag| flag.starts_with("--starve")));
-}
+use std::collections::BTreeSet;
 
 /// A knob the spec excludes is emitted by no generation, and excluding it
 /// leaves every other flag exactly as the unexcluded campaign derives it.

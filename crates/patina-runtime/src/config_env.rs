@@ -6,18 +6,16 @@ use crate::config::{
     validate_hostname, validate_partition,
 };
 
-use crate::scheduler::{PctConfig, StarvationConfig};
+use crate::scheduler::PctConfig;
 use crate::{
     DEFAULT_CONVERGE_BUDGET_NANOS, DEFAULT_LIVENESS_BUDGET_NANOS, DEFAULT_PCT_DEPTH,
-    DEFAULT_PCT_STEPS, DEFAULT_STARVE_INTERVALS, DEFAULT_STARVE_MAX_LEN, DEFAULT_STARVE_WINDOW,
-    ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION,
-    ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN, ENV_FACTS, ENV_FACTS_FD,
-    ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV,
-    ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE, ENV_PARAMS_JSON,
-    ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-    ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SCHED_YIELD_STRIDE,
-    ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM, ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane,
-    RuntimeError,
+    DEFAULT_PCT_STEPS, ENV_BRANCH_FROM, ENV_BRANCH_ID, ENV_BRANCH_SEED, ENV_BUGGIFY,
+    ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF, ENV_CONVERGE_WITHIN,
+    ENV_FACTS, ENV_FACTS_FD, ENV_FINGERPRINT, ENV_GUEST_ARGV, ENV_GUEST_CPUS, ENV_GUEST_CWD,
+    ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_HEAL_AFTER, ENV_LIVENESS_WATCHDOG, ENV_MODE,
+    ENV_PARAMS_JSON, ENV_PARENT_TIMELINE, ENV_REALTIME_EPOCH_NANOS, ENV_SCHED_PCT,
+    ENV_SCHED_PCT_STEPS, ENV_SCHED_YIELD_STRIDE, ENV_SEED, ENV_STEP_BUDGET, ENV_SWARM,
+    ENV_TIMELINE, ENV_TRACE, ENV_TRACE_FD, FaultKnob, Plane, RuntimeError,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -414,8 +412,7 @@ impl RuntimeConfig {
     /// Apply the exploration scheduling-policy knobs from a control-plane
     /// accessor, mirroring [`RuntimeConfig::apply_fault_env`]. Presence of
     /// [`ENV_SCHED_PCT`] enables PCT (its value is the bug depth `d`, empty =
-    /// default); presence of [`ENV_SCHED_STARVE`] enables starvation intervals
-    /// (its value is the interval count). Absence leaves the default uniform
+    /// default). Absence leaves the default uniform
     /// policy (zero behavior change). Malformed values are rejected fail-closed.
     pub fn apply_schedule_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
@@ -452,50 +449,6 @@ impl RuntimeConfig {
                 )));
             }
             self.schedule_policy.pct = Some(PctConfig { depth, steps });
-        }
-        if let Some(value) = get(ENV_SCHED_STARVE) {
-            let value = value.trim();
-            let intervals = if value.is_empty() {
-                DEFAULT_STARVE_INTERVALS
-            } else {
-                value.parse().map_err(|_| {
-                    RuntimeError::Config(format!(
-                        "{ENV_SCHED_STARVE} must be an unsigned integer >= 1"
-                    ))
-                })?
-            };
-            if intervals < 1 {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_SCHED_STARVE} interval count must be >= 1"
-                )));
-            }
-            let max_len = match get(ENV_SCHED_STARVE_MAX_LEN) {
-                Some(value) => value.trim().parse().map_err(|_| {
-                    RuntimeError::Config(format!(
-                        "{ENV_SCHED_STARVE_MAX_LEN} must be an unsigned 64-bit integer"
-                    ))
-                })?,
-                None => DEFAULT_STARVE_MAX_LEN,
-            };
-            let window = match get(ENV_SCHED_STARVE_WINDOW) {
-                Some(value) => value.trim().parse().map_err(|_| {
-                    RuntimeError::Config(format!(
-                        "{ENV_SCHED_STARVE_WINDOW} must be an unsigned 64-bit integer"
-                    ))
-                })?,
-                None => DEFAULT_STARVE_WINDOW,
-            };
-            if max_len < 1 || window < 1 {
-                return Err(RuntimeError::Config(format!(
-                    "{ENV_SCHED_STARVE_MAX_LEN} and {ENV_SCHED_STARVE_WINDOW} must be >= 1 so \
-                     intervals are bounded and placeable"
-                )));
-            }
-            self.schedule_policy.starvation = Some(StarvationConfig {
-                intervals,
-                max_len,
-                window,
-            });
         }
         if let Some(value) = get(ENV_SCHED_YIELD_STRIDE) {
             self.yield_stride = value.trim().parse().map_err(|_| {
@@ -714,11 +667,10 @@ mod tests {
     use crate::config::RuntimeConfig;
 
     use crate::replay::{reconcile_replay_guest_cwd, reconcile_replay_guest_env};
-    use crate::scheduler::{PctConfig, StarvationConfig};
+    use crate::scheduler::PctConfig;
     use crate::{
         ENV_GUEST_ARGV, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_SCHED_PCT, ENV_SCHED_PCT_STEPS,
-        ENV_SCHED_STARVE, ENV_SCHED_STARVE_MAX_LEN, ENV_SCHED_STARVE_WINDOW, ENV_SWARM,
-        RuntimeError,
+        ENV_SWARM, RuntimeError,
     };
     use std::collections::BTreeMap;
 
@@ -727,9 +679,6 @@ mod tests {
         let vars: BTreeMap<&str, String> = [
             (ENV_SCHED_PCT, "4".to_string()),
             (ENV_SCHED_PCT_STEPS, "123".to_string()),
-            (ENV_SCHED_STARVE, "2".to_string()),
-            (ENV_SCHED_STARVE_MAX_LEN, "16".to_string()),
-            (ENV_SCHED_STARVE_WINDOW, "64".to_string()),
             (ENV_SWARM, "1".to_string()),
         ]
         .into_iter()
@@ -746,14 +695,6 @@ mod tests {
             Some(PctConfig {
                 depth: 4,
                 steps: 123
-            })
-        );
-        assert_eq!(
-            policy.starvation,
-            Some(StarvationConfig {
-                intervals: 2,
-                max_len: 16,
-                window: 64
             })
         );
         assert!(config.swarm());

@@ -311,33 +311,6 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         "--sched-pct",
     ),
     f(
-        "--starve",
-        None,
-        Value::Optional("N", Kind::PositiveU64),
-        "Starvation exploration; N is the interval count (>= 1).",
-        false,
-    ),
-    needs(
-        f(
-            "--starve-max-len",
-            None,
-            Value::Required("N", Kind::PositiveU64),
-            "Maximum starvation run length (>= 1). Requires --starve.",
-            false,
-        ),
-        "--starve",
-    ),
-    needs(
-        f(
-            "--starve-window",
-            None,
-            Value::Required("N", Kind::PositiveU64),
-            "Starvation window (>= 1). Requires --starve.",
-            false,
-        ),
-        "--starve",
-    ),
-    f(
         "--swarm",
         None,
         Value::None,

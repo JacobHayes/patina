@@ -421,9 +421,9 @@ struct NativeRunInvocation {
     /// passed. Presence enables buggify and folds `+buggify` into the run
     /// fingerprint.
     buggify: Option<NativeBuggify>,
-    /// Exploration scheduling-policy (PCT / starvation) and swarm knobs. Enabling
+    /// Exploration scheduling-policy (PCT) and swarm knobs. Enabling
     /// a non-default policy, swarm or a yield stride folds
-    /// `+pct`/`+starve`/`+swarm`/`+yieldstride` into the run fingerprint.
+    /// `+pct`/`+swarm`/`+yieldstride` into the run fingerprint.
     schedule: NativeSchedule,
     /// Liveness-watchdog knobs forwarded to the guest through the control plane.
     /// Schedule-invariant: recorded (informational) but NOT fingerprinted.
@@ -512,14 +512,6 @@ struct NativeSchedule {
     pct: Option<String>,
     /// Expected schedule length from `--sched-pct-steps N`. Inert without `pct`.
     pct_steps: Option<String>,
-    /// Starvation interval count from `--starve[=N]`. `Some("")` = bare `--starve`
-    /// (default count). `None` = starvation off.
-    starve: Option<String>,
-    /// Maximum starvation-interval length from `--starve-max-len N`. Inert
-    /// without `starve`.
-    starve_max_len: Option<String>,
-    /// Starvation start window from `--starve-window N`. Inert without `starve`.
-    starve_window: Option<String>,
     /// `--swarm`: apply a seed-derived subset of the enabled fault classes.
     swarm: bool,
     /// `--yield-stride N`: an instrumented guest takes a scheduling point every

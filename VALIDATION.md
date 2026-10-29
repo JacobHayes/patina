@@ -68,7 +68,7 @@ systems.
 | V3 | native linked-shim target: interposition, audit gate, threads, reactors, SUD | partial |
 | V4 | trace hardening, crash models, host capture, minimization, budgets | partial |
 | V5 | cooperative-SUT SDK (`buggify!`, `always!`, `sometimes!`) | partial |
-| V6 | directed exploration: PCT, swarm, starvation, coverage-guided campaigns | partial |
+| V6 | directed exploration: PCT, swarm, coverage-guided campaigns | partial |
 
 A level is complete only when all its checks pass; higher levels never weaken
 lower ones.

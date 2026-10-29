@@ -3,8 +3,7 @@
 mod scaling;
 
 use super::classify::{
-    HOST_KILL_SHAPE, SIGABRT, SIGABRT_EXIT, STARVATION_STALL_EXIT, TRACE_UNAVAILABLE_CLASS,
-    is_runtime_diagnostic,
+    HOST_KILL_SHAPE, SIGABRT, SIGABRT_EXIT, TRACE_UNAVAILABLE_CLASS, is_runtime_diagnostic,
 };
 use super::generation::{SIGKILL, facts_from_envelope};
 use super::report::{CoverageGate, coverage_verdict};
@@ -15,7 +14,7 @@ use super::{
     VerdictFacts, classify, signature,
 };
 use crate::sdk_report::CoverageTally;
-use scaling::{fault_scale_selftest, starve_scale_selftest};
+use scaling::fault_scale_selftest;
 
 // ===========================================================================
 // Selftest
@@ -570,23 +569,7 @@ fn classifier_and_detector_checks() {
         classify(&planted(prerun, "CORRUPTION detected"), &declares_violation),
     );
 
-    // -- the supervisor backstops --------------------------------------------
-    check(
-        "starvation-stall-exit-111",
-        CampaignClass::StarvationStall,
-        classify(
-            &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
-            &no_rules,
-        ),
-    );
-    check(
-        "starvation-stall-refusal-class",
-        CampaignClass::StarvationStall,
-        classify(
-            &planted(RunFacts::ok().exit(2).refusal("starvation_stall"), ""),
-            &no_rules,
-        ),
-    );
+    // -- the campaign backstop ----------------------------------------------
     check(
         "infra-wall-clock-timeout",
         CampaignClass::Infra,
@@ -940,7 +923,6 @@ into the deterministic runtime via syscall-user-dispatch.",
         "patina: step budget of 100 boundary operations was exhausted",
         "patina: the deterministic runtime failed to initialize: fingerprint mismatch",
         "patina: interposed call before deterministic runtime initialization",
-        "patina: starvation stall",
         "cargo-patina: could not compile guest",
         "Error: disk I/O error",
     ];
@@ -1304,16 +1286,6 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
 
     println!("-- fault intensity scaling (--fault-scale-permille) --");
     for (name, ok, detail) in fault_scale_selftest() {
-        if ok {
-            println!("  ok   {name:<40} -> {detail}");
-        } else {
-            println!("  FAIL {name:<40} -> {detail}");
-            failures += 1;
-        }
-    }
-
-    println!("-- starvation intensity scaling (--starve-scale-permille) --");
-    for (name, ok, detail) in starve_scale_selftest() {
         if ok {
             println!("  ok   {name:<40} -> {detail}");
         } else {

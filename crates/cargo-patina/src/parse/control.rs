@@ -154,9 +154,6 @@ pub(super) fn schedule_of(args: &cli::Args) -> NativeSchedule {
     NativeSchedule {
         pct: args.string("--sched-pct"),
         pct_steps: args.string("--sched-pct-steps"),
-        starve: args.string("--starve"),
-        starve_max_len: args.string("--starve-max-len"),
-        starve_window: args.string("--starve-window"),
         swarm: args.flag("--swarm"),
         yield_stride: args.u32("--yield-stride").unwrap_or(0),
     }
@@ -243,7 +240,7 @@ pub(crate) fn buggify_env_pairs(buggify: &NativeBuggify) -> Vec<(&'static str, S
 
 /// The exploration scheduling-policy and swarm control-plane pairs. Presence of
 /// `PATINA_RT_SCHED_PCT` enables PCT (its value, possibly empty, being the bug
-/// depth); `PATINA_RT_SCHED_STARVE` enables starvation; `PATINA_RT_SWARM` enables
+/// depth); `PATINA_RT_SWARM` enables
 /// swarm fault-class selection. Mirrors [`knob_env_pairs`]: the native family
 /// forwards them to its subprocess through the same protocol.
 pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str, String)> {
@@ -252,15 +249,6 @@ pub(crate) fn schedule_env_pairs(schedule: &NativeSchedule) -> Vec<(&'static str
         pairs.push((ENV_SCHED_PCT, depth.clone()));
         if let Some(steps) = &schedule.pct_steps {
             pairs.push((ENV_SCHED_PCT_STEPS, steps.clone()));
-        }
-    }
-    if let Some(count) = &schedule.starve {
-        pairs.push((ENV_SCHED_STARVE, count.clone()));
-        if let Some(len) = &schedule.starve_max_len {
-            pairs.push((ENV_SCHED_STARVE_MAX_LEN, len.clone()));
-        }
-        if let Some(window) = &schedule.starve_window {
-            pairs.push((ENV_SCHED_STARVE_WINDOW, window.clone()));
         }
     }
     if schedule.swarm {

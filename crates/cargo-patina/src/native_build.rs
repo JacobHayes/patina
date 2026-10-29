@@ -870,9 +870,6 @@ pub(super) fn native_run_fingerprint_around(
     if policy.pct {
         fingerprint.push_str("+pct");
     }
-    if policy.starvation {
-        fingerprint.push_str("+starve");
-    }
     if policy.swarm {
         fingerprint.push_str("+swarm");
     }
@@ -889,7 +886,6 @@ pub(super) fn native_run_fingerprint_around(
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct SchedulePolicyFingerprint {
     pct: bool,
-    starvation: bool,
     swarm: bool,
     yield_stride: bool,
 }
@@ -898,7 +894,6 @@ impl SchedulePolicyFingerprint {
     pub(super) fn from_schedule(schedule: &NativeSchedule) -> Self {
         Self {
             pct: schedule.pct.is_some(),
-            starvation: schedule.starve.is_some(),
             swarm: schedule.swarm,
             yield_stride: schedule.yield_stride != 0,
         }
@@ -914,13 +909,12 @@ pub(super) fn trace_has_buggify(bundle: &TraceBundle) -> bool {
 
 /// Reconstruct the exploration-policy fingerprint components from a recorded
 /// trace's metadata, so a flag-free replay recomputes the same fingerprint the
-/// record run folded (`+pct`/`+starve`/`+swarm`/`+yieldstride`) and a cross-policy replay fails
+/// record run folded (`+pct`/`+swarm`/`+yieldstride`) and a cross-policy replay fails
 /// closed.
 pub(super) fn native_policy_from_trace(bundle: &TraceBundle) -> SchedulePolicyFingerprint {
     let policy = bundle.metadata.schedule_policy.as_ref();
     SchedulePolicyFingerprint {
         pct: policy.is_some_and(|policy| policy.pct.is_some()),
-        starvation: policy.is_some_and(|policy| policy.starvation.is_some()),
         swarm: bundle.metadata.swarm.is_some(),
         yield_stride: policy.is_some_and(|policy| policy.yield_stride != 0),
     }

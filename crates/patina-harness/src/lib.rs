@@ -60,7 +60,7 @@
 //! a harness knob: the supervisor that boots the next incarnation reads it from
 //! the CLI.
 //! **Fingerprinted** knobs ([`HarnessBuilder::buggify`] and friends,
-//! [`HarnessBuilder::schedule_pct`]/[`HarnessBuilder::schedule_starvation`],
+//! [`HarnessBuilder::schedule_pct`],
 //! [`HarnessBuilder::swarm`]) fold a fingerprint suffix that the *supervisor*
 //! computes from CLI flags, not from the in-process overlay. For seeded
 //! (non-recording) runs they work from the harness alone; for `--record`/`replay`
@@ -234,16 +234,6 @@ impl HarnessBuilder {
     pub fn schedule_pct(self, depth: u32, steps: u64) -> Self {
         self.set(rt::ENV_SCHED_PCT, depth.to_string())
             .set(rt::ENV_SCHED_PCT_STEPS, steps.to_string())
-    }
-
-    /// Enable the starvation exploration scheduling policy with `intervals`
-    /// deferral intervals of at most `max_len` boundaries, placed within the first
-    /// `window` boundaries. Fingerprinted (see crate docs).
-    #[must_use]
-    pub fn schedule_starvation(self, intervals: u64, max_len: u64, window: u64) -> Self {
-        self.set(rt::ENV_SCHED_STARVE, intervals.to_string())
-            .set(rt::ENV_SCHED_STARVE_MAX_LEN, max_len.to_string())
-            .set(rt::ENV_SCHED_STARVE_WINDOW, window.to_string())
     }
 
     /// Arm the generic no-progress liveness watchdog with a virtual-time budget in

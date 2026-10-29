@@ -133,22 +133,7 @@ pub struct PctPolicyRecord {
     pub steps: u64,
 }
 
-/// The starvation-interval scheduling parameters of a recorded run. Mirror of the
-/// runtime's `StarvationConfig`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StarvationPolicyRecord {
-    /// Number of bounded starvation intervals placed over the schedule.
-    pub intervals: u32,
-    /// Maximum length (scheduling decisions) of any interval; every interval is
-    /// bounded so it always ends.
-    pub max_len: u64,
-    /// Interval starts are placed uniformly in `[1, window]`.
-    pub window: u64,
-}
-
-/// The seed-driven exploration scheduling policy (PCT priority-change points,
-/// starvation intervals) of a recorded run. Stored in the trace metadata so a
+/// The seed-driven exploration scheduling policy (PCT priority-change points) of a recorded run. Stored in the trace metadata so a
 /// replay knows the policy that produced the recorded schedule, and enabling a
 /// non-default policy folds a fingerprint component so a cross-policy replay
 /// fails closed. Absent (`None`) under the default uniform policy.
@@ -157,8 +142,6 @@ pub struct StarvationPolicyRecord {
 pub struct SchedulePolicyRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pct: Option<PctPolicyRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub starvation: Option<StarvationPolicyRecord>,
     /// The instrumented guest's edge-hook yield stride: a scheduling point every
     /// this many edges a thread executes. Absent means 0, no added points.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -172,7 +155,7 @@ fn is_zero(value: &u32) -> bool {
 impl SchedulePolicyRecord {
     /// Whether this record describes any non-default policy.
     pub fn is_active(&self) -> bool {
-        self.pct.is_some() || self.starvation.is_some() || self.yield_stride != 0
+        self.pct.is_some() || self.yield_stride != 0
     }
 }
 
@@ -358,7 +341,7 @@ pub struct RunMetadata {
     /// default). `chdir` is guest-driven and unrecorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_cwd: Option<String>,
-    /// The run's exploration scheduling policy (PCT / starvation), authoritative
+    /// The run's exploration scheduling policy (PCT), authoritative
     /// on replay. Additive exactly like [`faults`](RunMetadata::faults): absent
     /// (`None`) in traces recorded under the default uniform policy, which the
     /// runtime treats as the default. Enabling a non-default policy folds a

@@ -459,9 +459,9 @@ pub(super) struct CampaignEnvelopeInput<'a> {
 }
 
 /// How many distinct FINDINGS the store holds — the novel-signature budget.
-/// `INFRA` and `STARVATION_STALL` records are excluded: they are conditions of
-/// the run, not results. Both still appear in the class histogram and keep their
-/// signatures; what they do not do is claim to be a bug.
+/// `INFRA` records are excluded: they are a condition of the run, not a result.
+/// They still appear in the class histogram and keep their signatures; what
+/// they do not do is claim to be a bug.
 pub(super) fn novel_findings(signatures: &BTreeMap<String, SignatureRecord>) -> u64 {
     signatures
         .values()
@@ -655,52 +655,12 @@ fn sdk_sites_summary_json(
 
 #[cfg(test)]
 mod tests {
-    use super::super::classify::STARVATION_STALL_EXIT;
     use super::super::observe::EdgeCoverageState;
-    use super::super::selftest::planted;
     use super::super::state::{ArtifactIdentity, CampaignState, GenerationOutcome};
-    use super::super::{CampaignClass, CampaignSpec, ClassifyRules, RunFacts, classify};
+    use super::super::{CampaignClass, CampaignSpec};
     use super::*;
     use crate::sdk_report::CoverageTally;
     use std::path::Path;
-
-    /// A wedge the `--starve` backstop killed is not a bug found. The backstop
-    /// arms only under `--starve`, so exit 111 always means patina's own injector
-    /// was holding tasks off when progress stopped, and std's uninstrumented spin
-    /// loops make that wedge a limitation of the injector rather than a verdict
-    /// on the guest. It stays its own class — an operator tunes
-    /// `--starve-scale-permille` by reading it — and it stays a failure, but it
-    /// must not spend the novel-signature budget that counts DISTINCT BUGS. The
-    /// guest's own livelock keeps its finding: that one arrives as `LIVENESS`,
-    /// from a watchdog that fires while the scheduler is still making decisions.
-    #[test]
-    fn a_starvation_stall_is_reported_but_is_not_counted_as_a_bug_found() {
-        assert!(CampaignClass::StarvationStall.is_failure());
-        assert!(!CampaignClass::StarvationStall.is_finding());
-        assert!(CampaignClass::Liveness.is_finding());
-        assert_ne!(
-            CampaignClass::StarvationStall.as_str(),
-            CampaignClass::Infra.as_str(),
-            "folding the stall into INFRA would erase which generations the injector wedged"
-        );
-        // Both halves of the classifier still reach the class: the supervisor's
-        // distinct exit code, and the envelope refusal the child reports.
-        let rules = ClassifyRules::default();
-        assert_eq!(
-            classify(
-                &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
-                &rules
-            ),
-            CampaignClass::StarvationStall
-        );
-        assert_eq!(
-            classify(
-                &planted(RunFacts::ok().exit(2).refusal("starvation_stall"), ""),
-                &rules
-            ),
-            CampaignClass::StarvationStall
-        );
-    }
 
     /// Build the campaign envelope for `state`, with no coverage signal, written
     /// under `out/`.

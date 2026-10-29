@@ -332,21 +332,19 @@ fire", never zero.
   sometimes_satisfied, always_violated, knob}`). A campaign folds it into
   `sites.json`. `verdicts[]` gathers every runtime context's verdicts in a
   process that ran several (each context numbers its own `seq` from 0).
-- `schedule_policy` — the exploration policy's accounting when PCT or
-  starvation was active (`pct`, `pct_depth`, `pct_change_points`,
-  `pct_change_points_hit`, `starvation`, `starve_events`, `starve_vacuous`,
+- `schedule_policy` — the exploration policy's accounting when PCT was
+  active (`pct`, `pct_depth`, `pct_change_points`, `pct_change_points_hit`,
   `decisions`, `bug_depth`); `bug_depth` annotates a campaign signature.
 - `runtime_findings[]` — runtime-detected findings, each with a `source`:
   `liveness` (a fired liveness/converge watchdog, carrying
   `kind`/`detail`/`vtime_ns`/`budget_ns`/`last_fault_vtime_ns`) and `schedule`
-  (`vacuous_schedule` with the unschedulable `tasks[]`, `vacuous_starvation`
-  with the forced `decisions` count).
+  (`vacuous_schedule` with the unschedulable `tasks[]`).
 - `refusal` = `{class, message}` — present only when PATINA failed closed
   (`host_limit`, `fingerprint_mismatch`, `trace_operation_mismatch`, `runtime_init_failure`,
   `no_runtime_installed`, `buggify_duplicate_label`,
   `buggify_setup_never_called`, `harness_before_install`,
   `preinit_interposed_call`, `shim_fatal`, `unsupported_import`,
-  `unknown_import`, `starvation_stall`, `incomplete_trace`, `native_prerun_audit`).
+  `unknown_import`, `incomplete_trace`, `native_prerun_audit`).
   `native_prerun_audit` is emitted directly by the native audit gate before any
   guest launch, with no `guest_exit`; it lets harnesses skip futile recording retries.
   A native replay refused for its build identity is likewise emitted before launch

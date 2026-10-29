@@ -588,7 +588,7 @@ impl Context {
         if let Some(violation) = self.liveness.observe(now, progress, deferring) {
             // The single interface-contract line, loud.
             // Emitted from the runtime so it reaches stderr regardless of the
-            // driving surface, exactly like the vacuous-starvation `PATINA WARNING`.
+            // driving surface, exactly like the vacuous-schedule `PATINA WARNING`.
             let marker = violation.marker_line();
             crate::reports::diagnostic!("{marker}");
             // The interposed families abort the process on this error without

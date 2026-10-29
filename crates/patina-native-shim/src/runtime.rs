@@ -1174,7 +1174,7 @@ pub(crate) fn runtime_config_from_control_plane()
                 .into(),
         ));
     }
-    // Exploration scheduling-policy (PCT / starvation) and swarm fault-class
+    // Exploration scheduling-policy (PCT) and swarm fault-class
     // selection knobs travel the same control plane through the shared parsers,
     // so the shim and the process-environment path agree on the protocol.
     config = config.apply_schedule_env(control_env)?;

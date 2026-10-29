@@ -31,8 +31,6 @@ pub mod fault_domain {
     /// The deterministic scheduler's PCT (Probabilistic Concurrency Testing)
     /// priority/change-point stream.
     pub const SCHED_PCT: &str = "patina.sched.pct";
-    /// The deterministic scheduler's starvation-interval placement stream.
-    pub const SCHED_STARVE: &str = "patina.sched.starve";
 
     /// Explicit `FaultNet` wrapper datagram-drop stream.
     pub const FAULT_NET_DROP: &str = "patina.wrapper.fault_net.drop";

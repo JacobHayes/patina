@@ -412,11 +412,6 @@ impl Context {
         if !schedule.vacuous.is_empty() {
             findings.push(facts::vacuous_schedule_finding(&schedule));
         }
-        if let Some(report) = self.scheduler.policy_report()
-            && report.starve_vacuous > 0
-        {
-            findings.push(facts::vacuous_starvation_finding(report.starve_vacuous));
-        }
         let mut document = facts::document(planes, findings);
         if let serde_json::Value::Object(root) = &mut document {
             root.insert("context".into(), self.facts_context.into());
@@ -545,7 +540,7 @@ a recorded result or a replay fetch",
         if let Some(swarm) = self.swarm.as_ref() {
             emit_swarm_report(self.reports, swarm);
         }
-        // Exploration-policy diagnostic (PCT / starvation). Populated from live
+        // Exploration-policy diagnostic (PCT). Populated from live
         // selection, so it reflects a record/seeded run; a replay reports the
         // inert default because recorded selections bypass the policy.
         if let Some(report) = self.scheduler.policy_report() {

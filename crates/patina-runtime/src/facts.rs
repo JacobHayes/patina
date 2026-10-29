@@ -325,7 +325,7 @@ pub(crate) fn sdk(diag: &crate::BuggifyDiagnostics) -> Value {
     ])
 }
 
-/// The exploration-policy (PCT / starvation) accounting, with the bug-depth
+/// The exploration-policy (PCT) accounting, with the bug-depth
 /// estimate a found failure is annotated with.
 pub(crate) fn schedule_policy(report: &crate::scheduler::SchedulePolicyReport) -> Value {
     object(vec![
@@ -336,9 +336,6 @@ pub(crate) fn schedule_policy(report: &crate::scheduler::SchedulePolicyReport) -
             "pct_change_points_hit",
             Value::from(report.pct_change_points_hit),
         ),
-        ("starvation", Value::from(report.starvation)),
-        ("starve_events", Value::from(report.starve_events)),
-        ("starve_vacuous", Value::from(report.starve_vacuous)),
         ("decisions", Value::from(report.decisions)),
         ("bug_depth", Value::from(report.bug_depth())),
     ])
@@ -467,17 +464,6 @@ pub(crate) fn vacuous_schedule_finding(diagnostics: &ScheduleDiagnostics) -> Val
         ("kind", Value::from("vacuous_schedule")),
         ("detail", Value::from("unschedulable-worker")),
         ("tasks", Value::Array(tasks)),
-    ])
-}
-
-/// The vacuous-starvation finding: scheduling decisions that would have starved
-/// every runnable task and were forced to schedule anyway.
-pub(crate) fn vacuous_starvation_finding(starve_vacuous: u64) -> Value {
-    object(vec![
-        ("source", Value::from("schedule")),
-        ("kind", Value::from("vacuous_starvation")),
-        ("detail", Value::from("starves-only-runnable-task")),
-        ("decisions", Value::from(starve_vacuous)),
     ])
 }
 
@@ -648,9 +634,16 @@ mod tests {
                 jumps_applied: 0,
             }),
         );
-        let value = document(planes, vec![vacuous_starvation_finding(4)]);
+        let value = document(
+            planes,
+            vec![object(vec![
+                ("source", Value::from("schedule")),
+                ("kind", Value::from("example_finding")),
+                ("decisions", Value::from(4)),
+            ])],
+        );
         assert_eq!(value["fault_reports"]["entropy"]["vacuous"], true);
-        assert_eq!(value["runtime_findings"][0]["kind"], "vacuous_starvation");
+        assert_eq!(value["runtime_findings"][0]["kind"], "example_finding");
         assert_eq!(value["runtime_findings"][0]["decisions"], 4);
     }
 }

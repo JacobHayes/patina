@@ -106,7 +106,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     spec.swarm |= args.flag("--swarm");
     spec.pct |= args.flag("--sched-pct");
     spec.yield_stride |= args.flag("--yield-stride");
-    spec.starve |= args.flag("--starve");
     // Bare `--faults` is every plane; `--faults=PLANE,...` the named subset.
     if let Some(planes) = args.text("--faults") {
         spec.faults = if planes.is_empty() {
@@ -120,9 +119,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     // when actually supplied; an absent flag leaves the spec's scale alone.
     if let Some(value) = args.u64("--fault-scale-permille") {
         spec.fault_scale_permille = value;
-    }
-    if let Some(value) = args.u64("--starve-scale-permille") {
-        spec.starve_scale_permille = value;
     }
     spec.report |= args.flag("--report-failures");
     if args.flag("--no-verify") {

@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--starve-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -56,7 +56,7 @@ Each generation runs with --format json and is classified from its \
 patina.result/v1 envelope ALONE — verdicts, per-plane fault_reports vacuity, \
 runtime_findings, refusal, guest_exit — into one outcome class: a finding \
 (VIOLATION, LIVENESS, GUEST_ABORT), a harness class (FAIL_CLOSED_ABORT, \
-STARVATION_STALL, INFRA), OK, the loud UNCLASSIFIED catch-all, or VACUOUS, the \
+INFRA), OK, the loud UNCLASSIFIED catch-all, or VACUOUS, the \
 coverage class whose signature names the inert fault or exploration planes; \
 nothing in the classifier reads guest output. An unattributed SIGABRT is \
 GUEST_ABORT (the guest's own doing); the same abort carrying a patina refusal is \
@@ -98,19 +98,11 @@ per-mille of filesystem operations failed, 200 per-mille short); \
 needs faults to be RARE enough to run to completion. It is part of the campaign's \
 shape, so it is recorded in the out-dir spec, baked into the per-generation flags \
 the reproduce commands replay, and refused on a continuation like every other spec \
-flag. --starve-scale-permille is the same dial over the starvation policy, for the \
-same measured reason: a starvation sweep that wedges most of its generations spends \
-its budget on runs that finish nothing. It gates how often a generation starves at \
-all and dampens the interval count and hold length; the start window is placement \
-rather than intensity and keeps its full sweep. A generation the stall backstop \
-kills is reported as STARVATION_STALL and is NOT counted as a distinct bug found: \
-the backstop only arms under --starve, so the wedge is patina's own injector, not a \
-verdict on the guest.\n\
+flag.\n\
 \n\
 The crash plane (`crash` in --faults) draws a per-crash-point crash rate on a \
 power-of-two sweep and a process or machine crash kind; a generation whose crash \
-lands restarts once from the image the crash leaves. It is refused alongside \
---starve. `minimize --generation` on a crash generation shrinks the crashed and the \
+lands restarts once from the image the crash leaves. `minimize --generation` on a crash generation shrinks the crashed and the \
 restarted incarnation separately, keeping the crash on the operation it followed.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
@@ -229,24 +221,10 @@ refused by name.",
                     false,
                 ),
                 f(
-                    "--starve",
-                    None,
-                    Value::None,
-                    "Randomize a bounded starvation-interval policy (count, start window, max length) per generation.",
-                    false,
-                ),
-                f(
                     "--yield-stride",
                     None,
                     Value::None,
                     "Randomize the yield stride (1 to 1024 edges) per generation; needs an --instrument artifact.",
-                    false,
-                ),
-                f(
-                    "--starve-scale-permille",
-                    None,
-                    Value::Required("N", Kind::Permille),
-                    "Dampen the --starve policy to N per-mille of its default (default 1000 = today's bands; 100 = a tenth as many generations starve, with a tenth the holds and a tenth the hold length when they do). Gates how often a generation starves at all, and scales the interval count and the maximum hold length. The start window is placement rather than intensity — which end of it is harsh depends on the guest's own schedule — so it keeps its full sweep.",
                     false,
                 ),
                 f(

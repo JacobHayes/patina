@@ -51,29 +51,6 @@ claims! {
     ENTROPY_FAIL = 28,
     EPOCH_JUMP = 29,
     CUSTOM_OP_FAIL = 30,
-    /// The whole starvation policy configuration — interval count, start window,
-    /// and maximum interval length — bit-sliced out of ONE byte.
-    ///
-    /// The three sub-knobs are deliberately correlated with each other and with
-    /// nothing else. They are not three independent faults; they are one policy's
-    /// shape ("how many holds, how deep, how long"), and the campaign's
-    /// disjointness rule exists to stop two UNRELATED knobs from sweeping a
-    /// diagonal of their joint space. Slicing one byte gives 256 distinct
-    /// starvation configurations — every generation of a thousand-generation
-    /// sweep sees several — while leaving every other band's draw untouched.
-    SCHED_STARVE = 31,
-    /// Whether this generation starves at all. The first claim in the extension
-    /// block (see [`super::generation_bands`]), and it had to be: the three
-    /// starvation sub-knobs consume all eight bits of [`SCHED_STARVE`], and a
-    /// gate sliced out of that same byte would decide "does this generation
-    /// starve" from the very bits that decide "how", so a dampened campaign
-    /// would starve only at one corner of the policy space instead of rarely
-    /// across all of it.
-    ///
-    /// Only ever consulted below full `--starve-scale-permille`: at full scale
-    /// the gate is unconditionally open, which is what keeps the default sweep
-    /// unchanged.
-    STARVE_FIRE = 32,
     /// The per-crash-point machine-crash rate, as a power of two.
     MACHINE_CRASH = 33,
     /// The per-crash-point process-crash rate, as a power of two.
@@ -103,8 +80,6 @@ pub(super) const EXPLORATION_CLAIMS: &[Claim] = &[
     BUGGIFY_FIRE,
     SCHED_PCT_DEPTH,
     YIELD_STRIDE,
-    SCHED_STARVE,
-    STARVE_FIRE,
 ];
 
 /// The derivation input stays opaque before band expansion as well. Guidance

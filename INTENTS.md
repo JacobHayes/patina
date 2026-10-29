@@ -27,7 +27,7 @@ This gives Rust code a deterministic OS personality rather than asking every lib
 Patina exists to make these workflows normal:
 
 - Run a Rust program repeatedly with the same seed and get the same behavior.
-- Explore many scheduler, timing, network, filesystem, and crash interleavings quickly, with directed policies (priority-based preemption, starvation, fault-subset swarms) when uniform exploration is not enough.
+- Explore many scheduler, timing, network, filesystem, and crash interleavings quickly, with directed policies (priority-based preemption, fault-subset swarms) when uniform exploration is not enough.
 - Reproduce a failure from a seed and trace.
 - Record boundary effects from one run and replay them later.
 - Fail loudly when code escapes the deterministic boundary.

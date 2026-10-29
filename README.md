@@ -211,10 +211,9 @@ into the trace so replay reproduces them flag-free.
   a guest that makes no such read (any Darwin guest, and Rust's std)
   gets no entropy report. The knob is undiagnosable there, not vacuous.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
-- **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling),
-  `--starve` (bounded starvation intervals), `--swarm` (seed-derived fault-class
-  subsets). `campaign --sched-pct` and `campaign --starve` sweep those policies
-  per generation. To make atomics-only race windows schedulable, build with
+- **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling) and
+  `--swarm` (seed-derived fault-class subsets). `campaign --sched-pct` sweeps
+  PCT per generation. To make atomics-only race windows schedulable, build with
   `cargo patina build --instrument` and run with `--yield-stride N`: a
   scheduling point every N edges a thread executes, 1 being every edge (densest,
   and by far the most expensive). The stride is a run setting recorded in the

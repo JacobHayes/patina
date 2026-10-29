@@ -64,7 +64,6 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     ("patina native shim fatal:", "shim_fatal"),
     ("unsupported-import", "unsupported_import"),
     ("unknown-import", "unknown_import"),
-    ("patina: starvation stall", "starvation_stall"),
     // Patina's OWN recorder gave out at the end of the run — the trace resource
     // limit exceeded, the trace file unwritable — and the shim `abort()`s. The
     // guest is then killed by a SIGABRT it did not raise, which without this

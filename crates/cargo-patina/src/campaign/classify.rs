@@ -56,17 +56,6 @@ pub enum CampaignClass {
     /// declared-but-never-called setup gate, a runtime that refused to
     /// initialize, a shim fatal abort.
     FailClosedAbort,
-    /// The `--starve` supervisor stall backstop killed a wedged run (exit 111).
-    ///
-    /// NOT a finding — see [`CampaignClass::is_finding`]. The backstop only arms
-    /// under `--starve`, so every exit 111 is a run that patina's OWN injector
-    /// was holding tasks off in when it stopped making progress, and patina
-    /// cannot today say whether the guest livelocks on its own or whether the
-    /// hold plus an uninstrumented spin loop wedged it. Its own class rather than
-    /// folded into [`CampaignClass::Infra`], because which generations the
-    /// injector wedged is exactly what an operator tunes
-    /// `--starve-scale-permille` against.
-    StarvationStall,
     /// Harness/build infrastructure failure, not a SUT finding: the campaign's
     /// wall-clock backstop killed the generation, or the child `cargo patina run`
     /// never produced a `patina.result/v1` envelope at all (a build failure, a
@@ -90,7 +79,6 @@ impl CampaignClass {
         CampaignClass::Vacuous,
         CampaignClass::GuestAbort,
         CampaignClass::FailClosedAbort,
-        CampaignClass::StarvationStall,
         CampaignClass::Infra,
         CampaignClass::Unclassified,
     ];
@@ -104,7 +92,6 @@ impl CampaignClass {
             CampaignClass::Vacuous => "VACUOUS",
             CampaignClass::GuestAbort => "GUEST_ABORT",
             CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
-            CampaignClass::StarvationStall => "STARVATION_STALL",
             CampaignClass::Infra => "INFRA",
             CampaignClass::Unclassified => "UNCLASSIFIED",
         }
@@ -136,36 +123,8 @@ impl CampaignClass {
     /// answer. They are still surfaced and still deduped, but they must not spend
     /// the campaign's novel-signature budget, which exists to say "this many
     /// DISTINCT BUGS were found".
-    ///
-    /// `STARVATION_STALL` joins it, by the same argument that moved the host
-    /// SIGKILL and patina's own recorder failures out of the bug classes. The
-    /// stall backstop arms ONLY under `--starve`, so every exit 111 is a run that
-    /// patina's own injector was holding tasks off in — and the wedge is a
-    /// documented limitation of that injector rather than a fact about the guest:
-    /// std's spin loops carry no yield point, so once a spinner starts while the
-    /// lock holder is held off, the scheduler gets no further decision, its aging
-    /// cap can never fire, and the run is stuck no matter how briefly the hold
-    /// was meant to last. Measured on turso's `turso_stress`: two holds of at
-    /// most four decisions wedge a run that completes in 26 s at the same seed
-    /// with starvation off, and it is still wedged 15 minutes later. Filing that
-    /// as a distinct bug found spends a novel-signature slot on patina's own
-    /// exploration knob and prints a reproduce command whose "failure" is the
-    /// harness.
-    ///
-    /// What this deliberately does NOT do is erase the distinction the class
-    /// exists for. A guest that livelocks on its own, where the scheduler still
-    /// gets decisions to make, is caught by the runtime's liveness watchdog and
-    /// filed as [`CampaignClass::Liveness`] — a finding, and still counted as
-    /// one. A wedge that only exists because patina was starving the guest stays
-    /// visible under its own name, which is what an operator reads to tune
-    /// `--starve-scale-permille`, rather than being flattened into the
-    /// timeout/build-failure bucket. Telling the two apart INSIDE exit 111 needs
-    /// a progress signal the supervisor does not have today — the scheduler's
-    /// decision counter, which a wedged run freezes and a merely slow one does
-    /// not — and until it does, the honest reading of exit 111 is "no answer",
-    /// not "a bug".
     pub const fn is_finding(&self) -> bool {
-        self.is_failure() && !matches!(self, CampaignClass::Infra | CampaignClass::StarvationStall)
+        self.is_failure() && !matches!(self, CampaignClass::Infra)
     }
 }
 
@@ -183,9 +142,8 @@ const _: () = {
             CampaignClass::Vacuous => 4,
             CampaignClass::GuestAbort => 5,
             CampaignClass::FailClosedAbort => 6,
-            CampaignClass::StarvationStall => 7,
-            CampaignClass::Infra => 8,
-            CampaignClass::Unclassified => 9,
+            CampaignClass::Infra => 7,
+            CampaignClass::Unclassified => 8,
         }
     }
     let all = CampaignClass::ALL;
@@ -551,13 +509,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     if facts.host_killed() {
         return CampaignClass::Infra;
     }
-    // 3. The `--starve` supervisor stall backstop. Checked before the envelope
-    //    rule below because the stalled child is killed by its own supervisor,
-    //    which returns this code INSTEAD of finalizing a result.
-    if facts.exit_code == STARVATION_STALL_EXIT {
-        return CampaignClass::StarvationStall;
-    }
-    // 4. No envelope at all: the child `cargo patina run` failed before it could
+    // 3. No envelope at all: the child `cargo patina run` failed before it could
     //    report a result (a build failure, a pre-run gate refusal, a supervisor
     //    error). That is a harness failure, not a system-under-test finding.
     if !facts.envelope {
@@ -575,7 +527,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     {
         return CampaignClass::Infra;
     }
-    // 5. A liveness/converge watchdog finding is its own class (a "never
+    // 4. A liveness/converge watchdog finding is its own class (a "never
     //    converges" wedge), reported by the runtime as a `runtime_findings[]`
     //    entry with `source=liveness`.
     if facts
@@ -585,20 +537,15 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     {
         return CampaignClass::Liveness;
     }
-    // 6. A system-under-test safety violation: a `violation` verdict. Fires even
+    // 5. A system-under-test safety violation: a `violation` verdict. Fires even
     //    on exit 0 — a violated invariant is a bug however the process exited.
     if facts.has_verdict("violation").is_some() {
         return CampaignClass::Violation;
     }
-    // 7. Patina fail-closed refusal: the envelope attributed the failure to
+    // 6. Patina fail-closed refusal: the envelope attributed the failure to
     //    patina itself. Checked after the SUT findings above, so an `always!`
     //    abort stays a VIOLATION.
     if let Some(class) = &facts.refusal {
-        // A refusal the parent classified as the stall backstop keeps its own
-        // class; every other refusal is the fail-closed bucket.
-        if class == "starvation_stall" {
-            return CampaignClass::StarvationStall;
-        }
         // Patina's OWN recorder gave out at the end of the run (the trace
         // resource limit, an unwritable trace file). The shim `abort()`s after
         // it, so a guest that had already finished dies on a SIGABRT it never
@@ -645,7 +592,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
                 None | Some(0) => return CampaignClass::Infra,
                 // The guest's own class. It cannot have aborted (an `abort()`
                 // skips atexit and never reaches finalization), so what is left
-                // is a panic or a deliberate nonzero exit: rule 10's bucket,
+                // is a panic or a deliberate nonzero exit: rule 9's bucket,
                 // reached directly because `exit_code`/`signal` here describe
                 // patina's abort and would otherwise misfile it as GUEST_ABORT.
                 Some(_) => return CampaignClass::Unclassified,
@@ -654,14 +601,14 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
             return CampaignClass::FailClosedAbort;
         }
     }
-    // 8. An abort patina did NOT attribute to itself is the guest's own doing.
+    // 7. An abort patina did NOT attribute to itself is the guest's own doing.
     //    This is §4.4's inversion: before the envelope carried `refusal`, every
     //    unattributed SIGABRT was blamed on patina and buried in an infra-looking
     //    bucket; now it is a finding in its own right.
     if facts.aborted() {
         return CampaignClass::GuestAbort;
     }
-    // 9. A clean exit with no finding is OK, unless a fault or exploration plane
+    // 8. A clean exit with no finding is OK, unless a fault or exploration plane
     //    went inert: then it is a coverage failure, and the signature names the
     //    planes. Vacuity is judged only here, on a run that otherwise passed: a
     //    run that failed on its own (every rule above, and the nonzero exit
@@ -673,16 +620,12 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
         }
         return CampaignClass::Vacuous;
     }
-    // 10. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
+    // 9. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
     //    loudly for triage, never silently dropped as OK or mislabeled. A guest
     //    that fails in a way patina cannot see structurally declares a
     //    `classify` rule for it in its campaign spec (arc §4.3).
     CampaignClass::Unclassified
 }
-
-/// The distinct exit code the native supervisor returns for a `--starve` stall,
-/// mirrored here for the classifier (kept in sync with `lib.rs`).
-pub(super) const STARVATION_STALL_EXIT: i32 = 111;
 
 /// Build a signature from a classified generation.
 ///
@@ -757,7 +700,6 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
             .refusal
             .as_ref()
             .map(|class| format!("refusal class={class}")),
-        CampaignClass::StarvationStall => Some("starvation stall".to_string()),
         // A host-side kill has ONE shape, always: there is no finding in it to
         // describe, and every such generation must dedup onto the same entry
         // rather than spraying novel signatures made of whatever the guest
@@ -1079,10 +1021,6 @@ mod tests {
                         .refusal("shim_fatal"),
                     "",
                 ),
-                &rules,
-            ),
-            classify(
-                &planted(RunFacts::ok().exit(STARVATION_STALL_EXIT).no_envelope(), ""),
                 &rules,
             ),
             classify(&planted(RunFacts::ok().timed_out(), ""), &rules),

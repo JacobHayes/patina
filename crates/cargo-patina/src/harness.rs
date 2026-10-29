@@ -722,17 +722,6 @@ fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &Native
         "--sched-pct-steps",
         invocation.schedule.pct_steps.as_deref(),
     );
-    push_optional_value_flag(args, "--starve", invocation.schedule.starve.as_deref());
-    push_optional_arg(
-        args,
-        "--starve-max-len",
-        invocation.schedule.starve_max_len.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--starve-window",
-        invocation.schedule.starve_window.as_deref(),
-    );
     if invocation.schedule.swarm {
         args.push(OsString::from("--swarm"));
     }

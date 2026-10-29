@@ -69,17 +69,6 @@ use patina_dst_runtime::FaultKnob;
 /// own limits.
 const FAULT_SCALE_FULL: u64 = 1000;
 
-/// The `--starve-scale-permille` value that leaves the starvation sweep exactly
-/// as it was before the flag existed: 1000 per-mille = 1.0 = full intensity.
-/// Also the upper bound, for the reason [`FAULT_SCALE_FULL`] is one — the dial
-/// DAMPENS a tuned band, it never amplifies it past a ceiling chosen against the
-/// child `run` knobs' own limits.
-///
-/// The same grammar and the same identity as the fault dial, so an operator who
-/// has met one has met the other, but its own name: the two govern different
-/// planes, and a report that says "scale 10" has to be unambiguous about which.
-const STARVE_SCALE_FULL: u64 = FAULT_SCALE_FULL;
-
 /// Route the `campaign` verb.
 pub fn execute(invocation: CampaignInvocation) -> Result<i32, CliError> {
     run_campaign(invocation)
@@ -245,8 +234,8 @@ fn excludable(knob: FaultKnob) -> bool {
 /// The band material a generation draws every knob from: its 32-byte generation
 /// hash, followed by a domain-separated 32-byte extension block.
 ///
-/// The namespace grew because byte 31 was the last free one and the starvation
-/// fire gate still needed a draw INDEPENDENT of the policy it gates. Appending
+/// The namespace grew because byte 31 was the last free one and later bands
+/// still needed draws. Appending
 /// rather than re-hashing is the whole point: bytes 0..32 are the generation
 /// hash unchanged, so every band that existed before the extension derives
 /// byte-for-byte what it always did and every recorded campaign still
@@ -360,11 +349,7 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
 
 /// Dampen one band's drawn INTENSITY by a per-mille scale.
 ///
-/// Shared by both dials — `--fault-scale-permille` over the fault bands and
-/// `--starve-scale-permille` over the starvation policy's count and hold length
-/// — because they are one arithmetic with one identity ([`FAULT_SCALE_FULL`] and
-/// [`STARVE_SCALE_FULL`] are the same 1000), and two copies of it would be two
-/// chances to round differently.
+/// The `--fault-scale-permille` dial over the fault bands.
 ///
 /// Applied to the value the band ALREADY drew rather than to the band's ceiling,
 /// which is what makes `FAULT_SCALE_FULL` the exact identity — `(v * 1000 + 500)
@@ -382,26 +367,6 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
 /// mean rate is a hundredfold lower — which is the regime the operator asked for.
 fn scale_intensity(value: u64, scale_permille: u64) -> u64 {
     (value * scale_permille + FAULT_SCALE_FULL / 2) / FAULT_SCALE_FULL
-}
-
-/// Whether this generation runs a starvation policy at all.
-///
-/// The dominant lever of `--starve-scale-permille`. Dampening the policy's
-/// fields alone would still hand every generation a hold: the guest's exposure
-/// to the one exploration policy that
-/// can WEDGE it would stay at 100% of the sweep under a flag that says the
-/// opposite. Gating the whole policy is what makes a dampened campaign spend its
-/// budget on runs that finish, and it is not a loss of exploration — an
-/// unstarved generation still samples the guest under buggify, swarm, PCT and
-/// every fault band the campaign enabled.
-///
-/// At `STARVE_SCALE_FULL` the comparison is `byte * 1000 < 256_000`, true for
-/// all 256 byte values, so the gate is unconditionally open and the default
-/// sweep is byte-for-byte the sweep it always was. Its own claimed band byte, so
-/// the decision is independent of the policy's own shape rather than correlated
-/// with it.
-fn starve_band_fires(hash: &gen_byte::Bands, scale_permille: u64) -> bool {
-    u64::from(hash.read(gen_byte::STARVE_FIRE)) * STARVE_SCALE_FULL < scale_permille * 256
 }
 
 /// Derive the per-generation `run` flags from the generation hash. Every draw
@@ -647,61 +612,6 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         // every edge to one per 1024 gets an equal share of the generations.
         let stride = 1u64 << (hash.read(gen_byte::YIELD_STRIDE) % 11); // 1..=1024
         push_run_flag(&mut flags, "--yield-stride", RunValue::Int(stride));
-    }
-    if spec.starve {
-        // One byte, three fields. The low three bits pick the interval count; the
-        // next three pick the START WINDOW as a power of two; the top two pick the
-        // maximum interval length, also as a power of two.
-        //
-        // WHY POWERS OF TWO, AND WHY THIS WIDE. The window is measured in
-        // SCHEDULING DECISIONS, and a real guest's schedule length spans orders of
-        // magnitude — a toy two-thread probe takes a handful of decisions, an
-        // instrumented database stress run takes tens of thousands. A linear sweep
-        // over any single range would place every interval in the first fraction
-        // of a percent of the long runs (which is exactly what the fixed
-        // `--starve-window` default does) or would never reach the short ones. A
-        // log sweep from 512 to 65536 puts intervals both near startup and deep
-        // into a long schedule across a campaign.
-        //
-        // The maximum length is deliberately much smaller (16..128 decisions):
-        // it is also the scheduler's AGING CAP, so it bounds how long any task can
-        // be held off before liveness forces it to run. A narrow hold is what the
-        // lost-wakeup / missed-notify bug shapes need; a long one just stalls.
-        //
-        // The whole policy is gated by `--starve-scale-permille`
-        // (`starve_band_fires`): at full scale every generation starves, as it
-        // always has; below it, proportionally fewer do, and a generation that
-        // does not starve is still a full sample under the campaign's other
-        // knobs. Two of the three fields are then dampened and the third is
-        // deliberately left alone — see `CampaignSpec::starve_scale_permille`
-        // for which way each axis points and why.
-        let starve_scale = spec.starve_scale_permille;
-        if starve_band_fires(hash, starve_scale) {
-            let policy = hash.read(gen_byte::SCHED_STARVE);
-            // Dampened around the [1, 8] band's FLOOR, not its raw value: a
-            // gated generation starves, so it has at least one interval, and
-            // scaling `count - 1` makes 1000 the exact arithmetic identity.
-            let intervals = 1 + scale_intensity(u64::from(policy & 0b111), starve_scale); // [1, 8]
-            // NOT scaled: placement, not intensity, and WHICH END IS HARSH is a
-            // property of the guest rather than of the dial. Measured on
-            // `turso_stress`, 512 puts every hold in the startup prefix, where
-            // the policy defers nothing at all (`starve_events=0`) and the run
-            // completes; 65536 puts the same-shaped holds in the concurrent
-            // phase, where the run never finishes. For a SHORT guest the
-            // relationship inverts — a large window places starts past the end of
-            // the schedule, so nothing fires. There is no direction a uniform
-            // multiply could move this that is right for both, so it keeps its
-            // full log sweep at every scale.
-            let window = 1u64 << (9 + u32::from((policy >> 3) & 0b111)); // 512..65536
-            // Dampened, floored at one decision: `--starve-max-len` is a
-            // positive integer, and a zero-length hold is not a gentler hold but
-            // no hold at all — which the gate above already expresses honestly.
-            let max_len =
-                scale_intensity(1u64 << (4 + u32::from((policy >> 6) & 0b11)), starve_scale).max(1); // 16..128
-            push_run_flag(&mut flags, "--starve", RunValue::Int(intervals));
-            push_run_flag(&mut flags, "--starve-window", RunValue::Int(window));
-            push_run_flag(&mut flags, "--starve-max-len", RunValue::Int(max_len));
-        }
     }
     if let Some(nanos) = spec.watchdog_nanos {
         push_run_flag(&mut flags, "--liveness-watchdog", RunValue::Int(nanos));

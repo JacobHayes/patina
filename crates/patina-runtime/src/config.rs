@@ -123,7 +123,7 @@ pub struct RuntimeConfig {
     pub(super) params: BTreeMap<String, String>,
     pub(super) faults: FaultConfig,
     pub(super) buggify: BuggifyConfig,
-    /// The exploration scheduling policy (PCT / starvation). Default is the
+    /// The exploration scheduling policy (PCT). Default is the
     /// uniform-random policy, byte-for-byte the historical scheduler.
     pub(super) schedule_policy: SchedulePolicy,
     /// The yield stride an instrumented guest's edge hook reads: 0 takes no

@@ -40,8 +40,7 @@ pub use handoff::{
 pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
 pub use metadata::{
     AddressLayout, BuggifyConfigRecord, ComputeStop, DnsConfigRecord, FaultConfigRecord,
-    PctPolicyRecord, RunMetadata, SchedulePolicyRecord, StarvationPolicyRecord, SwarmConfigRecord,
-    WatchdogConfigRecord,
+    PctPolicyRecord, RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, WatchdogConfigRecord,
 };
 pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord};
 pub use recorder::{PrefixWriteError, Recorder};
@@ -121,7 +120,9 @@ pub use replay::Replayer;
 ///   (`process_crash_permille`), in place of one rate and a kind
 ///   (`crash_permille`, `crash_kind`), and the `Crash` marker records what
 ///   the crash took down (`crash_kind`).
-pub const TRACE_FORMAT_VERSION: u32 = 25;
+/// - 26: no `starvation` in the schedule policy metadata; the starvation
+///   policy is gone, so a format 25 trace that names it is refused.
+pub const TRACE_FORMAT_VERSION: u32 = 26;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

@@ -575,8 +575,7 @@ addresses this run actually connects between.",
 }
 
 /// Emit the human `PATINA_SCHEDULE_POLICY` line for a run that used an
-/// exploration scheduling policy (PCT / starvation), with a loud warning for a
-/// vacuous starvation configuration. The machine copy, bug-depth estimate
+/// exploration scheduling policy (PCT). The machine copy, bug-depth estimate
 /// included, is the facts document's `schedule_policy`. Suppressed
 /// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
 pub(super) fn emit_schedule_policy_report(
@@ -591,26 +590,14 @@ pub(super) fn emit_schedule_policy_report(
     }
     diagnostic!(
         "PATINA_SCHEDULE_POLICY pct={} pct_depth={} pct_change_points={} pct_change_points_hit={} \
-starvation={} starve_events={} starve_vacuous={} decisions={} bug_depth={}",
+decisions={} bug_depth={}",
         u8::from(report.pct),
         report.pct_depth,
         report.pct_change_points,
         report.pct_change_points_hit,
-        u8::from(report.starvation),
-        report.starve_events,
-        report.starve_vacuous,
         report.decisions,
         report.bug_depth(),
     );
-    if report.starve_vacuous > 0 {
-        diagnostic!(
-            "PATINA WARNING: vacuous starvation configuration — {} scheduling decision(s) would have \
-starved every runnable task and were forced to schedule anyway to preserve liveness. A starvation \
-configuration that routinely starves the only runnable task is testing nothing; narrow the starved \
-subset or the interval window.",
-            report.starve_vacuous,
-        );
-    }
 }
 
 /// Emit the human `PATINA_SDK_REPORT` line ([`sdk_report_line`]).

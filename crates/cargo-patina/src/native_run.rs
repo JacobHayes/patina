@@ -54,16 +54,13 @@ mod trace;
 const ENVP_SLOT_PREFIX: &str = "_PATINA_ENVP_SLOT_";
 
 pub(super) use child::NATIVE_CRASH_RESTART_EXIT;
-#[cfg(unix)]
-pub(super) use child::NativeChildStatus;
 use child::encode_guest_argv;
-#[cfg(unix)]
-pub(super) use child::native_child_status;
 use child::reconcile_replay_argv;
 #[cfg(unix)]
-use child::spawn_native_child;
 #[cfg(unix)]
 use child::wait_native_child_once;
+#[cfg(all(test, unix))]
+pub(super) use child::{NativeChildStatus, native_child_status};
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
 pub(super) use gate::effective_native_allow;
 pub(super) use gate::emit_native_deny_trap_note;
@@ -209,29 +206,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         )));
     }
 
-    // Starvation intervals reorder real thread execution adversarially. A guest
-    // whose synchronization is INTERPOSED (mutex/condvar/futex) is always safe —
-    // every wait is a scheduling boundary the aging guarantee can act on. But a
-    // guest with an *invisible atomic spinlock* (e.g. std's queue `RwLock`/`Parker`
-    // fast path) held across an interposed boundary can wedge: the adversarial
-    // deferral schedules the spinner while the lock holder is starved, and the
-    // spinner's atomics-only loop offers no boundary for aging to force the holder
-    // — the exact cooperative-scheduling limitation the vacuous-schedule warning
-    // flags. A yield stride closes it, one boundary every N edges, which bounds
-    // the aging delay by N edges. Warn loudly when starvation runs without one
-    // rather than risk a silent hang.
-    if invocation.schedule.starve.is_some() && invocation.schedule.yield_stride == 0 {
-        eprintln!(
-            "PATINA WARNING: starvation intervals (--starve) are enabled WITHOUT a yield stride, so \
-an atomics-only window is not schedulable. Starvation is liveness-safe for guests whose \
-synchronization is interposed (mutex/condvar/futex), but a guest with an invisible atomic spinlock \
-(e.g. std's queue RwLock/Parker fast path) held across a boundary can WEDGE under adversarial \
-deferral — the same atomics-only window the vacuous-schedule diagnostic flags as unreachable. \
-Build with `cargo patina build --instrument` and run with `--yield-stride N` (a scheduling point \
-every N edges) to make those windows schedulable so starvation stays liveness-safe."
-        );
-    }
-
     // Capture the mounted host directory into a deterministic filesystem image.
     // The supervisor is not interposed, so it may read the host tree freely; the
     // encoded image travels to the guest over an inherited descriptor and the
@@ -351,7 +325,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
             (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
         ],
         NativeRunMode::Replay { fingerprint, .. } => {
-            // Reconstruct the `+buggify` and `+pct`/`+starve`/`+swarm`/`+yieldstride`
+            // Reconstruct the `+buggify` and `+pct`/`+swarm`/`+yieldstride`
             // fingerprint components from the trace so replay is self-contained;
             // a policy trace replayed against a plain build still fails closed on
             // the fingerprint.
@@ -411,12 +385,6 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
     // the recording without its build identity.
     let replay_channel = replay_trace.as_ref().map(guest_trace_channel).transpose()?;
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
-    if crash_restart_plan.is_some() && invocation.schedule.starve.is_some() {
-        return Err(CliError::usage(
-            "native crash-restart (--machine-crash-permille, --process-crash-permille) with --starve is not implemented; refusing rather than mixing the restart supervisor with the starvation stall backstop",
-        ));
-    }
-
     // Every incarnation of the run is launched from this one description; only
     // its descriptors (trace channel, base filesystem, crash handoff) differ. A
     // run without a crash rate is the single incarnation 0. Returns the
@@ -525,7 +493,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
                 command.env(ENV_BUGGIFY_AFTER_SETUP, "1");
             }
         }
-        // Forward the exploration scheduling-policy (PCT / starvation) and swarm
+        // Forward the exploration scheduling-policy (PCT) and swarm
         // knobs through the same control plane. Recorded into the trace metadata
         // and restored from the trace on native replay; the fingerprint suffix
         // rejects a cross-policy replay.
@@ -633,97 +601,7 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
             crash_report: None,
             restart: None,
         })?;
-        // Starvation stall backstop (diagnostic, NOT a liveness guarantee; armed only
-        // when starvation is enabled, so it has zero effect on any other mode). The
-        // scheduler's aging bounds starvation for interposed synchronization, but a
-        // guest spinning inside a std-internal atomic critical section — which is NOT
-        // yield-point instrumented, so cooperative scheduling has no edge to preempt
-        // it while the lock holder is starved — can livelock. A hung generation
-        // silently eats a sweep slot, so the supervisor (uninterposed, real
-        // wall-clock) converts an already-hung run into a LOUD named fatal with a
-        // distinct nonzero exit so sweeps classify STARVATION_STALL instead of
-        // hanging. The threshold is deliberately generous (default 60 real seconds,
-        // `PATINA_STARVATION_STALL_SECS` override) so a healthy run normally finishes
-        // far inside it — a 10,000-iteration `turso_stress` generation takes about
-        // 30 s — though a busy enough host can still cross it; it never touches the
-        // recorded operation stream of a run that completes.
-        // It is an ELAPSED-TIME deadline, not a progress detector: the supervisor
-        // cannot see the scheduler's decision counter, so it cannot separate a wedge
-        // from a run that is merely slower than the deadline. That is exactly why a
-        // campaign files exit 111 under a class that is NOT counted as a bug found
-        // (`CampaignClass::is_finding`), and why the counter is the signal to publish
-        // if the two ever need telling apart from the outside.
-        if invocation.schedule.starve.is_some() {
-            let stall_secs: u64 = std::env::var("PATINA_STARVATION_STALL_SECS")
-                .ok()
-                .and_then(|value| value.trim().parse().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(60);
-            let capture = output::capture_active();
-            if capture {
-                command.stdout(Stdio::piped()).stderr(Stdio::piped());
-            }
-            let (mut child, inherited_guard) =
-                spawn_native_child(&mut command, &binary, &inherited_fds)?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(stall_secs);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_status)) => break,
-                    Ok(None) => {
-                        if std::time::Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            eprintln!(
-                                "patina: starvation stall — the run did not finish within {stall_secs}s \
-    under --starve. What this backstop measures is elapsed wall clock, not scheduler progress: the \
-    supervisor cannot see the decision counter, so it cannot tell a guest spinning inside an \
-    uninstrumented atomic critical section (std carries no yield point, so cooperative scheduling \
-    cannot preempt a spinner while the lock holder is starved — the documented starvation limitation, \
-    and the likely cause) from a run that is merely slower than this deadline. Not a liveness \
-    guarantee, and not a verdict on the guest. \
-    Killed with a nonzero exit."
-                            );
-                            inherited_guard.restore()?;
-                            drop(trace_sink);
-                            drop(replay_trace_file);
-                            drop(image_file);
-                            drop(coverage_file);
-                            drop(facts_file);
-                            return Ok(STARVATION_STALL_EXIT);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                    Err(error) => {
-                        return Err(CliError(format!(
-                            "failed while waiting on native program {}: {error}",
-                            binary.display()
-                        )));
-                    }
-                }
-            }
-            let output = child.wait_with_output().map_err(|error| {
-                CliError(format!(
-                    "failed while waiting on native program {}: {error}",
-                    binary.display()
-                ))
-            })?;
-            inherited_guard.restore()?;
-            let NativeChildStatus {
-                exit_code,
-                signal,
-                core,
-            } = native_child_status(output.status);
-            output::Captured {
-                exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
-                captured: capture,
-                signal,
-                core,
-            }
-        } else {
-            wait_native_child_once(&mut command, &binary, &inherited_fds)?.0
-        }
+        wait_native_child_once(&mut command, &binary, &inherited_fds)?.0
     };
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;
@@ -877,11 +755,6 @@ every N edges) to make those windows schedulable so starvation stays liveness-sa
     }
     Ok(exit)
 }
-
-/// Distinct exit code the supervisor returns when the starvation stall backstop
-/// kills a hung `--starve` run, so a sweep can classify `STARVATION_STALL` rather
-/// than treat the run as an ordinary crash.
-pub(super) const STARVATION_STALL_EXIT: i32 = 111;
 
 #[cfg(not(unix))]
 pub(super) fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError> {

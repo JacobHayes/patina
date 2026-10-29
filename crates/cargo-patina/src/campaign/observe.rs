@@ -1,6 +1,5 @@
 //! Campaign coverage, SDK-site folds, and guidance inputs.
 
-use super::classify::STARVATION_STALL_EXIT;
 use super::state::CampaignState;
 use super::{CampaignSpec, RunFacts};
 use crate::CliError;
@@ -102,9 +101,6 @@ pub(super) fn campaign_coverage_fingerprint(spec: &CampaignSpec, instrumented: b
     if spec.pct {
         fingerprint.push_str("+pct");
     }
-    if spec.starve {
-        fingerprint.push_str("+starve");
-    }
     if spec.swarm {
         fingerprint.push_str("+swarm");
     }
@@ -165,13 +161,13 @@ pub(super) fn fold_sites_generation(
 /// Whether this generation could have written its coverage map at all.
 ///
 /// The map is dumped from the shim's shutdown path. A generation the supervisor
-/// KILLED never reaches it: a `--timeout-secs` kill and the `--starve` stall
-/// backstop both SIGKILL the process group, and a guest that died on a signal
+/// KILLED never reaches it: a `--timeout-secs` kill SIGKILLs the process
+/// group, and a guest that died on a signal
 /// (an `abort()`, a fatal fault) skips `atexit` by definition. A generation that
 /// exited on its own — with any status, zero or not — did reach shutdown, so a
 /// missing map there is a real plumbing failure and must stay loud.
 pub(super) fn generation_reached_shutdown(facts: &RunFacts) -> bool {
-    !facts.timed_out && facts.signal.is_none() && facts.exit_code != STARVATION_STALL_EXIT
+    !facts.timed_out && facts.signal.is_none()
 }
 
 pub(super) fn fold_edge_coverage_generation(
@@ -197,8 +193,8 @@ pub(super) fn fold_edge_coverage_generation(
         .unwrap_or(0);
     if len == 0 {
         // A killed generation has no coverage to contribute and never claimed to,
-        // so it is skipped. Failing the whole campaign here would make `--starve` (whose stall
-        // backstop kills a wedged generation BY DESIGN) unusable with coverage.
+        // so it is skipped. Failing the whole campaign here would make a
+        // `--timeout-secs` kill unusable with coverage.
         if !reached_shutdown {
             let _ = fs::remove_file(path);
             store.note_generation_without_covmap(generation);

@@ -44,7 +44,6 @@ fn pct_record_replay_reproduces_schedule_and_records_policy() {
             depth: 3,
             steps: 50,
         }),
-        starvation: None,
     };
     let config = RuntimeConfig::record(11, &trace, "fp+pct").with_schedule_policy(policy);
     let mut record = Context::from_config(config).unwrap();

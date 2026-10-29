@@ -507,11 +507,12 @@ impl CampaignCoverageStore {
     /// Record that `generation` contributed no coverage map, advancing the
     /// watermark so the store's sequential-accumulation invariant still holds.
     ///
-    /// A generation the supervisor KILLED — a `--timeout-secs` kill, the
-    /// `--starve` stall backstop, a guest that died on a signal — never reaches
+    /// A generation the supervisor KILLED — a `--timeout-secs` kill, a
+    /// guest that died on a signal — never reaches
     /// the shim's shutdown dump, so it has no map and never will. Without this
     /// the next generation's fold reads as a gap and fails the whole campaign,
-    /// which would make coverage and `--starve` mutually exclusive in practice.
+    /// which would make coverage and a timed-out generation mutually exclusive in
+    /// practice.
     /// Skipping is not the same as folding nothing: no edge is claimed and the
     /// plateau window still advances, so a long run of killed generations is
     /// correctly reported as a plateau rather than as progress.

@@ -135,7 +135,7 @@ fn render_overview() -> String {
     push_prose(
         &mut out,
         "A flag that takes a required value accepts both `--flag VALUE` and `--flag=VALUE` in \
-every family. A flag with an OPTIONAL value (e.g. --buggify, --sched-pct, --starve, \
+every family. A flag with an OPTIONAL value (e.g. --buggify, --sched-pct, \
 --liveness-watchdog, --converge-within) accepts only the bare `--flag` or `--flag=VALUE` — the \
 space form is ambiguous with a positional. Everything after a `--` separator is the \
 guest's argv (or the oracle's), passed untouched in every family.",

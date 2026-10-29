@@ -122,9 +122,7 @@ pub use builder::RuntimeBuilder;
 pub use charge::CpuAlarms;
 pub use clock::VirtualClock;
 pub use recording::TraceTransport;
-pub use scheduler::{
-    DetScheduler, PctConfig, SchedulePolicy, SchedulePolicyReport, StarvationConfig,
-};
+pub use scheduler::{DetScheduler, PctConfig, SchedulePolicy, SchedulePolicyReport};
 
 pub use config_env::trace_fd_from_env;
 pub use crash::{CrashAttemptSink, Incarnation, RESTART_DOWNTIME_NANOS};
@@ -471,21 +469,6 @@ pub const ENV_SCHED_PCT: &str = "PATINA_RT_SCHED_PCT";
 /// points. Default [`DEFAULT_PCT_STEPS`]. Inert without [`ENV_SCHED_PCT`].
 pub const ENV_SCHED_PCT_STEPS: &str = "PATINA_RT_SCHED_PCT_STEPS";
 
-/// Enable the starvation-interval exploration scheduling policy. Its value is the
-/// number of bounded intervals to place (>= 1); an empty value uses the default
-/// count. Presence enables starvation; absence leaves it off. Folds a `+starve`
-/// fingerprint component.
-pub const ENV_SCHED_STARVE: &str = "PATINA_RT_SCHED_STARVE";
-
-/// Maximum length (scheduling decisions) of any starvation interval — the bound
-/// that keeps starvation liveness-safe. Default [`DEFAULT_STARVE_MAX_LEN`]. Inert
-/// without [`ENV_SCHED_STARVE`].
-pub const ENV_SCHED_STARVE_MAX_LEN: &str = "PATINA_RT_SCHED_STARVE_MAX_LEN";
-
-/// Window `[1, N]` over which starvation interval starts are placed. Default
-/// [`DEFAULT_STARVE_WINDOW`]. Inert without [`ENV_SCHED_STARVE`].
-pub const ENV_SCHED_STARVE_WINDOW: &str = "PATINA_RT_SCHED_STARVE_WINDOW";
-
 /// The yield stride of an instrumented guest's edge hook: an unsigned 32-bit
 /// count, 0 (the default) for no added scheduling points, N for one every Nth
 /// edge a thread executes. A non-zero stride is recorded in the schedule policy
@@ -562,15 +545,6 @@ pub const DEFAULT_PCT_DEPTH: u32 = 3;
 
 /// Default PCT expected schedule length.
 pub const DEFAULT_PCT_STEPS: u64 = 2_000;
-
-/// Default number of starvation intervals when `--starve` is given bare.
-pub const DEFAULT_STARVE_INTERVALS: u32 = 3;
-
-/// Default maximum starvation interval length (bounded → liveness-safe).
-pub const DEFAULT_STARVE_MAX_LEN: u64 = 32;
-
-/// Default starvation interval start window.
-pub const DEFAULT_STARVE_WINDOW: u64 = 512;
 
 /// FoundationDB's default per-evaluation buggify firing probability, in per-mille.
 pub const DEFAULT_BUGGIFY_FIRE_PERMILLE: u16 = 250;

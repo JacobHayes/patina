@@ -4,7 +4,7 @@ use super::super::selftest::declared_rules_fixture;
 use super::super::spec::{classify_rules_to_json, json_classify_rules};
 use super::super::{
     AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL,
-    FaultPlanes, STARVE_SCALE_FULL,
+    FaultPlanes,
 };
 use super::*;
 use std::ffi::OsString;
@@ -100,7 +100,7 @@ fn declared_rules_are_grammar_validated_and_loud() {
     );
 }
 
-/// The bound and the precedence of both scale dials, on the JSON and the flag
+/// The bound and the precedence of the scale dial, on the JSON and the flag
 /// path: a spec file cannot ask for a scale ABOVE the tuned policy (it
 /// dampens, it never amplifies), an explicit flag overrides a spec file's
 /// value, and with neither the default is full intensity.
@@ -111,22 +111,13 @@ fn the_scale_dials_are_bounded_and_the_flag_beats_the_spec_file() {
     let spec_flag = path.display().to_string();
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     type Field = fn(&CampaignSpec) -> u64;
-    let dials: [(&str, &str, &str, Field, u64); 2] = [
-        (
-            "faults",
-            "fault_scale_permille",
-            "--fault-scale-permille",
-            |spec| spec.fault_scale_permille,
-            FAULT_SCALE_FULL,
-        ),
-        (
-            "starve",
-            "starve_scale_permille",
-            "--starve-scale-permille",
-            |spec| spec.starve_scale_permille,
-            STARVE_SCALE_FULL,
-        ),
-    ];
+    let dials: [(&str, &str, &str, Field, u64); 1] = [(
+        "faults",
+        "fault_scale_permille",
+        "--fault-scale-permille",
+        |spec| spec.fault_scale_permille,
+        FAULT_SCALE_FULL,
+    )];
     for (switch, key, flag, field, full) in dials {
         fs::write(&path, format!(r#"{{"{switch}": true, "{key}": 1001}}"#)).expect("write");
         let error = parse(args(&["art", "--spec", &spec_flag]))
