@@ -28,6 +28,12 @@ impl MemFs {
             .expect("handle references a description"))
     }
 
+    /// The open file description `fd` refers to: one per `open`, shared by
+    /// every duplicate of it.
+    pub fn description_of(&self, fd: Fd) -> DriverResult<u64> {
+        self.handles.get(&fd).copied().ok_or_else(|| invalid_fd(fd))
+    }
+
     /// Mint a descriptor on `node`, taking the node's open reference with it.
     pub(super) fn allocate_handle(
         &mut self,

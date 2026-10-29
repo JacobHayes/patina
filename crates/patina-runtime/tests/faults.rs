@@ -77,6 +77,111 @@ fn a_machine_crash_can_drop_an_unsynced_record_a_process_crash_keeps() {
     );
 }
 
+/// What a commit that retries a failed fsync leaves behind a machine crash.
+struct RetriedCommit {
+    /// Some fsync of the record failed with a writeback error before one
+    /// succeeded.
+    retried: bool,
+    /// The crash came after the store acknowledged the commit.
+    acknowledged: bool,
+    crash: InjectedCrash,
+}
+
+/// The classic fsyncgate store: commit a record to a log whose name is
+/// already durable, retry every failed call (an fsync included) until it
+/// succeeds, and take the first successful fsync as the record being
+/// durable. Then keep working, so a crash can land after the acknowledgement.
+fn commit_retrying_fsync(seed: u64) -> Option<RetriedCommit> {
+    let config = RuntimeConfig::seeded(seed)
+        .with_fs_error_permille(300)
+        .with_crash_permille(150)
+        .with_crash_kind(CrashKind::Machine)
+        .with_crash_supervisor();
+    let mut context = Context::from_config(config).unwrap();
+    let mut retried = false;
+    let mut acknowledged = false;
+    fn retry<T>(
+        context: &mut Context,
+        mut call: impl FnMut(&mut Context) -> Result<T, RuntimeError>,
+        mut failed: impl FnMut(ErrorCode),
+    ) -> Result<T, RuntimeError> {
+        loop {
+            match call(context) {
+                Err(RuntimeError::Effect(error)) => failed(error.code),
+                other => return other,
+            }
+        }
+    }
+    let mut run = |context: &mut Context| -> Result<(), RuntimeError> {
+        let fd = retry(
+            context,
+            |c| c.fs_open("/commit.log", OpenFlags::create_truncate_write()),
+            |_| {},
+        )?;
+        let dir = retry(context, |c| c.fs_open("/", OpenFlags::read_only()), |_| {})?;
+        retry(context, |c| c.fs_sync(dir), |_| {})?;
+        retry(context, |c| c.fs_write(fd, b"durable-record-0001"), |_| {})?;
+        retry(
+            context,
+            |c| c.fs_sync(fd),
+            |code| retried |= matches!(code, ErrorCode::Io | ErrorCode::NoSpace),
+        )?;
+        acknowledged = true;
+        for _ in 0..8 {
+            let other = retry(
+                context,
+                |c| c.fs_open("/other", OpenFlags::create_truncate_write()),
+                |_| {},
+            )?;
+            retry(context, |c| c.fs_write(other, b"later work"), |_| {})?;
+        }
+        Ok(())
+    };
+    match run(&mut context) {
+        Ok(()) => None,
+        Err(RuntimeError::InjectedCrash(crash)) => Some(RetriedCommit {
+            retried,
+            acknowledged,
+            crash: *crash,
+        }),
+        Err(error) => panic!("unexpected error {error}"),
+    }
+}
+
+/// A writeback error marks the dirty pages clean without writing them, so a
+/// retried fsync that succeeds makes nothing durable: every machine crash
+/// after such an acknowledgement loses the record, which is how the
+/// retrying store is caught. A commit whose fsync never failed keeps it.
+#[test]
+fn a_machine_crash_catches_a_store_that_retried_a_failed_fsync() {
+    let commits: Vec<RetriedCommit> = (0..512)
+        .filter_map(commit_retrying_fsync)
+        .filter(|commit| commit.acknowledged)
+        .collect();
+    let record = |commit: &RetriedCommit| {
+        commit
+            .crash
+            .snapshot
+            .clone()
+            .into_memfs()
+            .contents("/commit.log")
+            .unwrap()
+    };
+    let (retried, clean): (Vec<_>, Vec<_>) = commits.iter().partition(|commit| commit.retried);
+    assert!(!retried.is_empty(), "no seed retried a failed fsync");
+    assert!(!clean.is_empty(), "no seed committed without a failure");
+    for commit in retried {
+        assert_ne!(
+            record(commit),
+            b"durable-record-0001",
+            "a retried fsync made the record durable"
+        );
+    }
+    for commit in clean {
+        assert_eq!(record(commit), b"durable-record-0001");
+    }
+}
+
 #[test]
 fn replay_with_a_different_crash_rate_fails_closed() {
     let directory = tempdir().unwrap();

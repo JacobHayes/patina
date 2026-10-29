@@ -115,8 +115,19 @@ pub trait FsDriver: Send {
     fn remove_file(&mut self, _clock: FsClock, _path: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("remove file"))
     }
+    /// `fsync`. A driver that models writeback errors reports one here once
+    /// per open file description, as `file_check_and_advance_wb_err` does.
     fn sync(&mut self, _fd: Fd) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("sync"))
+    }
+    /// An `fsync` of `fd` failed with `code` (`EIO`, `ENOSPC`) because writing
+    /// its file's dirty pages back failed: the kernel marks those pages clean
+    /// without them reaching the disk (they stay readable in the page cache),
+    /// and records the error against every other open file description of the
+    /// file, each of which reports it once on its next `fsync`. The failing
+    /// call reports it itself. A driver with no page cache has nothing to do.
+    fn fail_writeback(&mut self, _fd: Fd, _code: ErrorCode) -> DriverResult<()> {
+        Ok(())
     }
     /// `ftruncate`. Stamps `mtime`/`ctime` even when the length is unchanged,
     /// as `do_truncate` does.

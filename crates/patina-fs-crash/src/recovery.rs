@@ -223,8 +223,10 @@ impl CrashFs {
                 baseline
             } else {
                 match self.live.file_data(path) {
+                    // A page a writeback error dropped never reached the
+                    // disk, so no tear can have persisted it.
                     Ok(current) => {
-                        let current = current.clone();
+                        let current = self.written_back(source_inode, &baseline, current);
                         self.torn_merge(&baseline, &current)
                     }
                     Err(_) => baseline,
@@ -366,6 +368,10 @@ impl CrashFs {
         self.staged_times.clear();
         self.pending.clear();
         self.dirty.clear();
+        // The cache is rebuilt from the disk, and the errors recorded on it
+        // go with it.
+        self.lost.clear();
+        self.unseen_errors.clear();
         Ok(())
     }
 

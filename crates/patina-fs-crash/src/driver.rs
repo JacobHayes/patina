@@ -12,7 +12,7 @@ use crate::baseline::DurableTimes;
 use crate::namespace::{PendingKind, Removed, normalize_entry_path, swapped};
 
 /// The page `cachestat` counts dirty pages in: the virtual machine's.
-const DIRTY_PAGE: u64 = 4096;
+pub(crate) const DIRTY_PAGE: u64 = 4096;
 
 impl FsDriver for CrashFs {
     fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
@@ -112,8 +112,12 @@ impl FsDriver for CrashFs {
 
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
         let ino = self.live.fd_metadata(fd).ok().map(|metadata| metadata.ino);
+        let description = self.live.description_of(fd).ok();
         self.live.close(fd)?;
         self.open_paths.remove(&fd);
+        if let Some(description) = description {
+            self.description_closed(description);
+        }
         self.forget_if_gone(ino);
         Ok(())
     }
@@ -198,8 +202,11 @@ impl FsDriver for CrashFs {
         self.staged_times
             .insert(metadata.ino, DurableTimes::from(metadata));
         match metadata.kind {
+            // Every dirty page is written back; a page a writeback error
+            // dropped is clean, so the disk keeps what it had there.
             FsEntryKind::File => {
-                let bytes = self.live.fd_file_data(fd)?.clone();
+                let durable = self.durable_content(metadata.ino);
+                let bytes = self.written_back(metadata.ino, &durable, self.live.fd_file_data(fd)?);
                 self.staged_content.insert(metadata.ino, bytes);
                 self.dirty.remove(&metadata.ino);
             }
@@ -216,7 +223,11 @@ impl FsDriver for CrashFs {
             | FsEntryKind::Socket
             | FsEntryKind::CharDevice => {}
         }
-        Ok(())
+        self.take_unseen_error(fd)
+    }
+
+    fn fail_writeback(&mut self, fd: Fd, code: ErrorCode) -> DriverResult<()> {
+        self.writeback_failed(fd, code)
     }
 
     /// A length change is unsynced data like a write: the live image takes it
@@ -528,6 +539,7 @@ impl CrashFs {
         };
         let first = offset / DIRTY_PAGE;
         let last = (offset + written as u64 - 1) / DIRTY_PAGE;
+        self.rewritten(metadata.ino, first, last);
         self.dirty
             .entry(metadata.ino)
             .or_default()
@@ -535,9 +547,20 @@ impl CrashFs {
     }
 
     /// `ino` is `len` bytes long now: its pages past the end are gone.
+    /// A page a writeback error dropped that the new end cuts through is
+    /// zeroed past it through its block (`ext4_block_truncate_page`), which
+    /// dirties the page again.
     fn truncated(&mut self, ino: u64, len: u64) {
         if let Some(pages) = self.dirty.get_mut(&ino) {
             pages.retain(|page| *page < len.div_ceil(DIRTY_PAGE));
+        }
+        self.rewritten(ino, len.div_ceil(DIRTY_PAGE), u64::MAX);
+        let tail = len / DIRTY_PAGE;
+        if !len.is_multiple_of(DIRTY_PAGE)
+            && self.lost.get(&ino).is_some_and(|lost| lost.contains(&tail))
+        {
+            self.rewritten(ino, tail, tail);
+            self.dirty.entry(ino).or_default().insert(tail);
         }
     }
 
@@ -554,6 +577,11 @@ impl CrashFs {
             return Ok(());
         }
         let metadata = self.live.fd_metadata(fd)?;
+        // A range at or past the end leaves the file as it was (a punch
+        // there returns at once; a zeroing that grew the file ends past it).
+        if offset >= metadata.len {
+            return Ok(());
+        }
         let written = |page: u64| {
             self.live
                 .fd_file_data(fd)
@@ -567,6 +595,7 @@ impl CrashFs {
         .map(|page| page.filter(|page| written(*page)));
         let end = offset.saturating_add(len);
         let (first, last) = (offset / DIRTY_PAGE, (end - 1) / DIRTY_PAGE);
+        self.rewritten(metadata.ino, first, last);
         let pages = self.dirty.entry(metadata.ino).or_default();
         pages.retain(|page| *page < first || *page > last);
         for page in partial.into_iter().flatten() {
@@ -593,10 +622,12 @@ impl CrashFs {
     /// `ino` may have lost its last name or reference: once it is gone, its
     /// dirty pages go with it.
     fn forget_if_gone(&mut self, ino: Option<u64>) {
-        if let Some(ino) = ino.filter(|ino| self.dirty.contains_key(ino))
+        if let Some(ino) =
+            ino.filter(|ino| self.dirty.contains_key(ino) || self.lost.contains_key(ino))
             && self.live.inode_metadata(ino).is_err()
         {
             self.dirty.remove(&ino);
+            self.lost.remove(&ino);
         }
     }
 }

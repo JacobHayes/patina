@@ -334,11 +334,22 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.remove_file(clock, path)
     }
 
+    /// An injected `EIO` or `ENOSPC` is a failed writeback, which the inner
+    /// driver models (the dirty pages are dropped from writeback, and the
+    /// file's other descriptions see the error once). An `EINTR` stopped
+    /// before any writeback, so the pages stay dirty.
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::Sync) {
+            if matches!(error.code, ErrorCode::Io | ErrorCode::NoSpace) {
+                self.inner.fail_writeback(fd, error.code)?;
+            }
             return Err(error);
         }
         self.inner.sync(fd)
+    }
+
+    fn fail_writeback(&mut self, fd: Fd, code: ErrorCode) -> DriverResult<()> {
+        self.inner.fail_writeback(fd, code)
     }
 
     fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {

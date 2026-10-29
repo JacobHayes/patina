@@ -37,6 +37,10 @@
 //!   creation leaves whatever the name held before it. A temp file whose
 //!   creation was lost too stays gone; a reused journal name whose unlink and
 //!   re-creation were both lost holds the first journal.
+//! - **Writeback errors**: an `fsync` that failed writing a file's dirty pages
+//!   back ([`FsDriver::fail_writeback`]) leaves them clean but not on disk, so
+//!   no later `fsync` or `sync` makes them durable and a crash reverts them;
+//!   the error reaches each open file description once (see [`writeback`]).
 //!
 //! Files, directories, symlinks, named pipes, socket nodes and whiteouts are all
 //! carried through the durable baseline and recomputed on crash with the same
@@ -74,6 +78,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::{CrashKind, EffectError, ErrorCode, Fd};
 use patina_dst_driver_api::DriverResult;
+#[cfg(doc)]
+use patina_dst_driver_api::FsDriver;
 use patina_dst_fs_mem::{FileData, FsSnapshot, MemFs};
 use patina_dst_rng_seeded::SplitMix64;
 
@@ -82,6 +88,7 @@ mod driver;
 mod namespace;
 mod recovery;
 mod torn;
+mod writeback;
 
 use baseline::{Baseline, DurableTimes, enumerate};
 use namespace::PendingOp;
@@ -132,6 +139,13 @@ pub struct CrashFs {
     /// durability point, by inode: `cachestat`'s dirty pages. Anonymous
     /// files are no part of the durable image and have none.
     dirty: BTreeMap<u64, BTreeSet<u64>>,
+    /// The 4096-byte pages of each named file a writeback error dropped, by
+    /// inode: clean in the cache, but the disk never got them (see
+    /// [`writeback`]).
+    lost: BTreeMap<u64, BTreeSet<u64>>,
+    /// The writeback error each open file description has yet to report, by
+    /// description.
+    unseen_errors: BTreeMap<u64, ErrorCode>,
     policy: CrashPolicy,
     rng: SplitMix64,
     crashes: u64,
@@ -260,15 +274,31 @@ impl CrashFs {
             pending: Vec::new(),
             open_paths: BTreeMap::new(),
             dirty: BTreeMap::new(),
+            lost: BTreeMap::new(),
+            unseen_errors: BTreeMap::new(),
             policy,
             rng: SplitMix64::new(seed),
             crashes: 0,
         }
     }
 
-    /// Make the entire live image durable as one deterministic checkpoint.
+    /// Make the entire live image durable as one deterministic checkpoint:
+    /// every dirty page is written back, and the pages a writeback error
+    /// dropped are not (they are clean).
     pub fn checkpoint(&mut self) {
+        let durable: BTreeMap<u64, FileData> = self
+            .lost
+            .keys()
+            .map(|ino| (*ino, self.durable_content(*ino)))
+            .collect();
         self.durable = enumerate(&self.live);
+        let mut files = std::mem::take(&mut self.durable.files);
+        for file in files.values_mut() {
+            if let Some(durable) = durable.get(&file.inode) {
+                file.contents = self.written_back(file.inode, durable, &file.contents);
+            }
+        }
+        self.durable.files = files;
         self.staged_content.clear();
         self.staged_times.clear();
         self.pending.clear();

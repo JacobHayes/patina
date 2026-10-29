@@ -174,7 +174,11 @@ into the trace so replay reproduces them flag-free.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
   (seeded delay before every eligible fs op, so slow I/O reorders against timers
-  and peers).
+  and peers). An `fsync` failed with EIO or ENOSPC is a failed writeback, as on
+  Linux: the file's dirty pages stay readable but are marked clean, so a
+  retried `fsync` that succeeds makes none of them durable and a machine crash
+  loses them, and each other open description of the file reports the error
+  once on its next `fsync`.
 - **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
   `--net-latency-nanos` (base delivery latency, on datagrams and TCP alike).
 - **DNS**:

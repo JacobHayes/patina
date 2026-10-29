@@ -112,7 +112,9 @@ name. Each knob emits a report, and a knob that never fired is a warning or a
 knob declaration, and vacuity tests per class.
 
 **Crash consistency.** `CrashFs` rolls back to the durable image with seeded torn
-writes, and native `--crash-permille` restarts a fresh incarnation whose handoff
+writes; an `fsync` failed by an injected EIO or ENOSPC drops the dirty pages
+from writeback and reports once per open description, as Linux's `errseq` does;
+and native `--crash-permille` restarts a fresh incarnation whose handoff
 replays against its recorded digest (`docs/crash-restart-protocol.md`).
 Oracle: the fs-crash unit suite and native crash-restart record/replay.
 
