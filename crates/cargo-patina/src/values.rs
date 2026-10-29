@@ -62,6 +62,7 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
             }),
         Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::AddressPair => address_pair(name, value).map(drop),
+        Kind::FsErrorTarget => fs_error_target(name, value).map(drop),
         Kind::UnsupportedSymbols => unsupported_symbols(name, value).map(drop),
         Kind::Enum(allowed) => {
             if allowed.contains(&value) {
@@ -101,6 +102,14 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
         }
         Kind::Str => Ok(()),
     }
+}
+
+/// A `--fs-error-at` value: `KIND:N[:ERRNO]`.
+pub(crate) fn fs_error_target(
+    name: &str,
+    value: &str,
+) -> Result<patina_dst_driver_api::FsErrorTarget, String> {
+    value.parse().map_err(|error| format!("{name}: {error}"))
 }
 
 fn u64_of(name: &str, value: &str) -> Result<u64, String> {

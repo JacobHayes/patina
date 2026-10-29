@@ -230,6 +230,30 @@ extern "C" fn fdatasync(fd: c_int) -> c_int {
     cancel(c"fdatasync");
     crate::abi::libc_result(crate::fd::fsync(fd), -1)
 }
+/// `sync(2)`: the volume made durable; it reports nothing.
+#[unsafe(no_mangle)]
+extern "C" fn sync() {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::advice::patina_sync();
+}
+/// `syncfs(2)` through `fd`.
+#[unsafe(no_mangle)]
+extern "C" fn syncfs(fd: c_int) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    crate::advice::patina_syncfs(fd)
+}
+/// `sync_file_range(2)`, a cancellation point.
+#[unsafe(no_mangle)]
+extern "C" fn sync_file_range(
+    fd: c_int,
+    offset: libc::off64_t,
+    nbytes: libc::off64_t,
+    flags: core::ffi::c_uint,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    cancel(c"sync_file_range");
+    crate::advice::patina_sync_file_range(fd, offset, nbytes, flags)
+}
 #[unsafe(no_mangle)]
 extern "C" fn lseek64(fd: c_int, offset: libc::off64_t, whence: c_int) -> libc::off64_t {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

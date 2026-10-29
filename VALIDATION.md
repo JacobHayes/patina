@@ -112,11 +112,16 @@ name. Each knob emits a report, and a knob that never fired is a warning or a
 knob declaration, and vacuity tests per class.
 
 **Crash consistency.** `CrashFs` rolls back to the durable image with seeded torn
-writes; an `fsync` failed by an injected EIO or ENOSPC drops the dirty pages
-from writeback and reports once per open description, as Linux's `errseq` does;
+writes; an `fsync`, `sync` or `syncfs` failed by an injected EIO or ENOSPC drops
+the dirty pages from writeback and reports once per open description per check,
+as Linux's `errseq` does (`fsync` and a `WAIT`ing `sync_file_range` the file's,
+`syncfs` the volume's), and `posix_fadvise(DONTNEED)` drops clean pages so a
+re-read sees the disk;
 and native `--crash-permille` restarts a fresh incarnation whose handoff
 replays against its recorded digest (`docs/crash-restart-protocol.md`).
-Oracle: the fs-crash unit suite and native crash-restart record/replay.
+Oracle: the fs-crash unit suite, native crash-restart record/replay, and a
+native store that fails closed after a targeted (`--fs-error-at`) writeback
+failure and re-reads the disk.
 
 **Liveness.** A wedged run, frozen-clock churn or call-free compute starving a
 timed peer stops with a `PATINA_VIOLATION liveness` finding and a replayable
@@ -164,9 +169,14 @@ versions, target triple and fingerprint.
   `mise run conformance:coverage` lists the registry entries no scenario covers
   and no exclusion accounts for.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block
-  accounting and the volume page cache are not modeled. `CrashFs` renames are
-  always atomic, and directory-durability loss covers explicitly created entries
-  only.
+  accounting and page-cache residency are not modeled: `cachestat` counts every
+  page of a file cached (a page `DONTNEED` dropped, or one over a hole never
+  read, included), and `DONTNEED` leaves every page of a mapped file. A failed
+  writeback loses all the dirty pages it covers, and a failed `sync`/`syncfs`
+  still commits the metadata. A `--crash-kind process` restart boots from the
+  page cache as its disk, so pages a failed writeback dropped, and writeback
+  errors nobody saw, do not reach the restarted incarnation. `CrashFs` renames are always atomic, and
+  directory-durability loss covers explicitly created entries only.
 - **Custom allocators.** Multi-threaded jemalloc has no automated end-to-end test.
 - **Scope.** One record path is one finalized context, so multi-test aggregation
   is unsupported. Arbitrary host DNS, arbitrary FFI, dynamic loading and full

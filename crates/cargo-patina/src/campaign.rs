@@ -170,6 +170,9 @@ pub(crate) mod gen_byte;
 enum BandWaiver {
     /// Partition endpoints must come from the guest's topology.
     Topology,
+    /// A targeted fault names one operation of the guest's own sequence,
+    /// which only a check written against that guest can know.
+    Targeted,
     /// The DNS host table is workload shape passed through from the spec.
     Workload,
 }
@@ -185,7 +188,7 @@ impl BandPolicy {
                 claims
             }
             Self::Waived(waiver) => match waiver {
-                BandWaiver::Topology | BandWaiver::Workload => &[],
+                BandWaiver::Topology | BandWaiver::Workload | BandWaiver::Targeted => &[],
             },
         }
     }
@@ -228,6 +231,7 @@ const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
         // a per-generation draw, and is passed through from the spec (see the
         // DNS block in `derive_flags`).
         FaultKnob::DnsEntry => BandPolicy::Waived(BandWaiver::Workload),
+        FaultKnob::FsErrorAt => BandPolicy::Waived(BandWaiver::Targeted),
     }
 }
 
@@ -278,9 +282,10 @@ fn band_byte(hash: &gen_byte::Bands, knob: FaultKnob, nth: usize) -> u8 {
 #[cfg(test)]
 fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
     match knob {
-        FaultKnob::FsErrorPermille | FaultKnob::FsShortPermille | FaultKnob::FsLatencyNanos => {
-            Some("fs")
-        }
+        FaultKnob::FsErrorPermille
+        | FaultKnob::FsErrorAt
+        | FaultKnob::FsShortPermille
+        | FaultKnob::FsLatencyNanos => Some("fs"),
         FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => Some("dns"),
         FaultKnob::EntropyFailPermille => Some("entropy"),
         FaultKnob::EpochJumpNanos => Some("clock"),

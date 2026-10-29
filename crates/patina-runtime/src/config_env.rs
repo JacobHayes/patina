@@ -177,6 +177,16 @@ impl RuntimeConfig {
             FaultKnob::FsErrorPermille => {
                 self.faults.fs.error_permille = parse_permille(env, value)?;
             }
+            FaultKnob::FsErrorAt => {
+                let spellings: Vec<String> = serde_json::from_str(value)
+                    .map_err(|error| RuntimeError::Config(format!("{env} is invalid: {error}")))?;
+                for spelling in spellings {
+                    let target = spelling
+                        .parse()
+                        .map_err(|error| RuntimeError::Config(format!("{env}: {error}")))?;
+                    self.faults.fs.error_at.insert(target);
+                }
+            }
             FaultKnob::FsShortPermille => {
                 self.faults.fs.short_permille = parse_permille(env, value)?;
             }

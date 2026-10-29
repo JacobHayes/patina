@@ -92,6 +92,11 @@ const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
             "Fail eligible fs ops at N per-mille with a seeded errno (EIO/ENOSPC/EINTR per op).",
             KnobGroup::Fault,
         ),
+        FaultKnob::FsErrorAt => (
+            Value::Required("KIND:N[:ERRNO]", Kind::FsErrorTarget),
+            "Fail the Nth fault-eligible fs op of KIND (as the fs fault report names it: sync, sync_all, write, read_at, ...) with ERRNO (EIO, the default; ENOSPC or EINTR where the op can fail so), whatever the seed (repeatable). A target that never landed makes the fs fault report vacuous.",
+            KnobGroup::Fault,
+        ),
         FaultKnob::FsShortPermille => (
             Value::Required("N", Kind::Permille),
             "Truncate fs reads/writes at N per-mille (short I/O, ≥1 byte).",

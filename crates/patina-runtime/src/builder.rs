@@ -552,6 +552,7 @@ impl RuntimeBuilder {
         // filesystem that bypassed the fault config (the gap this replaced).
         let fs_fault_knobs_set = self.config.faults.crash != Default::default()
             || self.config.faults.fs.error_permille != 0
+            || !self.config.faults.fs.error_at.is_empty()
             || self.config.faults.fs.short_permille != 0;
         if self.filesystem.is_some() {
             // An explicit filesystem (`with_filesystem`/`with_captured_filesystem`)
@@ -560,8 +561,8 @@ impl RuntimeBuilder {
             if fs_fault_knobs_set {
                 return Err(RuntimeError::Config(
                     "a filesystem was installed explicitly while filesystem fault \
-                     knobs (--crash-permille / --crash-kind / \
-                     --fs-error-permille / --fs-short-permille) are set; those \
+                     knobs (--crash-permille / --crash-kind / --fs-error-permille / \
+                     --fs-error-at / --fs-short-permille) are set; those \
                      knobs would be silently ignored. Supply the durable image via \
                      RuntimeBuilder::with_fs_image so the runtime builds the \
                      filesystem from the fault configuration."
@@ -609,6 +610,7 @@ impl RuntimeBuilder {
                 self.filesystem = Some(Box::new(
                     FaultFs::new(crash_fs, root_seed)
                         .error_permille(self.config.faults.fs.error_permille)
+                        .error_at(self.config.faults.fs.error_at.iter().copied())
                         .short_permille(self.config.faults.fs.short_permille)
                         .latency_live(self.config.faults.fs.latency_nanos.is_some()),
                 ));

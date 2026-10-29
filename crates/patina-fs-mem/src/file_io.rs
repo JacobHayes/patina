@@ -143,6 +143,24 @@ impl MemFs {
             })
     }
 
+    /// [`MemFs::fd_file_data`] to change in place, for a page-cache model
+    /// putting back what the disk holds: no time is stamped and no seal is
+    /// judged, since the file's contents as the guest wrote them are not
+    /// what changes.
+    pub fn fd_file_data_mut(&mut self, fd: Fd) -> DriverResult<&mut FileData> {
+        let node = self.description(fd)?.node;
+        self.inodes
+            .get_mut(&node)
+            .filter(|inode| inode.kind == FsEntryKind::File)
+            .map(|inode| &mut inode.contents)
+            .ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidInput,
+                    format!("virtual descriptor is not open on a regular file: {fd:?}"),
+                )
+            })
+    }
+
     /// A positional write through `fd`, judged against the node's write seals
     /// when `sealed`.
     pub(super) fn write_node_at(

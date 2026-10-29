@@ -107,6 +107,11 @@ pub enum Kind {
     /// one address twice, or carrying a third, is a typo worth refusing at parse
     /// time rather than at the end-of-run vacuity report.
     AddressPair,
+    /// `KIND:N[:ERRNO]`: a targeted filesystem fault
+    /// (`patina_dst_driver_api::FsErrorTarget`), refused at parse time when
+    /// the kind is unknown, the ordinal below 1, or the errno one the kind
+    /// cannot fail with.
+    FsErrorTarget,
     /// `all`, or a comma-separated list of at least one non-empty symbol.
     UnsupportedSymbols,
     /// One of a fixed set of string literals.
@@ -141,6 +146,7 @@ impl Kind {
             Kind::Cpus => "cpus",
             Kind::DnsEntry => "dns-entry",
             Kind::AddressPair => "address-pair",
+            Kind::FsErrorTarget => "fs-error-target",
             Kind::UnsupportedSymbols => "unsupported-symbols",
             Kind::Enum(_) => "enum",
             Kind::EnumList(_) => "enum-list",

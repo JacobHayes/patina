@@ -158,7 +158,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_fadvise`: EBADF, ESPIPE for a FIFO (before the advice), EINVAL for a negative length or an unknown advice; no page cache, so every advice is otherwise a no-op.",
+                "Routed into `patina_fadvise`: EBADF, ESPIPE for a FIFO (before the advice), EINVAL for a negative length or an unknown advice; otherwise every advice is a no-op but DONTNEED on a regular file no view maps, which drops the clean pages the range covers whole, so a page a failed writeback dropped reads back what the disk holds.",
                 None,
             ),
             Syscall::N_timer_create => r(
@@ -561,7 +561,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_sync_file_range`: the kernel refusals (EBADF, then EINVAL for flags and range, then ESPIPE for a node without a mapping) and otherwise a no-op, since it promises no durability.",
+                "Routed into `patina_sync_file_range`: the kernel refusals (EBADF, then EINVAL for flags and range, then ESPIPE for a node without a mapping) then, since it promises no durability, nothing but a WAIT flag's check of the file's writeback errors: one its description has not seen is reported once, as fsync reports it.",
                 None,
             ),
             Syscall::N_vmsplice => r(
@@ -771,7 +771,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_syncfs`: fdget (O_PATH EBADF); a volume descriptor makes the volume durable, a pseudo-filesystem one (pipe, socket, eventfd) has nothing to write back.",
+                "Routed into `patina_syncfs`: fdget (O_PATH EBADF); a volume descriptor makes the volume durable and reports the volume's writeback error its description has not seen, once; a pseudo-filesystem one (pipe, socket, eventfd) has nothing to write back.",
                 None,
             ),
             Syscall::N_sendmmsg => r(

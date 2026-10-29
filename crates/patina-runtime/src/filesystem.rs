@@ -852,9 +852,35 @@ impl Context {
         )
     }
 
-    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable.
+    /// `sync(2)`: every change on the volume made durable. It reports no
+    /// writeback error.
     pub fn fs_sync_all(&mut self) -> Result<(), RuntimeError> {
         self.filesystem_unit(Operation::FsSyncAll, |filesystem| filesystem.sync_all())
+    }
+
+    /// `syncfs(2)` through `fd`: the volume made durable, and the writeback
+    /// error on it `fd`'s description has not seen reported once.
+    pub fn fs_sync_filesystem(&mut self, fd: Fd) -> Result<(), RuntimeError> {
+        self.filesystem_unit(Operation::FsSyncFilesystem { fd }, |filesystem| {
+            filesystem.sync_filesystem(fd)
+        })
+    }
+
+    /// `sync_file_range(2)` with a `WAIT` flag: the writeback error of `fd`'s
+    /// file its description has not seen reported once. Never faulted.
+    pub fn fs_wait_writeback(&mut self, fd: Fd) -> Result<(), RuntimeError> {
+        self.filesystem_unit_undelayed(Operation::FsWaitWriteback { fd }, |filesystem| {
+            filesystem.wait_writeback(fd)
+        })
+    }
+
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)`: the clean cached pages of `fd`'s
+    /// file the range covers whole dropped, so they read back from the disk.
+    /// Never faulted.
+    pub fn fs_drop_cache(&mut self, fd: Fd, offset: u64, len: u64) -> Result<(), RuntimeError> {
+        self.filesystem_unit_undelayed(Operation::FsDropCache { fd, offset, len }, |filesystem| {
+            filesystem.drop_cache(fd, offset, len)
+        })
     }
 
     /// One extended attribute's value (`getxattr` family).

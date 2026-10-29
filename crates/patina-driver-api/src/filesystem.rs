@@ -124,9 +124,33 @@ pub trait FsDriver: Send {
     /// its file's dirty pages back failed: the kernel marks those pages clean
     /// without them reaching the disk (they stay readable in the page cache),
     /// and records the error against every other open file description of the
-    /// file, each of which reports it once on its next `fsync`. The failing
-    /// call reports it itself. A driver with no page cache has nothing to do.
+    /// file, each of which reports it once on its next `fsync`, and against
+    /// the filesystem, which `syncfs` reports. The failing call reports it
+    /// itself. A driver with no page cache has nothing to do.
     fn fail_writeback(&mut self, _fd: Fd, _code: ErrorCode) -> DriverResult<()> {
+        Ok(())
+    }
+    /// A `sync(2)` or `syncfs(2)` failed with `code` writing the volume's
+    /// dirty pages back: every file's dirty pages are marked clean without
+    /// reaching the disk, as [`FsDriver::fail_writeback`] does to one file's,
+    /// and the error is recorded against each of those files and the
+    /// filesystem. Nobody has seen it yet. A driver with no page cache has
+    /// nothing to do.
+    fn fail_writeback_all(&mut self, _code: ErrorCode) -> DriverResult<()> {
+        Ok(())
+    }
+    /// `sync_file_range(2)` with a `WAIT` flag (`file_fdatawait_range`): wait
+    /// on the file's writeback and report a writeback error `fd`'s open file
+    /// description has not seen yet, once, as `fsync` does. Nothing is made
+    /// durable. A driver that models no writeback errors has none to report.
+    fn wait_writeback(&mut self, _fd: Fd) -> DriverResult<()> {
+        Ok(())
+    }
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)` over `offset..offset + len` (`len`
+    /// 0: to the end) of `fd`'s file: the clean cached pages the range covers
+    /// whole are dropped, so the next read of them comes from the disk. Dirty
+    /// pages stay. A driver with no page cache has nothing to drop.
+    fn drop_cache(&mut self, _fd: Fd, _offset: u64, _len: u64) -> DriverResult<()> {
         Ok(())
     }
     /// `ftruncate`. Stamps `mtime`/`ctime` even when the length is unchanged,
@@ -276,10 +300,18 @@ pub trait FsDriver: Send {
     fn exchange(&mut self, _clock: FsClock, _first: &str, _second: &str) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("exchange"))
     }
-    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable. A driver
-    /// with no durability model has nothing to do.
+    /// `sync(2)`: every change on the volume made durable. It reports nothing:
+    /// a writeback error it meets stays for `fsync` and `syncfs` to report. A
+    /// driver with no durability model has nothing to do.
     fn sync_all(&mut self) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("sync all"))
+    }
+    /// `syncfs(2)` through `fd`: [`FsDriver::sync_all`], then the writeback
+    /// error recorded against the filesystem that `fd`'s open file description
+    /// has not seen yet, reported once (`errseq_check_and_advance` of
+    /// `s_wb_err`).
+    fn sync_filesystem(&mut self, _fd: Fd) -> DriverResult<()> {
+        self.sync_all()
     }
     /// One extended attribute's value, with the kernel's namespace and
     /// permission rules applied to the node `target` names (a read: `ENODATA`

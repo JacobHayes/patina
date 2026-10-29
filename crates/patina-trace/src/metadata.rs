@@ -24,6 +24,10 @@ pub struct FaultConfigRecord {
     pub crash_kind: CrashKind,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub fs_error_permille: u16,
+    /// Targeted filesystem errors, each as its canonical `KIND:N:ERRNO`
+    /// spelling, in the runtime's stable order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fs_error_at: Vec<String>,
     #[serde(default, skip_serializing_if = "is_zero_u16")]
     pub fs_short_permille: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]

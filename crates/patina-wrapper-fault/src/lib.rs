@@ -5,7 +5,8 @@ use patina_dst_abi::{
     FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{
-    DriverResult, FsDriver, FsFaultOpKind, FsFaultReport, vacuity_is_diagnosable,
+    DriverResult, FsDriver, FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport,
+    vacuity_is_diagnosable,
 };
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
@@ -14,14 +15,18 @@ pub use net::FaultNet;
 
 /// Injects seeded filesystem errors and short I/O around another filesystem
 /// driver. The wrapper sits above durable/crash-model drivers: an injected error
-/// returns before the inner filesystem is touched, while a passed-through write
-/// is journaled/crash-modeled exactly as the inner driver already does.
+/// returns before the inner filesystem is touched (a failed writeback excepted,
+/// which the inner driver models), while a passed-through write is
+/// journaled/crash-modeled exactly as the inner driver already does.
 pub struct FaultFs<D> {
     inner: D,
     error_rng: SplitMix64,
     short_rng: SplitMix64,
     error_permille: u16,
     short_permille: u16,
+    /// Targeted errors, each with how many of its operations went by and
+    /// whether its error was the one injected.
+    targets: Vec<(FsErrorTarget, u64, bool)>,
     /// Whether the run's Context-side fs-latency knob is live. The wrapper
     /// injects no latency itself — latency needs the clock, which only the
     /// Context owns — but it is the independent observer of the eligible-op
@@ -42,6 +47,7 @@ impl<D> FaultFs<D> {
             short_rng: SplitMix64::new(domain_seed(seed, fault_domain::FAULT_FS_SHORT)),
             error_permille: 0,
             short_permille: 0,
+            targets: Vec::new(),
             latency_live: false,
             short_opportunities: 0,
             report: FsFaultReport::default(),
@@ -56,6 +62,18 @@ impl<D> FaultFs<D> {
             "FaultFs::error_permille must be within [0, 1000]"
         );
         self.error_permille = permille;
+        self
+    }
+
+    /// Fail the operations `targets` name, whatever the seed (see
+    /// [`FsErrorTarget`]). Each operation still takes its per-mille draw, so
+    /// adding a target moves no seeded fault elsewhere; a targeted operation
+    /// fails with the target's errno whether or not the draw fired.
+    pub fn error_at(mut self, targets: impl IntoIterator<Item = FsErrorTarget>) -> Self {
+        self.targets = targets
+            .into_iter()
+            .map(|target| (target, 0, false))
+            .collect();
         self
     }
 
@@ -85,23 +103,42 @@ impl<D> FaultFs<D> {
 
     fn maybe_error(&mut self, op: FsFaultOp) -> Option<EffectError> {
         self.report.eligible_ops += 1;
-        if self.error_permille == 0 {
-            return None;
-        }
-        if !permille_fires(&mut self.error_rng, self.error_permille) {
-            return None;
-        }
-        let code = choose_error_code(&mut self.error_rng, op);
+        let drawn = (self.error_permille != 0
+            && permille_fires(&mut self.error_rng, self.error_permille))
+        .then(|| choose_error_code(&mut self.error_rng, op));
+        let targeted = self.targeted(op);
+        let (code, why) = match (targeted, drawn) {
+            (Some(target), _) => (target.errno.code(), format!(" (targeted {target})")),
+            (None, Some(code)) => (code, String::new()),
+            (None, None) => return None,
+        };
         self.report.errors_injected += 1;
         self.report.errors_by_op.record(op.kind());
         Some(EffectError::new(
             code,
             format!(
-                "injected filesystem {} fault during {}",
+                "injected filesystem {} fault during {}{why}",
                 code_name(code),
                 op.kind().name()
             ),
         ))
+    }
+
+    /// Count `op` against every target it could be, and answer the first
+    /// whose ordinal it is. Another target on the same operation did not
+    /// land: its errno was not the one injected.
+    fn targeted(&mut self, op: FsFaultOp) -> Option<FsErrorTarget> {
+        let mut hit = None;
+        for (target, seen, landed) in &mut self.targets {
+            if target.kind == op.kind() && op.can_fail_with(target.errno) {
+                *seen += 1;
+                if *seen == target.nth && hit.is_none() {
+                    hit = Some(*target);
+                    *landed = true;
+                }
+            }
+        }
+        hit
     }
 
     /// Draw a truncated request length for a short-eligible operation, or `None`
@@ -160,11 +197,13 @@ impl<D> FaultFs<D> {
             vacuity_is_diagnosable(report.eligible_ops, self.error_permille);
         report.short_vacuity_diagnosable =
             vacuity_is_diagnosable(self.short_opportunities, self.short_permille);
+        report.targets_missed = self.targets.iter().filter(|(_, _, landed)| !landed).count() as u64;
         if let Some(inner) = self.inner.fault_report() {
             report.eligible_ops += inner.eligible_ops;
             report.error_vacuity_diagnosable |= inner.error_vacuity_diagnosable;
             report.errors_injected += inner.errors_injected;
             report.errors_by_op.merge(&inner.errors_by_op);
+            report.targets_missed += inner.targets_missed;
             report.short_vacuity_diagnosable |= inner.short_vacuity_diagnosable;
             report.shorts_applied += inner.shorts_applied;
             report.shorts_by_op.merge(&inner.shorts_by_op);
@@ -352,6 +391,21 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.fail_writeback(fd, code)
     }
 
+    fn fail_writeback_all(&mut self, code: ErrorCode) -> DriverResult<()> {
+        self.inner.fail_writeback_all(code)
+    }
+
+    /// Waiting on writeback started earlier is no storage access of its own:
+    /// never faulted.
+    fn wait_writeback(&mut self, fd: Fd) -> DriverResult<()> {
+        self.inner.wait_writeback(fd)
+    }
+
+    /// Dropping clean pages touches no storage: never faulted.
+    fn drop_cache(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
+        self.inner.drop_cache(fd, offset, len)
+    }
+
     fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
         if let Some(error) = self.maybe_error(FsFaultOp::SetLen) {
             return Err(error);
@@ -507,13 +561,30 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.exchange(clock, first, second)
     }
 
-    /// Whole-volume durability fails the way a descriptor's does: the sync
-    /// fault kind.
+    /// An injected `EIO` or `ENOSPC` fails the volume's writeback: every
+    /// file's dirty pages are dropped from it (see
+    /// [`FsDriver::fail_writeback_all`]). `sync(2)` returns nothing, so the
+    /// error stays recorded for `fsync` and `syncfs` to report, and the rest
+    /// of the sync happens.
     fn sync_all(&mut self) -> DriverResult<()> {
-        if let Some(error) = self.maybe_error(FsFaultOp::Sync) {
-            return Err(error);
+        if let Some(error) = self.maybe_error(FsFaultOp::SyncAll) {
+            self.inner.fail_writeback_all(error.code)?;
         }
         self.inner.sync_all()
+    }
+
+    /// `syncfs(2)`: the volume's writeback fails as for `sync(2)`, and the
+    /// call reports the error, as the filesystem's record of it reaches the
+    /// calling description.
+    fn sync_filesystem(&mut self, fd: Fd) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::SyncAll) {
+            self.inner.fail_writeback_all(error.code)?;
+            return match self.inner.sync_filesystem(fd) {
+                Err(reported) if reported.code != error.code => Err(reported),
+                _ => Err(error),
+            };
+        }
+        self.inner.sync_filesystem(fd)
     }
 
     /// Reading attributes is a metadata read of the node named.
@@ -667,7 +738,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
     /// the fault plane did. Deciding whether the numbers are worth printing —
     /// and whether they are vacuous — belongs to the consumer.
     fn fault_report(&self) -> Option<FsFaultReport> {
-        let modeled = self.error_permille != 0 || self.short_permille != 0 || self.latency_live;
+        let modeled = self.error_permille != 0
+            || self.short_permille != 0
+            || !self.targets.is_empty()
+            || self.latency_live;
         (modeled || self.inner.fault_report().is_some()).then(|| self.merged_report())
     }
 }
@@ -712,6 +786,7 @@ enum FsFaultOp {
     Link,
     Symlink,
     ReadLink,
+    SyncAll,
 }
 
 impl FsFaultOp {
@@ -741,54 +816,38 @@ impl FsFaultOp {
             FsFaultOp::Link => FsFaultOpKind::Link,
             FsFaultOp::Symlink => FsFaultOpKind::Symlink,
             FsFaultOp::ReadLink => FsFaultOpKind::ReadLink,
+            FsFaultOp::SyncAll => FsFaultOpKind::SyncAll,
+        }
+    }
+
+    /// Whether this operation can fail with `errno`: the kind's set
+    /// ([`FsFaultOpKind::can_fail_with`]), with an `open` that creates nothing
+    /// unable to run out of space.
+    fn can_fail_with(self, errno: FsErrno) -> bool {
+        match (self, errno) {
+            (FsFaultOp::Open { allocating }, FsErrno::NoSpace) => allocating,
+            _ => self.kind().can_fail_with(errno),
         }
     }
 
     /// Whether this operation can consume space, and so can plausibly fail
-    /// `ENOSPC`. `Sync` is here because a filesystem with delayed allocation
-    /// does the allocation at writeback: `fsync(2)` ERRORS lists `ENOSPC`
-    /// explicitly, and a database's durability path meeting a full disk at
-    /// fsync — not at write — is the canonical storage failure it must handle.
-    /// `unlink(2)`/`rmdir(2)` are deliberately absent: neither lists `ENOSPC`,
-    /// and removing a name does not allocate.
+    /// `ENOSPC`. `Sync` and `SyncAll` are here because a filesystem with
+    /// delayed allocation does the allocation at writeback: `fsync(2)` ERRORS
+    /// lists `ENOSPC` explicitly, and a database's durability path meeting a
+    /// full disk at fsync — not at write — is the canonical storage failure it
+    /// must handle. `unlink(2)`/`rmdir(2)` are deliberately absent: neither
+    /// lists `ENOSPC`, and removing a name does not allocate.
     fn can_no_space(self) -> bool {
-        match self {
-            FsFaultOp::Open { allocating } => allocating,
-            FsFaultOp::Write
-            | FsFaultOp::WriteAt
-            | FsFaultOp::Sync
-            | FsFaultOp::CreateDirectory
-            | FsFaultOp::MakeNode
-            | FsFaultOp::SetLen
-            | FsFaultOp::Rename
-            | FsFaultOp::Link
-            | FsFaultOp::Symlink => true,
-            FsFaultOp::Read
-            | FsFaultOp::ReadAt
-            | FsFaultOp::Metadata
-            | FsFaultOp::FdMetadata
-            | FsFaultOp::RemoveFile
-            | FsFaultOp::SetTimes
-            | FsFaultOp::SetTimesByPath
-            | FsFaultOp::ReadDirectory
-            | FsFaultOp::RemoveDirectory
-            | FsFaultOp::ReadLink => false,
-        }
+        self.can_fail_with(FsErrno::NoSpace)
     }
 
     /// Whether a signal can land mid-operation and surface as `EINTR`. The
     /// data-plane calls and `fsync(2)` list it; `open(2)`'s `EINTR` is scoped to
     /// blocking opens of slow devices and FIFOs, which this filesystem does not
-    /// model, so a regular-file open is not interruptible here.
+    /// model, so a regular-file open is not interruptible here, and neither
+    /// `sync(2)` nor `syncfs(2)` can be interrupted.
     fn can_interrupt(self) -> bool {
-        matches!(
-            self,
-            FsFaultOp::Read
-                | FsFaultOp::Write
-                | FsFaultOp::ReadAt
-                | FsFaultOp::WriteAt
-                | FsFaultOp::Sync
-        )
+        self.can_fail_with(FsErrno::Interrupted)
     }
 }
 
@@ -813,6 +872,7 @@ impl FsFaultOp {
 /// | read, pread                         | `EIO`, `EINTR`                 |
 /// | write, pwrite                       | `EIO`, `ENOSPC`, `EINTR`       |
 /// | fsync                               | `EIO`, `ENOSPC`, `EINTR`       |
+/// | sync, syncfs                        | `EIO`, `ENOSPC`                |
 /// | open (creating)                     | `EIO`, `ENOSPC`                |
 /// | open (existing), stat, fstat        | `EIO`                          |
 /// | ftruncate                           | `EIO`, `ENOSPC`                |
@@ -972,7 +1032,7 @@ mod tests {
         // Every fault-eligible operation, `open` in both of its shapes. Pinned
         // against the shared kind table below so a new operation cannot slip in
         // untested.
-        const ALL_FAULT_OPS: [FsFaultOp; 21] = [
+        const ALL_FAULT_OPS: [FsFaultOp; 22] = [
             FsFaultOp::Open { allocating: true },
             FsFaultOp::Open { allocating: false },
             FsFaultOp::Read,
@@ -994,6 +1054,7 @@ mod tests {
             FsFaultOp::Link,
             FsFaultOp::Symlink,
             FsFaultOp::ReadLink,
+            FsFaultOp::SyncAll,
         ];
         let covered: BTreeSet<&str> = ALL_FAULT_OPS.iter().map(|op| op.kind().name()).collect();
         let declared: BTreeSet<&str> = FsFaultOpKind::ALL.iter().map(|kind| kind.name()).collect();
@@ -1149,6 +1210,7 @@ mod tests {
             FsFaultOpKind::Link => fs.link(FsClock::EPOCH, "/f", "/g").err(),
             FsFaultOpKind::Symlink => fs.symlink(FsClock::EPOCH, "/f", "/g").err(),
             FsFaultOpKind::ReadLink => fs.read_link(FsClock::EPOCH, "/f").err(),
+            FsFaultOpKind::SyncAll => fs.sync_filesystem(fd).err(),
         };
 
         for kind in FsFaultOpKind::ALL {
@@ -1303,5 +1365,98 @@ mod tests {
         let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
         assert_eq!(net.tcp_send(client, b"reliable", 0).unwrap(), 8);
         assert_eq!(net.tcp_recv(server, 16, 0).unwrap().unwrap(), b"reliable");
+    }
+
+    fn target(text: &str) -> FsErrorTarget {
+        text.parse().unwrap()
+    }
+
+    /// The outcome of each of a fixed run of operations: errno or success.
+    fn outcomes(fs: &mut FaultFs<MemFs>, fd: Fd) -> Vec<Option<ErrorCode>> {
+        (0..12)
+            .map(|i| {
+                if i % 3 == 0 {
+                    fs.sync(fd).err()
+                } else {
+                    fs.write_at(FsClock::EPOCH, fd, 0, b"abc").err()
+                }
+                .map(|error| error.code)
+            })
+            .collect()
+    }
+
+    /// A target fails exactly the Nth operation of its kind that can fail
+    /// with its errno, with that errno, at every seed; nothing else fails.
+    #[test]
+    fn a_target_fails_its_nth_operation_at_any_seed() {
+        for seed in [1, 2, 99] {
+            let (inner, fd) = fs_with_open_file();
+            let mut fs = FaultFs::new(inner, seed).error_at([target("sync:3:ENOSPC")]);
+            let mut expected = vec![None; 12];
+            expected[6] = Some(ErrorCode::NoSpace);
+            assert_eq!(outcomes(&mut fs, fd), expected, "seed {seed}");
+            let report = fs.fault_report().unwrap();
+            assert_eq!(report.errors_by_op.get(FsFaultOpKind::Sync), 1);
+            assert!(!report.is_vacuous());
+        }
+    }
+
+    /// Two targets on one operation inject one error: the other did not land.
+    #[test]
+    fn a_target_another_one_preempted_did_not_land() {
+        let (inner, fd) = fs_with_open_file();
+        let mut fs = FaultFs::new(inner, 1).error_at([target("sync:1"), target("sync:1:ENOSPC")]);
+        assert_eq!(outcomes(&mut fs, fd)[0], Some(ErrorCode::Io));
+        assert_eq!(fs.fault_report().unwrap().targets_missed, 1);
+    }
+
+    /// A target whose operation never comes is a fault the run did not test.
+    #[test]
+    fn a_target_past_the_last_operation_is_vacuous() {
+        let (inner, fd) = fs_with_open_file();
+        let mut fs = FaultFs::new(inner, 1).error_at([target("sync:5")]);
+        assert!(outcomes(&mut fs, fd).iter().all(Option::is_none));
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.targets_missed, 1);
+        assert!(report.is_vacuous());
+    }
+
+    /// Adding a target moves no seeded fault: every other operation fails or
+    /// succeeds as it did without it.
+    #[test]
+    fn a_target_leaves_the_seeded_draws_alone() {
+        let (inner, fd) = fs_with_open_file();
+        let seeded = outcomes(&mut FaultFs::new(inner, 7).error_permille(300), fd);
+        let (inner, fd) = fs_with_open_file();
+        let mut fs = FaultFs::new(inner, 7)
+            .error_permille(300)
+            .error_at([target("write_at:2:EINTR")]);
+        let targeted = outcomes(&mut fs, fd);
+        assert!(seeded.iter().any(Option::is_some), "seed 7 drew no fault");
+        assert_eq!(targeted[2], Some(ErrorCode::Interrupted));
+        for (index, (seeded, targeted)) in seeded.iter().zip(&targeted).enumerate() {
+            if index != 2 {
+                assert_eq!(seeded, targeted, "operation {index}");
+            }
+        }
+    }
+
+    /// The grammar refuses an errno the kind cannot fail with, an unknown
+    /// kind and an ordinal below 1; the spelling round-trips.
+    #[test]
+    fn a_target_parses_only_what_the_kind_can_fail_with() {
+        for bad in [
+            "read:1:ENOSPC",
+            "sync_all:1:EINTR",
+            "fsync:1",
+            "sync:0",
+            "sync",
+            "sync:1:EIO:x",
+        ] {
+            assert!(bad.parse::<FsErrorTarget>().is_err(), "{bad}");
+        }
+        let parsed = target("write:4:enospc");
+        assert_eq!(parsed.to_string().parse::<FsErrorTarget>(), Ok(parsed));
+        assert_eq!(target("sync:2").errno, FsErrno::Io);
     }
 }

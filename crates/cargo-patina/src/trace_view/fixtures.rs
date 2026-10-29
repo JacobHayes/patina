@@ -281,6 +281,16 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             Outcome::Unit,
         ),
         (Operation::FsSyncAll, Outcome::Unit),
+        (Operation::FsSyncFilesystem { fd: Fd(3) }, Outcome::Unit),
+        (Operation::FsWaitWriteback { fd: Fd(3) }, Outcome::Unit),
+        (
+            Operation::FsDropCache {
+                fd: Fd(3),
+                offset: 0,
+                len: 0,
+            },
+            Outcome::Unit,
+        ),
         (
             Operation::FsGetXattr {
                 target: XattrTarget::Path("/file".into()),

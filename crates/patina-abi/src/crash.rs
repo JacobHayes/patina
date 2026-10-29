@@ -61,6 +61,7 @@ impl Operation {
             | Operation::FsSetInodeMode { .. }
             | Operation::FsSync { .. }
             | Operation::FsSyncAll
+            | Operation::FsSyncFilesystem { .. }
             | Operation::FsSetLength { .. }
             | Operation::FsSetLengthByPath { .. }
             | Operation::FsAllocate { .. }
@@ -87,6 +88,9 @@ impl Operation {
             | Operation::SleepUntil { .. }
             | Operation::FsRead { .. }
             | Operation::FsReadAt { .. }
+            // Neither makes anything durable or changes what the disk holds.
+            | Operation::FsWaitWriteback { .. }
+            | Operation::FsDropCache { .. }
             // Anonymous files and seals live and die with the process.
             | Operation::FsCreateAnonymous { .. }
             | Operation::FsSeals { .. }

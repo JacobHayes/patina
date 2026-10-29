@@ -37,10 +37,12 @@
 //!   creation leaves whatever the name held before it. A temp file whose
 //!   creation was lost too stays gone; a reused journal name whose unlink and
 //!   re-creation were both lost holds the first journal.
-//! - **Writeback errors**: an `fsync` that failed writing a file's dirty pages
-//!   back ([`FsDriver::fail_writeback`]) leaves them clean but not on disk, so
-//!   no later `fsync` or `sync` makes them durable and a crash reverts them;
-//!   the error reaches each open file description once (see [`writeback`]).
+//! - **Writeback errors**: an `fsync`, `sync` or `syncfs` that failed writing
+//!   dirty pages back ([`FsDriver::fail_writeback`],
+//!   [`FsDriver::fail_writeback_all`]) leaves them clean but not on disk, so
+//!   no later `fsync` or `sync` makes them durable, and a crash or a
+//!   `DONTNEED` ([`FsDriver::drop_cache`]) reverts them; the error reaches each
+//!   open file description once per check (see [`writeback`]).
 //!
 //! Files, directories, symlinks, named pipes, socket nodes and whiteouts are all
 //! carried through the durable baseline and recomputed on crash with the same
@@ -143,9 +145,13 @@ pub struct CrashFs {
     /// inode: clean in the cache, but the disk never got them (see
     /// [`writeback`]).
     lost: BTreeMap<u64, BTreeSet<u64>>,
-    /// The writeback error each open file description has yet to report, by
-    /// description.
-    unseen_errors: BTreeMap<u64, ErrorCode>,
+    /// The writeback errors recorded against each named file's mapping, by
+    /// inode (see [`writeback`]).
+    file_errors: BTreeMap<u64, writeback::ErrSeq>,
+    /// The writeback errors recorded against the filesystem (`s_wb_err`).
+    filesystem_errors: writeback::ErrSeq,
+    /// What each open file description last saw of those, by description.
+    samples: BTreeMap<u64, writeback::Samples>,
     policy: CrashPolicy,
     rng: SplitMix64,
     crashes: u64,
@@ -275,7 +281,9 @@ impl CrashFs {
             open_paths: BTreeMap::new(),
             dirty: BTreeMap::new(),
             lost: BTreeMap::new(),
-            unseen_errors: BTreeMap::new(),
+            file_errors: BTreeMap::new(),
+            filesystem_errors: writeback::ErrSeq::default(),
+            samples: BTreeMap::new(),
             policy,
             rng: SplitMix64::new(seed),
             crashes: 0,

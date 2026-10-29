@@ -18,8 +18,9 @@ pub use address::{
 };
 pub use faults::{
     ClockFaultReport, CustomOpFaultReport, DnsFaultReport, EMPTY_OP_BREAKDOWN, EntropyFaultReport,
-    FsFaultOpKind, FsFaultReport, FsOpCounts, NetFaultReport, VACUITY_MIN_EXPECTED_FIRES,
-    epoch_jump_vacuity_is_diagnosable, range_vacuity_is_diagnosable, vacuity_is_diagnosable,
+    FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport, FsOpCounts, NetFaultReport,
+    VACUITY_MIN_EXPECTED_FIRES, epoch_jump_vacuity_is_diagnosable, range_vacuity_is_diagnosable,
+    vacuity_is_diagnosable,
 };
 pub use filesystem::{FsDriver, XattrNamespace, xattr_permission};
 pub use network::{NetDriver, NetReadiness};

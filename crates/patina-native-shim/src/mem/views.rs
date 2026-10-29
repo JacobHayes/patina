@@ -297,6 +297,13 @@ pub(crate) fn view_dirty_pages(handle: u64) -> Vec<u64> {
         .unwrap_or_default()
 }
 
+/// Whether a view maps the file `handle` is open on: its pages are in use,
+/// which `DONTNEED` leaves cached.
+#[cfg(target_os = "linux")]
+pub(crate) fn mapped_file(handle: u64) -> bool {
+    cached_ino(handle).is_some()
+}
+
 /// The inode `handle` is open on, when a page cache exists for it.
 pub(super) fn cached_ino(handle: u64) -> Option<u64> {
     if !caching() {

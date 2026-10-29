@@ -8,10 +8,11 @@ use crate::{
     ENV_CLOCK_FAULT_REPORT, ENV_CRASH_KIND, ENV_CRASH_PERMILLE, ENV_CUSTOM_OP_FAIL_PERMILLE,
     ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
     ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
-    ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
-    ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE,
-    ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY, ENV_NET_PARTITIONS,
-    ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY,
+    ENV_FS_ERROR_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY,
+    ENV_FS_SHORT_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
+    ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
+    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES, ENV_SLEEP_JITTER,
+    FINGERPRINT_BUGGIFY,
 };
 
 /// How a knob's value reaches a guest over the `PATINA_*` control plane.
@@ -30,6 +31,8 @@ pub enum Plumbing {
 pub enum RepeatableFormat {
     AddressPairs,
     DnsEntries,
+    /// `--fs-error-at`: a JSON array of canonical target spellings.
+    FsErrorTargets,
 }
 
 /// Which configuration plane a knob's control-plane variable is applied to.
@@ -192,6 +195,23 @@ fault_registry! {
                     report: Some(ENV_FS_FAULT_REPORT),
                 },
                 sample: 1,
+            }
+            /// Targeted errors: each fails the Nth fault-eligible operation of
+            /// its kind that can fail with its errno, whatever the seed
+            /// ([`patina_dst_driver_api::FsErrorTarget`]). Deterministic, so
+            /// nothing is drawn, and no swarm class masks it: a target is an
+            /// explicit claim about one operation, which a regression check
+            /// relies on landing.
+            error_at: std::collections::BTreeSet<patina_dst_driver_api::FsErrorTarget> => FsErrorAt = 20 {
+                meta: KnobMeta {
+                    flag: "--fs-error-at",
+                    env: ENV_FS_ERROR_AT,
+                    plumbing: Plumbing::Repeatable(RepeatableFormat::FsErrorTargets),
+                    injection_domains: &[],
+                    swarm_class: None,
+                    report: Some(ENV_FS_FAULT_REPORT),
+                },
+                sample: std::collections::BTreeSet::from(["sync:1".parse().expect("a target")]),
             }
             /// Seeded short-read/short-write probability in per-mille (0..=1000).
             short_permille: u16 => FsShortPermille = 3 {

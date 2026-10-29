@@ -280,6 +280,88 @@ fn main() {
 }
 "#;
 
+/// A store that fails closed after a failed writeback and re-reads its log
+/// from the disk, the way a real kernel lets it: `posix_fadvise(DONTNEED)`
+/// drops the clean pages, so the re-read sees what the disk holds, not what
+/// the failed writeback dropped. One mode per volume writeback a test fails
+/// (`--fs-error-at`): `fsync` fails the commit's `fsync`, `sync` fails a
+/// `sync(2)`, which reports nothing. Each prints what the guest saw.
+#[cfg(target_os = "linux")]
+pub(super) const WRITEBACK_SOURCE: &str = r#"
+use std::env;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileExt;
+
+unsafe extern "C" {
+    fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+    fn syncfs(fd: i32) -> i32;
+    fn sync();
+    fn sync_file_range(fd: i32, offset: i64, nbytes: i64, flags: u32) -> i32;
+}
+
+const PAGE: usize = 4096;
+const POSIX_FADV_DONTNEED: i32 = 4;
+const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
+
+fn errno_of(result: i32) -> i32 {
+    if result == 0 { 0 } else { std::io::Error::last_os_error().raw_os_error().unwrap_or(-1) }
+}
+
+fn fsync_errno(file: &File) -> i32 {
+    match file.sync_all() {
+        Ok(()) => 0,
+        Err(error) => error.raw_os_error().unwrap_or(-1),
+    }
+}
+
+/// What the log's first page reads after its clean pages are dropped.
+fn reread() -> &'static str {
+    let mut log = File::open("/log").expect("reopen");
+    assert_eq!(unsafe { posix_fadvise(log.as_raw_fd(), 0, 0, POSIX_FADV_DONTNEED) }, 0);
+    let mut page = vec![0u8; PAGE];
+    log.read_exact(&mut page).expect("reread");
+    match page[0] {
+        b'a' => "durable",
+        b'b' => "dropped-write",
+        _ => "other",
+    }
+}
+
+fn main() {
+    let mode = env::args().nth(1).expect("mode");
+    let mut log = OpenOptions::new()
+        .read(true).write(true).create(true).truncate(true)
+        .open("/log").expect("open");
+    log.write_all(&[b'a'; PAGE]).expect("write");
+    assert_eq!(fsync_errno(&log), 0, "the first commit");
+    let watcher = File::open("/log").expect("watcher");
+    log.write_all_at(&[b'b'; PAGE], 0).expect("overwrite");
+    let line = match mode.as_str() {
+        "fsync" => {
+            let failed = fsync_errno(&log);
+            let retried = fsync_errno(&log);
+            let waited = [0, 1].map(|_| errno_of(unsafe {
+                sync_file_range(watcher.as_raw_fd(), 0, 0, SYNC_FILE_RANGE_WAIT_BEFORE)
+            }));
+            let syncfs = [0, 1].map(|_| errno_of(unsafe { syncfs(watcher.as_raw_fd()) }));
+            format!("fsync={failed},{retried} wait={},{} syncfs={},{}",
+                waited[0], waited[1], syncfs[0], syncfs[1])
+        }
+        "sync" => {
+            unsafe { sync() };
+            let later = File::open("/log").expect("opened after the failure");
+            let fsync = [fsync_errno(&later), fsync_errno(&later)];
+            let syncfs = [0, 1].map(|_| errno_of(unsafe { syncfs(log.as_raw_fd()) }));
+            format!("fsync={},{} syncfs={},{}", fsync[0], fsync[1], syncfs[0], syncfs[1])
+        }
+        other => panic!("unknown mode {other}"),
+    };
+    println!("NATIVE_WRITEBACK {line} reread={}", reread());
+}
+"#;
+
 // A planted escape: a program that references two uninterposed blocking
 // primitives (the Mach `semaphore_wait`/`semaphore_signal`, in the
 // `unmanaged-sync` class) directly. Taking their addresses forces the undefined

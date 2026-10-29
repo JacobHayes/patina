@@ -694,6 +694,24 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
+        "sync",
+        Platform::Linux,
+        Serves::Syscalls(&["sync"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "syncfs",
+        Platform::Linux,
+        Serves::Syscalls(&["syncfs"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "sync_file_range",
+        Platform::Linux,
+        Serves::Syscalls(&["sync_file_range"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
         "ftruncate",
         Platform::Both,
         Serves::Syscalls(&["ftruncate"]),

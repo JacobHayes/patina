@@ -383,6 +383,11 @@ pub const ENV_FS_ERROR_PERMILLE: &str = "PATINA_FS_ERROR_PERMILLE";
 /// unset.
 pub const ENV_FS_SHORT_PERMILLE: &str = "PATINA_FS_SHORT_PERMILLE";
 
+/// Targeted filesystem errors, a JSON array of `KIND:N:ERRNO` spellings
+/// ([`patina_dst_driver_api::FsErrorTarget`]): the Nth fault-eligible
+/// operation of each kind fails, whatever the seed. None when unset.
+pub const ENV_FS_ERROR_AT: &str = "PATINA_FS_ERROR_AT";
+
 /// Seeded extra latency `MIN..MAX` in nanoseconds added to every fault-eligible
 /// filesystem operation before it executes, applied by the `Context` (the only
 /// site that owns the clock). Slow I/O reorders against timers and peers. Off

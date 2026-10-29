@@ -456,14 +456,21 @@ pub(super) fn emit_fs_fault_report(
     reports: ReportConfig,
     report: &patina_dst_driver_api::FsFaultReport,
 ) {
-    if report.eligible_ops == 0 {
+    if report.eligible_ops == 0 && report.targets_missed == 0 {
         return;
     }
     if !reports.enabled(Report::FsFault) {
         return;
     }
     diagnostic!("{}", fs_fault_report_line(report));
-    if report.is_vacuous() {
+    if report.targets_missed != 0 {
+        diagnostic!(
+            "PATINA WARNING: {} --fs-error-at target(s) never landed — the run made fewer \
+operations of the kind than the ordinal, or another target took the same operation, so the fault \
+it names was not tested.",
+            report.targets_missed,
+        );
+    } else if report.is_vacuous() {
         diagnostic!(
             "PATINA WARNING: filesystem fault knobs inert — {} fault-eligible filesystem op(s) \
 occurred, enough that the configured rate should have fired an enabled fs fault class several \
@@ -490,12 +497,13 @@ short-I/O knob applies nothing to a guest whose reads never fill their buffer.",
 pub(super) fn fs_fault_report_line(report: &patina_dst_driver_api::FsFaultReport) -> String {
     format!(
         "PATINA_FS_FAULT_REPORT eligible_ops={} error_vacuity_diagnosable={} errors_injected={} \
-errors_by_op={} short_vacuity_diagnosable={} shorts_applied={} shorts_by_op={} \
+errors_by_op={} targets_missed={} short_vacuity_diagnosable={} shorts_applied={} shorts_by_op={} \
 latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
         report.eligible_ops,
         u8::from(report.error_vacuity_diagnosable),
         report.errors_injected,
         report.errors_by_op,
+        report.targets_missed,
         u8::from(report.short_vacuity_diagnosable),
         report.shorts_applied,
         report.shorts_by_op,

@@ -36,6 +36,7 @@ impl FsDriver for CrashFs {
             self.truncated(metadata.ino, metadata.len);
         }
         self.open_paths.insert(fd, normalized);
+        self.description_opened(fd);
         Ok(fd)
     }
 
@@ -98,8 +99,11 @@ impl FsDriver for CrashFs {
         seals: u32,
         huge_page: u64,
     ) -> DriverResult<Fd> {
-        self.live
-            .create_anonymous(clock, name, mode, seals, huge_page)
+        let fd = self
+            .live
+            .create_anonymous(clock, name, mode, seals, huge_page)?;
+        self.description_opened(fd);
+        Ok(fd)
     }
 
     fn seals(&mut self, fd: Fd) -> DriverResult<u32> {
@@ -223,11 +227,25 @@ impl FsDriver for CrashFs {
             | FsEntryKind::Socket
             | FsEntryKind::CharDevice => {}
         }
-        self.take_unseen_error(fd)
+        self.check_file_error(fd)
     }
 
     fn fail_writeback(&mut self, fd: Fd, code: ErrorCode) -> DriverResult<()> {
         self.writeback_failed(fd, code)
+    }
+
+    fn fail_writeback_all(&mut self, code: ErrorCode) -> DriverResult<()> {
+        self.writeback_failed_all(code);
+        Ok(())
+    }
+
+    fn wait_writeback(&mut self, fd: Fd) -> DriverResult<()> {
+        self.live.fd_metadata(fd)?;
+        self.check_file_error(fd)
+    }
+
+    fn drop_cache(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
+        self.cache_dropped(fd, offset, len)
     }
 
     /// A length change is unsynced data like a write: the live image takes it
@@ -410,6 +428,12 @@ impl FsDriver for CrashFs {
         Ok(())
     }
 
+    fn sync_filesystem(&mut self, fd: Fd) -> DriverResult<()> {
+        self.live.fd_metadata(fd)?;
+        self.sync_all()?;
+        self.check_filesystem_error(fd)
+    }
+
     /// Extended attributes are metadata on an existing node, like a mode: the
     /// live image takes a change, and reconstruction reads them back off it
     /// (or off the durable baseline for a resurrected entry).
@@ -481,6 +505,7 @@ impl FsDriver for CrashFs {
         let fd = self.live.open_path_unfaulted(clock, path)?;
         let normalized = normalize_entry_path(path).expect("open normalized the path already");
         self.open_paths.insert(fd, normalized);
+        self.description_opened(fd);
         Ok(fd)
     }
 
@@ -622,12 +647,15 @@ impl CrashFs {
     /// `ino` may have lost its last name or reference: once it is gone, its
     /// dirty pages go with it.
     fn forget_if_gone(&mut self, ino: Option<u64>) {
-        if let Some(ino) =
-            ino.filter(|ino| self.dirty.contains_key(ino) || self.lost.contains_key(ino))
-            && self.live.inode_metadata(ino).is_err()
+        if let Some(ino) = ino.filter(|ino| {
+            self.dirty.contains_key(ino)
+                || self.lost.contains_key(ino)
+                || self.file_errors.contains_key(ino)
+        }) && self.live.inode_metadata(ino).is_err()
         {
             self.dirty.remove(&ino);
             self.lost.remove(&ino);
+            self.file_errors.remove(&ino);
         }
     }
 }

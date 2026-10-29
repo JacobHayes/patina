@@ -142,12 +142,19 @@ pub(crate) fn fs_sync_handle(handle: Fd) -> Result<(), c_int> {
     with_context(|context| context.fs_sync(handle))
 }
 
-/// `sync`/`syncfs` of the volume: every mapped file's stores are written back
-/// first.
+/// `sync` of the volume: every mapped file's stores are written back first.
 #[cfg(target_os = "linux")]
 pub(crate) fn fs_sync_volume() -> Result<(), c_int> {
     mem::syncing_all()?;
     with_context(|context| context.fs_sync_all())
+}
+
+/// `syncfs` of the volume through `handle`: [`fs_sync_volume`], reporting
+/// the volume's writeback error `handle`'s description has not seen.
+#[cfg(target_os = "linux")]
+pub(crate) fn fs_sync_volume_through(handle: Fd) -> Result<(), c_int> {
+    mem::syncing_all()?;
+    with_context(|context| context.fs_sync_filesystem(handle))
 }
 
 #[cfg(any(target_os = "linux", patina_posix_exports))]

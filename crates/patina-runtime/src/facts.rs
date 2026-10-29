@@ -121,6 +121,7 @@ pub(crate) fn fs_plane(report: &patina_dst_driver_api::FsFaultReport) -> Value {
         ),
         ("errors_injected", Value::from(report.errors_injected)),
         ("errors_by_op", op_counts(&report.errors_by_op)),
+        ("targets_missed", Value::from(report.targets_missed)),
         (
             "short_vacuity_diagnosable",
             Value::from(report.short_vacuity_diagnosable),

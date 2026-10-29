@@ -2,19 +2,26 @@
 //! `posix_fadvise(2)` (`fadvise64`), `cachestat(2)`, `sync_file_range(2)`,
 //! `sync(2)` and `syncfs(2)`, one set of entries both doors call. Linux only.
 //!
-//! The deterministic filesystem has no page cache, so advice has nothing to
-//! warm, drop or start writing back: each call answers exactly the refusals the
-//! kernel judges (in its order) and is otherwise a no-op. What `cachestat`
-//! counts follows from the same fact: the filesystem holds a file in memory,
-//! so every page of a regular file up to its end is cached, none is dirty or
-//! under writeback (there is no writeback to wait for), and none was ever
-//! evicted; anything else has no pages. A divergence (VALIDATION.md): a page
-//! over a hole or an unwritten block that was never read is uncached
-//! natively, and counted cached here. Durability is the one
-//! effect with a model behind it — `sync` and `syncfs` make every change on the
-//! volume durable, the checkpoint a crash model rolls back to. `sync_file_range`
-//! promises no durability at all (it writes out no metadata and waits on no
-//! journal), so it moves nothing into the crash model's durable image either.
+//! The deterministic filesystem holds every file in memory, so advice has
+//! nothing to warm or start writing back: each call answers exactly the
+//! refusals the kernel judges (in its order). The crash model's page cache is
+//! where the rest lands. `POSIX_FADV_DONTNEED` drops a regular file's clean
+//! pages, which matters only for a page a failed writeback dropped: it reads
+//! back what the disk holds. Dirty pages stay, and so do the pages of a file a
+//! view maps. What `cachestat` counts: every page of a regular file up to its
+//! end is cached, dirty those written since their last fsync, none under
+//! writeback (there is no writeback to wait for), and none ever evicted;
+//! anything else has no pages. Divergences (VALIDATION.md): a page over a hole
+//! or an unwritten block that was never read is uncached natively, and
+//! counted cached here; so is a page `DONTNEED` dropped, and `DONTNEED` keeps
+//! every page of a mapped file, not only the mapped ones. Durability: `sync`
+//! and `syncfs` make every change on the volume durable, the checkpoint a
+//! crash model rolls back to; `syncfs` then reports a writeback error on the
+//! volume its description has not seen, and `sync` reports none.
+//! `sync_file_range` promises no durability at all (it writes out no metadata
+//! and waits on no journal), so it moves nothing into the crash model's
+//! durable image; with a `WAIT` flag it reports the file's writeback error as
+//! `fsync` does.
 
 use std::ffi::c_int;
 
@@ -25,10 +32,15 @@ use crate::{EBADF, EINVAL, EOPNOTSUPP, ESPIPE, O_READ, fail, fdget, set_errno, t
 
 /// `POSIX_FADV_NORMAL` .. `POSIX_FADV_NOREUSE` (0..=5 on x86_64 and arm64).
 const POSIX_FADV_NOREUSE: c_int = 5;
+/// `POSIX_FADV_DONTNEED` on x86_64 and arm64.
+const POSIX_FADV_DONTNEED: c_int = 4;
 
+/// `sync_file_range(2)`'s `WAIT_BEFORE` and `WAIT_AFTER`: each waits on the
+/// range's writeback and checks the file's writeback error.
+const SYNC_FILE_RANGE_WAIT: u32 = 0x1 | 0x4;
 /// `sync_file_range(2)`'s defined flags (`SYNC_FILE_RANGE_WAIT_BEFORE|WRITE|
 /// WAIT_AFTER`).
-const SYNC_FILE_RANGE_VALID: u32 = 0x1 | 0x2 | 0x4;
+const SYNC_FILE_RANGE_VALID: u32 = SYNC_FILE_RANGE_WAIT | 0x2;
 
 fn answered(result: Result<(), c_int>) -> c_int {
     match result {
@@ -77,11 +89,13 @@ fn has_mapping(resolved: &Resolved) -> bool {
 }
 
 #[unsafe(no_mangle)]
-/// `posix_fadvise(2)`: every `POSIX_FADV_*` advice is accepted and changes
-/// nothing. The refusals are `generic_fadvise`'s, in its order: an empty slot
-/// or an `O_PATH` descriptor `EBADF`, a FIFO `ESPIPE` (before the advice is
-/// looked at), a negative length or an unknown advice `EINVAL`.
-pub extern "C" fn patina_fadvise(raw_fd: c_int, _offset: i64, length: i64, advice: c_int) -> c_int {
+/// `posix_fadvise(2)`: every `POSIX_FADV_*` advice is accepted, and
+/// `POSIX_FADV_DONTNEED` on a regular file no view maps drops its clean pages
+/// the range covers whole (a negative offset covers none). The refusals are
+/// `generic_fadvise`'s, in its order: an empty slot or an `O_PATH` descriptor
+/// `EBADF`, a FIFO `ESPIPE` (before the advice is looked at), a negative
+/// length or an unknown advice `EINVAL`.
+pub extern "C" fn patina_fadvise(raw_fd: c_int, offset: i64, length: i64, advice: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
         if is_fifo(&resolved) {
@@ -89,6 +103,16 @@ pub extern "C" fn patina_fadvise(raw_fd: c_int, _offset: i64, length: i64, advic
         }
         if length < 0 || !(0..=POSIX_FADV_NOREUSE).contains(&advice) {
             return Err(EINVAL);
+        }
+        if advice == POSIX_FADV_DONTNEED
+            && resolved.kind == FdKind::File
+            && offset >= 0
+            && !crate::mem::mapped_file(resolved.handle)
+        {
+            let handle = Fd(resolved.handle);
+            crate::with_context(|context| {
+                context.fs_drop_cache(handle, offset as u64, length as u64)
+            })?;
         }
         Ok(())
     }))
@@ -216,10 +240,13 @@ pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> 
 }
 
 #[unsafe(no_mangle)]
-/// `sync_file_range(2)`: no durability to promise, so a no-op once the kernel's
+/// `sync_file_range(2)`: no durability to promise, so once the kernel's
 /// refusals pass — the descriptor first (`EBADF`), then the flags and the range
 /// (`EINVAL` for an unknown flag, a negative offset or end, or a range that
-/// wraps), then the node's kind (`ESPIPE` for anything without a mapping).
+/// wraps), then the node's kind (`ESPIPE` for anything without a mapping) —
+/// it only waits: with `WAIT_BEFORE` or `WAIT_AFTER`, a regular file or a
+/// directory reports the writeback error its description has not seen, once
+/// (`file_fdatawait_range`).
 pub extern "C" fn patina_sync_file_range(
     raw_fd: c_int,
     offset: i64,
@@ -235,12 +262,17 @@ pub extern "C" fn patina_sync_file_range(
         if !has_mapping(&resolved) {
             return Err(ESPIPE);
         }
+        if flags & SYNC_FILE_RANGE_WAIT != 0 && resolved.kind.is_fs() {
+            let handle = Fd(resolved.handle);
+            crate::with_context(|context| context.fs_wait_writeback(handle))?;
+        }
         Ok(())
     }))
 }
 
 #[unsafe(no_mangle)]
-/// `sync(2)`: every change on the volume becomes durable. Never fails.
+/// `sync(2)`: every change on the volume becomes durable. Never fails: a
+/// writeback error it meets stays for `fsync` and `syncfs` to report.
 pub extern "C" fn patina_sync() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(crate::fs_sync_volume())
@@ -249,41 +281,40 @@ pub extern "C" fn patina_sync() -> c_int {
 #[unsafe(no_mangle)]
 /// `syncfs(2)`: the filesystem a descriptor is on made durable. An empty slot
 /// or an `O_PATH` descriptor is `EBADF` (`fdget`); a descriptor on the volume
-/// syncs it; one on a pseudo-filesystem (a pipe, a socket, an eventfd) has
-/// nothing to write back.
+/// syncs it and reports the writeback error on it the descriptor's open file
+/// description has not seen, once; one on a pseudo-filesystem (a pipe, a
+/// socket, an eventfd) has nothing to write back. A FIFO on the volume syncs
+/// it, but its description is the pipe's, not the filesystem's, so it
+/// reports nothing (a divergence: natively it reports like any other).
 pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered(fdget(raw_fd).and_then(|resolved| {
-        let on_volume = match resolved.kind {
-            FdKind::File | FdKind::Dir => true,
-            FdKind::Pipe => thread::pipe_filesystem(raw_fd) == Some(crate::PATINA_FS_VOLUME),
-            FdKind::OPath
-            | FdKind::Stdin
-            | FdKind::Stdout
-            | FdKind::Stderr
-            | FdKind::MemDevice
-            | FdKind::Socket
-            | FdKind::EventFd
-            | FdKind::TimerFd
-            | FdKind::Inotify
-            | FdKind::SignalFd
-            | FdKind::Epoll
-            | FdKind::MessageQueue
-            | FdKind::Pidfd
-            | FdKind::LandlockRuleset
-            | FdKind::Userfaultfd
-            | FdKind::Namespace
-            | FdKind::NamespacePath
-            | FdKind::PtyMaster
-            | FdKind::PtySlave
-            | FdKind::Proc
-            | FdKind::ProcDir => false,
-        };
-        if on_volume {
+    answered(fdget(raw_fd).and_then(|resolved| match resolved.kind {
+        FdKind::File | FdKind::Dir => crate::fs_sync_volume_through(Fd(resolved.handle)),
+        FdKind::Pipe if thread::pipe_filesystem(raw_fd) == Some(crate::PATINA_FS_VOLUME) => {
             crate::fs_sync_volume()
-        } else {
-            Ok(())
         }
+        FdKind::OPath
+        | FdKind::Stdin
+        | FdKind::Stdout
+        | FdKind::Stderr
+        | FdKind::MemDevice
+        | FdKind::Socket
+        | FdKind::EventFd
+        | FdKind::TimerFd
+        | FdKind::Inotify
+        | FdKind::SignalFd
+        | FdKind::Epoll
+        | FdKind::MessageQueue
+        | FdKind::Pidfd
+        | FdKind::LandlockRuleset
+        | FdKind::Userfaultfd
+        | FdKind::Namespace
+        | FdKind::NamespacePath
+        | FdKind::PtyMaster
+        | FdKind::PtySlave
+        | FdKind::Proc
+        | FdKind::ProcDir
+        | FdKind::Pipe => Ok(()),
     }))
 }
 

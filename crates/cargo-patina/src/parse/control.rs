@@ -16,6 +16,7 @@ pub(crate) fn repeatable_payload(knob: FaultKnob, values: &[String]) -> Result<S
     match knob.meta().plumbing {
         Plumbing::Repeatable(RepeatableFormat::DnsEntries) => encode_dns_entries(values),
         Plumbing::Repeatable(RepeatableFormat::AddressPairs) => encode_net_partitions(values),
+        Plumbing::Repeatable(RepeatableFormat::FsErrorTargets) => encode_fs_error_targets(values),
         Plumbing::Scalar => Err(CliError(format!(
             "{} is not a repeatable knob",
             knob.meta().flag
@@ -34,6 +35,21 @@ fn encode_dns_entries(values: &[String]) -> Result<String, CliError> {
         .collect::<Result<_, CliError>>()?;
     serde_json::to_string(&entries)
         .map_err(|error| CliError(format!("failed to encode the DNS host table: {error}")))
+}
+
+/// The targets as the JSON array of canonical spellings the control plane
+/// carries.
+fn encode_fs_error_targets(values: &[String]) -> Result<String, CliError> {
+    let targets: Vec<String> = values
+        .iter()
+        .map(|value| {
+            values::fs_error_target("--fs-error-at", value)
+                .map(|target| target.to_string())
+                .map_err(CliError)
+        })
+        .collect::<Result<_, CliError>>()?;
+    serde_json::to_string(&targets)
+        .map_err(|error| CliError(format!("failed to encode the fs error targets: {error}")))
 }
 
 /// The partition set as the JSON array of pairs the control plane carries.

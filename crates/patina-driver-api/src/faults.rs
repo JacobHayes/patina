@@ -1,5 +1,7 @@
 //! Fault-injection reports, operation counters, and vacuity thresholds.
 
+use patina_dst_abi::ErrorCode;
+
 /// Expected firings a rate-based fault class must have accumulated before a
 /// zero-fire run is diagnosed as vacuous.
 ///
@@ -92,6 +94,8 @@ pub enum FsFaultOpKind {
     Link,
     Symlink,
     ReadLink,
+    /// `sync(2)` and `syncfs(2)`: the whole volume's writeback.
+    SyncAll,
 }
 
 impl FsFaultOpKind {
@@ -99,7 +103,7 @@ impl FsFaultOpKind {
     /// counter array is sized from it and the breakdown is rendered by walking
     /// it, so a kind added to the enum reaches the report by adding one row
     /// here rather than by editing three parallel lists.
-    pub const ALL: [FsFaultOpKind; 20] = [
+    pub const ALL: [FsFaultOpKind; 21] = [
         FsFaultOpKind::Open,
         FsFaultOpKind::Read,
         FsFaultOpKind::Write,
@@ -120,6 +124,7 @@ impl FsFaultOpKind {
         FsFaultOpKind::Link,
         FsFaultOpKind::Symlink,
         FsFaultOpKind::ReadLink,
+        FsFaultOpKind::SyncAll,
     ];
 
     /// The token the report and the injected-error message spell the operation
@@ -147,7 +152,141 @@ impl FsFaultOpKind {
             FsFaultOpKind::Link => "link",
             FsFaultOpKind::Symlink => "symlink",
             FsFaultOpKind::ReadLink => "read_link",
+            FsFaultOpKind::SyncAll => "sync_all",
         }
+    }
+
+    /// The kind [`FsFaultOpKind::name`] spells `name`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// Whether an operation of this kind can fail with `errno` on a real
+    /// filesystem (the sets `FaultFs` injects from; see its error choice).
+    /// `EIO` every kind can. `ENOSPC` the kinds that can allocate, an `open`
+    /// only when it creates; `EINTR` the data-plane calls and `fsync(2)`.
+    pub const fn can_fail_with(self, errno: FsErrno) -> bool {
+        match errno {
+            FsErrno::Io => true,
+            FsErrno::NoSpace => matches!(
+                self,
+                FsFaultOpKind::Open
+                    | FsFaultOpKind::Write
+                    | FsFaultOpKind::WriteAt
+                    | FsFaultOpKind::Sync
+                    | FsFaultOpKind::SyncAll
+                    | FsFaultOpKind::CreateDirectory
+                    | FsFaultOpKind::MakeNode
+                    | FsFaultOpKind::SetLen
+                    | FsFaultOpKind::Rename
+                    | FsFaultOpKind::Link
+                    | FsFaultOpKind::Symlink
+            ),
+            FsErrno::Interrupted => matches!(
+                self,
+                FsFaultOpKind::Read
+                    | FsFaultOpKind::Write
+                    | FsFaultOpKind::ReadAt
+                    | FsFaultOpKind::WriteAt
+                    | FsFaultOpKind::Sync
+            ),
+        }
+    }
+}
+
+/// An errno a filesystem fault can inject: the storage's failures, never the
+/// caller's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FsErrno {
+    /// `EIO`.
+    Io,
+    /// `ENOSPC`.
+    NoSpace,
+    /// `EINTR`.
+    Interrupted,
+}
+
+impl FsErrno {
+    pub const ALL: [FsErrno; 3] = [FsErrno::Io, FsErrno::NoSpace, FsErrno::Interrupted];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            FsErrno::Io => "EIO",
+            FsErrno::NoSpace => "ENOSPC",
+            FsErrno::Interrupted => "EINTR",
+        }
+    }
+
+    pub const fn code(self) -> ErrorCode {
+        match self {
+            FsErrno::Io => ErrorCode::Io,
+            FsErrno::NoSpace => ErrorCode::NoSpace,
+            FsErrno::Interrupted => ErrorCode::Interrupted,
+        }
+    }
+}
+
+/// A targeted filesystem fault (`--fs-error-at KIND:N[:ERRNO]`): the `nth`
+/// (from 1) fault-eligible operation of `kind` that can fail with `errno`
+/// fails with it, whatever the seed. The ordinal counts the same operations
+/// the per-mille error knob draws for, in the process that runs them, so a
+/// target names one operation of the guest's own sequence: a guest that adds
+/// an operation of that kind before it moves the target by one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FsErrorTarget {
+    pub kind: FsFaultOpKind,
+    pub nth: u64,
+    pub errno: FsErrno,
+}
+
+impl core::str::FromStr for FsErrorTarget {
+    type Err = String;
+
+    /// `KIND:N[:ERRNO]`: a kind as the fault report spells it (`sync`,
+    /// `write_at`, ...), an ordinal from 1, and `EIO` (the default), `ENOSPC`
+    /// or `EINTR`, which the kind must be able to fail with.
+    fn from_str(text: &str) -> Result<Self, String> {
+        let mut parts = text.trim().split(':');
+        let (Some(kind), Some(nth)) = (parts.next(), parts.next()) else {
+            return Err(format!("`{text}` is not KIND:N[:ERRNO]"));
+        };
+        let errno = parts.next();
+        if parts.next().is_some() {
+            return Err(format!("`{text}` is not KIND:N[:ERRNO]"));
+        }
+        let kind = FsFaultOpKind::from_name(kind).ok_or_else(|| {
+            let kinds: Vec<&str> = FsFaultOpKind::ALL.iter().map(|kind| kind.name()).collect();
+            format!(
+                "`{kind}` is not a filesystem operation kind (one of {})",
+                kinds.join(", ")
+            )
+        })?;
+        let nth = nth
+            .parse::<u64>()
+            .ok()
+            .filter(|nth| *nth >= 1)
+            .ok_or_else(|| format!("`{nth}` is not an ordinal from 1"))?;
+        let errno = match errno {
+            None => FsErrno::Io,
+            Some(name) => FsErrno::ALL
+                .into_iter()
+                .find(|errno| errno.name().eq_ignore_ascii_case(name))
+                .ok_or_else(|| format!("`{name}` is not EIO, ENOSPC or EINTR"))?,
+        };
+        if !kind.can_fail_with(errno) {
+            return Err(format!(
+                "a {} cannot fail with {}",
+                kind.name(),
+                errno.name()
+            ));
+        }
+        Ok(Self { kind, nth, errno })
+    }
+}
+
+impl core::fmt::Display for FsErrorTarget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}:{}:{}", self.kind.name(), self.nth, self.errno.name())
     }
 }
 
@@ -251,6 +390,11 @@ pub struct FsFaultReport {
     /// nothing about the write path, which is the half a torn-record bug lives
     /// on.
     pub shorts_by_op: FsOpCounts,
+    /// Targeted faults (`--fs-error-at`) that never landed: the process ran
+    /// fewer operations of the kind than the ordinal, or another target on
+    /// the same operation injected its errno instead. Each one is a fault the
+    /// run claimed and did not test.
+    pub targets_missed: u64,
     /// Reserved for the Context-side fs-latency knob; false in Wave B.
     pub latency_vacuity_diagnosable: bool,
     /// Reserved for Context-side fs latency applications; zero in Wave B.
@@ -263,6 +407,7 @@ impl FsFaultReport {
     /// effects.
     pub fn is_vacuous(&self) -> bool {
         (self.error_vacuity_diagnosable && self.errors_injected == 0)
+            || self.targets_missed != 0
             || (self.short_vacuity_diagnosable && self.shorts_applied == 0)
             || (self.latency_vacuity_diagnosable && self.latency_applied == 0)
     }

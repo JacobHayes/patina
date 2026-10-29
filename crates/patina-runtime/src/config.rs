@@ -1045,7 +1045,7 @@ pub(super) mod tests {
                 "{knob:?} left no trace in the recorded fault configuration"
             );
             assert_eq!(
-                fault_config_from_record(&record),
+                fault_config_from_record(&record).unwrap(),
                 config.faults,
                 "{knob:?} did not survive the record round trip"
             );

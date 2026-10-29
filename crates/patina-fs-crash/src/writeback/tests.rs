@@ -154,3 +154,114 @@ fn closing_a_description_drops_only_its_unseen_error() {
     fs.close(first).unwrap();
     assert_eq!(fs.sync(second).unwrap_err().code, ErrorCode::Io);
 }
+
+/// `DONTNEED` drops clean pages, so a page a writeback error dropped reads
+/// back what the disk holds; a dirty page stays, and so does a page the
+/// range only covers in part.
+#[test]
+fn dontneed_rereads_the_disk_under_a_dropped_page() {
+    let page = 4096;
+    let (mut fs, fd) = log_with_pending(&vec![b'a'; 2 * page], &[]);
+    fs.seek(fd, 0, SeekWhence::Start).unwrap();
+    fs.write(FsClock::EPOCH, fd, &vec![b'b'; 2 * page]).unwrap();
+    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
+
+    // The range covers neither page whole.
+    fs.drop_cache(fd, 1, 2 * page as u64 - 2).unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), vec![b'b'; 2 * page]);
+
+    // Page 1 dirty again, then the whole file advised away: page 0 reads the
+    // disk, page 1 keeps the write.
+    fs.write_at(FsClock::EPOCH, fd, page as u64, &vec![b'c'; page])
+        .unwrap();
+    fs.drop_cache(fd, 0, 0).unwrap();
+    let mut expected = vec![b'a'; page];
+    expected.extend(vec![b'c'; page]);
+    assert_eq!(fs.contents("/log").unwrap(), expected);
+    // What it read back is clean and on disk already.
+    fs.sync(fd).unwrap();
+    assert_eq!(on_disk(&mut fs, "/log"), expected);
+}
+
+/// A range that ends at the end of the file covers its last page whole,
+/// partial or not.
+#[test]
+fn dontneed_to_the_end_of_the_file_covers_its_last_page() {
+    let (mut fs, fd) = log_with_pending(b"a", &[]);
+    fs.write_at(FsClock::EPOCH, fd, 0, b"b").unwrap();
+    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
+    fs.drop_cache(fd, 0, 1).unwrap();
+    assert_eq!(fs.contents("/log").unwrap(), b"a");
+}
+
+/// An append a writeback error dropped reads back as the zeros the disk
+/// holds past its old end; the size it reached stays.
+#[test]
+fn dontneed_past_the_durable_end_reads_zeros() {
+    let (mut fs, fd) = log_with_pending(b"committed;", b"lost;");
+    fs.fail_writeback(fd, ErrorCode::Io).unwrap();
+    fs.drop_cache(fd, 0, 0).unwrap();
+    let mut expected = b"committed;".to_vec();
+    expected.resize(b"committed;lost;".len(), 0);
+    assert_eq!(fs.contents("/log").unwrap(), expected);
+}
+
+/// A failed `sync`/`syncfs` drops every file's dirty pages from writeback.
+/// `sync(2)` reports nothing; `syncfs` reports the filesystem's error once per
+/// description, and each file's error reaches `fsync` (and a `WAIT`ing
+/// `sync_file_range`) once per description, a description opened after an
+/// error nobody saw included.
+#[test]
+fn a_failed_volume_writeback_reports_through_syncfs_and_fsync() {
+    let (mut fs, log) = log_with_pending(b"committed;", b"lost;");
+    let other = write(&mut fs, "/other", b"unsynced");
+    let watcher = fs
+        .open(FsClock::EPOCH, "/log", OpenFlags::read_only())
+        .unwrap();
+    fs.fail_writeback_all(ErrorCode::Io).unwrap();
+    fs.sync_all().unwrap();
+    let later = fs
+        .open(FsClock::EPOCH, "/log", OpenFlags::read_only())
+        .unwrap();
+
+    assert_eq!(fs.sync_filesystem(log).unwrap_err().code, ErrorCode::Io);
+    assert!(fs.sync_filesystem(log).is_ok());
+    assert_eq!(fs.sync_filesystem(other).unwrap_err().code, ErrorCode::Io);
+    // The filesystem's error was seen by then, so a description opened after
+    // that never reports it.
+    let after_seen = fs
+        .open(FsClock::EPOCH, "/other", OpenFlags::read_only())
+        .unwrap();
+    assert!(fs.sync_filesystem(after_seen).is_ok());
+
+    // The file errors are separate: nobody has checked /log's yet, so the
+    // description opened after the failure sees it too.
+    assert_eq!(fs.sync(later).unwrap_err().code, ErrorCode::Io);
+    assert_eq!(fs.wait_writeback(watcher).unwrap_err().code, ErrorCode::Io);
+    assert!(fs.sync(watcher).is_ok());
+    assert_eq!(fs.sync(log).unwrap_err().code, ErrorCode::Io);
+    assert!(fs.sync(log).is_ok());
+
+    let mut expected = b"committed;".to_vec();
+    expected.resize(b"committed;lost;".len(), 0);
+    assert_eq!(on_disk(&mut fs, "/log"), expected);
+}
+
+/// A failed `fsync` is recorded against the filesystem too: every
+/// description, the failing one included, reports it on its next `syncfs`.
+#[test]
+fn a_failed_fsync_reaches_syncfs() {
+    let (mut fs, log) = log_with_pending(b"committed;", b"lost;");
+    let unrelated = write(&mut fs, "/other", b"x");
+    fs.fail_writeback(log, ErrorCode::NoSpace).unwrap();
+    assert_eq!(
+        fs.sync_filesystem(unrelated).unwrap_err().code,
+        ErrorCode::NoSpace
+    );
+    assert_eq!(
+        fs.sync_filesystem(log).unwrap_err().code,
+        ErrorCode::NoSpace
+    );
+    assert!(fs.sync_filesystem(log).is_ok());
+    assert!(fs.sync(log).is_ok());
+}

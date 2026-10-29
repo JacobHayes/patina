@@ -165,8 +165,25 @@ pub enum Operation {
     FsSync {
         fd: Fd,
     },
-    /// `sync(2)`/`syncfs(2)`: every change on the volume made durable at once.
+    /// `sync(2)`: every change on the volume made durable at once.
     FsSyncAll,
+    /// `syncfs(2)` through `fd`: [`Operation::FsSyncAll`], answering the
+    /// writeback error on the volume `fd`'s description has not seen.
+    FsSyncFilesystem {
+        fd: Fd,
+    },
+    /// `sync_file_range(2)` waiting on `fd`'s writeback: nothing made durable,
+    /// the file's writeback error `fd`'s description has not seen answered.
+    FsWaitWriteback {
+        fd: Fd,
+    },
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)`: the clean cached pages of `fd`'s
+    /// file in `offset..offset + len` (`len` 0: to the end) dropped.
+    FsDropCache {
+        fd: Fd,
+        offset: u64,
+        len: u64,
+    },
     FsSetLength {
         fd: Fd,
         len: u64,

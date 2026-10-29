@@ -88,6 +88,9 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
         FaultKnob::CrashPermille | FaultKnob::CrashKind => Some(FaultPlane::Crash),
         // The host table is workload, forwarded whichever planes are drawn.
         FaultKnob::DnsEntry => None,
+        // A target names one operation of one guest's sequence: no plane can
+        // draw it.
+        FaultKnob::FsErrorAt => None,
     }
 }
 

@@ -53,6 +53,9 @@ operation_kinds! {
     Operation::FsExchange { .. } => ("fs_exchange", Fs);
     Operation::FsRenameWhiteout { .. } => ("fs_rename_whiteout", Fs);
     Operation::FsSyncAll => ("fs_sync_all", Fs);
+    Operation::FsSyncFilesystem { .. } => ("fs_sync_filesystem", Fs);
+    Operation::FsWaitWriteback { .. } => ("fs_wait_writeback", Fs);
+    Operation::FsDropCache { .. } => ("fs_drop_cache", Fs);
     Operation::FsGetXattr { .. } => ("fs_get_xattr", Fs);
     Operation::FsListXattr { .. } => ("fs_list_xattr", Fs);
     Operation::FsSetXattr { .. } => ("fs_set_xattr", Fs);

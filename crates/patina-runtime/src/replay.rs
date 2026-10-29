@@ -49,6 +49,13 @@ pub(super) fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultCon
         crash_permille: config.faults.crash.permille,
         crash_kind: config.faults.crash.kind,
         fs_error_permille: config.faults.fs.error_permille,
+        fs_error_at: config
+            .faults
+            .fs
+            .error_at
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
         fs_short_permille: config.faults.fs.short_permille,
         fs_latency_nanos: config.faults.fs.latency_nanos,
         sleep_jitter_nanos: config.faults.clock.sleep_jitter_nanos,
@@ -72,14 +79,24 @@ pub(super) fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultCon
 /// fault metadata.
 pub(super) fn fault_config_from_record(
     record: &patina_dst_trace::FaultConfigRecord,
-) -> FaultConfig {
-    FaultConfig {
+) -> Result<FaultConfig, RuntimeError> {
+    let error_at = record
+        .fs_error_at
+        .iter()
+        .map(|spelling| {
+            spelling.parse().map_err(|error| {
+                RuntimeError::Config(format!("the trace's recorded --fs-error-at: {error}"))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(FaultConfig {
         crash: CrashFaultConfig {
             permille: record.crash_permille,
             kind: record.crash_kind,
         },
         fs: FsFaultConfig {
             error_permille: record.fs_error_permille,
+            error_at,
             short_permille: record.fs_short_permille,
             latency_nanos: record.fs_latency_nanos,
         },
@@ -112,7 +129,7 @@ pub(super) fn fault_config_from_record(
         custom_op: CustomOpFaultConfig {
             fail_permille: record.custom_op_fail_permille,
         },
-    }
+    })
 }
 
 /// Reconcile a recorded trace's authoritative fault configuration with any fault
@@ -129,7 +146,7 @@ pub(super) fn reconcile_replay_faults(
     let Some(record) = recorded else {
         return Ok(None);
     };
-    let stored_faults = fault_config_from_record(record);
+    let stored_faults = fault_config_from_record(record)?;
     let supplied_any = config.faults != FaultConfig::default();
     if supplied_any && config.faults != stored_faults {
         return Err(RuntimeError::Config(

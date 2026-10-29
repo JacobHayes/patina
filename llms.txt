@@ -242,7 +242,7 @@ unknown option.
 
 ## Fault + buggify knobs (seed-driven, default off)
 
-- `--crash-permille N`, `--crash-kind process|machine`, `--fs-error-permille N`, `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
+- `--crash-permille N`, `--crash-kind process|machine`, `--fs-error-permille N`, `--fs-error-at KIND:N[:ERRNO]` (repeatable; the Nth op of a kind fails at any seed), `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
 - `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,

@@ -520,8 +520,6 @@ pub(crate) use segments::{
     Segment, attach, attachments, detach, fault_in, mapped, policies_in, policy_at, resident,
     set_policy,
 };
-#[cfg(target_os = "linux")]
-pub(crate) use views::view_dirty_pages;
 #[cfg(all(test, target_os = "linux"))]
 use views::writer_among;
 use views::{
@@ -530,6 +528,8 @@ use views::{
 };
 #[cfg(target_os = "linux")]
 use views::{finish, take_all};
+#[cfg(target_os = "linux")]
+pub(crate) use views::{mapped_file, view_dirty_pages};
 
 #[cfg(target_os = "macos")]
 #[cfg_attr(not(patina_posix_exports), allow(unused_imports))]

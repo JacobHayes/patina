@@ -371,7 +371,9 @@ impl CrashFs {
         // The cache is rebuilt from the disk, and the errors recorded on it
         // go with it.
         self.lost.clear();
-        self.unseen_errors.clear();
+        self.file_errors.clear();
+        self.filesystem_errors = crate::writeback::ErrSeq::default();
+        self.samples.clear();
         Ok(())
     }
 

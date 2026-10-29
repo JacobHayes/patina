@@ -46,6 +46,7 @@ pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
         FaultKnob::NetLatencyNanos | FaultKnob::EpochJumpNanos => "500",
         FaultKnob::NetTcpBufferBytes => "4096",
         FaultKnob::NetPartition => "a,b",
+        FaultKnob::FsErrorAt => "sync:1",
         FaultKnob::DnsEntry => "svc=10.0.0.9",
         FaultKnob::FsLatencyNanos
         | FaultKnob::SleepJitterNanos
@@ -385,6 +386,17 @@ mod registry {
             Kind::AddressPair => (
                 vec!["a,b", "10.0.0.1:80,10.0.0.2:80", "left, right"],
                 vec!["a", "a,", ",b", "a,b,c", "", "a,a", " , "],
+            ),
+            Kind::FsErrorTarget => (
+                vec!["sync:1", "write:3:ENOSPC", "read_at:2:eintr"],
+                vec![
+                    "",
+                    "sync",
+                    "sync:0",
+                    "fsync:1",
+                    "read:1:ENOSPC",
+                    "sync:1:EBADF",
+                ],
             ),
             Kind::UnsupportedSymbols => (
                 vec!["all", "memcpy", "a,b", "foo , bar"],
