@@ -450,7 +450,12 @@ fn drive(
             std::thread::sleep(options.tick);
             continue;
         }
-        if view.converged(options.jobs) && (options.crash_at_completed == 0 || crashed) {
+        // Every job terminal with fewer completed than the trigger (failures
+        // took the rest) means the crash can no longer fire.
+        let crash_pending = options.crash_at_completed > 0
+            && !crashed
+            && view.completed >= options.crash_at_completed;
+        if view.converged(options.jobs) && !crash_pending {
             return DriveOutcome::Converged;
         }
         std::thread::sleep(options.tick);
