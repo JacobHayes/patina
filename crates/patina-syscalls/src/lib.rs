@@ -378,8 +378,7 @@ impl Family {
 }
 
 /// What the runtime does with a syscall number today. The dispositions are the
-/// design's (docs/arcs/syscall-conformance.md §3); each names the gate that
-/// keeps it honest.
+/// design's; each names the gate that keeps it honest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disposition {
     /// Routed to a runtime entry; semantics host-checked by a conformance
@@ -592,12 +591,10 @@ pub struct SyscallRow {
     pub disposition: Disposition,
     /// Why this disposition: what is modeled, or why the row stays a trap.
     pub reasoning: &'static str,
-    /// The arc (docs/arcs/syscall-conformance.md §6) that changes this row's
-    /// disposition, or `None` when the disposition is final.
+    /// The arc that changes this row's disposition, or `None` when the disposition is final.
     pub closes_in: Option<&'static str>,
     /// The first mainline kernel release carrying this number, when it is
-    /// newer than the table's baseline (docs/arcs/syscall-conformance.md; the
-    /// prior-art drift table). `None` means the number predates every host the
+    /// newer than the table's baseline. `None` means the number predates every host the
     /// harness runs on. A `since` newer than [`VIRTUAL_ABI`] makes the row
     /// `Absent`.
     pub since: Option<&'static str>,

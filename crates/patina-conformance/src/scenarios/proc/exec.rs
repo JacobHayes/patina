@@ -71,7 +71,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],
-        what: "execvp is a process-lifecycle deny-trap (c/posix/signal_process.c patina_process_trap; docs/arcs/syscall-conformance.md §7): the first call aborts the run, even one that would only fail",
+        what: "execvp is a process-lifecycle deny-trap (c/posix/signal_process.c patina_process_trap): the first call aborts the run, even one that would only fail",
         failure: Failure::Stops {
             events: 3,
             ending: Ending::Signal(SIGABRT),

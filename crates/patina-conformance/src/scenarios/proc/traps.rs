@@ -82,7 +82,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: Vehicle::DOORS,
-        what: "fork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only",
+        what: "fork is a process-lifecycle trap; the child oracle runs natively only",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(libc::SIGABRT),

@@ -310,8 +310,7 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   A C callee cannot make a guarded Rust caller safe across guest siglongjmp or
   context restoration. Before moving an adapter, trace model calls through
   sched_point, blocking resume and SUD dispatch as well as its explicit delivery
-  helper. The model/delivery frame lifetime is a known blocker (see
-  `docs/arcs/signal-frame-safety.md`); passing guest tests does not establish this
+  helper. The model/delivery frame lifetime is a known gap (VALIDATION.md, Known gaps); passing guest tests does not establish this
   Rust language invariant.
 
 - `raise` is a modeled entry on both platforms, not an audit allowance. Darwin's

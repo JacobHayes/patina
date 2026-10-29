@@ -1,5 +1,5 @@
 //! Linux syscall conformance scenarios, with the host kernel as the live
-//! oracle (docs/arcs/syscall-conformance.md).
+//! oracle.
 //!
 //! A scenario is a plain function over a [`probe::Probe`]: it issues calls
 //! through one of three vehicles (`libc`, `syscall`, `raw`), asserts the

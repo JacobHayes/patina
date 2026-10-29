@@ -1,4 +1,4 @@
-//! Syscall conformance (docs/arcs/syscall-conformance.md): every scenario of
+//! Syscall conformance: every scenario of
 //! `crates/patina-conformance`, natively — the host kernel is the oracle — and
 //! under `cargo patina`, in the same test, through every vehicle it has.
 //!

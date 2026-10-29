@@ -1,6 +1,6 @@
 //! The IPC rows: System V shared memory, semaphores and message queues, and
 //! POSIX message queues — all within one process (and its threads), the
-//! semantics the owner decision models (docs/arcs/syscall-conformance.md §2).
+//! semantics the owner decision models.
 //!
 //! Identifiers the kernel allocates (`shmid`, `semid`, `msqid`) are recorded
 //! by relation (`Norm::Relative`), keys by the scenario's label, and the

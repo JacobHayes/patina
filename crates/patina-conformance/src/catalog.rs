@@ -267,8 +267,7 @@ impl Need {
 /// run deadline, so a hang gap's cost stays visible where it is declared.
 pub const MAX_HANG_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The family arc (docs/arcs/syscall-conformance.md §6) that models a
-/// pending gap away.
+/// The family arc that models a pending gap away.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arc {
     Fs,

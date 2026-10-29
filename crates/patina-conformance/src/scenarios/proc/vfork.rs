@@ -12,9 +12,8 @@
 //! is a process symbol the pre-run audit refuses (a probe binary importing
 //! it would not run under patina at all), so neither is a vehicle here.
 //!
-//! Under patina `vfork` is a process-lifecycle trap by design
-//! (docs/arcs/syscall-conformance.md §7): the child oracle runs natively
-//! only.
+//! Under patina `vfork` is a process-lifecycle trap by design:
+//! the child oracle runs natively only.
 
 use crate::catalog::{DEFAULTS, Gap, Scenario, Status};
 use crate::compare::{Ending, Failure};
@@ -100,7 +99,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Raw],
-        what: "vfork is a process-lifecycle trap (docs/arcs/syscall-conformance.md §7); the child oracle runs natively only",
+        what: "vfork is a process-lifecycle trap; the child oracle runs natively only",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(libc::SIGABRT),

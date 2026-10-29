@@ -1,8 +1,7 @@
 # patina-dst-conformance
 
 Linux syscall conformance scenarios with the host kernel as the live oracle,
-authoritative on the pinned kernel (below)
-(design: `docs/arcs/syscall-conformance.md`). Unpublished; it exists for
+authoritative on the pinned kernel (below). Unpublished; it exists for
 `crates/cargo-patina/tests/native_conformance.rs`.
 
 A scenario is a plain Rust function over the `Probe` call API

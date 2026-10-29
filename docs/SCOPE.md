@@ -75,8 +75,7 @@ What comes back into the repository is anonymous:
 - hot calls;
 - MREs, reduced into testbeds or conformance rows.
 
-The broad syscall-conformance arc was the right move while every new program hit
-a wall of gaps. Coverage is now broad enough that more breadth has diminishing
+Syscall coverage is broad enough that more breadth has diminishing
 returns, so new coverage follows target workloads.
 
 **Culling** is measured, not a campaign. Surface that no target exercises is a

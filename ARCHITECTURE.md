@@ -1350,10 +1350,8 @@ the shim runtime into the host oracle: its scenarios are plain functions built
 into one probe binary, and `crates/cargo-patina/tests/native_conformance.rs`
 runs catalog-generated individual tests natively and under patina and compares
 the observations live, exact
-but for each scenario's declared normalizations and gaps. See the
-[revised contract](docs/arcs/syscall-conformance.md#revised-contract-supersedes-conflicting-decisions-below)
-for the acceptance boundary; exhaustive coverage of the registry is still open
-(`mise run conformance:coverage`).
+but for each scenario's declared normalizations and gaps. Exhaustive coverage
+of the registry is still open (`mise run conformance:coverage`).
 
 **Native syscall inventory.** `cargo patina syscalls` emits one
 `patina.syscalls/v3` contract for the compiled target. On every target,
@@ -1364,4 +1362,4 @@ and ABI metadata are Linux-specific fields. Darwin aarch64 inventories pinned
 XNU BSD, Mach, ARM-special and platform-subcode entries with guards and holes,
 not a Darwin virtual-kernel ABI. Raw entries are not interposed; existing C
 symbol models are reported independently. MIG messages and commpage APIs are
-outside the kernel-entry scope. See the [inventory contract](docs/arcs/syscall-conformance.md#cross-platform-entry-inventory).
+outside the kernel-entry scope.

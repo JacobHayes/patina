@@ -222,7 +222,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],
-        what: "the posix_spawn family is a process-lifecycle deny-trap (c/posix/signal_process.c patina_process_trap; docs/arcs/syscall-conformance.md §7): the first call, posix_spawnp, aborts the run, so the file actions, attributes and waitpid after it are judged natively only",
+        what: "the posix_spawn family is a process-lifecycle deny-trap (c/posix/signal_process.c patina_process_trap): the first call, posix_spawnp, aborts the run, so the file actions, attributes and waitpid after it are judged natively only",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(SIGABRT),

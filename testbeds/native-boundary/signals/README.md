@@ -104,7 +104,7 @@ handler held back, a timer expiring during counter reads, a raw `tgkill`,
 a raw `read` another thread signals, a raw `rt_sigsuspend`,
 `abort`, and a SIGSEGV handler inside an `atexit` handler. Each reports the
 shim scopes still counted beneath guest code after the jumps and the handlers
-that ran over a shim Rust frame (`docs/arcs/signal-frame-safety.md`).
+that ran over a shim Rust frame.
 `native_signals` requires 0 for both natively, for the control, and for the
 cases a C exit delivers (the raw system calls and counter reads on x86_64,
 the held-back signal, `raise` and the other libc doors that forward to the

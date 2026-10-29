@@ -151,14 +151,16 @@ versions, target triple and fingerprint.
 - **`mmap(MAP_SHARED)` without the POSIX layer** is invisible to the symbol
   audit.
 - **Signal handlers leaving by `siglongjmp`/`setcontext`** while interrupting a
-  shim call skip live shim frames. This is unsupported until the
-  [signal frame safety](docs/arcs/signal-frame-safety.md) port lands. Ambient host
-  signals are outside the model.
+  shim call are unsupported where delivery still runs over shim Rust frames
+  (libc doors); only the trap handlers deliver from C. `native_signals`
+  (`signals/frame_abandon.c`, `planted-faults` shim) pins each such delivery
+  origin. Ambient host signals are outside the model.
 - **Multi-process.** Process spawning is a non-goal: the spawn family deny-traps.
   `testbeds/multiproc` pins each workload's first refusal on x86_64 Linux; arm64
   and Darwin baselines are pending.
-- **Conformance coverage** is not exhaustive: `mise run conformance:coverage`
-  lists the registry entries still uncovered.
+- **Conformance coverage** is Linux only and not exhaustive:
+  `mise run conformance:coverage` lists the registry entries no scenario covers
+  and no exclusion accounts for.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block
   accounting and the volume page cache are not modeled. `CrashFs` renames are
   always atomic, and directory-durability loss covers explicitly created entries

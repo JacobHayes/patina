@@ -81,7 +81,7 @@ pub const SCENARIO: Scenario = Scenario {
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],
-        what: "pidfd_spawnp and pidfd_getpid are process-lifecycle deny-traps (c/posix/signal_process.c patina_process_trap; docs/arcs/syscall-conformance.md §7): the first call, pidfd_spawnp, aborts the run, so pidfd_getpid is judged natively only",
+        what: "pidfd_spawnp and pidfd_getpid are process-lifecycle deny-traps (c/posix/signal_process.c patina_process_trap): the first call, pidfd_spawnp, aborts the run, so pidfd_getpid is judged natively only",
         failure: Failure::Stops {
             events: 0,
             ending: Ending::Signal(SIGABRT),
