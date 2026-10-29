@@ -54,6 +54,9 @@
 //!   the operation, which is what `--custom-op-fail-permille` acts on.
 //!   [`custom_op`] and [`custom_op_faultable`] are the same two with
 //!   serde-typed keys and results.
+//! - [`param`] — a named run parameter (`cargo patina run --param K=V`, or a
+//!   harness's `.param()` default), recorded and restored on replay; `None`
+//!   outside Patina.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
 //! - With the default-off `macros` feature, `#[patina_dst::test]` rebuilds the
 //!   same libtest harness shim-linked and sweeps the annotated test under plain

@@ -111,4 +111,4 @@ A crash-restart trace holds exactly one timeline. Branching such a trace is not 
 
 ## Remaining boundary
 
-The cargo family refuses both crash rates by name. A failed crash's trace does not replay to its refusal (see above).
+A failed crash's trace does not replay to its refusal (see above).

@@ -544,7 +544,7 @@ surface (never reached by the scenario) is visibly qualified. A partial list
 still fails closed on the un-listed symbols.
 
 `--allow-randomized-address-layout` (every native verb that launches a guest:
-`run`, `replay`, native `test`, `explore`, and `campaign` with its reproduce
+`run`, `replay`, `test`, and `campaign` with its reproduce
 commands) is the hatch for a host that forbids turning address-space
 randomization off, such as Docker's default seccomp profile. The guest keeps
 the host's layout, so its addresses are host state again (residual 12). The

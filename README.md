@@ -14,7 +14,7 @@ bugs that normally only show up in production.
 cargo patina run ./my-server --seed 42                       # a deterministic run
 cargo patina run ./my-server --seed 42 --record run.patina   # record it
 cargo patina replay ./my-server run.patina                   # reproduce it exactly, flag-free
-cargo patina explore run ./my-server --seeds 1000            # hunt for a failing seed
+cargo patina campaign ./my-server --gens 1000                # hunt for failing seeds
 ```
 
 Patina is **experimental**. It is developed in the open, validated hard (see
@@ -103,7 +103,7 @@ Now record a run, replay it byte-for-byte, and sweep seeds:
 cargo patina build lottery.rs --output lottery       # build once for run-many stability
 cargo patina run ./lottery --seed 1 --record run.patina
 cargo patina replay ./lottery run.patina             # no flags: the trace is authoritative
-cargo patina explore run ./lottery --seeds 100       # per-seed outcomes, stops at first failure
+cargo patina campaign ./lottery --gens 100          # sweep seeds, dedupe and reproduce failures
 ```
 
 From here, the [tutorial](./TUTORIAL.md) walks a small program from
@@ -111,26 +111,24 @@ instrumentation to a caught, replayed, HTML-rendered bug in about ten minutes.
 
 ## How to use it
 
-One CLI, two artifact families, inferred automatically: a **Cargo
-package/test** (directory or `Cargo.toml`, run in-process) and a **native
-binary** (Mach-O/ELF, linked against the deterministic shim). `run`, `audit`,
-and `replay` are source-first: hand them a `.rs` file, a directory, or a
+One CLI over one kind of artifact: a **native binary** (Mach-O/ELF, linked
+against the deterministic shim), run interposed. `run`, `audit`, and `replay`
+are source-first: hand them a `.rs` file, a package directory, or a
 `Cargo.toml` and they build through the same pipeline as `build` first. `test` also has a
 source-first native libtest harness mode for one exact test target.
 
 | Verb | What it does | Example |
 |---|---|---|
 | `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
-| `test` | Run Cargo-family tests, or rebuild one libtest harness shim-linked and sweep an exact test. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
+| `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
 | `build` | Build the shim-linked native binary, or a Go main package (`--go`, Linux). | `cargo patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
-| `explore` | Sweep a seed range, reporting per-seed outcomes. | `cargo patina explore run ./app --seeds 500` |
 | `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
 | `sites` | Inventory assertion/oracle instrumentation; optionally join a run or campaign SDK report. | `cargo patina sites --exercised out/` |
-| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or the seed/params. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
+| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `cargo patina syscalls` |
 
 Native harness mode is the tight point-solution loop: `cargo patina test
@@ -178,8 +176,7 @@ into the trace so replay reproduces them flag-free.
   holds, as ext4 leaves it: metadata rolls back to the last journal commit (an
   `fsync` of a changed inode, `sync`/`syncfs`, or every 5 virtual seconds),
   a file is the prefix that commit recorded, and each block overwritten in
-  place since keeps its old or new bytes. The Cargo family refuses crash
-  restart.
+  place since keeps its old or new bytes.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
   (seeded delay before every eligible fs op, so slow I/O reorders against timers
@@ -264,18 +261,15 @@ when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
 loads through `cargo patina sites --exercised <out-dir>`.
 
-### Record, replay, branch
+### Record and replay
 
 `--record` captures every boundary decision into a compact JSON `.patina` trace
 (inspect with `jq` or `cargo patina trace info|events`). Replay is strict: the
 trace carries the seed, fault knobs, buggify config, guest argv, and native
-`--env` values, and any mismatch — changed binary, changed
+`--env` and `--param` values, and any mismatch — changed binary, changed
 config, diverging operation — fails closed rather than lying. A native trace
 names its binary by digest, so replaying it against one that differs by a
-single byte is refused before the guest starts, naming what differs. Cargo
-traces also support *branch timelines*: replay a recorded prefix, then explore a
-different seeded suffix from that moment
-(`replay … --branch --from N --branch-seed S --branch-id ID`).
+single byte is refused before the guest starts, naming what differs.
 
 ### Debug vs release guest builds
 
@@ -314,8 +308,8 @@ case. Two things differ from plain `cargo test`:
   and deterministic process-state constants.
 - **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
   interposed over virtual sockets, pipes, and the virtual clock.
-- **Record/replay** with byte-identical traces, branch timelines
-  (Cargo), and failure-preserving **knob and input minimization**.
+- **Record/replay** with byte-identical traces, and failure-preserving
+  **knob and parameter minimization**.
 - **Default-deny audit gate**: before a native guest runs, every externally
   resolved symbol must be interposed or provably effect-free; unknown imports
   and raw syscall/clock/entropy instructions are refusals
@@ -323,10 +317,9 @@ case. Two things differ from plain `cargo test`:
 - **Campaigns**: deterministic multi-generation sweeps with an outcome
   classifier (finding, harness, vacuity and catch-all classes),
   failure-signature dedup, and per-failure repro commands.
-- **Three adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
-  (`patina-dst`), a configure-then-run harness (`patina-dst-harness`), and the
-  explicit-context simulator API (`patina-dst-runtime`, with deterministic
-  async in `patina-dst-async`).
+- **Two adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
+  (`patina-dst`, with run parameters through `patina_dst::param`) and a
+  configure-then-run harness (`patina-dst-harness`).
 
 ### Platforms
 

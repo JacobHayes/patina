@@ -59,7 +59,7 @@ Conventions:
   breach is a `Violation` under the invariant's label, a deliberate fail-closed
   stop is an `AbortIntent` before the exit, and a clean run is a `Pass` whose
   detail carries the outcome digest. So a violation under Patina is a
-  deterministic failing run that `explore`/`minimize` can bisect, and every
+  deterministic failing run that `campaign`/`minimize` can reduce, and every
   consumer — the campaign classifier, the sweep scripts, a minimize oracle —
   reads the run's `patina.result/v1` envelope (`verdicts[]`, `fault_reports{}`). The `WORKQ_*`/`PUBSUB_*` lines
   the guests still print are a human echo; **nothing downstream needs them**, and

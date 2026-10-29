@@ -133,17 +133,15 @@ space), so sweep for one rather than hardcoding it.
 
 ## 4. Sweep seeds automatically
 
-`explore` builds once and runs that same artifact across a range of seeds,
-stopping at the first failure:
+`campaign` runs the same artifact across generations, each on its own seed,
+deduplicates the failures it finds, and prints a reproduction command for each
+one (also kept in the campaign state under `--out-dir`):
 
 ```
-$ cargo patina explore run ./ledger/ledger --buggify --seeds 50
-PATINA_EXPLORE_FAILURE seed=5 exit=1 repro="cargo patina run ./ledger/ledger --buggify --seed 5"
+$ cargo patina campaign ./ledger/ledger --buggify --gens 50 --out-dir ./ledger-out
 ```
 
-(A clean sweep instead ends with `PATINA_EXPLORE_COMPLETE start=0 seeds=50`.)
-The repro string is also present in the `patina.result/v1` `message` field under
-`--format json`.
+"Where to go next" shows how to reduce a campaign failure to its minimal fault knobs.
 
 ## 5. Record the catching run
 
@@ -355,8 +353,8 @@ reported none.
   `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
   shape as the DNS knobs in section 9. They are seed-driven and default off. All
   are recorded for flag-free replay. Crash restart (`--machine-crash-permille`
-  and `--process-crash-permille`) is native-only: the Cargo family refuses it,
-  and campaigns draw it from the `crash` fault plane.
+  and `--process-crash-permille`) restarts the guest in a new incarnation, and
+  campaigns draw it from the `crash` fault plane.
 - Vary the *workload* across campaign generations from inside the guest: a
   campaign varies patina-side seeds (scheduler, faults, buggify) per generation
   but keeps guest argv fixed by design. A guest that wants a different logical
@@ -379,8 +377,10 @@ reported none.
   that generation, and the completion line names it (`target=verdicts[…]`). A
   guest that reports nothing through the verdict ABI is refused with a pointer
   to `--marker 'wal corruption'`, which names the failure text instead.
-- Shrink the seed and parameters that trigger a failure against your own oracle:
-  `cargo patina minimize --scenario --seed 12 -- ./oracle`.
+- Feed the guest named inputs with `cargo patina run --param clients=40` (read
+  through `patina_dst::param("clients")`, recorded for flag-free replay), and
+  shrink the parameters a failure needs:
+  `cargo patina minimize --params -- cargo patina run ./ledger/ledger --seed 5 --param clients=40`.
 - See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work
   queue: WAL crash-recovery, SimNet faults, buggify) for the flagship end-to-end
   demonstration.

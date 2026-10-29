@@ -66,10 +66,10 @@ trace format.
   `patina_harness_install`. Its overlay flows through the same `PATINA_RT_*`
   values and `RuntimeConfig` fields as the CLI, so replay reconciliation
   covers it. Run without Patina, it returns `NotUnderPatina`.
-- **Cargo package, in process** (usage mode 3). Code performs effects through
-  an explicit `patina_dst_runtime::Context` (`run`, `run_with`).
-  `patina-dst-async` is a deterministic single-threaded executor over that
-  boundary. Cargo-family runs refuse crash restart.
+  Its `.param()` values are run-parameter defaults a CLI `--param` overrides
+  per key (the shim merges the two control-plane values); the guest reads the
+  merged set through `patina_dst::param`, a pure configuration read, and the
+  trace records it for replay.
 
 ## Crate layout
 
@@ -83,7 +83,6 @@ patina-dst-macros           # the SDK's proc macros
 patina-dst-harness          # configure-then-run harness under the shim
 patina-dst-abi              # boundary operations/outcomes, time-model constants
 patina-dst-runtime          # Context, drivers, scheduler policies, record/replay, params
-patina-dst-async            # deterministic executor over the explicit boundary
 patina-dst-trace            # trace bundle, branch metadata, strict replay
 patina-dst-target           # target metadata, import audit, instruction scan
 patina-dst-syscalls         # syscall registry (generated identities + support)

@@ -48,13 +48,11 @@ not. Get the current spelling of anything here from the CLI.
 executes one at a chosen seed and can record a trace; `replay` reproduces that
 trace, needing no flags because the trace is authoritative; `trace` inspects a
 recording offline — metadata, filtered events, aggregates, or a two-trace diff —
-without executing anything. `test` runs the Cargo family under Patina, and in its
-source-first form rebuilds one libtest target shim-linked to sweep a single exact
-test. A run with a trace can be rendered to a self-contained HTML timeline.
+without executing anything. `test` rebuilds one libtest target shim-linked to
+sweep a single exact test across seeds. `run --param K=V` hands the guest a named
+input it reads through `patina_dst::param`, recorded for flag-free replay. A run with a trace can be rendered to a self-contained HTML timeline.
 
-**Search.** `explore` sweeps a seed range over one artifact, building once and
-stopping at the first failure. `campaign` is the heavier instrument: a
-config-driven fault-and-schedule sweep where every generation's seed and knobs
+**Search.** `campaign` sweeps seeds over one artifact: a config-driven fault-and-schedule sweep where every generation's seed and knobs
 are a pure function of the generation number, with outcome classification,
 novel-failure deduplication with saved traces, per-failure repro commands, and
 accumulated coverage. It runs each novel failure's repro command before reporting
@@ -66,9 +64,9 @@ trace recorded from that reduction replays it without flags. That path needs no 
 already recognized the generation through the verdict channel, and preserving
 those verdicts is the question every candidate is judged on. A nondeterministic
 generation is refused: two runs disagreeing is not something a one-run oracle can
-preserve, so find the uncontrolled input first. `minimize --scenario`
-shrinks the seed and parameters that trigger a failure against an oracle you
-supply.
+preserve, so find the uncontrolled input first. `minimize --params -- cargo
+patina run ...` shrinks the `--param` set a failing run needs, keeping a
+candidate only while it fails the way the original did.
 
 **Fault domains** are seed-driven and off by default. Most are recorded into the
 trace so replay reproduces them: I/O errors, short writes and latency; network drop,
@@ -76,8 +74,7 @@ latency, and jitter; name resolution failure and latency; sleep jitter; schedule
 preemption; liveness watchdogs. Native
 `--machine-crash-permille` and `--process-crash-permille` crash at a seeded
 side-effecting operation and perform a real fresh-process restart (a process
-crash keeps the page cache, a machine crash keeps only what the disk holds), recording and replaying across both incarnations, while the Cargo family
-refuses it; campaigns draw it from the `crash` plane. A
+crash keeps the page cache, a machine crash keeps only what the disk holds), recording and replaying across both incarnations; campaigns draw it from the `crash` plane. A
 *swarm* mode deselects a seeded subset of enabled fault classes per run. Which controls a verb and family accept is registry-defined — do
 not assume.
 
@@ -425,7 +422,7 @@ cargo patina run /tmp/snippet.rs --seed 7    # note the order
 cargo patina run /tmp/snippet.rs --seed 7    # identical — determinism
 cargo patina run /tmp/snippet.rs --seed 8    # different — seed variation
 cargo patina audit /tmp/snippet.rs           # the residual effect surface
-cargo patina explore run /tmp/snippet.rs     # a seed sweep
+cargo patina campaign /tmp/snippet.rs --gens 20   # a seed sweep
 ```
 
 `HashMap` iteration order is the cheapest visible proof: normally randomized per

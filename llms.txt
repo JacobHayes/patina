@@ -14,19 +14,17 @@ Patina has no host fallback: a supported `std` call is deterministic or the run
 fails closed (a missed interposer is a refusal, never a silent escape). A trace
 carries its seed, fault config, and buggify config, so `replay` is flag-free.
 
-## Targets (families)
+## Targets
 
-The verb infers the family from the argument: a Mach-O/ELF binary (by its magic
-bytes) -> native (linked shim); no artifact, or a directory / `Cargo.toml` whose
-package depends on the Patina runtime -> the Cargo package family (in-process
-boundary API), except `test <DIR|Cargo.toml>` which selects native libtest
-harness mode. A
-`.rs`/dir/`Cargo.toml` source argument is built on the fly, then run.
+Every run is native and interposed: a Mach-O/ELF binary linked against the shim
+runs as is, and a `.rs` file, package directory, or `Cargo.toml` is built
+shim-linked on the fly, then run. `test <DIR|Cargo.toml>` rebuilds one libtest
+target shim-linked.
 
-A verb's families are also machine-readable: `cargo patina <verb> --help --format
-json` tags every flag group with the families that accept it (and narrows an
-individual flag where it differs), plus `requires` for a flag that is inert
-without another. A flag given to the wrong family is refused by name, not as an
+A verb's flags are machine-readable: `cargo patina <verb> --help --format json`
+lists every flag group (tagged with the forms that accept it where a verb has
+several, e.g. the `trace` subcommands), plus `requires` for a flag that is inert
+without another. A flag given to the wrong form is refused by name, not as an
 unknown option.
 
 Every flag except `--help`/`--version` can be defaulted from `PATINA_<FLAG>`:
@@ -59,11 +57,13 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   through. The `go` on PATH builds it (pin it with `GOTOOLCHAIN` or mise).
 - `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
-  `--record PATH` writes a trace. Native runs take `--env K=V` (the guest's
-  starting environment) and `--cwd PATH` (its starting working directory, an
-  absolute path that must exist in the deterministic image; default `/`); both
-  are recorded into the trace and restored flag-free on replay.
-  `--realtime-epoch 2001-09-09T01:46:40Z` (every family) sets realtime at
+  `--record PATH` writes a trace. `--env K=V` sets the guest's starting
+  environment, `--cwd PATH` its starting working directory (an absolute path
+  that must exist in the deterministic image; default `/`), and `--param K=V` a
+  run parameter it reads through `patina_dst::param` (overriding a harness's
+  `.param()` default); all are recorded into the trace and restored flag-free
+  on replay.
+  `--realtime-epoch 2001-09-09T01:46:40Z` sets realtime at
   monotonic zero (default 2026-07-22T23:00:09Z, Patina's first commit), not
   guest-start wall time. The default boot origin is 12345.678901234s of uptime;
   realtime = epoch + uptime, so default guest start is 2026-07-23T02:25:54.678901234Z.
@@ -78,8 +78,8 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   the same way.
   Native runs execute with address-space randomization off; a host that
   forbids it (Docker's default seccomp profile) refuses the run unless
-  `--allow-randomized-address-layout` is passed (also on native `test`,
-  `explore run` and `campaign`, which forwards it to every generation and
+  `--allow-randomized-address-layout` is passed (also on `test` and
+  `campaign`, which forwards it to every generation and
   reproduce command). It keeps the host's layout, pads nothing, qualifies the
   run (stderr warning, envelope `qualifications[]`) and records
   `address_layout: "randomized"` in the trace, where a fixed run records
@@ -90,8 +90,6 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run with the `host_limit` refusal.
-- `cargo patina test [--seed N | --record PATH] [FAULT OPTIONS] [CARGO OPTIONS]`
-  The Cargo package family under Patina.
 - `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
   stages it under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, runs the exact libtest
@@ -111,9 +109,9 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   by the supervisor when it commits the recording); replay against a different build, or of a
   trace with no identity, is refused before the guest starts, naming each
   differing component (refusal class `fingerprint_mismatch`).
-- `cargo patina trace info <TRACE> [--timeline ID]` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
+- `cargo patina trace info <TRACE>` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
   Inspect an existing trace without executing a guest. `info` prints metadata,
-  timelines, resolved event count, and virtual-time span. `events` prints the
+  resolved event count, and virtual-time span. `events` prints the
   shared decoded event view; `--kind` accepts operation tags or categories
   (`filesystem`, `network`, `scheduling`, `sleep`, `clock`, `entropy`, `crash`,
   `other`), and `--task` accepts a task id or `main`. `stats` aggregates totals,
@@ -126,11 +124,6 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   finding. Audit source-first (or a `cargo patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `cargo patina explore run <ARTIFACT|SOURCE> [--seeds N] [--seed-start N] [RUN OPTIONS]`
-  Sweep seeds, building once and running that artifact per seed. Stops at the
-  first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
-  the JSON envelope's `message` carries the same repro. Otherwise
-  `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
 - `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
@@ -233,10 +226,12 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   that two runs disagree, which no single-run oracle can preserve.
   Because that oracle is hermetic by construction, candidates are evaluated in
   parallel by default (`--jobs`, default half the CPUs).
-- `cargo patina minimize --scenario --seed N [--param K=V]... [--seed-budget N] -- <ORACLE>`
-  Shrink the seed/params that trigger a failure. The oracle runs as a fresh
-  seeded child with the seed and params in `PATINA_RT_SEED`/`PATINA_RT_PARAMS_JSON`;
-  a NON-ZERO exit means "the failure is still present".
+- `cargo patina minimize --params -- cargo patina run <BINARY> --param K=V... [RUN OPTIONS] [-- ARGS]`
+  Shrink the `--param` set of a failing command: each candidate drops or
+  shrinks a parameter (numbers toward zero, values toward empty) and re-runs
+  the command; it still fails when it exits with the original's non-zero
+  status. Prints `PATINA_MINIMIZE_PARAMS_COMPLETE params=[...] oracle_runs=N
+  repro: <command>`.
 - `cargo patina syscalls`
   Print a target-local kernel-entry inventory and its C symbol layer (default:
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
@@ -256,9 +251,9 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
 - `--machine-crash-permille N`, `--process-crash-permille N`, `--fs-error-permille N`, `--fs-error-at KIND:N[:ERRNO]` (repeatable; the Nth op of a kind fails at any seed), `--fs-short-permille N`, `--fs-latency-nanos MIN..MAX`
 - `--sleep-jitter-nanos MIN..MAX`, `--net-jitter-nanos MIN..MAX`, `--net-drop-permille N`, `--net-latency-nanos N`
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
-- Most knobs above are accepted by `run` and `test` in all families and refused by `replay`,
-  which restores them from the trace. Exception: the crash knobs are native-only (the
-  Cargo family refuses them; campaigns draw them from the `crash` plane).
+- The knobs above are accepted by `run` and `test` and refused by `replay`,
+  which restores them from the trace. Campaigns draw the crash knobs from the
+  `crash` plane.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
@@ -401,9 +396,9 @@ dev-dependency use under plain `cargo test`.
 - `patina_dst::sometimes!(cond, "label")`, `patina_dst::reachable!("label")`: coverage.
 - `patina_dst::lifecycle::setup_complete()`, `patina_dst::lifecycle::event!("name")`.
 - `patina_dst::rng()`: seed-bridged deterministic entropy. `patina_dst::is_simulated()`.
-- Explicit-context API (crate `patina-dst-runtime`): `patina_dst_runtime::run` /
-  `run_with`, `Context`, `RuntimeBuilder`. Deterministic async lives in
-  `patina-dst-async` (`block_on`, `spawn`, TCP/UDP futures) over that `Context`.
+- `patina_dst::param("key") -> Option<String>`: a run parameter
+  (`run --param key=value`, or a harness `.param()` default), recorded and
+  restored on replay; `None` outside Patina.
 
 ## proptest
 

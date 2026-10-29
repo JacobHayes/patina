@@ -33,7 +33,7 @@ use super::*;
 /// (split index vs per-verb payloads; default-valued flag fields omitted).
 pub const HELP_SCHEMA: &str = "patina.help/v2";
 
-fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
+fn flag_json(flag: &Flag) -> serde_json::Value {
     use serde_json::{Map, Value as J};
     let mut m = Map::new();
     m.insert("name".into(), J::from(flag.name));
@@ -65,7 +65,6 @@ fn flag_json(flag: &Flag, group: &Group) -> serde_json::Value {
     if let Some(parent) = flag.requires {
         m.insert("requires".into(), J::from(parent));
     }
-    let _ = group;
     J::Object(m)
 }
 
@@ -85,23 +84,10 @@ fn group_json(group: &Group) -> serde_json::Value {
     }
     gm.insert(
         "flags".into(),
-        J::Array(
-            group
-                .flags
-                .iter()
-                .map(|flag| flag_json(flag, group))
-                .collect(),
-        ),
+        J::Array(group.flags.iter().map(flag_json).collect()),
     );
     J::Object(gm)
 }
-
-/// The stand-in group for the always-available flags, which belong to no verb.
-const GLOBAL_GROUP: Group = Group {
-    title: "",
-    families: SOLE,
-    flags: &[],
-};
 
 /// The always-available output flags as `{title, flags}` (present in both the
 /// index and every per-verb payload).
@@ -111,12 +97,7 @@ fn global_flags_json() -> serde_json::Value {
     global.insert("title".into(), J::from("Output options (all verbs)"));
     global.insert(
         "flags".into(),
-        J::Array(
-            GLOBAL_OUTPUT
-                .iter()
-                .map(|flag| flag_json(flag, &GLOBAL_GROUP))
-                .collect(),
-        ),
+        J::Array(GLOBAL_OUTPUT.iter().map(flag_json).collect()),
     );
     J::Object(global)
 }

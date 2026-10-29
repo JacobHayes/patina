@@ -29,10 +29,9 @@ maintainer recipes; it is gitignored and is not project doctrine.
 ## The CLI: verbs, and where its truth lives
 
 `cargo patina` is verb-first: `build`, `run`, `test`, `audit`, `replay`,
-`explore`, `campaign`, `coverage`, `sites`, `trace`, `minimize`, `syscalls`. Verbs infer the artifact family (Cargo
-package / native binary) from the argument; `run`, `audit`, and
-`replay` are source-first (a `.rs` file, directory, or `Cargo.toml` builds on
-the fly).
+`campaign`, `coverage`, `sites`, `trace`, `minimize`, `syscalls`. Every run is
+native and interposed; `run`, `audit`, and `replay` are source-first (a `.rs`
+file, package directory, or `Cargo.toml` builds on the fly).
 
 Never guess flag names — the CLI has gone through renames. The authoritative
 registry is `crates/cargo-patina/src/help.rs` and its `help/` modules, and it is the single source for
@@ -52,11 +51,10 @@ index lists each verb's summary and forms but no flag rows; per-verb detail
 (flag_groups) comes from `cargo patina <verb> --help --format json`. Flag fields
 default-omit — an absent `short`/`value_grammar`/`repeatable` means none/false.
 
-A verb's forms are its **families** (`cargo`/`native`, the `trace`
-subcommands, …), chosen at routing time from the artifact's magic bytes or a
-subcommand token. Each group carries a `families` array naming the forms that
-accept it, and a flag narrower than its group repeats the array — so
-`run --help --format json` says outright that `--param` is Cargo-family-only. A dependent flag carries `requires` (e.g.
+A verb with several forms has **families** (the `trace` subcommands,
+`minimize --generation`/`--params`), chosen at routing time from a subcommand
+or selector token. A group accepted by only some forms carries a `families`
+array naming them. A dependent flag carries `requires` (e.g.
 `--sched-pct-steps` requires `--sched-pct`). A flag supplied to the wrong family
 is refused by name, not as an unknown option.
 
