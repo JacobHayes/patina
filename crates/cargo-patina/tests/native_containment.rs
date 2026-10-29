@@ -894,26 +894,53 @@ mod linux {
 /// Every reference in the program's load set is judged by the image it binds
 /// to: application libraries are audited as the executable is, and what the
 /// loader would run before the shim's containment is refused before it can.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod load_set {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    /// `lib<stem>.so` in `dir`, named by that soname and finding its own
-    /// dependencies in `dir`.
+    /// The host's C library, as the refusals name it.
+    const LIBC: &str = if cfg!(target_os = "macos") {
+        "libSystem.B.dylib"
+    } else {
+        "libc.so.6"
+    };
+
+    /// The file name of the library built from `stem`.
+    fn lib(stem: &str) -> String {
+        if cfg!(target_os = "macos") {
+            format!("lib{stem}.dylib")
+        } else {
+            format!("lib{stem}.so")
+        }
+    }
+
+    /// `lib<stem>` in `dir`, named by that file name (soname, or `@rpath`
+    /// install name) and finding its own dependencies in `dir`.
     fn library(name: &str, dir: &Path, flags: &[&str]) -> PathBuf {
         let stem = Path::new(name).file_stem().unwrap().to_str().unwrap();
-        let soname = format!("-Wl,-soname,lib{stem}.so");
+        let id = if cfg!(target_os = "macos") {
+            format!("-Wl,-install_name,@rpath/{}", lib(stem))
+        } else {
+            format!("-Wl,-soname,{}", lib(stem))
+        };
         let rpath = format!("-Wl,-rpath,{}", dir.display());
-        let mut all = vec![soname.as_str(), rpath.as_str()];
+        let mut all = vec![id.as_str(), rpath.as_str()];
         all.extend_from_slice(flags);
         assert_build_c_library(name, dir, &all)
     }
 
-    /// `main` over the POSIX layer, linked against `library`, plus `flags`.
+    /// `main` over the POSIX layer, linked against `library`, plus `flags`,
+    /// with the product link's dead-section removal: otherwise the C link
+    /// retains unused std archive sections and their unrelated host imports.
     fn guest_over(main: &str, library: &Path, flags: &[&str]) -> Guest {
         let rpath = format!("-Wl,-rpath,{}", library.parent().unwrap().display());
-        let mut all = vec![library.to_str().unwrap(), rpath.as_str()];
+        let strip = if cfg!(target_os = "linux") {
+            "-Wl,--gc-sections"
+        } else {
+            "-Wl,-dead_strip"
+        };
+        let mut all = vec![library.to_str().unwrap(), rpath.as_str(), strip];
         all.extend_from_slice(flags);
         assert_build_c_guest_with_flags(main, CLink::PosixShim, &all)
     }
@@ -938,15 +965,28 @@ mod load_set {
         let g = guest_over("load_set_main.c", &a, &[]);
         assert_refused_before_running(
             &g,
-            &["libload_set_chain_b.so", "getloadavg", "libc.so.6"],
+            &[&lib("load_set_chain_b"), "getloadavg", LIBC],
             "LOAD_SET_MAIN",
         );
+    }
+
+    /// A library whose references all stay inside the audited images runs
+    /// and replays as one program.
+    #[test]
+    fn a_contained_library_runs_and_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let pure = library("load_set_pure.c", dir.path(), &[]);
+        let g = guest_over("load_set_main.c", &pure, &[]);
+        g.assert_audit_clean();
+        let out = g.assert_run_success(1, &[]);
+        assert_exact_line(&out.stdout, "LOAD_SET_MAIN 204");
     }
 
     /// A library's `write` binds to the shim's definition the executable
     /// exports, so it runs and replays deterministically; with the
     /// executable's exports hidden by a version script it binds to libc's
     /// instead, around the shim, and is refused.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_librarys_modeled_io_runs_through_the_shim_and_is_refused_around_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -971,17 +1011,40 @@ mod load_set {
     #[test]
     fn a_librarys_weak_resolver_reference_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let lib = library("load_set_weak_dlsym.c", dir.path(), &[]);
-        let g = guest_over("load_set_main.c", &lib, &[]);
+        let weak = library("load_set_weak_dlsym.c", dir.path(), &[]);
+        let g = guest_over("load_set_main.c", &weak, &[]);
         assert_refused_before_running(
             &g,
-            &["libload_set_weak_dlsym.so", "dlsym", "dynamic-loading"],
+            &[&lib("load_set_weak_dlsym"), "dlsym", "dynamic-loading"],
             "LOAD_SET_MAIN",
         );
     }
 
+    /// A dylib's references bind by two-level namespace to the dylib that
+    /// provides them, so a library's `write` binds to libSystem's, never to
+    /// the shim the executable carries: it is refused by name.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_dylibs_io_binds_to_libsystem_around_the_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let io = library("load_set_io.c", dir.path(), &[]);
+        let g = guest_over("load_set_main.c", &io, &[]);
+        assert_refused_before_running(&g, &[&lib("load_set_io"), "write", LIBC], "LOAD_SET_IO");
+    }
+
+    /// A C++ guest over the platform's shared libc++ binds its stream calls
+    /// into a library dyld maps from its shared cache, whose code calls
+    /// libSystem directly and cannot be read: refused, naming libc++.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_cxx_guest_over_the_shared_libcxx_is_refused() {
+        let g = assert_build_cxx_guest("cxx_libcxx_probe.cc");
+        assert_refused_before_running(&g, &["libc++.1.dylib"], "CXX_LIBCXX_RAN");
+    }
+
     /// A weak reference libc defines binds there, so it is judged by the
     /// effect policy rather than listed as inert.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_weak_reference_libc_defines_is_host_bound_not_inert() {
         let g = assert_build_c_guest("weak_thread_atexit_probe.c", CLink::PosixShim);
@@ -999,6 +1062,7 @@ mod load_set {
     /// the loader runs at all: an rtld-audit module (it would run even while
     /// the load set is listed), a library initialized first, and an IFUNC
     /// resolver the executable's relocation calls.
+    #[cfg(target_os = "linux")]
     #[test]
     fn code_the_loader_runs_before_containment_is_refused_before_it_runs() {
         let dir = tempfile::tempdir().unwrap();
