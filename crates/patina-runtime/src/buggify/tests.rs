@@ -304,10 +304,6 @@ fn verdicts_are_recorded_queued_and_drained_once() {
         "queued diagnostics must be the verdict marker lines in call order"
     );
     assert!(context.take_pending_diagnostics().is_empty());
-    assert_eq!(
-        lines[0],
-        "PATINA_VERDICT seq=0 kind=pass label=queue\\sdrained detail="
-    );
     // The reported set survives the drain: draining is a print queue, not the
     // record of what happened.
     assert_eq!(context.verdicts().len(), 2);

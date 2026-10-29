@@ -138,7 +138,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         && let Some(message) =
             native_identity_refusal(path, bundle.metadata.native.as_ref(), identity)
     {
-        if output::facts_active() {
+        if output::json_active() {
             output::emit_native_refusal(&binary, output::FINGERPRINT_MISMATCH_REFUSAL, message);
             return Ok(2);
         }
@@ -182,7 +182,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         &invocation.allow_unsupported,
     ) {
         Ok(downgraded) => downgraded,
-        Err(error) if output::facts_active() => {
+        Err(error) if output::json_active() => {
             output::emit_native_refusal(&binary, output::NATIVE_PRERUN_REFUSAL, error.to_string());
             return Ok(2);
         }
@@ -279,7 +279,7 @@ liveness-safe."
                 host_dir.display(),
                 mismatch.describe()
             );
-            if output::facts_active() {
+            if output::json_active() {
                 output::emit_native_mismatch_refusal(
                     &binary,
                     output::FINGERPRINT_MISMATCH_REFUSAL,
@@ -784,7 +784,8 @@ liveness-safe."
         }
     }
     let native_signal = captured.signal;
-    let native_run_marker = append_native_infra_marker(
+    let supervisor_infra = native_signal.is_some() || trace_finalization_error.is_some();
+    append_native_infra_marker(
         &mut captured,
         native_signal,
         trace_finalization_error
@@ -864,7 +865,7 @@ liveness-safe."
             coverage: coverage.clone(),
             crash_restart,
             facts,
-            native_run_marker,
+            supervisor_infra,
             qualifications,
         },
         captured,

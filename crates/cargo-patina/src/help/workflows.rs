@@ -512,14 +512,13 @@ pub(super) const SITES: Verb = Verb {
     name: "sites",
     summary: "Inventory static assertion/oracle sites in the current workspace.",
     synopsis: &[
-        "cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
+        "cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]",
     ],
     prose: "\
 `sites` scans the current Cargo workspace with a syn-based static analyzer and reports \
 where Patina SDK sites, Rust assertions, proptest/quickcheck checks, and \
-antithesis-sdk assertions live. With --exercised FILE, it parses runtime PATINA_SDK_REPORT line(s); \
-with --exercised OUTDIR, it reads OUTDIR/sites.json from a campaign. Both forms join \
-runtime counters and link-time declared SDK rows to the static SDK rows by label or \
+antithesis-sdk assertions live. With --exercised OUTDIR, it reads OUTDIR/sites.json from a \
+campaign and joins runtime counters and link-time declared SDK rows to the static SDK rows by label or \
 dynamic-label file:line; declared-but-never-evaluated rows carry registered_gens=0. \
 Invisible sites remain inventory rows rather than coverage claims. The default output is a \
 crate/module index; scoped flags \
@@ -561,8 +560,8 @@ or --all opt into per-site drill-down rows. Results are cached per file under \
             f(
                 "--exercised",
                 None,
-                Value::Required("FILE|OUTDIR", Kind::Path),
-                "Read raw PATINA_SDK_REPORT line(s) from FILE, or OUTDIR/sites.json from a campaign, and join runtime counters into the static inventory.",
+                Value::Required("OUTDIR", Kind::Path),
+                "Read a campaign's OUTDIR/sites.json (or the sites.json itself) and join its runtime counters into the static inventory.",
                 false,
             ),
             f(

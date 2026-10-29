@@ -359,7 +359,7 @@ fn a_replay_divergence_reaches_the_facts_channel_as_its_kind() {
             let _ = replay.write_file(path, b"payload");
         }
         let _ = replay.finish();
-        serde_json::from_slice(&fs::read(&facts).unwrap()).unwrap()
+        last_facts(&facts)
     };
     assert!(
         replay("followed.json", &["/a", "/b"])
@@ -398,6 +398,18 @@ fn a_time_model_divergence_reaches_the_facts_channel() {
         replay.now(ClockKind::Monotonic),
         Err(RuntimeError::TimeModel { .. })
     ));
-    let document: serde_json::Value = serde_json::from_slice(&fs::read(&facts).unwrap()).unwrap();
+    let document = last_facts(&facts);
     assert_eq!(document["replay_divergence"], "time_model_mismatch");
+}
+
+/// The last complete document the run appended to its facts channel.
+fn last_facts(path: &std::path::Path) -> serde_json::Value {
+    let text = fs::read_to_string(path).unwrap();
+    serde_json::from_str(
+        text.lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap(),
+    )
+    .unwrap()
 }

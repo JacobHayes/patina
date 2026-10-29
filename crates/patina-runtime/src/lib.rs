@@ -143,7 +143,7 @@ pub use reports::{
     ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_FAULT_REPORT,
     ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT,
     ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report,
-    ReportConfig, sdk_report_line, set_diagnostic_writer,
+    ReportConfig, set_diagnostic_writer,
 };
 
 pub use patina_dst_abi::VerdictKind;
@@ -767,11 +767,14 @@ pub struct Context {
     /// Where this run's structured facts document goes, or `None` when nobody
     /// asked for one. Like `reports`, it reaches no recorded byte.
     facts: Option<facts::FactsOutput>,
-    /// Whether the facts document has already been written. The document is
-    /// emitted at [`Context::finish`] on the ordinary path, but a fired liveness
-    /// watchdog aborts the process before `finish` on the interposed families,
-    /// so that path emits it early — this flag keeps it at exactly one write.
-    facts_emitted: bool,
+    /// Whether a compute-bound stop wrote the run's terminal facts document.
+    /// Every other write is a fresh, complete document the reader takes the
+    /// last of; after that one nothing more is written.
+    facts_sealed: bool,
+    /// This context's process-unique number on the facts channel. A process
+    /// that runs several contexts (a cargo-family test binary) writes each
+    /// one's documents to the same channel; the reader tells them apart by it.
+    facts_context: u64,
     /// The first replay divergence the trace layer reported, as its typed kind
     /// ([`patina_dst_trace::TraceError::replay_divergence`]). Carried on the
     /// facts channel, never on a guest-writable stream.

@@ -64,8 +64,7 @@ Conventions:
   detail carries the outcome digest. So a violation under Patina is a
   deterministic failing run that `explore`/`minimize` can bisect, and every
   consumer — the campaign classifier, the sweep scripts, a minimize oracle —
-  reads the run's `patina.result/v1` envelope (`verdicts[]`, `fault_reports{}`)
-  or the ABI's own `PATINA_VERDICT` wire lines. The `WORKQ_*`/`PUBSUB_*` lines
+  reads the run's `patina.result/v1` envelope (`verdicts[]`, `fault_reports{}`). The `WORKQ_*`/`PUBSUB_*` lines
   the guests still print are a human echo; **nothing downstream needs them**, and
   no guest string is baked into patina (a guest that only prints its findings
   declares `classify.patterns` in its campaign spec instead — the level-1 escape

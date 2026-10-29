@@ -37,24 +37,7 @@ mod network;
 /// `Option` wrapper over [`bytes_base64`]: `None` serializes as JSON null,
 /// `Some(bytes)` as the base64 payload, exactly like `bytes_base64`.
 mod option_bytes_base64;
-/// Escaping for free-text fields (verdict labels and details, SDK site labels
-/// and identities) in the one-line stderr reports, so no guest-supplied text can
-/// split a token or forge a line.
-pub mod report_token;
 mod verdict;
-/// The verdict wire format: the `PATINA_VERDICT` diagnostic line that carries a
-/// recorded verdict from the guest process to whatever reads its output.
-///
-/// The runtime records every verdict in the trace, but a *plain* seeded run
-/// writes no trace and an aborting guest never finalizes one, so the line is the
-/// channel the result envelope is built from. It lives here, beside the ABI
-/// enum, so the producer (`patina-dst-runtime`) and the consumer (`cargo-patina`
-/// building `patina.result/v1`) share one implementation and cannot drift.
-///
-/// Fields are whitespace-separated `key=value`; `label` and `detail` are escaped
-/// by [`report_token::escape`] so no guest-supplied byte can introduce a space or
-/// a newline and forge a second marker line.
-pub mod verdict_line;
 
 pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
 pub use crash::CrashKind;

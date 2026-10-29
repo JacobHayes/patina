@@ -161,10 +161,8 @@ unknown option.
   saved trace, else the seeded re-run), and a seeded one-in-16 sample of clean
   generations runs twice. The comparison is exact, not by signature (which
   collapses numbers): a differing signature, exit status, unnormalized finding
-  line (the native supervisor's own `PATINA_INFRA native_run` marker, which the
-  envelope names as `native_run_marker`, loses its trace path and scratch-file
-  reason; a guest line is evidence as written, however much it looks like
-  patina's), verdict row (detail included) or
+  line (a `PATINA_INFRA native_run` line loses its trace path and scratch-file
+  reason), verdict row (detail included) or
   trace digest, or a replay that does not follow its trace (`replay_divergence`
   in the replay's envelope), is `NONDETERMINISM` — the one cross-run class,
   ranked above every single-run failure class, reported with both outcomes
@@ -197,14 +195,14 @@ unknown option.
   up by crate/module/function, refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
   `patina.coverage/v1` JSON envelope.
-- `cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised FILE|OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]`
+- `cargo patina sites [--crate NAME] [--module PATH] [--site LABEL] [--all] [--exercised OUTDIR] [--kind KIND] [--runtime driven|observed|invisible] [--no-cache]`
   Static inventory of Patina SDK assertion/oracle sites, Rust assert/debug_assert,
   proptest/quickcheck, and antithesis-sdk assertions in the current workspace.
   JSON output is schema `patina.sites/v1`; per-file cache is
-  `.patina/out/sites-cache.json` unless `--no-cache` is set. `--exercised FILE`
-  reads raw `PATINA_SDK_REPORT` line(s); `--exercised OUTDIR` reads a campaign's
-  `OUTDIR/sites.json`. Both join runtime counters and link-time declared SDK rows
-  by label or dynamic-label file:line.
+  `.patina/out/sites-cache.json` unless `--no-cache` is set. `--exercised OUTDIR`
+  reads a campaign's `OUTDIR/sites.json` (or that file itself) and joins its
+  runtime counters and link-time declared SDK rows by label or dynamic-label
+  file:line.
 - `cargo patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--no-trace-phase] [--jobs N]`
   Reduce one failing campaign generation, knobs first: delta-debug the fault-knob
   vector that generation drew (each candidate a fresh seeded `run`), print and
@@ -276,14 +274,17 @@ unknown option.
 ### JSON result envelope (`patina.result/v1`)
 
 One line of JSON on stdout. Always: `schema`, `verb`, `result`
-(`ok|violation|failure|error`), `exit_code`. When applicable: `family`
+(`ok|violation|liveness|infra|failure|error`, derived from the structured fields
+below only: a violation verdict or SDK misuse refusal is `violation`, a fired
+watchdog `liveness`, a refusal, divergence or native signal death
+`infra`; printed failure text alone is `failure`), `exit_code`. When applicable: `family`
 (`native|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
 (audit import/finding strings), `finding_details` (structured audit symbol,
-category, provenance), `output_path` + `content_hash` (build), `markers` (extracted
-`PATINA_*`/`*_VIOLATION`/`BUG_CAUGHT` lines), `verdicts` (every verdict the guest
+category, provenance), `output_path` + `content_hash` (build), `verdicts` (every verdict the guest
 reported through the verdict ABI, in call order: `{seq, kind, label, detail}`;
 omitted when the run reported none), `result_line`, `stdout`, `stderr`,
-`message`, optional `config` provenance, optional native `coverage` =
+`message`, optional native `coverage` (present when a coverage map was
+requested) =
 `{edges_total, edges_covered, covered_permille, hits_total, hits_max, saturated,
 map_path?}`, and `trace` =
 `{path, format_version, timelines[], event_count, metadata}` where `metadata` is
@@ -299,12 +300,14 @@ json` is a normal `patina.result/v1` envelope with a nested
 #### Runtime-owned outcome fields
 
 A run/replay envelope also carries what Patina itself knows about the outcome,
-structurally — no marker-line parsing required. Every field is optional and
-ABSENT means "did not fire", never zero.
+structurally. These fields, lifted from the runtime's `patina.runfacts/v1`
+document, are the machine channel: the `PATINA_*` stderr lines are for people
+and nothing parses them. Every field is optional and ABSENT means "did not
+fire", never zero.
 
 - `fault_reports{}` — per-plane accounting, keyed `fs`, `dns`, `net`, `entropy`,
   `clock`, `swarm`, `schedule`. Each object carries the same fields as its
-  `PATINA_*_REPORT` stderr line (which still prints), including every
+  human `PATINA_*_REPORT` stderr line, including every
   `*_vacuity_diagnosable` bit, the per-op-kind breakdowns (`errors_by_op`,
   `shorts_by_op` as `{kind: count}` objects), and the plane's `vacuous` bit. A
   plane appears only when it saw at least one opportunity. The runtime builds
@@ -316,9 +319,18 @@ ABSENT means "did not fire", never zero.
   (`time_model_mismatch`, `schedule_divergence`, `compute_stop_state`,
   `custom_op_fault_shape`). Carried on the `patina.runfacts/v1` channel, which
   the guest cannot write, so no guest output can claim one.
-- `native_run_marker` — the `PATINA_INFRA native_run` line the native
-  supervisor appended to `stderr`, verbatim, so a consumer can tell patina's
-  marker from a guest line written to look like it.
+- `sdk` — the cooperative-SUT site accounting when the run declared or
+  evaluated a site: `enabled`, `swarm_deselected`, the fire/activation
+  permille, `sites_registered`, `sites_activated`, `total_firings`, the
+  cutoff and setup-gate state, `declared_sites[]` (`{label, kind, site}`) and
+  `sites[]` (`{label, kind, site, active, evals, fires, reachable,
+  sometimes_satisfied, always_violated, knob}`). A campaign folds it into
+  `sites.json`. `verdicts[]` gathers every runtime context's verdicts in a
+  process that ran several (each context numbers its own `seq` from 0).
+- `schedule_policy` — the exploration policy's accounting when PCT or
+  starvation was active (`pct`, `pct_depth`, `pct_change_points`,
+  `pct_change_points_hit`, `starvation`, `starve_events`, `starve_vacuous`,
+  `decisions`, `bug_depth`); `bug_depth` annotates a campaign signature.
 - `runtime_findings[]` — runtime-detected findings, each with a `source`:
   `liveness` (a fired liveness/converge watchdog, carrying
   `kind`/`detail`/`vtime_ns`/`budget_ns`/`last_fault_vtime_ns`) and `schedule`
@@ -367,7 +379,7 @@ dev-dependency use under plain `cargo test`.
 - `patina_dst::verdict(VerdictKind::{Violation,Pass,AbortIntent}, "label", "detail")`:
   report a structured outcome. One ABI verb; kinds are data. Recorded as a trace
   event (replay reproduces it; a divergent verdict stream fails closed), printed
-  as a `PATINA_VERDICT` line, and surfaced in `--format json` as `verdicts[]`
+  as a human `PATINA_VERDICT` line, and surfaced in `--format json` as `verdicts[]`
   (`seq`, `kind`, `label`, `detail`). A verdict changes no control flow:
   `AbortIntent` attributes an abort the guest performs itself. Labels share the
   `sites.json` namespace but register no site, so the duplicate-label rule does
@@ -381,9 +393,9 @@ dev-dependency use under plain `cargo test`.
 
 ## Interpreting results
 
-- Exit 0 = clean. A nonzero exit is the guest's own code; a violation
-  (`*_VIOLATION`, `BUG_CAUGHT`, an `always!` abort, or a replay mismatch)
-  classifies as `violation` under `--format json`. A CLI-side error (bad flags,
+- Exit 0 = clean. A nonzero exit is the guest's own code; a `violation`
+  verdict (an `always!` abort included) classifies as `violation` under
+  `--format json`, and printed failure text alone as `failure`. A CLI-side error (bad flags,
   build failure, refused replay) exits 2.
 - `PATINA_SCHEDULE_REPORT` (stderr) reports per-task scheduling boundaries and
   warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
@@ -392,15 +404,13 @@ dev-dependency use under plain `cargo test`.
 - `PATINA_COVERAGE_REPORT` (stderr) reports native yield-point edge coverage
   (`edges_covered/edges_total`, hit totals/max, saturation); suppress with
   `PATINA_COVERAGE_REPORT=0`.
-- `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing; each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
+- `PATINA_SDK_REPORT` (stderr) reports buggify site registration/activation/firing (the envelope's `sdk` is the machine copy); each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
 - `PATINA_SWARM_REPORT` (stderr) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K vacuous=<0|1>` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. `vacuous=1` means `--swarm` was requested with NO fault class enabled, so the draw had nothing to select and the run explored the plain configuration; the runtime warns and a campaign refuses `--swarm` when it enables nothing to mask. Dropping every candidate of a non-empty set is a legitimate draw (`vacuous=0`). Suppress with `PATINA_SWARM_REPORT=0`.
 - `PATINA_FS_FAULT_REPORT` (stderr) reports the filesystem fault plane per class: `eligible_ops=N`, then for each of the error/short/latency classes a `*_vacuity_diagnosable=<0|1>` bit and its applied count, then `vacuous=<0|1>`. The error and short classes each also carry a per-operation-kind breakdown of where their effects landed — `errors_by_op=open:1,read:2`, `shorts_by_op=write:3` — listing only the kinds that absorbed an effect, in a fixed order, and `-` when none did. The breakdown is what the scalar count cannot say: a knob that fired plenty but only ever on `open` left every post-open failure path untested. `vacuous=1` means a class was live over enough opportunities to expect several firings yet applied zero effects (it is silently inert on the exercised I/O path); the runtime warns and a campaign classifies that generation `VACUOUS` with the fs plane in its signature. Suppress with `PATINA_FS_FAULT_REPORT=0`.
 - `PATINA_VERDICT seq=N kind=<violation|pass|abort_intent> label=L detail=D`
-  (stderr) is emitted once per verdict ABI call, at the call, on every family.
-  `label`/`detail` escape whitespace (`\s`, `\t`, `\r`, `\n`) and backslash, so a
-  verdict is always exactly one line. Unlike the reports below it has NO
-  suppression variable: a verdict is the run's result, not a diagnostic. Prefer
-  the envelope's `verdicts[]` over parsing these lines.
+  (stderr) is emitted once per verdict ABI call, at the call, on every family,
+  with `label`/`detail` quoted. Unlike the reports below it has NO suppression
+  variable. It is for people; the envelope's `verdicts[]` is the machine copy.
 - Every end-of-run report above is on by default and is silenced by setting its
   own variable to a false-y value (`0`, `off`, `false`, `no`), on every family:
   `PATINA_SCHEDULE_REPORT`, `PATINA_SCHEDULE_POLICY_REPORT` (gates the
@@ -409,9 +419,8 @@ dev-dependency use under plain `cargo test`.
   `PATINA_DNS_FAULT_REPORT`, `PATINA_NET_FAULT_REPORT`,
   `PATINA_COVERAGE_REPORT`. Suppression is presentation
   only: it changes no recorded byte and no fingerprint, so a quietly recorded
-  trace and a loud one replay against each other. `campaign` pins them all on for
-  its generations, because there they are classifier inputs rather than
-  cosmetics.
+  trace and a loud one replay against each other. Nothing parses these lines:
+  the envelope's structured fields carry the same facts whatever is silenced.
 - A trace is compact JSON: inspect it with `jq . run.patina`.
 
 ## Docs

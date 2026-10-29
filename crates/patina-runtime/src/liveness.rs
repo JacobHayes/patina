@@ -409,7 +409,7 @@ impl Escalation {
         self.charged_nanos = self.charged_nanos.saturating_add(nanos);
     }
 
-    /// The loud, machine-parseable line the frozen-clock-churn abort emits. It
+    /// The loud line the frozen-clock-churn abort emits. It
     /// reuses the established `PATINA_VIOLATION liveness …` interface contract
     /// (this IS a liveness failure, and a downstream campaign consumer already
     /// classifies that prefix) with its own `detail=` reason; `rescues` counts
@@ -491,13 +491,14 @@ impl Context {
         self.compute_stop = Some(stop);
         // An asynchronous observer may interrupt an allocator critical section.
         // Export borrowed data only, without ordinary finish-time enrichment.
-        if !self.facts_emitted {
-            self.facts_emitted = true;
+        if !self.facts_sealed {
+            self.facts_sealed = true;
             if let Some(output) = self.facts.as_mut() {
                 let mut bytes = [0u8; 512];
                 let mut cursor = std::io::Cursor::new(&mut bytes[..]);
                 use std::io::Write;
-                let encoded = facts::write_compute_bound_facts(stop, &mut cursor);
+                let encoded =
+                    facts::write_compute_bound_facts(self.facts_context, stop, &mut cursor);
                 let newline = cursor.write_all(b"\n");
                 let length = cursor.position() as usize;
                 if encoded.is_err() || newline.is_err() || output.write(&bytes[..length]).is_err() {
@@ -599,7 +600,7 @@ impl Context {
             .map(|scheduler| scheduler.liveness_deferring())
             .unwrap_or(false);
         if let Some(violation) = self.liveness.observe(now, progress, deferring) {
-            // The single interface-contract line, loud and machine-parseable.
+            // The single interface-contract line, loud.
             // Emitted from the runtime so it reaches stderr regardless of the
             // driving surface, exactly like the vacuous-starvation `PATINA WARNING`.
             let marker = violation.marker_line();
@@ -607,8 +608,7 @@ impl Context {
             // The interposed families abort the process on this error without
             // ever reaching `finish`, so the facts document — which carries this
             // very violation as a `runtime_findings` entry — has to be written
-            // here or it is never written at all. Idempotent: `finish` will not
-            // write a second one.
+            // here or it is never written at all.
             self.emit_facts();
             return Err(RuntimeError::Liveness {
                 kind: violation.kind,

@@ -251,13 +251,12 @@ kind is data, recorded as a trace event (so replay reproduces the verdict stream
 and a divergent one fails closed) and surfaced in `--format json` as `verdicts[]`
 rather than as text to grep; an `always!` violation reports one automatically.
 Enable at run time with `cargo patina run --buggify`; decisions are pure
-functions of the seed, and a `PATINA_SDK_REPORT` line proves sites actually
-fired (no vacuous "all clean"). Literal-label SDK macro calls also declare a
-link-time site table under Patina, so never-reached `sometimes!`/`reachable!`
-oracles appear in reports with `registered_gens=0`. Each row carries
-`@file:line`, so `cargo patina sites --exercised <stderr-file>` can join a run
-back to the static inventory. `cargo patina campaign` also folds every generation
-into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
+functions of the seed, and the run's `sdk` facts (and its human
+`PATINA_SDK_REPORT` line) prove sites actually fired (no vacuous "all clean").
+Literal-label SDK macro calls also declare a link-time site table under
+Patina, so never-reached `sometimes!`/`reachable!` oracles appear in reports
+with `registered_gens=0`. Each row carries `@file:line`. `cargo patina
+campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
 when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
 loads through `cargo patina sites --exercised <out-dir>`.

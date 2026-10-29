@@ -892,7 +892,7 @@ integrates the Patina runtime, or record under the native runtime: cargo patina 
             coverage: None,
             crash_restart: None,
             facts,
-            native_run_marker: None,
+            supervisor_infra: false,
             qualifications: Vec::new(),
         },
         captured,

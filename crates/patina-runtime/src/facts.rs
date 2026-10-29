@@ -1,12 +1,10 @@
-//! Runtime-owned structured run facts (`patina.runfacts/v1`).
-//!
-//! Every end-of-run diagnostic the runtime prints to stderr as a
-//! `PATINA_*_REPORT` line is *also* available as a structured document, built
-//! from the same report structs the lines are formatted from — never by parsing
-//! a line back. `cargo patina` reads the document and folds it into the
-//! `patina.result/v1` envelope's `fault_reports` / `runtime_findings` fields, so
-//! a consumer that wants the facts machine-readably never has to re-derive them
-//! from human text.
+//! Runtime-owned structured run facts (`patina.runfacts/v1`): the one machine
+//! channel out of a run. The per-plane fault accounting, the runtime-detected
+//! findings, the guest's verdicts, the cooperative-SUT site counters and the
+//! exploration-policy accounting all travel here, built from the same report
+//! structs the human `PATINA_*` stderr lines are formatted from. Those lines are
+//! for a reader; nothing parses them back. `cargo patina` folds the document
+//! into the `patina.result/v1` envelope.
 //!
 //! The document is emitted only when the embedder installs an output channel
 //! (`RuntimeConfig::with_facts_path`, `RuntimeBuilder::with_facts_sink`, or the
@@ -41,7 +39,9 @@ pub const FACTS_SCHEMA: &str = "patina.runfacts/v1";
 /// document must travel over a supervisor-provided host descriptor written with
 /// the shim's private host aliases rather than through `std::fs`.
 pub trait FactsSink: Send {
-    /// Write the complete facts document. Called at most once per run.
+    /// Write one complete, newline-terminated facts document. A run may write
+    /// several, each superseding the last: an appending sink leaves the reader
+    /// the final complete line.
     fn write_facts(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
@@ -53,10 +53,25 @@ pub(crate) enum FactsOutput {
     Sink(Box<dyn FactsSink>),
 }
 
+/// The next process-unique context number for the facts channel.
+pub(crate) fn next_context() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl FactsOutput {
+    /// Append one document. Appending, never truncating, so a write the
+    /// process does not live to finish leaves every earlier document whole.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         match self {
-            FactsOutput::Path(path) => std::fs::write(path, bytes),
+            FactsOutput::Path(path) => {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)?
+                    .write_all(bytes)
+            }
             FactsOutput::Sink(sink) => sink.write_facts(bytes),
         }
     }
@@ -242,6 +257,92 @@ pub(crate) fn swarm_plane(record: &patina_dst_trace::SwarmConfigRecord) -> Value
     ])
 }
 
+/// The verdicts the guest reported through the verdict ABI, in call order.
+pub(crate) fn verdicts(records: &[crate::VerdictRecord]) -> Value {
+    Value::Array(
+        records
+            .iter()
+            .map(|record| {
+                object(vec![
+                    ("seq", Value::from(record.seq)),
+                    ("kind", Value::from(record.kind.as_str())),
+                    ("label", Value::from(record.label.clone())),
+                    ("detail", Value::from(record.detail.clone())),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// The cooperative-SUT (SDK) site accounting: the run-level buggify state, the
+/// link-time declared sites, and every evaluated site's counters.
+pub(crate) fn sdk(diag: &crate::BuggifyDiagnostics) -> Value {
+    let declared: Vec<Value> = diag
+        .declared_sites
+        .iter()
+        .map(|site| {
+            object(vec![
+                ("label", Value::from(site.label.clone())),
+                ("kind", Value::from(site.kind.as_str())),
+                ("site", Value::from(site.site.clone())),
+            ])
+        })
+        .collect();
+    let sites: Vec<Value> = diag
+        .sites
+        .iter()
+        .map(|site| {
+            object(vec![
+                ("label", Value::from(site.label.clone())),
+                ("kind", Value::from(site.kind.as_str())),
+                ("site", Value::from(site.site.clone())),
+                ("active", Value::from(site.active)),
+                ("evals", Value::from(site.evals)),
+                ("fires", Value::from(site.fires)),
+                ("reachable", Value::from(site.reachable)),
+                ("sometimes_satisfied", Value::from(site.sometimes_satisfied)),
+                ("always_violated", Value::from(site.always_violated)),
+                ("knob", site.knob.map_or(Value::Null, Value::from)),
+            ])
+        })
+        .collect();
+    object(vec![
+        ("enabled", Value::from(diag.enabled)),
+        ("swarm_deselected", Value::from(diag.swarm_deselected)),
+        ("fire_permille", Value::from(diag.fire_permille)),
+        ("activation_permille", Value::from(diag.activation_permille)),
+        ("cutoff_nanos", Value::from(diag.cutoff_nanos)),
+        ("cutoff_reached", Value::from(diag.cutoff_reached)),
+        ("sites_registered", Value::from(diag.sites_registered)),
+        ("sites_activated", Value::from(diag.sites_activated)),
+        ("total_firings", Value::from(diag.total_firings)),
+        ("cutoff_suppressed", Value::from(diag.cutoff_suppressed)),
+        ("after_setup", Value::from(diag.after_setup)),
+        ("setup_complete", Value::from(diag.setup_complete)),
+        ("declared_sites", Value::Array(declared)),
+        ("sites", Value::Array(sites)),
+    ])
+}
+
+/// The exploration-policy (PCT / starvation) accounting, with the bug-depth
+/// estimate a found failure is annotated with.
+pub(crate) fn schedule_policy(report: &patina_dst_driver_api::SchedulePolicyReport) -> Value {
+    object(vec![
+        ("pct", Value::from(report.pct)),
+        ("pct_depth", Value::from(report.pct_depth)),
+        ("pct_change_points", Value::from(report.pct_change_points)),
+        (
+            "pct_change_points_hit",
+            Value::from(report.pct_change_points_hit),
+        ),
+        ("starvation", Value::from(report.starvation)),
+        ("starve_events", Value::from(report.starve_events)),
+        ("starve_vacuous", Value::from(report.starve_vacuous)),
+        ("decisions", Value::from(report.decisions)),
+        ("bug_depth", Value::from(report.bug_depth())),
+    ])
+}
+
 /// The schedule plane. `vacuous` mirrors the loud vacuous-schedule warning's
 /// condition, so the plane answers "was this run's concurrency explorable?"
 /// with the same bit the human diagnostic uses.
@@ -304,18 +405,21 @@ struct ComputeBoundFinding {
 /// The sole wire shape, serialized into the caller's fixed storage. No Value,
 /// String, Vec, or finish-time enrichment on the asynchronous stop path.
 pub(crate) fn write_compute_bound_facts(
+    context: u64,
     stop: patina_dst_trace::ComputeStop,
     writer: impl io::Write,
 ) -> serde_json::Result<()> {
     #[derive(serde::Serialize)]
     struct Envelope {
         schema: &'static str,
+        context: u64,
         runtime_findings: [ComputeBoundFinding; 1],
     }
     serde_json::to_writer(
         writer,
         &Envelope {
             schema: FACTS_SCHEMA,
+            context,
             runtime_findings: [ComputeBoundFinding {
                 source: "liveness",
                 kind: "liveness",
@@ -385,6 +489,7 @@ mod tests {
         let mut bytes = [0u8; 512];
         let mut cursor = io::Cursor::new(bytes.as_mut_slice());
         write_compute_bound_facts(
+            u64::MAX,
             patina_dst_trace::ComputeStop {
                 task: patina_dst_abi::TaskId(u64::MAX),
                 steps: u64::MAX,
@@ -396,7 +501,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&bytes[..length]).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({"schema": FACTS_SCHEMA, "runtime_findings": [{
+            serde_json::json!({"schema": FACTS_SCHEMA, "context": u64::MAX, "runtime_findings": [{
                 "source": "liveness", "kind": "liveness", "detail": "compute-bound",
                 "known_limit": true, "task": u64::MAX, "steps": u64::MAX,
             }]})

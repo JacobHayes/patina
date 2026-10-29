@@ -199,9 +199,7 @@ pub(super) fn build_report(
         root.insert(
             "exercised_source".to_string(),
             json!({
-                "kind": source.kind,
                 "path": source.path,
-                "reports": source.reports,
                 "generations_observed": source.generations_observed,
             }),
         );
@@ -441,10 +439,8 @@ pub(super) fn print_human(report: &Value) {
     );
     if let Some(source) = report.get("exercised_source") {
         println!(
-            "exercised_source={} kind={} reports={} generations_observed={} joined={} unmatched={} never_exercised={}",
+            "exercised_source={} generations_observed={} joined={} unmatched={} never_exercised={}",
             source["path"].as_str().unwrap_or("?"),
-            source["kind"].as_str().unwrap_or("?"),
-            source["reports"].as_u64().unwrap_or(0),
             source["generations_observed"].as_u64().unwrap_or(0),
             totals["exercised"]["joined_runtime_labels"]
                 .as_u64()

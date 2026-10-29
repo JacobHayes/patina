@@ -26,10 +26,14 @@ pub struct Envelope {
     pub(crate) finding_details: Vec<serde_json::Value>,
     pub(crate) output_path: Option<String>,
     pub(crate) content_hash: Option<String>,
-    /// Guest verdicts reported through the verdict ABI, in call order. Additive:
-    /// omitted entirely when the run reported none.
-    pub(super) verdicts: Vec<VerdictFact>,
-    pub(super) markers: Vec<String>,
+    /// Guest verdicts reported through the verdict ABI, in call order
+    /// (`patina.runfacts/v1`'s `verdicts`). Omitted when the run reported none.
+    pub(super) verdicts: Option<serde_json::Value>,
+    /// The cooperative-SUT site counters (`patina.runfacts/v1`'s `sdk`).
+    pub(super) sdk: Option<serde_json::Value>,
+    /// The exploration-policy accounting and bug-depth estimate
+    /// (`patina.runfacts/v1`'s `schedule_policy`).
+    pub(super) schedule_policy: Option<serde_json::Value>,
     pub(super) result_line: Option<String>,
     /// Runtime-owned per-plane fault accounting (`patina.runfacts/v1`'s
     /// `fault_reports`), carried through verbatim.
@@ -45,10 +49,6 @@ pub struct Envelope {
     /// its trace. Lifted from the facts channel, which the guest cannot write,
     /// never from the run's text.
     pub(super) replay_divergence: Option<String>,
-    /// The `PATINA_INFRA native_run` line the supervisor appended to `stderr`,
-    /// verbatim: the one way to tell patina's own marker from a guest line
-    /// written to look like it.
-    pub(super) native_run_marker: Option<String>,
     /// Native crash-restart facts, if the supervisor performed a modeled
     /// restart. `terminal_outcome.kind` is [`CRASH_REPLAY_DIVERGED`] for a
     /// replay that departed from its recording at or before the crash.
@@ -82,14 +82,14 @@ impl Envelope {
             finding_details: Vec::new(),
             output_path: None,
             content_hash: None,
-            verdicts: Vec::new(),
-            markers: Vec::new(),
+            verdicts: None,
+            sdk: None,
+            schedule_policy: None,
             result_line: None,
             fault_reports: None,
             runtime_findings: Vec::new(),
             cpu_charges: None,
             replay_divergence: None,
-            native_run_marker: None,
             crash_restart: None,
             qualifications: Vec::new(),
             refusal: None,
@@ -162,23 +162,14 @@ impl Envelope {
         if let Some(v) = &self.content_hash {
             m.insert("content_hash".into(), Value::from(v.clone()));
         }
-        if !self.verdicts.is_empty() {
-            let rows: Vec<Value> = self
-                .verdicts
-                .iter()
-                .map(|verdict| {
-                    let mut vm = Map::new();
-                    vm.insert("seq".into(), Value::from(verdict.seq));
-                    vm.insert("kind".into(), Value::from(verdict.kind.as_str()));
-                    vm.insert("label".into(), Value::from(verdict.label.clone()));
-                    vm.insert("detail".into(), Value::from(verdict.detail.clone()));
-                    Value::Object(vm)
-                })
-                .collect();
-            m.insert("verdicts".into(), Value::Array(rows));
+        if let Some(v) = &self.verdicts {
+            m.insert("verdicts".into(), v.clone());
         }
-        if !self.markers.is_empty() {
-            m.insert("markers".into(), Value::from(self.markers.clone()));
+        if let Some(v) = &self.sdk {
+            m.insert("sdk".into(), v.clone());
+        }
+        if let Some(v) = &self.schedule_policy {
+            m.insert("schedule_policy".into(), v.clone());
         }
         if let Some(v) = &self.result_line {
             m.insert("result_line".into(), Value::from(v.clone()));
@@ -197,9 +188,6 @@ impl Envelope {
         }
         if let Some(v) = &self.replay_divergence {
             m.insert("replay_divergence".into(), Value::from(v.clone()));
-        }
-        if let Some(v) = &self.native_run_marker {
-            m.insert("native_run_marker".into(), Value::from(v.clone()));
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());

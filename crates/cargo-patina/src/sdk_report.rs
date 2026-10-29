@@ -1,18 +1,11 @@
-//! Parser and aggregation for runtime `PATINA_SDK_REPORT` lines.
+//! Cross-generation aggregation of the cooperative-SUT site counters.
 //!
-//! This is the single cargo-patina parser for the runtime report format emitted
-//! by `patina-dst-runtime::emit_sdk_report`. The format is intentionally strict:
-//! Wave 2 adds a required trailing `|@<file:line>` site identity to every
-//! `site=` token, and old rows without it are malformed rather than accepted as
-//! a compatibility alias. Wave 5 adds `declared_site=<label>|<kind>|@<file:line>`
-//! rows from the SDK link-time table; these fold into `<out>/sites.json` with
-//! `registered_gens=0` until a runtime `site=` row evaluates them. Campaigns fold
-//! the same rows into `<out>/sites.json` (`patina.campaign.sites/v1`), which
-//! `cargo patina sites --exercised` also consumes. Labels and site identities
-//! are escaped by `patina_dst_abi::report_token`, so the line splits on single
-//! spaces and each token on `|` without ambiguity, whatever the label holds. The
-//! header's `encoding=escaped` token marks that encoding; a line without it is
-//! refused, never decoded under a guess.
+//! Each run's counters arrive structured, as the `sdk` object of its
+//! `patina.runfacts/v1` document (carried into the `patina.result/v1`
+//! envelope). Link-time declarations (`declared_sites`) fold into
+//! `<out>/sites.json` (`patina.campaign.sites/v1`) with `registered_gens=0`
+//! until an evaluated site (`sites`) registers them. `cargo patina sites
+//! --exercised` reads the same store back.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -22,31 +15,26 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::CliError;
-use patina_dst_abi::report_token;
 
 pub(crate) const CAMPAIGN_SITES_SCHEMA: &str = "patina.campaign.sites/v1";
-const PREFIX: &str = "PATINA_SDK_REPORT ";
-/// The header token naming the field encoding. Reports written before labels
-/// were escaped lack it, and their literal labels are indistinguishable from
-/// escaped ones (`a\sb` is both), so a line without it is refused rather than
-/// decoded under a guess.
-const ENCODING_MARKER: &str = "encoding=escaped";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One run's `sdk` facts object: the fields the tally folds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub(crate) struct SdkReport {
-    pub(crate) enabled: Option<bool>,
+    #[serde(default)]
     pub(crate) declared_sites: Vec<SdkDeclaredSiteReport>,
+    #[serde(default)]
     pub(crate) sites: Vec<SdkSiteReport>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SdkDeclaredSiteReport {
     pub(crate) label: String,
     pub(crate) kind: String,
     pub(crate) site: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct SdkSiteReport {
     pub(crate) label: String,
     pub(crate) kind: String,
@@ -234,28 +222,38 @@ pub(crate) struct CoverageTally {
 }
 
 impl CoverageTally {
+    /// Fold one generation's `sdk` facts, or count a generation that had none
+    /// (no cooperative site declared or evaluated).
     pub(crate) fn observe_generation(
         &mut self,
         generation: u64,
         seed: u64,
-        stderr: &str,
+        sdk: Option<&Value>,
     ) -> Result<(), String> {
         self.generations_observed += 1;
-        let Some(line) = last_report_line(stderr) else {
+        let Some(sdk) = sdk else {
             return Ok(());
         };
-        self.add_report(generation, Some(seed), line)
+        let report: SdkReport = serde_json::from_value(sdk.clone())
+            .map_err(|error| format!("the run's sdk facts are malformed: {error}"))?;
+        self.add_report(generation, Some(seed), report)
     }
 
-    fn add_report(&mut self, generation: u64, seed: Option<u64>, line: &str) -> Result<(), String> {
-        let report = parse_report_line(line)?;
+    fn add_report(
+        &mut self,
+        generation: u64,
+        seed: Option<u64>,
+        report: SdkReport,
+    ) -> Result<(), String> {
         for site in report.declared_sites {
+            validate_identity(&site.label, &site.kind, &site.site)?;
             self.sites
                 .entry(site.label.clone())
                 .or_insert_with(|| ExercisedSite::declared(&site))
                 .reconcile_declaration(&site)?;
         }
         for site in report.sites {
+            validate_identity(&site.label, &site.kind, &site.site)?;
             self.sites
                 .entry(site.label.clone())
                 .or_insert_with(|| ExercisedSite::new(&site))
@@ -306,9 +304,7 @@ impl CoverageTally {
 }
 
 fn validate_site_record(site: &ExercisedSite) -> Result<(), String> {
-    required_text("label", &site.label)?;
-    parse_kind(&site.kind)?;
-    required_text("site identity", &site.site)?;
+    validate_identity(&site.label, &site.kind, &site.site)?;
     if site.registered_gens == 0 {
         if site.first_registered_gen.is_some() || site.last_registered_gen.is_some() {
             return Err(format!(
@@ -371,34 +367,19 @@ fn validate_site_record(site: &ExercisedSite) -> Result<(), String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ExercisedSource {
-    pub(crate) kind: String,
     pub(crate) path: String,
-    pub(crate) reports: usize,
     pub(crate) generations_observed: u64,
     pub(crate) sites: BTreeMap<String, ExercisedSite>,
 }
 
-/// Parse an exercised source: either a campaign out-dir (or `sites.json` file)
-/// with schema `patina.campaign.sites/v1`, or a raw file containing one or more
-/// `PATINA_SDK_REPORT` lines. A source with no report line, a missing campaign
-/// store, or any malformed report row fails loudly.
+/// Parse an exercised source: a campaign out-dir, or its `sites.json` store
+/// (schema `patina.campaign.sites/v1`). A missing or malformed store fails
+/// loudly.
 pub(crate) fn parse_exercised_file(path: &Path) -> Result<ExercisedSource, CliError> {
     if path.is_dir() {
         return parse_campaign_sites_store(&path.join("sites.json"), Some(path));
     }
-
-    let text = fs::read_to_string(path).map_err(|error| {
-        CliError(format!(
-            "failed to read exercised SDK report file {}: {error}",
-            path.display()
-        ))
-    })?;
-    if let Ok(json) = serde_json::from_str::<Value>(&text)
-        && json.get("schema").and_then(Value::as_str) == Some(CAMPAIGN_SITES_SCHEMA)
-    {
-        return exercised_source_from_store(path, &json);
-    }
-    parse_raw_report_file(path, &text)
+    parse_campaign_sites_store(path, None)
 }
 
 fn parse_campaign_sites_store(
@@ -432,136 +413,17 @@ fn exercised_source_from_store(path: &Path, json: &Value) -> Result<ExercisedSou
         ))
     })?;
     Ok(ExercisedSource {
-        kind: "campaign".to_string(),
         path: path.display().to_string(),
-        reports: tally.generations_observed as usize,
         generations_observed: tally.generations_observed,
         sites: tally.sites,
     })
 }
 
-fn parse_raw_report_file(path: &Path, text: &str) -> Result<ExercisedSource, CliError> {
-    let mut reports = 0_usize;
-    let mut tally = CoverageTally::default();
-    for (index, line) in text.lines().enumerate() {
-        if !line.starts_with(PREFIX) {
-            continue;
-        }
-        tally
-            .add_report(reports as u64, None, line)
-            .map_err(|error| CliError(format!("{}:{}: {error}", path.display(), index + 1)))?;
-        reports += 1;
-    }
-    if reports == 0 {
-        return Err(CliError(format!(
-            "exercised SDK report file {} contained no PATINA_SDK_REPORT lines",
-            path.display()
-        )));
-    }
-    tally.generations_observed = reports as u64;
-    Ok(ExercisedSource {
-        kind: "sdk_report".to_string(),
-        path: path.display().to_string(),
-        reports,
-        generations_observed: tally.generations_observed,
-        sites: tally.sites,
-    })
-}
-
-pub(crate) fn last_report_line(stderr: &str) -> Option<&str> {
-    stderr.lines().rfind(|line| line.starts_with(PREFIX))
-}
-
-pub(crate) fn parse_report_line(line: &str) -> Result<SdkReport, String> {
-    let rest = line
-        .strip_prefix(PREFIX)
-        .ok_or_else(|| "SDK report line must start with PATINA_SDK_REPORT".to_string())?;
-    let mut enabled = None;
-    let mut encoded = false;
-    let mut declared_sites = Vec::new();
-    let mut sites = Vec::new();
-    for token in rest.split(' ').filter(|token| !token.is_empty()) {
-        if let Some(value) = token.strip_prefix("encoding=") {
-            if token != ENCODING_MARKER {
-                return Err(format!("unknown SDK report encoding {value:?}"));
-            }
-            encoded = true;
-            continue;
-        }
-        if !encoded && (token.starts_with("declared_site=") || token.starts_with("site=")) {
-            return Err(format!(
-                "SDK report line lacks {ENCODING_MARKER} before its site rows; it was written \
-                 before site labels were escaped, so its labels cannot be decoded unambiguously"
-            ));
-        }
-        if let Some(body) = token.strip_prefix("declared_site=") {
-            declared_sites.push(parse_declared_site_token(body)?);
-        } else if let Some(body) = token.strip_prefix("site=") {
-            sites.push(parse_site_token(body)?);
-        } else if let Some(value) = token.strip_prefix("enabled=") {
-            enabled = Some(parse_header_bool("enabled", value)?);
-        }
-    }
-    if !encoded {
-        return Err(format!(
-            "SDK report line lacks its {ENCODING_MARKER} header"
-        ));
-    }
-    Ok(SdkReport {
-        enabled,
-        declared_sites,
-        sites,
-    })
-}
-
-fn parse_declared_site_token(body: &str) -> Result<SdkDeclaredSiteReport, String> {
-    let parts = body.split('|').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(format!(
-            "malformed SDK declared-site token {body:?}: expected <label>|<kind>|@<file:line>"
-        ));
-    }
-    let label = escaped_text("declared label", parts[0])?;
-    let kind = parse_kind(parts[1])?.to_string();
-    let site = parts[2]
-        .strip_prefix('@')
-        .ok_or_else(|| format!("declared site identity field must start with @ in {body:?}"))?;
-    let site = escaped_text("declared site identity", site)?;
-    Ok(SdkDeclaredSiteReport { label, kind, site })
-}
-
-fn parse_site_token(body: &str) -> Result<SdkSiteReport, String> {
-    let parts = body.split('|').collect::<Vec<_>>();
-    if parts.len() != 10 {
-        return Err(format!(
-            "malformed SDK site token {body:?}: expected 10 pipe-separated fields including trailing |@<file:line>"
-        ));
-    }
-    let label = escaped_text("label", parts[0])?;
-    let kind = parse_kind(parts[1])?.to_string();
-    let active = parse_prefixed_bool("active", parts[2], 'a')?;
-    let evals = parse_prefixed_u64("evals", parts[3], 'e')?;
-    let fires = parse_prefixed_u64("fires", parts[4], 'f')?;
-    let reachable = parse_prefixed_bool("reachable", parts[5], 'r')?;
-    let sometimes_satisfied = parse_prefixed_bool("sometimes_satisfied", parts[6], 's')?;
-    let always_violated = parse_prefixed_bool("always_violated", parts[7], 'v')?;
-    let knob = parse_knob(parts[8])?;
-    let site = parts[9]
-        .strip_prefix('@')
-        .ok_or_else(|| format!("site identity field must start with @ in {body:?}"))?;
-    let site = escaped_text("site identity", site)?;
-    Ok(SdkSiteReport {
-        label,
-        kind,
-        active,
-        evals,
-        fires,
-        reachable,
-        sometimes_satisfied,
-        always_violated,
-        knob,
-        site,
-    })
+fn validate_identity(label: &str, kind: &str, site: &str) -> Result<(), String> {
+    required_text("label", label)?;
+    parse_kind(kind)?;
+    required_text("site identity", site)?;
+    Ok(())
 }
 
 fn required_text<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
@@ -572,12 +434,6 @@ fn required_text<'a>(name: &str, value: &'a str) -> Result<&'a str, String> {
     }
 }
 
-/// A required, `report_token`-escaped field, decoded.
-fn escaped_text(name: &str, value: &str) -> Result<String, String> {
-    report_token::unescape(required_text(name, value)?)
-        .ok_or_else(|| format!("SDK report {name} has a malformed escape: {value:?}"))
-}
-
 fn parse_kind(value: &str) -> Result<&str, String> {
     match value {
         "fault" | "delay" | "knob" | "always" | "sometimes" | "reachable" => Ok(value),
@@ -585,188 +441,55 @@ fn parse_kind(value: &str) -> Result<&str, String> {
     }
 }
 
-fn parse_header_bool(name: &str, value: &str) -> Result<bool, String> {
-    match value {
-        "0" => Ok(false),
-        "1" => Ok(true),
-        other => Err(format!("SDK report {name} must be 0 or 1; got {other:?}")),
-    }
-}
-
-fn parse_prefixed_bool(name: &str, value: &str, prefix: char) -> Result<bool, String> {
-    let rest = value.strip_prefix(prefix).ok_or_else(|| {
-        format!("SDK report {name} field must start with {prefix:?}; got {value:?}")
-    })?;
-    parse_header_bool(name, rest)
-}
-
-fn parse_prefixed_u64(name: &str, value: &str, prefix: char) -> Result<u64, String> {
-    let rest = value.strip_prefix(prefix).ok_or_else(|| {
-        format!("SDK report {name} field must start with {prefix:?}; got {value:?}")
-    })?;
-    rest.parse::<u64>()
-        .map_err(|_| format!("SDK report {name} must be an unsigned integer; got {rest:?}"))
-}
-
-fn parse_knob(value: &str) -> Result<Option<i64>, String> {
-    let rest = value
-        .strip_prefix('k')
-        .ok_or_else(|| format!("SDK report knob field must start with 'k'; got {value:?}"))?;
-    if rest == "-" {
-        Ok(None)
-    } else {
-        rest.parse::<i64>()
-            .map(Some)
-            .map_err(|_| format!("SDK report knob value must be an integer or '-'; got {rest:?}"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every ordered pair of awkward fragments, so each meets every other at
-    /// both ends of a label.
-    fn awkward_labels() -> Vec<String> {
-        const FRAGMENTS: &[&str] = &[
-            "plain",
-            "a spaced label",
-            " lead",
-            "trail ",
-            "\"quoted\"",
-            "k=v",
-            "declared_site=x",
-            "site=x|fault|@y",
-            "a|b|c",
-            "line\nPATINA_SDK_REPORT enabled=1",
-            "\r\t",
-            "back\\slash \\s",
-            "naïve café 日本語 🦀",
-            "\u{a0}nbsp\u{2003}em",
-            "@src/main.rs:3",
-        ];
-        FRAGMENTS
-            .iter()
-            .flat_map(|a| FRAGMENTS.iter().map(move |b| format!("{a}{b}")))
-            .collect()
+    fn sdk(sites: Value) -> Value {
+        json!({"enabled": true, "sites": sites})
+    }
+
+    fn site(label: &str, evals: u64, satisfied: bool) -> Value {
+        json!({
+            "label": label, "kind": "sometimes", "site": "src/main.rs:3",
+            "active": false, "evals": evals, "fires": 0, "reachable": true,
+            "sometimes_satisfied": satisfied, "always_violated": false, "knob": null,
+        })
     }
 
     #[test]
-    fn any_label_round_trips_through_the_runtime_writer() {
-        use patina_dst_runtime::{
-            BuggifyDeclaredSiteReport, BuggifyDiagnostics, BuggifyKind, BuggifySiteReport,
-        };
-        let labels = awkward_labels();
-        let site_of = |index: usize| format!("dir with space/a|b {index}.rs:{index}");
-        let diag = BuggifyDiagnostics {
-            enabled: true,
-            declared_sites: labels
-                .iter()
-                .enumerate()
-                .map(|(index, label)| BuggifyDeclaredSiteReport {
-                    label: label.clone(),
-                    site: site_of(index),
-                    kind: BuggifyKind::Reachable,
-                })
-                .collect(),
-            sites: labels
-                .iter()
-                .enumerate()
-                .map(|(index, label)| BuggifySiteReport {
-                    label: label.clone(),
-                    site: site_of(index),
-                    kind: BuggifyKind::Sometimes,
-                    active: true,
-                    evals: 3,
-                    fires: 1,
-                    reachable: true,
-                    sometimes_satisfied: false,
-                    always_violated: false,
-                    knob: Some(-7),
-                })
-                .collect(),
-            ..BuggifyDiagnostics::default()
-        };
-        let line = patina_dst_runtime::sdk_report_line(&diag).unwrap();
-        assert_eq!(line.lines().count(), 1, "the report must stay one line");
-        assert_eq!(last_report_line(&line), Some(line.as_str()));
-
-        let parsed = parse_report_line(&line).unwrap();
-        let declared = parsed
-            .declared_sites
-            .iter()
-            .map(|site| (site.label.clone(), site.site.clone()))
-            .collect::<Vec<_>>();
-        let evaluated = parsed
-            .sites
-            .iter()
-            .map(|site| (site.label.clone(), site.site.clone()))
-            .collect::<Vec<_>>();
-        let expected = labels
-            .iter()
-            .enumerate()
-            .map(|(index, label)| (label.clone(), site_of(index)))
-            .collect::<Vec<_>>();
-        assert_eq!(declared, expected);
-        assert_eq!(evaluated, expected);
+    fn malformed_sdk_facts_fail_loudly() {
+        let mut tally = CoverageTally::default();
+        let mut nameless = site("x", 1, false);
+        nameless["site"] = json!("");
         assert!(
-            parsed
-                .sites
-                .iter()
-                .all(|site| site.knob == Some(-7) && site.fires == 1 && site.evals == 3)
+            tally
+                .observe_generation(0, 1, Some(&sdk(json!([nameless]))))
+                .is_err()
         );
-    }
-
-    #[test]
-    fn malformed_rows_fail_loudly() {
-        let well_formed = "PATINA_SDK_REPORT encoding=escaped enabled=1 declared_site=ok|reachable|@src/main.rs:3";
-        assert!(parse_report_line(well_formed).is_ok());
-        for bad_label in ["dangling\\", "unknown\\q"] {
-            let line = well_formed.replace("=ok|", &format!("={bad_label}|"));
-            assert!(parse_report_line(&line).is_err(), "{line:?} must not parse");
-        }
-        // A site row without its file:line identity is refused, both as a line
-        // and as a campaign observation.
-        let short_row =
-            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-";
-        assert!(parse_report_line(short_row).is_err());
+        let mut unknown_kind = site("x", 1, false);
+        unknown_kind["kind"] = json!("maybe");
         assert!(
-            CoverageTally::default()
-                .observe_generation(0, 1, short_row)
+            tally
+                .observe_generation(1, 1, Some(&sdk(json!([unknown_kind]))))
+                .is_err()
+        );
+        assert!(
+            tally
+                .observe_generation(2, 1, Some(&json!({"sites": 3})))
                 .is_err()
         );
     }
 
     #[test]
-    fn reports_without_the_encoding_marker_are_refused_not_guessed() {
-        // Literal labels from a report written before escaping: one is not a
-        // valid escape, one IS a valid escape of a different label. Neither
-        // may decode, in a single line or through `sites --exercised`.
-        let dir = tempfile::tempdir().unwrap();
-        for label in ["retry\\queue", "a\\sb", "plain"] {
-            let unmarked = format!(
-                "PATINA_SDK_REPORT enabled=1 site={label}|sometimes|a0|e1|f0|r1|s1|v0|k-|@src/main.rs:3"
-            );
-            assert!(parse_report_line(&unmarked).is_err(), "{unmarked:?}");
-            let path = dir.path().join("old.stderr");
-            fs::write(&path, format!("{unmarked}\n")).unwrap();
-            assert!(parse_exercised_file(&path).is_err(), "{unmarked:?}");
-            // A marker after the site rows does not vouch for them.
-            let late = format!("{unmarked} encoding=escaped");
-            assert!(parse_report_line(&late).is_err(), "{late:?}");
-        }
-        assert!(parse_report_line("PATINA_SDK_REPORT encoding=literal enabled=1").is_err());
-    }
-
-    #[test]
-    fn last_line_wins_and_absent_line_is_ok_for_campaign_observation() {
-        let stderr = "noise\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n";
-        assert!(last_report_line("noise only").is_none());
+    fn a_generation_without_sdk_facts_is_counted_but_folds_nothing() {
         let mut tally = CoverageTally::default();
-        tally.observe_generation(0, 11, "noise only").unwrap();
+        tally.observe_generation(0, 11, None).unwrap();
         assert_eq!(tally.generations_observed, 1);
         assert!(tally.sites.is_empty());
-        tally.observe_generation(1, 12, stderr).unwrap();
+        tally
+            .observe_generation(1, 12, Some(&sdk(json!([site("x", 2, true)]))))
+            .unwrap();
         let site = &tally.sites["x"];
         assert_eq!(site.registered_gens, 1);
         assert_eq!(site.satisfied_gens, 1);
@@ -775,42 +498,16 @@ mod tests {
     }
 
     #[test]
-    fn raw_report_file_aggregates_multiple_reports_by_label() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stderr.log");
-        fs::write(
-            &path,
-            "noise\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:3\nPATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e2|f0|r1|s1|v0|k-|@src/main.rs:3\n",
-        )
-        .unwrap();
-        let source = parse_exercised_file(&path).unwrap();
-        assert_eq!(source.kind, "sdk_report");
-        assert_eq!(source.reports, 2);
-        assert_eq!(source.generations_observed, 2);
-        let site = &source.sites["x"];
-        assert_eq!(site.registered_gens, 2);
-        assert_eq!(site.evals, 3);
-        assert_eq!(site.reachable_runs, 2);
-        assert_eq!(site.sometimes_satisfied_runs, 1);
-        assert_eq!(site.satisfied_gens, 1);
-    }
-
-    #[test]
     fn campaign_sites_store_round_trips_and_loads_from_out_dir() {
         let mut tally = CoverageTally::default();
         tally
-            .observe_generation(
-                0,
-                123,
-                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e4|f0|r1|s0|v0|k-|@src/main.rs:3",
-            )
+            .observe_generation(0, 123, Some(&sdk(json!([site("x", 4, false)]))))
             .unwrap();
+        let mut fault = site("f", 1, false);
+        fault["kind"] = json!("fault");
+        fault["fires"] = json!(1);
         tally
-            .observe_generation(
-                1,
-                456,
-                "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e5|f0|r1|s1|v0|k-|@src/main.rs:3 site=f|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:4",
-            )
+            .observe_generation(1, 456, Some(&sdk(json!([site("x", 5, true), fault]))))
             .unwrap();
         let json = tally.to_json();
         let loaded = CoverageTally::from_json(&json).unwrap();
@@ -823,35 +520,33 @@ mod tests {
             serde_json::to_string_pretty(&json).unwrap(),
         )
         .unwrap();
-        let source = parse_exercised_file(dir.path()).unwrap();
-        assert_eq!(source.kind, "campaign");
-        assert_eq!(source.generations_observed, 2);
-        assert_eq!(source.sites["x"].first_satisfied_seed, Some(456));
-        // Declared sites that never registered round-trip as zero-registered rows.
-        {
-            let line = "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=2 \
-             declared_site=never|reachable|@src/main.rs:9 \
-             declared_site=maybe|sometimes|@src/main.rs:10 \
-             site=maybe|sometimes|a0|e1|f0|r1|s0|v0|k-|@src/main.rs:10";
-            let parsed = parse_report_line(line).unwrap();
-            assert_eq!(parsed.declared_sites.len(), 2);
-            assert_eq!(parsed.declared_sites[0].label, "never");
-            assert_eq!(parsed.sites.len(), 1);
-
-            let mut tally = CoverageTally::default();
-            tally.observe_generation(0, 7, line).unwrap();
-            let never = &tally.sites["never"];
-            assert_eq!(never.kind, "reachable");
-            assert_eq!(never.registered_gens, 0);
-            assert_eq!(never.reachable_runs, 0);
-            assert_eq!(never.first_registered_gen, None);
-            let maybe = &tally.sites["maybe"];
-            assert_eq!(maybe.registered_gens, 1);
-            assert_eq!(maybe.evals, 1);
-
-            let json = tally.to_json();
-            let loaded = CoverageTally::from_json(&json).unwrap();
-            assert_eq!(loaded, tally);
+        for source in [dir.path().to_path_buf(), dir.path().join("sites.json")] {
+            let source = parse_exercised_file(&source).unwrap();
+            assert_eq!(source.generations_observed, 2);
+            assert_eq!(source.sites["x"].first_satisfied_seed, Some(456));
         }
+
+        // Declared sites that never registered round-trip as zero-registered rows.
+        let declared = json!({
+            "enabled": true,
+            "declared_sites": [
+                {"label": "never", "kind": "reachable", "site": "src/main.rs:9"},
+                {"label": "maybe", "kind": "sometimes", "site": "src/main.rs:10"},
+            ],
+            "sites": [{
+                "label": "maybe", "kind": "sometimes", "site": "src/main.rs:10",
+                "active": false, "evals": 1, "fires": 0, "reachable": true,
+                "sometimes_satisfied": false, "always_violated": false, "knob": null,
+            }],
+        });
+        let mut tally = CoverageTally::default();
+        tally.observe_generation(0, 7, Some(&declared)).unwrap();
+        let never = &tally.sites["never"];
+        assert_eq!(never.kind, "reachable");
+        assert_eq!(never.registered_gens, 0);
+        assert_eq!(never.first_registered_gen, None);
+        assert_eq!(tally.sites["maybe"].registered_gens, 1);
+        let json = tally.to_json();
+        assert_eq!(CoverageTally::from_json(&json).unwrap(), tally);
     }
 }

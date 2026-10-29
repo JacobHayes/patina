@@ -287,12 +287,12 @@ fn swarm_deselection_clears_the_class_config_and_is_reported_distinctly() {
     assert_eq!(masked.buggify, BuggifyConfig::default());
 
     // `swarm_deselected` is what separates the two `enabled=0` states.
-    let mut context = Context::from_config(requested()).unwrap();
+    let context = Context::from_config(requested()).unwrap();
     let diagnostics = context.buggify_diagnostics();
     assert!(!diagnostics.enabled);
     assert!(diagnostics.swarm_deselected);
 
-    let mut never_asked = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
+    let never_asked = Context::from_config(RuntimeConfig::seeded(0)).unwrap();
     let diagnostics = never_asked.buggify_diagnostics();
     assert!(!diagnostics.enabled);
     assert!(!diagnostics.swarm_deselected);

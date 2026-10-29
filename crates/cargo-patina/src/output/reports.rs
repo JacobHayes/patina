@@ -31,13 +31,13 @@ pub struct RunReport<'a> {
     /// can reason about restarts structurally.
     pub crash_restart: Option<serde_json::Value>,
     /// The runtime's own `patina.runfacts/v1` document for this run, when the
-    /// facts channel was installed and the run produced one. Read from the
-    /// channel, never re-derived from the `PATINA_*_REPORT` stderr lines.
+    /// facts channel was installed and the run produced one. The one machine
+    /// channel out of the run: nothing here reads the `PATINA_*` stderr lines.
     pub facts: Option<serde_json::Value>,
-    /// The `PATINA_INFRA native_run` marker line the native supervisor itself
-    /// appended to the run's stderr, verbatim; `None` for every other family
-    /// and for a native run that appended none.
-    pub native_run_marker: Option<String>,
+    /// Whether the native supervisor saw the guest die on a signal or lose its
+    /// trace (and said so on its `PATINA_INFRA native_run` line). Always false
+    /// for the other families.
+    pub supervisor_infra: bool,
     /// What the operator relaxed for this run, each one a reason its
     /// determinism is not guaranteed. Empty for an unqualified run.
     pub qualifications: Vec<Qualification>,
@@ -72,7 +72,17 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         let _ = std::io::stderr().write_all(&captured.stderr);
     }
 
-    let classification = classify(captured.exit_code, &stdout_text, &stderr_text);
+    // Refusal attribution is the PARENT's job: a fail-closed abort kills the
+    // child before it can write anything structured, so what it already
+    // printed and the code it died with are all there is to work from. This
+    // is what makes an *unattributed* abort meaningful.
+    let refusal = refusal(captured.exit_code, &stdout_text, &stderr_text);
+    let classification = classify(
+        captured.exit_code,
+        report.facts.as_ref(),
+        refusal.as_ref(),
+        report.supervisor_infra,
+    );
     let failed = classification != "ok";
 
     // Render the timeline when `--render` is set (always) or `--report` is set and
@@ -92,6 +102,8 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 failure_summary(
                     captured.exit_code,
                     &classification,
+                    report.facts.as_ref(),
+                    refusal.as_ref(),
                     &stdout_text,
                     &stderr_text,
                 )
@@ -127,19 +139,15 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         if let Some(trace) = &report.trace_path {
             env.trace = trace_facts(trace, report.timeline);
         }
-        env.coverage = report
-            .coverage
-            .clone()
-            .or_else(|| coverage_report_line(&stdout_text, &stderr_text));
+        env.coverage = report.coverage.clone();
         env.crash_restart = report.crash_restart.clone();
-        env.native_run_marker = report.native_run_marker.clone();
         env.qualifications = report.qualifications.clone();
-        env.verdicts = extract_verdicts(&stdout_text, &stderr_text);
         // Runtime-owned structured facts, lifted verbatim out of the run's own
-        // `patina.runfacts/v1` document. The `PATINA_*_REPORT` lines still print
-        // and still land in `stderr`/`markers`; these fields are the parallel
-        // structured source, so nothing here parses a line back.
+        // `patina.runfacts/v1` document.
         if let Some(facts) = &report.facts {
+            env.verdicts = facts.get("verdicts").cloned();
+            env.sdk = facts.get("sdk").cloned();
+            env.schedule_policy = facts.get("schedule_policy").cloned();
             env.fault_reports = facts.get("fault_reports").cloned();
             env.runtime_findings = facts
                 .get("runtime_findings")
@@ -152,17 +160,12 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
         }
-        // Refusal attribution is the PARENT's job: a fail-closed abort kills the
-        // child before it can write anything structured, so what it already
-        // printed and the code it died with are all there is to work from. This
-        // is what makes an *unattributed* abort meaningful.
-        env.refusal = refusal(captured.exit_code, &stdout_text, &stderr_text);
+        env.refusal = refusal;
         env.guest_exit = Some(GuestExit {
             code: captured.exit_code,
             signal: captured.signal,
             core: captured.core,
         });
-        env.markers = extract_markers(&stdout_text, &stderr_text);
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
         env.stderr = Some(stderr_text);
@@ -172,53 +175,104 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
     Ok(captured.exit_code)
 }
 
-/// Classify a run's outcome for the envelope and failure report.
-fn classify(exit_code: i32, stdout: &str, stderr: &str) -> String {
+/// Classify a run's outcome for the envelope and failure report, from the
+/// structured facts alone: the runtime's facts document, patina's refusal
+/// attribution and the native supervisor's own observation. A guest that only
+/// prints failure text, without the verdict ABI, is a plain `failure`.
+fn classify(
+    exit_code: i32,
+    facts: Option<&serde_json::Value>,
+    refusal: Option<&Refusal>,
+    supervisor_infra: bool,
+) -> String {
     if exit_code == 0 {
         return "ok".to_string();
     }
-    let combined = format!("{stdout}\n{stderr}");
-    // A liveness-watchdog violation is its own classification (a virtual-time
-    // no-progress wedge), distinct from a safety violation, so triage can tell a
-    // "converges wrong" bug from a "never converges" one. Emitted per the interface
-    // contract as `PATINA_VIOLATION liveness …` / `PATINA_VIOLATION converge …`.
-    if combined.contains("PATINA_VIOLATION liveness ")
-        || combined.contains("PATINA_VIOLATION converge ")
-    {
+    let findings = facts
+        .and_then(|facts| facts.get("runtime_findings"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    // A liveness-watchdog violation (a no-progress wedge, a host-time compute
+    // bound) is its own classification, distinct from a safety violation, so
+    // triage can tell a "converges wrong" bug from a "never converges" one.
+    if findings.iter().any(|finding| {
+        finding.get("source").and_then(serde_json::Value::as_str) == Some("liveness")
+    }) {
         return "liveness".to_string();
     }
-    if combined.contains("VIOLATION")
-        || combined.contains("mismatch")
-        || combined.contains("PATINA_BUGGIFY_SETUP_NEVER_CALLED")
-        || combined.contains("PATINA_BUGGIFY_DUPLICATE_LABEL")
-    {
+    let violation_verdict = facts
+        .and_then(|facts| facts.get("verdicts"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|verdicts| {
+            verdicts.iter().any(|verdict| {
+                verdict.get("kind").and_then(serde_json::Value::as_str) == Some("violation")
+            })
+        });
+    let buggify_misuse = refusal.is_some_and(|refusal| refusal.class.starts_with("buggify_"));
+    if violation_verdict || buggify_misuse {
         return "violation".to_string();
     }
-    if combined.contains("PATINA_INFRA") || combined.contains("incomplete trace") {
+    let replay_diverged = facts.is_some_and(|facts| facts.get("replay_divergence").is_some());
+    if refusal.is_some() || supervisor_infra || replay_diverged {
         return "infra".to_string();
     }
     "failure".to_string()
 }
 
+/// The failure report's labeled facts, from the same structured sources the
+/// classification read: the guest's verdicts, the runtime's findings and
+/// patina's refusal.
 fn failure_summary(
     exit_code: i32,
     classification: &str,
+    facts: Option<&serde_json::Value>,
+    refusal: Option<&Refusal>,
     stdout: &str,
     stderr: &str,
 ) -> FailureSummary {
-    let markers = extract_markers(stdout, stderr);
-    let mut facts: Vec<(String, String)> = Vec::new();
-    for marker in &markers {
-        if let Some((head, rest)) = marker.split_once(' ') {
-            facts.push((head.to_string(), rest.to_string()));
-        }
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let rows = |key: &str| {
+        facts
+            .and_then(|facts| facts.get(key))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut labeled: Vec<(String, String)> = Vec::new();
+    for verdict in rows("verdicts") {
+        labeled.push((
+            format!("verdict {}", text(&verdict, "kind")),
+            format!("{} {}", text(&verdict, "label"), text(&verdict, "detail"))
+                .trim()
+                .to_string(),
+        ));
+    }
+    for finding in rows("runtime_findings") {
+        labeled.push((
+            format!("{} finding", text(&finding, "source")),
+            format!("{} {}", text(&finding, "kind"), text(&finding, "detail"))
+                .trim()
+                .to_string(),
+        ));
+    }
+    let mut messages = Vec::new();
+    if let Some(refusal) = refusal {
+        labeled.push(("refusal".to_string(), refusal.class.clone()));
+        messages.push(refusal.message.clone());
     }
     FailureSummary {
         result_line: result_line(stdout, stderr).unwrap_or_default(),
         classification: classification.to_string(),
         exit_code,
-        facts,
-        messages: markers,
+        facts: labeled,
+        messages,
     }
 }
 

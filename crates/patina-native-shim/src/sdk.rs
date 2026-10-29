@@ -54,7 +54,7 @@ fn abort_after_verdict() -> ! {
 }
 
 /// Move the runtime's queued diagnostic lines (today: `PATINA_VERDICT`) into the
-/// captured stderr stream. The runtime performs no process I/O of its own mid-run,
+/// captured stderr stream. The runtime prints nothing of its own mid-run,
 /// so every shim entry point that can produce one drains it here — including on
 /// the fatal paths, where [`abort_with_buggify_marker`] / [`abort_after_verdict`]
 /// flush the capture before aborting and the lines therefore still reach the real

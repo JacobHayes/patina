@@ -8,7 +8,7 @@ use patina_dst_abi::TaskId;
 /// (`next()` decisions), so it reflects the record/seeded schedule; on replay the
 /// recorded task selections are consumed through `select()` and `next()` is not
 /// called, so a replay reports the inert default. The runtime folds these counts
-/// into the machine-readable `PATINA_SCHEDULE_POLICY` diagnostic line and the
+/// into the facts document's `schedule_policy` and the
 /// bug-depth annotation of a failing schedule.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SchedulePolicyReport {

@@ -1,8 +1,7 @@
 //! `cargo patina sites` — static inventory of assertion/oracle sites.
 //!
-//! Wave 4 joins a syn static inventory with runtime `PATINA_SDK_REPORT` rows
-//! supplied through `--exercised FILE`, or with a campaign `<out>/sites.json`
-//! store supplied through `--exercised OUTDIR`.
+//! A syn static inventory, optionally joined with a campaign's `<out>/sites.json`
+//! store of runtime site counters (`--exercised OUTDIR`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -78,7 +77,7 @@ impl SitesOptions {
 }
 
 /// Parse `sites [--crate NAME] [--module PATH] [--site LABEL]
-/// [--all] [--exercised FILE] [--kind KIND]
+/// [--all] [--exercised OUTDIR] [--kind KIND]
 /// [--runtime driven|observed|invisible] [--no-cache]`.
 pub(crate) fn parse(arguments: Vec<OsString>) -> Result<SitesOptions, CliError> {
     if arguments.iter().any(|argument| argument == "--") {

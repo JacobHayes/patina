@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 
-use patina_dst_abi::{VerdictKind, verdict_line};
 use sha2::{Digest, Sha256};
 
 use crate::help::{self, Flag};
@@ -32,17 +31,14 @@ pub use capture::capture_active;
 pub use capture::end_guest_line;
 pub use capture::execute_command;
 pub use capture::facts_active;
+pub use capture::json_active;
 pub use capture::parse_facts;
 pub use envelope::CRASH_REPLAY_DIVERGED;
 pub use envelope::Envelope;
-use markers::coverage_report_line;
 use markers::result_line;
 pub use outcomes::GuestExit;
 pub use outcomes::Refusal;
 use outcomes::SIGNAL_NAMES;
-pub use outcomes::VerdictFact;
-use outcomes::extract_markers;
-use outcomes::extract_verdicts;
 use outcomes::refusal;
 pub use reports::CoverageReport;
 pub use reports::Qualification;

@@ -51,7 +51,7 @@ impl Default for VirtualClock {
 
 impl VirtualClock {
     /// The clock's current reading in the `clock` domain.
-    pub fn now(&mut self, clock: ClockKind) -> DriverResult<u64> {
+    pub fn now(&self, clock: ClockKind) -> DriverResult<u64> {
         self.observed_time(clock)
     }
 
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(clock.now(ClockKind::Monotonic).unwrap(), 100);
 
         // Realtime overflow fails explicitly.
-        let mut clock = VirtualClock::at(1, u64::MAX);
+        let clock = VirtualClock::at(1, u64::MAX);
         let error = clock.now(ClockKind::Realtime).unwrap_err();
         assert_eq!(error.code, ErrorCode::InvalidInput);
     }

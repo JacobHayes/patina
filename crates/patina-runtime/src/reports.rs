@@ -3,7 +3,6 @@
 use crate::buggify::BuggifyDiagnostics;
 use crate::liveness::LivenessWatchdog;
 use crate::schedule::ScheduleDiagnostics;
-use patina_dst_abi::report_token;
 use std::sync::OnceLock;
 
 /// Where the runtime's own diagnostic text goes: std's stderr, unless an
@@ -182,7 +181,7 @@ fn is_false_y(value: &str) -> bool {
 }
 
 /// Emit the default-on swarm-selection diagnostic for a run that applied swarm
-/// fault-class masking. One machine-readable line, in the same shape as
+/// fault-class masking. One line, in the same shape as
 /// `PATINA_SDK_REPORT`: the candidate/selected/deselected counts followed by one
 /// `class=<token>|<0|1>` row per candidate in table order.
 ///
@@ -262,7 +261,7 @@ pub(super) fn emit_liveness_report(reports: ReportConfig, watchdog: &LivenessWat
 
 /// Emit the default-on schedule-exploration diagnostic to stderr for a
 /// multithreaded run. Single-task runs (no concurrency to explore) stay silent.
-/// The machine-readable `PATINA_SCHEDULE_REPORT` line lets a campaign tell a
+/// The `PATINA_SCHEDULE_REPORT` line lets a reader tell a
 /// genuinely-explored "all clean" from a vacuous one; a loud warning fires when
 /// a spawned worker ran start-to-finish with zero scheduling boundaries.
 pub(super) fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnostics) {
@@ -449,8 +448,8 @@ times over, yet it applied ZERO effects.",
 
 /// Emit the default-on filesystem fault-injection diagnostic to stderr. A driver
 /// with no fault model reports `None` and stays silent, as does a live knob that
-/// saw no fault-eligible traffic at all. Otherwise the machine-readable
-/// `PATINA_FS_FAULT_REPORT` line lets a campaign tell a genuinely-perturbed run
+/// saw no fault-eligible traffic at all. Otherwise the
+/// `PATINA_FS_FAULT_REPORT` line lets a reader tell a genuinely-perturbed run
 /// from an inert one, and a loud warning fires when a class that was expected to
 /// fire repeatedly (see `vacuity_is_diagnosable`) applied zero effects.
 /// Suppressed by a false-y [`ENV_FS_FAULT_REPORT`].
@@ -510,8 +509,8 @@ latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
 /// Emit the default-on network fault-injection diagnostic to stderr. A driver
 /// with no fault model reports `None` and stays silent; a driver whose knobs
 /// cannot perturb anything (`could_apply == false`) is also silent. When the
-/// knobs could perturb delivery, the machine-readable `PATINA_NET_FAULT_REPORT`
-/// line lets a campaign tell a genuinely-perturbed run from an inert one, and a
+/// knobs could perturb delivery, the `PATINA_NET_FAULT_REPORT`
+/// line lets a reader tell a genuinely-perturbed run from an inert one, and a
 /// loud warning fires when fault-eligible traffic occurred yet ZERO fault
 /// effects landed — the silent-inertness class (historically: the SimNet TCP
 /// stream path ignoring the datagram-only fault knobs). Suppressed by a false-y
@@ -568,10 +567,10 @@ addresses this run actually connects between.",
     }
 }
 
-/// Emit the machine-readable `PATINA_SCHEDULE_POLICY` line for a run that used an
-/// exploration scheduling policy (PCT / starvation). One line, same spirit as
-/// `PATINA_SCHEDULE_REPORT`: a sweep parses it to annotate a found failure with a
-/// bug-depth estimate and to detect a vacuous starvation configuration. Suppressed
+/// Emit the human `PATINA_SCHEDULE_POLICY` line for a run that used an
+/// exploration scheduling policy (PCT / starvation), with a loud warning for a
+/// vacuous starvation configuration. The machine copy, bug-depth estimate
+/// included, is the facts document's `schedule_policy`. Suppressed
 /// by a false-y [`ENV_SCHEDULE_POLICY_REPORT`].
 pub(super) fn emit_schedule_policy_report(
     reports: ReportConfig,
@@ -607,7 +606,7 @@ subset or the interval window.",
     }
 }
 
-/// Emit the machine-readable `PATINA_SDK_REPORT` line ([`sdk_report_line`]).
+/// Emit the human `PATINA_SDK_REPORT` line ([`sdk_report_line`]).
 /// Suppressed by a false-y [`ENV_SDK_REPORT`].
 pub(super) fn emit_sdk_report(reports: ReportConfig, diag: &BuggifyDiagnostics) {
     if !reports.enabled(Report::Sdk) {
@@ -618,25 +617,20 @@ pub(super) fn emit_sdk_report(reports: ReportConfig, diag: &BuggifyDiagnostics) 
     }
 }
 
-/// The `PATINA_SDK_REPORT` line for a run that declared or registered any
-/// cooperative-SUT sites (or enabled buggify); `None` otherwise. One line, same
-/// spirit as `PATINA_SCHEDULE_REPORT`: a campaign parses it to accumulate
-/// per-site coverage across generations. Link-time declarations use
-/// `declared_site=<label>|<kind>|@<file:line>` and do not imply evaluation.
-/// Per-evaluated-site token is
+/// The human `PATINA_SDK_REPORT` line for a run that declared or registered any
+/// cooperative-SUT sites (or enabled buggify); `None` otherwise. Link-time
+/// declarations read `declared_site=<label>|<kind>|@<file:line>` and do not
+/// imply evaluation; an evaluated site reads
 /// `site=<label>|<kind>|a<0|1>|e<evals>|f<fires>|r<0|1>|s<0|1>|v<0|1>|k<knob|->|@<file:line>`.
-/// `<label>` and `<file:line>` are escaped with [`report_token::escape`], so any
-/// label stays one space-separated token with exactly these `|` fields; the
-/// header's `encoding=escaped` token, ahead of every site row, says so to a
-/// reader.
-pub fn sdk_report_line(diag: &BuggifyDiagnostics) -> Option<String> {
+/// The machine copy is the facts document's `sdk`.
+pub(crate) fn sdk_report_line(diag: &BuggifyDiagnostics) -> Option<String> {
     if !diag.enabled && diag.sites_registered == 0 && diag.declared_sites.is_empty() {
         return None;
     }
     let mut line = format!(
         "PATINA_SDK_REPORT enabled={} swarm_deselected={} fire_permille={} activation_permille={} \
 cutoff_nanos={} cutoff_reached={} sites_declared={} sites_registered={} sites_activated={} \
-total_firings={} cutoff_suppressed={} after_setup={} setup_complete={} encoding=escaped",
+total_firings={} cutoff_suppressed={} after_setup={} setup_complete={}",
         u8::from(diag.enabled),
         u8::from(diag.swarm_deselected),
         diag.fire_permille,
@@ -654,9 +648,9 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={} encoding=
     for site in &diag.declared_sites {
         line.push_str(&format!(
             " declared_site={}|{}|@{}",
-            report_token::escape(&site.label),
+            site.label,
             site.kind.as_str(),
-            report_token::escape(&site.site),
+            site.site,
         ));
     }
     for site in &diag.sites {
@@ -666,7 +660,7 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={} encoding=
             .unwrap_or_else(|| "-".to_string());
         line.push_str(&format!(
             " site={}|{}|a{}|e{}|f{}|r{}|s{}|v{}|k{}|@{}",
-            report_token::escape(&site.label),
+            site.label,
             site.kind.as_str(),
             u8::from(site.active),
             site.evals,
@@ -675,7 +669,7 @@ total_firings={} cutoff_suppressed={} after_setup={} setup_complete={} encoding=
             u8::from(site.sometimes_satisfied),
             u8::from(site.always_violated),
             knob,
-            report_token::escape(&site.site),
+            site.site,
         ));
     }
     Some(line)

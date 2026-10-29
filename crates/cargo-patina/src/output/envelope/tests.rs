@@ -23,15 +23,11 @@ fn envelope_omits_fields_nothing_produced() {
         "refusal",
         "guest_exit",
         "verdicts",
+        "sdk",
+        "schedule_policy",
     ] {
         assert!(json.get(absent).is_none(), "{absent} must be omitted");
     }
-    // Nothing on the verdict channel, and a truncated or unknown-kind line
-    // is dropped rather than half decoded.
-    assert!(extract_verdicts("hello\n", "PATINA_SDK_REPORT enabled=0\n").is_empty());
-    let malformed =
-        "PATINA_VERDICT seq=1 kind=pass label=x\nPATINA_VERDICT seq=2 kind=nope label=x detail=\n";
-    assert!(extract_verdicts("", malformed).is_empty());
 }
 
 /// Every key a fully-populated run envelope emits, pinned. The list is the
@@ -50,7 +46,6 @@ const ENVELOPE_KEYS: &[&str] = &[
     "findings",
     "fingerprint",
     "guest_exit",
-    "markers",
     "message",
     "output_path",
     "refusal",
@@ -58,7 +53,9 @@ const ENVELOPE_KEYS: &[&str] = &[
     "result",
     "result_line",
     "runtime_findings",
+    "schedule_policy",
     "schema",
+    "sdk",
     "seed",
     "stderr",
     "stdout",
@@ -87,15 +84,12 @@ fn fully_populated_envelope() -> Envelope {
     env.finding_details = vec![serde_json::json!({"symbol": "libc::open"})];
     env.output_path = Some("guest".into());
     env.content_hash = Some("sha256:00".into());
-    env.markers = vec!["PATINA_RESULT ok=1".into()];
     env.result_line = Some("PATINA_RESULT ok=1".into());
-    env.verdicts = extract_verdicts(
-        "",
-        &format!(
-            "{}\n",
-            verdict_line::render(0, VerdictKind::Pass, "queue-drained", "")
-        ),
-    );
+    env.verdicts = Some(serde_json::json!([
+        {"seq": 0, "kind": "pass", "label": "queue-drained", "detail": ""}
+    ]));
+    env.sdk = Some(serde_json::json!({"enabled": true, "sites": []}));
+    env.schedule_policy = Some(serde_json::json!({"pct": true, "bug_depth": 1}));
     env.fault_reports = Some(serde_json::json!({"fs": {"vacuous": false}}));
     env.runtime_findings = vec![serde_json::json!({"source": "liveness"})];
     env.crash_restart = Some(serde_json::json!({
@@ -138,24 +132,4 @@ fn envelope_keeps_every_field_and_adds_the_outcome_channel_ones() {
         .collect();
     keys.sort_unstable();
     assert_eq!(keys, ENVELOPE_KEYS);
-}
-
-#[test]
-fn envelope_carries_verdicts_in_report_order() {
-    let stderr = format!(
-        "noise\n{}\n{}\n",
-        verdict_line::render(0, VerdictKind::Pass, "queue-drained", ""),
-        verdict_line::render(1, VerdictKind::Violation, "two leaders", "{\"term\": 4}"),
-    );
-    let mut env = Envelope::new("run", "violation", 3);
-    env.verdicts = extract_verdicts("", &stderr);
-    let json = env.to_json();
-    assert_eq!(json["verdicts"][0]["seq"], 0);
-    assert_eq!(json["verdicts"][0]["kind"], "pass");
-    assert_eq!(json["verdicts"][0]["label"], "queue-drained");
-    assert_eq!(json["verdicts"][0]["detail"], "");
-    assert_eq!(json["verdicts"][1]["kind"], "violation");
-    // Spaces survive the escape round trip in both label and detail.
-    assert_eq!(json["verdicts"][1]["label"], "two leaders");
-    assert_eq!(json["verdicts"][1]["detail"], "{\"term\": 4}");
 }

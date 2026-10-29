@@ -543,7 +543,10 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
     );
     // The stop is a structured known limit on the facts channel, with no claim
     // about what the baton holder was doing outside the boundary.
-    let facts: serde_json::Value = serde_json::from_slice(&fs::read(&facts_path).unwrap()).unwrap();
+    let mut facts: serde_json::Value =
+        serde_json::from_slice(&fs::read(&facts_path).unwrap()).unwrap();
+    assert!(facts["context"].is_u64());
+    facts.as_object_mut().unwrap().remove("context");
     assert_eq!(
         facts,
         serde_json::json!({

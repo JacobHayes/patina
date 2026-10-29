@@ -262,8 +262,8 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             &state.spec.guest_args,
             effective_timeout_secs,
         )?;
+        let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, run.sdk.as_ref())?;
         let stderr = run.stderr;
-        let _sites_fold = fold_sites_generation(&mut coverage, generation, seed, &stderr)?;
         let observed_class = classify(&run.facts, &state.spec.classify);
         // Edge coverage folds AFTER classification: the shim writes the coverage
         // map at SHUTDOWN, so whether a missing map is a tolerable "this

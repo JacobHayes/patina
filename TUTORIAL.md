@@ -332,18 +332,20 @@ Any verb accepts `--format json`. Most emit one result envelope on stdout (schem
 $ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
 {"schema":"patina.result/v1","verb":"run","family":"native","result":"violation",
  "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":22,
- "event_count":...,"metadata":{...}},"markers":["..."],
+ "event_count":...,"metadata":{...}},"verdicts":[...],
  "result_line":"BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]", ...}
 ```
 
-`result` is `ok | violation | failure | error`. The selector is `--format`
+`result` is `ok | violation | liveness | infra | failure | error`, read from
+structured facts only: a guest that merely prints failure text is a `failure`.
+The selector is `--format`
 (not `--output`, which is the build/minimize artifact path).
 
 A guest that reports outcomes through the verdict ABI
 (`patina_dst::verdict(kind, label, detail)`, and every `always!` violation) adds
 a `verdicts` array — `{"seq":0,"kind":"violation","label":"ledger-sorted",
 "detail":"{\"row\": 12}"}` — so tooling reads structured results instead of
-grepping `markers`/`result_line` for strings. The field is omitted when the run
+grepping `result_line` for strings. The field is omitted when the run
 reported none.
 
 ## Where to go next

@@ -39,9 +39,7 @@ fn scan(sites: Vec<SiteRecord>) -> StaticScan {
 
 fn sdk_report(sites: BTreeMap<String, ExercisedSite>) -> ExercisedSource {
     ExercisedSource {
-        kind: "sdk_report".to_string(),
-        path: "stderr.log".to_string(),
-        reports: 1,
+        path: "out".to_string(),
         generations_observed: 1,
         sites,
     }
@@ -138,9 +136,7 @@ fn empty_exercised_source_warns_when_static_driven_sites_exist() {
         10,
     )]);
     let source = ExercisedSource {
-        kind: "campaign".to_string(),
         path: "out".to_string(),
-        reports: 3,
         generations_observed: 3,
         sites: BTreeMap::new(),
     };

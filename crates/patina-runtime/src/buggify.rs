@@ -2,7 +2,7 @@
 
 use crate::config::BuggifyConfig;
 use crate::{Context, FINGERPRINT_BUGGIFY, RuntimeError, VerdictKind};
-use patina_dst_abi::{ClockKind, Operation, Outcome, verdict_line};
+use patina_dst_abi::{ClockKind, Operation, Outcome};
 use patina_dst_rng_seeded::SplitMix64;
 use std::collections::BTreeMap;
 
@@ -105,8 +105,8 @@ pub enum SiteOutcome {
 ///
 /// `seq` is the run-scoped call index (from 0), so a verdict stream is ordered
 /// and countable without timestamps. The record is what the trace's
-/// [`Operation::Verdict`] event and the `PATINA_VERDICT` marker line both
-/// describe; see [`Context::verdict`].
+/// [`Operation::Verdict`] event, the facts document's `verdicts` and the human
+/// `PATINA_VERDICT` line all describe; see [`Context::verdict`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerdictRecord {
     pub seq: u64,
@@ -116,11 +116,16 @@ pub struct VerdictRecord {
 }
 
 impl VerdictRecord {
-    /// The `PATINA_VERDICT` diagnostic line for this verdict (no trailing
-    /// newline). Rendered by the shared ABI codec so the producer here and the
-    /// `patina.result/v1` envelope's parser cannot drift.
+    /// The human `PATINA_VERDICT` stderr line for this verdict (no trailing
+    /// newline). The machine copy is the facts document's `verdicts`.
     pub fn marker_line(&self) -> String {
-        verdict_line::render(self.seq, self.kind, &self.label, &self.detail)
+        format!(
+            "PATINA_VERDICT seq={} kind={} label={:?} detail={:?}",
+            self.seq,
+            self.kind.as_str(),
+            self.label,
+            self.detail
+        )
     }
 }
 
@@ -626,6 +631,10 @@ impl Context {
         };
         self.pending_diagnostics.push(record.marker_line());
         self.verdicts.push(record.clone());
+        // A verdict is often close to the guest's last act (a violation, an
+        // announced abort, a pass just before a refusal): put it on the facts
+        // channel now, before the process can die with it.
+        self.emit_facts();
         Ok(record)
     }
 
@@ -737,7 +746,7 @@ impl Context {
 
     /// End-of-run cooperative-SUT diagnostics. See [`BuggifyDiagnostics`]. Also
     /// emitted to stderr by [`Context::finish`] via `PATINA_SDK_REPORT`.
-    pub fn buggify_diagnostics(&mut self) -> BuggifyDiagnostics {
+    pub fn buggify_diagnostics(&self) -> BuggifyDiagnostics {
         let cutoff_reached_now = self.buggify.config.enabled
             && self.current_monotonic().is_ok_and(|now| {
                 now.saturating_sub(self.boot_origin_nanos) >= self.buggify.config.cutoff_nanos

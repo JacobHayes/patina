@@ -465,11 +465,10 @@ pub struct GenerationFacts {
     /// [`VerdictFacts`] drops `detail` because it varies between generations,
     /// but two runs of ONE generation must agree on it.
     pub exact_verdicts: Vec<String>,
-    /// The envelope's `native_run_marker`: the `PATINA_INFRA native_run` line
-    /// the native supervisor appended to the run's stderr. It rides the
-    /// guest's stream, so this is how [`primary_finding`] tells patina's own
-    /// marker from a guest line written to look like it.
-    pub native_run_marker: Option<String>,
+    /// The envelope's `schedule_policy.bug_depth`: how many live ordering
+    /// decisions the exploration policy made in this schedule. A signature
+    /// annotation, never a class input.
+    pub bug_depth: Option<u64>,
 }
 
 /// Per-guest classification rules a campaign spec declares (`classify` in the
@@ -694,7 +693,10 @@ pub(super) const STARVATION_STALL_EXIT: i32 = 111;
 /// the captured output, which is all there is in those cases.
 pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signature {
     let shape = normalize_shape(&primary_finding(class, generation));
-    let policy = policy_annotation(&generation.output);
+    let policy = generation
+        .bug_depth
+        .map(|depth| format!("bug_depth={depth}"))
+        .unwrap_or_default();
     Signature {
         class,
         shape,
@@ -813,7 +815,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
         .map(str::trim)
         .filter(|line| !line.is_empty() && !is_runtime_diagnostic(line))
     {
-        return patina_marker_evidence(line, generation);
+        return marker_evidence(line);
     }
     let mut lines = generation
         .output
@@ -825,12 +827,12 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
     for line in &mut lines {
         last_nonempty.get_or_insert(line);
         if !is_runtime_diagnostic(line) {
-            return patina_marker_evidence(line, generation);
+            return marker_evidence(line);
         }
     }
     // Every line was a diagnostic: a shape with no evidence in it still beats an
     // empty shape, which would collapse unrelated failures into one signature.
-    patina_marker_evidence(last_nonempty.unwrap_or_default(), generation)
+    marker_evidence(last_nonempty.unwrap_or_default())
 }
 
 /// Whether `line` is patina's OWN diagnostic — a summary, a progress marker, or
@@ -981,12 +983,11 @@ fn death_attribution(generation: &GenerationFacts) -> Option<String> {
         .iter()
         .rev()
         .find(|line| !line.is_empty() && !is_runtime_diagnostic(line))
-        .map(|line| patina_marker_evidence(line, generation))
+        .map(|line| marker_evidence(line))
 }
 
-/// A line as finding evidence: the line itself, unless it is the native
-/// supervisor's own `PATINA_INFRA native_run` marker for this run, which
-/// loses its trace fields.
+/// A line as finding evidence: the line itself, except that the native
+/// supervisor's `PATINA_INFRA native_run` line loses its trace fields.
 ///
 /// The supervisor writes `trace=incomplete trace_path="…" reason="…"` when the
 /// trace could not be finalized (`append_native_infra_marker`): the path is
@@ -994,19 +995,15 @@ fn death_attribution(generation: &GenerationFacts) -> Option<String> {
 /// Kept, they make one deterministic fault read differently on every run and
 /// under every reproduction: a novel signature each generation, and a false
 /// nondeterminism finding. `trace=incomplete` and the signal stay.
-///
-/// Only the line the supervisor reports having appended
-/// ([`GenerationFacts::native_run_marker`]) is reduced. A guest line is
-/// evidence as written, however much it looks like patina's.
-fn patina_marker_evidence(line: &str, generation: &GenerationFacts) -> String {
+fn marker_evidence(line: &str) -> String {
     let line = line.trim();
-    match &generation.native_run_marker {
-        Some(marker) if marker.trim() == line => line
+    if line.starts_with("PATINA_INFRA native_run ") {
+        return line
             .split_once(" trace_path=")
             .map_or(line, |(stable, _)| stable)
-            .to_string(),
-        _ => line.to_string(),
+            .to_string();
     }
+    line.to_string()
 }
 
 /// Collapse run-specific values (digit and hex runs) so a signature captures the
@@ -1027,25 +1024,6 @@ fn normalize_shape(line: &str) -> String {
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Extract the exploration-policy bug-depth annotation, if the run emitted one, so
-/// two failures found at different interleaving depths are distinguished. A
-/// signature *annotation*, never a class: the depth is a property of how the
-/// failure was reached, and the `PATINA_SCHEDULE_POLICY` line is the only place
-/// it is reported.
-fn policy_annotation(output: &str) -> String {
-    for line in output.lines() {
-        let line = line.trim();
-        if line.starts_with("PATINA_SCHEDULE_POLICY")
-            && let Some(depth) = line
-                .split_whitespace()
-                .find_map(|token| token.strip_prefix("bug_depth="))
-        {
-            return format!("bug_depth={depth}");
-        }
-    }
-    String::new()
 }
 
 #[cfg(test)]

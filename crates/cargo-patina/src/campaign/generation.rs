@@ -17,10 +17,12 @@ unsafe extern "C" {
 }
 
 /// One generation's completed run: the structured facts the classifier reads,
-/// plus the child's captured streams for the folds that parse their own report
-/// lines (`PATINA_SDK_REPORT`).
+/// the run's cooperative-site counters for the sites fold, and the child's
+/// captured streams for the failure log.
 pub(crate) struct GenerationRun {
     pub(super) facts: GenerationFacts,
+    /// The envelope's `sdk` facts, when the run declared or evaluated sites.
+    pub(super) sdk: Option<serde_json::Value>,
     pub(super) stdout: String,
     pub(super) stderr: String,
 }
@@ -270,15 +272,6 @@ fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
         // would have to grep. This is the classifier's ONLY input.
         .arg("--format")
         .arg("json");
-    // Keep the child's diagnostics deterministic and machine-parseable. For a
-    // campaign these lines are not cosmetic: they are the measurement channel and
-    // the only input the vacuity classifiers have, so an inherited
-    // `PATINA_*_REPORT=0` must never reach a generation and turn a blind run into
-    // a clean one. Pin every report on, from the same table the families forward,
-    // so a report added to the runtime is protected the day it exists.
-    for report in patina_dst_runtime::Report::ALL {
-        command.env(report.env(), "1");
-    }
     // Every child is this same supervisor build, or refuses to run; see
     // `collect_child`.
     crate::supervisor_identity::expect_this_supervisor(&mut command)?;
@@ -298,11 +291,11 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
         .map_err(|e| CliError(format!("failed to spawn generation run: {e}")))?;
 
     // Drain both pipes CONCURRENTLY with the timeout poll below. The poll loop
-    // does not read the pipes; a generation whose envelope (stdout) or report
-    // lines (stderr) exceed the pipe buffer — a guest with hundreds of SDK
-    // sites prints a PATINA_SDK_REPORT line well past 64 KiB — would block on
-    // write, never exit, and be misclassified as INFRA/timeout. Reader threads
-    // keep the pipes flowing; their bytes are what the classifier reads.
+    // does not read the pipes; a generation whose envelope (stdout) or
+    // diagnostics (stderr) exceed the pipe buffer — a guest with hundreds of SDK
+    // sites has an envelope well past 64 KiB — would block on write, never
+    // exit, and be misclassified as INFRA/timeout. Reader threads keep the
+    // pipes flowing.
     fn drain(
         stream: Option<impl std::io::Read + Send + 'static>,
     ) -> std::thread::JoinHandle<Vec<u8>> {
@@ -392,6 +385,14 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
         .and_then(serde_json::Value::as_array)
         .map(|rows| rows.iter().map(serde_json::Value::to_string).collect())
         .unwrap_or_default();
+    let sdk = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.get("sdk"))
+        .cloned();
+    let bug_depth = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.pointer("/schedule_policy/bug_depth"))
+        .and_then(serde_json::Value::as_u64);
     let stdout = envelope_stream("stdout").unwrap_or(child_stdout);
     let mut stderr = envelope_stream("stderr").unwrap_or(child_stderr.clone());
     if envelope.is_some() {
@@ -415,8 +416,9 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
             output: format!("{stdout}\n{stderr}"),
             result_line,
             exact_verdicts,
-            native_run_marker: envelope_stream("native_run_marker"),
+            bug_depth,
         },
+        sdk,
         stdout,
         stderr,
     })

@@ -263,9 +263,9 @@ Three channels, and they are a stable contract even as flags move.
 **stdout, machine-readable on request.** Every execution verb accepts
 `--format json`; it usually prints exactly one result envelope (schema
 `patina.result/v1`) carrying at least `schema`, `verb`, `result`
-(`ok`/`violation`/`failure`/`error`), and `exit_code`, plus whatever applies to
-the run: family, artifact, seed, fingerprint, captured guest output, extracted
-markers, trace metadata, coverage or depth. A few report verbs emit their own
+(`ok`/`violation`/`liveness`/`infra`/`failure`/`error`), and `exit_code`, plus whatever applies to
+the run: family, artifact, seed, fingerprint, captured guest output, verdicts,
+SDK site counters, per-plane fault facts, trace metadata, coverage or depth. A few report verbs emit their own
 schemas instead. Prefer JSON whenever you are parsing rather than reading — and
 discover an envelope's real fields by running the command once and inspecting the
 output, not by trusting a field list.
@@ -275,8 +275,9 @@ observability contract: scheduling, swarm selection, liveness, SDK sites,
 per-domain fault activity, coverage, and depth each emit a marker line. They are
 **on by default** and each is silenced by setting its own variable to a false-y value.
 Suppression is presentation only — it changes no recorded byte and no
-fingerprint, so a quiet run and a loud one replay against each other. A campaign
-pins them all on, because there they are classifier inputs rather than cosmetics.
+fingerprint, so a quiet run and a loud one replay against each other. They are
+for reading; tools read the envelope, which carries the same facts whatever is
+silenced.
 
 Read these reports. A clean pass with a fault knob that never fired, or a spawned
 thread that never yielded, is a **vacuous** result, and the reports are how you

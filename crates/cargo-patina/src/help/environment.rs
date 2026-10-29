@@ -12,7 +12,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: patina_dst_runtime::Report::ENV_NAMES,
         scope: "user",
-        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. A campaign pins them all on, since for a campaign they are classifier inputs rather than cosmetics.",
+        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one, on every family. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. The structured run facts a campaign classifies do not depend on them.",
     },
     EnvVar {
         name: "PATINA_PARAMS_JSON",

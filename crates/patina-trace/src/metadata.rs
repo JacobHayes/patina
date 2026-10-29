@@ -86,7 +86,7 @@ pub struct DnsConfigRecord {
 /// label, config)` and are NOT recorded per-evaluation (that would bloat the
 /// trace), so replay re-derives them from this config. The `active_sites` and
 /// `knobs` fields are the run's realized activation/knob picks: authoritative on
-/// replay and surfaced in the `PATINA_SDK_REPORT` line, they also make a trace
+/// replay and surfaced in the run's `sdk` facts, they also make a trace
 /// self-describing. This field is absent (`None`) in traces recorded before
 /// buggify shipped, which the runtime treats as buggify-disabled.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

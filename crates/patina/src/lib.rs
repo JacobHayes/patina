@@ -77,11 +77,11 @@
 //!
 //! # No vacuous "all clean"
 //!
-//! A fault site that never fires proves nothing. Under `--buggify` the runtime
-//! prints a `PATINA_SDK_REPORT` line at the end of the run showing how many
-//! sites registered, activated, and actually fired. Each per-site row carries
-//! the macro/import `file:line`, so `cargo patina sites --exercised <stderr-file>`
-//! can join runtime counters back to the static inventory. A green run with
+//! A fault site that never fires proves nothing. Under `--buggify` the run's
+//! `sdk` facts (and a human `PATINA_SDK_REPORT` line) show how many sites
+//! registered, activated, and actually fired. Each per-site row carries the
+//! macro/import `file:line`, so `cargo patina sites --exercised <campaign-out>`
+//! can join a campaign's counters back to the static inventory. A green run with
 //! inert instrumentation is visible instead of silently reassuring.
 //!
 //! ## Determinism and never-reached sites

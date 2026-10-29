@@ -111,15 +111,6 @@ fn main() {
             patina_dst_trace::TRACE_FORMAT_VERSION
         );
         assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
-        // The guest's PATINA_RESULT line is captured and surfaced as a marker.
-        assert!(
-            value["markers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m.as_str().unwrap().starts_with("PATINA_RESULT")),
-            "PATINA_RESULT marker missing from envelope: {value}"
-        );
         // Metadata is rendered generically (seed + policy present).
         assert_eq!(value["trace"]["metadata"]["root_seed"], 7);
 
@@ -213,9 +204,10 @@ fn main() {
             "violation line missing from report"
         );
 
-        // A source-first run of the same failure classifies it as a violation,
-        // echoes its result line, and names the source rather than the throwaway
-        // build artifact.
+        // A source-first run of the same failure echoes its result line and
+        // names the source rather than the throwaway build artifact. The guest
+        // only PRINTS a violation (no verdict ABI), so the run is a plain
+        // failure: nothing classifies guest text.
         let json = invoke_unchecked(
             patina,
             workspace,
@@ -232,7 +224,7 @@ fn main() {
         );
         assert_eq!(json.status.code(), Some(3));
         let value = envelope(&json);
-        assert_eq!(value["result"], "violation");
+        assert_eq!(value["result"], "failure");
         assert_eq!(value["exit_code"], 3);
         assert_eq!(
             value["result_line"],

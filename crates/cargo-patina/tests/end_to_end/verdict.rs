@@ -121,7 +121,7 @@ mod tests {
         assert_eq!(verdicts[0]["detail"], "");
         assert_eq!(verdicts[1]["seq"], 1);
         assert_eq!(verdicts[1]["kind"], "violation");
-        // Spaces in the label and the detail survive the escaped wire format.
+        // Spaces in the label and the detail survive the facts channel.
         assert_eq!(verdicts[1]["label"], "two leaders");
         assert_eq!(verdicts[1]["detail"], "{\"term\": 4}");
         assert_eq!(verdicts[2]["kind"], "abort_intent");
@@ -279,7 +279,7 @@ mod tests {
             "expected exactly one verdict from the violation:\n{stderr}"
         );
         assert!(
-            lines[0].contains("kind=violation") && lines[0].contains("label=never-holds"),
+            lines[0].contains("kind=violation") && lines[0].contains("label=\"never-holds\""),
             "verdict did not carry the violated invariant's label: {}",
             lines[0]
         );

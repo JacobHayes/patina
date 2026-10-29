@@ -9,11 +9,9 @@
 //! Per generation:
 //!   * the run seed and every randomized knob derive from `SHA-256("patina-campaign
 //!     -<seed_base>-<generation>")` (no wall clock, no `$RANDOM`);
-//!   * the child streams a generalized result contract — `PATINA_RESULT <k=v…>`
-//!     and `PATINA_VIOLATION <class> <detail>` (harness-agnostic generalizations of
-//!     the existing per-testbed result/violation and `PATINA_SDK_REPORT`
-//!     conventions), plus the runtime's own `PATINA_VIOLATION liveness` /
-//!     `PATINA_SCHEDULE_POLICY` diagnostics;
+//!   * the child reports a `patina.result/v1` envelope: its verdicts, runtime
+//!     findings, per-plane fault facts, SDK site counters and policy accounting,
+//!     all lifted from the runtime's `patina.runfacts/v1` document;
 //!   * the [`classify`] pure classifier assigns each generation one
 //!     [`CampaignClass`] — a finding, harness or catch-all class, or a
 //!     `VACUOUS` coverage class naming the inert planes — in the precedence `built_in_class` encodes, with

@@ -1,41 +1,6 @@
-//! Guest verdicts, exits, refusals, and marker recognition.
+//! Guest exits and patina's refusal attribution.
 
 use super::*;
-
-/// One verdict the run reported through the verdict ABI, for the envelope's
-/// `verdicts[]`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerdictFact {
-    pub seq: u64,
-    pub kind: VerdictKind,
-    pub label: String,
-    pub detail: String,
-}
-
-/// Collect the run's `PATINA_VERDICT` lines into structured verdicts, in the
-/// order the guest reported them.
-///
-/// The trace carries the same stream as `Operation::Verdict` events, but a plain
-/// seeded run writes no trace and an aborting guest never finalizes one, so the
-/// marker line is the channel that always exists. Decoding uses the ABI crate's
-/// codec, the same one the runtime renders with, and a malformed line is dropped
-/// rather than half-decoded into a verdict that would read as real.
-pub(super) fn extract_verdicts(stdout: &str, stderr: &str) -> Vec<VerdictFact> {
-    stdout
-        .lines()
-        .chain(stderr.lines())
-        .filter(|line| line.trim_start().starts_with(verdict_line::PREFIX))
-        .filter_map(|line| {
-            let (seq, kind, label, detail) = verdict_line::parse(line)?;
-            Some(VerdictFact {
-                seq,
-                kind,
-                label,
-                detail,
-            })
-        })
-        .collect()
-}
 
 /// How the guest process ended, structurally. `code` is the process exit status
 /// the CLI itself returns; `signal` is present only when the guest died on a
@@ -169,43 +134,6 @@ pub struct Refusal {
     pub(super) message: String,
     pub(super) guest_exit_code: Option<i32>,
     pub(super) mismatch: Option<&'static str>,
-}
-
-/// Known structured marker prefixes **patina itself** emits, worth surfacing
-/// verbatim in the envelope and failure report.
-///
-/// Patina's own prefixes only: core patina is guest-agnostic, so a guest's
-/// private marker dialect never appears here. A guest that wants its markers
-/// classified declares them in its campaign spec (`classify.patterns`); a guest
-/// that wants them structured calls the verdict ABI, and they surface in
-/// `verdicts[]`.
-const MARKER_PREFIXES: &[&str] = &[
-    "PATINA_RESULT",
-    "PATINA_VIOLATION",
-    "PATINA_SCHEDULE_REPORT",
-    "PATINA_COVERAGE_REPORT",
-    "PATINA_COVERAGE",
-    "PATINA_SDK_REPORT",
-    "PATINA_SWARM_REPORT",
-    "PATINA_LIVENESS_REPORT",
-    "PATINA_INFRA",
-    "PATINA_VERDICT",
-    "PATINA_BUGGIFY_DUPLICATE_LABEL",
-    "PATINA_BUGGIFY_SETUP_NEVER_CALLED",
-];
-
-pub(super) fn extract_markers(stdout: &str, stderr: &str) -> Vec<String> {
-    let mut markers = Vec::new();
-    for line in stdout.lines().chain(stderr.lines()) {
-        let trimmed = line.trim();
-        if MARKER_PREFIXES.iter().any(|p| trimmed.starts_with(p))
-            || trimmed.contains("trace operation mismatch")
-            || trimmed.contains("fingerprint mismatch")
-        {
-            markers.push(trimmed.to_string());
-        }
-    }
-    markers
 }
 
 #[cfg(test)]

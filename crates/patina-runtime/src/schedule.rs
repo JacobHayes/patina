@@ -577,9 +577,9 @@ impl Context {
     /// determine which timers are due after advancing the clock; the driver's
     /// monotonic value is maintained identically on record and replay by the
     /// recorded `SleepUntil`, so the result is deterministic.
-    pub(super) fn current_monotonic(&mut self) -> Result<u64, RuntimeError> {
+    pub(super) fn current_monotonic(&self) -> Result<u64, RuntimeError> {
         self.clock
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| EffectError::missing_driver("clock"))?
             .now(ClockKind::Monotonic)
             .map_err(Into::into)

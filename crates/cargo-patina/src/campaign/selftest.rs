@@ -29,7 +29,7 @@ pub(super) fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
         output: output.to_string(),
         result_line: None,
         exact_verdicts: Vec::new(),
-        native_run_marker: None,
+        bug_depth: None,
     }
 }
 
@@ -775,20 +775,12 @@ fn classifier_and_detector_checks() {
         failures += 1;
     }
     // A policy bug-depth annotation distinguishes otherwise-identical findings.
-    let shallow = signature(
-        CampaignClass::Violation,
-        &planted(
-            RunFacts::ok().verdict("violation", "x"),
-            "PATINA_SCHEDULE_POLICY pct=1 bug_depth=1 decisions=10",
-        ),
-    );
-    let deep = signature(
-        CampaignClass::Violation,
-        &planted(
-            RunFacts::ok().verdict("violation", "x"),
-            "PATINA_SCHEDULE_POLICY pct=1 bug_depth=5 decisions=10",
-        ),
-    );
+    let at_depth = |depth: u64| {
+        let mut generation = planted(RunFacts::ok().verdict("violation", "x"), "");
+        generation.bug_depth = Some(depth);
+        signature(CampaignClass::Violation, &generation)
+    };
+    let (shallow, deep) = (at_depth(1), at_depth(5));
     if shallow.key() != deep.key() {
         println!("  ok   bug-depth-annotation-distinguishes    -> ok");
     } else {
@@ -809,7 +801,7 @@ fn classifier_and_detector_checks() {
             output: format!("\nError: AlreadyInstalled\n{supervisor_note}\n"),
             result_line: Some("Error: AlreadyInstalled".to_string()),
             exact_verdicts: Vec::new(),
-            native_run_marker: None,
+            bug_depth: None,
         },
     );
     if shadowed.shape == "Error: AlreadyInstalled" {
@@ -869,7 +861,7 @@ fork (process)\n";
                     .next_back()
                     .map(str::to_string),
                 exact_verdicts: Vec::new(),
-                native_run_marker: None,
+                bug_depth: None,
             },
         )
     };
@@ -1171,34 +1163,30 @@ complete\"\n",
     }
     // A deterministic fault, observed and then reproduced: the supervisor's
     // marker names each run's own trace and scratch file, and neither may reach
-    // the evidence. Its red twin is the same line written by the guest: that is
-    // evidence as written, so the two runs read differently.
-    let faulted = |trace: &str, scratch: &str, supervisor: bool| {
+    // the evidence.
+    let faulted = |trace: &str, scratch: &str| {
         let marker = format!(
             "PATINA_INFRA native_run signal=11 trace=incomplete trace_path=\"out/traces/{trace}\" \
 reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
         );
-        let mut generation = planted(RunFacts::ok().exit(139).signal(11), &format!("{marker}\n"));
-        if supervisor {
-            generation.native_run_marker = Some(marker);
-        }
+        let generation = planted(RunFacts::ok().exit(139).signal(11), &format!("{marker}\n"));
         (
             signature(CampaignClass::Unclassified, &generation).key(),
             super::classify::primary_finding(CampaignClass::Unclassified, &generation),
         )
     };
-    for (name, supervisor, want_equal) in [
-        ("fault-marker-paths-are-not-evidence", true, true),
-        ("guest-written-marker-keeps-its-fields", false, false),
-    ] {
-        let observed = faulted("generation-0.patina", "3f19a522fbd5938d", supervisor);
-        let reproduced = faulted("generation-0.verify.patina", "79f652e981513a58", supervisor);
-        if (observed == reproduced) == want_equal && observed.1.contains("signal=11") {
-            println!("  ok   {name:<40} -> {}", observed.1);
-        } else {
-            println!("  FAIL {name:<40} -> {observed:?} vs {reproduced:?}");
-            failures += 1;
-        }
+    let observed = faulted("generation-0.patina", "3f19a522fbd5938d");
+    let reproduced = faulted("generation-0.verify.patina", "79f652e981513a58");
+    if observed == reproduced && observed.1.contains("signal=11") {
+        println!(
+            "  ok   fault-marker-paths-are-not-evidence      -> {}",
+            observed.1
+        );
+    } else {
+        println!(
+            "  FAIL fault-marker-paths-are-not-evidence      -> {observed:?} vs {reproduced:?}"
+        );
+        failures += 1;
     }
     // A cooperative `abort_intent` verdict still wins over any recovered text.
     let claimed = signature(
@@ -1303,24 +1291,6 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
         CoverageGate::Fail,
         1,
     );
-    let mut malformed = CoverageTally::default();
-    match malformed.observe_generation(
-        0,
-        1,
-        "PATINA_SDK_REPORT encoding=escaped enabled=1 site=x|sometimes|a0|e1|f0|r1|s0|v0|k-",
-    ) {
-        Ok(()) => {
-            println!("  FAIL malformed-coverage-row-rejected       -> parsed");
-            failures += 1;
-        }
-        Err(error) if error.contains("expected 10 pipe-separated fields") => {
-            println!("  ok   malformed-coverage-row-rejected       -> loud error");
-        }
-        Err(error) => {
-            println!("  FAIL malformed-coverage-row-rejected       -> {error}");
-            failures += 1;
-        }
-    }
 
     println!("-- native edge coverage store --");
     for (name, ok, detail) in crate::coverage::detectors::campaign_detector_selftest() {
@@ -1380,19 +1350,16 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
 
 fn coverage_fixture(satisfied: bool) -> Result<CoverageTally, String> {
     let mut tally = CoverageTally::default();
-    let bit = if satisfied { 1 } else { 0 };
-    tally.observe_generation(
-        0,
-        100,
-        &format!(
-            "PATINA_SDK_REPORT encoding=escaped enabled=1 site=oracle|sometimes|a0|e4|f0|r1|s{bit}|v0|k-|@src/main.rs:10"
-        ),
-    )?;
-    tally.observe_generation(
-        1,
-        101,
-        "PATINA_SDK_REPORT encoding=escaped enabled=1 site=faulty|fault|a1|e1|f1|r1|s0|v0|k-|@src/main.rs:11",
-    )?;
+    let site = |label: &str, kind: &str, line: u32, fires: u64, satisfied: bool| {
+        serde_json::json!({"sites": [{
+            "label": label, "kind": kind, "site": format!("src/main.rs:{line}"),
+            "active": fires > 0, "evals": if fires > 0 { 1 } else { 4 }, "fires": fires,
+            "reachable": true, "sometimes_satisfied": satisfied, "always_violated": false,
+            "knob": null,
+        }]})
+    };
+    tally.observe_generation(0, 100, Some(&site("oracle", "sometimes", 10, 0, satisfied)))?;
+    tally.observe_generation(1, 101, Some(&site("faulty", "fault", 11, 1, false)))?;
     Ok(tally)
 }
 
@@ -1401,7 +1368,9 @@ fn declared_reachable_fixture() -> Result<CoverageTally, String> {
     tally.observe_generation(
         0,
         200,
-        "PATINA_SDK_REPORT encoding=escaped enabled=1 sites_declared=1 declared_site=never|reachable|@src/main.rs:12",
+        Some(&serde_json::json!({"declared_sites": [
+            {"label": "never", "kind": "reachable", "site": "src/main.rs:12"}
+        ]})),
     )?;
     Ok(tally)
 }

@@ -57,8 +57,8 @@ published to it, `seq`-contiguous.
 ## Outcome contract (workq conventions)
 
 Outcomes are announced through the **verdict ABI** (`patina_dst::verdict`), so
-they arrive in the run's `patina.result/v1` envelope as `verdicts[]` and on
-stderr as `PATINA_VERDICT` wire lines. The `PUBSUB_*` lines below are still
+they arrive in the run's `patina.result/v1` envelope as `verdicts[]` (and on
+stderr as human `PATINA_VERDICT` lines). The `PUBSUB_*` lines below are still
 printed for log readability, but nothing downstream needs them.
 
 - `Pass` under `label=pubsub-outcome` (exit 0) — every invariant held. Its detail

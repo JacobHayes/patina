@@ -140,7 +140,7 @@ pub(super) fn fold_sites_generation(
     coverage: &mut CoverageTally,
     generation: u64,
     seed: u64,
-    stderr: &str,
+    sdk: Option<&serde_json::Value>,
 ) -> Result<AuxFoldDecision, CliError> {
     let decision = fold_decision(
         "campaign sites store",
@@ -150,12 +150,8 @@ pub(super) fn fold_sites_generation(
     )?;
     if decision == AuxFoldDecision::Apply {
         coverage
-            .observe_generation(generation, seed, stderr)
-            .map_err(|error| {
-                CliError(format!(
-                    "generation {generation} has malformed PATINA_SDK_REPORT: {error}"
-                ))
-            })?;
+            .observe_generation(generation, seed, sdk)
+            .map_err(|error| CliError(format!("generation {generation}: {error}")))?;
     }
     Ok(decision)
 }
@@ -226,13 +222,17 @@ mod tests {
 
     #[test]
     fn sites_fold_is_watermark_idempotent() {
-        let stderr = "PATINA_SDK_REPORT encoding=escaped enabled=1 \
-             site=oracle|sometimes|a1|e3|f2|r1|s1|v0|k-|@src/main.rs:9";
+        let sdk = serde_json::json!({"sites": [{
+            "label": "oracle", "kind": "sometimes", "site": "src/main.rs:9", "active": true,
+            "evals": 3, "fires": 2, "reachable": true, "sometimes_satisfied": true,
+            "always_violated": false, "knob": null,
+        }]});
         let mut coverage = CoverageTally::default();
-        let first = fold_sites_generation(&mut coverage, 0, 99, stderr).expect("first fold");
+        let first = fold_sites_generation(&mut coverage, 0, 99, Some(&sdk)).expect("first fold");
         assert_eq!(first, AuxFoldDecision::Apply);
         let after_first = coverage.clone();
-        let second = fold_sites_generation(&mut coverage, 0, 99, stderr).expect("watermark skip");
+        let second =
+            fold_sites_generation(&mut coverage, 0, 99, Some(&sdk)).expect("watermark skip");
         assert_eq!(second, AuxFoldDecision::SkipAlreadyApplied);
         assert_eq!(
             coverage, after_first,

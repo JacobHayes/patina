@@ -101,14 +101,14 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
 fn campaign_extend_equals_fresh_campaign() {
     let workspace = native_workspace();
     let directory = tempdir().unwrap();
-    let source = directory.path().join("aux_guest.rs");
+    let source = directory.path().join("aux_guest");
     let guest = directory.path().join("aux-guest");
     // Reports one SDK site, runs instrumented code for the coverage store, and
     // fails the same way every generation.
-    fs::write(
+    write_sdk_fixture(
         &source,
         r#"fn main() {
-    eprintln!("PATINA_SDK_REPORT encoding=escaped enabled=1 site=aux|sometimes|a1|e3|f1|r1|s1|v0|k-|@src/main.rs:1");
+    patina_dst::sometimes!(true, "aux");
     let mut sum = 0u64;
     for i in 0..128u64 {
         sum = sum.wrapping_add(i.rotate_left((i % 17) as u32));
@@ -118,9 +118,13 @@ fn campaign_extend_equals_fresh_campaign() {
     std::process::exit(3);
 }
 "#,
-    )
-    .unwrap();
-    invoke(
+    );
+    let manifest = source.join("Cargo.toml");
+    let mut contents = fs::read_to_string(&manifest).unwrap();
+    contents.push_str("\n[workspace]\n");
+    fs::write(&manifest, contents).unwrap();
+    let target = common::guest_target_dir("sdk-shared-target");
+    invoke_in_with_env(
         workspace,
         &[
             "build",
@@ -129,6 +133,7 @@ fn campaign_extend_equals_fresh_campaign() {
             guest.to_str().unwrap(),
             "--yield-points",
         ],
+        &[("CARGO_TARGET_DIR", target.to_str().unwrap())],
     );
 
     let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);

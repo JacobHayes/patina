@@ -409,7 +409,7 @@ mod tests {
 //
 // A whole package depending on the `patina` crate's default-feature SDK, built
 // and run through native-build/native-run. Verifies that buggify fires
-// deterministically, emits `PATINA_SDK_REPORT`, records and replays
+// deterministically, reports its sites, records and replays
 // byte-identically without re-supplying `--buggify`, and that a duplicate label
 // aborts with the fatal marker.
 
@@ -437,13 +437,28 @@ pub(super) fn write_sdk_fixture(root: &Path, main: &str) {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn assert_sites_join_for_sdk_report(
+pub(super) fn assert_sites_join_for_campaign(
     package: &Path,
-    stderr: &str,
+    binary: &Path,
     expected_labels: &[&str],
 ) {
-    let report_path = package.join("sdk-report.stderr");
-    fs::write(&report_path, stderr).unwrap();
+    let directory = tempdir().unwrap();
+    let out = directory.path().join("campaign");
+    // The guest's unreached `reachable!` fails the campaign's coverage gate;
+    // only the sites store it leaves behind matters here.
+    invoke_unchecked(
+        env!("CARGO_BIN_EXE_cargo-patina"),
+        native_workspace(),
+        &[
+            "campaign",
+            binary.to_str().unwrap(),
+            "--gens",
+            "1",
+            "--buggify",
+            "--out-dir",
+            out.to_str().unwrap(),
+        ],
+    );
     let joined = invoke_unchecked(
         env!("CARGO_BIN_EXE_cargo-patina"),
         package,
@@ -451,7 +466,7 @@ pub(super) fn assert_sites_join_for_sdk_report(
             "sites",
             "--no-cache",
             "--exercised",
-            report_path.to_str().unwrap(),
+            out.to_str().unwrap(),
             "--all",
             "--format",
             "json",

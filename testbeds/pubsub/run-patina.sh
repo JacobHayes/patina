@@ -24,17 +24,16 @@
 #   [5] TCP-stream fault leg: Patina's `--net-jitter-nanos`/`--net-drop-permille`
 #       knobs now bite on the SimNet TCP stream path (task #37). Each faulted
 #       run MUST still converge to the SAME order-invariant outcome hash (a
-#       reliable stream reorders/delays but never loses data), the default-on
-#       vacuity diagnostic MUST report the faults as APPLIED (never the "net
-#       fault knobs inert" warning), the faulted trace MUST differ from the
+#       reliable stream reorders/delays but never loses data), the envelope's
+#       net fault plane MUST report the faults as APPLIED (`vacuous: false`),
+#       the faulted trace MUST differ from the
 #       no-fault trace at the same seed (non-vacuity — else the leg is
 #       green-by-inertness), and the faulted run MUST record + strict-replay
 #       byte-identically.
 # The overriding guard: a `violation` verdict on any clean run fails the script.
 #
-# Every leg reads the run's VERDICT channel (the `PATINA_VERDICT` wire lines the
-# SDK emits) rather than pubsub's printed PUBSUB_*
-# dialect: the guest announces its outcomes through `patina_dst::verdict`, and
+# Every leg reads the run's verdicts from its `patina.result/v1` envelope
+# rather than pubsub's printed PUBSUB_* dialect: the guest announces its outcomes through `patina_dst::verdict`, and
 # the printed lines are only a human echo. The one exception is the convergence
 # timeout, which reports no verdict by design (leg [4], lost-wakeup).
 ###############################################################################
@@ -42,6 +41,8 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+# shellcheck source=../envelope.sh
+. "$here/../envelope.sh"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/pubsub}"
 export CARGO_TARGET_DIR="$target_dir"
 built="$target_dir/patina/pubsub"
@@ -102,29 +103,29 @@ fi
 fail=0
 start_secs=$SECONDS
 
-run() { "$PATINA" patina run "$built" "$@"; }
-replay() { "$PATINA" patina replay "$built" "$@"; }
+run() { jrun "$1" run "$built" "${@:2}"; }
+replay() { jrun "$1" replay "$built" "${@:2}"; }
 # Outcome facts come from the guest's `pass` verdict and findings from its
-# `violation` verdicts -- the verdict ABI's own wire lines on stderr
-# (patina_dst_abi::verdict_line) -- not from pubsub's printed PUBSUB_* dialect.
-# result_of/violated take the run's STDERR FILE; the field readers take the
-# verdict line itself, so a PUBSUB_FAILURE diagnostic carrying its own
-# `published=` can never be misread as the outcome.
-result_of() { /usr/bin/grep -m1 '^PATINA_VERDICT .*kind=pass label=pubsub-outcome ' "$1" 2>/dev/null || true; }
+# `violation` verdicts, read off the envelope (PREFIX.verdicts, see
+# ../envelope.sh) -- not from pubsub's printed PUBSUB_* dialect.
+# result_of/violated take a run's PREFIX; the field readers take the verdict
+# line itself, so a PUBSUB_FAILURE diagnostic carrying its own `published=` can
+# never be misread as the outcome.
+result_of() { /usr/bin/grep -m1 '^pass pubsub-outcome ' "$1.verdicts" 2>/dev/null || true; }
 field_of() { printf '%s' "$2" | /usr/bin/grep -o "$1=[0-9][0-9]*" | head -1 | cut -d= -f2; }
 hash_of() { printf '%s' "$1" | /usr/bin/grep -o 'hash=[0-9a-f]*' | head -1 | cut -d= -f2; }
-violated() { /usr/bin/grep -q '^PATINA_VERDICT .*kind=violation ' "$1"; }
+violated() { /usr/bin/grep -q '^violation ' "$1.verdicts"; }
 stderr_tail() { [[ -s "$1" ]] && sed -n '1,20p' "$1" | sed 's/^/      stderr| /'; }
 
 xseed_hash=""; xseed_delivered=""
 for s in 1 2 3 4 5; do
   ref_res=""; ref_trace=""
   for rep in 1 2 3; do
-    tr="$work/c.$s.$rep.trace"; err="$work/c.$s.$rep.err"
-    run --seed "$s" --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" >/dev/null 2>"$err" || {
-      echo "    FAIL: seed $s rep $rep exited nonzero"; fail=1; stderr_tail "$err"; }
-    if violated "$err"; then echo "    FAIL: violation verdict seed $s rep $rep"; fail=1; fi
-    res="$(result_of "$err")"
+    tr="$work/c.$s.$rep.trace"; out="$work/c.$s.$rep"
+    run "$out" --seed "$s" --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" || {
+      echo "    FAIL: seed $s rep $rep exited nonzero"; fail=1; stderr_tail "$out.err"; }
+    if violated "$out"; then echo "    FAIL: violation verdict seed $s rep $rep"; fail=1; fi
+    res="$(result_of "$out")"
     th="$(shasum -a256 "$tr" | cut -d' ' -f1)"
     pub="$(field_of published "$res")"; del="$(field_of delivered "$res")"; hb="$(field_of heartbeats "$res")"
     if [[ "$pub" != "$EXPECTED_PUBLISHED" || "$del" != "$EXPECTED_DELIVERED" ]]; then
@@ -146,38 +147,39 @@ for s in 1 2 3 4 5; do
 done
 
 rec="$work/replay.trace"
-run --seed 2 --record "$rec" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" >/dev/null 2>"$work/rec.err"
-r1="$(result_of "$work/rec.err")"
-replay "$rec" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$work/rep.err"
-r2="$(result_of "$work/rep.err")"
+run "$work/rec" --seed 2 --record "$rec" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}"
+r1="$(result_of "$work/rec")"
+replay "$work/rep" "$rec" ${ALLOW[@]+"${ALLOW[@]}"}
+r2="$(result_of "$work/rep")"
 if [[ "$r1" != "$r2" || -z "$r1" ]]; then echo "    FAIL: replay differs from record"; fail=1; fi
 
 # Each entry: NAME | run-seed | the expected CATCH pattern, matched against the
-# run's stderr. FAIL-CLOSED: a clean run means the bug slipped past the
+# run's verdict lines (`<kind> <label> <detail>`) and then its stderr.
+# FAIL-CLOSED: a clean run means the bug slipped past the
 # invariants and the leg FAILS, so the demo can never go vacuous. The failing run
 # is then recorded and strict-replayed, requiring an identical verdict stream +
 # trace hash + catch pattern. Two of the three are caught by a `violation`
-# verdict -- the verdict ABI's own wire line -- and the third by pubsub's
+# verdict and the third by pubsub's
 # convergence diagnostic, which reports no verdict on purpose (the ABI has no
 # liveness kind; see the crate module doc).
 bug_leg() {
   local name="$1" bseed="$2" marker="$3"
-  local tr="$work/bug.$name.trace" err="$work/bug.$name.err" code
-  if run --seed "$bseed" --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" --bug "$name" >/dev/null 2>"$err"; then code=0; else code=$?; fi
+  local tr="$work/bug.$name.trace" out="$work/bug.$name" code
+  if run "$out" --seed "$bseed" --record "$tr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" --bug "$name"; then code=0; else code=$?; fi
   # Every verdict the failing run reported, in order: the recorded outcome
   # stream the strict replay below must reproduce exactly.
-  local res; res="$(grep '^PATINA_VERDICT ' "$err" 2>/dev/null || true)"
-  if [[ $code -eq 0 ]] || ! grep -Eq "$marker" "$err"; then
-    echo "    FAIL: bug '$name' NOT caught (exit=$code, expected '$marker') -- demo went vacuous"; fail=1; stderr_tail "$err"; return
+  local res; res="$(cat "$out.verdicts")"
+  if [[ $code -eq 0 ]] || ! grep -Eq "$marker" "$out.verdicts" "$out.err"; then
+    echo "    FAIL: bug '$name' NOT caught (exit=$code, expected '$marker') -- demo went vacuous"; fail=1; stderr_tail "$out.err"; return
   fi
-  local th rerr rth
+  local th rout rth
   th="$(shasum -a256 "$tr" | cut -d' ' -f1)"
-  rerr="$work/bug.$name.replay.err"
-  replay "$tr" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$rerr" || true
+  rout="$work/bug.$name.replay"
+  replay "$rout" "$tr" ${ALLOW[@]+"${ALLOW[@]}"} || true
   rth="$(shasum -a256 "$tr" | cut -d' ' -f1)"
-  if [[ "$(grep '^PATINA_VERDICT ' "$rerr" 2>/dev/null || true)" != "$res" || "$th" != "$rth" ]]; then
+  if [[ "$(cat "$rout.verdicts")" != "$res" || "$th" != "$rth" ]]; then
     echo "    FAIL: bug '$name' replay did not reproduce the verdict stream + trace identically"; fail=1
-  elif ! grep -Eq "$marker" "$rerr"; then
+  elif ! grep -Eq "$marker" "$rout.verdicts" "$rout.err"; then
     echo "    FAIL: bug '$name' replay did not reproduce '$marker'"; fail=1
   fi
 }
@@ -186,10 +188,10 @@ bug_leg() {
 bug_leg lost-wakeup 1 '^PUBSUB_FAILURE not-converged'
 # drop-read-remainder: coalesced reads at the paced subscriber lose frames ->
 # per-topic seq contiguity fires.
-bug_leg drop-read-remainder 1 '^PATINA_VERDICT .*kind=violation label=seq-gap '
+bug_leg drop-read-remainder 1 '^violation seq-gap '
 # stale-timeout: the never-re-armed idle deadline expires mid-run despite live
 # heartbeats/messages.
-bug_leg stale-timeout 1 '^PATINA_VERDICT .*kind=violation label=liveness-timeout '
+bug_leg stale-timeout 1 '^violation liveness-timeout '
 
 # The knobs act on the SimNet TCP path this app uses. Each seed's faulted run
 # must still converge to EXPECTED_HASH, apply faults (vacuity diagnostic
@@ -197,10 +199,10 @@ bug_leg stale-timeout 1 '^PATINA_VERDICT .*kind=violation label=liveness-timeout
 # same seed, and record + strict-replay byte-identically.
 FAULTS=(--net-jitter-nanos 1000..50000 --net-drop-permille 50)
 for s in 2 4; do
-  ftr="$work/fault.$s.trace"; ferr="$work/fault.$s.err"; nftr="$work/fault.$s.nofault.trace"
-  run --seed "$s" --record "$ftr" ${ALLOW[@]+"${ALLOW[@]}"} "${FAULTS[@]}" -- "${ARGS[@]}" >/dev/null 2>"$ferr" || {
-    echo "    FAIL: fault seed $s exited nonzero"; fail=1; stderr_tail "$ferr"; }
-  fres="$(result_of "$ferr")"
+  ftr="$work/fault.$s.trace"; fout="$work/fault.$s"; nftr="$work/fault.$s.nofault.trace"
+  run "$fout" --seed "$s" --record "$ftr" ${ALLOW[@]+"${ALLOW[@]}"} "${FAULTS[@]}" -- "${ARGS[@]}" || {
+    echo "    FAIL: fault seed $s exited nonzero"; fail=1; stderr_tail "$fout.err"; }
+  fres="$(result_of "$fout")"
   pub="$(field_of published "$fres")"; del="$(field_of delivered "$fres")"; fh="$(hash_of "$fres")"
   if [[ "$pub" != "$EXPECTED_PUBLISHED" || "$del" != "$EXPECTED_DELIVERED" ]]; then
     echo "    FAIL: fault seed $s published=$pub delivered=$del expected $EXPECTED_PUBLISHED/$EXPECTED_DELIVERED"; fail=1
@@ -208,20 +210,20 @@ for s in 2 4; do
   if [[ "$fh" != "$EXPECTED_HASH" ]]; then
     echo "    FAIL: fault seed $s outcome hash $fh != $EXPECTED_HASH (a TCP fault must NOT lose data)"; fail=1
   fi
-  if violated "$ferr"; then echo "    FAIL: violation verdict on fault seed $s"; fail=1; fi
-  # Non-vacuity #1: the diagnostic proves the faults were applied, not inert.
-  if ! grep -q 'PATINA_NET_FAULT_REPORT .*vacuous=0' "$ferr" || grep -q 'net fault knobs inert' "$ferr"; then
-    echo "    FAIL: fault seed $s applied no faults (vacuity diagnostic did not confirm vacuous=0)"; fail=1; stderr_tail "$ferr"
+  if violated "$fout"; then echo "    FAIL: violation verdict on fault seed $s"; fail=1; fi
+  # Non-vacuity #1: the run's net fault plane proves the faults were applied, not inert.
+  if ! net_faults_applied "$fout"; then
+    echo "    FAIL: fault seed $s applied no faults (the net fault plane is absent or vacuous)"; fail=1; stderr_tail "$fout.err"
   fi
   # Non-vacuity #2: the faulted trace differs from the no-fault trace, same seed.
-  run --seed "$s" --record "$nftr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" >/dev/null 2>&1 || true
+  run "$work/fault.$s.nofault" --seed "$s" --record "$nftr" ${ALLOW[@]+"${ALLOW[@]}"} -- "${ARGS[@]}" || true
   fth="$(shasum -a256 "$ftr" | cut -d' ' -f1)"; nfth="$(shasum -a256 "$nftr" | cut -d' ' -f1)"
   if [[ "$fth" == "$nfth" ]]; then
     echo "    FAIL: fault seed $s trace equals the no-fault trace (green-by-inertness)"; fail=1
   fi
   # Record -> strict replay byte-identical (outcome verdict + trace hash).
-  replay "$ftr" ${ALLOW[@]+"${ALLOW[@]}"} >/dev/null 2>"$work/fault.$s.replay.err"
-  if [[ "$(result_of "$work/fault.$s.replay.err")" != "$fres" || "$(shasum -a256 "$ftr" | cut -d' ' -f1)" != "$fth" ]]; then
+  replay "$work/fault.$s.replay" "$ftr" ${ALLOW[@]+"${ALLOW[@]}"}
+  if [[ "$(result_of "$work/fault.$s.replay")" != "$fres" || "$(shasum -a256 "$ftr" | cut -d' ' -f1)" != "$fth" ]]; then
     echo "    FAIL: fault seed $s replay not byte-identical to record"; fail=1
   fi
 done

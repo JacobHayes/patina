@@ -34,9 +34,9 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
         sdk_report_line(&seeded).contains("|@src/main.rs:"),
         "SDK report rows must carry file:line identities: {stderr}"
     );
-    assert_sites_join_for_sdk_report(
+    assert_sites_join_for_campaign(
         &package,
-        &stderr,
+        &guest.binary,
         &[
             "batch",
             "loop-body",

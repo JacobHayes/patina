@@ -419,6 +419,22 @@ impl Context {
         }
         let mut document = facts::document(planes, findings);
         if let serde_json::Value::Object(root) = &mut document {
+            root.insert("context".into(), self.facts_context.into());
+            if !self.verdicts.is_empty() {
+                root.insert("verdicts".into(), facts::verdicts(&self.verdicts));
+            }
+            let sdk = self.buggify_diagnostics();
+            if sdk.enabled || sdk.sites_registered > 0 || !sdk.declared_sites.is_empty() {
+                root.insert("sdk".into(), facts::sdk(&sdk));
+            }
+            if let Some(report) = self
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.policy_report())
+                .filter(patina_dst_driver_api::SchedulePolicyReport::is_active)
+            {
+                root.insert("schedule_policy".into(), facts::schedule_policy(&report));
+            }
             root.insert("cpu_charges".into(), self.charges.facts());
             if let Some(kind) = self.replay_divergence {
                 root.insert("replay_divergence".into(), kind.into());
@@ -457,15 +473,18 @@ impl Context {
         error
     }
 
-    /// Write the facts document to the installed channel, at most once per run.
-    /// A write failure is loud and classifiable (`PATINA_INFRA`) rather than
+    /// Append the facts document, as the run stands now, to the installed
+    /// channel. Called at every point after which the process may die without
+    /// reaching [`Context::finish`] (a liveness or churn stop, a replay
+    /// divergence, a verdict) and again at finish; each document is complete,
+    /// so the reader takes this context's last one. A compute-bound stop seals
+    /// the channel: its terminal document is the run's last word. A write failure is loud and classifiable (`PATINA_INFRA`) rather than
     /// silent — a consumer that asked for the structured channel must never read
     /// a missing document as "nothing happened".
     pub(super) fn emit_facts(&mut self) {
-        if self.facts_emitted || self.facts.is_none() {
+        if self.facts_sealed || self.facts.is_none() {
             return;
         }
-        self.facts_emitted = true;
         let document = self.run_facts();
         let mut bytes = match serde_json::to_vec(&document) {
             Ok(bytes) => bytes,

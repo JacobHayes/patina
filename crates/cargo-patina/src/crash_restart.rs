@@ -566,19 +566,17 @@ fn crash_handoff_key(seed: u64, kind: CrashKind) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Append the supervisor's `PATINA_INFRA native_run` marker to the run's
-/// stderr, and return the marker line so the envelope can name it
-/// (`native_run_marker`): the line rides the guest's stream, and only this
-/// record tells it apart from a guest line that looks the same.
+/// Append the supervisor's human `PATINA_INFRA native_run` line to the run's
+/// stderr: the guest's death signal and any trace the run left incomplete.
 #[cfg(unix)]
 pub(super) fn append_native_infra_marker(
     captured: &mut output::Captured,
     signal: Option<i32>,
     trace_error: Option<(&Path, &str)>,
     channel_unavailable: Option<i32>,
-) -> Option<String> {
+) {
     if signal.is_none() && trace_error.is_none() {
-        return None;
+        return;
     }
     let mut line = String::from("PATINA_INFRA native_run");
     if let Some(signal) = signal {
@@ -591,7 +589,6 @@ pub(super) fn append_native_infra_marker(
             reason
         ));
     }
-    let marker = line.clone();
     line.push('\n');
     // A channel failure is patina's own operational condition, not a finding, so
     // it says so in the attributable form the envelope reads: one stable
@@ -610,5 +607,4 @@ not be written, so this generation has no replay artifact; the guest's own verdi
     } else {
         eprint!("{line}");
     }
-    Some(marker)
 }

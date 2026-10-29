@@ -19,6 +19,8 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
+# shellcheck source=../envelope.sh
+. "$here/../envelope.sh"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/workq}"
 export CARGO_TARGET_DIR="$target_dir"
 built="$target_dir/patina/workq"
@@ -44,7 +46,6 @@ trap 'printf "Logs: %s\n" "$work"' EXIT
 fail=0
 start_secs=$SECONDS
 run() { "$PATINA" patina run "$built" "$@"; }
-replay() { "$PATINA" patina replay "$built" "$@"; }
 stderr_tail() { [[ -s "$1" ]] && sed -n '1,20p' "$1" | sed 's/^/      stderr| /'; }
 
 echo "==> [1] campaign: $GENS generations of campaign.json"
@@ -65,33 +66,34 @@ ARGS=(--seed 7 --jobs 24 --workers 3 --producers 2 --base-port 5001 --data-dir /
 BUG_SEED_WINDOW=8
 bug_leg() {
   local name="$1" first="$2" pknobs="$3" gargs="$4" marker="$5"
-  local tr="$work/bug.$name.trace" err="$work/bug.$name.err" bseed caught=0
+  local tr="$work/bug.$name.trace" out="$work/bug.$name" bseed caught=0
   echo "==> [3] planted bug $name"
   for bseed in $(seq "$first" $((first + BUG_SEED_WINDOW - 1))); do
-    if ! run --seed "$bseed" $pknobs --record "$tr" -- "${ARGS[@]}" $gargs >/dev/null 2>"$err" \
-        && grep -Eq "$marker" "$err"; then caught=1; break; fi
+    if ! jrun "$out" run "$built" --seed "$bseed" $pknobs --record "$tr" -- "${ARGS[@]}" $gargs \
+        && grep -Eq "$marker" "$out.verdicts" "$out.err"; then caught=1; break; fi
   done
   bseed_caught=""
   if [[ $caught -ne 1 ]]; then
     echo "    FAIL: not caught by seeds $first..$((first + BUG_SEED_WINDOW - 1)) (expected '$marker')"
-    fail=1; stderr_tail "$err"; return
+    fail=1; stderr_tail "$out.err"; return
   fi
-  local th rerr
+  local th rout
   th="$(shasum -a256 "$tr" | cut -d' ' -f1)"
-  rerr="$work/bug.$name.replay.err"
-  replay "$tr" >/dev/null 2>"$rerr" || true
-  if [[ "$(grep '^PATINA_VERDICT ' "$rerr")" != "$(grep '^PATINA_VERDICT ' "$err")" \
-      || "$th" != "$(shasum -a256 "$tr" | cut -d' ' -f1)" ]] || ! grep -Eq "$marker" "$rerr"; then
+  rout="$work/bug.$name.replay"
+  jrun "$rout" replay "$built" "$tr" || true
+  if [[ "$(cat "$rout.verdicts")" != "$(cat "$out.verdicts")" \
+      || "$th" != "$(shasum -a256 "$tr" | cut -d' ' -f1)" ]] \
+      || ! grep -Eq "$marker" "$rout.verdicts" "$rout.err"; then
     echo "    FAIL: the replay did not reproduce the verdict stream and trace"; fail=1
   fi
   bseed_caught="$bseed"
 }
 bug_leg dedup-ignore-producer 1 "" "--timeout-secs 20 --bug dedup-ignore-producer" '^WORKQ_FAILURE not-converged'
-bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug skip-redelivery-commit" '^PATINA_VERDICT .*kind=violation '
-bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^PATINA_VERDICT .*kind=violation '
-bug_leg ignore-short-write 1 "--fs-short-permille 200" "--bug ignore-short-write" '^PATINA_VERDICT .*kind=violation '
+bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug skip-redelivery-commit" '^violation '
+bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^violation '
+bug_leg ignore-short-write 1 "--fs-short-permille 200" "--bug ignore-short-write" '^violation '
 fsync_bug="--ack-ledger /workq-acks --bug skip-wal-fsync"
-bug_leg skip-wal-fsync 2 "--crash-permille 10 --crash-kind machine" "$fsync_bug" '^PATINA_VERDICT .*kind=violation '
+bug_leg skip-wal-fsync 2 "--crash-permille 10 --crash-kind machine" "$fsync_bug" '^violation '
 echo "==> [3] skip-wal-fsync survives a process crash"
 if [[ -n ${bseed_caught:-} ]] && ! run --seed "$bseed_caught" --crash-permille 10 --crash-kind process \
     -- "${ARGS[@]}" $fsync_bug >/dev/null 2>"$work/bug.skip-wal-fsync.process.err"; then
