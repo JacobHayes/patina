@@ -193,15 +193,14 @@ mod tests {
     }
 
     /// Each seed reports its own violation label, so every generation is a
-    /// novel finding and is verified: a divergence surfaces as an unconsumed
-    /// trace on some replays and an overrun on others, and both land the same
-    /// way. `minimize --generation` then refuses the class rather than reduce
+    /// novel finding and is verified: the replayed write carries other bytes,
+    /// so the replay diverges after the verdict. `minimize --generation` then refuses the class rather than reduce
     /// the violation verdict a single-run oracle could target.
     #[test]
     fn a_replay_that_diverges_after_its_verdict_is_nondeterminism_minimize_refuses() {
         let directory = tempdir().unwrap();
         let out = directory.path().join("out");
-        let (code, envelope) = campaign(&address_leak(), &out, 6, &[], "leak-schedule");
+        let (code, envelope) = campaign(&address_leak(), &out, 6, &[], "leak-after-verdict");
         assert_eq!(code, Some(1), "{envelope:#}");
         assert!(
             envelope["classes"].get("VIOLATION").is_none(),

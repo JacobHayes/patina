@@ -24,13 +24,12 @@
 //   operation open under a label that spells a replay divergence, and print
 //   the structured token too. Deterministic: every word of it is the guest's,
 //   and a guest cannot claim a divergence its own run did not have.
-// * `leak-clean`: pass, after a thread and its peer each yield a leaked
-//   number of times. Two runnable threads make every yield a
-//   recorded scheduling decision, so a leaked count reaches the trace.
-// * `leak-schedule`: report a violation first, under a label drawn from
-//   patina's seeded entropy (so each seed is its own signature), then yield a
-//   leaked number of times. The verdict reproduces; the schedule after it does
-//   not, so a replay of the trace diverges.
+// * `leak-clean`: pass, after writing the address to a file. A filesystem
+//   write records its bytes, so the whole address reaches the trace.
+// * `leak-after-verdict`: report a violation first, under a label drawn from
+//   patina's seeded entropy (so each seed is its own signature), then write the
+//   address to a file. The verdict reproduces; the write after it does not, so
+//   a replay of the trace diverges.
 
 unsafe extern "C" {
     fn patina_verdict(
@@ -81,21 +80,8 @@ fn seeded_label() -> String {
     format!("broken-{}", token(usize::from(u16::from_le_bytes(bytes))))
 }
 
-// Each thread yields its own leaked count, so the schedule carries a pair of
-// numbers below 997: two runs agree on it by chance about once in a million,
-// where a single count would agree about once in a thousand runs.
-fn yield_alongside_a_peer() {
-    let bits = address_bits();
-    let (own_yields, peer_yields) = (bits % 997 + 1, bits / 997 % 997 + 1);
-    let peer = std::thread::spawn(move || {
-        for _ in 0..peer_yields {
-            std::thread::yield_now();
-        }
-    });
-    for _ in 0..own_yields {
-        std::thread::yield_now();
-    }
-    peer.join().unwrap();
+fn record_address() {
+    std::fs::write("/address", address_bits().to_string()).unwrap();
 }
 
 fn main() {
@@ -134,12 +120,12 @@ fn main() {
             unsafe { std::ptr::write_volatile(1 as *mut u8, 0) }
         }
         "leak-clean" => {
-            yield_alongside_a_peer();
+            record_address();
             println!("ADDRESS_LEAK clean");
         }
-        "leak-schedule" => {
+        "leak-after-verdict" => {
             verdict(VIOLATION, &seeded_label(), "");
-            yield_alongside_a_peer();
+            record_address();
         }
         other => panic!("unknown mode {other:?}"),
     }
