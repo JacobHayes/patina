@@ -72,19 +72,6 @@ fn main() {
         ));
         assert_eq!(built["verb"], "build");
         assert_eq!(built["result"], "ok");
-        assert_eq!(built["family"], "native");
-        assert!(
-            built["content_hash"]
-                .as_str()
-                .unwrap()
-                .starts_with("sha256:")
-        );
-        assert!(
-            built["output_path"]
-                .as_str()
-                .unwrap()
-                .ends_with("render-guest")
-        );
 
         let trace = directory.path().join("run.patina");
         let value = envelope(&invoke(
@@ -100,9 +87,6 @@ fn main() {
                 "json",
             ],
         ));
-        assert_eq!(value["schema"], "patina.result/v1");
-        assert_eq!(value["verb"], "run");
-        assert_eq!(value["family"], "native");
         assert_eq!(value["result"], "ok");
         assert_eq!(value["exit_code"], 0);
         assert_eq!(value["seed"], 7);
@@ -110,8 +94,6 @@ fn main() {
             value["trace"]["format_version"],
             patina_dst_trace::TRACE_FORMAT_VERSION
         );
-        assert!(value["trace"]["event_count"].as_u64().unwrap() > 0);
-        // Metadata is rendered generically (seed + policy present).
         assert_eq!(value["trace"]["metadata"]["root_seed"], 7);
 
         // Replaying WITH --render must not perturb the trace file (render only

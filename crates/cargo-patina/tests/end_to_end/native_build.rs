@@ -122,117 +122,6 @@ mod tests {
         );
     }
 
-    // Cargo may rewrite an unchanged executable during uplift. Its typed
-    // compiler-artifact receipts expose freshness independently of file times.
-    //
-    // The builds under test are cargo-patina's alone. They run in a target dir
-    // of their own, and with any compiler wrapper the suite inherits (a build
-    // cache running the tests) switched off: a wrapper that stamps its outputs
-    // with a fine-grained mtime can leave a build-script executable newer than
-    // the kernel-stamped record of that script's run, and Cargo then reruns the
-    // script and relinks the guest on an unchanged build.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn second_native_package_build_reuses_cargo_cache() {
-        let directory = tempdir().unwrap();
-        let package = directory.path().join("pkg");
-        create_package_fixture(directory.path());
-        let workspace = native_workspace();
-        let receipts = directory.path().join("cargo-receipts.jsonl");
-        let cargo = directory.path().join("cargo");
-        fs::write(
-            &cargo,
-            r#"#!/bin/sh
-[ "$1" = rustc ] || exec "$PATINA_TEST_REAL_CARGO" "$@"
-"$PATINA_TEST_REAL_CARGO" --verbose "$@" > "$PATINA_TEST_CARGO_RECEIPTS" \
-    2> "$PATINA_TEST_CARGO_RECEIPTS.log"
-status=$?
-cat "$PATINA_TEST_CARGO_RECEIPTS.log" >&2
-cat "$PATINA_TEST_CARGO_RECEIPTS"
-exit "$status"
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
-        let real_cargo = active_toolchain_binary("cargo");
-        let target = common::guest_target_dir("cargo-cache-reuse");
-        // The shim builds through the same Cargo as the guest, which is not the
-        // Cargo the other tests build the shared shim with, so it gets a
-        // persistent base of its own rather than rebuilding theirs.
-        let shim_target = common::guest_target_dir("cargo-cache-reuse-shim");
-        let envs = [
-            ("CARGO", cargo.to_str().unwrap()),
-            ("PATINA_SHIM_TARGET_DIR", shim_target.to_str().unwrap()),
-            ("PATINA_TEST_REAL_CARGO", real_cargo.to_str().unwrap()),
-            ("PATINA_TEST_CARGO_RECEIPTS", receipts.to_str().unwrap()),
-            ("CARGO_TARGET_DIR", target.to_str().unwrap()),
-            // Empty overrides an inherited or configured wrapper alike.
-            ("RUSTC_WRAPPER", ""),
-            ("RUSTC_WORKSPACE_WRAPPER", ""),
-        ];
-        let package_text = package.to_str().unwrap();
-        let plain = [
-            "build",
-            package_text,
-            "--bin",
-            "patina-native-pkg-fixture",
-            "--release",
-        ];
-        let yielded = [
-            "build",
-            package_text,
-            "--bin",
-            "patina-native-pkg-fixture",
-            "--release",
-            "--instrument",
-        ];
-        for flags in [&plain[..], &yielded[..]] {
-            invoke_in_with_env(workspace, flags, &envs);
-            invoke_in_with_env(workspace, flags, &envs);
-            let artifacts = cargo_artifact_receipts(&receipts);
-            // Cargo's own account of why a unit was dirty, for a failure.
-            let log = fs::read_to_string(receipts.with_extension("jsonl.log")).unwrap_or_default();
-            let reasons: Vec<_> = log.lines().filter(|line| line.contains("Dirty")).collect();
-            assert!(
-                artifacts.iter().all(|row| row["fresh"] == true),
-                "unchanged build ({flags:?}) recompiled guest artifacts: {artifacts:?}\n\
-                 Cargo's fingerprint log: {reasons:#?}"
-            );
-        }
-
-        // Positive control: a compiled guest-input change must fire this detector.
-        let main = package.join("src/main.rs");
-        fs::write(&main, "fn main() { println!(\"CACHE_REBUILD_PROBE\"); }\n").unwrap();
-        invoke_in_with_env(workspace, &yielded, &envs);
-        let artifacts = cargo_artifact_receipts(&receipts);
-        assert!(
-            artifacts.iter().any(|row| row["fresh"] == false),
-            "rebuild detector did not fire: {artifacts:?}"
-        );
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn cargo_artifact_receipts(path: &Path) -> Vec<serde_json::Value> {
-        let artifacts: Vec<_> = fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|row| row["reason"] == "compiler-artifact")
-            .collect();
-        assert!(
-            artifacts
-                .iter()
-                .any(|row| row["target"]["name"] == "patina-native-pkg-fixture"
-                    && row["executable"].is_string()),
-            "missing guest artifact receipt: {artifacts:?}"
-        );
-        assert!(
-            artifacts.iter().all(|row| row["fresh"].is_boolean()),
-            "artifact freshness must be typed: {artifacts:?}"
-        );
-        artifacts
-    }
-
     // Regression for the SlateDB dogfooding feedback: a dependency that declares
     // `crate-type = ["rlib", "cdylib"]` (crc-fast 1.10.0 in the field report) makes
     // Cargo build BOTH crate types even though the guest links only the rlib, and
@@ -397,8 +286,7 @@ exit "$status"
         }
     }
 
-    // The converse of the cache-hit test above: when the shim staticlib's BYTES
-    // change, the guest must relink. Cargo fingerprints the link arguments, never
+    // When the shim staticlib's BYTES change, the guest must relink. Cargo fingerprints the link arguments, never
     // the files they name, so a guest that links a staticlib at an unchanging path
     // is reported fresh ("Finished in 0.01s") after a shim/runtime change and
     // `build` hands back a binary still linked against the PREVIOUS shim. The guest

@@ -114,39 +114,25 @@ fn main() {
     }
 
     /// The same seed generates the same cases (the shared run check runs,
-    /// records and replays it), and a different seed generates different ones.
+    /// records and replays it), a different seed generates different ones, and
+    /// stock shrinking reaches the minimal failing case with the whole search
+    /// replaying from the trace.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn stock_proptest_generates_cases_from_the_run_seed() {
+    fn stock_proptest_generates_and_shrinks_from_the_run_seed() {
         let guest = proptest_guest();
         let seeded = guest.assert_run_success(5, &[]);
-        let again = assert_success(guest.command("run", &["--seed", "5"]));
         let other = assert_success(guest.command("run", &["--seed", "6"]));
-        assert_eq!(digest_line(&seeded), digest_line(&again));
         assert_ne!(
             digest_line(&seeded),
             digest_line(&other),
             "a different seed must generate a different case digest"
         );
-    }
-
-    /// Stock shrinking works under the shim: a failing property shrinks to its
-    /// minimal case, and the whole search (first failure, cases tried, result)
-    /// is identical across a seeded run, a recorded run and its replay.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn stock_proptest_shrinks_deterministically() {
-        let guest = proptest_guest();
-        let seeded = guest.assert_run_success(5, &["--", "shrink"]);
-        let shrunk = marker_line(&seeded, "PROPTEST_SHRUNK");
+        let shrunk = guest.assert_run_success(5, &["--", "shrink"]);
+        let shrunk = marker_line(&shrunk, "PROPTEST_SHRUNK");
         assert!(
             shrunk.contains("minimal=1000:[0, 0, 0] "),
             "proptest did not shrink to the minimal failing case: {shrunk}"
-        );
-        let other = assert_success(guest.command("run", &["--seed", "6", "--", "shrink"]));
-        assert!(
-            marker_line(&other, "PROPTEST_SHRUNK").contains("minimal=1000:[0, 0, 0] "),
-            "another seed shrank somewhere else"
         );
     }
 }

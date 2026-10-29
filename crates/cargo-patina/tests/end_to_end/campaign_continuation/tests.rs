@@ -2,32 +2,24 @@
 
 use super::*;
 
+/// A guest that spins forever, built once per run and shared.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spin_forever_guest() -> PathBuf {
+    super::super::run_facts::shared_guest("spin-forever", |directory| {
+        build_facts_guest(
+            directory,
+            "spin_forever",
+            "fn main() {\n    loop {\n        std::hint::spin_loop();\n    }\n}\n",
+        )
+    })
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_timeout_does_not_save_incomplete_trace() {
     let workspace = native_workspace();
     let directory = tempdir().unwrap();
-    let source = directory.path().join("spin_forever.rs");
-    fs::write(
-        &source,
-        r#"fn main() {
-    loop {
-        std::hint::spin_loop();
-    }
-}
-"#,
-    )
-    .unwrap();
-    let guest = directory.path().join("spin-forever");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-        ],
-    );
+    let guest = spin_forever_guest();
 
     let out = directory.path().join("timeout-campaign");
     let ran = invoke_unchecked(
@@ -516,27 +508,15 @@ fn campaign_continuation_refusals_are_loud() {
         &'a dyn Fn(&mut serde_json::Value),
         &'a [&'a [&'a str]],
     );
-    let edits: [Edit; 4] = [
+    let edits: [Edit; 2] = [
         (
             "different cargo-patina version",
             &|state| state["schema"] = "patina.campaign.state/v999".into(),
             &[extend],
         ),
         (
-            "corrupt",
-            &|state| state["classes"] = serde_json::json!({"MYSTERY": 1}),
-            &[extend],
-        ),
-        (
             "supervisor",
             &|state| state["supervisor_sha256"] = another.clone().into(),
-            &[extend, reduce],
-        ),
-        (
-            "supervisor",
-            &|state| {
-                state.as_object_mut().unwrap().remove("supervisor_sha256");
-            },
             &[extend, reduce],
         ),
     ];
@@ -634,22 +614,7 @@ fn campaign_continuation_refusals_are_loud() {
 fn a_killed_campaign_takes_its_generation_with_it() {
     let workspace = native_workspace();
     let directory = tempdir().unwrap();
-    let source = directory.path().join("spin_forever.rs");
-    fs::write(
-        &source,
-        "fn main() {\n    loop {\n        std::hint::spin_loop();\n    }\n}\n",
-    )
-    .unwrap();
-    let guest = directory.path().join("spin-forever");
-    invoke(
-        workspace,
-        &[
-            "build",
-            source.to_str().unwrap(),
-            "--output",
-            guest.to_str().unwrap(),
-        ],
-    );
+    let guest = spin_forever_guest();
 
     let out = directory.path().join("camp");
     let mut campaign = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))

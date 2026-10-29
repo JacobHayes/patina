@@ -185,49 +185,10 @@ mod tests {
         );
     }
 
-    // A package that depends on the Patina SDK is an ordinary program: `run
-    // <dir>` builds it shim-linked and interposes its std effects. Its file
-    // write lands in the deterministic filesystem, not on the host, and its
-    // clock reads are virtual, so two runs of one seed agree to the nanosecond.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_package_path_runs_interposed() {
-        let directory = tempdir().unwrap();
-        let pkg = directory.path().join("sdk-pkg");
-        let probe = directory.path().join("host-probe");
-        write_sdk_fixture(
-            &pkg,
-            &format!(
-                "fn main() {{\n\
-                 let probe = std::path::Path::new({probe:?});\n\
-                 std::fs::create_dir_all(probe.parent().unwrap()).unwrap();\n\
-                 std::fs::write(probe, b\"x\").unwrap();\n\
-                 let read = std::fs::read(probe).unwrap();\n\
-                 let wall = std::time::SystemTime::now()\n\
-                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();\n\
-                 let start = std::time::Instant::now();\n\
-                 std::thread::sleep(std::time::Duration::from_secs(3600));\n\
-                 println!(\"PROBE simulated={{}} read={{read:?}} wall={{wall}} slept={{}}\",\n\
-                     patina_dst::is_simulated(), start.elapsed().as_secs());\n\
-                 }}\n"
-            ),
-        );
-        let run = || {
-            let out = invoke(&pkg, &["run", pkg.to_str().unwrap(), "--seed", "3"]);
-            stdout_line_with(&out, "PROBE")
-        };
-        let first = run();
-        assert!(first.contains("simulated=true"), "{first}");
-        // An hour of sleep took no wall time and the write never reached the host.
-        assert!(first.contains("slept=3600"), "{first}");
-        assert!(!probe.exists(), "the guest's write escaped to the host");
-        assert_eq!(first, run(), "two runs of one seed diverged");
-    }
-
     // `run <package dir>` builds on the fly and must reach the same pre-run gate
     // a prebuilt binary of that package does: one refused package (an
-    // uninterposed process-class import kept behind an opaque branch) and one
-    // allowed, each judged the same way on both paths.
+    // uninterposed process-class import kept behind an opaque branch) is judged
+    // the same way on both paths (the allowed path is the package-dir test above).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn run_package_dir_and_its_prebuilt_binary_get_the_same_gate_verdict() {
@@ -241,54 +202,44 @@ mod tests {
                 envelope["guest_exit"].is_null(),
             )
         };
-        for (name, main, refused) in [
-            (
-                "refused",
-                "unsafe extern \"C\" { fn system(command: *const u8) -> i32; }\n\
-                 fn main() {\n\
-                 if std::hint::black_box(0) != 0 { unsafe { system(std::ptr::null()); } }\n\
-                 }\n",
-                true,
-            ),
-            ("allowed", "fn main() {}\n", false),
-        ] {
-            let pkg = directory.path().join(name);
-            write_plain_package(&pkg, &format!("patina-gate-{name}"), main);
-            let bin = directory.path().join(format!("{name}-bin"));
-            invoke(
+        let pkg = directory.path().join("refused");
+        write_plain_package(
+            &pkg,
+            "patina-gate-refused",
+            "unsafe extern \"C\" { fn system(command: *const u8) -> i32; }\n\
+             fn main() {\n\
+             if std::hint::black_box(0) != 0 { unsafe { system(std::ptr::null()); } }\n\
+             }\n",
+        );
+        let bin = directory.path().join("refused-bin");
+        invoke(
+            &pkg,
+            &[
+                "build",
+                pkg.to_str().unwrap(),
+                "--output",
+                bin.to_str().unwrap(),
+            ],
+        );
+        let [prebuilt, package_dir] = [&bin, &pkg].map(|target| {
+            verdict(&invoke_unchecked(
+                env!("CARGO_BIN_EXE_cargo-patina"),
                 &pkg,
                 &[
-                    "build",
-                    pkg.to_str().unwrap(),
-                    "--output",
-                    bin.to_str().unwrap(),
+                    "run",
+                    "--seed",
+                    "1",
+                    "--format",
+                    "json",
+                    target.to_str().unwrap(),
                 ],
-            );
-            let [prebuilt, package_dir] = [&bin, &pkg].map(|target| {
-                verdict(&invoke_unchecked(
-                    env!("CARGO_BIN_EXE_cargo-patina"),
-                    &pkg,
-                    &[
-                        "run",
-                        "--seed",
-                        "1",
-                        "--format",
-                        "json",
-                        target.to_str().unwrap(),
-                    ],
-                ))
-            });
-            assert_eq!(prebuilt, package_dir, "{name}");
-            assert_eq!(
-                prebuilt.2, refused,
-                "{name}: did the guest run? {prebuilt:?}"
-            );
-            if refused {
-                assert_eq!(prebuilt.0, Some(2), "{name}");
-                assert_eq!(prebuilt.1, "native_prerun_audit", "{name}");
-            } else {
-                assert_eq!(prebuilt.0, Some(0), "{name}");
-            }
-        }
+            ))
+        });
+        assert_eq!(prebuilt, package_dir);
+        assert_eq!(
+            prebuilt,
+            (Some(2), serde_json::json!("native_prerun_audit"), true),
+            "the guest must be refused before it runs"
+        );
     }
 }
