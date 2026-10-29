@@ -154,6 +154,23 @@ pub(super) struct CoverageReportTree {
     pub(super) functions: BTreeMap<String, CoverageStats>,
 }
 
+/// The static pc edge `index`'s anchor-relative `delta` names. The zero delta
+/// names none: the shim writes it for a pc-table sentinel, a guard whose block
+/// LLVM deleted or folded away. Whether the edge was hit plays no part — a hit
+/// sentinel is real coverage at an unknown site, never an edge at the anchor.
+fn edge_static_pc(index: usize, anchor: u64, delta: i64) -> Result<Option<u64>, CliError> {
+    if delta == 0 {
+        return Ok(None);
+    }
+    u64::try_from(i128::from(anchor) + i128::from(delta))
+        .map(Some)
+        .map_err(|_| {
+            CliError(format!(
+                "coverage edge {index} static pc is out of range: anchor={anchor} delta={delta}"
+            ))
+        })
+}
+
 pub(super) fn symbolize_coverage(
     binary: &Path,
     data: &CoverageData,
@@ -172,19 +189,8 @@ pub(super) fn symbolize_coverage(
     let mut functions = BTreeMap::<String, CoverageStats>::new();
     for (index, (&hits, &delta)) in data.hits.iter().zip(&data.deltas).enumerate() {
         let covered = hits != 0;
-        let (static_pc, function) = if delta == 0 && !covered {
-            (None, None)
-        } else {
-            let pc_i128 = i128::from(symbols.anchor) + i128::from(delta);
-            if !(0..=i128::from(u64::MAX)).contains(&pc_i128) {
-                return Err(CliError(format!(
-                    "coverage edge {index} static pc is out of range: anchor={} delta={delta}",
-                    symbols.anchor
-                )));
-            }
-            let pc = pc_i128 as u64;
-            (Some(pc), symbols.function_for_pc(pc))
-        };
+        let static_pc = edge_static_pc(index, symbols.anchor, delta)?;
+        let function = static_pc.and_then(|pc| symbols.function_for_pc(pc));
         let (crate_name, module, function_path, symbol_name) = function.map_or_else(
             || {
                 (
@@ -339,4 +345,18 @@ fn normalize_grouping_path(path: &str) -> &str {
         return "core";
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_zero_delta_names_no_site_and_others_offset_the_anchor() {
+        let anchor = 0x1000;
+        assert_eq!(edge_static_pc(0, anchor, 0).unwrap(), None);
+        assert_eq!(edge_static_pc(1, anchor, 0x10).unwrap(), Some(0x1010));
+        assert_eq!(edge_static_pc(2, anchor, -0x10).unwrap(), Some(0xff0));
+        assert!(edge_static_pc(3, anchor, -0x2000).is_err());
+    }
 }

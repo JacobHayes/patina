@@ -212,18 +212,15 @@ pub(crate) fn build_coverage_map(
         pc_offset += pcs.len as u64;
     }
 
-    let mut counters_flat = Vec::with_capacity(guard_count);
     for range in guard_ranges {
         // SAFETY: see `coverage_summary`.
         let counters = unsafe { slice::from_raw_parts(range.start as *const u32, range.len) };
         for &counter in counters {
-            counters_flat.push(counter);
             push_u32_le(&mut bytes, counter);
         }
     }
 
     let anchor = patina_yield_point as *const () as i128;
-    let mut guard_index = 0usize;
     for range in pc_ranges {
         // SAFETY: pc-table arrays are process-lifetime static storage. `len` is
         // the number of `(pc, flags)` pairs, so the raw word slice is `len * 2`.
@@ -231,19 +228,17 @@ pub(crate) fn build_coverage_map(
         for pair in words.as_chunks::<2>().0.iter() {
             let raw_pc = pair[0];
             let delta = if raw_pc <= 1 {
-                // On current Darwin/LLVM builds a handful of unexecuted guard
-                // slots can carry a null/function-entry sentinel (`0`/`1`) in
-                // the pc-table rather than a load-addressed code pointer. The
-                // literal sentinel is already stable; subtracting the ASLR-slid
-                // anchor would manufacture nondeterministic bytes. Keep unhit
-                // sentinels as the stable zero delta, but fail closed if such a
-                // guard ever reports coverage — a covered edge without a real PC
-                // cannot be symbolized honestly.
-                if counters_flat[guard_index] != 0 {
-                    return Err(format!(
-                        "coverage pc-table entry {guard_index} has sentinel pc={raw_pc} for a covered guard"
-                    ));
-                }
+                // A pc-table slot holding the literal `0`/`1` names no code:
+                // LLVM emits a `blockaddress` per instrumented block and, when a
+                // later pass deletes or folds that block, zaps the dangling
+                // address to `inttoptr 1`, while the guard bump survives in the
+                // block it was folded into. Such a guard is hit like any other
+                // (on Linux a `BTreeSet` dedup path in std's
+                // `DedupSortedIter::next` is one), so its count is real coverage
+                // and is kept; only its site is unknown. The literal sentinel is
+                // stable, so it maps to the stable zero delta — subtracting the
+                // ASLR-slid anchor would manufacture nondeterministic bytes —
+                // which the reader treats as an unattributable site.
                 0
             } else {
                 let pc = raw_pc as i128;
@@ -255,7 +250,6 @@ pub(crate) fn build_coverage_map(
                 })?
             };
             push_i64_le(&mut bytes, delta);
-            guard_index += 1;
         }
     }
     Ok(bytes)

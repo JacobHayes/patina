@@ -110,7 +110,7 @@ mod coverage_tests {
     }
 
     #[test]
-    fn coverage_map_serializes_counters_and_anchor_deltas_and_refuses_a_hit_sentinel() {
+    fn coverage_map_serializes_counters_and_anchor_deltas_and_keeps_a_hit_sentinel() {
         let counters = [1u32, 0, 7];
         let anchor = patina_yield_point as *const () as usize;
         let pcs = [
@@ -141,27 +141,33 @@ mod coverage_tests {
         assert_eq!(&deltas[8..16], &(-8i64).to_le_bytes());
         assert_eq!(&deltas[16..24], &0i64.to_le_bytes());
 
-        // The unhit sentinel pc (1) normalizes to a zero delta; a hit one is
-        // refused.
-        let counters = [0u32];
-        let pcs = [1usize, 0usize];
-        let guards = [CoverageRange {
-            start: counters.as_ptr() as usize,
-            len: counters.len(),
-        }];
-        let pc_ranges = [CoverageRange {
-            start: pcs.as_ptr() as usize,
-            len: counters.len(),
-        }];
-        let map = build_coverage_map(&guards, &pc_ranges).unwrap();
-        let delta_start = header_len + 4;
-        assert_eq!(&map[delta_start..delta_start + 8], &0i64.to_le_bytes());
-        let hit = [1u32];
-        let guards = [CoverageRange {
-            start: hit.as_ptr() as usize,
-            len: hit.len(),
-        }];
-        assert!(build_coverage_map(&guards, &pc_ranges).is_err());
+        // A sentinel pc (`1`: LLVM's zapped blockaddress, or `0`) normalizes to
+        // the stable zero delta whether or not its guard was hit, and a hit
+        // guard keeps its count: the edge ran, only its site is unknown.
+        for hits in [0u32, 5] {
+            for sentinel in [0usize, 1] {
+                let counters = [hits];
+                let pcs = [sentinel, 0usize];
+                let guards = [CoverageRange {
+                    start: counters.as_ptr() as usize,
+                    len: counters.len(),
+                }];
+                let pc_ranges = [CoverageRange {
+                    start: pcs.as_ptr() as usize,
+                    len: counters.len(),
+                }];
+                if hits != 0 {
+                    // The finalization path a requested-coverage run takes.
+                    prepare_coverage_output(true, &guards, &pc_ranges).unwrap_or_else(|error| {
+                        panic!("hit sentinel pc={sentinel} refused: {error}")
+                    });
+                }
+                let map = build_coverage_map(&guards, &pc_ranges).unwrap();
+                let delta_start = header_len + 4;
+                assert_eq!(&map[header_len..delta_start], &hits.to_le_bytes());
+                assert_eq!(&map[delta_start..delta_start + 8], &0i64.to_le_bytes());
+            }
+        }
     }
 }
 

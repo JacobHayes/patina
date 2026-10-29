@@ -12,7 +12,8 @@ use super::report::{
     print_campaign_summary, print_progress_heartbeat,
 };
 use super::repro::{
-    render_failure_report, reproduce_command, save_failure_log, save_failure_trace,
+    render_failure_report, reproduce_command, reproduce_inputs, save_failure_log,
+    save_failure_trace,
 };
 use super::state::{
     CampaignLock, CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord,
@@ -347,11 +348,13 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             let replayable = saved_trace
                 .as_deref()
                 .filter(|_| observed_class.is_failure());
+            let (repro_flags, repro_invocation) =
+                reproduce_inputs(&flags, &invocation, coverage_map_path.is_some(), generation);
             let reproduce = reproduce_command(
                 &artifact_path,
                 seed,
-                &flags,
-                &invocation,
+                &repro_flags,
+                &repro_invocation,
                 &state.spec.guest_args,
                 replayable,
                 &format!("generation-{generation}.patina"),

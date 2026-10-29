@@ -62,6 +62,31 @@ pub(super) fn reproduce_command(
     crate::cli::without_env_defaults(parts.join(" "))
 }
 
+/// The generation flags and invocation shape a reproduce command is built from,
+/// with `--coverage-out` added to both when the generation itself wrote an edge
+/// coverage map. Like `--record`, coverage is part of the experiment: the shim
+/// finalizes the map at shutdown and can fail the run there, so a repro without
+/// it is a different run that silently passes. The destination is a bare
+/// filename for the same reason `--record`'s is.
+pub(super) fn reproduce_inputs(
+    flags: &[String],
+    invocation: &[String],
+    wrote_coverage: bool,
+    generation: u64,
+) -> (Vec<String>, Vec<String>) {
+    let mut flags = flags.to_vec();
+    let mut invocation = invocation.to_vec();
+    if wrote_coverage {
+        let coverage = [
+            "--coverage-out".to_string(),
+            format!("generation-{generation}.covmap"),
+        ];
+        flags.extend(coverage.iter().cloned());
+        invocation.extend(coverage);
+    }
+    (flags, invocation)
+}
+
 /// Save a failing generation's trace into `<out>/failures/`, but ONLY when the
 /// child wrote a complete, validated bundle. A mid-run abort or timeout never
 /// reaches `Context::finish`; an empty/truncated scratch trace is skipped rather
@@ -238,6 +263,36 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_generation_that_wrote_coverage_reproduces_with_coverage() {
+        let flags = vec!["--seed-flag".to_string()];
+        let invocation = vec!["--allow-unsupported-symbols".to_string(), "all".to_string()];
+        let artifact = PathBuf::from("guest-bin");
+        for trace in [Some("out/failures/generation-4.patina"), None] {
+            for wrote_coverage in [true, false] {
+                let (repro_flags, repro_invocation) =
+                    reproduce_inputs(&flags, &invocation, wrote_coverage, 4);
+                let command = reproduce_command(
+                    &artifact,
+                    7,
+                    &repro_flags,
+                    &repro_invocation,
+                    &[],
+                    trace,
+                    "generation-4.patina",
+                );
+                // Coverage finalization runs at shutdown and can fail the run,
+                // so a repro without it is a different experiment; its
+                // destination is bare, like `--record`'s.
+                assert_eq!(
+                    command.contains("--coverage-out generation-4.covmap"),
+                    wrote_coverage,
+                    "trace={trace:?} wrote_coverage={wrote_coverage}: {command}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_reproduce_command_carries_the_invocation_flags_the_trace_cannot() {
