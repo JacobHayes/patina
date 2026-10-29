@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use patina_dst_abi::{FsEntryKind, FsMetadata};
 use patina_dst_fs_mem::{FileData, MemFs};
 
-/// A file name captured in the durable baseline.
+/// A file name captured in a committed image.
 #[derive(Clone, Debug)]
 pub(super) struct BaselineFile {
     pub(super) inode: u64,
@@ -14,7 +14,7 @@ pub(super) struct BaselineFile {
     pub(super) contents: FileData,
 }
 
-/// A symlink name captured in the durable baseline: the node it names (two
+/// A symlink name captured in a committed image: the node it names (two
 /// names of one link node come back as one) and the target.
 #[derive(Clone, Debug)]
 pub(super) struct BaselineSymlink {
@@ -44,7 +44,7 @@ impl From<FsMetadata> for DurableTimes {
     }
 }
 
-/// A durable filesystem baseline captured at a durability point: the directory
+/// A committed filesystem image, captured at a journal commit: the directory
 /// set, file contents, file inode identity, symlink targets, and per-entry
 /// timestamps.
 #[derive(Clone, Default)]
@@ -63,20 +63,18 @@ pub(super) struct Baseline {
     /// change or birth time any more than its modification time.
     pub(super) times: BTreeMap<String, DurableTimes>,
     /// Permission bits, by path, for every entry that owns a mode (files,
-    /// directories and FIFOs; a symlink leaf has none). A mode is durable
-    /// metadata like a symlink's target — a crash reverts a lost entry, never a
-    /// surviving entry's bits to a per-kind constant.
+    /// directories and FIFOs; a symlink leaf has none). A crash restores the
+    /// committed bits, never a per-kind constant.
     pub(super) modes: BTreeMap<String, u32>,
     /// Extended attributes, by path, for every entry that has any. Metadata
-    /// like a mode: a surviving entry keeps its live attributes, a resurrected
-    /// one the durable baseline's.
+    /// like a mode: a crash restores the committed ones.
     pub(super) xattrs: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
     /// The node each name held, by path, for every entry: a crash asks whether
     /// a name still holds the SAME node, never just whether the name exists.
     pub(super) inodes: BTreeMap<String, u64>,
 }
 
-/// Snapshot a filesystem into a durable baseline: directories, file contents,
+/// Snapshot a filesystem into a committed image: directories, file contents,
 /// symlink targets, special nodes, permission bits, extended attributes, and
 /// per-entry timestamps. Every entry kind is captured so none is silently lost
 /// across a crash.

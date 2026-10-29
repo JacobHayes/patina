@@ -1,4 +1,6 @@
-//! Tests for seeded crash decisions and block torn-write merging.
+//! Tests for seeded crash decisions and in-place block tearing.
+
+use std::collections::BTreeSet;
 
 use crate::CrashFs;
 use crate::tests::{write, write_only};
@@ -17,42 +19,50 @@ fn torn_after_crash(seed: u64) -> Vec<u8> {
     fs.checkpoint();
     let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
     fs.write(FsClock::EPOCH, fd, b"BBBBBBBB").unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     fs.contents("/f").unwrap()
 }
 
 #[test]
-fn a_crash_merges_a_sparse_file_block_by_block_without_its_holes() {
+fn only_an_in_place_overwrite_tears_and_never_materializes_a_hole() {
     // A 1 TiB file: 4 KiB of `a` at 0, a reservation at 1 GiB, 4 KiB of
-    // `z` just below the end, all durable. After the checkpoint one step
-    // changes it and the crash keeps (probability 0) or reverts
-    // (probability 1) every modified block; each row expects `st_blocks`,
-    // `SEEK_DATA` from 4096 and the first byte. A hole never becomes data
-    // and nothing is materialized: a merge over the hole would not finish.
+    // `z` just below the end, all committed. One step changes it, and the
+    // crash keeps every block it can (probability 0); each row expects
+    // `st_blocks`, `SEEK_DATA` from 4096 and the first byte. Only the
+    // overwrite of a committed block reaches the disk: a write into a hole
+    // was never allocated, and a punch or a reservation is an extent change
+    // the commit did not record. A hole never becomes data and nothing is
+    // materialized: a merge over the hole would not finish.
     const TIB: u64 = 1 << 40;
     const GIB: u64 = 1 << 30;
     type Change = fn(&mut CrashFs, Fd);
     type Expected = (u64, u64, u8);
-    let rows: &[(&str, Change, Expected, Expected)] = &[
+    let committed = (3 * 8, TIB - 4096, b'a');
+    let rows: &[(&str, Change, Expected)] = &[
+        (
+            "an overwrite of a committed block",
+            |fs, fd| {
+                fs.write_at(FsClock::EPOCH, fd, 0, b"n").unwrap();
+            },
+            (3 * 8, TIB - 4096, b'n'),
+        ),
         (
             "a write into a hole far out",
             |fs, fd| {
                 fs.write_at(FsClock::EPOCH, fd, 512 * GIB, b"new").unwrap();
             },
-            (4 * 8, 512 * GIB, b'a'),
-            (3 * 8, TIB - 4096, b'a'),
+            committed,
         ),
         (
-            "a punched data block (its bytes changed)",
+            "a punched data block",
             |fs, fd| {
                 fs.allocate(FsClock::EPOCH, fd, 0, 4096, FsAllocateMode::PunchHole, true)
                     .unwrap();
             },
-            (2 * 8, TIB - 4096, 0),
-            (3 * 8, TIB - 4096, b'a'),
+            committed,
         ),
         (
-            "a reservation alone (metadata, no bytes changed)",
+            "a reservation",
             |fs, fd| {
                 fs.allocate(
                     FsClock::EPOCH,
@@ -64,14 +74,13 @@ fn a_crash_merges_a_sparse_file_block_by_block_without_its_holes() {
                 )
                 .unwrap();
             },
-            (5 * 8, TIB - 4096, b'a'),
-            (5 * 8, TIB - 4096, b'a'),
+            committed,
         ),
     ];
-    for (name, change, kept, reverted) in rows {
-        for (probability, expected) in [(0.0, kept), (1.0, reverted)] {
+    for (name, change, expected) in rows {
+        {
             let mut fs = CrashFs::builder()
-                .torn_write_probability(probability)
+                .torn_write_probability(0.0)
                 .build()
                 .unwrap();
             let fd = write(&mut fs, "/f", &[b'a'; 4096]);
@@ -81,7 +90,7 @@ fn a_crash_merges_a_sparse_file_block_by_block_without_its_holes() {
                 .unwrap();
             fs.checkpoint();
             change(&mut fs, fd);
-            fs.crash().unwrap();
+            fs.crash(FsClock::EPOCH).unwrap();
             let metadata = fs.fd_metadata(fd).unwrap();
             let data = fs.seek(fd, 4096, SeekWhence::Data).unwrap();
             let reader = fs
@@ -89,62 +98,12 @@ fn a_crash_merges_a_sparse_file_block_by_block_without_its_holes() {
                 .unwrap();
             let first = fs.read_at(FsClock::EPOCH, reader, 0, 1).unwrap()[0];
             assert_eq!(metadata.len, TIB, "{name}");
-            assert_eq!(
-                (metadata.blocks, data, first),
-                *expected,
-                "{name} at probability {probability}"
-            );
+            assert_eq!((metadata.blocks, data, first), *expected, "{name}");
             assert_eq!(
                 fs.read_at(FsClock::EPOCH, reader, TIB - 2, 8).unwrap(),
                 b"zz"
             );
         }
-    }
-}
-
-/// A seeded tear over a multi-block file: 12388 durable bytes, then
-/// unsynced writes across blocks, into a hole past the end, and last
-/// inside the first write.
-fn golden_tear(seed: u64) -> Vec<u8> {
-    let clock = FsClock::EPOCH;
-    let mut fs = CrashFs::builder()
-        .seed(seed)
-        .torn_write_granularity(512)
-        .torn_write_probability(0.5)
-        .build()
-        .unwrap();
-    let durable: Vec<u8> = (0..12_388u32).map(|i| b'a' + (i % 26) as u8).collect();
-    let fd = write(&mut fs, "/f", &durable);
-    fs.checkpoint();
-    fs.write_at(clock, fd, 1000, &[b'B'; 6000]).unwrap();
-    fs.write_at(clock, fd, 20_000, b"CCCCCCCCCC").unwrap();
-    fs.write_at(clock, fd, 3000, &[b'D'; 700]).unwrap();
-    fs.crash().unwrap();
-    fs.contents("/f").unwrap()
-}
-
-#[test]
-fn a_seeded_tear_is_the_dense_models_byte_for_byte() {
-    // Digests (FNV-1a 64) of the dense byte-vector merge's result on main
-    // before the block map, per seed: the block-map merge visits fewer
-    // blocks but draws the same decisions in the same order, so each
-    // seed's torn image is unchanged.
-    fn fnv(bytes: &[u8]) -> u64 {
-        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-        })
-    }
-    let rows: &[(u64, usize, u64)] = &[
-        (0, 20010, 0xdead_e3b0_8f80_ced7),
-        (1, 20010, 0x12ff_b786_e153_1d57),
-        (2, 12388, 0x59d8_b2a7_56dd_9995),
-        (3, 12388, 0xbc4f_c4ab_01cc_c1ad),
-        (4, 20010, 0xa4a2_83cf_a23b_01c3),
-        (5, 12388, 0x6c67_df6c_1454_70c5),
-    ];
-    for &(seed, len, digest) in rows {
-        let torn = golden_tear(seed);
-        assert_eq!((torn.len(), fnv(&torn)), (len, digest), "seed {seed}");
     }
 }
 
@@ -161,12 +120,16 @@ fn a_block_tear_mixes_durable_and_live_blocks_and_varies_across_seeds() {
     assert!(varied, "torn writes never varied across seeds");
 }
 
-/// An append's blocks persist or revert each on its own, the file's length
-/// following its last persisted block: across seeds, a two-block append to a
-/// durable empty file recovers as nothing, either block alone, or both.
+/// The SQLite/Turso torn log tail: a fresh log fsynced once (no directory
+/// fsync), then rewritten in place and appended to without one. Across
+/// seeds the crash leaves the committed length with each rewritten block
+/// old or new on its own, and never the unwritten-back append.
+///
+/// RED before the journal model: the log's entry was lost unless its
+/// directory was fsynced, so no tear ever reached it.
 #[test]
-fn an_unsynced_append_recovers_any_subset_of_its_blocks() {
-    let mut images = std::collections::BTreeSet::new();
+fn a_torn_tail_reaches_a_fresh_file_whose_directory_was_never_fsynced() {
+    let mut images = BTreeSet::new();
     for seed in 0..64 {
         let mut fs = CrashFs::builder()
             .seed(seed)
@@ -174,18 +137,59 @@ fn an_unsynced_append_recovers_any_subset_of_its_blocks() {
             .torn_write_probability(0.5)
             .build()
             .unwrap();
-        let fd = write(&mut fs, "/f", b"");
+        let fd = write(&mut fs, "/wal", b"AAAA");
         fs.sync(fd).unwrap();
-        fs.close(fd).unwrap();
-        fs.checkpoint();
-        let fd = fs.open(FsClock::EPOCH, "/f", write_only()).unwrap();
-        fs.write(FsClock::EPOCH, fd, b"BBCC").unwrap();
-        fs.crash().unwrap();
-        images.insert(fs.contents("/f").unwrap());
+        fs.write_at(FsClock::EPOCH, fd, 0, b"BBBBCC").unwrap();
+        fs.crash(FsClock::EPOCH).unwrap();
+        images.insert(fs.contents("/wal").unwrap());
     }
-    let expected: std::collections::BTreeSet<Vec<u8>> = [&b""[..], b"BB", b"\0\0CC", b"BBCC"]
+    let expected: BTreeSet<Vec<u8>> = [b"AAAA", b"BBAA", b"AABB", b"BBBB"]
         .iter()
         .map(|image| image.to_vec())
         .collect();
     assert_eq!(images, expected);
+}
+
+/// A block truncated or punched away since the last commit was freed, not
+/// overwritten in place: whatever is written there again, its committed
+/// bytes come back whole. The block a truncation's end falls in stays
+/// allocated, so it tears like any other.
+#[test]
+fn a_block_freed_since_the_commit_comes_back_whole() {
+    const BLOCK: usize = 4096;
+    let punch = |fs: &mut CrashFs, fd: Fd| {
+        let mode = FsAllocateMode::PunchHole;
+        fs.allocate(FsClock::EPOCH, fd, BLOCK as u64, BLOCK as u64, mode, true)
+            .unwrap();
+    };
+    let truncate = |fs: &mut CrashFs, fd: Fd| {
+        fs.set_len(FsClock::EPOCH, fd, BLOCK as u64 + 1).unwrap();
+    };
+    type Free = fn(&mut CrashFs, Fd);
+    let frees: [(&str, Free, std::ops::Range<usize>); 2] =
+        [("punch", punch, 1..2), ("truncate", truncate, 2..3)];
+    for (name, free, freed) in frees {
+        let mut kept = BTreeSet::new();
+        for seed in 0..16 {
+            let mut fs = CrashFs::builder()
+                .seed(seed)
+                .torn_write_probability(0.5)
+                .build()
+                .unwrap();
+            let fd = write(&mut fs, "/f", &[b'A'; 3 * BLOCK]);
+            fs.sync(fd).unwrap();
+            free(&mut fs, fd);
+            fs.write_at(FsClock::EPOCH, fd, 0, &[b'B'; 3 * BLOCK])
+                .unwrap();
+            fs.crash(FsClock::EPOCH).unwrap();
+            let image = fs.contents("/f").unwrap();
+            let blocks: Vec<u8> = image.chunks(BLOCK).map(|block| block[0]).collect();
+            assert!(
+                blocks[freed.clone()].iter().all(|byte| *byte == b'A'),
+                "{name} seed {seed}: {blocks:?}"
+            );
+            kept.insert(blocks[0]);
+        }
+        assert_eq!(kept, BTreeSet::from(*b"AB"), "{name}");
+    }
 }

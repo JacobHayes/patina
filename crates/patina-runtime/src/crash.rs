@@ -176,8 +176,9 @@ fn hits(rng: &mut SplitMix64, permille: u16) -> bool {
 
 impl Context {
     pub fn fs_crash(&mut self) -> Result<(), RuntimeError> {
+        let clock = self.fs_clock()?;
         self.filesystem_unit_undelayed(patina_dst_abi::Operation::FsCrash, |filesystem| {
-            filesystem.crash()
+            filesystem.crash(clock)
         })
     }
 
@@ -266,9 +267,10 @@ impl Context {
         if kind == CrashKind::Process {
             self.write_back_unwritten_stores()?;
         }
+        let clock = self.fs_clock().map_err(|error| error.to_string())?;
         let bytes = self
             .filesystem
-            .crash_and_export_restart_snapshot(kind)
+            .crash_and_export_restart_snapshot(clock, kind)
             .map_err(|error| error.to_string())?;
         FsSnapshot::decode(&bytes).map_err(|error| {
             format!("filesystem driver exported an invalid crash-restart snapshot: {error}")

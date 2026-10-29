@@ -43,20 +43,19 @@ fn crash_and_snapshot_exports_the_image_the_crash_kind_leaves() {
     let mut fs = CrashFs::new(base);
     let fd = write(&mut fs, "/state", b"stable");
     fs.sync(fd).unwrap();
-    fs.sync_directory("/").unwrap();
     fs.write(FsClock::EPOCH, fd, b"-volatile").unwrap();
     let linked = fs.open(FsClock::EPOCH, "/a", write_only()).unwrap();
     fs.write(FsClock::EPOCH, linked, b"volatile").unwrap();
 
     let process = fs
-        .crash_and_snapshot(CrashKind::Process)
+        .crash_and_snapshot(FsClock::EPOCH, CrashKind::Process)
         .unwrap()
         .into_memfs();
     assert_eq!(process.contents("/state").unwrap(), b"stable-volatile");
     assert_eq!(process.contents("/b").unwrap(), b"volatile");
 
     let mut imported = fs
-        .crash_and_snapshot(CrashKind::Machine)
+        .crash_and_snapshot(FsClock::EPOCH, CrashKind::Machine)
         .unwrap()
         .into_memfs();
     assert_eq!(imported.contents("/state").unwrap(), b"stable");
@@ -67,10 +66,10 @@ fn crash_and_snapshot_exports_the_image_the_crash_kind_leaves() {
     assert_eq!(imported.contents("/b").unwrap(), b"stable");
 }
 
-/// An unsynced rename of an unsynced file still held open: a machine crash
-/// loses both names, and the restart image keeps no name for the dead
-/// process's descriptor, while an in-place crash, whose process lives on,
-/// keeps the open file reachable under the name it holds.
+/// An uncommitted rename of a committed file still held open: a machine
+/// crash brings the old name back and keeps no name for the dead process's
+/// descriptor, while an in-place crash, whose process lives on, keeps the
+/// open file reachable under the name it holds.
 #[test]
 fn a_held_unsynced_rename_recovers_in_place_and_for_a_restart() {
     let build = || {
@@ -82,13 +81,13 @@ fn a_held_unsynced_rename_recovers_in_place_and_for_a_restart() {
     };
     let (mut fs, _held) = build();
     let image = fs
-        .crash_and_snapshot(CrashKind::Machine)
+        .crash_and_snapshot(FsClock::EPOCH, CrashKind::Machine)
         .unwrap()
         .into_memfs();
-    assert!(image.contents("/t").is_err());
+    assert_eq!(image.contents("/t").unwrap(), b"stable");
     assert!(image.contents("/final").is_err());
     let (mut fs, held) = build();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     assert!(fs.fd_metadata(held).is_ok());
     assert!(fs.contents("/final").is_ok());
 }
@@ -106,14 +105,6 @@ fn builder_rejects_invalid_configuration() {
     assert_eq!(
         CrashFs::builder()
             .torn_write_probability(1.5)
-            .build()
-            .unwrap_err()
-            .code,
-        ErrorCode::InvalidInput
-    );
-    assert_eq!(
-        CrashFs::builder()
-            .directory_loss_probability(-0.1)
             .build()
             .unwrap_err()
             .code,
@@ -137,7 +128,7 @@ fn checkpoint_persists_namespace_operations() {
     // written afterwards does not.
     fs.rename(FsClock::EPOCH, "/before", "/after").unwrap();
     fs.checkpoint();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     assert_eq!(fs.contents("/after").unwrap(), b"value");
     assert_eq!(
         fs.metadata("/before").unwrap_err().code,
@@ -145,14 +136,14 @@ fn checkpoint_persists_namespace_operations() {
     );
 }
 
-pub(super) fn lossy() -> CrashFs {
+/// A filesystem holding an empty `/d`, seeded.
+pub(super) fn with_dir() -> CrashFs {
     let mut base = MemFs::new();
     base.create_directory(FsClock::EPOCH, "/d", 0o777).unwrap();
-    CrashFs::builder()
-        .filesystem(base)
-        .seed(7)
-        .model_directory_durability(true)
-        .directory_loss_probability(1.0)
-        .build()
-        .unwrap()
+    CrashFs::builder().filesystem(base).seed(7).build().unwrap()
+}
+
+/// The virtual clock `seconds` past the epoch.
+pub(super) fn at_seconds(seconds: u64) -> FsClock {
+    FsClock::at(seconds * 1_000_000_000)
 }

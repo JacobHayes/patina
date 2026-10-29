@@ -26,7 +26,7 @@ fn a_mounted_image_is_durable_and_composes_with_crash_injection() {
     // and this case is about the namespace, not the descriptor table.
     let volatile = write(&mut fs, "/scratch/out.txt", b"never-synced");
     fs.close(volatile).unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
 
     // The mounted (durable) content survives the crash byte-for-byte.
     assert_eq!(

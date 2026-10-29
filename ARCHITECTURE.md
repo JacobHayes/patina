@@ -343,8 +343,8 @@ try-lock runtime locks.
 
 ## Drivers and wrappers
 
-Concrete drivers implement capabilities: `MemFs`, `CrashFs` (checkpoints,
-torn writes, rename atomicity, directory `fsync` as the namespace barrier),
+Concrete drivers implement capabilities: `MemFs`, `CrashFs` (an ext4-style
+journal: commits, delayed allocation, torn in-place overwrites),
 `SimNet`, `VirtualClock`, `SeededEntropy`, `DetScheduler`. Wrapper drivers
 compose around them (`FaultNet`). Record and replay live at the runtime
 boundary, not in drivers, so they compose with any driver stack. Every

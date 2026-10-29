@@ -1007,12 +1007,13 @@ fn main() {
         }
     }
 
-    /// A log the guest acks record by record, after each record's own fsync,
-    /// into a ledger whose creation it makes durable first. A restarted
+    /// A log the guest acks record by record into a ledger it fsyncs after
+    /// each ack, and whose creation it makes durable first. A restarted
     /// incarnation reports `LOST` and exits 3 when the ledger holds more acks
-    /// than the log holds records. Without `--fsync-data-dir` the log's directory is never made
-    /// durable, so a machine crash loses the whole log: the bug a crash plane
-    /// exists to find, and nothing short of a crash can show. Each incarnation
+    /// than the log holds records. Without `--fsync-log` the log's records are
+    /// never written back, so a machine crash loses records the ledger acked:
+    /// the bug a crash plane exists to find, and nothing short of a crash can
+    /// show. Each incarnation
     /// first draws entropy until a low byte: draws a trace reducer can delete,
     /// since a later draw's answer ends the loop as well.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1056,14 +1057,14 @@ fn main() {
     let mut ledger = OpenOptions::new().create(true).append(true).open("/acked").unwrap();
     sync_dir("/");
     fs::create_dir("/data").unwrap();
-    if std::env::args().any(|arg| arg == "--fsync-data-dir") {
-        sync_dir("/");
-    }
     let mut log = OpenOptions::new().create(true).append(true).open("/data/log").unwrap();
     sync_dir("/data");
+    let fsync_log = std::env::args().any(|arg| arg == "--fsync-log");
     for record in 0..8 {
         writeln!(log, "record {record}").unwrap();
-        log.sync_all().unwrap();
+        if fsync_log {
+            log.sync_all().unwrap();
+        }
         writeln!(ledger, "{record}").unwrap();
         ledger.sync_all().unwrap();
     }
@@ -1071,12 +1072,12 @@ fn main() {
 "#;
 
     /// A campaign drawing the crash plane crashes and restarts generations at
-    /// drawn rates: it catches a log lost to a missing directory fsync (red)
+    /// drawn rates: it catches log records lost to a missing fsync (red)
     /// and passes the fixed guest (green); and `minimize` shrinks a crash
     /// generation's two-incarnation trace, keeping the crash it needs.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn a_campaign_crash_plane_catches_a_lost_directory_entry() {
+    fn a_campaign_crash_plane_catches_an_unsynced_log() {
         let guest = build_guest("acked_log", ACKED_LOG_SOURCE);
         let spec = guest.dir.path().join("spec.json");
         fs::write(
@@ -1120,7 +1121,7 @@ fn main() {
                 .all(|class| class == "OK" || class == "VIOLATION"),
             "{envelope:#}"
         );
-        let (_, envelope) = campaign("green", &["--fsync-data-dir"]);
+        let (_, envelope) = campaign("green", &["--fsync-log"]);
         assert_eq!(
             classes(&envelope).into_keys().collect::<Vec<_>>(),
             ["OK"],

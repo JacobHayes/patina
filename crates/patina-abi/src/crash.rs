@@ -14,11 +14,11 @@ pub enum CrashKind {
     /// restart whether or not it was synced. Only process state is lost: open
     /// descriptors, anonymous files, bytes in flight through a pipe.
     Process,
-    /// The machine goes down (power loss, a kernel panic): only what was made
-    /// durable is certain to survive. Each unsynced block may or may not have
-    /// reached the disk, independently of every other, and a namespace change
-    /// (a new, removed or renamed name) whose parent directory was never
-    /// fsynced is lost.
+    /// The machine goes down (power loss, a kernel panic): the disk is what
+    /// the last journal commit recorded, as ext4 leaves it. Metadata (names,
+    /// sizes, times) rolls back to that commit atomically, and each block
+    /// overwritten in place since may or may not have reached the disk,
+    /// independently of every other.
     Machine,
 }
 

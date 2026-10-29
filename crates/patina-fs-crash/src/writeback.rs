@@ -24,10 +24,11 @@
 //! each error once.
 //!
 //! This model loses every dirty page a failed writeback covers, the worst a
-//! failing device can do; a kernel can lose fewer. A failed directory `fsync`
-//! changes nothing here: its namespace changes stay uncommitted. A failed
-//! `sync`/`syncfs` still commits the namespace and the metadata (the journal
-//! commit is separate from data writeback).
+//! failing device can do; a kernel can lose fewer. An `fsync` that reports an
+//! error returns before it commits (`ext4_sync_file`), so its changes stay in
+//! the running transaction. A failed `sync`/`syncfs` still commits the
+//! namespace and the metadata (the journal commit is separate from data
+//! writeback).
 
 use std::collections::BTreeSet;
 
@@ -149,9 +150,8 @@ impl CrashFs {
     /// See [`patina_dst_driver_api::FsDriver::fail_writeback`].
     pub(super) fn writeback_failed(&mut self, fd: Fd, code: ErrorCode) -> DriverResult<()> {
         let metadata = self.live.fd_metadata(fd)?;
-        // An anonymous file has no writeback, and a directory's failure
-        // leaves its namespace changes pending.
-        if metadata.kind != FsEntryKind::File || !self.open_paths.contains_key(&fd) {
+        // An anonymous file has no writeback, and a directory has no pages.
+        if metadata.kind != FsEntryKind::File || !self.named.contains(&fd) {
             return Ok(());
         }
         self.lose_dirty_pages(metadata.ino, code);
@@ -202,7 +202,7 @@ impl CrashFs {
 
     /// Forget the samples of `description` once no descriptor names it.
     pub(super) fn description_closed(&mut self, description: u64) {
-        let open = self.open_paths.keys().any(|fd| {
+        let open = self.named.iter().any(|fd| {
             self.live
                 .description_of(*fd)
                 .is_ok_and(|open| open == description)
@@ -219,7 +219,7 @@ impl CrashFs {
     /// change: they read back what the disk holds. Dirty pages stay.
     pub(super) fn cache_dropped(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
         let metadata = self.live.fd_metadata(fd)?;
-        if metadata.kind != FsEntryKind::File || !self.open_paths.contains_key(&fd) {
+        if metadata.kind != FsEntryKind::File || !self.named.contains(&fd) {
             return Ok(());
         }
         let Some((first, last)) = whole_pages(offset, len, metadata.len) else {
@@ -232,27 +232,12 @@ impl CrashFs {
         if dropped.is_empty() {
             return Ok(());
         }
-        let durable = self.durable_content(metadata.ino);
+        let durable = self.disk_content(metadata.ino);
         let current = self.live.fd_file_data(fd)?;
         let reverted = without_lost_pages(&durable, current, &dropped);
         *self.live.fd_file_data_mut(fd)? = reverted;
         self.rewritten_pages(metadata.ino, &dropped);
         Ok(())
-    }
-
-    /// What the disk holds for `ino` at its last durability point.
-    pub(super) fn durable_content(&self, ino: u64) -> FileData {
-        self.staged_content
-            .get(&ino)
-            .or_else(|| {
-                self.durable
-                    .files
-                    .values()
-                    .find(|file| file.inode == ino)
-                    .map(|file| &file.contents)
-            })
-            .cloned()
-            .unwrap_or_default()
     }
 
     /// `current`, the cached content of `ino`, with the pages a writeback

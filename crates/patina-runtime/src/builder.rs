@@ -589,9 +589,9 @@ impl RuntimeBuilder {
                 // directory, while `MemFs::default()` is ROOTLESS.
                 #[allow(clippy::unwrap_or_default)]
                 let base = self.fs_image.take().unwrap_or_else(MemFs::new);
-                // A machine crash leaves any subset of the unsynced blocks on
-                // disk, each a fair coin, and loses every namespace change no
-                // directory fsync committed.
+                // A machine crash rolls back to the last journal commit and
+                // keeps any subset of the blocks overwritten in place since,
+                // each a fair coin.
                 let crash_fs = CrashFs::builder()
                     .filesystem(base)
                     .seed(domain_seed(root_seed, fault_domain::FS_CRASH))

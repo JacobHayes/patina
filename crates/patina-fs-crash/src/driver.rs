@@ -1,4 +1,5 @@
-//! Filesystem driver operations and dirty-page tracking.
+//! Filesystem driver operations: what each joins the running transaction
+//! with, what commits it, and dirty-page tracking.
 
 use patina_dst_abi::{
     CrashKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsEntryKind,
@@ -8,53 +9,50 @@ use patina_dst_driver_api::{DriverResult, FsDriver};
 use patina_dst_fs_mem::BLOCK_SIZE;
 
 use crate::CrashFs;
-use crate::baseline::DurableTimes;
-use crate::namespace::{PendingKind, Removed, normalize_entry_path, swapped};
 
 /// The page `cachestat` counts dirty pages in: the virtual machine's.
 pub(crate) const DIRTY_PAGE: u64 = 4096;
 
 impl FsDriver for CrashFs {
     fn open(&mut self, clock: FsClock, path: &str, flags: OpenFlags) -> DriverResult<Fd> {
+        self.tick(clock);
         let existed = self
             .live
             .metadata(path)
             .map(|metadata| matches!(metadata.kind, FsEntryKind::File))
             .unwrap_or(false);
         let fd = self.live.open(clock, path, flags)?;
-        let normalized = normalize_entry_path(path).expect("open normalized the path already");
+        let ino = self.live.fd_metadata(fd)?.ino;
         if flags.create && !existed {
-            self.journal(PendingKind::Create {
-                path: normalized.clone(),
-                kind: FsEntryKind::File,
-            });
+            let inodes = self.entry_and_parent(path);
+            self.journal(clock, inodes);
         }
         // An `O_TRUNC` open of an existing file drops its pages, dirty ones
         // included (`do_truncate`), as a shortening `set_len` does.
         if flags.truncate && existed {
-            let metadata = self.live.fd_metadata(fd)?;
-            self.truncated(metadata.ino, metadata.len);
+            self.truncated(clock, ino, 0);
         }
-        self.open_paths.insert(fd, normalized);
+        self.named.insert(fd);
         self.description_opened(fd);
         Ok(fd)
     }
 
     fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
+        self.tick(clock);
         self.live.read(clock, fd, max_len)
     }
 
     fn write(&mut self, clock: FsClock, fd: Fd, bytes: &[u8]) -> DriverResult<usize> {
+        self.tick(clock);
         let written = self.live.write(clock, fd, bytes)?;
         // Capture the actual byte range after the filesystem has applied open
         // mode semantics. In particular, O_APPEND chooses EOF at write time, so
         // the pre-write cursor can be stale after intervening writes or crash
         // reconstruction.
         if let Ok(end) = self.live.seek(fd, 0, SeekWhence::Current)
-            && self.open_paths.contains_key(&fd)
             && let Some(start) = end.checked_sub(written as u64)
         {
-            self.dirtied(fd, start, written);
+            self.dirtied(clock, fd, start, written);
         }
         Ok(written)
     }
@@ -66,10 +64,9 @@ impl FsDriver for CrashFs {
         offset: u64,
         bytes: &[u8],
     ) -> DriverResult<usize> {
+        self.tick(clock);
         let written = self.live.write_at(clock, fd, offset, bytes)?;
-        if self.open_paths.contains_key(&fd) {
-            self.dirtied(fd, offset, written);
-        }
+        self.dirtied(clock, fd, offset, written);
         Ok(written)
     }
 
@@ -81,14 +78,13 @@ impl FsDriver for CrashFs {
         offset: u64,
         bytes: &[u8],
     ) -> DriverResult<usize> {
+        self.tick(clock);
         let written = self.live.write_back_at(clock, fd, offset, bytes)?;
-        if self.open_paths.contains_key(&fd) {
-            self.dirtied(fd, offset, written);
-        }
+        self.dirtied(clock, fd, offset, written);
         Ok(written)
     }
 
-    /// An anonymous file has no name for the durable baseline to carry: it is
+    /// An anonymous file has no name for the committed image to carry: it is
     /// process state, like the bytes in a pipe, and a restart has nothing
     /// that could reach it.
     fn create_anonymous(
@@ -99,6 +95,7 @@ impl FsDriver for CrashFs {
         seals: u32,
         huge_page: u64,
     ) -> DriverResult<Fd> {
+        self.tick(clock);
         let fd = self
             .live
             .create_anonymous(clock, name, mode, seals, huge_page)?;
@@ -114,11 +111,21 @@ impl FsDriver for CrashFs {
         self.live.add_seals(fd, seals, writably_mapped)
     }
 
+    /// Closing a file truncated to zero writes its data back
+    /// (`auto_da_alloc`), so the commit that carries the truncation carries
+    /// the bytes written since.
     fn close(&mut self, fd: Fd) -> DriverResult<()> {
-        let ino = self.live.fd_metadata(fd).ok().map(|metadata| metadata.ino);
+        let metadata = self.live.fd_metadata(fd).ok();
+        let ino = metadata.map(|metadata| metadata.ino);
+        if let Some(ino) = ino.filter(|ino| self.flush_on_close.remove(ino))
+            && let Ok(current) = self.live.fd_file_data(fd)
+        {
+            let current = current.clone();
+            self.write_back_delayed(ino, &current);
+        }
         let description = self.live.description_of(fd).ok();
         self.live.close(fd)?;
-        self.open_paths.remove(&fd);
+        self.named.remove(&fd);
         if let Some(description) = description {
             self.description_closed(description);
         }
@@ -132,8 +139,8 @@ impl FsDriver for CrashFs {
 
     fn dup(&mut self, fd: Fd) -> DriverResult<Fd> {
         let duplicate = self.live.dup(fd)?;
-        if let Some(path) = self.open_paths.get(&fd).cloned() {
-            self.open_paths.insert(duplicate, path);
+        if self.named.contains(&fd) {
+            self.named.insert(duplicate);
         }
         Ok(duplicate)
     }
@@ -156,11 +163,11 @@ impl FsDriver for CrashFs {
         self.live.inode_metadata(ino)
     }
 
-    /// A mode is durable metadata wherever it is named from; the crash model
-    /// reads it back off the live image at reconstruction, exactly as it does
-    /// for the path- and descriptor-named spellings.
     fn set_inode_mode(&mut self, clock: FsClock, ino: u64, mode: u32) -> DriverResult<()> {
-        self.live.set_inode_mode(clock, ino, mode)
+        self.tick(clock);
+        self.live.set_inode_mode(clock, ino, mode)?;
+        self.journal(clock, [ino]);
+        Ok(())
     }
 
     /// An inode reference is a descriptor's hold on a node, and a descriptor is
@@ -176,58 +183,37 @@ impl FsDriver for CrashFs {
     }
 
     fn create_directory(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
+        self.tick(clock);
         self.live.create_directory(clock, path, mode)?;
-        let normalized = normalize_entry_path(path).expect("create normalized the path already");
-        self.journal(PendingKind::Create {
-            path: normalized,
-            kind: FsEntryKind::Directory,
-        });
+        let inodes = self.entry_and_parent(path);
+        self.journal(clock, inodes);
         Ok(())
     }
 
     fn remove_file(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
-        // A symlink is removed through this call too, so capture the node
-        // before it disappears to journal the correct survival set.
-        let removed = self.removed(path);
+        self.tick(clock);
+        let inodes = self.entry_and_parent(path);
         self.live.remove_file(clock, path)?;
-        let removed = removed.expect("the live image removed an entry that existed");
-        let ino = removed.metadata.ino;
-        self.journal(PendingKind::Remove {
-            path: normalize_entry_path(path).expect("remove normalized the path already"),
-            removed: Box::new(removed),
-        });
-        self.forget_if_gone(Some(ino));
+        self.journal(clock, inodes.iter().copied());
+        self.forget_if_gone(inodes.first().copied());
         Ok(())
     }
 
+    /// `fsync`: write the file's dirty pages back, then commit if the inode
+    /// has a change in the running transaction. An `fsync` that reports a
+    /// writeback error returns before it commits.
     fn sync(&mut self, fd: Fd) -> DriverResult<()> {
         self.live.sync(fd)?;
         let metadata = self.live.fd_metadata(fd)?;
-        self.staged_times
-            .insert(metadata.ino, DurableTimes::from(metadata));
-        match metadata.kind {
-            // Every dirty page is written back; a page a writeback error
-            // dropped is clean, so the disk keeps what it had there.
-            FsEntryKind::File => {
-                let durable = self.durable_content(metadata.ino);
-                let bytes = self.written_back(metadata.ino, &durable, self.live.fd_file_data(fd)?);
-                self.staged_content.insert(metadata.ino, bytes);
-                self.dirty.remove(&metadata.ino);
-            }
-            FsEntryKind::Directory => {
-                if let Some(path) = self.open_paths.get(&fd).cloned() {
-                    self.sync_directory(&path)?;
-                }
-            }
-            // Neither a symlink's target nor a FIFO's buffer is file data this
-            // model stages, and a socket node or a whiteout holds none: there
-            // is nothing to make durable.
-            FsEntryKind::Symlink
-            | FsEntryKind::Fifo
-            | FsEntryKind::Socket
-            | FsEntryKind::CharDevice => {}
+        if metadata.kind == FsEntryKind::File && self.named.contains(&fd) {
+            let current = self.live.fd_file_data(fd)?.clone();
+            self.write_back(metadata.ino, &current);
         }
-        self.check_file_error(fd)
+        self.check_file_error(fd)?;
+        if self.named.contains(&fd) && self.journaled.contains(&metadata.ino) {
+            self.commit();
+        }
+        Ok(())
     }
 
     fn fail_writeback(&mut self, fd: Fd, code: ErrorCode) -> DriverResult<()> {
@@ -248,20 +234,23 @@ impl FsDriver for CrashFs {
         self.cache_dropped(fd, offset, len)
     }
 
-    /// A length change is unsynced data like a write: the live image takes it
-    /// and the durable baseline keeps the old bytes until a `sync`.
-    /// Pages past a shortened end leave the cache, dirty or not.
+    /// A truncation is journaled metadata: the next commit records the new
+    /// size. Pages past a shortened end leave the cache, dirty or not.
     fn set_len(&mut self, clock: FsClock, fd: Fd, len: u64) -> DriverResult<()> {
+        self.tick(clock);
         self.live.set_len(clock, fd, len)?;
         let ino = self.live.fd_metadata(fd)?.ino;
-        self.truncated(ino, len);
+        if self.named.contains(&fd) {
+            self.truncated(clock, ino, len);
+        }
         Ok(())
     }
 
     fn set_len_by_path(&mut self, clock: FsClock, path: &str, len: u64) -> DriverResult<()> {
+        self.tick(clock);
         self.live.set_len_by_path(clock, path, len)?;
         let ino = self.live.metadata(path)?.ino;
-        self.truncated(ino, len);
+        self.truncated(clock, ino, len);
         Ok(())
     }
 
@@ -281,10 +270,28 @@ impl FsDriver for CrashFs {
         mode: FsAllocateMode,
         keep_size: bool,
     ) -> DriverResult<()> {
+        self.tick(clock);
         self.live
             .allocate(clock, fd, offset, len, mode, keep_size)?;
+        if !self.named.contains(&fd) {
+            return Ok(());
+        }
+        let metadata = self.live.fd_metadata(fd)?;
         if mode != FsAllocateMode::Reserve {
             self.zeroed(fd, offset, len)?;
+            // The range's extents change on disk too: the next commit
+            // records them punched or zeroed.
+            let current = self.live.fd_file_data(fd)?;
+            let end = offset.saturating_add(len).min(current.len());
+            let mut disk = self.disk_content(metadata.ino);
+            disk.overlay(current, offset, end);
+            self.written.insert(metadata.ino, disk);
+            self.freed_range(metadata.ino, offset, len);
+        }
+        self.journal(clock, [metadata.ino]);
+        // An allocation that grew the file records the new size itself.
+        if metadata.len > self.disk_content(metadata.ino).len() {
+            self.resized_on_disk(metadata.ino, metadata.len);
         }
         Ok(())
     }
@@ -294,48 +301,65 @@ impl FsDriver for CrashFs {
         clock: FsClock,
         path: &str,
     ) -> DriverResult<Vec<FsDirectoryEntry>> {
+        self.tick(clock);
         self.live.read_directory(clock, path)
     }
 
     fn read_directory_fd(&mut self, clock: FsClock, fd: Fd) -> DriverResult<Vec<FsDirectoryEntry>> {
+        self.tick(clock);
         self.live.read_directory_fd(clock, fd)
     }
 
     fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
-        let removed = self.removed(path);
+        self.tick(clock);
+        let inodes = self.entry_and_parent(path);
         self.live.remove_directory(clock, path)?;
-        let removed = removed.expect("the live image removed a directory that existed");
-        self.journal(PendingKind::Remove {
-            path: normalize_entry_path(path).expect("remove_directory normalized the path already"),
-            removed: Box::new(removed),
-        });
+        self.journal(clock, inodes);
         Ok(())
     }
 
+    /// A rename over an existing name writes the source file's data back
+    /// first (`auto_da_alloc`), so the commit that carries the rename carries
+    /// the bytes it names.
     fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
-        let replaced = self.live.metadata(to).ok().map(|metadata| metadata.ino);
+        self.tick(clock);
+        let mut inodes = self.entry_and_parent(from);
+        let destination = self.entry_and_parent(to);
+        let replaced = self
+            .live
+            .entry_metadata(to)
+            .ok()
+            .map(|metadata| metadata.ino);
         self.live.rename(clock, from, to)?;
-        self.record_rename(from, to, false)?;
+        inodes.extend(destination);
+        self.journal(clock, inodes);
+        if replaced.is_some()
+            && let Ok(metadata) = self.live.entry_metadata(to)
+            && let Ok(current) = self.live.file_data(to)
+        {
+            let current = current.clone();
+            self.write_back_delayed(metadata.ino, &current);
+        }
         self.forget_if_gone(replaced);
         Ok(())
     }
 
-    /// One journal entry for the rename and its whiteout, decided together.
     fn rename_whiteout(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.tick(clock);
+        let mut inodes = self.entry_and_parent(from);
+        inodes.extend(self.entry_and_parent(to));
         self.live.rename_whiteout(clock, from, to)?;
-        self.record_rename(from, to, true)
+        inodes.extend(self.entry_and_parent(from));
+        self.journal(clock, inodes);
+        Ok(())
     }
 
-    /// An exchange moves the open descriptors' attribution with the names;
-    /// staged (fsynced) bytes are the nodes' and need no move.
     fn exchange(&mut self, clock: FsClock, first: &str, second: &str) -> DriverResult<()> {
+        self.tick(clock);
+        let mut inodes = self.entry_and_parent(first);
+        inodes.extend(self.entry_and_parent(second));
         self.live.exchange(clock, first, second)?;
-        let first = normalize_entry_path(first).expect("exchange normalized the path already");
-        let second = normalize_entry_path(second).expect("exchange normalized the path already");
-        for path in self.open_paths.values_mut() {
-            *path = swapped(path, &first, &second);
-        }
-        self.journal(PendingKind::Exchange { first, second });
+        self.journal(clock, inodes);
         Ok(())
     }
 
@@ -346,7 +370,11 @@ impl FsDriver for CrashFs {
         atime_nanos: Option<i128>,
         mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
-        self.live.set_times(clock, fd, atime_nanos, mtime_nanos)
+        self.tick(clock);
+        self.live.set_times(clock, fd, atime_nanos, mtime_nanos)?;
+        let ino = self.live.fd_metadata(fd)?.ino;
+        self.journal(clock, [ino]);
+        Ok(())
     }
 
     fn set_inode_times(
@@ -356,8 +384,11 @@ impl FsDriver for CrashFs {
         atime_nanos: Option<i128>,
         mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
+        self.tick(clock);
         self.live
-            .set_inode_times(clock, ino, atime_nanos, mtime_nanos)
+            .set_inode_times(clock, ino, atime_nanos, mtime_nanos)?;
+        self.journal(clock, [ino]);
+        Ok(())
     }
 
     fn set_times_by_path(
@@ -367,42 +398,30 @@ impl FsDriver for CrashFs {
         atime_nanos: Option<i128>,
         mtime_nanos: Option<i128>,
     ) -> DriverResult<()> {
+        self.tick(clock);
         self.live
-            .set_times_by_path(clock, path, atime_nanos, mtime_nanos)
+            .set_times_by_path(clock, path, atime_nanos, mtime_nanos)?;
+        let inodes = self.entry_and_parent(path);
+        self.journal(clock, inodes.first().copied());
+        Ok(())
     }
 
     fn link(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
+        self.tick(clock);
         self.live.link(clock, from, to)?;
-        // The new name is a fresh namespace entry; its kind follows the source
-        // (a hard link to a file, or a copied symlink per MemFs semantics).
-        let to_norm = normalize_entry_path(to).expect("link normalized the destination already");
-        let kind = self
-            .live
-            .metadata(to)
-            .map(|metadata| metadata.kind)
-            .unwrap_or(FsEntryKind::File);
-        self.journal(PendingKind::Create {
-            path: to_norm,
-            kind,
-        });
+        let inodes = self.entry_and_parent(to);
+        self.journal(clock, inodes);
         Ok(())
     }
 
-    /// A FIFO creation is a NAME appearing, exactly like a symlink's: the
-    /// namespace-durability journal holds it, and a crash before the parent
-    /// directory is fsynced can lose it.
     fn make_fifo(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
+        self.tick(clock);
         self.live.make_fifo(clock, path, mode)?;
-        let normalized = normalize_entry_path(path).expect("make_fifo normalized the path already");
-        self.journal(PendingKind::Create {
-            path: normalized,
-            kind: FsEntryKind::Fifo,
-        });
+        let inodes = self.entry_and_parent(path);
+        self.journal(clock, inodes);
         Ok(())
     }
 
-    /// A special node (a regular file made by `mknod`, a socket node, a
-    /// whiteout) is a NAME appearing, like a FIFO's.
     fn make_node(
         &mut self,
         clock: FsClock,
@@ -410,18 +429,15 @@ impl FsDriver for CrashFs {
         node: FsNode,
         mode: u32,
     ) -> DriverResult<()> {
+        self.tick(clock);
         self.live.make_node(clock, path, node, mode)?;
-        let normalized = normalize_entry_path(path).expect("make_node normalized the path already");
-        self.journal(PendingKind::Create {
-            path: normalized,
-            kind: node.kind().expect("the live image made the node"),
-        });
+        let inodes = self.entry_and_parent(path);
+        self.journal(clock, inodes);
         Ok(())
     }
 
-    /// `sync(2)`/`syncfs(2)`: the whole live image becomes the durable
-    /// baseline — every staged file, every namespace change — as one
-    /// checkpoint.
+    /// `sync(2)`/`syncfs(2)`: every dirty page is written back and the
+    /// running transaction commits.
     fn sync_all(&mut self) -> DriverResult<()> {
         self.live.sync_all()?;
         self.checkpoint();
@@ -434,9 +450,6 @@ impl FsDriver for CrashFs {
         self.check_filesystem_error(fd)
     }
 
-    /// Extended attributes are metadata on an existing node, like a mode: the
-    /// live image takes a change, and reconstruction reads them back off it
-    /// (or off the durable baseline for a resurrected entry).
     fn get_xattr(&mut self, target: &XattrTarget, name: &str) -> DriverResult<Vec<u8>> {
         self.live.get_xattr(target, name)
     }
@@ -453,7 +466,10 @@ impl FsDriver for CrashFs {
         value: &[u8],
         flags: u32,
     ) -> DriverResult<()> {
-        self.live.set_xattr(clock, target, name, value, flags)
+        self.tick(clock);
+        self.live.set_xattr(clock, target, name, value, flags)?;
+        self.journal_xattr_target(clock, target);
+        Ok(())
     }
 
     fn remove_xattr(
@@ -462,33 +478,39 @@ impl FsDriver for CrashFs {
         target: &XattrTarget,
         name: &str,
     ) -> DriverResult<()> {
-        self.live.remove_xattr(clock, target, name)
+        self.tick(clock);
+        self.live.remove_xattr(clock, target, name)?;
+        self.journal_xattr_target(clock, target);
+        Ok(())
     }
 
     fn symlink(&mut self, clock: FsClock, target: &str, link_path: &str) -> DriverResult<()> {
+        self.tick(clock);
         self.live.symlink(clock, target, link_path)?;
-        let normalized =
-            normalize_entry_path(link_path).expect("symlink normalized the path already");
-        self.journal(PendingKind::Create {
-            path: normalized,
-            kind: FsEntryKind::Symlink,
-        });
+        let inodes = self.entry_and_parent(link_path);
+        self.journal(clock, inodes);
         Ok(())
     }
 
     fn read_link(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.tick(clock);
         self.live.read_link(clock, path)
     }
 
-    /// A mode change is metadata on an existing entry, like `set_times`: the
-    /// live image takes it and no name appears or disappears, so there is
-    /// nothing for the namespace-durability journal to hold.
     fn set_mode(&mut self, clock: FsClock, path: &str, mode: u32) -> DriverResult<()> {
-        self.live.set_mode(clock, path, mode)
+        self.tick(clock);
+        self.live.set_mode(clock, path, mode)?;
+        let ino = self.live.metadata(path)?.ino;
+        self.journal(clock, [ino]);
+        Ok(())
     }
 
     fn set_fd_mode(&mut self, clock: FsClock, fd: Fd, mode: u32) -> DriverResult<()> {
-        self.live.set_fd_mode(clock, fd, mode)
+        self.tick(clock);
+        self.live.set_fd_mode(clock, fd, mode)?;
+        let ino = self.live.fd_metadata(fd)?.ino;
+        self.journal(clock, [ino]);
+        Ok(())
     }
 
     fn fd_path(&mut self, fd: Fd) -> DriverResult<String> {
@@ -502,9 +524,9 @@ impl FsDriver for CrashFs {
     /// A path-only open creates and truncates nothing, so the handle is the
     /// only thing to track.
     fn open_path_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<Fd> {
+        self.tick(clock);
         let fd = self.live.open_path_unfaulted(clock, path)?;
-        let normalized = normalize_entry_path(path).expect("open normalized the path already");
-        self.open_paths.insert(fd, normalized);
+        self.named.insert(fd);
         self.description_opened(fd);
         Ok(fd)
     }
@@ -514,6 +536,7 @@ impl FsDriver for CrashFs {
     }
 
     fn read_link_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
+        self.tick(clock);
         self.live.read_link_unfaulted(clock, path)
     }
 
@@ -532,36 +555,44 @@ impl FsDriver for CrashFs {
         offset: u64,
         max_len: usize,
     ) -> DriverResult<Vec<u8>> {
+        self.tick(clock);
         self.live.read_at_unfaulted(clock, fd, offset, max_len)
     }
 
-    fn crash(&mut self) -> DriverResult<()> {
+    fn crash(&mut self, clock: FsClock) -> DriverResult<()> {
         let crashes = self.crashes.checked_add(1).ok_or_else(|| {
             EffectError::new(
                 ErrorCode::InvalidState,
                 "filesystem crash counter exhausted",
             )
         })?;
-        self.recompute_after_crash(true)?;
+        self.recompute_after_crash(clock, true)?;
         self.crashes = crashes;
         Ok(())
     }
 
-    fn crash_and_export_restart_snapshot(&mut self, kind: CrashKind) -> DriverResult<Vec<u8>> {
-        Ok(self.crash_and_snapshot(kind)?.encode()?)
+    fn crash_and_export_restart_snapshot(
+        &mut self,
+        clock: FsClock,
+        kind: CrashKind,
+    ) -> DriverResult<Vec<u8>> {
+        Ok(self.crash_and_snapshot(clock, kind)?.encode()?)
     }
 }
 
 impl CrashFs {
-    /// `written` bytes at `offset` of named file `fd` are dirty pages until
-    /// its next durability point.
-    fn dirtied(&mut self, fd: Fd, offset: u64, written: usize) {
-        if written == 0 {
+    /// `written` bytes at `offset` of `fd` are dirty pages until its next
+    /// writeback, and its inode (its size and `mtime`) has a change in the
+    /// running transaction, when it is a named file.
+    fn dirtied(&mut self, clock: FsClock, fd: Fd, offset: u64, written: usize) {
+        if written == 0 || !self.named.contains(&fd) {
             return;
         }
         let Ok(metadata) = self.live.fd_metadata(fd) else {
             return;
         };
+        self.journal(clock, [metadata.ino]);
+        self.extended(metadata.ino, metadata.len);
         let first = offset / DIRTY_PAGE;
         let last = (offset + written as u64 - 1) / DIRTY_PAGE;
         self.rewritten(metadata.ino, first, last);
@@ -571,11 +602,17 @@ impl CrashFs {
             .extend(first..=last);
     }
 
-    /// `ino` is `len` bytes long now: its pages past the end are gone.
-    /// A page a writeback error dropped that the new end cuts through is
-    /// zeroed past it through its block (`ext4_block_truncate_page`), which
-    /// dirties the page again.
-    fn truncated(&mut self, ino: u64, len: u64) {
+    /// `ino` is `len` bytes long now: the next commit records the size,
+    /// and its pages past the end are gone. A page a writeback error dropped
+    /// that the new end cuts through is zeroed past it through its block
+    /// (`ext4_block_truncate_page`), which dirties the page again. A file
+    /// truncated to zero writes its data back at close (`auto_da_alloc`).
+    fn truncated(&mut self, clock: FsClock, ino: u64, len: u64) {
+        self.journal(clock, [ino]);
+        self.resized_on_disk(ino, len);
+        if len == 0 {
+            self.flush_on_close.insert(ino);
+        }
         if let Some(pages) = self.dirty.get_mut(&ino) {
             pages.retain(|page| *page < len.div_ceil(DIRTY_PAGE));
         }
@@ -598,7 +635,7 @@ impl CrashFs {
     /// zero and the page stays clean (host-checked with `cachestat` on ext4
     /// and XFS).
     fn zeroed(&mut self, fd: Fd, offset: u64, len: u64) -> DriverResult<()> {
-        if len == 0 || !self.open_paths.contains_key(&fd) {
+        if len == 0 {
             return Ok(());
         }
         let metadata = self.live.fd_metadata(fd)?;
@@ -634,14 +671,14 @@ impl CrashFs {
         Ok(())
     }
 
-    /// The node at `path`, as a removal about to take it would leave it.
-    fn removed(&self, path: &str) -> Option<Removed> {
-        let metadata = self.live.entry_metadata(path).ok()?;
-        Some(Removed {
-            metadata,
-            xattrs: self.live.entry_xattrs(path),
-            target: self.live.symlink_target(path),
-        })
+    /// The inode an extended-attribute change on `target` journals.
+    fn journal_xattr_target(&mut self, clock: FsClock, target: &XattrTarget) {
+        let ino = match target {
+            XattrTarget::Path(path) => self.live.metadata(path).ok().map(|metadata| metadata.ino),
+            XattrTarget::Fd(fd) => self.live.fd_metadata(*fd).ok().map(|metadata| metadata.ino),
+            XattrTarget::Inode(ino) => Some(*ino),
+        };
+        self.journal(clock, ino);
     }
 
     /// `ino` may have lost its last name or reference: once it is gone, its
@@ -651,8 +688,10 @@ impl CrashFs {
             self.dirty.contains_key(ino)
                 || self.lost.contains_key(ino)
                 || self.file_errors.contains_key(ino)
+                || self.flush_on_close.contains(ino)
         }) && self.live.inode_metadata(ino).is_err()
         {
+            self.flush_on_close.remove(&ino);
             self.dirty.remove(&ino);
             self.lost.remove(&ino);
             self.file_errors.remove(&ino);

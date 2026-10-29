@@ -110,8 +110,8 @@ const SEEK_DATA: u32 = 3;
 const SEEK_HOLE: u32 = 4;
 
 #[unsafe(no_mangle)]
-/// `fsync(2)`: durability for a file (or a directory: the crash model's
-/// namespace barrier); every other kind is `EINVAL`, as the kernel answers for
+/// `fsync(2)`: durability for a file or a directory (a journal commit when
+/// the inode changed since the last one); every other kind is `EINVAL`, as the kernel answers for
 /// a pipe or a socket.
 pub extern "C" fn patina_fsync(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();

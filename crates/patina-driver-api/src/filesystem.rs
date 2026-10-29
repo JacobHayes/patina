@@ -492,17 +492,24 @@ pub trait FsDriver: Send {
     fn add_seals(&mut self, _fd: Fd, _seals: u32, _writably_mapped: bool) -> DriverResult<()> {
         Err(not_sealable())
     }
-    fn crash(&mut self) -> DriverResult<()> {
+    /// Crash the machine under a process that lives on, at `clock`: the
+    /// image rolls back to what the disk held, and every open descriptor
+    /// stays valid.
+    fn crash(&mut self, _clock: FsClock) -> DriverResult<()> {
         Err(unsupported_filesystem_operation("crash"))
     }
 
     /// Export the image a fresh incarnation boots from after a crash of
-    /// `kind`: the live image for a process crash, whose page cache survives,
+    /// `kind` at `clock`: the live image for a process crash, whose page cache survives,
     /// and the recovered durable image for a machine crash. Drivers that cannot
     /// produce a canonical restart snapshot must fail closed; the default
     /// deliberately refuses so a custom filesystem never silently pretends to
     /// support crash restart.
-    fn crash_and_export_restart_snapshot(&mut self, _kind: CrashKind) -> DriverResult<Vec<u8>> {
+    fn crash_and_export_restart_snapshot(
+        &mut self,
+        _clock: FsClock,
+        _kind: CrashKind,
+    ) -> DriverResult<Vec<u8>> {
         Err(unsupported_filesystem_operation(
             "crash restart snapshot export",
         ))
@@ -644,7 +651,7 @@ mod tests {
     fn restart_snapshot_export_fails_closed_by_default() {
         let mut filesystem = MinimalFs;
         let error = filesystem
-            .crash_and_export_restart_snapshot(CrashKind::Machine)
+            .crash_and_export_restart_snapshot(FsClock::EPOCH, CrashKind::Machine)
             .unwrap_err();
         assert_eq!(error.code, patina_dst_abi::ErrorCode::Denied);
     }

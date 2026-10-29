@@ -111,8 +111,8 @@ name. Each knob emits a report, and a knob that never fired is a warning or a
 `VACUOUS` campaign class naming its plane. Oracle: table-driven per-knob tests from the one
 knob declaration, and vacuity tests per class.
 
-**Crash consistency.** `CrashFs` rolls back to the durable image with seeded torn
-writes; an `fsync`, `sync` or `syncfs` failed by an injected EIO or ENOSPC drops
+**Crash consistency.** `CrashFs` rolls metadata back to the last ext4-style
+journal commit and tears in-place overwrites per block with a seeded coin; an `fsync`, `sync` or `syncfs` failed by an injected EIO or ENOSPC drops
 the dirty pages from writeback and reports once per open description per check,
 as Linux's `errseq` does (`fsync` and a `WAIT`ing `sync_file_range` the file's,
 `syncfs` the volume's), and `posix_fadvise(DONTNEED)` drops clean pages so a
@@ -175,8 +175,10 @@ versions, target triple and fingerprint.
   writeback loses all the dirty pages it covers, and a failed `sync`/`syncfs`
   still commits the metadata. A process-crash restart boots from the
   page cache as its disk, so pages a failed writeback dropped, and writeback
-  errors nobody saw, do not reach the restarted incarnation. `CrashFs` renames are always atomic, and
-  directory-durability loss covers explicitly created entries only.
+  errors nobody saw, do not reach the restarted incarnation. `CrashFs` models
+  ext4 only: `fdatasync` commits like `fsync`, background writeback (dirty
+  expiry, memory pressure) never writes data on its own, and `O_DIRECT` is
+  not modelled.
 - **Custom allocators.** Multi-threaded jemalloc has no automated end-to-end test.
 - **Scope.** One record path is one finalized context, so multi-test aggregation
   is unsupported. Arbitrary host DNS, arbitrary FFI, dynamic loading and full

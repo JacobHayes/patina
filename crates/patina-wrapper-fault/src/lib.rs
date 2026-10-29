@@ -726,12 +726,16 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.dirty_pages(fd, first, last)
     }
 
-    fn crash(&mut self) -> DriverResult<()> {
-        self.inner.crash()
+    fn crash(&mut self, clock: FsClock) -> DriverResult<()> {
+        self.inner.crash(clock)
     }
 
-    fn crash_and_export_restart_snapshot(&mut self, kind: CrashKind) -> DriverResult<Vec<u8>> {
-        self.inner.crash_and_export_restart_snapshot(kind)
+    fn crash_and_export_restart_snapshot(
+        &mut self,
+        clock: FsClock,
+        kind: CrashKind,
+    ) -> DriverResult<Vec<u8>> {
+        self.inner.crash_and_export_restart_snapshot(clock, kind)
     }
 
     /// Report whenever a knob was live, so the run is self-describing about what
@@ -966,7 +970,11 @@ mod tests {
             Err(EffectError::new(ErrorCode::Denied, "unused"))
         }
 
-        fn crash_and_export_restart_snapshot(&mut self, _kind: CrashKind) -> DriverResult<Vec<u8>> {
+        fn crash_and_export_restart_snapshot(
+            &mut self,
+            _clock: FsClock,
+            _kind: CrashKind,
+        ) -> DriverResult<Vec<u8>> {
             Ok(b"snapshot".to_vec())
         }
     }
@@ -975,7 +983,7 @@ mod tests {
     fn restart_snapshot_export_forwards_through_fault_wrapper() {
         let mut fs = FaultFs::new(RestartSnapshotDriver, 1).error_permille(1000);
         assert_eq!(
-            fs.crash_and_export_restart_snapshot(CrashKind::Machine)
+            fs.crash_and_export_restart_snapshot(FsClock::EPOCH, CrashKind::Machine)
                 .unwrap(),
             b"snapshot"
         );

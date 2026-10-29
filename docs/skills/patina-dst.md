@@ -349,11 +349,12 @@ class of confusing first-run failures.
   run needs a variable (`RUST_BACKTRACE=1` is the common one), inject it
   explicitly through the run verb's env-injection flag — it becomes part of the
   recorded, replayable run.
-- **Durability claims require parent-directory fsync.** The crash model loses
-  namespace operations (create/rename/link) that were not made durable by an
-  fsync of the parent directory — faithfully to real filesystems. A harness or
-  storage layer that skips parent-dir sync will see crash sweeps "lose" files
-  it considered written; that finding is about the code, not the model.
+- **Machine crashes follow ext4's journal.** Metadata rolls back to the last
+  commit (an `fsync` of a changed inode, `sync`/`syncfs`, or 5 virtual seconds
+  after the first change), so a create or rename nothing committed is lost,
+  and unsynced appended data never reaches the disk. A harness that skips an
+  fsync will see crash sweeps "lose" what it considered written; that finding
+  is about the code, not the model.
 - **Audit output that can fail after injected faults must not `expect()` or
   swallow.** Fault injection reaches every filesystem read your oracle makes;
   an `unwrap` turns an injected error into a panic, and an error-swallowing

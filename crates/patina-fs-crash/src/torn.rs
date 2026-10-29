@@ -1,4 +1,4 @@
-//! Seeded crash decisions and block torn-write merging.
+//! Seeded crash decisions and in-place block tearing.
 
 use std::collections::BTreeSet;
 
@@ -64,51 +64,43 @@ impl CrashFs {
         (bits as f64) / ((1u64 << 53) as f64) < probability
     }
 
-    /// Merge durable `baseline` and live `current` at block granularity,
-    /// tearing modified blocks back to the baseline per the seeded policy.
-    ///
-    /// A block is modified when its BYTES differ; a change of allocation alone
-    /// (a reservation, a punched hole over zeros) is metadata the live image
-    /// keeps, so it draws no decision. Only blocks that hold written data on
-    /// either side can differ, so the merge visits those and nothing else: a
-    /// sparse file costs its written blocks, whatever its length. Unchanged
-    /// blocks are shared storage and compare by identity.
-    pub(super) fn torn_merge(&mut self, baseline: &FileData, current: &FileData) -> FileData {
+    /// The bytes a crash leaves of a file the last commit recorded as `base`
+    /// and the cache holds as `current`: `base`, except that each block below
+    /// `limit` the commit had written and the cache has since overwritten in
+    /// place keeps its old bytes or takes the new ones whole, per the seeded
+    /// policy, as a disk that writes whole sectors leaves it. A block
+    /// `freed` since the commit (punched or zeroed) is not overwritten in
+    /// place either: a write there lands on a new block. A block
+    /// allocated since the commit is not on disk (delayed allocation), and
+    /// a punched, zeroed or reserved range is an extent change the commit
+    /// did not record, so neither draws a decision. Only blocks holding written data on
+    /// either side can differ, so a sparse file costs its written blocks,
+    /// whatever its length.
+    pub(super) fn torn_in_place(
+        &mut self,
+        base: &FileData,
+        current: &FileData,
+        limit: u64,
+        freed: &BTreeSet<u64>,
+    ) -> FileData {
         let granularity = self.policy.torn_write_granularity as u64;
-        let max_len = baseline.len().max(current.len());
-        let blocks = max_len.div_ceil(granularity);
-        let mut result = current.clone();
-        // The tail block dictates the reconstructed length: an unchanged or
-        // persisted tail keeps the live length. A reverted tail falls back to
-        // the durable length, or, for a file that grew, to the end of its last
-        // persisted block past it: an append whose last block reverted keeps
-        // the blocks before it that persisted.
-        let mut tail_reverted = false;
-        let mut persisted_end = baseline.len();
-        for block in candidate_blocks(baseline, current, granularity, blocks) {
+        let blocks = limit.div_ceil(granularity);
+        let mut result = base.clone();
+        for block in candidate_blocks(base, current, granularity, blocks) {
             let start = block * granularity;
-            let end = ((block + 1) * granularity).min(max_len);
-            if bytes_of(baseline, start, end) == bytes_of(current, start, end) {
+            let end = ((block + 1) * granularity).min(limit);
+            let index = start / BLOCK_SIZE;
+            if !base.is_written(index)
+                || !current.is_written(index)
+                || freed.contains(&index)
+                || bytes_of(base, start, end) == bytes_of(current, start, end)
+            {
                 continue;
             }
-            // Persisted, the live bytes are already there; else the block
-            // reverts to the durable bytes whole.
-            let reverted = self.decide(self.policy.torn_write_probability);
-            if reverted {
-                result.overlay(baseline, start, end);
-            } else {
-                persisted_end = persisted_end.max(end.min(current.len()));
-            }
-            if block + 1 == blocks {
-                tail_reverted = reverted;
+            if !self.decide(self.policy.torn_write_probability) {
+                result.overlay(current, start, end);
             }
         }
-        let len = if tail_reverted {
-            persisted_end
-        } else {
-            current.len()
-        };
-        result.clip(len);
         result
     }
 }

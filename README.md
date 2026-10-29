@@ -174,9 +174,11 @@ into the trace so replay reproduces them flag-free.
   `--machine-crash-permille N` takes the machine down with N per-mille odds,
   else `--process-crash-permille M` kills the process with M per-mille odds;
   the first hit terminates the incarnation and restarts it once. A process
-  crash keeps the page cache. A machine crash restarts from the recovered
-  durable image, where any subset of unsynced blocks may survive and a new
-  name in an unsynced directory is lost. The Cargo family refuses crash
+  crash keeps the page cache. A machine crash restarts from what the disk
+  holds, as ext4 leaves it: metadata rolls back to the last journal commit (an
+  `fsync` of a changed inode, `sync`/`syncfs`, or every 5 virtual seconds),
+  a file is the prefix that commit recorded, and each block overwritten in
+  place since keeps its old or new bytes. The Cargo family refuses crash
   restart.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
   `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`

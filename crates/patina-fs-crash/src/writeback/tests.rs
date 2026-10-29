@@ -10,13 +10,12 @@ fn log_with_pending(synced: &[u8], pending: &[u8]) -> (CrashFs, patina_dst_abi::
     let mut fs = CrashFs::default();
     let fd = write(&mut fs, "/log", synced);
     fs.sync(fd).unwrap();
-    fs.sync_directory("/").unwrap();
     fs.write(FsClock::EPOCH, fd, pending).unwrap();
     (fs, fd)
 }
 
 fn on_disk(fs: &mut CrashFs, path: &str) -> Vec<u8> {
-    fs.crash_and_snapshot(CrashKind::Machine)
+    fs.crash_and_snapshot(FsClock::EPOCH, CrashKind::Machine)
         .unwrap()
         .into_memfs()
         .contents(path)
@@ -37,7 +36,7 @@ fn a_failed_writeback_keeps_the_bytes_cached_but_never_durable() {
     fs.sync(fd).unwrap();
     fs.sync_all().unwrap();
     let process = fs
-        .crash_and_snapshot(CrashKind::Process)
+        .crash_and_snapshot(FsClock::EPOCH, CrashKind::Process)
         .unwrap()
         .into_memfs();
     assert_eq!(

@@ -2,7 +2,7 @@
 
 use super::DIRTY_PAGE;
 use crate::CrashFs;
-use crate::tests::{lossy, write};
+use crate::tests::{at_seconds, with_dir, write};
 use patina_dst_abi::{FsAllocateMode, FsClock, FsEntryKind, OpenFlags, SeekWhence};
 use patina_dst_driver_api::FsDriver;
 
@@ -25,10 +25,9 @@ fn positional_write_is_crash_losable_exactly_like_a_cursor_write() {
         .unwrap();
     fs.set_len(FsClock::EPOCH, fd, 4096).unwrap();
     fs.sync(fd).unwrap(); // durable baseline: 4096 zero bytes
-    fs.sync_directory("/").unwrap(); // durable namespace entry
     fs.write_at(FsClock::EPOCH, fd, OFFSET, b"positional")
         .unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     let after = fs.contents("/db").unwrap();
     assert!(
         !after
@@ -46,8 +45,7 @@ fn positional_write_is_crash_losable_exactly_like_a_cursor_write() {
     fs.write_at(FsClock::EPOCH, fd, OFFSET, b"positional")
         .unwrap();
     fs.sync(fd).unwrap();
-    fs.sync_directory("/").unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     let after = fs.contents("/db").unwrap();
     let start = OFFSET as usize;
     assert_eq!(
@@ -90,7 +88,7 @@ fn positional_write_is_crash_losable_exactly_like_a_cursor_write() {
     assert_eq!(after[OFFSET as usize + 32], b'X');
 }
 
-/// A page is dirty from a write until a durability point: an fsync of
+/// A page is dirty from a write until its writeback: an fsync of
 /// its file, a whole-volume sync or a crash; a truncation (an `O_TRUNC`
 /// open included) drops the pages past the new end, a punched or zeroed
 /// range its whole pages, and a positional write dirties its pages. A
@@ -113,7 +111,7 @@ fn written_pages_are_dirty_until_made_durable() {
     fs.sync_all().unwrap();
     assert_eq!(dirty(&mut fs), 0);
     fs.write_at(FsClock::EPOCH, fd, 0, b"w").unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     assert_eq!(dirty(&mut fs), 0);
 
     // An O_TRUNC open drops them, however far the file grows back.
@@ -163,12 +161,29 @@ fn written_pages_are_dirty_until_made_durable() {
 
 #[test]
 fn sync_all_makes_every_change_durable_at_once() {
-    let mut fs = lossy();
+    let mut fs = with_dir();
     let fd = write(&mut fs, "/d/f", b"data");
     fs.close(fd).unwrap();
     fs.make_fifo(FsClock::EPOCH, "/d/pipe", 0o600).unwrap();
     fs.sync_all().unwrap();
-    fs.crash().unwrap();
+    fs.crash(FsClock::EPOCH).unwrap();
     assert_eq!(fs.contents("/d/f").unwrap(), b"data");
     assert_eq!(fs.metadata("/d/pipe").unwrap().kind, FsEntryKind::Fifo);
+}
+
+/// A punched range is an extent change: a crash before the next commit
+/// brings the bytes back, and one after it keeps the hole, whether or not
+/// the file was written back since.
+#[test]
+fn a_punch_rolls_back_with_its_commit() {
+    for crash_at in [1, 10] {
+        let mut fs = CrashFs::default();
+        let fd = write(&mut fs, "/f", &[b'a'; 8192]);
+        fs.sync(fd).unwrap();
+        fs.allocate(at_seconds(1), fd, 0, 4096, FsAllocateMode::PunchHole, true)
+            .unwrap();
+        fs.crash(at_seconds(crash_at)).unwrap();
+        let first = fs.contents("/f").unwrap()[0];
+        assert_eq!(first, if crash_at == 10 { 0 } else { b'a' });
+    }
 }

@@ -163,7 +163,7 @@ pub(super) fn sys_fsync(fd: i64) -> i64 {
         return err;
     }
     // A directory fd IS an ordinary deterministic-filesystem fd, so `fsync` on it
-    // is the crash model's namespace-durability barrier with no special case.
+    // commits the crash model's journal with no special case.
     crate::abi::raw(crate::fd::fsync(fd as c_int).map(i64::from))
 }
 
