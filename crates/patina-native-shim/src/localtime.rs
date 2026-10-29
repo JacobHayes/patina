@@ -521,7 +521,10 @@ pub unsafe extern "C" fn patina_localtime(
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: NULL or NUL-terminated, per the contract.
     let text = |value: *const c_char| (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) });
-    let zone = ZONE.get_or_init(|| {
+    // Chosen outside the cell: the choice reads the filesystem, a scheduling
+    // point, and a task waiting on a cell another task is filling would wait
+    // on the host with the baton. Racing first calls each choose, alike.
+    let zone = ZONE.get().cloned().unwrap_or_else(|| {
         let chosen = Zone::choose(
             text(tz).map(CStr::to_bytes),
             text(tzdir).map(CStr::to_bytes),
@@ -543,6 +546,7 @@ pub unsafe extern "C" fn patina_localtime(
             )),
         }
     });
+    let zone = ZONE.get_or_init(|| zone);
     match zone.local(t) {
         Ok(tm) => {
             // SAFETY: writable, per the contract.

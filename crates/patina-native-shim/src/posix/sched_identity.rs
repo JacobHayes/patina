@@ -30,14 +30,21 @@ extern "C" fn gettid() -> libc::pid_t {
 #[unsafe(no_mangle)]
 extern "C" fn __res_init() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    0
+    resolver_init()
 }
 
 #[cfg(target_os = "linux")]
 #[unsafe(no_mangle)]
 extern "C" fn res_init() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    __res_init()
+    resolver_init()
+}
+
+/// Both resolver-initialisation doors: the virtual machine's resolver
+/// configuration is fixed, so there is nothing to reload.
+#[cfg(target_os = "linux")]
+fn resolver_init() -> c_int {
+    0
 }
 
 #[cfg(target_os = "macos")]

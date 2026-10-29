@@ -9,11 +9,15 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   not public interposable symbols. The guest and shim may use the same native
   primitive only when the shim reaches the real host entry through the alias
   table and guest calls still bind to the interposer.
-- Shim code takes no guest-facing effect of its own. The guest archive is one
-  object that defines the interposers, so a shim call of a libc name it defines
-  (or a std API that lowers to one: `std::env::var`, `Instant::now`,
-  `eprintln!`, `std::sync::Mutex`) binds to its own door, and no undefined-symbol
-  scan sees it. A kernel-internal step inside a guest call (an inode, cursor or
+- Shim code takes no guest-facing effect of its own. A shim call of a libc
+  name it defines (or a std API that lowers to one: `std::env::var`,
+  `Instant::now`, `eprintln!`, `std::sync::Mutex`) binds to its own door in
+  the archive, where no undefined-symbol scan sees it; the seal binds the
+  same call to the host's definition instead, and refuses one from a door's
+  own code. Either is wrong for shim logic (a host clock, host I/O), so the
+  spelling stays refused. The engine's own once-cells and locks therefore
+  wait on the host: never hold one across a scheduling point, or a task
+  waiting on it holds the baton. A kernel-internal step inside a guest call (an inode, cursor or
   size read, a path walk lookup) uses the unrecorded, unfaulted `Context`
   variant, never the guest's recorded, faulted query. The crate's `clippy.toml`
   refuses both kinds of spelling; a true guest funnel says so with an

@@ -452,7 +452,7 @@ fn planted_guest() -> Guest {
 /// (planted, in the dispatch of the guest's own call: `syscall(2)`, which
 /// holds the thread around it, or `prctl(2)`, which holds nothing) is a named
 /// stop before its call is serviced as the guest's: through the `syscall(2)`
-/// door std's futex-based locks and once-cells lower to, on every Linux arch,
+/// door, which the unsealed archive binds shim code's own call to, on every Linux arch,
 /// and as a raw syscall instruction, where the host has syscall-user-dispatch.
 /// Guest code a shim entry calls nests instead
 /// (`native_workloads::cpus::an_allocator_making_system_calls_runs_threads`).

@@ -145,20 +145,26 @@ Darwin alike:
 
 - the **engine**: the shim archive linked relocatably into one object
   (`seal/elf.rs`, `seal/macho.rs`), with each Rust door renamed
-  `patina_impl_<name>`, the engine's own references to a door left undefined
-  under the door's name, and every other global made local;
+  `patina_impl_<name>`, a door's `dlsym` route alias left undefined under
+  the door's name, and every other global made local;
 - the **façade**: the POSIX C object plus one thunk per Rust door that
   tail-jumps to `patina_impl_<name>`.
 
-A door therefore has one public address, whether the guest, the engine or
-`dlsym` reaches it. The seal is also a gate: it refuses an engine whose
+A door therefore has one public address, whether the guest or `dlsym`
+reaches it. Engine code never reaches a door: every other reference it makes
+to a door's name (`std`'s I/O, locks, entropy and panic machinery, and what a
+workspace crate does through them) is bound to a **host binding**, a stub the
+seal links into the engine that resolves the host's definition on its first
+call and jumps there. A door's own code naming another door is refused. The
+seal is also a gate: it refuses an engine whose
 exports differ from the registry inventory and the `patina_*` ABI, a row both
 or neither side defines, workspace code naming a host symbol the audit would
 call an escape, and any raw syscall or counter read in the engine. Its scan
 covers every executable section and refuses undecodable bytes.
 
 The engine carries its own copy of `std`: a shim panic runs the engine's hook,
-never the guest's `set_hook` or `catch_unwind`. The two-copy tests
+never the guest's `set_hook` or `catch_unwind`, and its once-cells and locks
+wait on the host, so none may be held across a scheduling point. The two-copy tests
 (`tests/native_workloads/two_copy.rs`) pin what must hold across the copies.
 
 The C seams that stay in C are frames Rust must not own: acting cancellation

@@ -192,8 +192,18 @@ unsafe extern "C" fn fdopendir(fd: c_int) -> *mut libc::DIR {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: `dirp` is a live stream per readdir64's contract; `next` writes
-    // its error result into this local integer.
+    // SAFETY: `dirp` is a live stream per readdir64's contract.
+    unsafe { read_entry(dirp) }
+}
+
+/// The next entry of the stream `dirp`, for `readdir` and `readdir64` alike.
+///
+/// # Safety
+/// `dirp` is a live stream owned by this adapter.
+#[cfg(target_os = "linux")]
+unsafe fn read_entry(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
+    // SAFETY: `dirp` is a live stream per the contract; `next` writes its
+    // error result into this local integer.
     unsafe {
         let mut failure = 0;
         let entry = next(dirp.cast(), &mut failure);
@@ -209,12 +219,22 @@ unsafe extern "C" fn readdir64(dirp: *mut libc::DIR) -> *mut libc::dirent64 {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn readdir(dirp: *mut libc::DIR) -> *mut libc::dirent {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: `dirp` is a live stream per readdir's contract; the macOS branch
+    // SAFETY: `dirp` is a live stream per readdir's contract.
+    unsafe { next_dirent(dirp) }
+}
+
+/// The next entry of the stream `dirp` as a `dirent`, for `readdir` and,
+/// on macOS, `readdir_r`.
+///
+/// # Safety
+/// `dirp` is a live stream owned by this adapter.
+unsafe fn next_dirent(dirp: *mut libc::DIR) -> *mut libc::dirent {
+    // SAFETY: `dirp` is a live stream per the contract; the macOS branch
     // writes its entry only after the snapshot core returns an entry.
     unsafe {
         #[cfg(target_os = "linux")]
         {
-            readdir64(dirp).cast()
+            read_entry(dirp).cast()
         }
         #[cfg(target_os = "macos")]
         {
@@ -302,7 +322,7 @@ unsafe extern "C" fn readdir_r(
         #[cfg(target_os = "macos")]
         {
             super::super::errno(0);
-            let next = readdir(dirp);
+            let next = next_dirent(dirp);
             if next.is_null() {
                 result.write(ptr::null_mut());
                 return super::super::get_errno();

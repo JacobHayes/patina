@@ -554,6 +554,67 @@ fn an_engine_comdat_group_survives_a_guests_group_of_the_same_name() {
     );
 }
 
+/// Engine code that calls one of the shim's own doors, as `std`'s I/O, locks
+/// and panic machinery do, is the engine's use of the host, never a guest
+/// call: the seal binds it to the host's definition. A planted engine call
+/// to `getpid` answers the process's own id while the guest's call of the
+/// same name answers the virtual one.
+#[test]
+fn an_engine_call_to_a_door_reaches_the_host_not_the_door() {
+    let dir = tempfile::tempdir().unwrap();
+    let posix = compile_posix_object(dir.path());
+    let archive = shim_archive();
+    // A workspace crate's member, so its call is engine code like any other.
+    let plant = compile_plant(
+        dir.path(),
+        "patina_dst_planted",
+        "int getpid(void);\nint patina_planted_engine_getpid(void) { return getpid(); }\n",
+    );
+    let planted = plant_member(&archive, dir.path(), &plant);
+    let sealed = cargo_patina::seal_shim(&planted, &posix, &dir.path().join("sealed"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    let guest = dir.path().join("guest.c");
+    std::fs::write(
+        &guest,
+        "#include <stdio.h>\n#include <unistd.h>\n\
+         int patina_planted_engine_getpid(void);\n\
+         int main(void) {\n\
+             printf(\"guest=%d engine=%d\\n\", (int)getpid(), patina_planted_engine_getpid());\n\
+             return 0;\n\
+         }\n",
+    )
+    .unwrap();
+    let binary = dir.path().join("guest");
+    run_tool(
+        common::c_compiler()
+            .arg(&guest)
+            .args(sealed)
+            .args(common::shim_linker_args(&planted, dir.path()))
+            .arg("-o")
+            .arg(&binary),
+    );
+    let child = std::process::Command::new(&binary)
+        .env_clear()
+        .envs([("PATINA_MODE", "seeded"), ("PATINA_SEED", "1")])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id().to_string();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let field = |key: &str| {
+        stdout
+            .split_whitespace()
+            .find_map(|word| word.strip_prefix(key))
+            .unwrap_or_else(|| panic!("no {key} in {output:?}"))
+            .to_owned()
+    };
+    assert_eq!(field("engine="), pid, "{output:?}");
+    assert_ne!(field("guest="), pid, "{output:?}");
+}
+
 /// Compile the C `source` to `<dir>/<member>.o`.
 fn compile_plant(dir: &std::path::Path, member: &str, source: &str) -> std::path::PathBuf {
     let c = dir.join(format!("{member}.c"));

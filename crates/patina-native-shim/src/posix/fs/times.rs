@@ -187,6 +187,16 @@ unsafe extern "C" fn lutimes(path: *const c_char, times: *const libc::timeval) -
 #[unsafe(no_mangle)]
 unsafe extern "C" fn futimes(fd: c_int, times: *const libc::timeval) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the guest timestamp array satisfies futimes's contract.
+    unsafe { futimes_impl(fd, times) }
+}
+
+/// Set `fd`'s timestamps from a `timeval` pair, for `futimes` and a
+/// path-less `futimesat`.
+///
+/// # Safety
+/// The guest timestamp array satisfies libc futimes's contract.
+unsafe fn futimes_impl(fd: c_int, times: *const libc::timeval) -> c_int {
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         let (atime_kind, atime) = match timeval_argument(times) {
@@ -253,7 +263,7 @@ unsafe extern "C" fn futimesat(
     // SAFETY: The timestamp arrays and path pointers satisfy this libc operation’s documented contract.
     unsafe {
         if path.is_null() {
-            return futimes(directory, times);
+            return futimes_impl(directory, times);
         }
         utimes_impl(at(directory), path, times, 0)
     }

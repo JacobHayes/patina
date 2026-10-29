@@ -1,7 +1,8 @@
 # The shim is one object that also defines the guest's libc doors, so its own
 # code must not take a guest-facing effect (an injected fault, a recorded op,
 # fs latency, a crash point, a seeded draw the guest did not ask for), nor
-# make a call that binds to one of its own interposers. These rules refuse the
+# make a call that binds to one of its own interposers in the archive (the
+# seal binds it to the host's definition instead). These rules refuse the
 # spellings that do. A guest funnel that really is the guest's call says so
 # with one `expect`; every other site uses the internal variant its reason
 # names. Shim unit tests run as ordinary host test binaries, where no door
@@ -39,7 +40,8 @@ disallowed-methods = [
   { path = "std::thread::spawn", reason = "binds to the shim's own pthread_create, a managed guest thread; the shim's host threads use thread::spawn_host_thread" },
   { path = "std::thread::Builder::spawn", reason = "binds to the shim's own pthread_create, a managed guest thread; the shim's host threads use thread::spawn_host_thread" },
   # libc names the shim itself defines. A call from shim code binds to its own
-  # interposer, which no undefined-symbol scan can see.
+  # interposer in the archive, which no undefined-symbol scan can see, and to
+  # the host's definition once sealed.
   { path = "libc::read", reason = "the shim's own read door; the host's is host_read" },
   { path = "libc::write", reason = "the shim's own write door; the host's is host_write or host_write_all" },
   { path = "libc::pread", reason = "the shim's own pread door; the host's is host_pread" },

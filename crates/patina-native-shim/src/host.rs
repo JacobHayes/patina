@@ -39,6 +39,22 @@ unsafe fn unresolved_symbol_diagnostic(write: *mut c_void, name: &std::ffi::CStr
     }
 }
 
+/// The host's definition of the door `name`, for the sealed engine's host
+/// bindings (ARCHITECTURE.md, "The sealed shim"): the seal binds every
+/// reference engine code makes to a door, std's included, to a stub that
+/// resolves the host's definition through here on its first call. The seal
+/// keeps this name out of the engine's exports. An unresolvable name is a
+/// named fatal, as for the alias table.
+///
+/// # Safety
+/// `name` is a NUL-terminated string.
+#[cfg(patina_posix_exports)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn patina_host_symbol(name: *const c_char) -> *mut c_void {
+    // SAFETY: NUL-terminated, per the contract.
+    hostapi::resolve(unsafe { std::ffi::CStr::from_ptr(name) })
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) mod hostapi {
     use std::ffi::{CStr, c_char, c_int, c_void};

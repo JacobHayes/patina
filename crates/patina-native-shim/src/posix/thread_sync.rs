@@ -275,7 +275,7 @@ unsafe extern "C" fn pthread_cond_timedwait_relative_np(
         tv_nsec: 0,
     };
     // SAFETY: `now` is a writable local timespec for clock_gettime.
-    if unsafe { super::time::clock_gettime(libc::CLOCK_REALTIME, &mut now) } != 0 {
+    if unsafe { super::time::read_clock(libc::CLOCK_REALTIME, &mut now) } != 0 {
         return super::get_errno();
     }
     let now = (now.tv_sec as u64)

@@ -169,12 +169,20 @@ extern "C" fn sleep(seconds: libc::c_uint) -> libc::c_uint {
 /// `time` names writable storage.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub(super) unsafe extern "C" fn clock_gettime(
-    clock_id: libc::clockid_t,
-    time: *mut libc::timespec,
-) -> c_int {
+unsafe extern "C" fn clock_gettime(clock_id: libc::clockid_t, time: *mut libc::timespec) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::ClockGettime);
     crate::patina_note_boundary_symbol(c"clock_gettime".as_ptr());
+    // SAFETY: as this door's contract.
+    unsafe { read_clock(clock_id, time) }
+}
+
+/// The guest's read of `clock_id` into `time`, for `clock_gettime` and the
+/// waits that read the clock as part of their own call.
+///
+/// # Safety
+/// `time` names writable storage.
+#[cfg(target_os = "macos")]
+pub(super) unsafe fn read_clock(clock_id: libc::clockid_t, time: *mut libc::timespec) -> c_int {
     let clock = match clock_id {
         libc::CLOCK_REALTIME => REALTIME,
         libc::CLOCK_MONOTONIC | libc::CLOCK_UPTIME_RAW => MONOTONIC,

@@ -7,17 +7,26 @@
 //! The **engine** is the archive partially linked into one relocatable object
 //! (the shim crate, the runtime crates and their own copy of `std`), garbage
 //! collected from the doors and the runtime ABI (on Mach-O, by the guest's
-//! final link instead), with every definition but the inventory made local. A door's Rust definition is renamed
-//! `patina_impl_<name>`; the engine's own references to a door, its route
-//! alias included, are left undefined under the door's name, so they bind to
-//! the façade exactly as they bound to the shim's definition before. The
-//! **façade** is the C seams (the POSIX object, unchanged) and one generated
-//! thunk per Rust door, a tail jump to its implementation.
+//! final link instead), with every definition but the inventory made local. A
+//! door's Rust definition is renamed `patina_impl_<name>`; a door's route
+//! alias (the `dlsym` table's answer) is left undefined under the door's name,
+//! so it names the façade's address. The **façade** is the C seams (the POSIX
+//! object, unchanged) and one generated thunk per Rust door, a tail jump to
+//! its implementation.
+//!
+//! Every other reference engine code makes to a door is the engine's own use
+//! of the host, not a guest's call: `std`'s I/O, locks and panic machinery,
+//! and anything a workspace crate does through them. The seal binds each one
+//! to a **host binding**, a stub it links into the engine that resolves the
+//! host's definition of the name on its first call (`patina_host_symbol`, the
+//! alias table's resolver) and jumps there, so no engine code re-enters a
+//! door. A door's own code naming another door is refused instead: a door
+//! shares its model with another through an ordinary function, never through
+//! the symbol, which the host binding would take.
 //!
 //! The engine's `std` is therefore a second copy beside the guest's: its own
-//! panic hook, `thread::panicking()` and `io::stderr`. Nothing rebinds yet: the
-//! engine's references still reach the doors, the allocator and the host
-//! exactly as they did.
+//! panic hook, `thread::panicking()` and `io::stderr`, which write to the
+//! host.
 //!
 //! The seal refuses an engine whose exports are not the inventory (the rows of
 //! the symbol registry the Rust side defines, and the runtime's `patina_*` ABI)
@@ -54,6 +63,11 @@ pub(super) const REFERENCES: &str = "patina_engine.references";
 const IMPL: &str = "patina_impl_";
 /// The prefix of a door's route alias.
 const ROUTE: &str = "patina_route_";
+/// The prefix of a door's host binding.
+const HOST: &str = "patina_bound_";
+/// The shim's resolver of a door's host definition, which the host bindings
+/// call: the engine's own, never exported.
+const HOST_SYMBOL: &str = "patina_host_symbol";
 
 /// A digest of the seal's own source and of the linker it runs, which decide
 /// its outputs' bytes as much as its inputs do.
@@ -130,9 +144,16 @@ pub(super) fn seal(
     let posix_bytes = read(posix)?;
     let posix_file = parse(&posix_bytes, posix)?;
     let platform = Platform::of(&posix_file)?;
-    let seams: BTreeSet<String> = global_definitions(&posix_file).into_keys().collect();
+    let seam_definitions = global_definitions(&posix_file);
+    let seams: BTreeSet<String> = seam_definitions.keys().cloned().collect();
     let archive_bytes = read(staticlib)?;
-    let inventory = Inventory::classify(&archive_bytes, staticlib, &seams, platform)?;
+    let mut inventory = Inventory::classify(&archive_bytes, staticlib, &seams, platform)?;
+    let rows = rows(platform);
+    inventory.seam_doors = seam_definitions
+        .into_iter()
+        .filter(|(name, kind)| *kind == SymbolKind::Text && rows.contains(name.as_str()))
+        .map(|(name, _)| name)
+        .collect();
     let allocator = routing.entry_points();
     let scratch = tempfile::Builder::new()
         .prefix(".seal-")
@@ -190,6 +211,9 @@ struct Inventory {
     /// Registry rows with a Rust function definition: each becomes a façade
     /// thunk over `patina_impl_<name>`.
     doors: BTreeSet<String>,
+    /// Registry rows the C seams define as functions: the façade's own
+    /// doors, which engine code reaches by an undefined reference.
+    seam_doors: BTreeSet<String>,
     /// Registry rows with a Rust data definition, exported under their own
     /// name: data cannot be thunked.
     data: BTreeSet<String>,
@@ -270,10 +294,12 @@ impl Inventory {
                 }
             }
         }
-        // A door's route alias is a reference to the door, not ABI.
+        // A door's route alias is a reference to the door, not ABI, and
+        // the host bindings' resolver is the engine's own.
         for door in &inventory.doors {
             inventory.abi.remove(&route(door));
         }
+        inventory.abi.remove(HOST_SYMBOL);
         let undefined: BTreeSet<&str> = rows
             .iter()
             .copied()
@@ -324,6 +350,18 @@ impl Inventory {
         }
     }
 
+    /// The doors engine code reaches the host's definition of instead, the
+    /// Rust side's and the C seams' alike: all but the shim's `--wrap`
+    /// vehicles (`__wrap_dlsym`), which the host does not define.
+    fn bound(&self) -> BTreeSet<String> {
+        self.doors
+            .iter()
+            .chain(&self.seam_doors)
+            .filter(|door| !door.starts_with("__wrap_"))
+            .cloned()
+            .collect()
+    }
+
     /// What the engine exports, by C name.
     fn exports<'a>(&'a self, allocator: &'a [String]) -> impl Iterator<Item = String> + 'a {
         self.doors
@@ -334,6 +372,11 @@ impl Inventory {
             .chain(self.comdat.iter().cloned())
             .chain(allocator.iter().cloned())
     }
+}
+
+/// A door's host binding.
+fn host(door: &str) -> String {
+    format!("{HOST}{door}")
 }
 
 /// A door's route alias (the `dlsym` table's hidden address for it), as
@@ -433,8 +476,7 @@ fn check_opcodes(engine: &[u8]) -> Result<(), CliError> {
     )))
 }
 
-/// The engine's undefined references, for review: S0 reports them, the
-/// binding stage gates them against a checked-in allowlist.
+/// The engine's undefined references, for review.
 fn references(engine: &object::File<'_>) -> String {
     let mut text = String::new();
     for (name, weak) in undefined_references(engine) {
@@ -545,27 +587,146 @@ impl Platform {
             }
             .expect("writing to a string");
         }
+        text.push_str(&self.object_notes());
+        text
+    }
+
+    /// The notes ending a generated object. On Mach-O, each symbol its own
+    /// atom, as the C seams' functions are, so the final link drops what
+    /// nothing reaches. On ELF, NT_GNU_PROPERTY_TYPE_0: x86 IBT | SHSTK, or
+    /// aarch64 BTI | PAC, so the object keeps the program's control-flow
+    /// marking.
+    fn object_notes(self) -> String {
         if self.macho {
-            // Each thunk its own atom, as the C seams' functions are, so the
-            // final link drops the doors nothing calls.
-            text.push_str("\t.subsections_via_symbols\n");
-            return text;
+            return "\t.subsections_via_symbols\n".to_owned();
         }
-        // NT_GNU_PROPERTY_TYPE_0: x86 IBT | SHSTK, or aarch64 BTI | PAC, so
-        // the façade keeps the program's control-flow marking.
         let property = if self.aarch64 {
             "0xc0000000"
         } else {
             "0xc0000002"
         };
-        write!(
-            text,
+        format!(
             "\t.section .note.GNU-stack,\"\",%progbits\n\
              \t.section .note.gnu.property,\"a\"\n\t.p2align 3\n\
              \t.long 4\n\t.long 16\n\t.long 5\n\t.asciz \"GNU\"\n\
              \t.long {property}\n\t.long 4\n\t.long 3\n\t.long 0\n"
         )
+    }
+
+    /// The engine's host bindings: per bindable door, a stub that jumps
+    /// through its slot to the host's definition of the name, filling the
+    /// slot on its first call through one shared binder. The binder keeps
+    /// every argument register across the resolver call, so a stub is
+    /// transparent to any signature, a variadic one's included, and a racing
+    /// first call only stores the same address twice. The stubs are global
+    /// so the rewrite can find them; it makes them local.
+    fn host_bindings(self, bound: &BTreeSet<String>) -> String {
+        // Local names outside the stubs' `patina_bound_<door>` space.
+        let binder = self.symbol("patina_bind_host");
+        let resolver = self.symbol(HOST_SYMBOL);
+        let mut text = String::new();
+        for door in bound {
+            let stub = self.symbol(&host(door));
+            let slot = self.symbol(&format!("patina_slot_{door}"));
+            let name = self.symbol(&format!("patina_name_{door}"));
+            let (text_section, slot_section, name_section) = if self.macho {
+                (
+                    "__TEXT,__text,regular,pure_instructions".to_owned(),
+                    "__DATA,__data".to_owned(),
+                    "__TEXT,__cstring,cstring_literals".to_owned(),
+                )
+            } else {
+                (
+                    format!(".text.{stub},\"ax\",%progbits"),
+                    format!(".bss.{slot},\"aw\",%nobits"),
+                    format!(".rodata.{name},\"a\",%progbits"),
+                )
+            };
+            let body = match (self.macho, self.aarch64) {
+                (false, false) | (true, false) => format!(
+                    "{landing}\tmovq {slot}(%rip), %r11\n\ttestq %r11, %r11\n\tjz 1f\n\tjmp *%r11\n\
+                     1:\tleaq {slot}(%rip), %r11\n\tleaq {name}(%rip), %r10\n\tjmp {binder}\n",
+                    landing = if self.macho { "" } else { "\tendbr64\n" },
+                ),
+                (false, true) => format!(
+                    "\thint 34\n\tadrp x16, {slot}\n\tadd x16, x16, :lo12:{slot}\n\tldr x17, [x16]\n\
+                     \tcbz x17, 1f\n\tbr x17\n\
+                     1:\tadrp x17, {name}\n\tadd x17, x17, :lo12:{name}\n\tb {binder}\n"
+                ),
+                (true, true) => format!(
+                    "\tadrp x16, {slot}@PAGE\n\tadd x16, x16, {slot}@PAGEOFF\n\tldr x17, [x16]\n\
+                     \tcbz x17, 1f\n\tbr x17\n\
+                     1:\tadrp x17, {name}@PAGE\n\tadd x17, x17, {name}@PAGEOFF\n\tb {binder}\n"
+                ),
+            };
+            let (function, size) = if self.macho {
+                (String::new(), String::new())
+            } else {
+                (
+                    format!("\t.type {stub}, %function\n"),
+                    format!("\t.size {stub}, .-{stub}\n"),
+                )
+            };
+            write!(
+                text,
+                "\t.section {text_section}\n\t.globl {stub}\n{function}\t.p2align 4\n{stub}:\n{body}{size}\
+                 \t.section {slot_section}\n\t.p2align 3\n{slot}:\n\t.quad 0\n\
+                 \t.section {name_section}\n{name}:\n\t.asciz \"{door}\"\n"
+            )
+            .expect("writing to a string");
+        }
+        // The binder: the stub's slot and the name in two scratch registers
+        // no argument uses (x86_64 %r11 and %r10, aarch64 x16 and x17).
+        let section = if self.macho {
+            "__TEXT,__text,regular,pure_instructions".to_owned()
+        } else {
+            format!(".text.{binder},\"ax\",%progbits")
+        };
+        let body = if self.aarch64 {
+            format!(
+                "\tstp x29, x30, [sp, #-224]!\n\tmov x29, sp\n\
+                 \tstp x0, x1, [sp, #16]\n\tstp x2, x3, [sp, #32]\n\
+                 \tstp x4, x5, [sp, #48]\n\tstp x6, x7, [sp, #64]\n\
+                 \tstp x8, x16, [sp, #80]\n\
+                 \tstp q0, q1, [sp, #96]\n\tstp q2, q3, [sp, #128]\n\
+                 \tstp q4, q5, [sp, #160]\n\tstp q6, q7, [sp, #192]\n\
+                 \tmov x0, x17\n\tbl {resolver}\n\tmov x17, x0\n\
+                 \tldp x8, x16, [sp, #80]\n\tstr x17, [x16]\n\
+                 \tldp q6, q7, [sp, #192]\n\tldp q4, q5, [sp, #160]\n\
+                 \tldp q2, q3, [sp, #128]\n\tldp q0, q1, [sp, #96]\n\
+                 \tldp x6, x7, [sp, #64]\n\tldp x4, x5, [sp, #48]\n\
+                 \tldp x2, x3, [sp, #32]\n\tldp x0, x1, [sp, #16]\n\
+                 \tldp x29, x30, [sp], #224\n\tbr x17\n"
+            )
+        } else {
+            // Eight pushes and 136 bytes leave the stack aligned for the
+            // call, as the stub's caller left it.
+            let mut body = String::from(
+                "\tpushq %rdi\n\tpushq %rsi\n\tpushq %rdx\n\tpushq %rcx\n\
+                 \tpushq %r8\n\tpushq %r9\n\tpushq %rax\n\tpushq %r11\n\tsubq $136, %rsp\n",
+            );
+            for register in 0..8 {
+                writeln!(body, "\tmovdqu %xmm{register}, {}(%rsp)", register * 16)
+                    .expect("writing to a string");
+            }
+            writeln!(body, "\tmovq %r10, %rdi\n\tcall {resolver}").expect("writing to a string");
+            for register in 0..8 {
+                writeln!(body, "\tmovdqu {}(%rsp), %xmm{register}", register * 16)
+                    .expect("writing to a string");
+            }
+            body.push_str(
+                "\taddq $136, %rsp\n\tpopq %r10\n\tmovq %rax, (%r10)\n\tmovq %rax, %r11\n\
+                 \tpopq %rax\n\tpopq %r9\n\tpopq %r8\n\tpopq %rcx\n\
+                 \tpopq %rdx\n\tpopq %rsi\n\tpopq %rdi\n\tjmp *%r11\n",
+            );
+            body
+        };
+        write!(
+            text,
+            "\t.section {section}\n\t.p2align 4\n{binder}:\n{body}"
+        )
         .expect("writing to a string");
+        text.push_str(&self.object_notes());
         text
     }
 
@@ -581,10 +742,22 @@ impl Platform {
         engine: &Path,
     ) -> Result<(), CliError> {
         let merged = work.join("merged.o");
+        let source = work.join("patina_host.s");
+        fs::write(&source, self.host_bindings(&inventory.bound()))
+            .map_err(|error| refuse(format!("writing the host bindings: {error}")))?;
+        let bindings = work.join("patina_host.o");
+        run(
+            Command::new(cc())
+                .arg("-c")
+                .arg(&source)
+                .arg("-o")
+                .arg(&bindings),
+            "assembling the host bindings",
+        )?;
         if self.macho {
-            self.link_macho_engine(inventory, allocator, staticlib, &merged)?;
+            self.link_macho_engine(inventory, allocator, staticlib, &bindings, &merged)?;
         } else {
-            self.link_elf_engine(inventory, allocator, staticlib, work, &merged)?;
+            self.link_elf_engine(inventory, allocator, staticlib, &bindings, work, &merged)?;
         }
         fs::rename(&merged, engine)
             .map_err(|error| refuse(format!("localising the engine: {error}")))
@@ -592,18 +765,23 @@ impl Platform {
 
     /// ELF: garbage-collect from the inventory and wrap each door so the
     /// other members' references to it stay undefined, then rename the
-    /// definitions and the wrapped references.
+    /// definitions and bind the references, wrapped or not, to the host.
     fn link_elf_engine(
         self,
         inventory: &Inventory,
         allocator: &[String],
         staticlib: &Path,
+        bindings: &Path,
         work: &Path,
         merged: &Path,
     ) -> Result<(), CliError> {
         let mut args = String::new();
         for door in &inventory.doors {
             writeln!(args, "-u {door}\n--wrap={door}").expect("writing to a string");
+        }
+        // Rooted: nothing references a binding until the rewrite.
+        for door in inventory.bound() {
+            writeln!(args, "-u {}", host(&door)).expect("writing to a string");
         }
         for name in inventory.data.iter().chain(&inventory.abi) {
             writeln!(args, "-u {name}").expect("writing to a string");
@@ -620,6 +798,7 @@ impl Platform {
             self.relocatable_link()
                 .arg("--gc-sections")
                 .arg(at(&args_path))
+                .arg(bindings)
                 // Whole: a wrapped door's `-u` roots its wrapper, never the
                 // member that defines it.
                 .arg("--whole-archive")
@@ -644,6 +823,19 @@ impl Platform {
         // the same address: one that aliases the definition becomes a
         // reference to the door.
         let undefine: BTreeSet<String> = inventory.doors.iter().map(|door| route(door)).collect();
+        // A member's reference to a Rust door is wrapped; the defining
+        // member's own names the definition, and a reference to a C seam's
+        // door is undefined. All are the engine's, and bind to the host.
+        let bind: BTreeMap<String, String> = inventory
+            .bound()
+            .into_iter()
+            .flat_map(|door| {
+                [
+                    (door.clone(), host(&door)),
+                    (format!("__wrap_{door}"), host(&door)),
+                ]
+            })
+            .collect();
         let keep: BTreeSet<String> = inventory.exports(allocator).collect();
         let weaken: BTreeSet<String> = allocator.iter().cloned().collect();
         elf::rewrite(
@@ -653,6 +845,8 @@ impl Platform {
                 keep: &keep,
                 weaken: &weaken,
                 undefine: &undefine,
+                bind: &bind,
+                doors: &inventory.doors,
             },
         )
         .map_err(|error| refuse(format!("localising the engine: {error}")))
@@ -660,13 +854,15 @@ impl Platform {
 
     /// Mach-O: Apple's relocatable link neither collects garbage nor wraps,
     /// so the whole archive links, and the final link's dead stripping
-    /// collects it at the symbols; the rewrite splits the doors. Darwin
-    /// routes no allocator and has no route aliases.
+    /// collects it at the symbols; the rewrite splits the doors and binds
+    /// every reference to one to the host. Darwin routes no allocator and
+    /// has no route aliases.
     fn link_macho_engine(
         self,
         inventory: &Inventory,
         allocator: &[String],
         staticlib: &Path,
+        bindings: &Path,
         merged: &Path,
     ) -> Result<(), CliError> {
         if !allocator.is_empty() {
@@ -674,6 +870,7 @@ impl Platform {
         }
         run(
             self.relocatable_link()
+                .arg(bindings)
                 .arg("-Wl,-all_load")
                 .arg(staticlib)
                 .arg("-o")
@@ -685,6 +882,11 @@ impl Platform {
             .iter()
             .map(|door| (self.symbol(door), self.symbol(&format!("{IMPL}{door}"))))
             .collect();
+        let bind: BTreeMap<String, String> = inventory
+            .bound()
+            .iter()
+            .map(|door| (self.symbol(door), self.symbol(&host(door))))
+            .collect();
         let keep: BTreeSet<String> = inventory
             .exports(allocator)
             .map(|name| self.symbol(&name))
@@ -693,6 +895,7 @@ impl Platform {
             merged,
             &macho::Plan {
                 doors: &doors,
+                bind: &bind,
                 keep: &keep,
                 // `Inventory::classify` refused any member that could not be.
                 subsections: true,

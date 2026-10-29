@@ -1,6 +1,7 @@
 //! The sealed engine's `std` is a second copy beside the guest's: one thread
-//! carries both copies' thread-locals, one futex model serves both copies'
-//! parking, and a panic belongs to the copy that raised it.
+//! carries both copies' thread-locals, the guest's parking reaches the futex
+//! model while the engine's waits on the host, and a panic belongs to the
+//! copy that raised it.
 
 use super::*;
 
@@ -16,14 +17,27 @@ fn guest_thread_local_destructors_reach_the_doors_beside_the_engines_copy() {
 }
 
 /// Guest parking, condvar waits and a contended blocking `OnceLock`
-/// initialisation reach the futex model the engine's copy parks through too,
-/// deterministically for a seed.
+/// initialisation reach the futex model while the engine's copy takes its own
+/// locks, deterministically for a seed.
 #[test]
-fn guest_parking_shares_the_futex_model_with_the_engines_copy() {
+fn guest_parking_reaches_the_futex_model_beside_the_engines_copy() {
     let g = Guest::assert_build("two_copy_probe.rs");
     for seed in [1, 2, 3] {
         let out = g.assert_run_success(seed, &["--", "park"]).stdout;
         assert_unique_line_payload(&out, "TWO_COPY_PARK=");
+    }
+}
+
+/// The engine's own once-cells and locks wait on the host, so one held
+/// across a scheduling point would hold the guest that waits on it, and the
+/// baton with it: concurrent first `localtime_r` calls, whose zone choice
+/// reads the filesystem, all convert.
+#[test]
+fn concurrent_first_calls_into_a_yielding_engine_initialiser_complete() {
+    let g = Guest::assert_build("two_copy_probe.rs");
+    for seed in [1, 2, 3] {
+        let out = g.assert_run_success(seed, &["--", "zone"]).stdout;
+        assert_eq!(assert_unique_line_payload(&out, "TWO_COPY_ZONE="), "8");
     }
 }
 

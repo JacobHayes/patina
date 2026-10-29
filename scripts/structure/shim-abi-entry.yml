@@ -39,11 +39,13 @@ rule:
                           kind: string_literal
     # These implement panic/stack ownership; __real_dlsym is a test resolver.
     # The allocator routes read ownership to pick an allocator, so entering a
-    # scope would send every guest allocation to the runtime's arena.
+    # scope would send every guest allocation to the runtime's arena. The
+    # host bindings' resolver runs beneath whatever engine code called the
+    # binding, guest-owned or not, and must not change that ownership.
     - not:
         has:
           field: name
-          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|__real_dlsym|patina_route_(alloc|alloc_zeroed|dealloc|realloc))$'
+          regex: '^(patina_abort|patina_trap_enter|patina_trap_leave|patina_trap_hand_over|patina_trap_take_back|__real_dlsym|patina_host_symbol|patina_route_(alloc|alloc_zeroed|dealloc|realloc))$'
     - any:
         - not:
             has:

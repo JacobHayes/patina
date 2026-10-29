@@ -3,7 +3,9 @@
 //! thread exit, after the engine's copy registered thread-locals of its own on
 //! the same thread. `park`: guest threads park, wait on a condvar and race a
 //! blocking `OnceLock` initialisation while the engine's copy takes its own
-//! locks on every door. `engine-panic` (a test-panic shim): a panic inside the
+//! locks on every door. `zone`: guest threads make their first `localtime_r`
+//! calls at once, while the engine's choice of zone, which reads the
+//! filesystem, is still in progress. `engine-panic` (a test-panic shim): a panic inside the
 //! engine is the engine's copy's, so the guest's hook and `catch_unwind` never
 //! see it.
 use std::cell::RefCell;
@@ -128,10 +130,37 @@ fn engine_panic() {
     println!("GUEST_CAUGHT={}", caught.is_err());
 }
 
+unsafe extern "C" {
+    fn localtime_r(time: *const i64, out: *mut [i64; 16]) -> *mut [i64; 16];
+}
+
+/// Eight first `localtime_r` calls released together.
+fn zone() {
+    let start = Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                let mut out = [0i64; 16];
+                // SAFETY: a live time and a buffer larger than `struct tm`.
+                !unsafe { localtime_r(&0, &mut out) }.is_null()
+            })
+        })
+        .collect();
+    let converted = threads
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .filter(|converted| *converted)
+        .count();
+    println!("TWO_COPY_ZONE={converted}");
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("tls") => tls(),
         Some("park") => park(),
+        Some("zone") => zone(),
         #[cfg(patina_test_clock_panic)]
         Some("engine-panic") => engine_panic(),
         other => panic!("unknown mode {other:?}"),

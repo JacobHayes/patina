@@ -4,11 +4,13 @@
 //! symbol table and the string table change; every section's bytes stay where
 //! the linker wrote them.
 //!
-//! Apple's relocatable link has no `--wrap`, so the split of a door into its
-//! implementation and its public name happens here: the definition takes the
-//! implementation's name, and every relocation that named it, outside the
-//! unwind tables that describe the definition itself, names a new undefined
-//! symbol of the door's own name instead.
+//! Apple's relocatable link has no `--wrap`, and resolves every member's
+//! reference to a door to the door's definition, so the split happens here:
+//! the definition takes the implementation's name, and every relocation that
+//! named it, outside the unwind and debug tables that describe the definition
+//! itself, names the door's host binding instead. One inside a door's own
+//! definition refuses the rewrite. Darwin has no route aliases, so no engine
+//! reference names the door itself.
 //!
 //! A Mach-O symbol table orders local symbols, then defined externals, then
 //! undefined ones, so every symbol this localises or adds moves and every
@@ -50,6 +52,7 @@ const R_SCATTERED: u32 = 0x8000_0000;
 const INDIRECT_SYMBOL_LOCAL: u32 = 0x8000_0000;
 const INDIRECT_SYMBOL_ABS: u32 = 0x4000_0000;
 const SECTION_TYPE: u32 = 0xff;
+const S_ATTR_DEBUG: u32 = 0x0200_0000;
 const S_ZEROFILL: u32 = 0x1;
 const S_GB_ZEROFILL: u32 = 0xc;
 const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
@@ -58,8 +61,11 @@ const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
 /// Mach-O's leading underscore).
 pub(super) struct Plan<'a> {
     /// A door's name to its implementation's: the definition takes the new
-    /// name, and the references to it a new undefined symbol of the old.
+    /// name.
     pub(super) doors: &'a BTreeMap<String, String>,
+    /// A door's name to its host binding's, the definition every reference
+    /// to the door names instead.
+    pub(super) bind: &'a BTreeMap<String, String>,
     /// The (new) names whose definitions stay global; every other global
     /// definition becomes local.
     pub(super) keep: &'a BTreeSet<String>,
@@ -85,6 +91,9 @@ fn set_u32(bytes: &mut [u8], at: usize, value: u32) {
 struct Section {
     /// `segname,sectname`, for the unwind-table test.
     name: (Vec<u8>, Vec<u8>),
+    addr: u64,
+    size: u64,
+    debug: bool,
     reloff: usize,
     nreloc: usize,
 }
@@ -100,10 +109,11 @@ fn trimmed(field: &[u8]) -> Vec<u8> {
 /// Whether `section` describes its definitions rather than referring to them:
 /// its references to a door's definition stay on the implementation.
 fn describes_definitions(section: &Section) -> bool {
-    matches!(
-        (section.name.0.as_slice(), section.name.1.as_slice()),
-        (b"__TEXT", b"__eh_frame") | (b"__LD", b"__compact_unwind")
-    )
+    section.debug
+        || matches!(
+            (section.name.0.as_slice(), section.name.1.as_slice()),
+            (b"__TEXT", b"__eh_frame") | (b"__LD", b"__compact_unwind")
+        )
 }
 
 /// Whether the member `bytes`, a relocatable Mach-O object, splits at its
@@ -196,6 +206,9 @@ impl Object {
                         section_addresses.push(u64_at(header, 32));
                         sections.push(Section {
                             name: (trimmed(&header[16..32]), trimmed(&header[..16])),
+                            addr: u64_at(header, 32),
+                            size: u64_at(header, 40),
+                            debug: flags & S_ATTR_DEBUG != 0,
                             reloff,
                             nreloc,
                         });
@@ -277,13 +290,16 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
     let total = old.len() / SYMBOL;
 
     // The symbols in their new order: locals as they were, then those
-    // localised, the kept definitions and the undefined ones, the doors'
-    // new references last.
-    let mut symbols: Vec<[u8; SYMBOL]> = Vec::with_capacity(total + plan.doors.len());
+    // localised, the kept definitions and the undefined ones.
+    let mut symbols: Vec<[u8; SYMBOL]> = Vec::with_capacity(total);
     let (mut locals, mut localised, mut kept, mut undefined) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     // Door definitions by old index, to the door's name.
     let mut split: BTreeMap<usize, &str> = BTreeMap::new();
+    // Global definitions by (old) name, to their index.
+    let mut definitions: BTreeMap<String, usize> = BTreeMap::new();
+    // Undefined references to a door the C seams define.
+    let mut seam_references: Vec<(usize, String)> = Vec::new();
     for (index, symbol) in old.as_chunks::<SYMBOL>().0.iter().enumerate() {
         let mut symbol = *symbol;
         let kind = symbol[4];
@@ -299,10 +315,14 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
                     "common symbol {name}: no section to localise it in"
                 ));
             }
+            if plan.bind.contains_key(&name) {
+                seam_references.push((index, name.clone()));
+            }
             undefined.push((name, index));
             symbols.push(symbol);
             continue;
         }
+        definitions.insert(name.clone(), index);
         let new = match plan.doors.get_key_value(&name) {
             Some((door, implementation)) => {
                 split.insert(index, door.as_str());
@@ -324,25 +344,54 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
         }
         symbols.push(symbol);
     }
-    // One undefined symbol per door, named as the door.
-    let mut references: BTreeMap<&str, usize> = BTreeMap::new();
-    for door in split.values() {
-        if references.contains_key(door) {
-            return Err(format!("{door} is defined twice"));
+    // Each door's binding, and the extent of its definition: to the next
+    // symbol in its section, or the section's end.
+    let mut starts: BTreeMap<u8, BTreeSet<u64>> = BTreeMap::new();
+    for symbol in &symbols {
+        if symbol[4] & N_STAB == 0 && symbol[4] & N_TYPE == 0xe {
+            starts
+                .entry(symbol[5])
+                .or_default()
+                .insert(u64_at(symbol, 8));
         }
-        if undefined.iter().any(|(name, _)| name == door) {
-            return Err(format!("{door} is both defined and undefined"));
-        }
-        let at = u32::try_from(strings.len()).map_err(|error| error.to_string())?;
-        strings.extend_from_slice(door.as_bytes());
-        strings.push(0);
-        let mut symbol = [0; SYMBOL];
-        symbol[..4].copy_from_slice(&at.to_le_bytes());
-        symbol[4] = N_EXT;
-        references.insert(door, symbols.len());
-        undefined.push(((*door).to_owned(), symbols.len()));
-        symbols.push(symbol);
     }
+    let mut bindings: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut bodies: BTreeMap<u8, Vec<(u64, u64, &str)>> = BTreeMap::new();
+    for (&index, door) in &split {
+        let binding = plan
+            .bind
+            .get(*door)
+            .and_then(|binding| definitions.get(binding))
+            .ok_or_else(|| format!("no host binding for {door}"))?;
+        bindings.insert(index, *binding);
+        let symbol = &symbols[index];
+        let (section, start) = (symbol[5], u64_at(symbol, 8));
+        let end = starts
+            .get(&section)
+            .and_then(|starts| starts.range(start + 1..).next().copied())
+            .or_else(|| {
+                let header = object.sections.get(usize::from(section).wrapping_sub(1))?;
+                Some(header.addr + header.size)
+            })
+            .unwrap_or(start);
+        bodies.entry(section).or_default().push((start, end, door));
+    }
+    for (index, door) in &seam_references {
+        let binding = definitions
+            .get(&plan.bind[door])
+            .ok_or_else(|| format!("no host binding for {door}"))?;
+        bindings.insert(*index, *binding);
+    }
+    // Every door a reference may name, by its symbol's index.
+    let named_doors: BTreeMap<usize, &str> = split
+        .iter()
+        .map(|(index, door)| (*index, *door))
+        .chain(
+            seam_references
+                .iter()
+                .map(|(index, door)| (*index, door.as_str())),
+        )
+        .collect();
     // Each global debug note follows its symbol: kept, made a static's, or
     // dropped with nothing to describe.
     let mut addresses: BTreeMap<String, (u8, u64)> = BTreeMap::new();
@@ -385,8 +434,8 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
         renumber[*index] = u32::try_from(position).map_err(|error| error.to_string())?;
     }
     let remap = |index: usize, describing: bool| -> Result<u32, String> {
-        let target = match split.get(&index) {
-            Some(door) if !describing => references[door],
+        let target = match bindings.get(&index) {
+            Some(binding) if !describing => *binding,
             _ => index,
         };
         renumber
@@ -395,7 +444,8 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
             .ok_or_else(|| format!("symbol index {index} out of range"))
     };
 
-    for section in &object.sections {
+    let mut refused: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for (number, section) in object.sections.iter().enumerate() {
         let describing = describes_definitions(section);
         for entry in 0..section.nreloc {
             let at = section.reloff + entry * RELOCATION;
@@ -407,12 +457,33 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
             if info & (1 << 27) == 0 {
                 continue;
             }
-            let symbol = remap((info & 0x00ff_ffff) as usize, describing)?;
+            let named = (info & 0x00ff_ffff) as usize;
+            if let Some(door) = named_doors.get(&named).filter(|_| !describing) {
+                let site = section.addr + u64::from(u32_at(&bytes, at));
+                let section = u8::try_from(number + 1).unwrap_or(0);
+                if let Some((_, _, caller)) = bodies.get(&section).and_then(|bodies| {
+                    bodies
+                        .iter()
+                        .find(|(start, end, _)| (*start..*end).contains(&site))
+                }) {
+                    refused.insert((caller, door));
+                }
+            }
+            let symbol = remap(named, describing)?;
             if symbol > 0x00ff_ffff {
                 return Err("more symbols than a relocation can name".into());
             }
             set_u32(&mut bytes, at + 4, (info & 0xff00_0000) | symbol);
         }
+    }
+    if !refused.is_empty() {
+        let pairs: Vec<String> = refused
+            .iter()
+            .map(|(caller, door)| format!("{caller} -> {door}"))
+            .collect();
+        return Err(format!(
+            "doors whose own code names another door, which binds to the host's: {pairs:?}"
+        ));
     }
     if let Some(dysymtab) = object.dysymtab {
         let (offset, count) = (

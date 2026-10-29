@@ -8,6 +8,11 @@
 //! symbols this localises move down into the local part, and every reference
 //! to a global symbol's index is renumbered. A COMDAT group whose signature
 //! ends up local stops being COMDAT.
+//!
+//! The rewrite also binds references: a relocation in a loaded section other
+//! than the unwind table that names a symbol the plan binds names its binding
+//! instead, unless it lies in a door's own definition, which refuses the
+//! rewrite.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -21,6 +26,8 @@ const SHT_GROUP: u32 = 17;
 const SHT_SYMTAB_SHNDX: u32 = 18;
 const SHN_UNDEF: u16 = 0;
 const SHN_COMMON: u16 = 0xfff2;
+const SHN_XINDEX: u16 = 0xffff;
+const SHF_ALLOC: u64 = 0x2;
 const STB_LOCAL: u8 = 0;
 const GRP_COMDAT: u32 = 1;
 const STB_WEAK: u8 = 2;
@@ -38,6 +45,12 @@ pub(super) struct Plan<'a> {
     pub(super) weaken: &'a BTreeSet<String>,
     /// The (old) names whose definitions become references to their new name.
     pub(super) undefine: &'a BTreeSet<String>,
+    /// Old name to the (old) name of the definition every reference to it
+    /// from loaded code or data binds to instead.
+    pub(super) bind: &'a BTreeMap<String, String>,
+    /// The (old) names of the doors, whose own definitions may name no
+    /// symbol the plan binds.
+    pub(super) doors: &'a BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -52,8 +65,14 @@ impl Section {
     fn u64(&self, at: usize) -> u64 {
         u64::from_le_bytes(self.header[at..at + 8].try_into().expect("eight bytes"))
     }
+    fn name(&self) -> u32 {
+        self.u32(0)
+    }
     fn kind(&self) -> u32 {
         self.u32(4)
+    }
+    fn flags(&self) -> u64 {
+        self.u64(8)
     }
     fn offset(&self) -> u64 {
         self.u64(24)
@@ -138,6 +157,79 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
             .ok_or("unterminated name")?;
         String::from_utf8(rest[..end].to_vec()).map_err(|error| error.to_string())
     };
+    // What binding needs, read before the rewrite changes any symbol: each
+    // bound symbol's binding, the extent of each door's definition, and the
+    // sections whose references bind (loaded, other than the unwind table).
+    let shndx_table = match sections.iter().find(|section| {
+        section.kind() == SHT_SYMTAB_SHNDX && section.link() as usize == symtab_index
+    }) {
+        Some(section) => Some(read(section.offset(), section.size())?),
+        None => None,
+    };
+    let section_of = |index: usize, symbol: &[u8]| -> Result<usize, String> {
+        let shndx = u16::from_le_bytes([symbol[6], symbol[7]]);
+        if shndx != SHN_XINDEX {
+            return Ok(usize::from(shndx));
+        }
+        let table = shndx_table
+            .as_ref()
+            .ok_or("an extended section index without its table")?;
+        let entry = table
+            .get(index * 4..index * 4 + 4)
+            .ok_or("an extended section index out of range")?;
+        Ok(u32::from_le_bytes(entry.try_into().expect("four bytes")) as usize)
+    };
+    let mut globals: BTreeMap<String, u32> = BTreeMap::new();
+    let mut bodies: BTreeMap<usize, Vec<(u64, u64, String)>> = BTreeMap::new();
+    for index in first_global..total {
+        let symbol = &symbols[index * SYMBOL..(index + 1) * SYMBOL];
+        let old = name(&strings, symbol)?;
+        let shndx = u16::from_le_bytes([symbol[6], symbol[7]]);
+        if plan.doors.contains(&old) && shndx != SHN_UNDEF {
+            let value = u64::from_le_bytes(symbol[8..16].try_into().expect("eight bytes"));
+            let size = u64::from_le_bytes(symbol[16..24].try_into().expect("eight bytes"));
+            bodies.entry(section_of(index, symbol)?).or_default().push((
+                value,
+                value + size,
+                old.clone(),
+            ));
+        }
+        globals.insert(
+            old,
+            u32::try_from(index).map_err(|error| error.to_string())?,
+        );
+    }
+    let mut bindings: BTreeMap<u32, (u32, &str)> = BTreeMap::new();
+    for (bound, binding) in plan.bind {
+        let Some(&index) = globals.get(bound) else {
+            continue;
+        };
+        let target = *globals
+            .get(binding)
+            .ok_or_else(|| format!("no binding {binding} for {bound}"))?;
+        let door = bound.strip_prefix("__wrap_").unwrap_or(bound);
+        bindings.insert(index, (target, door));
+    }
+    let section_names = {
+        let index = match u16::from_le_bytes([ident[0x3e], ident[0x3f]]) {
+            SHN_XINDEX => sections[0].link() as usize,
+            index => usize::from(index),
+        };
+        let table = sections.get(index).ok_or("no section name table")?;
+        read(table.offset(), table.size())?
+    };
+    let binding_sections: Vec<bool> = sections
+        .iter()
+        .map(|section| {
+            let name = section_names
+                .get(section.name() as usize..)
+                .and_then(|rest| rest.split(|byte| *byte == 0).next())
+                .unwrap_or_default();
+            section.flags() & SHF_ALLOC != 0 && name != b".eh_frame"
+        })
+        .collect();
+    let mut refused: BTreeSet<(String, &str)> = BTreeSet::new();
+
     // The globals in their new order: those localised, then those kept.
     let mut localised = Vec::new();
     let mut kept = Vec::new();
@@ -198,12 +290,26 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
         match section.kind() {
             SHT_RELA | SHT_REL => {
                 let entry = if section.kind() == SHT_RELA { 24 } else { 16 };
+                let target = section.info() as usize;
+                let binds = binding_sections.get(target).copied().unwrap_or(false);
                 let mut relocations = read(section.offset(), section.size())?;
                 let mut changed = false;
                 for relocation in relocations.chunks_exact_mut(entry) {
                     let info =
                         u64::from_le_bytes(relocation[8..16].try_into().expect("eight bytes"));
-                    let symbol = (info >> 32) as u32;
+                    let mut symbol = (info >> 32) as u32;
+                    if binds && let Some(&(binding, door)) = bindings.get(&symbol) {
+                        let offset =
+                            u64::from_le_bytes(relocation[..8].try_into().expect("eight bytes"));
+                        if let Some((_, _, caller)) = bodies.get(&target).and_then(|bodies| {
+                            bodies
+                                .iter()
+                                .find(|(start, end, _)| (*start..*end).contains(&offset))
+                        }) {
+                            refused.insert((caller.clone(), door));
+                        }
+                        symbol = binding;
+                    }
                     if (symbol as usize) < first_global {
                         continue;
                     }
@@ -242,6 +348,15 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
             }
             _ => {}
         }
+    }
+    if !refused.is_empty() {
+        let pairs: Vec<String> = refused
+            .iter()
+            .map(|(caller, door)| format!("{caller} -> {door}"))
+            .collect();
+        return Err(format!(
+            "doors whose own code names another door, which binds to the host's: {pairs:?}"
+        ));
     }
 
     file.write_all_at(&reordered, symtab.offset())

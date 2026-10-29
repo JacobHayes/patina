@@ -317,8 +317,8 @@ static PLANTED_REENTRY: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomic
 /// tests: the next system call dispatched (the caller's own `syscall(2)`,
 /// which holds the thread, or `prctl`, which does not) makes one of its own
 /// from inside its dispatch. It writes a marker to stderr through the C library's `syscall(2)`
-/// (`kind` 0), which binds to the shim's own door as std's futex-based locks
-/// and once-cells do when they wait or wake, or as a raw `syscall`
+/// (`kind` 0), which binds to the shim's own door in the unsealed archive the
+/// plant links (a sealed engine's call binds to the host's), or as a raw `syscall`
 /// instruction (`kind` 1, x86_64), which traps: the marker is written only if
 /// that call is serviced.
 #[cfg(feature = "planted-faults")]
