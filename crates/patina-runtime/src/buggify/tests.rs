@@ -1,5 +1,6 @@
 //! Tests for cooperative fault sites, verdicts, and application oracles.
 
+use crate::RuntimeError;
 use crate::buggify::{Buggify, BuggifyKind, SiteOutcome, label_hash};
 use crate::config::{BuggifyConfig, RuntimeConfig};
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
 };
 use patina_dst_abi::Operation;
 
-use patina_dst_trace::TraceBundle;
+use patina_dst_trace::{TraceBundle, TraceError};
 use tempfile::tempdir;
 
 fn buggify_context(seed: u64, config: BuggifyConfig) -> Context {
@@ -416,10 +417,12 @@ fn verdict_stream_records_replays_and_refuses_a_divergent_replay() {
     let error = diverged
         .verdict(VerdictKind::Violation, "phase-one", "a")
         .expect_err("a diverging verdict must be refused");
-    let message = error.to_string();
     assert!(
-        message.contains("mismatch"),
-        "expected an operation mismatch, got: {message}"
+        matches!(
+            error,
+            RuntimeError::Trace(TraceError::OperationMismatch { .. })
+        ),
+        "expected an operation mismatch, got: {error:?}"
     );
 }
 

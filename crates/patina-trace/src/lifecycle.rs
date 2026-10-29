@@ -51,15 +51,129 @@ pub(super) fn validate_timeline_lifecycle(timeline: &Timeline) -> Result<(), Tra
     )
 }
 
+/// What is wrong with a timeline's incarnation lifecycle. The validator's
+/// refusals are distinct failures of one state machine, so a consumer (or a
+/// test) can tell them apart without reading the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LifecycleViolation {
+    TooShort,
+    DuplicateOrder {
+        order: u64,
+    },
+    OrderNotIncreasing {
+        order: u64,
+    },
+    StartWhileActive {
+        incarnation: u64,
+    },
+    StartDisagreesWithRestart {
+        incarnation: u64,
+        expected: u64,
+    },
+    StartWithoutRestart {
+        incarnation: u64,
+    },
+    CrashInactive {
+        incarnation: u64,
+    },
+    RestartWhileActive,
+    RestartWithoutCrash,
+    RestartMismatchesCrash,
+    RestartNotForward,
+    EndInactive {
+        incarnation: u64,
+    },
+    NotEndedCleanly,
+    OperationReusesOrder {
+        sequence: u64,
+        order: u64,
+    },
+    OperationOutsideIncarnation {
+        sequence: u64,
+        order: u64,
+    },
+    OperationIncarnationMismatch {
+        sequence: u64,
+        declared: u64,
+        expected: u64,
+    },
+}
+
+impl std::fmt::Display for LifecycleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooShort => write!(f, "must record at least Start and End lifecycle events"),
+            Self::DuplicateOrder { order } => write!(f, "has duplicate global order {order}"),
+            Self::OrderNotIncreasing { order } => {
+                write!(f, "lifecycle order {order} is not strictly increasing")
+            }
+            Self::StartWhileActive { incarnation } => write!(
+                f,
+                "starts incarnation {incarnation} while another incarnation is active"
+            ),
+            Self::StartDisagreesWithRestart {
+                incarnation,
+                expected,
+            } => write!(
+                f,
+                "starts incarnation {incarnation} but restart expected {expected}"
+            ),
+            Self::StartWithoutRestart { incarnation } => {
+                write!(f, "has Start({incarnation}) without a preceding Restart")
+            }
+            Self::CrashInactive { incarnation } => {
+                write!(f, "crashes inactive incarnation {incarnation}")
+            }
+            Self::RestartWhileActive => {
+                write!(f, "restarts while an incarnation is still active")
+            }
+            Self::RestartWithoutCrash => write!(f, "has Restart without a preceding Crash"),
+            Self::RestartMismatchesCrash => {
+                write!(f, "Restart does not match preceding Crash")
+            }
+            Self::RestartNotForward => {
+                write!(f, "Restart target must be greater than source")
+            }
+            Self::EndInactive { incarnation } => {
+                write!(f, "ends inactive incarnation {incarnation}")
+            }
+            Self::NotEndedCleanly => write!(f, "lifecycle does not end cleanly"),
+            Self::OperationReusesOrder { sequence, order } => {
+                write!(
+                    f,
+                    "operation sequence {sequence} reuses global order {order}"
+                )
+            }
+            Self::OperationOutsideIncarnation { sequence, order } => write!(
+                f,
+                "operation sequence {sequence} at order {order} is outside any active incarnation"
+            ),
+            Self::OperationIncarnationMismatch {
+                sequence,
+                declared,
+                expected,
+            } => write!(
+                f,
+                "operation sequence {sequence} declares incarnation {declared}, expected {expected} from lifecycle"
+            ),
+        }
+    }
+}
+
+fn lifecycle_error(label: &str, violation: LifecycleViolation) -> TraceError {
+    TraceError::Lifecycle {
+        label: label.to_owned(),
+        violation,
+    }
+}
+
 pub(super) fn validate_lifecycle_events(
     label: &str,
     lifecycle: &[LifecycleEvent],
     decisions: &[TraceEvent],
 ) -> Result<(), TraceError> {
     if lifecycle.len() < 2 {
-        return Err(TraceError::Invalid(format!(
-            "{label} must record at least Start and End lifecycle events"
-        )));
+        return Err(lifecycle_error(label, LifecycleViolation::TooShort));
     }
 
     let mut global_orders = BTreeSet::new();
@@ -68,34 +182,48 @@ pub(super) fn validate_lifecycle_events(
     let mut last_crash: Option<(u64, &str)> = None;
     for (index, marker) in lifecycle.iter().enumerate() {
         if !global_orders.insert(marker.order) {
-            return Err(TraceError::Invalid(format!(
-                "{label} has duplicate global order {}",
-                marker.order
-            )));
+            return Err(lifecycle_error(
+                label,
+                LifecycleViolation::DuplicateOrder {
+                    order: marker.order,
+                },
+            ));
         }
         if index > 0 && marker.order <= lifecycle[index - 1].order {
-            return Err(TraceError::Invalid(format!(
-                "{label} lifecycle order {} is not strictly increasing",
-                marker.order
-            )));
+            return Err(lifecycle_error(
+                label,
+                LifecycleViolation::OrderNotIncreasing {
+                    order: marker.order,
+                },
+            ));
         }
         match &marker.kind {
             LifecycleEventKind::Start { incarnation } => {
                 if active.is_some() {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} starts incarnation {incarnation} while another incarnation is active"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::StartWhileActive {
+                            incarnation: *incarnation,
+                        },
+                    ));
                 }
                 if let Some(expected) = pending_restart_start.take() {
                     if *incarnation != expected {
-                        return Err(TraceError::Invalid(format!(
-                            "{label} starts incarnation {incarnation} but restart expected {expected}"
-                        )));
+                        return Err(lifecycle_error(
+                            label,
+                            LifecycleViolation::StartDisagreesWithRestart {
+                                incarnation: *incarnation,
+                                expected,
+                            },
+                        ));
                     }
                 } else if index != 0 {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} has Start({incarnation}) without a preceding Restart"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::StartWithoutRestart {
+                            incarnation: *incarnation,
+                        },
+                    ));
                 }
                 active = Some(*incarnation);
             }
@@ -106,9 +234,12 @@ pub(super) fn validate_lifecycle_events(
             } => {
                 Sha256Digest::parse(snapshot_digest)?;
                 if active != Some(*incarnation) {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} crashes inactive incarnation {incarnation}"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::CrashInactive {
+                            incarnation: *incarnation,
+                        },
+                    ));
                 }
                 active = None;
                 last_crash = Some((*incarnation, snapshot_digest.as_str()));
@@ -120,62 +251,77 @@ pub(super) fn validate_lifecycle_events(
             } => {
                 Sha256Digest::parse(snapshot_digest)?;
                 if active.is_some() {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} restarts while an incarnation is still active"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::RestartWhileActive,
+                    ));
                 }
                 let Some((crashed, crash_digest)) = last_crash.take() else {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} has Restart without a preceding Crash"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::RestartWithoutCrash,
+                    ));
                 };
                 if crashed != *from_incarnation || crash_digest != snapshot_digest {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} Restart does not match preceding Crash"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::RestartMismatchesCrash,
+                    ));
                 }
                 if to_incarnation <= from_incarnation {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} Restart target must be greater than source"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::RestartNotForward,
+                    ));
                 }
                 pending_restart_start = Some(*to_incarnation);
             }
             LifecycleEventKind::End { incarnation } => {
                 if active != Some(*incarnation) {
-                    return Err(TraceError::Invalid(format!(
-                        "{label} ends inactive incarnation {incarnation}"
-                    )));
+                    return Err(lifecycle_error(
+                        label,
+                        LifecycleViolation::EndInactive {
+                            incarnation: *incarnation,
+                        },
+                    ));
                 }
                 active = None;
             }
         }
     }
     if active.is_some() || pending_restart_start.is_some() || last_crash.is_some() {
-        return Err(TraceError::Invalid(format!(
-            "{label} lifecycle does not end cleanly"
-        )));
+        return Err(lifecycle_error(label, LifecycleViolation::NotEndedCleanly));
     }
 
     for event in decisions {
         if !global_orders.insert(event.order) {
-            return Err(TraceError::Invalid(format!(
-                "{label} operation sequence {} reuses global order {}",
-                event.sequence, event.order
-            )));
+            return Err(lifecycle_error(
+                label,
+                LifecycleViolation::OperationReusesOrder {
+                    sequence: event.sequence,
+                    order: event.order,
+                },
+            ));
         }
         let active_incarnation =
             active_incarnation_at_order(lifecycle, event.order).ok_or_else(|| {
-                TraceError::Invalid(format!(
-                    "{label} operation sequence {} at order {} is outside any active incarnation",
-                    event.sequence, event.order
-                ))
+                lifecycle_error(
+                    label,
+                    LifecycleViolation::OperationOutsideIncarnation {
+                        sequence: event.sequence,
+                        order: event.order,
+                    },
+                )
             })?;
         if event.incarnation != active_incarnation {
-            return Err(TraceError::Invalid(format!(
-                "{label} operation sequence {} declares incarnation {}, expected {} from lifecycle",
-                event.sequence, event.incarnation, active_incarnation
-            )));
+            return Err(lifecycle_error(
+                label,
+                LifecycleViolation::OperationIncarnationMismatch {
+                    sequence: event.sequence,
+                    declared: event.incarnation,
+                    expected: active_incarnation,
+                },
+            ));
         }
     }
     Ok(())

@@ -459,12 +459,10 @@ mod tests {
             || unreachable!(),
         )
         .expect_err("a changed key must be refused");
-        let message = error.to_string();
         assert!(
-            message.contains("dns.lookup") && message.contains("elsewhere.com"),
-            "the refusal must name the label and what was asked: {message}"
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "dns.lookup"),
+            "{error:?}"
         );
-        assert!(matches!(error, RuntimeError::CustomOp { .. }), "{error:?}");
 
         // Same key, different label.
         let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
@@ -475,10 +473,9 @@ mod tests {
             || unreachable!(),
         )
         .expect_err("a changed label must be refused");
-        let message = error.to_string();
         assert!(
-            message.contains("dns.reverse") && message.contains("dns.lookup"),
-            "the refusal must name both labels: {message}"
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "dns.reverse"),
+            "{error:?}"
         );
 
         // The clean replay still works, so the two refusals above are not a
@@ -506,10 +503,9 @@ mod tests {
         let error = context
             .custom_op_record(b"result".to_vec())
             .expect_err("a modeled operation inside perform must be refused");
-        let message = error.to_string();
         assert!(
-            message.contains("wrapped.fs") && message.contains("1 modeled boundary operation"),
-            "{message}"
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "wrapped.fs"),
+            "{error:?}"
         );
     }
 
@@ -525,14 +521,17 @@ mod tests {
             .custom_op_begin("inner", b"k", false)
             .expect_err("a nested custom op must be refused");
         assert!(
-            error.to_string().contains("inner") && error.to_string().contains("outer"),
-            "{error}"
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "inner"),
+            "{error:?}"
         );
         // A record pass has no recorded answer to hand back.
         let error = context
             .custom_op_replay_result()
             .expect_err("a record pass has no recorded result");
-        assert!(error.to_string().contains("outer"), "{error}");
+        assert!(
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "outer"),
+            "{error:?}"
+        );
 
         // ... and the still-open operation is refused at finish rather than
         // silently leaving the trace short one event.
@@ -542,7 +541,10 @@ mod tests {
             .custom_op_begin("never-closed", b"k", false)
             .unwrap();
         let error = context.finish().expect_err("an open custom op must refuse");
-        assert!(error.to_string().contains("never-closed"), "{error}");
+        assert!(
+            matches!(&error, RuntimeError::CustomOp { label, .. } if label == "never-closed"),
+            "{error:?}"
+        );
 
         // Closing with no operation open is equally refused.
         let mut context = Context::from_config(RuntimeConfig::seeded(3)).unwrap();

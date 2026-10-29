@@ -30,14 +30,14 @@ mod replay;
 
 pub use branch::BranchSession;
 pub use bundle::{Timeline, TraceBundle, TraceEvent};
-pub use crash_restart::CrashRestartSegments;
+pub use crash_restart::{CrashRestartError, CrashRestartSegments};
 pub use digest::Sha256Digest;
 pub use file_lock::{create_scratch, lock_exclusive, lock_shared, path_names, remove_dead_scratch};
 pub use handoff::{
     CrashReport, HandoffConsumedState, HandoffError, HandoffSealKey, IncarnationHandoff,
     MAX_CRASH_REPORT_REASON_BYTES, MAX_HANDOFF_PAYLOAD_BYTES, VerifiedIncarnationHandoff,
 };
-pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
+pub use lifecycle::{LifecycleEvent, LifecycleEventKind, LifecycleViolation};
 pub use metadata::{
     AddressLayout, BuggifyConfigRecord, ComputeStop, DnsConfigRecord, FaultConfigRecord,
     PctPolicyRecord, RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, WatchdogConfigRecord,
@@ -228,6 +228,15 @@ pub enum TraceError {
         found: u32,
     },
     Invalid(String),
+    /// A timeline's incarnation lifecycle breaks the Start/Crash/Restart/End
+    /// state machine; `label` names the timeline and `violation` the break.
+    Lifecycle {
+        label: String,
+        violation: LifecycleViolation,
+    },
+    /// A trace cannot be split into, or joined from, the two incarnation
+    /// segments of a crash-restart run.
+    CrashRestart(CrashRestartError),
     /// A *budget* refusal: the trace is larger than a configured limit allows.
     /// Distinct in kind from every other variant here — nothing is broken or
     /// corrupt, the run simply produced more than the budget carries — so a
@@ -323,6 +332,10 @@ impl fmt::Display for TraceError {
                 patina_dst_abi::TIME_MODEL
             ),
             Self::Invalid(message) => write!(f, "invalid trace: {message}"),
+            Self::Lifecycle { label, violation } => {
+                write!(f, "invalid trace: {label} {violation}")
+            }
+            Self::CrashRestart(error) => write!(f, "invalid trace: {error}"),
             Self::ResourceLimit { message, .. } => {
                 write!(f, "trace resource limit exceeded: {message}")
             }

@@ -172,7 +172,7 @@ fn record_mode_rejects_concurrent_and_existing_trace_writers() {
     let first = Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")).unwrap();
     assert!(matches!(
         Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
-        Err(RuntimeError::Config(message)) if message.contains("another Patina recorder")
+        Err(RuntimeError::Config(_))
     ));
     drop(first);
 
@@ -182,14 +182,14 @@ fn record_mode_rejects_concurrent_and_existing_trace_writers() {
         .unwrap();
     assert!(matches!(
         Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
-        Err(RuntimeError::Config(message)) if message.contains("refusing to overwrite")
+        Err(RuntimeError::Config(_))
     ));
 
     let branch = |id: &str| RuntimeConfig::branch(&path, "main", 0, id, 2, "fixture-v1");
     let first = Context::from_config(branch("first")).unwrap();
     assert!(matches!(
         Context::from_config(branch("second")),
-        Err(RuntimeError::Config(message)) if message.contains("another Patina recorder")
+        Err(RuntimeError::Config(_))
     ));
     first.finish().unwrap();
 

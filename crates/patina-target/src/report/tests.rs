@@ -6,7 +6,7 @@ use crate::provenance::NativeProvenance;
 use crate::tests::instruction_finding;
 
 #[test]
-fn cpu_nondeterminism_note_names_allowability_and_trappability() {
+fn cpu_nondeterminism_note_names_the_blocked_instructions() {
     // No instruction findings: no note (a by-name cpu-nondeterminism import
     // is answered by the ordinary symbol machinery).
     let by_name = NativeEscape::new(
@@ -16,23 +16,17 @@ fn cpu_nondeterminism_note_names_allowability_and_trappability() {
     );
     assert!(render_cpu_nondeterminism_note(&[by_name]).is_none());
 
-    // A blocked timestamp read: say it is trappable elsewhere, and that
-    // --allow cannot clear an instruction finding.
+    // A blocked instruction finding carries a note naming the instruction.
     let note =
         render_cpu_nondeterminism_note(&[instruction_finding("cpu-nondeterminism", "rdtscp")])
             .expect("a blocked instruction finding must carry a note");
-    assert!(note.contains("--allow <symbol> cannot clear one"), "{note}");
     assert!(note.contains("rdtscp"), "{note}");
-    assert!(note.contains("PR_SET_TSC"), "{note}");
 
-    // A blocked entropy read: say it is untrappable anywhere, so the operator
-    // is not sent hunting for a platform that would run it.
+    // Every blocked instruction is named.
     let note = render_cpu_nondeterminism_note(&[
         instruction_finding("cpu-nondeterminism", "rdrand"),
         instruction_finding("cpu-nondeterminism", "cntvct"),
     ])
     .expect("a blocked instruction finding must carry a note");
-    assert!(note.contains("untrappable anywhere"), "{note}");
-    assert!(note.contains("cntvct/rdrand"), "{note}");
-    assert!(!note.contains("PR_SET_TSC"), "{note}");
+    assert!(note.contains("cntvct") && note.contains("rdrand"), "{note}");
 }

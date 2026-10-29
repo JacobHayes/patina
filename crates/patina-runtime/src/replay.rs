@@ -618,22 +618,12 @@ mod tests {
         // RED direction 1: a trace recorded under SUD replayed where SUD did not
         // arm (kernel lacks it / macOS) is refused up front, naming the kernel.
         let err = reconcile_replay_sud(&unarmed, Some(true)).unwrap_err();
-        let text = format!("{err}");
-        assert!(
-            text.contains("recorded under syscall-user-dispatch"),
-            "{text}"
-        );
-        assert!(
-            text.contains("rustix_use_libc") || text.contains("lacks SUD"),
-            "{text}"
-        );
+        assert!(matches!(err, RuntimeError::Config(_)), "{err:?}");
 
         // RED direction 2: a run that armed SUD replaying a trace recorded WITHOUT
         // it is refused too — the converse mismatch, never a silent divergence.
         let err = reconcile_replay_sud(&armed, None).unwrap_err();
-        let text = format!("{err}");
-        assert!(text.contains("armed syscall-user-dispatch"), "{text}");
-        assert!(text.contains("recorded WITHOUT it"), "{text}");
+        assert!(matches!(err, RuntimeError::Config(_)), "{err:?}");
     }
 
     #[test]

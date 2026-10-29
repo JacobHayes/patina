@@ -71,7 +71,10 @@ mod coverage_tests {
     /// guard was hit, and when the guard and pc tables disagree.
     #[test]
     fn requested_coverage_refuses_missing_empty_or_mismatched_tables() {
-        assert!(prepare_coverage_output(true, &[], &[]).is_err());
+        assert_eq!(
+            prepare_coverage_output(true, &[], &[]).unwrap_err(),
+            CoverageError::Unavailable
+        );
 
         let counters = [0u32, 0];
         let pcs = [
@@ -89,10 +92,7 @@ mod coverage_tests {
             len: counters.len(),
         }];
         let error = prepare_coverage_output(true, &guards, &pc_ranges).unwrap_err();
-        assert!(
-            error.contains("edges_total=2") && error.contains("edges_covered=0"),
-            "empty-coverage refusal should name the zero covered count; got {error}"
-        );
+        assert_eq!(error, CoverageError::Empty { edges_total: 2 });
 
         let guards = [CoverageRange {
             start: 0x1000,
@@ -103,10 +103,7 @@ mod coverage_tests {
             len: 2,
         }];
         let error = prepare_coverage_output(true, &guards, &pcs).unwrap_err();
-        assert!(
-            error.contains("guards=3") && error.contains("pcs=2"),
-            "mismatch refusal should name both counts; got {error}"
-        );
+        assert_eq!(error, CoverageError::TableMismatch { guards: 3, pcs: 2 });
     }
 
     #[test]

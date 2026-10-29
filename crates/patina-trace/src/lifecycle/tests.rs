@@ -55,7 +55,13 @@ fn resolved_branch_lifecycle_state_is_validated() {
     };
     let error = bundle.validate().unwrap_err();
     assert!(
-        matches!(&error, TraceError::Invalid(message) if message.contains("resolved timeline branch-1 starts incarnation 1 while another incarnation is active")),
+        matches!(
+            &error,
+            TraceError::Lifecycle {
+                label,
+                violation: LifecycleViolation::StartWhileActive { incarnation: 1 },
+            } if label == "resolved timeline branch-1"
+        ),
         "unexpected error: {error}"
     );
 }
@@ -69,7 +75,13 @@ fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     bundle.timelines[0].decisions[0].order = 0;
     let error = bundle.validate().unwrap_err();
     assert!(
-        error.to_string().contains("reuses global order"),
+        matches!(
+            error,
+            TraceError::Lifecycle {
+                violation: LifecycleViolation::OperationReusesOrder { .. },
+                ..
+            }
+        ),
         "duplicate lifecycle/operation order must be named: {error}"
     );
 
@@ -80,9 +92,17 @@ fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     bundle.timelines[0].decisions[0].incarnation = 1;
     let error = bundle.validate().unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("declares incarnation 1, expected 0"),
+        matches!(
+            error,
+            TraceError::Lifecycle {
+                violation: LifecycleViolation::OperationIncarnationMismatch {
+                    declared: 1,
+                    expected: 0,
+                    ..
+                },
+                ..
+            }
+        ),
         "incarnation/lifecycle mismatch must be named: {error}"
     );
 
@@ -92,9 +112,13 @@ fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     bundle.timelines[0].lifecycle[1].kind = LifecycleEventKind::End { incarnation: 0 };
     let error = bundle.validate().unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("Restart without a preceding Crash"),
+        matches!(
+            error,
+            TraceError::Lifecycle {
+                violation: LifecycleViolation::RestartWithoutCrash,
+                ..
+            }
+        ),
         "missing crash must be named: {error}"
     );
 
@@ -107,9 +131,13 @@ fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     }
     let error = bundle.validate().unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("Restart does not match preceding Crash"),
+        matches!(
+            error,
+            TraceError::Lifecycle {
+                violation: LifecycleViolation::RestartMismatchesCrash,
+                ..
+            }
+        ),
         "digest mismatch must be named: {error}"
     );
 
@@ -117,7 +145,13 @@ fn malformed_lifecycles_are_refused_by_what_is_wrong() {
     bundle.timelines[0].lifecycle.pop();
     let error = bundle.validate().unwrap_err();
     assert!(
-        error.to_string().contains("lifecycle does not end cleanly"),
+        matches!(
+            error,
+            TraceError::Lifecycle {
+                violation: LifecycleViolation::NotEndedCleanly,
+                ..
+            }
+        ),
         "unended lifecycle must be named: {error}"
     );
 }

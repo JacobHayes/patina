@@ -141,11 +141,7 @@ impl TraceBundle {
             return Ok(None);
         }
         let [main] = self.timelines.as_slice() else {
-            return Err(TraceError::Invalid(
-                "a crash-restart trace must hold exactly one timeline; branching a crash-restart \
-                 run is not modeled"
-                    .into(),
-            ));
+            return Err(CrashRestartError::NotOneTimeline.into());
         };
         let (kind, digest) = match main.lifecycle.as_slice() {
             [
@@ -181,11 +177,7 @@ impl TraceBundle {
                 },
             ] => (*crash_kind, Sha256Digest::parse(snapshot_digest)?),
             _ => {
-                return Err(TraceError::Invalid(
-                    "a crash-restart trace must record exactly Start(0), Crash(0), \
-                     Restart(0 -> 1), Start(1), End(1)"
-                        .into(),
-                ));
+                return Err(CrashRestartError::UnexpectedLifecycle.into());
             }
         };
         let segment = |incarnation: u64| {
@@ -213,6 +205,71 @@ fn is_crash(marker: &LifecycleEvent) -> bool {
     matches!(marker.kind, LifecycleEventKind::Crash { .. })
 }
 
+/// Why a trace is not (or cannot be joined from) the two incarnation segments
+/// of one crash-restart run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CrashRestartError {
+    /// The trace holds more than one timeline; branching a crash-restart run is
+    /// not modeled.
+    NotOneTimeline,
+    /// The lifecycle is not exactly Start(0), Crash(0), Restart(0 -> 1),
+    /// Start(1), End(1).
+    UnexpectedLifecycle,
+    /// A segment is not one unbranched timeline of its own incarnation.
+    SegmentNotLinear { incarnation: u64 },
+    /// The two incarnations recorded different run metadata.
+    MetadataDiffers,
+    /// Only one incarnation recorded a buggify configuration.
+    BuggifyPresenceDiffers,
+    /// The two incarnations recorded different buggify configurations.
+    BuggifyConfigDiffers,
+    /// The two incarnations realized different values for one buggify knob.
+    BuggifyKnobDiffers { knob: String },
+}
+
+impl std::fmt::Display for CrashRestartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotOneTimeline => write!(
+                f,
+                "a crash-restart trace must hold exactly one timeline; branching a crash-restart \
+                 run is not modeled"
+            ),
+            Self::UnexpectedLifecycle => write!(
+                f,
+                "a crash-restart trace must record exactly Start(0), Crash(0), \
+                 Restart(0 -> 1), Start(1), End(1)"
+            ),
+            Self::SegmentNotLinear { incarnation } => write!(
+                f,
+                "incarnation {incarnation}'s segment must be one linear timeline of that incarnation"
+            ),
+            Self::MetadataDiffers => write!(
+                f,
+                "the crashed and restarted incarnations recorded different run metadata"
+            ),
+            Self::BuggifyPresenceDiffers => {
+                write!(f, "only one incarnation recorded a buggify configuration")
+            }
+            Self::BuggifyConfigDiffers => write!(
+                f,
+                "the crashed and restarted incarnations recorded different buggify configurations"
+            ),
+            Self::BuggifyKnobDiffers { knob } => write!(
+                f,
+                "the crashed and restarted incarnations realized different values for buggify \
+                 knob {knob:?}"
+            ),
+        }
+    }
+}
+
+impl From<CrashRestartError> for TraceError {
+    fn from(error: CrashRestartError) -> Self {
+        Self::CrashRestart(error)
+    }
+}
+
 /// The decisions of a segment that is `incarnation`'s own linear trace: one
 /// unbranched timeline whose lifecycle is `Start(incarnation)`,
 /// `End(incarnation)`.
@@ -222,9 +279,7 @@ fn incarnation_decisions(
 ) -> Result<Vec<TraceEvent>, TraceError> {
     bundle.validate()?;
     let [main] = bundle.timelines.as_slice() else {
-        return Err(TraceError::Invalid(format!(
-            "incarnation {incarnation}'s segment must be one linear timeline"
-        )));
+        return Err(CrashRestartError::SegmentNotLinear { incarnation }.into());
     };
     match main.lifecycle.as_slice() {
         [
@@ -237,9 +292,7 @@ fn incarnation_decisions(
                 ..
             },
         ] if *start == incarnation && *end == incarnation => Ok(main.decisions.clone()),
-        _ => Err(TraceError::Invalid(format!(
-            "incarnation {incarnation}'s segment must be one linear timeline of that incarnation"
-        ))),
+        _ => Err(CrashRestartError::SegmentNotLinear { incarnation }.into()),
     }
 }
 
@@ -253,9 +306,7 @@ fn merge_incarnation_metadata(
 ) -> Result<RunMetadata, TraceError> {
     let buggify = merge_buggify(crashed.buggify.take(), restarted.buggify.take())?;
     if crashed != restarted {
-        return Err(TraceError::Invalid(
-            "the crashed and restarted incarnations recorded different run metadata".into(),
-        ));
+        return Err(CrashRestartError::MetadataDiffers.into());
     }
     crashed.buggify = buggify;
     Ok(crashed)
@@ -269,9 +320,7 @@ fn merge_buggify(
         (None, None) => return Ok(None),
         (Some(crashed), Some(restarted)) => (crashed, restarted),
         _ => {
-            return Err(TraceError::Invalid(
-                "only one incarnation recorded a buggify configuration".into(),
-            ));
+            return Err(CrashRestartError::BuggifyPresenceDiffers.into());
         }
     };
     let config_differs = crashed.fire_permille != restarted.fire_permille
@@ -279,10 +328,7 @@ fn merge_buggify(
         || crashed.cutoff_nanos != restarted.cutoff_nanos
         || crashed.after_setup != restarted.after_setup;
     if config_differs {
-        return Err(TraceError::Invalid(
-            "the crashed and restarted incarnations recorded different buggify configurations"
-                .into(),
-        ));
+        return Err(CrashRestartError::BuggifyConfigDiffers.into());
     }
     let active_sites: BTreeSet<String> = crashed
         .active_sites
@@ -292,10 +338,7 @@ fn merge_buggify(
     let mut knobs = crashed.knobs;
     for (label, value) in restarted.knobs {
         if *knobs.entry(label.clone()).or_insert(value) != value {
-            return Err(TraceError::Invalid(format!(
-                "the crashed and restarted incarnations realized different values for buggify \
-                 knob {label:?}"
-            )));
+            return Err(CrashRestartError::BuggifyKnobDiffers { knob: label }.into());
         }
     }
     Ok(Some(BuggifyConfigRecord {
@@ -425,7 +468,10 @@ mod tests {
         });
         let error = branched.crash_restart_segments().unwrap_err();
         assert!(
-            error.to_string().contains("exactly one timeline"),
+            matches!(
+                error,
+                TraceError::CrashRestart(CrashRestartError::NotOneTimeline)
+            ),
             "{error}"
         );
     }
@@ -439,21 +485,33 @@ mod tests {
         parts.restarted.metadata.root_seed += 1;
         let error = parts.join().unwrap_err();
         assert!(
-            error.to_string().contains("different run metadata"),
+            matches!(
+                error,
+                TraceError::CrashRestart(CrashRestartError::MetadataDiffers)
+            ),
             "{error}"
         );
 
         let mut parts = segments();
         parts.restarted = segments().join().unwrap();
         let error = parts.join().unwrap_err();
-        assert!(error.to_string().contains("one linear timeline"), "{error}");
+        assert!(
+            matches!(
+                error,
+                TraceError::CrashRestart(CrashRestartError::SegmentNotLinear { incarnation: 1 })
+            ),
+            "{error}"
+        );
 
         let mut parts = segments();
         let metadata = parts.restarted.metadata.clone();
         parts.restarted = segment(&metadata, 0, &[b"after"]);
         let error = parts.join().unwrap_err();
         assert!(
-            error.to_string().contains("incarnation 1's segment"),
+            matches!(
+                error,
+                TraceError::CrashRestart(CrashRestartError::SegmentNotLinear { incarnation: 1 })
+            ),
             "{error}"
         );
     }
@@ -475,6 +533,12 @@ mod tests {
         parts.crashed.metadata.buggify = Some(buggify(&[], &[("b", 4)]));
         parts.restarted.metadata.buggify = Some(buggify(&[], &[("b", 5)]));
         let error = parts.join().unwrap_err();
-        assert!(error.to_string().contains("knob \"b\""), "{error}");
+        assert!(
+            matches!(
+                &error,
+                TraceError::CrashRestart(CrashRestartError::BuggifyKnobDiffers { knob }) if knob == "b"
+            ),
+            "{error}"
+        );
     }
 }

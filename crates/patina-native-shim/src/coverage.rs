@@ -93,10 +93,45 @@ fn coverage_snapshot() -> (Vec<CoverageRange>, Vec<CoverageRange>) {
     (state.guard_ranges.clone(), state.pc_ranges.clone())
 }
 
-fn coverage_count(ranges: &[CoverageRange]) -> Result<usize, String> {
+/// Why requested coverage could not be prepared or encoded. Every variant is
+/// fatal for the coverage request; the split lets the tests (and the report
+/// text) tell the failure classes apart.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CoverageError {
+    /// The binary registered no guard ranges: it was not built instrumented.
+    Unavailable,
+    /// Guards are registered but none was ever hit.
+    Empty { edges_total: u64 },
+    /// The guard and pc tables disagree in total size.
+    TableMismatch { guards: usize, pcs: usize },
+    /// Any other malformed range table or unencodable entry.
+    Malformed(String),
+}
+
+impl core::fmt::Display for CoverageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str(
+                "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --instrument`",
+            ),
+            Self::Empty { edges_total } => write!(
+                f,
+                "requested coverage is empty: edges_total={edges_total} edges_covered=0; the yield-point hook did not count any executed guard"
+            ),
+            Self::TableMismatch { guards, pcs } => {
+                write!(f, "guard/pc-table count mismatch: guards={guards} pcs={pcs}")
+            }
+            Self::Malformed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+fn coverage_count(ranges: &[CoverageRange]) -> Result<usize, CoverageError> {
     ranges.iter().try_fold(0usize, |total, range| {
         total.checked_add(range.len).ok_or_else(|| {
-            "registered coverage ranges exceed this platform's addressable size".to_string()
+            CoverageError::Malformed(
+                "registered coverage ranges exceed this platform's addressable size".to_string(),
+            )
         })
     })
 }
@@ -104,29 +139,30 @@ fn coverage_count(ranges: &[CoverageRange]) -> Result<usize, String> {
 fn validate_coverage_ranges(
     guard_ranges: &[CoverageRange],
     pc_ranges: &[CoverageRange],
-) -> Result<usize, String> {
+) -> Result<usize, CoverageError> {
     let guard_count = coverage_count(guard_ranges)?;
     let pc_count = coverage_count(pc_ranges)?;
     if guard_count != pc_count {
-        return Err(format!(
-            "guard/pc-table count mismatch: guards={guard_count} pcs={pc_count}"
-        ));
+        return Err(CoverageError::TableMismatch {
+            guards: guard_count,
+            pcs: pc_count,
+        });
     }
     if guard_ranges.len() != pc_ranges.len() {
-        return Err(format!(
+        return Err(CoverageError::Malformed(format!(
             "guard/pc-table range count mismatch: guard_ranges={} pc_ranges={} guards={} pcs={}",
             guard_ranges.len(),
             pc_ranges.len(),
             guard_count,
             pc_count,
-        ));
+        )));
     }
     for (index, (guards, pcs)) in guard_ranges.iter().zip(pc_ranges).enumerate() {
         if guards.len != pcs.len {
-            return Err(format!(
+            return Err(CoverageError::Malformed(format!(
                 "guard/pc-table range {index} count mismatch: guards={} pcs={} total_guards={} total_pcs={}",
                 guards.len, pcs.len, guard_count, pc_count,
-            ));
+            )));
         }
     }
     Ok(guard_count)
@@ -185,7 +221,7 @@ fn push_i64_le(out: &mut Vec<u8>, value: i64) {
 pub(crate) fn build_coverage_map(
     guard_ranges: &[CoverageRange],
     pc_ranges: &[CoverageRange],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CoverageError> {
     let guard_count = validate_coverage_ranges(guard_ranges, pc_ranges)?;
     let range_count = guard_ranges.len();
     let mut bytes = Vec::with_capacity(
@@ -244,9 +280,9 @@ pub(crate) fn build_coverage_map(
                 let pc = raw_pc as i128;
                 let delta = pc - anchor;
                 i64::try_from(delta).map_err(|_| {
-                    format!(
+                    CoverageError::Malformed(format!(
                         "coverage pc delta {delta} does not fit in patina.covmap/v1 i64 encoding"
-                    )
+                    ))
                 })?
             };
             push_i64_le(&mut bytes, delta);
@@ -288,13 +324,10 @@ pub(crate) fn prepare_coverage_output(
     requested: bool,
     guard_ranges: &[CoverageRange],
     pc_ranges: &[CoverageRange],
-) -> Result<Option<PreparedCoverage>, String> {
+) -> Result<Option<PreparedCoverage>, CoverageError> {
     let guard_count = coverage_count(guard_ranges)?;
     if requested && guard_count == 0 {
-        return Err(
-            "requested coverage is unavailable: the binary registered zero SanitizerCoverage guard ranges; rebuild with `cargo patina build --instrument`"
-                .to_string(),
-        );
+        return Err(CoverageError::Unavailable);
     }
     if guard_count == 0 {
         return Ok(None);
@@ -304,10 +337,9 @@ pub(crate) fn prepare_coverage_output(
     validate_coverage_ranges(guard_ranges, pc_ranges)?;
     let summary = coverage_summary(guard_ranges);
     if requested && summary.edges_covered == 0 {
-        return Err(format!(
-            "requested coverage is empty: edges_total={} edges_covered=0; the yield-point hook did not count any executed guard",
-            summary.edges_total,
-        ));
+        return Err(CoverageError::Empty {
+            edges_total: summary.edges_total,
+        });
     }
     let map = requested
         .then(|| build_coverage_map(guard_ranges, pc_ranges))
@@ -319,7 +351,9 @@ pub(crate) fn finalize_coverage() -> Result<(), String> {
     let coverage_fd = control_coverage_fd().map_err(|error| error.to_string())?;
     let requested = coverage_fd.is_some();
     let (guard_ranges, pc_ranges) = coverage_snapshot();
-    let Some(prepared) = prepare_coverage_output(requested, &guard_ranges, &pc_ranges)? else {
+    let Some(prepared) = prepare_coverage_output(requested, &guard_ranges, &pc_ranges)
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(());
     };
     if control_reports().enabled(patina_dst_runtime::Report::Coverage) {

@@ -459,10 +459,13 @@ fn fs_latency_replays_self_contained_without_re_supplying_flags() {
 fn resolve_once(
     config: RuntimeConfig,
     name: &str,
-) -> (Result<String, String>, u64, Option<DnsFaultReport>) {
+) -> (Result<String, ErrorCode>, u64, Option<DnsFaultReport>) {
     let mut context = Context::from_config(config).unwrap();
     let start = context.now(ClockKind::Monotonic).unwrap();
-    let outcome = context.dns_resolve(name).map_err(|error| error.to_string());
+    let outcome = context.dns_resolve(name).map_err(|error| match error {
+        RuntimeError::Effect(effect) => effect.code,
+        other => panic!("a resolution refusal is an effect error: {other}"),
+    });
     let elapsed = context.now(ClockKind::Monotonic).unwrap() - start;
     let report = context.dns_fault_report();
     context.finish().unwrap();
@@ -481,10 +484,16 @@ fn dns_resolves_the_host_table_and_nxdomains_everything_else() {
     assert_eq!(resolved.unwrap(), "10.0.0.5");
     assert!(report.is_none(), "no DNS knob was live, so no report");
 
-    let (missing, _, _) = resolve_once(with_entry(RuntimeConfig::seeded(1)), "absent.internal");
-    assert!(
-        missing.unwrap_err().contains("no virtual DNS entry"),
+    let (missing, _, report) =
+        resolve_once(with_entry(RuntimeConfig::seeded(1)), "absent.internal");
+    assert_eq!(
+        missing.unwrap_err(),
+        ErrorCode::NotFound,
         "an undefined name must be NXDOMAIN"
+    );
+    assert!(
+        report.is_none(),
+        "NXDOMAIN semantics is not an injected fault"
     );
 
     // Built-ins resolve without the table and are never fault-eligible.
@@ -521,7 +530,7 @@ fn the_dns_failure_knob_fires_only_on_defined_names_and_is_reported() {
         "db.internal",
     );
     assert!(
-        failed.unwrap_err().contains("injected DNS failure"),
+        failed.is_err(),
         "a certain failure rate must fail a defined name"
     );
     let report = report.expect("a live knob reports");
@@ -1256,7 +1265,7 @@ fn a_recorded_fault_replays_without_consulting_eligibility() {
         .custom_op_begin("s3.get", b"0", false)
         .expect_err("a recorded fault needs a declared failure shape");
     assert!(
-        error.to_string().contains("s3.get") && error.to_string().contains("declares no failure"),
-        "{error}"
+        matches!(&error, RuntimeError::CustomOp { label, .. } if label == "s3.get"),
+        "{error:?}"
     );
 }

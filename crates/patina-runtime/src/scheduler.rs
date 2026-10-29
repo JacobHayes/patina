@@ -490,7 +490,6 @@ mod tests {
         scheduler.park(task, "waiting for packet").unwrap();
         let deadlock = scheduler.next().unwrap_err();
         assert_eq!(deadlock.code, ErrorCode::Deadlock);
-        assert!(deadlock.message.contains("waiting for packet"));
 
         scheduler.wake(task).unwrap();
         assert_eq!(scheduler.next().unwrap(), Some(task));

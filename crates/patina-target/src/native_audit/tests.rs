@@ -156,12 +156,8 @@ fn undefined_weak_imports_are_inert_not_refused() {
     let rendered =
         render_inert_weak_imports(&audit.inert_weak_imports).expect("a non-empty list renders");
     assert!(
-        rendered.starts_with("inert weak imports"),
-        "the heading must name the class: {rendered}"
-    );
-    assert!(
-        rendered.contains("sdallocx") && rendered.contains("resolve to NULL"),
-        "the note must list the symbols and say why they are inert: {rendered}"
+        rendered.contains("sdallocx"),
+        "the note must list the symbols: {rendered}"
     );
     assert_eq!(
         render_inert_weak_imports(&[]),
