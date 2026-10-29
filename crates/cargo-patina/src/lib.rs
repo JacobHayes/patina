@@ -446,14 +446,6 @@ struct NativeRunInvocation {
     /// deterministic filesystem. The image hash is folded into the run
     /// fingerprint so replay rejects a different corpus.
     mount: Option<PathBuf>,
-    /// `--harness`: the guest is a `patina-dst-harness` binary (usage mode 2). Sets
-    /// `PATINA_RT_DEFER_INIT=1` so the packaged constructor captures/scrubs the
-    /// control plane and registers finalization but does NOT install the runtime;
-    /// `patina_dst_harness::run`/`run_with` installs it explicitly after applying
-    /// its configuration overlay. Applies to both record/seeded runs and replay of
-    /// a harness binary (replay must defer too, or the constructor would install a
-    /// context the harness could not own).
-    harness: bool,
     /// `--allow-randomized-address-layout`: launch the guest with the host's
     /// address-space randomization and inherited stack limit instead of the
     /// fixed layout, qualifying the run's determinism. Recorded into the trace;

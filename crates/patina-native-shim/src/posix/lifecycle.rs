@@ -98,8 +98,8 @@ extern "C" fn native_start() {
             Some(super::stdio::take_pending),
         )
     };
-    // Deferred harness init (PATINA_RT_DEFER_INIT=1, set by `cargo patina run
-    // --harness`): still capture the control plane, register finalization and
+    // Deferred harness init (PATINA_RT_DEFER_INIT=1, set by `cargo patina run`
+    // for a harness binary): still capture the control plane, register finalization and
     // scrub the environment, but leave the runtime uninstalled so
     // patina-dst-harness can apply its configuration overlay and install
     // explicitly. An interposed effect before that install fails closed in

@@ -126,13 +126,6 @@ pub struct CampaignSpec {
     /// are all NXDOMAIN by semantics and no DNS fault is ever eligible — so the
     /// band is only emitted when this is non-empty.
     pub dns_entries: Vec<String>,
-    /// Sweep a `patina-dst-harness` binary: every generation's child `run` gets
-    /// `--harness`, so the guest installs and configures the runtime itself.
-    ///
-    /// Invocation shape rather than a per-generation draw, and — like
-    /// [`Self::allow_symbols`] and [`Self::allow_unsupported_symbols`] — a fact the
-    /// trace cannot carry, so the reproduce commands re-supply it too.
-    pub harness: bool,
     /// Symbols added to every generation's pre-run gate allow list (`--allow`).
     pub allow_symbols: Vec<String>,
     /// The `--allow-unsupported-symbols` policy (`all` or a symbol list) every
@@ -141,7 +134,7 @@ pub struct CampaignSpec {
     /// The address layout every generation runs, and every reproduce command
     /// replays, with. `Randomized` (`--allow-randomized-address-layout`) keeps
     /// the host's randomization and qualifies each generation's determinism.
-    /// Invocation shape like [`Self::harness`]. A campaign's state always
+    /// Invocation shape like [`Self::allow_symbols`]. A campaign's state always
     /// records it; `None` before the campaign starts means fixed.
     pub address_layout: Option<patina_dst_trace::AddressLayout>,
     /// The CPU count every generation's guest sees (`--cpus`), forwarded to
@@ -200,7 +193,6 @@ impl Default for CampaignSpec {
             custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
-            harness: false,
             allow_symbols: Vec::new(),
             allow_unsupported_symbols: None,
             address_layout: None,
@@ -285,7 +277,6 @@ impl CampaignSpec {
                         })
                         .collect::<Result<_, CliError>>()?;
                 }
-                "harness" => self.harness = json_bool(key, val)?,
                 "address_layout" => self.address_layout = Some(json_address_layout(key, val)?),
                 "cpus" => {
                     let cpus = json_u64(key, val)?;
@@ -355,7 +346,7 @@ impl CampaignSpec {
                          custom_op_faults, \
                          fault_scale_permille, \
                          dns_entries, \
-                         harness, allow_symbols, allow_unsupported_symbols, address_layout, \
+                         allow_symbols, allow_unsupported_symbols, address_layout, \
                          cpus, watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, verify, or classify"
@@ -660,7 +651,6 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                harness: true,
                 allow_symbols: vec!["dlsym".into()],
                 allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
                 address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
@@ -675,7 +665,6 @@ mod tests {
             "classify",
             "verify",
             "dns_entries",
-            "harness",
             "allow_symbols",
             "allow_unsupported_symbols",
             "address_layout",

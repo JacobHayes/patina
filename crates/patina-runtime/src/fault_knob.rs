@@ -10,7 +10,7 @@ use crate::{
     ENV_MACHINE_CRASH_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
     ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
     ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
-    ENV_PROCESS_CRASH_PERMILLE, ENV_SLEEP_JITTER, FINGERPRINT_BUGGIFY,
+    ENV_PROCESS_CRASH_PERMILLE, ENV_SLEEP_JITTER,
 };
 
 /// How a knob's value reaches a guest over the `PATINA_*` control plane.
@@ -484,16 +484,11 @@ pub enum Masks {
 }
 
 /// One swarm fault-class row: the stable token recorded in the trace, the domain
-/// label its coin draws from, the compatibility-fingerprint component its
-/// capability declares, and what it masks.
+/// label its coin draws from, and what it masks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SwarmClass {
     pub token: &'static str,
     pub domain: &'static str,
-    /// Retracted from `RuntimeConfig::fingerprint` when the seed deselects the
-    /// class, because the fingerprint describes the run that actually happened.
-    /// Only `buggify` declares one today.
-    pub fingerprint_component: Option<&'static str>,
     pub masks: Masks,
 }
 
@@ -550,7 +545,6 @@ macro_rules! swarm_class {
         SwarmClass {
             token: $token,
             domain: $domain,
-            fingerprint_component: None,
             masks: Masks::Knobs(&mask_knobs::<{ mask_count($token) }>($token)),
         }
     };
@@ -585,7 +579,6 @@ pub const SWARM_CLASSES: &[SwarmClass] = &[
     SwarmClass {
         token: "buggify",
         domain: fault_domain::SWARM_BUGGIFY,
-        fingerprint_component: Some(FINGERPRINT_BUGGIFY),
         masks: Masks::Buggify,
     },
     // Appended at the END rather than beside the other clock-domain row

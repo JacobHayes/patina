@@ -131,7 +131,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   first failing seed with `PATINA_EXPLORE_FAILURE seed=S exit=E repro="cargo patina run ... --seed S"`;
   the JSON envelope's `message` carries the same repro. Otherwise
   `PATINA_EXPLORE_COMPLETE start=... seeds=...`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--harness] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
+- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout]`
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
   fault plane's knobs — `fs` (error/short/latency), `crash` (independent
@@ -152,10 +152,10 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   table in the out-dir spec, forwards it to every generation, and is what enables
   the DNS band (fail per-mille + resolution latency) — with no defined name every
   lookup is NXDOMAIN by semantics and the knobs could not fire, so the band is not
-  emitted at all. `--harness` (a `patina-dst-harness` binary), `--allow
+  emitted at all. `--allow
   SYMBOL` (repeatable), and `--allow-unsupported-symbols` are campaign SHAPE in
   the same sense: the native `run` invocation is forwarded verbatim to every
-  generation, so a guest that needs the harness deferral or the pre-run gate
+  generation, so a guest that needs the pre-run gate
   hatch can be swept at all instead of being refused identically in every
   generation. They also ride on the reproduce commands, since a trace cannot
   carry them; a non-native campaign carrying one is refused by name. Outcomes are

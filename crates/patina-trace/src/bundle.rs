@@ -304,13 +304,6 @@ impl TraceBundle {
                 "trace compatibility fingerprint is empty".into(),
             ));
         }
-        if fingerprint_declares_component(&self.metadata.fingerprint, "buggify")
-            && self.metadata.buggify.is_none()
-        {
-            return Err(TraceError::Invalid(
-                "fingerprint declares +buggify but trace metadata has no buggify config".into(),
-            ));
-        }
         // The swarm record must partition cleanly: every selected class was a
         // candidate, and no class is listed twice. Consumers derive "swarm
         // dropped this class" as the complement of the two lists, so a record
@@ -513,10 +506,6 @@ impl TraceBundle {
         lifecycle.extend(suffix_lifecycle);
         Ok(lifecycle)
     }
-}
-
-fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
-    fingerprint.split('+').skip(1).any(|part| part == component)
 }
 
 /// Read the declared format version from a decoded bundle when it is present as

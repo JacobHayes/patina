@@ -6,46 +6,25 @@ mod tests {
     use super::super::run_facts::{outcome_guest, shared_sdk_guest};
     use super::super::*;
 
-    // Gate: a `patina-dst-harness` binary is sweepable. Without `--harness` the
-    // supervisor installs the runtime itself and the guest's own install fails closed
-    // (`AlreadyInstalled`) in every generation; with it, every generation runs.
+    // Gate: a `patina-dst-harness` binary is sweepable with no flag. The binary
+    // carries its own marker, so every generation's child `run` defers runtime
+    // installation and the guest's install succeeds.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn campaign_forwards_harness_deferral_to_every_generation() {
+    fn campaign_sweeps_a_harness_binary_without_a_flag() {
         let directory = tempdir().unwrap();
         let guest = super::super::sdk_harness::harness_guest();
 
-        // RED: no `--harness`. Every generation fails closed, identically.
-        let refused = campaign_run(&directory.path().join("red"), &guest, &[]);
-        assert!(
-            !refused.status.success(),
-            "a harness guest swept without --harness must not report a clean campaign"
-        );
-        let envelope = campaign_json_stdout(&refused);
-        assert_eq!(
-            envelope["classes"]["OK"],
-            serde_json::Value::Null,
-            "no generation can have run the guest: {}",
-            envelope["classes"]
-        );
-        let signatures = serde_json::to_string(&envelope["signatures"]).unwrap();
-        assert!(
-            signatures.contains("AlreadyInstalled"),
-            "the refusal must be the harness double-install one:\n{signatures}"
-        );
-
-        // GREEN: forwarded to every generation.
-        let swept = campaign_run(&directory.path().join("green"), &guest, &["--harness"]);
+        let swept = campaign_run(&directory.path().join("green"), &guest, &[]);
         assert!(
             swept.status.success(),
-            "the forwarded --harness must let the campaign sweep:\nstdout:\n{}\nstderr:\n{}",
+            "a harness binary must be sweepable:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&swept.stdout),
             String::from_utf8_lossy(&swept.stderr)
         );
         assert_eq!(campaign_json_stdout(&swept)["classes"]["OK"], 2);
 
-        // And it is campaign SHAPE: recorded in the out-dir spec, so a continuation
-        // re-derives it without re-supplying.
+        // A continuation needs nothing re-supplied either.
         let extended = invoke_unchecked(
             env!("CARGO_BIN_EXE_cargo-patina"),
             native_workspace(),
@@ -61,7 +40,7 @@ mod tests {
         );
         assert!(
             extended.status.success(),
-            "a resumed harness campaign must re-derive --harness from the recorded spec:\nstderr:\n{}",
+            "a resumed harness campaign must run unchanged:\nstderr:\n{}",
             String::from_utf8_lossy(&extended.stderr)
         );
         assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);

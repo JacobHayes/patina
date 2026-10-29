@@ -35,7 +35,7 @@ pub struct BranchSession {
 impl BranchSession {
     pub fn open(
         path: impl AsRef<Path>,
-        expected_fingerprint: &str,
+        base_fingerprint: &str,
         parent: &str,
         from_sequence: u64,
         branch_id: impl Into<String>,
@@ -48,9 +48,13 @@ impl BranchSession {
                 "branching a compute-stop trace is not supported".into(),
             ));
         }
-        if bundle.metadata.fingerprint != expected_fingerprint {
+        let expected = format!(
+            "{base_fingerprint}{}",
+            bundle.metadata.policy_fingerprint_suffix()
+        );
+        if bundle.metadata.fingerprint != expected {
             return Err(TraceError::FingerprintMismatch {
-                expected: expected_fingerprint.into(),
+                expected,
                 recorded: bundle.metadata.fingerprint.clone(),
             });
         }
@@ -110,6 +114,11 @@ impl BranchSession {
     /// buggify.
     pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
         self.bundle.metadata.buggify.as_ref()
+    }
+
+    /// The parent trace's recorded compatibility fingerprint.
+    pub fn fingerprint(&self) -> &str {
+        &self.bundle.metadata.fingerprint
     }
 
     /// The parent trace's recorded exploration scheduling policy, inherited by

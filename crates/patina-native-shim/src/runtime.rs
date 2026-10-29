@@ -439,7 +439,7 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
         abort_preinit_interposed_call();
     }
-    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `cargo patina run --harness`):
+    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `cargo patina run` on a harness binary):
     // the harness owns installation, so an effect that arrives with no context
     // installed and no install yet performed ran BEFORE `patina_harness_install`.
     // Do NOT auto-init from the env — that would race the harness's overlay and
@@ -1162,18 +1162,6 @@ pub(crate) fn runtime_config_from_control_plane()
     // Cooperative-SUT (buggify) knobs come from the same control plane through
     // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
-    if matches!(
-        config.mode(),
-        &patina_dst_runtime::ExecutionMode::Record { .. }
-            | &patina_dst_runtime::ExecutionMode::RecordTransport
-    ) && fingerprint_declares_component(config.fingerprint(), "buggify")
-        && !config.buggify().enabled
-    {
-        return Err(RuntimeError::Config(
-            "fingerprint declares +buggify but buggify is not enabled; refusing vacuous SDK buggify coverage"
-                .into(),
-        ));
-    }
     // Exploration scheduling-policy (PCT) and swarm fault-class
     // selection knobs travel the same control plane through the shared parsers,
     // so the shim and the process-environment path agree on the protocol.
@@ -1266,10 +1254,6 @@ fn tsc_armed_metadata() -> Option<bool> {
 #[cfg(not(target_os = "linux"))]
 fn tsc_armed_metadata() -> Option<bool> {
     None
-}
-
-fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
-    fingerprint.split('+').skip(1).any(|part| part == component)
 }
 
 /// The runtime's diagnostic writer: the text joins the captured stderr (on

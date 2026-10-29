@@ -6,9 +6,8 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    IMAGE_FINGERPRINT_COMPONENT, SchedulePolicyFingerprint, binary_instrumented,
-    native_policy_from_trace, native_run_fingerprint, native_run_fingerprint_around,
-    resolve_artifact, trace_has_buggify,
+    IMAGE_FINGERPRINT_COMPONENT, binary_instrumented, binary_is_harness,
+    instrumentation_fingerprint, native_run_fingerprint, resolve_artifact,
 };
 use crate::output;
 use crate::parse::{knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
@@ -217,9 +216,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         None => None,
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
-    // A replay's `+buggify` component: requested, or recorded in the trace.
-    let replay_buggify =
-        |bundle: &TraceBundle| invocation.buggify.is_some() || trace_has_buggify(bundle);
+    // A harness binary installs the runtime itself, after applying its own
+    // configuration; the image says so, on every run and replay.
+    let harness = image.remember("harness", || {
+        Ok::<_, CliError>(binary_is_harness(image.bytes()))
+    })?;
     // A replay against another corpus would only fail as a fingerprint
     // mismatch inside the guest; refuse it here and say which half differs.
     // The recorded hash is read where this replay's fingerprint puts its
@@ -236,13 +237,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         &image_hash,
         &invocation.mount,
     ) {
-        let (head, tail) = native_run_fingerprint_around(
-            fingerprint,
-            instrumented,
-            replay_buggify(bundle),
-            &native_policy_from_trace(bundle),
-        );
-        if let Some(recorded) = recorded_image_hash(&bundle.metadata.fingerprint, &head, &tail)
+        let head = instrumentation_fingerprint(fingerprint, instrumented);
+        if let Some(recorded) = recorded_image_hash(&bundle.metadata.fingerprint, &head)
             && let Some(mismatch) = FsImageHash::mismatch(recorded, current)
         {
             let message = format!(
@@ -310,13 +306,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             (ENV_SEED, seed.to_string()),
             (
                 ENV_FINGERPRINT,
-                native_run_fingerprint(
-                    fingerprint,
-                    instrumented,
-                    image_hash.as_deref(),
-                    invocation.buggify.is_some(),
-                    &SchedulePolicyFingerprint::from_schedule(&invocation.schedule),
-                ),
+                native_run_fingerprint(fingerprint, instrumented, image_hash.as_deref()),
             ),
             // Record the guest arguments into the trace metadata so a later
             // `replay` restores them without the `--` section being re-passed.
@@ -325,15 +315,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
         ],
         NativeRunMode::Replay { fingerprint, .. } => {
-            // Reconstruct the `+buggify` and `+pct`/`+swarm`/`+yieldstride`
-            // fingerprint components from the trace so replay is self-contained;
-            // a policy trace replayed against a plain build still fails closed on
-            // the fingerprint.
             let bundle = replay_trace
                 .as_ref()
                 .expect("a native replay loads its trace first");
-            let buggify = replay_buggify(bundle);
-            let policy = native_policy_from_trace(bundle);
             vec![
                 (ENV_MODE, "replay".into()),
                 // Startup effects (notably AT_RANDOM) happen before the shim
@@ -341,13 +325,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 (ENV_SEED, bundle.metadata.root_seed.to_string()),
                 (
                     ENV_FINGERPRINT,
-                    native_run_fingerprint(
-                        fingerprint,
-                        instrumented,
-                        image_hash.as_deref(),
-                        buggify,
-                        &policy,
-                    ),
+                    native_run_fingerprint(fingerprint, instrumented, image_hash.as_deref()),
                 ),
             ]
         }
@@ -358,7 +336,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // (ELF auxv / Darwin apple vector); libc/dyld keep the original trailer.
     // Replay restores its map from metadata, not the normally empty CLI map.
     // A deferred harness starts empty and later replaces environ at installation.
-    let startup_env_entries = if invocation.harness {
+    let startup_env_entries = if harness {
         0
     } else if let Some(bundle) = &replay_trace {
         bundle.metadata.guest_env.as_ref().map_or(0, BTreeMap::len)
@@ -413,13 +391,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         for slot in 0..startup_env_entries + NATIVE_INITIAL_STACK_TRAILER_SLOTS {
             command.env(format!("{ENVP_SLOT_PREFIX}{slot}"), "");
         }
-        // A `patina-dst-harness` binary (usage mode 2) defers runtime
-        // installation to its `run`/`run_with` call: tell the packaged
-        // constructor to capture/scrub the control plane and register
-        // finalization but NOT install the runtime. Applies uniformly to
-        // seeded/record and replay so the harness owns installation on every
+        // A `patina-dst-harness` binary (usage mode 2, recognised by its image
+        // marker) defers runtime installation to its `run`/`run_with` call:
+        // tell the packaged constructor to capture/scrub the control plane and
+        // register finalization but NOT install the runtime. Applies uniformly
+        // to seeded/record and replay so the harness owns installation on every
         // path. An interposed effect before the harness installs fails closed.
-        if invocation.harness {
+        if harness {
             command.env(ENV_DEFER_INIT, "1");
         }
         if let Some(file) = &coverage_file {

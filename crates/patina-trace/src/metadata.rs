@@ -177,10 +177,9 @@ impl SchedulePolicyRecord {
 /// distinguishable from "it was never asked for": the first names the class as a
 /// candidate, the second does not mention it at all.
 ///
-/// A dropped class is also retracted from the run's compatibility fingerprint
-/// (see `patina_dst_runtime::FINGERPRINT_BUGGIFY`), so a masked run's fingerprint
-/// and its `buggify`/`faults` records agree — the trace never declares coverage
-/// this generation did not carry.
+/// The run's compatibility fingerprint is computed from the masked
+/// configuration, so a dropped class never appears in it and the trace never
+/// declares coverage this generation did not carry.
 ///
 /// Both lists are in the runtime's stable class-table order, not alphabetical
 /// order; that order is a property of the table, so it is stable across runs and
@@ -302,9 +301,8 @@ pub struct RunMetadata {
     pub faults: FaultConfigRecord,
     /// The run's cooperative-SUT (buggify) configuration, authoritative on
     /// replay. Additive: absent (`None`) in traces recorded without buggify,
-    /// which the runtime treats as buggify-disabled. A native trace whose textual
-    /// fingerprint declares `+buggify` must not omit this field; that would claim
-    /// SDK-fault coverage without an armed SDK config. A conflicting explicit
+    /// which the runtime treats as buggify-disabled. The fingerprint's `+buggify`
+    /// part is derived from this field. A conflicting explicit
     /// knob at replay fails closed exactly like
     /// [`RunMetadata::faults`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -435,7 +433,44 @@ pub struct ComputeStop {
     pub task: TaskId,
 }
 
+/// The policy suffix of a run's compatibility fingerprint: `+buggify`, `+pct`,
+/// `+swarm` and `+yieldstride`, in that order, each present only when the run's
+/// recorded configuration has it. The runtime appends it to the base
+/// fingerprint it is given at record time and recomputes it from the trace's
+/// own metadata at replay, so record and replay agree by construction and
+/// nothing outside the runtime has to know which knobs a run turned on.
+pub fn policy_fingerprint_suffix(
+    buggify: Option<&BuggifyConfigRecord>,
+    schedule_policy: Option<&SchedulePolicyRecord>,
+    swarm: Option<&SwarmConfigRecord>,
+) -> String {
+    let mut suffix = String::new();
+    if buggify.is_some() {
+        suffix.push_str("+buggify");
+    }
+    if schedule_policy.is_some_and(|policy| policy.pct.is_some()) {
+        suffix.push_str("+pct");
+    }
+    if swarm.is_some() {
+        suffix.push_str("+swarm");
+    }
+    if schedule_policy.is_some_and(|policy| policy.yield_stride != 0) {
+        suffix.push_str("+yieldstride");
+    }
+    suffix
+}
+
 impl RunMetadata {
+    /// The policy suffix this metadata's own configuration implies
+    /// ([`policy_fingerprint_suffix`]).
+    pub fn policy_fingerprint_suffix(&self) -> String {
+        policy_fingerprint_suffix(
+            self.buggify.as_ref(),
+            self.schedule_policy.as_ref(),
+            self.swarm.as_ref(),
+        )
+    }
+
     /// The metadata every recording carries. The realtime epoch and the node
     /// name are required run facts. The origin and the CPU count default to the
     /// ABI constants; runtime builders set the run's own with

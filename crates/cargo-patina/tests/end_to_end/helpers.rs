@@ -678,7 +678,7 @@ pub(super) fn assert_native_harness_prerun_refusal(
 //
 // Validation gates for USAGE-MODES.md usage mode 2 (startup Option B, deferred
 // init). A harness binary depends on `patina-dst-harness` and is built and run
-// through `cargo patina run --harness`; ordinary `std` effects in the application
+// through `cargo patina run`; ordinary `std` effects in the application
 // closure are interposed by the native shim, and the harness's `HarnessBuilder`
 // overlay flows through the same `RuntimeConfig` fields the CLI env path sets.
 // Gate 7 (SDK dependency-lightness) belongs to the facade builder; gate 8
@@ -720,7 +720,7 @@ pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
 
 // ---- campaign forwards the native `run` invocation shape ---------------------
 //
-// A campaign spawns child `cargo patina run` processes. `--harness` and the
+// A campaign spawns child `cargo patina run` processes. The
 // pre-run gate surface (`--allow`, `--allow-unsupported-symbols`) are host/build
 // facts, not seed-derived knobs: without them every generation of an affected
 // guest is refused IDENTICALLY, so the campaign is not a sweep that reports

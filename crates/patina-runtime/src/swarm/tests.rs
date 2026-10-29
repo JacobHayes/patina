@@ -2,7 +2,7 @@
 
 use crate::config::{BuggifyConfig, FaultConfig, RuntimeConfig};
 use crate::reports::swarm_report_line;
-use crate::swarm::{apply_swarm_mask, remove_fingerprint_component};
+use crate::swarm::apply_swarm_mask;
 use crate::{Context, FINGERPRINT_BUGGIFY, FaultKnob, Masks, SWARM_CLASSES};
 
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
@@ -17,7 +17,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     // Enable several fault classes plus buggify, then record under swarm.
     let build = |seed: u64| {
         let trace = directory.path().join(format!("swarm-{seed}.patina"));
-        let config = RuntimeConfig::record(seed, &trace, "fp+swarm")
+        let config = RuntimeConfig::record(seed, &trace, "fp")
             .with_machine_crash_permille(1)
             .with_crash_supervisor()
             .with_fs_error_permille(100)
@@ -44,7 +44,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
             "fs_short",
             "sleep_jitter",
             "net_drop",
-            "buggify"
+            FINGERPRINT_BUGGIFY
         ]
     );
     // The selected subset is a subset of candidates and reflects the applied
@@ -59,7 +59,10 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
     );
     assert_eq!(
         bundle.metadata.buggify.is_some(),
-        swarm.selected_classes.iter().any(|c| c == "buggify")
+        swarm
+            .selected_classes
+            .iter()
+            .any(|c| c == FINGERPRINT_BUGGIFY)
     );
 
     // Across seeds the selected subset actually varies (swarm testing).
@@ -80,7 +83,7 @@ fn swarm_masks_a_subset_and_records_candidates_and_selection() {
 fn swarm_with_no_enabled_fault_class_reports_vacuous() {
     let directory = tempdir().unwrap();
     let trace = directory.path().join("swarm-vacuous.patina");
-    let config = RuntimeConfig::record(3, &trace, "fp+swarm").with_swarm(true);
+    let config = RuntimeConfig::record(3, &trace, "fp").with_swarm(true);
     let context = Context::from_config(config).unwrap();
     context.finish().unwrap();
     let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
@@ -95,7 +98,7 @@ fn swarm_with_no_enabled_fault_class_reports_vacuous() {
     // A live candidate set is NOT vacuous, even when the draw drops all of it:
     // exploring the empty subset of a real candidate set is a legitimate draw.
     let all_dropped = patina_dst_trace::SwarmConfigRecord {
-        candidate_classes: vec!["crash".to_string(), "buggify".to_string()],
+        candidate_classes: vec!["crash".to_string(), FINGERPRINT_BUGGIFY.to_string()],
         selected_classes: Vec::new(),
     };
     assert_eq!(
@@ -109,7 +112,7 @@ class=crash|0 class=buggify|0"
 fn swarm_class_table_covers_every_current_fault_field() {
     let directory = tempdir().unwrap();
     let trace = directory.path().join("swarm-coverage.patina");
-    let mut config = RuntimeConfig::record(9, &trace, "fp+swarm")
+    let mut config = RuntimeConfig::record(9, &trace, "fp")
         .with_buggify(BuggifyConfig {
             enabled: true,
             ..BuggifyConfig::default()
@@ -148,7 +151,7 @@ fn swarm_class_table_covers_every_current_fault_field() {
             "net_partition",
             "net_tcp_buffer",
             "entropy_fail",
-            "buggify",
+            FINGERPRINT_BUGGIFY,
             "epoch_jump",
             "custom_op_fail",
         ]
@@ -210,17 +213,46 @@ fn seed_where_buggify_is(selected: bool) -> u64 {
         .expect("some seed in 0..1024 draws each way")
 }
 
+/// A harness keeps asking for buggify in code on replay. When the recording's
+/// swarm draw deselected it, the replay must accept the request and run with
+/// buggify disarmed, exactly as recorded, rather than refuse the configuration.
+#[test]
+fn replay_accepts_a_buggify_request_the_recording_swarm_deselected() {
+    let directory = tempdir().unwrap();
+    let trace = directory.path().join("swarm-replay.patina");
+    let seed = seed_where_buggify_is(false);
+    let armed = BuggifyConfig {
+        enabled: true,
+        ..BuggifyConfig::default()
+    };
+    Context::from_config(
+        RuntimeConfig::record(seed, &trace, "fp")
+            .with_buggify(armed)
+            .with_swarm(true),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+    let replay = Context::from_config(
+        RuntimeConfig::replay(&trace, "fp")
+            .with_buggify(armed)
+            .with_swarm(true),
+    )
+    .expect("the same configuration must replay its own deselected recording");
+    replay.finish().unwrap();
+}
+
 /// The bug behind SlateDB feedback item 9. A `--swarm` generation whose seed
 /// deselects `buggify` used to keep `+buggify` in its fingerprint while
 /// disarming the buggify config, which the coherence guard then (correctly)
 /// refused — so a legitimate masked generation aborted. Masking now retracts
 /// the component, and the whole declared state stays truthful.
 #[test]
-fn swarm_deselecting_buggify_retracts_the_fingerprint_component() {
+fn swarm_deselecting_buggify_leaves_no_buggify_in_the_fingerprint() {
     let directory = tempdir().unwrap();
     let record = |seed: u64| {
         let trace = directory.path().join(format!("swarm-fp-{seed}.patina"));
-        let config = RuntimeConfig::record(seed, &trace, "fp+buggify+swarm")
+        let config = RuntimeConfig::record(seed, &trace, "fp")
             .with_buggify(BuggifyConfig {
                 enabled: true,
                 fire_permille: 372,
@@ -244,8 +276,6 @@ fn swarm_deselecting_buggify_retracts_the_fingerprint_component() {
     assert!(swarm.was_candidate(FINGERPRINT_BUGGIFY));
     assert!(swarm.deselected(FINGERPRINT_BUGGIFY));
     assert_eq!(swarm.deselected_classes(), vec![FINGERPRINT_BUGGIFY]);
-    // The trace's own coherence check agrees (it is what rejects a fingerprint
-    // that declares +buggify with no buggify config).
     dropped.validate().expect("masked trace must validate");
 
     // Selected: nothing changes — the component and the config both stand.
@@ -296,79 +326,6 @@ fn swarm_deselection_clears_the_class_config_and_is_reported_distinctly() {
     let diagnostics = never_asked.buggify_diagnostics();
     assert!(!diagnostics.enabled);
     assert!(!diagnostics.swarm_deselected);
-}
-
-/// `buggify` is the ONLY swarm class whose capability is declared as a
-/// fingerprint component today. Adding another one without registering it in
-/// the swarm class table would resurrect the item-9 incoherence for that
-/// class, so pin the mapping: with every class enabled and every class token
-/// present as a fingerprint component, masking must retract `buggify` (when
-/// dropped) and nothing else, whatever the seed decided.
-#[test]
-fn swarm_class_table_declares_every_fingerprint_component() {
-    let classes = [
-        "crash",
-        "fs_error",
-        "fs_short",
-        "sleep_jitter",
-        "net_jitter",
-        "net_drop",
-        "net_latency",
-        "buggify",
-    ];
-    for seed in 0..8u64 {
-        let mut config = RuntimeConfig::seeded(seed)
-            .with_machine_crash_permille(1)
-            .with_crash_supervisor()
-            .with_fs_error_permille(1)
-            .with_fs_short_permille(1)
-            .with_sleep_jitter_nanos(1, 2)
-            .with_net_jitter_nanos(1, 2)
-            .with_net_drop_permille(1)
-            .with_net_latency_nanos(1)
-            .with_buggify(BuggifyConfig {
-                enabled: true,
-                ..BuggifyConfig::default()
-            })
-            .with_swarm(true);
-        config.fingerprint = format!("fp+{}", classes.join("+"));
-        let record = apply_swarm_mask(&mut config);
-        let expected: Vec<&str> = classes
-            .iter()
-            .copied()
-            .filter(|class| {
-                *class != FINGERPRINT_BUGGIFY || !record.deselected(FINGERPRINT_BUGGIFY)
-            })
-            .collect();
-        assert_eq!(
-            config.fingerprint,
-            format!("fp+{}", expected.join("+")),
-            "seed {seed} retracted the wrong component set"
-        );
-    }
-}
-
-#[test]
-fn remove_fingerprint_component_drops_only_whole_components() {
-    assert_eq!(
-        remove_fingerprint_component("patina-native+buggify+swarm", "buggify"),
-        "patina-native+swarm"
-    );
-    // The base label and every other component keep their order.
-    assert_eq!(
-        remove_fingerprint_component("base+fsimg:abc+buggify+pct+swarm", "buggify"),
-        "base+fsimg:abc+pct+swarm"
-    );
-    // A component is matched whole, never as a substring of another.
-    assert_eq!(
-        remove_fingerprint_component("base+buggifyx+swarm", "buggify"),
-        "base+buggifyx+swarm"
-    );
-    // Absent component: unchanged.
-    assert_eq!(
-        remove_fingerprint_component("base+swarm", "buggify"),
-        "base+swarm"
-    );
 }
 
 /// Every class's coin must come from `domain_seed` with the label the table

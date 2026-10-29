@@ -176,9 +176,6 @@ mod registry {
                 // The verb's own flags are present; a DIFFERENT verb's unique flag is
                 // not. `run`'s `--mount` (re-supplying a host corpus) is unique to
                 // run/replay, so it never appears in, say, `build`'s payload.
-                // Deliberately NOT `--harness`: `campaign` forwards that one to its
-                // child runs and registers it too, so it would not be a probe of
-                // leakage.
                 let names = flag_names(&json["verb"]["flag_groups"]);
                 if verb.name != "run" && verb.name != "replay" {
                     assert!(

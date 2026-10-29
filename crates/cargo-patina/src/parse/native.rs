@@ -296,7 +296,6 @@ pub(crate) fn parse_native_run_from(
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
-        harness: args.flag("--harness"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }
@@ -312,7 +311,7 @@ pub(crate) fn parse_native_run_from(
 /// option, and a knob added to a shared slice is refused the day it is added.
 /// The only flags are host/build facts the trace cannot carry: `--fingerprint`,
 /// `--mount` (re-supply the host corpus whose hash the fingerprint verifies),
-/// `--harness`, and the machine-local pre-run audit surface. An optional trailing
+/// and the machine-local pre-run audit surface. An optional trailing
 /// `--` section is accepted only for script compatibility and must match the
 /// recorded arguments byte-for-byte (enforced downstream by
 /// `reconcile_replay_argv`).
@@ -362,7 +361,6 @@ pub(crate) fn parse_native_replay(
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
-        harness: args.flag("--harness"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }

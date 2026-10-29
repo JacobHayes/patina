@@ -16,46 +16,51 @@ fn reload(metadata: RunMetadata) -> (String, RunMetadata) {
 /// absent one: a zero-argument run must replay zero arguments.
 #[test]
 fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
-    let full = RunMetadata::new(7, "fingerprint+buggify+pct+swarm", 1_000_000_000, "db-1")
-        .with_faults(FaultConfigRecord {
-            machine_crash_permille: 34,
-            process_crash_permille: 12,
-            fs_error_permille: 100,
-            net_drop_permille: 250,
-            ..FaultConfigRecord::default()
-        })
-        .with_buggify(Some(BuggifyConfigRecord {
-            fire_permille: 250,
-            activation_permille: 250,
-            cutoff_nanos: 300_000_000_000,
-            after_setup: true,
-            active_sites: vec!["commit-early-return".to_string()],
-            knobs: BTreeMap::from([("commit-batch".to_string(), 42)]),
-        }))
-        .with_schedule_policy(Some(SchedulePolicyRecord {
-            pct: Some(PctPolicyRecord {
-                depth: 3,
-                steps: 512,
-            }),
-            yield_stride: 16,
-        }))
-        .with_swarm(Some(SwarmConfigRecord {
-            candidate_classes: vec!["crash".to_string(), "net_drop".to_string()],
-            selected_classes: vec!["crash".to_string()],
-        }))
-        .with_sud(Some(true))
-        .with_tsc(Some(true))
-        .with_guest_argv(Some(vec!["--replay-commands".into(), "3,1,2".into()]))
-        .with_guest_cwd(Some("/work".into()))
-        .with_guest_env(Some(BTreeMap::from([(
-            "RUST_LOG".to_string(),
-            "debug".to_string(),
-        )])));
+    let full = RunMetadata::new(
+        7,
+        "fingerprint+buggify+pct+swarm+yieldstride",
+        1_000_000_000,
+        "db-1",
+    )
+    .with_faults(FaultConfigRecord {
+        machine_crash_permille: 34,
+        process_crash_permille: 12,
+        fs_error_permille: 100,
+        net_drop_permille: 250,
+        ..FaultConfigRecord::default()
+    })
+    .with_buggify(Some(BuggifyConfigRecord {
+        fire_permille: 250,
+        activation_permille: 250,
+        cutoff_nanos: 300_000_000_000,
+        after_setup: true,
+        active_sites: vec!["commit-early-return".to_string()],
+        knobs: BTreeMap::from([("commit-batch".to_string(), 42)]),
+    }))
+    .with_schedule_policy(Some(SchedulePolicyRecord {
+        pct: Some(PctPolicyRecord {
+            depth: 3,
+            steps: 512,
+        }),
+        yield_stride: 16,
+    }))
+    .with_swarm(Some(SwarmConfigRecord {
+        candidate_classes: vec!["crash".to_string(), "net_drop".to_string()],
+        selected_classes: vec!["crash".to_string()],
+    }))
+    .with_sud(Some(true))
+    .with_tsc(Some(true))
+    .with_guest_argv(Some(vec!["--replay-commands".into(), "3,1,2".into()]))
+    .with_guest_cwd(Some("/work".into()))
+    .with_guest_env(Some(BTreeMap::from([(
+        "RUST_LOG".to_string(),
+        "debug".to_string(),
+    )])));
     let (_, reloaded) = reload(full.clone());
     assert_eq!(reloaded, full);
     let replay = Replayer::from_bundle(
         TraceBundle::new(reloaded, Vec::new()),
-        "fingerprint+buggify+pct+swarm",
+        "fingerprint",
         "main",
     )
     .unwrap();

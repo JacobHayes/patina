@@ -45,7 +45,7 @@ fn pct_record_replay_reproduces_schedule_and_records_policy() {
             steps: 50,
         }),
     };
-    let config = RuntimeConfig::record(11, &trace, "fp+pct").with_schedule_policy(policy);
+    let config = RuntimeConfig::record(11, &trace, "fp").with_schedule_policy(policy);
     let mut record = Context::from_config(config).unwrap();
     let recorded = drive_schedule(&mut record, 4, 40);
     record.finish().unwrap();
@@ -57,7 +57,7 @@ fn pct_record_replay_reproduces_schedule_and_records_policy() {
 
     // Replay WITHOUT re-supplying the policy reproduces the exact selection
     // order (decisions come from the recorded op-stream).
-    let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp+pct")).unwrap();
+    let mut replay = Context::from_config(RuntimeConfig::replay(&trace, "fp")).unwrap();
     let replayed = drive_schedule(&mut replay, 4, 40);
     replay.finish().unwrap();
     assert_eq!(recorded, replayed);

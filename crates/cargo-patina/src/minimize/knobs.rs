@@ -70,7 +70,7 @@ pub(super) struct KnobOracle {
     pub(super) self_exe: PathBuf,
     pub(super) artifact: PathBuf,
     pub(super) seed: u64,
-    /// Invocation shape every candidate keeps (`--harness`, the pre-run gate).
+    /// Invocation shape every candidate keeps (the pre-run gate).
     pub(super) pinned: Vec<String>,
     pub(super) guest_args: Vec<String>,
     pub(super) timeout_secs: u64,

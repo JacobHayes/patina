@@ -79,40 +79,6 @@ fn save_paths_refuse_an_over_budget_trace_classifiably_and_write_nothing() {
 }
 
 #[test]
-fn buggify_fingerprint_requires_buggify_metadata() {
-    // Class-level pairing for SDK buggify value-form point pins: a trace whose
-    // fingerprint declares `+buggify` must carry the authoritative buggify
-    // config, or the run is vacuous and replay cannot reproduce SDK decisions.
-    let invalid = serde_json::json!({
-        "format_version": TRACE_FORMAT_VERSION,
-        "metadata": {
-            "root_seed": 7,
-            "fingerprint": "fingerprint+buggify",
-            "faults": {},
-            "realtime_epoch_nanos": 0,
-            "boot_origin_nanos": 1000,
-            "hostname": "patina",
-            "cpus": patina_dst_abi::DEFAULT_CPUS,
-            "time_model": patina_dst_abi::TIME_MODEL
-        },
-        "timelines": [{
-            "id": MAIN_TIMELINE,
-            "parent": null,
-            "from_sequence": null,
-            "branch_seed": null,
-            "lifecycle": [
-                {"order": 0, "kind": "start", "incarnation": 0},
-                {"order": 1, "kind": "end", "incarnation": 0}
-            ],
-            "decisions": []
-        }]
-    });
-    let bytes = serde_json::to_vec(&invalid).unwrap();
-    let error = TraceBundle::from_slice(&bytes).expect_err("missing buggify config must fail");
-    assert!(matches!(error, TraceError::Invalid(_)), "{error}");
-}
-
-#[test]
 fn rejects_non_contiguous_sequences() {
     let mut bundle = TraceBundle::new(
         RunMetadata::new(1, "fingerprint", 0, "patina"),

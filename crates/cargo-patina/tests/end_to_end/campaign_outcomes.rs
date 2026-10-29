@@ -288,8 +288,7 @@ mod tests {
     //      (no `+buggify`, no buggify config, swarm names it a dropped candidate);
     //   2. a masked generation is DISTINGUISHABLE from "buggify was never requested"
     //      — the ambiguity that sent the original bug report after the wrong cause;
-    //   3. an unmasked swarm generation still carries `+buggify`, and genuine
-    //      incoherence (declaring `+buggify` with no buggify at all) still refuses.
+    //   3. an unmasked swarm generation still carries `+buggify`.
     //
     // And the other end of the draw: a run that enabled NO class has nothing to
     // select from, so `--swarm` is an inert knob, and an inert knob must not read
@@ -442,30 +441,6 @@ mod tests {
         assert!(
             info.contains("swarm: candidates=buggify selected=buggify deselected=(none)"),
             "the trace must name buggify as selected:\n{info}"
-        );
-
-        // Genuine incoherence — a fingerprint declaring `+buggify` on a run that
-        // never armed buggify — still fails closed, exactly as before.
-        let incoherent = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            workspace,
-            &[
-                "run",
-                guest.to_str().unwrap(),
-                "--seed",
-                "0",
-                "--fingerprint",
-                "patina-native+buggify",
-                "--record",
-                directory.path().join("incoherent.patina").to_str().unwrap(),
-            ],
-        );
-        assert!(!incoherent.status.success());
-        assert!(
-            String::from_utf8_lossy(&incoherent.stderr)
-                .contains("fingerprint declares +buggify but buggify is not enabled"),
-            "the coherence guard must still refuse genuine incoherence:\nstderr:\n{}",
-            String::from_utf8_lossy(&incoherent.stderr)
         );
 
         // A live draw is not vacuous and does not warn.

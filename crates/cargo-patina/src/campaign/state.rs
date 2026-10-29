@@ -557,9 +557,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());
     }
-    if spec.harness {
-        map.insert("harness".into(), true.into());
-    }
     if !spec.allow_symbols.is_empty() {
         map.insert("allow_symbols".into(), spec.allow_symbols.clone().into());
     }

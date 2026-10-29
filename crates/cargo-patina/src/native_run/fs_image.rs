@@ -74,20 +74,16 @@ impl MountMismatch {
 }
 
 /// The image hash a recorded fingerprint carries where this run's puts one:
-/// between `head` and `tail` ([`native_run_fingerprint_around`]), so a
-/// `+fsimg:` in the user's own label is never taken for it. `None` when the
-/// recorded fingerprint is not this run's with some image hash (it differs
-/// elsewhere too, or recorded no corpus).
-pub(crate) fn recorded_image_hash<'a>(
-    recorded: &'a str,
-    head: &str,
-    tail: &str,
-) -> Option<&'a str> {
-    let hash = recorded
+/// right after `head` (the base and instrumentation parts), before the policy
+/// suffix the runtime appends. A `+fsimg:` in the user's own label is never taken
+/// for it. `None` when the recorded fingerprint is not this run's head followed
+/// by some image hash (it differs elsewhere too, or recorded no corpus).
+pub(crate) fn recorded_image_hash<'a>(recorded: &'a str, head: &str) -> Option<&'a str> {
+    let rest = recorded
         .strip_prefix(head)?
-        .strip_prefix(IMAGE_FINGERPRINT_COMPONENT)?
-        .strip_suffix(tail)?;
-    (!hash.is_empty() && !hash.contains('+')).then_some(hash)
+        .strip_prefix(IMAGE_FINGERPRINT_COMPONENT)?;
+    let hash = rest.split('+').next().unwrap_or_default();
+    (!hash.is_empty()).then_some(hash)
 }
 
 fn short_digest(bytes: &[u8]) -> String {
@@ -250,32 +246,27 @@ mod tests {
         );
     }
 
-    /// The hash is the component the run's own fingerprint puts there, a
-    /// `+fsimg:` in the label notwithstanding; a fingerprint that differs
-    /// anywhere else carries none this run can compare.
+    /// The hash is the component right after the run's own head, a `+fsimg:` in
+    /// the label notwithstanding, and ends where the runtime's policy suffix
+    /// begins; a fingerprint that differs in the head carries none this run can
+    /// compare.
     #[test]
     fn the_image_hash_is_read_where_the_fingerprint_puts_it() {
-        let policy = SchedulePolicyFingerprint::default();
         for label in ["label+fsimg:custom", "a+fsimg:b+fsimg:c", "base"] {
-            for buggify in [false, true] {
-                let fingerprint =
-                    |hash| native_run_fingerprint(label, false, Some(hash), buggify, &policy);
-                let (head, tail) = native_run_fingerprint_around(label, false, buggify, &policy);
+            let head = instrumentation_fingerprint(label, false);
+            for policy in ["", "+buggify", "+pct+swarm+yieldstride"] {
+                let recorded = format!(
+                    "{}{policy}",
+                    native_run_fingerprint(label, false, Some("aa.bb"))
+                );
                 assert_eq!(
-                    recorded_image_hash(&fingerprint("aa.bb"), &head, &tail),
+                    recorded_image_hash(&recorded, &head),
                     Some("aa.bb"),
-                    "{label} buggify={buggify}"
+                    "{label} {policy}"
                 );
-                let (other_head, _) =
-                    native_run_fingerprint_around("other", false, buggify, &policy);
-                assert_eq!(
-                    recorded_image_hash(&fingerprint("aa.bb"), &other_head, &tail),
-                    None
-                );
-                assert_eq!(
-                    recorded_image_hash(&format!("{head}{tail}"), &head, &tail),
-                    None
-                );
+                let other = instrumentation_fingerprint("other", false);
+                assert_eq!(recorded_image_hash(&recorded, &other), None);
+                assert_eq!(recorded_image_hash(&format!("{head}{policy}"), &head), None);
             }
         }
     }

@@ -29,12 +29,15 @@
 //! (startup Option B, deferred initialization):
 //!
 //! ```sh
-//! cargo patina run path/to/harness/Cargo.toml --harness --seed 1
-//! cargo patina run path/to/harness/Cargo.toml --harness --record trace.patina
-//! cargo patina replay path/to/harness/Cargo.toml trace.patina --harness
+//! cargo patina run path/to/harness/Cargo.toml --seed 1
+//! cargo patina run path/to/harness/Cargo.toml --record trace.patina
+//! cargo patina replay path/to/harness/Cargo.toml trace.patina
 //! ```
 //!
-//! `--harness` sets `PATINA_RT_DEFER_INIT=1`, which tells the packaged constructor to
+//! A harness binary identifies itself: this crate embeds a marker
+//! ([`rt::HARNESS_MARKER`]) in the program image, and the supervisor sets
+//! `PATINA_RT_DEFER_INIT=1` whenever it finds it, so no flag has to be repeated
+//! on `run`, `replay` or `campaign`. The variable tells the packaged constructor to
 //! capture and scrub the control plane and register finalization but leave the
 //! runtime uninstalled; [`run`]/[`run_with`] then install it after applying the
 //! configuration overlay. A plain `cargo run` (or any execution without the
@@ -54,18 +57,13 @@
 //! configuration that conflicts with the recorded trace fails closed
 //! ([`HarnessError::Config`]).
 //!
-//! Non-fingerprinted knobs (faults — sleep/network jitter, packet drop —,
-//! liveness watchdog, network latency, step budget, and params) record and
-//! replay cleanly from the harness alone. A crash (`--machine-crash-permille`, `--process-crash-permille`) is not
-//! a harness knob: the supervisor that boots the next incarnation reads it from
+//! Every knob records into the trace header, and the policy part of the
+//! compatibility fingerprint (`+buggify`, `+pct`, `+swarm`, `+yieldstride`) is
+//! computed by the runtime from the configuration it actually installed, so a
+//! harness that enables buggify in code records and replays with no extra flags.
+//! A crash (`--machine-crash-permille`, `--process-crash-permille`) is not a
+//! harness knob: the supervisor that boots the next incarnation reads it from
 //! the CLI.
-//! **Fingerprinted** knobs ([`HarnessBuilder::buggify`] and friends,
-//! [`HarnessBuilder::schedule_pct`],
-//! [`HarnessBuilder::swarm`]) fold a fingerprint suffix that the *supervisor*
-//! computes from CLI flags, not from the in-process overlay. For seeded
-//! (non-recording) runs they work from the harness alone; for `--record`/`replay`
-//! pass the matching CLI flag too (e.g. `--buggify`) so the recorded and replayed
-//! fingerprints agree.
 //!
 //! # Named services
 //!
@@ -115,15 +113,29 @@ use std::fmt;
 
 use patina_dst_runtime as rt;
 
+/// The bytes of [`rt::HARNESS_MARKER`], placed in every program that links this
+/// crate. `cargo patina run` scans the image for them (as it does for the
+/// instrumentation marker) and defers runtime installation to [`run_with`].
+#[used]
+static HARNESS_MARKER: [u8; rt::HARNESS_MARKER.len()] = {
+    let mut bytes = [0u8; rt::HARNESS_MARKER.len()];
+    let mut index = 0;
+    while index < bytes.len() {
+        bytes[index] = rt::HARNESS_MARKER[index];
+        index += 1;
+    }
+    bytes
+};
+
 /// An error from a harness run.
 #[derive(Debug)]
 pub enum HarnessError {
-    /// The binary is not running under `cargo patina run --harness`: there is no
+    /// The binary is not running under `cargo patina run`: there is no
     /// Patina control plane (plain `cargo run`, or a missing supervisor). The
     /// application closure never ran.
     NotUnderPatina,
-    /// A deterministic runtime is already installed. A harness binary must run
-    /// with `--harness` (deferred init) and call [`run`]/[`run_with`] once.
+    /// A deterministic runtime is already installed. Call
+    /// [`run`]/[`run_with`] once, from a binary run through `cargo patina`.
     AlreadyInstalled,
     /// A deterministic boundary effect ran before the harness installed the
     /// runtime, so reconfiguring it would make replay ambiguous.
@@ -144,12 +156,12 @@ impl fmt::Display for HarnessError {
             HarnessError::NotUnderPatina => write!(
                 formatter,
                 "not running under Patina: build and run the harness with \
-                 `cargo patina run <manifest> --harness`"
+                 `cargo patina run <manifest>`"
             ),
             HarnessError::AlreadyInstalled => write!(
                 formatter,
-                "a deterministic runtime is already installed; run the harness with `--harness` \
-                 so startup defers initialization, and call run/run_with exactly once"
+                "a deterministic runtime is already installed; call run/run_with exactly once, \
+                 from a binary run through `cargo patina`"
             ),
             HarnessError::BoundaryBeforeInstall => write!(
                 formatter,
@@ -228,8 +240,7 @@ impl HarnessBuilder {
     }
 
     /// Enable the PCT exploration scheduling policy with bug depth `depth` and an
-    /// expected schedule length of `steps` boundaries. Fingerprinted (see crate
-    /// docs).
+    /// expected schedule length of `steps` boundaries.
     #[must_use]
     pub fn schedule_pct(self, depth: u32, steps: u64) -> Self {
         self.set(rt::ENV_SCHED_PCT, depth.to_string())
@@ -278,14 +289,14 @@ impl HarnessBuilder {
     }
 
     /// Enable cooperative-SUT (buggify) fault injection at its default firing
-    /// per-mille. Fingerprinted (see crate docs).
+    /// per-mille.
     #[must_use]
     pub fn buggify(self) -> Self {
         self.enable_buggify()
     }
 
     /// Enable buggify with an explicit per-evaluation firing per-mille (0..=1000).
-    /// Fingerprinted (see crate docs).
+    ///
     #[must_use]
     pub fn buggify_fire_permille(self, permille: u16) -> Self {
         self.set(rt::ENV_BUGGIFY, permille.to_string())
@@ -306,7 +317,7 @@ impl HarnessBuilder {
     }
 
     /// Apply a seed-derived subset of the enabled fault classes this run instead
-    /// of all of them. Fingerprinted (see crate docs).
+    /// of all of them.
     #[must_use]
     pub fn swarm(self) -> Self {
         self.set(rt::ENV_SWARM, "1")
@@ -436,6 +447,9 @@ pub fn run_with<E>(
 where
     E: Into<Box<dyn Error + Send + Sync>>,
 {
+    // Anchor the marker in the image so the supervisor can recognise a harness
+    // binary even after the linker drops unreferenced statics.
+    std::hint::black_box(&HARNESS_MARKER);
     let builder = configure(HarnessBuilder::new())?;
 
     #[cfg(patina_shim)]

@@ -72,7 +72,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_RT_DEFER_INIT",
         scope: "protocol",
-        doc: "Set by --harness: defer runtime installation so the harness owns configure-then-run.",
+        doc: "Set for a patina-dst-harness binary (recognised by its embedded marker): defer runtime installation so the harness owns configure-then-run.",
     },
     EnvVar {
         name: "PATINA_RT_STEP_BUDGET",

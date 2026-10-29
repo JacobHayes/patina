@@ -17,27 +17,35 @@ pub struct Replayer {
 }
 
 impl Replayer {
-    pub fn open(path: impl AsRef<Path>, expected_fingerprint: &str) -> Result<Self, TraceError> {
-        Self::open_timeline(path, expected_fingerprint, MAIN_TIMELINE)
+    /// Open the trace at `path`. `base_fingerprint` is the replaying run's own
+    /// fingerprint without the policy suffix; the suffix is derived from the
+    /// trace's recorded configuration ([`RunMetadata::policy_fingerprint_suffix`])
+    /// and the two must equal the recorded string.
+    pub fn open(path: impl AsRef<Path>, base_fingerprint: &str) -> Result<Self, TraceError> {
+        Self::open_timeline(path, base_fingerprint, MAIN_TIMELINE)
     }
 
     pub fn open_timeline(
         path: impl AsRef<Path>,
-        expected_fingerprint: &str,
+        base_fingerprint: &str,
         timeline: &str,
     ) -> Result<Self, TraceError> {
-        Self::from_bundle(TraceBundle::load(path)?, expected_fingerprint, timeline)
+        Self::from_bundle(TraceBundle::load(path)?, base_fingerprint, timeline)
     }
 
     /// Build a replayer from an already-loaded bundle.
     pub fn from_bundle(
         bundle: TraceBundle,
-        expected_fingerprint: &str,
+        base_fingerprint: &str,
         timeline: &str,
     ) -> Result<Self, TraceError> {
-        if bundle.metadata.fingerprint != expected_fingerprint {
+        let expected = format!(
+            "{base_fingerprint}{}",
+            bundle.metadata.policy_fingerprint_suffix()
+        );
+        if bundle.metadata.fingerprint != expected {
             return Err(TraceError::FingerprintMismatch {
-                expected: expected_fingerprint.into(),
+                expected,
                 recorded: bundle.metadata.fingerprint,
             });
         }
@@ -77,6 +85,11 @@ impl Replayer {
     /// replay. `None` for a trace recorded without buggify.
     pub const fn buggify_config(&self) -> Option<&BuggifyConfigRecord> {
         self.metadata.buggify.as_ref()
+    }
+
+    /// The recorded compatibility fingerprint (base plus policy suffix).
+    pub fn fingerprint(&self) -> &str {
+        &self.metadata.fingerprint
     }
 
     /// The recorded exploration scheduling policy, authoritative on replay.

@@ -264,15 +264,14 @@ fn the_dns_band_rides_on_the_host_table() {
     );
 }
 
-// The native harness/pre-run-gate surface a campaign forwards verbatim. A
-// guest that needs `--harness` or the gate hatch is not "a campaign that
+// The native pre-run-gate surface a campaign forwards verbatim. A
+// guest that needs the gate hatch is not "a campaign that
 // reports failures" — it is a campaign that cannot run at all, every
 // generation refused identically, so the forwarding is what makes the sweep
 // possible.
 #[test]
 fn the_native_invocation_surface_is_forwarded_to_every_generation() {
     let spec = CampaignSpec {
-        harness: true,
         allow_symbols: vec!["semaphore_wait".into(), "semaphore_signal".into()],
         allow_unsupported_symbols: Some("all".into()),
         address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
@@ -280,12 +279,12 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation() {
     };
     for generation in 0..8 {
         let native = derive_flags(&spec, &generation_hash(0, generation));
-        for flag in ["--harness", "--allow-randomized-address-layout"] {
-            assert!(
-                native.iter().any(|f| f == flag),
-                "generation {generation} lost {flag}: {native:?}"
-            );
-        }
+        assert!(
+            native
+                .iter()
+                .any(|f| f == "--allow-randomized-address-layout"),
+            "generation {generation} lost the address layout: {native:?}"
+        );
         let allowed: Vec<&String> = native
             .iter()
             .enumerate()
@@ -306,7 +305,6 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation() {
     // A spec that asks for none of it forwards none of it.
     let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0));
     for flag in [
-        "--harness",
         "--allow",
         "--allow-unsupported-symbols",
         "--allow-randomized-address-layout",

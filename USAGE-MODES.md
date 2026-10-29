@@ -70,22 +70,22 @@ patina_dst_harness::run_with(
 )
 ```
 
-Built and run through `cargo patina build` / `cargo patina run --harness`
-(replays of harness binaries also need `--harness`, and `cargo patina campaign
---harness` forwards it to every generation and to the reproduce commands it
-prints). Startup is *Option B:
-deferred init* (the name code comments reference): the flag sets
-`PATINA_RT_DEFER_INIT=1`, the shim's startup constructor still
-captures the control plane, registers finalization, and scrubs the
-environment, but leaves the runtime uninstalled; `patina_harness_install`
-applies the harness configuration as a control-plane overlay and installs
-through the same parsers `cargo patina run` uses, so there is no second config
-surface and no new fingerprint component. Fail-closed edges: an interposed
+Built and run through `cargo patina build` / `cargo patina run`; replays and
+campaigns need no flag. A harness binary carries a `PATINA_HARNESS_V1` marker
+(the same pattern as `PATINA_INSTRUMENTED_V1`), and the supervisor sets
+`PATINA_RT_DEFER_INIT=1` when it finds it. Startup is *Option B:
+deferred init* (the name code comments reference): the shim's startup
+constructor still captures the control plane, registers finalization, and
+scrubs the environment, but leaves the runtime uninstalled;
+`patina_harness_install` applies the harness configuration as a control-plane
+overlay and installs through the same parsers `cargo patina run` uses, so there
+is no second config surface. The runtime computes the fingerprint's policy
+suffix (`+buggify`, `+pct`, `+swarm`, `+yieldstride`) from the configuration it
+installed, so knobs set in the harness record and replay without matching CLI
+flags. Fail-closed edges: an interposed
 effect before install aborts loudly (the runtime never auto-inits under
 defer); install after an effect boundary, double install, or running the
 binary outside `cargo patina run` are each distinct loud errors.
-Fingerprinted knobs (buggify, schedule exploration, fault families) work from
-the harness for seeded runs but need the matching CLI flag on record/replay.
 
 The harness can also name services: `dns_service(name)` allocates a virtual
 address and inserts the DNS host-table entry, while `dns_entry(name, addr)` pins

@@ -11,7 +11,7 @@ pub(super) const RUN: Verb = Verb {
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
         "cargo patina run [--seed N | --record PATH] [FAULT/BUGGIFY OPTIONS] [--budget N] [--param K=V]... [CARGO OPTIONS] [-- PROGRAM OPTIONS]",
-        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [--harness] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -30,9 +30,9 @@ known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matchin
 denials to a loud warning (an instruction-class finding matches by its own \
 `instruction@.text+OFF` name or by the containing symbol its provenance names).\n\
 \n\
-`--harness` marks a patina-dst-harness (configure-then-run) binary: it defers \
-runtime installation so the harness installs and configures the context itself. \
-Supply it on both the record `run` and the `replay`. Reproduce a recorded run with \
+A `patina-dst-harness` (configure-then-run) binary is recognised by the marker it \
+embeds and defers runtime installation on its own; no flag is needed on `run` or \
+`replay`. Reproduce a recorded run with \
 `cargo patina replay`.",
     families: &[
         fam(Family::Cargo, "`run`", None),
@@ -120,7 +120,6 @@ Supply it on both the record `run` and the `replay`. Reproduce a recorded run wi
             title: "Native run options (run <BINARY>)",
             families: &[Family::Native],
             flags: &[
-                HARNESS_FLAG,
                 CPUS_FLAG,
                 f(
                     "--mount",
@@ -534,7 +533,7 @@ carries the timeline/branch controls (--timeline, and --branch --from \
 --branch-seed --branch-id [--parent]). Native traces restore \
 `run --env` values from metadata and reject re-supplied native `--env`; native \
 traces are single-timeline (native runs cannot branch), so native replay accepts \
-only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, the \
+only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
 --allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
     families: &[
         fam(Family::Cargo, "`replay` of a Cargo package", None),
@@ -567,10 +566,6 @@ only --fingerprint, --mount, --coverage-out, --harness, --compute-watchdog-ms, t
                     "Write a patina.covmap/v1 edge-counter map for the replayed native run.",
                     false,
                 ),
-                Flag {
-                    doc: "Replay a patina-dst-harness binary (defers runtime init).",
-                    ..HARNESS_FLAG
-                },
                 ALLOW_FLAG,
                 ALLOW_UNSUPPORTED_FLAG,
                 Flag {

@@ -174,29 +174,6 @@ pub(super) fn buggify_record(
     })
 }
 
-/// Refuse a run whose fingerprint claims cooperative-SUT coverage the config
-/// cannot deliver. This stays exactly as strict as it was for genuine
-/// incoherence; a swarm-masked generation passes because [`apply_swarm_mask`] has
-/// already retracted [`FINGERPRINT_BUGGIFY`] from the fingerprint, so the run's
-/// declared state is truthful rather than merely tolerated.
-pub(super) fn validate_buggify_fingerprint_contract(
-    config: &RuntimeConfig,
-) -> Result<(), RuntimeError> {
-    if fingerprint_declares_component(&config.fingerprint, FINGERPRINT_BUGGIFY)
-        && !config.buggify.enabled
-    {
-        return Err(RuntimeError::Config(
-            "fingerprint declares +buggify but buggify is not enabled; refusing vacuous SDK buggify coverage"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-fn fingerprint_declares_component(fingerprint: &str, component: &str) -> bool {
-    fingerprint.split('+').skip(1).any(|part| part == component)
-}
-
 /// Rebuild a [`BuggifyConfig`] from a recorded trace's authoritative buggify
 /// metadata.
 fn buggify_config_from_record(record: &patina_dst_trace::BuggifyConfigRecord) -> BuggifyConfig {
@@ -214,14 +191,27 @@ fn buggify_config_from_record(record: &patina_dst_trace::BuggifyConfigRecord) ->
 /// [`reconcile_replay_faults`]. The trace is authoritative: with no knobs the
 /// stored config is adopted verbatim (byte-identical replay); supplied knobs
 /// must match exactly or replay fails closed. A trace recorded without buggify
-/// (`None`) means the operator's configuration stands — and if the operator
-/// tries to enable buggify on a non-buggify trace, that is caught earlier by the
-/// `+buggify` fingerprint mismatch.
+/// (`None`) refuses an operator who enables it: the replay would claim coverage
+/// the recording never had. The exception is a trace whose swarm draw
+/// deselected buggify: the recording asked for it and had it masked, so a
+/// harness that still asks for it replays with buggify disarmed, as recorded.
 pub(super) fn reconcile_replay_buggify(
     config: &RuntimeConfig,
     recorded: Option<&patina_dst_trace::BuggifyConfigRecord>,
+    swarm: Option<&patina_dst_trace::SwarmConfigRecord>,
 ) -> Result<Option<BuggifyConfig>, RuntimeError> {
     let Some(record) = recorded else {
+        if config.buggify.enabled
+            && swarm.is_some_and(|swarm| swarm.deselected(FINGERPRINT_BUGGIFY))
+        {
+            return Ok(Some(BuggifyConfig::default()));
+        }
+        if config.buggify.enabled {
+            return Err(RuntimeError::Config(
+                "replay enables buggify but the trace was recorded without it; omit the flags"
+                    .into(),
+            ));
+        }
         return Ok(None);
     };
     let stored = buggify_config_from_record(record);
@@ -425,15 +415,20 @@ fn schedule_policy_from_record(record: &patina_dst_trace::SchedulePolicyRecord) 
 /// any policy the operator also supplied at replay, mirroring
 /// [`reconcile_replay_faults`]. The trace is authoritative: with no policy
 /// supplied the stored one is adopted verbatim; a conflicting supplied policy
-/// fails closed. A trace recorded under the default policy (`None`) leaves the
-/// operator's configuration in place — and an operator trying to *enable* a
-/// policy on a default trace is caught earlier by the `+pct`
-/// fingerprint mismatch.
+/// fails closed. A trace recorded under the default policy (`None`) refuses an
+/// operator who enables one, as it does for buggify.
 pub(super) fn reconcile_replay_schedule_policy(
     config: &RuntimeConfig,
     recorded: Option<&patina_dst_trace::SchedulePolicyRecord>,
 ) -> Result<Option<SchedulePolicy>, RuntimeError> {
     let Some(record) = recorded else {
+        if !config.schedule_policy.is_default() {
+            return Err(RuntimeError::Config(
+                "replay enables a scheduling policy but the trace was recorded without one; \
+                 omit the flags"
+                    .into(),
+            ));
+        }
         return Ok(None);
     };
     let stored = schedule_policy_from_record(record);
@@ -706,7 +701,7 @@ mod tests {
         assert!(reconcile_replay_schedule_policy(&conflicting, Some(&stored_policy)).is_err());
 
         assert_eq!(
-            reconcile_replay_buggify(&RuntimeConfig::seeded(0), None).unwrap(),
+            reconcile_replay_buggify(&RuntimeConfig::seeded(0), None, None).unwrap(),
             None
         );
         let stored_buggify = patina_dst_trace::BuggifyConfigRecord {
@@ -722,6 +717,6 @@ mod tests {
             fire_permille: 999,
             ..BuggifyConfig::default()
         });
-        assert!(reconcile_replay_buggify(&conflicting, Some(&stored_buggify)).is_err());
+        assert!(reconcile_replay_buggify(&conflicting, Some(&stored_buggify), None).is_err());
     }
 }

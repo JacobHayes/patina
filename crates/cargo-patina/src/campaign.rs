@@ -303,7 +303,7 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
 }
 
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
-/// draw: `--harness`, the pre-run gate surface (`--allow`,
+/// draw: the pre-run gate surface (`--allow`,
 /// `--allow-unsupported-symbols`), `--allow-randomized-address-layout` and
 /// `--cpus`. Every generation gets them verbatim.
 ///
@@ -320,9 +320,6 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
     let mut flags = Vec::new();
     if let Some(bound) = spec.compute_watchdog_ms {
         push_run_flag(&mut flags, "--compute-watchdog-ms", RunValue::Int(bound));
-    }
-    if spec.harness {
-        push_run_flag(&mut flags, "--harness", RunValue::Switch);
     }
     for symbol in &spec.allow_symbols {
         push_run_flag(&mut flags, "--allow", RunValue::Text(symbol.clone()));

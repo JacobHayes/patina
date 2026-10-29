@@ -8,10 +8,8 @@ use crate::shim_build::{
     lock_target_dir, prepare_shim_sources, stage_instrumentation_object, stage_shim_object,
 };
 use crate::{
-    ArtifactRef, BuildSpec, CliError, NativeBuildInvocation, NativeBuildTarget, NativeSchedule,
-    hex, output,
+    ArtifactRef, BuildSpec, CliError, NativeBuildInvocation, NativeBuildTarget, hex, output,
 };
-use patina_dst_trace::TraceBundle;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -815,110 +813,36 @@ pub(super) fn instrumentation_fingerprint(base: &str, instrumented: bool) -> Str
     }
 }
 
-/// The compatibility fingerprint for a native run: the base fingerprint, then
-/// the instrumentation suffix, the mounted-corpus suffix, and the
-/// cooperative-SUT (buggify) suffix. Folding the filesystem image hash in means
-/// a trace recorded against one corpus fails closed on replay against a
-/// different one, exactly like a schedule-policy mismatch. The `+buggify`
-/// suffix means a buggify trace never cross-replays with a non-buggify build,
-/// even though the per-site knobs live in (reconciled) metadata.
-///
-/// `+buggify` is a *request* here; it is the one component the guest may retract.
-/// A `--swarm` generation whose seed deselects the buggify class strips it again
-/// inside the runtime, so the fingerprint recorded into the trace describes the
-/// run that happened. A flag-free replay of such a trace reconstructs the
-/// component set from the metadata ([`trace_has_buggify`],
-/// [`native_policy_from_trace`]) and therefore recomputes the same string.
+/// Whether the program whose bytes are `image` is a `patina-dst-harness` binary,
+/// recovered from the marker that crate embeds. A harness owns runtime
+/// installation, so the supervisor defers it for such a program on every run,
+/// replay and campaign generation alike, with no flag to repeat.
+pub(super) fn binary_is_harness(image: &[u8]) -> bool {
+    memchr::memmem::find(image, patina_dst_runtime::HARNESS_MARKER).is_some()
+}
+
+/// The fingerprint a native run hands the runtime: the base fingerprint, the
+/// instrumentation suffix and the mounted-corpus suffix. Folding the filesystem
+/// image hash in means a trace recorded against one corpus fails closed on
+/// replay against a different one. The runtime appends the policy suffix
+/// (`+buggify`, `+pct`, `+swarm`, `+yieldstride`) itself, from the
+/// configuration it actually installs, so nothing here has to track which knobs
+/// a run turned on.
 pub(super) fn native_run_fingerprint(
     base: &str,
     instrumented: bool,
     image_hash: Option<&str>,
-    buggify: bool,
-    policy: &SchedulePolicyFingerprint,
 ) -> String {
-    let (head, tail) = native_run_fingerprint_around(base, instrumented, buggify, policy);
+    let head = instrumentation_fingerprint(base, instrumented);
     match image_hash {
-        Some(hash) => format!("{head}{IMAGE_FINGERPRINT_COMPONENT}{hash}{tail}"),
-        None => head + &tail,
+        Some(hash) => format!("{head}{IMAGE_FINGERPRINT_COMPONENT}{hash}"),
+        None => head,
     }
 }
 
 /// The mounted-corpus component of a native run's fingerprint, before its
 /// image hash.
 pub(super) const IMAGE_FINGERPRINT_COMPONENT: &str = "+fsimg:";
-
-/// A native run's fingerprint either side of its mounted-corpus component
-/// ([`native_run_fingerprint`]): the base and instrumentation suffix, then
-/// the buggify and policy suffixes. Where the image hash sits is known only
-/// from these, never from the string itself, whose base is the user's free
-/// text.
-pub(super) fn native_run_fingerprint_around(
-    base: &str,
-    instrumented: bool,
-    buggify: bool,
-    policy: &SchedulePolicyFingerprint,
-) -> (String, String) {
-    let head = instrumentation_fingerprint(base, instrumented);
-    let mut fingerprint = String::new();
-    if buggify {
-        fingerprint.push('+');
-        fingerprint.push_str(patina_dst_runtime::FINGERPRINT_BUGGIFY);
-    }
-    // Exploration-policy suffixes, in a fixed order so the fingerprint is stable.
-    // Each folds only when active, so a plain run fingerprints exactly as before
-    // these components existed — mirroring the conditional `+buggify` suffix.
-    if policy.pct {
-        fingerprint.push_str("+pct");
-    }
-    if policy.swarm {
-        fingerprint.push_str("+swarm");
-    }
-    if policy.yield_stride {
-        fingerprint.push_str("+yieldstride");
-    }
-    (head, fingerprint)
-}
-
-/// The exploration-policy fingerprint components of a native run. On a fresh run
-/// these come from the CLI flags; on replay they are reconstructed from the trace
-/// metadata (see [`native_policy_from_trace`]), so replay is self-contained and a
-/// policy trace never cross-replays with a plain build.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct SchedulePolicyFingerprint {
-    pct: bool,
-    swarm: bool,
-    yield_stride: bool,
-}
-
-impl SchedulePolicyFingerprint {
-    pub(super) fn from_schedule(schedule: &NativeSchedule) -> Self {
-        Self {
-            pct: schedule.pct.is_some(),
-            swarm: schedule.swarm,
-            yield_stride: schedule.yield_stride != 0,
-        }
-    }
-}
-
-/// Whether a recorded trace carries buggify metadata. Used at replay so the
-/// `+buggify` fingerprint component is reconstructed from the trace itself,
-/// keeping replay self-contained (the operator need not re-pass `--buggify`).
-pub(super) fn trace_has_buggify(bundle: &TraceBundle) -> bool {
-    bundle.metadata.buggify.is_some()
-}
-
-/// Reconstruct the exploration-policy fingerprint components from a recorded
-/// trace's metadata, so a flag-free replay recomputes the same fingerprint the
-/// record run folded (`+pct`/`+swarm`/`+yieldstride`) and a cross-policy replay fails
-/// closed.
-pub(super) fn native_policy_from_trace(bundle: &TraceBundle) -> SchedulePolicyFingerprint {
-    let policy = bundle.metadata.schedule_policy.as_ref();
-    SchedulePolicyFingerprint {
-        pct: policy.is_some_and(|policy| policy.pct.is_some()),
-        swarm: bundle.metadata.swarm.is_some(),
-        yield_stride: policy.is_some_and(|policy| policy.yield_stride != 0),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1044,5 +968,15 @@ mod tests {
             instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, true),
             DEFAULT_NATIVE_FINGERPRINT
         );
+    }
+
+    #[test]
+    fn a_harness_binary_is_recognised_by_its_embedded_marker() {
+        let mut image = vec![0u8; 200_000];
+        assert!(!binary_is_harness(&image));
+        let marker = patina_dst_runtime::HARNESS_MARKER;
+        let at = 64 * 1024 - (marker.len() / 2);
+        image[at..at + marker.len()].copy_from_slice(marker);
+        assert!(binary_is_harness(&image));
     }
 }

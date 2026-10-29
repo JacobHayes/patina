@@ -248,9 +248,16 @@ pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";
 /// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
 /// the harness's configuration overlay. An interposed effect that reaches the
 /// boundary before the harness installs fails closed loudly (never auto-inits).
-/// Set by `cargo patina run --harness` (and the matching `replay`). Off when
+/// Set by `cargo patina run` (and `replay`) for a program carrying
+/// [`HARNESS_MARKER`]. Off when
 /// unset (the ordinary constructor-installs-at-startup path).
 pub const ENV_DEFER_INIT: &str = "PATINA_RT_DEFER_INIT";
+
+/// The bytes a harness binary embeds in its image (`patina-dst-harness` places
+/// them, `cargo patina` scans for them, the same way it does for
+/// `PATINA_INSTRUMENTED_V1`): the program owns runtime installation, so the
+/// supervisor sets [`ENV_DEFER_INIT`] without being told.
+pub const HARNESS_MARKER: &[u8] = b"PATINA_HARNESS_V1";
 
 /// Native supervisor reservation marker (`=1`): the initial environment has
 /// room for the deterministic map and a disjoint copy of the platform trailer.
@@ -481,16 +488,8 @@ pub const ENV_SCHED_YIELD_STRIDE: &str = "PATINA_RT_SCHED_YIELD_STRIDE";
 /// fingerprint component.
 pub const ENV_SWARM: &str = "PATINA_RT_SWARM";
 
-/// The compatibility-fingerprint component a supervisor folds (as `+buggify`)
-/// when a run arms cooperative-SUT injection, and the component swarm strips
-/// again when a generation deselects the `buggify` class.
-///
-/// Both sides read this one constant so the declaration and the retraction can
-/// never disagree: `cargo patina`'s fingerprint composer appends it, and
-/// [`RuntimeConfig`]'s swarm mask removes it. A fingerprint component that is
-/// also a swarm-maskable class MUST live here and be registered in the swarm
-/// class table (see the `swarm_class_table_declares_every_fingerprint_component`
-/// test), or a masked run would keep declaring coverage it no longer has.
+/// The swarm class token (and `+buggify` fingerprint part) of cooperative-SUT
+/// injection.
 pub const FINGERPRINT_BUGGIFY: &str = "buggify";
 
 /// Enable the generic liveness watchdog with a virtual-time no-progress budget in
@@ -517,7 +516,7 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_RT_HEAL_AFTER_NANOS";
 pub const HARNESS_OK: i32 = 0;
 
 /// No `PATINA_RT_MODE` in the control plane: the harness binary was not run under
-/// `cargo patina run --harness` (plain execution or missing supervisor protocol).
+/// `cargo patina run` (plain execution or missing supervisor protocol).
 pub const HARNESS_ERR_NOT_UNDER_PATINA: i32 = -1;
 
 /// The runtime is already installed (a non-deferred startup, or a second

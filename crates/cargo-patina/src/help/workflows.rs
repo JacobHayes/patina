@@ -44,7 +44,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--harness] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -106,10 +106,9 @@ lands restarts once from the image the crash leaves. `minimize --generation` on 
 restarted incarnation separately, keeping the crash on the operation it followed.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
-generation: `--harness` for a patina-dst-harness (configure-then-run) binary, and \
-the pre-run gate surface `--allow SYMBOL` / `--allow-unsupported-symbols`. \
-Without them a guest needing either is refused identically in every generation \
-rather than swept. They are part of the campaign's shape, so they are recorded in \
+generation: the pre-run gate surface `--allow SYMBOL` / `--allow-unsupported-symbols`. \
+Without it a guest needing either is refused identically in every generation \
+rather than swept. It is part of the campaign's shape, so it is recorded in \
 the out-dir spec, replayed by the reproduce commands, and refused on a \
 continuation like every other spec flag; a non-native artifact carrying one is \
 refused by name.",
@@ -297,16 +296,12 @@ refused by name.",
             flags: DNS_ENTRY_FLAGS,
         },
         Group {
-            // `run <BINARY>`'s harness/pre-run-gate surface, forwarded verbatim to
+            // `run <BINARY>`'s pre-run-gate surface, forwarded verbatim to
             // every generation's child `run` (and to the reproduce commands, since
             // these are host/build facts a trace cannot carry).
             title: "Native run options (forwarded to every generation)",
             families: SOLE,
             flags: &[
-                Flag {
-                    doc: "Sweep a patina-dst-harness binary: every generation runs with --harness (defers runtime init).",
-                    ..HARNESS_FLAG
-                },
                 Flag {
                     doc: "Add a known-safe symbol to every generation's pre-run gate allow list.",
                     ..ALLOW_FLAG

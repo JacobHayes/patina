@@ -347,7 +347,6 @@ fn the_native_invocation_flags_parse_into_the_spec() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     let inv = parse(args(&[
         "art",
-        "--harness",
         "--allow",
         "dlsym",
         "--allow",
@@ -356,18 +355,13 @@ fn the_native_invocation_flags_parse_into_the_spec() {
         "all",
     ]))
     .unwrap();
-    assert!(inv.spec.harness);
     assert_eq!(inv.spec.allow_symbols, ["dlsym", "semaphore_wait"]);
     assert_eq!(inv.spec.allow_unsupported_symbols.as_deref(), Some("all"));
     // The value grammars are the registry's, enforced at parse time.
     assert!(parse(args(&["art", "--allow-unsupported-symbols", ""])).is_err());
     assert!(parse(args(&["art", "--allow"])).is_err());
     // They describe the campaign's shape, so a continuation cannot change them.
-    for flag in [
-        "--harness",
-        "--allow=dlsym",
-        "--allow-unsupported-symbols=all",
-    ] {
+    for flag in ["--allow=dlsym", "--allow-unsupported-symbols=all"] {
         let error = parse(args(&["--resume", flag])).unwrap_err().to_string();
         assert!(
             error.contains("recorded spec is authoritative"),

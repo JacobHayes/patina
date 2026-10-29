@@ -371,14 +371,6 @@ pub(super) const REPLAY_TIMELINE_FLAGS: &[Flag] = &[
     ),
 ];
 
-pub(super) const HARNESS_FLAG: Flag = f(
-    "--harness",
-    None,
-    Value::None,
-    "Treat the binary as a patina-dst-harness (defers runtime init).",
-    false,
-);
-
 pub(super) const ALLOW_FLAG: Flag = f(
     "--allow",
     None,

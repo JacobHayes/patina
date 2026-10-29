@@ -14,8 +14,7 @@ use crate::replay::{
     reconcile_replay_cpus, reconcile_replay_dns, reconcile_replay_faults,
     reconcile_replay_guest_cwd, reconcile_replay_guest_env, reconcile_replay_hostname,
     reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy, reconcile_replay_sud,
-    reconcile_replay_tsc, reconcile_replay_yield_stride, schedule_policy_record,
-    validate_buggify_fingerprint_contract, watchdog_record,
+    reconcile_replay_tsc, reconcile_replay_yield_stride, schedule_policy_record, watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
 use crate::scheduler::{DetScheduler, SchedulePolicy};
@@ -198,13 +197,6 @@ impl RuntimeBuilder {
                 }
             }
         }
-        if matches!(
-            self.config.mode,
-            ExecutionMode::Seeded | ExecutionMode::Record { .. } | ExecutionMode::RecordTransport
-        ) {
-            validate_buggify_fingerprint_contract(&self.config)?;
-        }
-
         // Swarm fault-class selection: for a record/seeded run, mask the enabled
         // fault classes down to a seed-derived subset BEFORE any driver or
         // metadata record consumes `self.config.faults`. Not applied on
@@ -222,6 +214,21 @@ impl RuntimeBuilder {
         } else {
             None
         };
+
+        // The fingerprint a record or seeded run carries: the base the embedder
+        // gave, then the policy parts of the EFFECTIVE configuration (after the
+        // swarm mask above), so the string always describes the run that
+        // happened and no caller has to keep it in step with its own knobs.
+        // Replay recomputes the same suffix from the trace's metadata.
+        let record_fingerprint = format!(
+            "{}{}",
+            self.config.fingerprint,
+            patina_dst_trace::policy_fingerprint_suffix(
+                buggify_record(&self.config).as_ref(),
+                schedule_policy_record(&self.config).as_ref(),
+                swarm_record.as_ref(),
+            )
+        );
 
         // A replayed or branched trace supplies its own authoritative fault
         // configuration, applied to `self.config` after the match releases its
@@ -250,7 +257,7 @@ impl RuntimeBuilder {
                     recorder: Recorder::new(
                         RunMetadata::new(
                             self.config.seed,
-                            self.config.fingerprint.clone(),
+                            record_fingerprint.clone(),
                             recorded_realtime_epoch,
                             self.config.hostname(),
                         )
@@ -282,7 +289,7 @@ impl RuntimeBuilder {
                     recorder: Recorder::new(
                         RunMetadata::new(
                             self.config.seed,
-                            self.config.fingerprint.clone(),
+                            record_fingerprint.clone(),
                             recorded_realtime_epoch,
                             self.config.hostname(),
                         )
@@ -321,8 +328,11 @@ impl RuntimeBuilder {
                     &self.config,
                     replayer.fault_config(),
                 )?);
-                replay_buggify_override =
-                    reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_buggify_override = reconcile_replay_buggify(
+                    &self.config,
+                    replayer.buggify_config(),
+                    replayer.swarm_config(),
+                )?;
                 replay_guest_env_override = Some(reconcile_replay_guest_env(
                     &self.config,
                     replayer.guest_env(),
@@ -374,8 +384,11 @@ impl RuntimeBuilder {
                     &self.config,
                     replayer.fault_config(),
                 )?);
-                replay_buggify_override =
-                    reconcile_replay_buggify(&self.config, replayer.buggify_config())?;
+                replay_buggify_override = reconcile_replay_buggify(
+                    &self.config,
+                    replayer.buggify_config(),
+                    replayer.swarm_config(),
+                )?;
                 replay_guest_env_override = Some(reconcile_replay_guest_env(
                     &self.config,
                     replayer.guest_env(),
@@ -432,8 +445,11 @@ impl RuntimeBuilder {
                     &self.config,
                     session.fault_config(),
                 )?);
-                replay_buggify_override =
-                    reconcile_replay_buggify(&self.config, session.buggify_config())?;
+                replay_buggify_override = reconcile_replay_buggify(
+                    &self.config,
+                    session.buggify_config(),
+                    session.swarm_config(),
+                )?;
                 replay_guest_env_override = Some(reconcile_replay_guest_env(
                     &self.config,
                     session.guest_env(),
@@ -466,6 +482,11 @@ impl RuntimeBuilder {
                     *branch_seed,
                 )
             }
+        };
+        let effective_fingerprint = match &execution {
+            Execution::Replay(replayer) => replayer.fingerprint().to_owned(),
+            Execution::Branch { session, .. } => session.fingerprint().to_owned(),
+            Execution::Seeded | Execution::Record { .. } => record_fingerprint,
         };
 
         // Every incarnation of a crash-restart run boots with its own streams,
@@ -541,7 +562,6 @@ impl RuntimeBuilder {
         if let Some(stride) = replay_yield_stride {
             self.config.yield_stride = stride;
         }
-        validate_buggify_fingerprint_contract(&self.config)?;
 
         // The crash-consistency filesystem is built HERE, and only here, from
         // `config.faults` — the single choke point that always consumes the
@@ -722,7 +742,7 @@ impl RuntimeBuilder {
             compute_stop,
             boot_origin_nanos,
             root_seed: run_seed,
-            compatibility_fingerprint: self.config.fingerprint.clone(),
+            compatibility_fingerprint: effective_fingerprint,
             step_budget: self.config.step_budget,
             steps: 0,
             params: self.config.params,

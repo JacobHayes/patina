@@ -60,7 +60,8 @@ trace format.
   point. A metered run defaults `GOMAXPROCS=1`.
 - **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
   configures the run in code, then runs ordinary `std` code under the shim's
-  global runtime. `--harness` sets `PATINA_RT_DEFER_INIT=1`, so the constructor
+  global runtime. a harness binary's `PATINA_HARNESS_V1` marker makes the supervisor set
+  `PATINA_RT_DEFER_INIT=1`, so the constructor
   scrubs the control plane but leaves installation to
   `patina_harness_install`. Its overlay flows through the same `PATINA_RT_*`
   values and `RuntimeConfig` fields as the CLI, so replay reconciliation

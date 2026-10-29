@@ -267,7 +267,7 @@ mod tests {
         }
 
         // `cargo patina run --help --format json` emits ONLY run's detail: run's own
-        // flags (its unique --harness) but NOT another verb's unique flag (campaign's
+        // flags (its unique --mount) but NOT another verb's unique flag (campaign's
         // --gens), and no environment block. Absent-field defaults hold: --release is
         // native to build; run's repeatable --param carries `repeatable: true`.
         let run_out = invoke_unchecked(
@@ -290,8 +290,8 @@ mod tests {
         );
         let run_flags = e2e_flag_names(&run["verb"]["flag_groups"]);
         assert!(
-            run_flags.contains("--harness"),
-            "run's payload should carry its own --harness flag"
+            run_flags.contains("--mount"),
+            "run's payload should carry its own --mount flag"
         );
         assert!(
             !run_flags.contains("--gens"),

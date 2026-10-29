@@ -13,6 +13,7 @@ use super::*;
 /// * `threads`: worker threads doing interposed sleeps, joined in the closure;
 /// * `dns-thread`: a wildcard-bound listener thread served through the name a
 ///   `dns_service` registered;
+/// * `knobs`: the `round_trip` body under buggify and PCT enabled in code;
 /// * `boundary`: an interposed `std::fs` effect before the harness installs;
 /// * `early-write`: captured output before the harness installs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -111,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             |harness| {
                 Ok(match mode.as_str() {
                     "jitter" => harness.sleep_jitter_nanos(1_000_000, 1_000_000),
+                    "knobs" => harness.buggify().schedule_pct(2, 100),
                     "dns" => harness
                         .dns_entry("pinned.internal", "10.9.9.9")
                         .dns_service("db.internal"),
@@ -191,10 +193,10 @@ mod tests {
             .unwrap_or_else(|| panic!("missing elapsed= in {line}"))
     }
 
-    /// A `--harness` run of `mode` at seed 1, with the guest's arguments last.
+    /// A run of the harness binary in `mode` at seed 1, with the guest's arguments last.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn harness_run(bin: &Path, mode: &str, extra: &[&str]) -> Output {
-        let mut args = vec!["run", bin.to_str().unwrap(), "--harness", "--seed", "1"];
+        let mut args = vec!["run", bin.to_str().unwrap(), "--seed", "1"];
         args.extend_from_slice(extra);
         if !mode.is_empty() {
             args.extend(["--", mode]);
@@ -206,12 +208,46 @@ mod tests {
         )
     }
 
+    // Knobs a harness turns on in code are recorded with the policy part of the
+    // fingerprint computed by the runtime, so the trace replays with no flag on
+    // the command line and a replay that arms them differently still fails closed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_harness_that_enables_buggify_in_code_records_and_replays_without_flags() {
+        let bin = harness_guest();
+        let directory = tempdir().unwrap();
+        let trace = directory.path().join("knobs.patina");
+        let recorded = assert_success(harness_run(
+            &bin,
+            "knobs",
+            &["--record", trace.to_str().unwrap()],
+        ));
+        let metadata = patina_dst_trace::TraceBundle::load(&trace)
+            .unwrap()
+            .metadata;
+        assert!(metadata.buggify.is_some(), "buggify was not recorded");
+        assert!(
+            metadata.fingerprint.ends_with("+buggify+pct"),
+            "the runtime must fold the harness-enabled knobs into the fingerprint: {}",
+            metadata.fingerprint
+        );
+        let replayed = invoke(
+            native_workspace(),
+            &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
+        );
+        assert_eq!(
+            harness_out_line(&replayed),
+            harness_out_line(&recorded),
+            "a flag-free replay of a harness that enabled buggify diverged"
+        );
+    }
+
     // One harness binary carries every interposed-service claim. Executed directly
     // (no Patina control plane) it fails loudly with NotUnderPatina before any
     // application code runs, never a silent host-effect fallback. Under
-    // `cargo patina run --harness` each scenario runs with its std effects
-    // interposed and its recording finalized, and a replay carrying only
-    // `--harness` (deferred init: no semantic flags, no guest arguments, since the
+    // `cargo patina run` each scenario runs with its std effects
+    // interposed and its recording finalized, and a replay carrying no
+    // flag (the binary's marker defers init: no semantic flags, no guest arguments, since the
     // trace is authoritative) prints the same bytes. The harness closure re-applies
     // its overlay on replay, so the DNS scenarios also prove the overlay and the
     // authoritative trace reconcile rather than conflict.
@@ -269,12 +305,7 @@ mod tests {
             );
             let replayed = invoke(
                 native_workspace(),
-                &[
-                    "replay",
-                    bin.to_str().unwrap(),
-                    trace.to_str().unwrap(),
-                    "--harness",
-                ],
+                &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
             );
             assert_eq!(
                 harness_out_line(&replayed),

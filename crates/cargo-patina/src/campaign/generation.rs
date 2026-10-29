@@ -238,7 +238,7 @@ pub(super) fn run_generation(
 /// process: the reproduce command a campaign prints for a failure that left a
 /// valid trace, run with the same child shape, environment and timeout backstop
 /// as the generation it replays. `invocation` is the shape the trace cannot carry
-/// (`--harness`, the pre-run gate surface, the host-time bound).
+/// (the pre-run gate surface, the host-time bound).
 pub(super) fn run_replay(
     self_exe: &Path,
     artifact: &Path,

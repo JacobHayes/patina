@@ -13,17 +13,10 @@ use patina_dst_rng_seeded::{SplitMix64, domain_seed};
 /// candidate set and the seed's selection so the trace is self-describing. Each
 /// class draws independently, so subsets vary across generations (seeds).
 ///
-/// **Deselection is retracted from the fingerprint too.** A class whose
-/// capability the supervisor declared as a compatibility-fingerprint component
-/// (today only [`FINGERPRINT_BUGGIFY`]) has that component stripped from
-/// `config.fingerprint` when the seed deselects it, because the fingerprint
-/// describes the run that actually happened, not the run that was requested.
-/// Without this the run would declare `+buggify` while carrying a disarmed
-/// buggify config — exactly the incoherence
-/// [`validate_buggify_fingerprint_contract`] refuses — so a legitimate
-/// swarm-masked generation aborted. The trace metadata stays coherent by the same
-/// rule: the recorded fault/buggify records are derived from the masked config,
-/// and the swarm record names the class as a candidate that was not selected.
+/// The recorded fault/buggify records are derived from the masked config, and
+/// the swarm record names a dropped class as a candidate that was not selected.
+/// The run's fingerprint is computed from the masked config afterwards, so a
+/// deselected `buggify` leaves no `+buggify` behind.
 pub(super) fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::SwarmConfigRecord {
     let mut draw = SwarmDraw::default();
     let seed = config.seed;
@@ -39,13 +32,8 @@ pub(super) fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::
         if !candidate {
             continue;
         }
-        apply_swarm_class(
-            seed,
-            class.token,
-            class.domain,
-            class.fingerprint_component,
-            &mut draw,
-            || match class.masks {
+        apply_swarm_class(seed, class.token, class.domain, &mut draw, || {
+            match class.masks {
                 Masks::Knobs(knobs) => {
                     for knob in knobs {
                         knob.clear(&mut config.faults);
@@ -64,12 +52,8 @@ pub(super) fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::
                 // class, so a replay that rebuilt one from residue could not
                 // reproduce the recording's diagnostics.
                 Masks::Buggify => config.buggify = BuggifyConfig::default(),
-            },
-        );
-    }
-
-    for component in draw.retract {
-        config.fingerprint = remove_fingerprint_component(&config.fingerprint, component);
+            }
+        });
     }
 
     patina_dst_trace::SwarmConfigRecord {
@@ -79,23 +63,19 @@ pub(super) fn apply_swarm_mask(config: &mut RuntimeConfig) -> patina_dst_trace::
 }
 
 /// What one run's swarm draw accumulated: the classes it considered, the ones it
-/// kept, and the fingerprint components of the ones it dropped. Collected in a
-/// struct rather than three out-parameters so the per-class droppers — which each
+/// kept. Collected in a
+/// struct rather than two out-parameters so the per-class droppers — which each
 /// borrow the config mutably — stay independent of the accumulation.
 #[derive(Default)]
 struct SwarmDraw {
     candidates: Vec<&'static str>,
     selected: Vec<String>,
-    /// Retracted from the fingerprint only after every dropper has run, so the
-    /// config borrow the droppers hold is released first.
-    retract: Vec<&'static str>,
 }
 
 fn apply_swarm_class(
     seed: u64,
     token: &'static str,
     domain: &'static str,
-    fingerprint_component: Option<&'static str>,
     draw: &mut SwarmDraw,
     drop: impl FnOnce(),
 ) {
@@ -105,28 +85,7 @@ fn apply_swarm_class(
         draw.selected.push(token.into());
     } else {
         drop();
-        if let Some(component) = fingerprint_component {
-            draw.retract.push(component);
-        }
     }
-}
-
-/// Remove every `+component` occurrence from a compatibility fingerprint,
-/// preserving the base label and the order of the remaining components. The
-/// result is exactly the string a supervisor composes for a run that never
-/// declared the component, so a flag-free replay — which reconstructs the
-/// component set from the trace metadata — recomputes an identical fingerprint.
-fn remove_fingerprint_component(fingerprint: &str, component: &str) -> String {
-    let mut parts = fingerprint.split('+');
-    let mut out = String::from(parts.next().unwrap_or_default());
-    for part in parts {
-        if part == component {
-            continue;
-        }
-        out.push('+');
-        out.push_str(part);
-    }
-    out
 }
 
 #[cfg(test)]

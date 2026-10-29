@@ -41,6 +41,7 @@ pub use lifecycle::{LifecycleEvent, LifecycleEventKind};
 pub use metadata::{
     AddressLayout, BuggifyConfigRecord, ComputeStop, DnsConfigRecord, FaultConfigRecord,
     PctPolicyRecord, RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, WatchdogConfigRecord,
+    policy_fingerprint_suffix,
 };
 pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord};
 pub use recorder::{PrefixWriteError, Recorder};

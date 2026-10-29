@@ -186,21 +186,52 @@ fn buggify_disabled_is_inert_and_records_nothing() {
 }
 
 #[test]
-fn buggify_fingerprint_requires_enabled_config() {
-    // Class-level pairing for SDK buggify value-form point pins: a native
-    // `+buggify` compatibility fingerprint without an armed SDK config is a
-    // vacuous coverage claim and must fail before any trace can be recorded.
+fn the_fingerprint_follows_the_effective_buggify_config() {
+    // The runtime owns the policy suffix: a run that arms buggify in code
+    // records `+buggify`, one that does not records none, and a replay with no
+    // extra configuration recomputes the same string from the trace. A replay
+    // that arms buggify against a trace recorded without it fails closed.
     let directory = tempfile::tempdir().unwrap();
-    let trace = directory.path().join("vacuous-buggify.patina");
-    let error = match Context::from_config(RuntimeConfig::record(7, &trace, "fp+buggify")) {
-        Ok(_) => panic!("+buggify fingerprint without buggify config must fail"),
-        Err(error) => error,
+    let armed = BuggifyConfig {
+        enabled: true,
+        ..BuggifyConfig::default()
     };
+    let trace = |name: &str| directory.path().join(name);
+
+    let plain = trace("plain.patina");
+    Context::from_config(RuntimeConfig::record(7, &plain, "fp"))
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&plain)
+            .unwrap()
+            .metadata
+            .fingerprint,
+        "fp"
+    );
+
+    let buggy = trace("buggy.patina");
+    Context::from_config(RuntimeConfig::record(7, &buggy, "fp").with_buggify(armed))
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        patina_dst_trace::TraceBundle::load(&buggy)
+            .unwrap()
+            .metadata
+            .fingerprint,
+        "fp+buggify"
+    );
+    Context::from_config(RuntimeConfig::replay(&buggy, "fp"))
+        .expect("a flag-free replay adopts the recorded buggify configuration")
+        .finish()
+        .unwrap();
+
+    let refused = Context::from_config(RuntimeConfig::replay(&plain, "fp").with_buggify(armed));
     assert!(
-        error
-            .to_string()
-            .contains("fingerprint declares +buggify but buggify is not enabled"),
-        "{error}"
+        refused.is_err(),
+        "enabling buggify on a trace recorded without it must fail closed"
     );
 }
 

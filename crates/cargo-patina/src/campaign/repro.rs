@@ -16,9 +16,9 @@ pub(super) fn reproduce_command(
     record: &str,
 ) -> String {
     // A valid recorded trace replays flag-free EXCEPT for the invocation shape the
-    // trace cannot carry (`--harness`, the pre-run gate surface): every semantic
-    // input is authoritative in the trace, but a harness binary replayed without
-    // `--harness` fails closed, so those flags ride along. A traceless failure (a
+    // trace cannot carry (the pre-run gate surface): every semantic input is
+    // authoritative in the trace, but a guest replayed without its allow list
+    // fails closed, so those flags ride along. A traceless failure (a
     // mid-run abort) reproduces by a deterministic re-run, whose `flags` already
     // contain them.
     if let Some(trace) = trace {
@@ -136,7 +136,7 @@ pub(crate) struct GenerationRepro {
     /// invocation shape together, exactly as the campaign spelled it.
     pub(crate) flags: Vec<String>,
     /// The subset of `flags` that is invocation shape rather than a fault knob
-    /// (`--harness`, the pre-run gate surface). These are host/build facts the
+    /// (the pre-run gate surface). These are host/build facts the
     /// guest needs to run at all, so a reducer must never drop them: doing so
     /// would lose the failure for a reason that has nothing to do with faults.
     pub(crate) pinned: Vec<String>,
@@ -242,15 +242,14 @@ mod tests {
     #[test]
     fn a_reproduce_command_carries_the_invocation_flags_the_trace_cannot() {
         let spec = CampaignSpec {
-            harness: true,
             allow_unsupported_symbols: Some("all".into()),
             address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
         let invocation = invocation_flags(&spec);
         let artifact = PathBuf::from("guest-bin");
-        // The trace form: replay restores every SEMANTIC input, but `--harness` and
-        // the gate surface are host/build facts it cannot carry, so a repro line
+        // The trace form: replay restores every SEMANTIC input, but the gate
+        // surface and address layout are host/build facts it cannot carry, so a repro line
         // without them fails closed on the operator.
         let replay = reproduce_command(
             &artifact,
@@ -263,7 +262,7 @@ mod tests {
         );
         assert_eq!(
             replay,
-            "cargo patina replay guest-bin out/failures/generation-0.patina --harness \
+            "cargo patina replay guest-bin out/failures/generation-0.patina \
              --allow-unsupported-symbols all --allow-randomized-address-layout"
         );
         // The traceless form re-runs, and its flag list already contains them.
@@ -277,8 +276,7 @@ mod tests {
             "generation-0.patina",
         );
         assert!(
-            rerun.contains("--harness")
-                && rerun.contains("--allow-unsupported-symbols all")
+            rerun.contains("--allow-unsupported-symbols all")
                 && rerun.contains("--allow-randomized-address-layout"),
             "the re-run repro dropped the invocation shape: {rerun}"
         );
