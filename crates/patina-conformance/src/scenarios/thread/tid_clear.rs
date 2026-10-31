@@ -4,7 +4,10 @@
 //! futex_wake). A thread installs its own word, exits, and the main thread's
 //! `FUTEX_WAIT` on the word returns with it cleared. The thread is detached:
 //! glibc's own join bookkeeping relies on the clear_child_tid it registered
-//! at clone, which this scenario deliberately replaces.
+//! at clone, which this scenario deliberately replaces. The worker waits
+//! until it is detached before it replaces the word: glibc 2.43 detaches a
+//! thread that is already exiting by joining it, which waits forever for the
+//! exit-time clear of the word the worker replaced.
 
 use crate::catalog::{DEFAULTS, Scenario, TraceFacts};
 use crate::vehicle::Vehicle;
@@ -17,6 +20,7 @@ use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
 static SLOT: AtomicU32 = AtomicU32::new(0);
 static STARTED: AtomicI32 = AtomicI32::new(0);
+static DETACHED: AtomicI32 = AtomicI32::new(0);
 static THREAD_TID: AtomicI32 = AtomicI32::new(0);
 static PROBE: AtomicPtr<Probe> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -35,6 +39,13 @@ pub fn run(p: &Probe) {
     let handle = std::thread::Builder::new()
         .spawn(|| {
             let p: &Probe = unsafe { &*PROBE.load(Ordering::SeqCst) };
+            // Unbounded: replacing the word before the detach would reopen
+            // the race, and main detaches at once (any exit ends this thread).
+            p.rec.quiet(|| {
+                while DETACHED.load(Ordering::SeqCst) == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
             let tid = unsafe { syscall(SYS_gettid) } as i32;
             SLOT.store(tid as u32, Ordering::SeqCst);
             THREAD_TID.store(tid, Ordering::SeqCst);
@@ -47,6 +58,7 @@ pub fn run(p: &Probe) {
         })
         .expect("spawn");
     drop(handle);
+    DETACHED.store(1, Ordering::SeqCst);
     p.rec.quiet(|| {
         support::wait_until(std::time::Duration::from_millis(1), || {
             STARTED.load(Ordering::SeqCst) != 0
