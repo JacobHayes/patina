@@ -1,9 +1,9 @@
 /*
- * A finished thread's teardown and the threads still running (glibc 2.39).
- * The task of a managed thread completes from its thread-local destructor
- * pass; what glibc's start_thread runs after it (the pthread_key destructors,
- * the allocator's thread shutdown, the thread's exit) is host code on no
- * task. Here a key destructor computes for a while, then publishes a flag,
+ * A finished thread's teardown and the threads still running. The task of a
+ * managed thread completes as its start routine ends (glibc: from its
+ * thread-local destructor pass); what the C library runs on the thread after
+ * it (the pthread_key destructors, the allocator's thread shutdown, the
+ * thread's exit) is host code on no task. Here a key destructor computes for a while, then publishes a flag,
  * while main yields until it sees the flag and counts its yields. Natively
  * the count is the host's. Under patina no task may run beside that
  * teardown, so the count is the same on every run of a seed and on its

@@ -286,6 +286,31 @@ fn memory_calls_answer_from_the_virtual_kernel() {
     }
 }
 
+/// What the C library runs on a thread after its task completed (its
+/// `pthread_key` destructors, the allocator's thread shutdown, the host exit)
+/// runs beside no task: a thread that takes the baton next starts only once
+/// that teardown is over. The main thread counts its yields until the
+/// destructor publishes, which a teardown left to the host makes the host's
+/// count: two runs of a seed, or a recording and its replay, then differ.
+/// Run standalone, as a C guest's whole run is on both hosts.
+#[test]
+fn a_finished_threads_teardown_runs_beside_no_task() {
+    let g = assert_build_c_guest("thread_teardown_probe.c", CLink::PosixShim);
+    let seeded = |seed: &str| {
+        let env = [("PATINA_RT_MODE", "seeded"), ("PATINA_RT_SEED", seed)];
+        let out = assert_standalone_success(&g.binary, &[], &env).stdout;
+        assert_fields(&out, "NATIVE_THREAD_TEARDOWN ", &["yields"]);
+        out
+    };
+    for seed in ["1", "2", "3"] {
+        assert_eq!(text(&seeded(seed)), text(&seeded(seed)), "seed {seed}");
+    }
+    let (recorded, trace) = g.record_standalone(&[]);
+    let recorded = assert_success(recorded);
+    let replayed = assert_success(g.replay_standalone(&trace, &[]));
+    assert_eq!(text(&recorded.stdout), text(&replayed.stdout));
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -340,21 +365,6 @@ mod linux {
             ("cancel-self-join", &["cancellation", "pthread_join"][..]),
         ] {
             g.assert_internal_fatal(&[mode], diagnostic);
-        }
-    }
-
-    /// What glibc runs on a thread after its task completed (a `pthread_key`
-    /// destructor here, the allocator's thread shutdown, the host exit) runs
-    /// beside no task: a thread that takes the baton next starts only once
-    /// that teardown is over. The main thread counts its yields until the
-    /// destructor publishes, which a teardown left to the host makes the
-    /// host's count: seeded, recorded and replayed runs then differ.
-    #[test]
-    fn a_finished_threads_teardown_runs_beside_no_task() {
-        let g = assert_build_c_guest("thread_teardown_probe.c", CLink::PosixShim);
-        for seed in 1..=3 {
-            let out = g.assert_run_success(seed, &[]).stdout;
-            assert_fields(&out, "NATIVE_THREAD_TEARDOWN ", &["yields"]);
         }
     }
 
