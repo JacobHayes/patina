@@ -135,6 +135,7 @@ impl ThreadRuntime {
             sched: sched::SchedRuntime::default(),
             #[cfg(target_os = "linux")]
             registrations: registrations::RegistrationRuntime::default(),
+            exits: exits::Exits::default(),
             #[cfg(target_os = "linux")]
             timers: timers::Timers::default(),
             #[cfg(target_os = "linux")]
@@ -258,10 +259,10 @@ pub(crate) fn watchdog_observe(
         return;
     };
     #[cfg(target_os = "linux")]
-    let creating = state.starting.is_some() || state.registrations.awaiting_exit();
+    let creating = state.starting.is_some() || state.exits.awaiting();
     // Darwin's creator returns without waiting for its new thread.
     #[cfg(not(target_os = "linux"))]
-    let creating = false;
+    let creating = state.exits.awaiting();
     if let Some(context) = slot.as_mut() {
         observe(context, &state.handles, creating);
     }

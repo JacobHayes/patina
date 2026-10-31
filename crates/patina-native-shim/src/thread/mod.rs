@@ -2,6 +2,7 @@
 
 #[cfg(target_os = "linux")]
 pub(crate) mod cancel;
+mod exits;
 #[cfg(target_os = "linux")]
 pub(crate) mod futex2;
 #[cfg(target_os = "linux")]
@@ -247,6 +248,40 @@ pub(super) unsafe fn spawn_host_thread(
     start: StartRoutine,
     arg: *mut c_void,
 ) -> c_int {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { spawn_suspended(handle, attr, start, arg, |_| ()) }.map_or_else(|rc| rc, |()| 0)
+}
+
+/// [`spawn_host_thread`] for a managed thread: its exit beacon is armed
+/// while the new thread is still suspended, so it cannot have exited yet
+/// (`exits`).
+///
+/// # Safety
+/// As [`spawn_host_thread`]'s.
+#[cfg(target_os = "macos")]
+unsafe fn spawn_managed_host_thread(
+    handle: *mut *mut c_void,
+    attr: *const c_void,
+    start: StartRoutine,
+    arg: *mut c_void,
+) -> Result<exits::darwin::DeadName, c_int> {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { spawn_suspended(handle, attr, start, arg, exits::arm) }
+}
+
+/// Create the host thread suspended, run `armed` on its kernel port, then
+/// let it run.
+///
+/// # Safety
+/// As [`spawn_host_thread`]'s.
+#[cfg(target_os = "macos")]
+unsafe fn spawn_suspended<T>(
+    handle: *mut *mut c_void,
+    attr: *const c_void,
+    start: StartRoutine,
+    arg: *mut c_void,
+    armed: impl FnOnce(u32) -> T,
+) -> Result<T, c_int> {
     let api = crate::hostapi::get();
     // SAFETY: forwarded from this function's contract to the resolved host
     // `pthread_create_suspended_np`. `StartRoutine` here and the table's
@@ -254,11 +289,14 @@ pub(super) unsafe fn spawn_host_thread(
     // ABI, so the resolved pointer is called with its true signature.
     let rc = unsafe { (api.pthread_create_suspended_np)(handle, attr, start, arg) };
     if rc != 0 {
-        return rc;
+        return Err(rc);
     }
     // SAFETY: `*handle` is the freshly created (suspended) host thread.
-    unsafe { (api.thread_resume)((api.pthread_mach_thread_np)(handle.read())) };
-    0
+    let port = unsafe { (api.pthread_mach_thread_np)(handle.read()) };
+    let value = armed(port);
+    // SAFETY: as above.
+    unsafe { (api.thread_resume)(port) };
+    Ok(value)
 }
 
 /// # Safety
@@ -846,9 +884,8 @@ fn handoff(state: StateGuard, picked: TaskId, me: TaskId) {
     picked_sem.signal();
     my_sem.wait();
     // A task that completed before handing the baton on may still be
-    // running glibc's teardown on its host thread.
-    #[cfg(target_os = "linux")]
-    registrations::await_exits();
+    // running the C library's teardown on its host thread.
+    exits::await_exits();
 }
 
 fn switch_and_park(state: StateGuard, picked: TaskId, me: TaskId) {
@@ -915,6 +952,8 @@ struct ThreadRuntime {
     /// Per-thread kernel registrations (the robust-futex list head).
     #[cfg(target_os = "linux")]
     registrations: registrations::RegistrationRuntime,
+    /// Finished threads whose host exit the next task waits for.
+    exits: exits::Exits,
     /// The interval timers, POSIX timers and timer descriptors.
     #[cfg(target_os = "linux")]
     timers: timers::Timers,

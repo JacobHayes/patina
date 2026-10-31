@@ -38,7 +38,7 @@
 //! destructors, the allocator's thread shutdown, the stack's release) is host
 //! code on no task, sharing glibc's locks and heap with the tasks; a task
 //! that takes the baton after a completion waits for the beacon before it
-//! runs ([`await_exits`]), so that teardown never runs beside one.
+//! runs (`super::exits`), so that teardown never runs beside one.
 
 use super::*;
 use linux_raw_sys::errno;
@@ -106,20 +106,6 @@ struct Registrations {
 #[derive(Default)]
 pub(super) struct RegistrationRuntime {
     tasks: BTreeMap<TaskId, Registrations>,
-    /// The beacons of threads whose tasks completed, as addresses, for the
-    /// task that takes the baton next to wait for ([`await_exits`]).
-    exiting: Vec<usize>,
-    /// Whether the baton holder waits for such a thread's host exit: off
-    /// the guest, as long as the host takes.
-    awaiting: bool,
-}
-
-impl RegistrationRuntime {
-    /// Whether the baton holder waits for a finished thread's host exit
-    /// (the compute watchdog's ineligible window, as a creation is).
-    pub(super) fn awaiting_exit(&self) -> bool {
-        self.awaiting
-    }
 }
 
 /// A host thread's exit, as the host kernel reports it: a `struct
@@ -190,68 +176,56 @@ pub(super) fn exiting() {
     ) == 0
         && head == beacon;
     if registered {
-        lock_state().registrations.exiting.push(beacon);
+        super::exits::publish(beacon);
     } else {
         // SAFETY: no host registration names it any more.
         drop(unsafe { Box::from_raw(beacon as *mut ExitBeacon) });
     }
 }
 
-/// Wait until every thread whose task completed has left user space: called
-/// by a task as it takes the baton, before it runs anything else.
-pub(super) fn await_exits() {
-    let exiting = {
-        let mut state = lock_state();
-        let exiting = std::mem::take(&mut state.registrations.exiting);
-        state.registrations.awaiting = !exiting.is_empty();
-        exiting
-    };
-    if exiting.is_empty() {
-        return;
-    }
+/// Wait until the thread `beacon` (published by [`exiting`]) has left user
+/// space, then free the beacon.
+pub(super) fn await_exit(beacon: usize) {
+    let beacon = beacon as *mut ExitBeacon;
+    // SAFETY: a published beacon is alive until its waiter frees it here.
+    let word = unsafe { &(*beacon).word };
     // A wait the exit beat answers EAGAIN through glibc's errno, whichever
     // way the host's timing went: the guest's errno is put back.
     let errno = crate::abi::host_errno();
-    for beacon in exiting {
-        let beacon = beacon as *mut ExitBeacon;
-        // SAFETY: a published beacon is alive until its waiter frees it here.
-        let word = unsafe { &(*beacon).word };
-        loop {
-            let value = word.load(Ordering::Acquire);
-            if value & FUTEX_OWNER_DIED != 0 {
-                break;
-            }
-            if value & FUTEX_WAITERS == 0
-                && word
-                    .compare_exchange(
-                        value,
-                        value | FUTEX_WAITERS,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-            {
-                continue;
-            }
-            // The kernel's wake is by the word's shared key: no private flag.
-            host(
-                __NR_futex,
-                [
-                    word.as_ptr() as u64,
-                    FUTEX_WAIT,
-                    u64::from(value | FUTEX_WAITERS),
-                    0,
-                    0,
-                    0,
-                ],
-            );
+    loop {
+        let value = word.load(Ordering::Acquire);
+        if value & FUTEX_OWNER_DIED != 0 {
+            break;
         }
-        // SAFETY: the kernel's walk has marked it, and its wake by the
-        // word's key reads nothing of it; nothing else names it.
-        drop(unsafe { Box::from_raw(beacon) });
+        if value & FUTEX_WAITERS == 0
+            && word
+                .compare_exchange(
+                    value,
+                    value | FUTEX_WAITERS,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            continue;
+        }
+        // The kernel's wake is by the word's shared key: no private flag.
+        host(
+            __NR_futex,
+            [
+                word.as_ptr() as u64,
+                FUTEX_WAIT,
+                u64::from(value | FUTEX_WAITERS),
+                0,
+                0,
+                0,
+            ],
+        );
     }
     crate::abi::restore_host_errno(errno);
-    lock_state().registrations.awaiting = false;
+    // SAFETY: the kernel's walk has marked it, and its wake by the word's
+    // key reads nothing of it; nothing else names it.
+    drop(unsafe { Box::from_raw(beacon) });
 }
 
 /// The task the calling thread's registrations belong to: the main thread's

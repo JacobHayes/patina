@@ -53,8 +53,7 @@ fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
     // Park on this task's baton semaphore until it is first scheduled.
     let sem = lock_state().task_sem(task);
     sem.wait();
-    #[cfg(target_os = "linux")]
-    registrations::await_exits();
+    exits::await_exits();
     #[cfg(target_os = "linux")]
     {
         let mask = lock_state().signals.mask(task);
@@ -384,10 +383,12 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     // The kernel's exit order: the robust list, then clear-child-tid.
     #[cfg(target_os = "linux")]
     registrations::exit(task);
-    // What runs on this host thread from here is glibc's teardown, on no
-    // task: the task that takes the baton waits for the host exit.
+    // What runs on this host thread from here is the C library's teardown,
+    // on no task: the task that takes the baton waits for the host exit.
     #[cfg(target_os = "linux")]
     registrations::exiting();
+    #[cfg(target_os = "macos")]
+    exits::exiting(task);
     #[cfg(target_os = "linux")]
     signals::clear_tid(task);
     #[cfg(target_os = "linux")]
@@ -524,13 +525,26 @@ pub unsafe extern "C" fn patina_thread_create(
     let mut handle: *mut c_void = core::ptr::null_mut();
     // SAFETY: `spawn_host_thread` creates a real, non-interposed host OS
     // thread; `payload` is consumed exactly once by the trampoline.
+    #[cfg(target_os = "linux")]
     let rc = unsafe { spawn_host_thread(&mut handle, attr, host_start_routine(), payload.cast()) };
+    // SAFETY: as above; the beacon is the new thread's (`exits`).
+    #[cfg(target_os = "macos")]
+    let (rc, beacon) = match unsafe {
+        super::spawn_managed_host_thread(&mut handle, attr, host_start_routine(), payload.cast())
+    } {
+        Ok(beacon) => (0, Some(beacon)),
+        Err(rc) => (rc, None),
+    };
     if rc != 0 {
         // SAFETY: the trampoline never ran, so `payload` is still owned.
         drop(unsafe { Box::from_raw(payload) });
         fatal(&format!("host thread creation failed with code {rc}"));
     }
     state.handles.insert(handle as usize, task);
+    #[cfg(target_os = "macos")]
+    if let Some(beacon) = beacon {
+        exits::armed(&mut state.exits, task, beacon);
+    }
     // The new thread takes over its host registrations off the baton;
     // wait for that before the guest can ask about them. However long the
     // host takes to run it, this wait is not guest compute.
