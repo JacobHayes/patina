@@ -845,6 +845,10 @@ fn handoff(state: StateGuard, picked: TaskId, me: TaskId) {
     drop(state);
     picked_sem.signal();
     my_sem.wait();
+    // A task that completed before handing the baton on may still be
+    // running glibc's teardown on its host thread.
+    #[cfg(target_os = "linux")]
+    registrations::await_exits();
 }
 
 fn switch_and_park(state: StateGuard, picked: TaskId, me: TaskId) {

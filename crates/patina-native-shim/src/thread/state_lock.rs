@@ -241,8 +241,9 @@ pub(super) fn unsettled_state() -> SpinGuard<'static, ThreadRuntime> {
 
 /// Observer lock order is the ordinary ThreadRuntime -> Context order.
 /// Never wait for the guest: a busy shim is not compute-only starvation.
-/// `observe` also learns whether the baton holder is creating a thread: it
-/// then waits, off the guest, for the new host thread's start-up, which a
+/// `observe` also learns whether the baton holder is creating a thread or
+/// taking the baton after a completion: it then waits, off the guest, for
+/// the new host thread's start-up or the finished one's exit, which a
 /// loaded host can stretch past any bound.
 pub(crate) fn watchdog_observe(
     observe: impl FnOnce(&mut crate::Context, &BTreeMap<usize, TaskId>, bool),
@@ -257,7 +258,7 @@ pub(crate) fn watchdog_observe(
         return;
     };
     #[cfg(target_os = "linux")]
-    let creating = state.starting.is_some();
+    let creating = state.starting.is_some() || state.registrations.awaiting_exit();
     // Darwin's creator returns without waiting for its new thread.
     #[cfg(not(target_os = "linux"))]
     let creating = false;

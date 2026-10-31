@@ -15,9 +15,10 @@
 //!   reports glibc's head as the kernel would. From then on the guest's calls
 //!   change only the virtual head, and the virtual kernel walks it when the
 //!   task exits, marking the futexes the task still owns `FUTEX_OWNER_DIED`
-//!   and waking a waiter by the word's shared key. The host keeps glibc's
-//!   head, whose list stays empty: the shim interposes glibc's robust
-//!   mutexes, so glibc never links one into it;
+//!   and waking a waiter by the word's shared key. glibc's head needs no host
+//!   registration, its list staying empty (the shim interposes glibc's robust
+//!   mutexes, so glibc never links one into it): the host's is the thread's
+//!   exit beacon (below);
 //! * glibc's rseq area is unregistered from the host, which would otherwise
 //!   keep writing host CPU ids into it (a determinism leak through
 //!   `__rseq_offset`), and registered virtually instead. The area reads
@@ -29,11 +30,23 @@
 //!   Tasks run one at a time and are switched only at a boundary call, which
 //!   a restartable sequence never contains, so no sequence is ever preempted,
 //!   migrated or interrupted by a handler, and no abort is ever due.
+//!
+//! The host list head is the shim's own instead: an [`ExitBeacon`] whose one
+//! entry is a word naming the host thread, which the host kernel's exit walk
+//! marks `FUTEX_OWNER_DIED` once the thread has run its last instruction.
+//! What glibc runs on a thread after its task completes (its `pthread_key`
+//! destructors, the allocator's thread shutdown, the stack's release) is host
+//! code on no task, sharing glibc's locks and heap with the tasks; a task
+//! that takes the baton after a completion waits for the beacon before it
+//! runs ([`await_exits`]), so that teardown never runs beside one.
 
 use super::*;
 use linux_raw_sys::errno;
-use linux_raw_sys::general::{__NR_get_robust_list, __NR_rseq};
+use linux_raw_sys::general::{
+    __NR_futex, __NR_get_robust_list, __NR_gettid, __NR_rseq, __NR_set_robust_list,
+};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// `sizeof(struct robust_list_head)`: `next`, `futex_offset`, `list_op_pending`.
 const HEAD_BYTES: usize = 24;
@@ -93,6 +106,152 @@ struct Registrations {
 #[derive(Default)]
 pub(super) struct RegistrationRuntime {
     tasks: BTreeMap<TaskId, Registrations>,
+    /// The beacons of threads whose tasks completed, as addresses, for the
+    /// task that takes the baton next to wait for ([`await_exits`]).
+    exiting: Vec<usize>,
+    /// Whether the baton holder waits for such a thread's host exit: off
+    /// the guest, as long as the host takes.
+    awaiting: bool,
+}
+
+impl RegistrationRuntime {
+    /// Whether the baton holder waits for a finished thread's host exit
+    /// (the compute watchdog's ineligible window, as a creation is).
+    pub(super) fn awaiting_exit(&self) -> bool {
+        self.awaiting
+    }
+}
+
+/// A host thread's exit, as the host kernel reports it: a `struct
+/// robust_list_head` registered with the host for the thread, whose one entry
+/// is `word`. The word holds the host thread id, so the kernel's exit walk
+/// (`handle_futex_death`) marks it `FUTEX_OWNER_DIED` and wakes its waiter
+/// once the thread has left user space for good, after everything glibc
+/// runs on it.
+#[repr(C)]
+struct ExitBeacon {
+    /// The head's `list.next`: `entry`.
+    next: usize,
+    /// From `entry` to `word`.
+    futex_offset: isize,
+    list_op_pending: usize,
+    /// The one entry, whose `next` is the head.
+    entry: usize,
+    word: AtomicU32,
+}
+
+const FUTEX_WAIT: u64 = 0;
+
+thread_local! {
+    /// This thread's beacon, until its task completes.
+    static BEACON: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Register a beacon as the calling thread's host robust list.
+fn arm_beacon() {
+    let tid = host(__NR_gettid, [0; 6]) as u32;
+    let beacon = Box::into_raw(Box::new(ExitBeacon {
+        next: 0,
+        futex_offset: (std::mem::offset_of!(ExitBeacon, word)
+            - std::mem::offset_of!(ExitBeacon, entry)) as isize,
+        list_op_pending: 0,
+        entry: 0,
+        word: AtomicU32::new(tid & FUTEX_TID_MASK),
+    }));
+    // SAFETY: the beacon just leaked above, owned by this thread until its
+    // task completes.
+    unsafe {
+        (*beacon).next = &raw const (*beacon).entry as usize;
+        (*beacon).entry = beacon as usize;
+    }
+    if host(
+        __NR_set_robust_list,
+        [beacon as u64, HEAD_BYTES as u64, 0, 0, 0, 0],
+    ) != 0
+    {
+        fatal("registering a thread's exit beacon with the host failed (set_robust_list)");
+    }
+    BEACON.with(|cell| cell.set(beacon as usize));
+}
+
+/// The calling thread's task completed: hand its beacon to the task that
+/// takes the baton next. A thread whose host registration is no longer the
+/// beacon (a fork child's, which glibc re-registers) has none to wait for.
+pub(super) fn exiting() {
+    let beacon = BEACON.with(|cell| cell.replace(0));
+    if beacon == 0 {
+        return;
+    }
+    let mut head = 0usize;
+    let mut len = 0usize;
+    let registered = host(
+        __NR_get_robust_list,
+        [0, &raw mut head as u64, &raw mut len as u64, 0, 0, 0],
+    ) == 0
+        && head == beacon;
+    if registered {
+        lock_state().registrations.exiting.push(beacon);
+    } else {
+        // SAFETY: no host registration names it any more.
+        drop(unsafe { Box::from_raw(beacon as *mut ExitBeacon) });
+    }
+}
+
+/// Wait until every thread whose task completed has left user space: called
+/// by a task as it takes the baton, before it runs anything else.
+pub(super) fn await_exits() {
+    let exiting = {
+        let mut state = lock_state();
+        let exiting = std::mem::take(&mut state.registrations.exiting);
+        state.registrations.awaiting = !exiting.is_empty();
+        exiting
+    };
+    if exiting.is_empty() {
+        return;
+    }
+    // A wait the exit beat answers EAGAIN through glibc's errno, whichever
+    // way the host's timing went: the guest's errno is put back.
+    let errno = crate::abi::host_errno();
+    for beacon in exiting {
+        let beacon = beacon as *mut ExitBeacon;
+        // SAFETY: a published beacon is alive until its waiter frees it here.
+        let word = unsafe { &(*beacon).word };
+        loop {
+            let value = word.load(Ordering::Acquire);
+            if value & FUTEX_OWNER_DIED != 0 {
+                break;
+            }
+            if value & FUTEX_WAITERS == 0
+                && word
+                    .compare_exchange(
+                        value,
+                        value | FUTEX_WAITERS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+            {
+                continue;
+            }
+            // The kernel's wake is by the word's shared key: no private flag.
+            host(
+                __NR_futex,
+                [
+                    word.as_ptr() as u64,
+                    FUTEX_WAIT,
+                    u64::from(value | FUTEX_WAITERS),
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+        // SAFETY: the kernel's walk has marked it, and its wake by the
+        // word's key reads nothing of it; nothing else names it.
+        drop(unsafe { Box::from_raw(beacon) });
+    }
+    crate::abi::restore_host_errno(errno);
+    lock_state().registrations.awaiting = false;
 }
 
 /// The task the calling thread's registrations belong to: the main thread's
@@ -212,6 +371,7 @@ pub(super) fn adopt(task: TaskId, cpu: u32) {
         fatal("host robust-list query failed (get_robust_list)");
     }
     let rseq = adopt_rseq(cpu);
+    arm_beacon();
     lock_state()
         .registrations
         .tasks

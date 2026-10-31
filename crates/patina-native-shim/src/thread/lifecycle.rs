@@ -54,6 +54,8 @@ fn thread_prelude(raw: *mut c_void) -> (StartRoutine, *mut c_void) {
     let sem = lock_state().task_sem(task);
     sem.wait();
     #[cfg(target_os = "linux")]
+    registrations::await_exits();
+    #[cfg(target_os = "linux")]
     {
         let mask = lock_state().signals.mask(task);
         signals::set_segv(mask);
@@ -382,6 +384,10 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     // The kernel's exit order: the robust list, then clear-child-tid.
     #[cfg(target_os = "linux")]
     registrations::exit(task);
+    // What runs on this host thread from here is glibc's teardown, on no
+    // task: the task that takes the baton waits for the host exit.
+    #[cfg(target_os = "linux")]
+    registrations::exiting();
     #[cfg(target_os = "linux")]
     signals::clear_tid(task);
     #[cfg(target_os = "linux")]

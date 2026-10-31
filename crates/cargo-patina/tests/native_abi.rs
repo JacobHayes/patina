@@ -343,6 +343,21 @@ mod linux {
         }
     }
 
+    /// What glibc runs on a thread after its task completed (a `pthread_key`
+    /// destructor here, the allocator's thread shutdown, the host exit) runs
+    /// beside no task: a thread that takes the baton next starts only once
+    /// that teardown is over. The main thread counts its yields until the
+    /// destructor publishes, which a teardown left to the host makes the
+    /// host's count: seeded, recorded and replayed runs then differ.
+    #[test]
+    fn a_finished_threads_teardown_runs_beside_no_task() {
+        let g = assert_build_c_guest("thread_teardown_probe.c", CLink::PosixShim);
+        for seed in 1..=3 {
+            let out = g.assert_run_success(seed, &[]).stdout;
+            assert_fields(&out, "NATIVE_THREAD_TEARDOWN ", &["yields"]);
+        }
+    }
+
     /// An interest whose registered number was closed while a `dup` keeps
     /// its socket open still watches the socket, as the host kernel's does:
     /// a segment in flight ends a bounded wait at its delivery, not the

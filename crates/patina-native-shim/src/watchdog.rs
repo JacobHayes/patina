@@ -101,7 +101,7 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
         platform::wait_ms(poll);
         let now = platform::monotonic_ms();
         let mut observed = false;
-        super::thread::watchdog_observe(|context, handles, creating| {
+        super::thread::watchdog_observe(|context, handles, off_guest| {
             observed = true;
             if let Some(stop) = context.replay_compute_stop_due() {
                 let handle = handles
@@ -110,9 +110,10 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
                 let error = context.stop_compute_bound(stop.task);
                 report_and_abort(&error, handle, None);
             }
-            // A creator waiting for its new thread's host start-up runs no
-            // guest code: a confirmed ineligible state, not a missed lock.
-            let candidate = if creating {
+            // A creator waiting for its new thread's host start-up, or a
+            // task waiting for a finished thread's host exit, runs no guest
+            // code: a confirmed ineligible state, not a missed lock.
+            let candidate = if off_guest {
                 None
             } else {
                 context.compute_watchdog_candidate()
