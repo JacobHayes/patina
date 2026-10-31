@@ -233,10 +233,58 @@ pub(crate) fn pipe_inode_time() -> u64 {
     super::fs_time_unrecorded()
 }
 
+/// The pipefs node of each standard stream (`handle` 0, 1, 2): the guest
+/// starts with its standard input on the read end of a pipe whose writer is
+/// gone and its output and error each on the write end of a pipe the
+/// supervisor drains, three pipes made before the guest ran. Their nodes
+/// take the first pipefs numbers ([`NetState::new`] starts past them).
+pub(crate) const STDIO_PIPE_INOS: [u64; 3] = [1, 2, 3];
+
+/// [`lock_state`], with the standard stream `fd` names (if it is one) given
+/// its pipefs node: made, like the pipe behind it, at boot, so a node minted
+/// at first use answers exactly as one minted at startup would.
+fn lock_state_with_stdio(fd: c_int) -> StateGuard {
+    let stream = class_entry(fd)
+        .ok()
+        .and_then(|resolved| stdio_ino(&resolved));
+    let born = stream.map(|_| crate::boot_instant());
+    let mut state = lock_state();
+    if let (Some(ino), Some(born)) = (stream, born) {
+        state
+            .net
+            .pipe_inodes
+            .entry(ino)
+            .or_insert_with(|| PipeInode {
+                socket: false,
+                mode: 0o600,
+                atime_nanos: born,
+                mtime_nanos: born,
+                ctime_nanos: born,
+                // A standard stream's description is never reclaimed into
+                // the pipe tables, so nothing counts its ends down.
+                ends: 1,
+            });
+    }
+    state
+}
+
+/// The pipefs node of a standard-stream description.
+fn stdio_ino(resolved: &crate::fdtable::Resolved) -> Option<u64> {
+    match resolved.kind {
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => {
+            STDIO_PIPE_INOS.get(resolved.handle as usize).copied()
+        }
+        _ => None,
+    }
+}
+
 /// The pipefs/sockfs node behind `fd` when it is an anonymous pipe end
-/// or a socket.
+/// (a standard stream included) or a socket.
 fn anon_inode(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
     let resolved = class_entry(fd).ok()?;
+    if let Some(ino) = stdio_ino(&resolved) {
+        return Some(ino);
+    }
     let handle = resolved.handle as c_int;
     match resolved.kind {
         FdKind::Pipe => state.net.pipe_ends.get(&handle)?.inode,
@@ -253,7 +301,7 @@ fn anon_inode(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
 /// The pipefs/sockfs node behind `fd`, if it is an anonymous pipe end or
 /// a socket: its metadata as `fstat` reports it.
 pub(crate) fn pipe_inode_metadata(fd: c_int) -> Option<super::PatinaMetadata> {
-    let state = lock_state();
+    let state = lock_state_with_stdio(fd);
     let ino = anon_inode(&state, fd)?;
     let inode = state.net.pipe_inodes.get(&ino)?;
     Some(super::PatinaMetadata {
@@ -285,7 +333,7 @@ pub(crate) fn pipe_inode_metadata(fd: c_int) -> Option<super::PatinaMetadata> {
 /// bits change and its `ctime` moves. `None` for any other descriptor.
 pub(crate) fn pipe_inode_set_mode(fd: c_int, mode: u32) -> Option<()> {
     let now = pipe_inode_time();
-    let mut state = lock_state();
+    let mut state = lock_state_with_stdio(fd);
     let ino = anon_inode(&state, fd)?;
     let inode = state.net.pipe_inodes.get_mut(&ino)?;
     inode.mode = mode & 0o7777;
@@ -1244,6 +1292,13 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
         Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
+        // A standard stream's pipe keeps the default sixteen pages; nothing
+        // resizes it (`F_SETPIPE_SZ` on one stops).
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if stdio_ino(&resolved).is_some() => {
+            super::set_errno(0);
+            return (16 * crate::PAGE_SIZE) as c_int;
+        }
         Ok(_) => return super::fail(EINVAL),
         Err(errno) => return super::fail(errno),
     };
@@ -1269,6 +1324,10 @@ pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
         Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
+        #[cfg(target_os = "linux")]
+        Ok(resolved) if stdio_ino(&resolved).is_some() => crate::trap_fatal(
+            "fcntl(F_SETPIPE_SZ) on a standard stream is not modeled; failing closed",
+        ),
         Ok(_) => return super::fail(EINVAL),
         Err(errno) => return super::fail(errno),
     };

@@ -53,9 +53,12 @@ fn answered(result: Result<(), c_int>) -> c_int {
 }
 
 /// Whether the node behind a descriptor is a FIFO (`S_ISFIFO`): an anonymous
-/// pipe or a FIFO's endpoint.
+/// pipe (a standard stream is one) or a FIFO's endpoint.
 fn is_fifo(resolved: &Resolved) -> bool {
-    resolved.kind == FdKind::Pipe
+    matches!(
+        resolved.kind,
+        FdKind::Pipe | FdKind::Stdin | FdKind::Stdout | FdKind::Stderr
+    )
 }
 
 /// Whether the node is a regular file, a directory or a symlink — the kinds

@@ -484,6 +484,158 @@ fn main() {
 }
 "#;
 
+    // The standard streams are pipes: the guest starts with standard input on
+    // the read end of an empty pipe whose writer is gone and its output and
+    // error on the write ends of two others. Every metadata door answers each
+    // as 6.8 answers a pipe end (`S_IFIFO|0600`, one link, empty, a page-sized
+    // block, its own pipefs node), and so do the calls a program asks of a
+    // stream before using it (`F_GETFL`, `isatty`, `lseek`, `fstatfs`,
+    // `poll`, `FIONREAD`, `fallocate`, `posix_fadvise`, `fchmod`).
+    const STD_STREAMS_SOURCE: &str = r#"
+use std::fs::File;
+use std::mem::ManuallyDrop;
+use std::os::fd::FromRawFd;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+unsafe extern "C" {
+    fn syscall(number: i64, ...) -> i64;
+    fn fstat(fd: i32, buf: *mut u8) -> i32;
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+    fn isatty(fd: i32) -> i32;
+    fn lseek(fd: i32, offset: i64, whence: i32) -> i64;
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
+    fn poll(fds: *mut [i32; 2], count: u64, timeout: i32) -> i32;
+    fn fallocate(fd: i32, mode: i32, offset: i64, len: i64) -> i32;
+    fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+    fn fchmod(fd: i32, mode: u32) -> i32;
+    fn __errno_location() -> *mut i32;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod nr {
+    pub const FSTAT: i64 = 5;
+    pub const NEWFSTATAT: i64 = 262;
+    pub const FSTATFS: i64 = 138;
+}
+#[cfg(target_arch = "aarch64")]
+mod nr {
+    pub const FSTAT: i64 = 80;
+    pub const NEWFSTATAT: i64 = 79;
+    pub const FSTATFS: i64 = 44;
+}
+
+const AT_EMPTY_PATH: i64 = 0x1000;
+const F_GETFL: i32 = 3;
+const FIONREAD: u64 = 0x541b;
+const PIPEFS_MAGIC: i64 = 0x5049_5045;
+
+fn errno() -> i32 {
+    unsafe { *__errno_location() }
+}
+
+/// `st_ino` of a kernel `struct stat`: the second word on both arches.
+fn ino(buf: &[u64; 18]) -> u64 {
+    buf[1]
+}
+
+fn main() {
+    let mut nodes = Vec::new();
+    let mut devices = Vec::new();
+    for fd in 0..3 {
+        // std's metadata is `statx(fd, "", AT_EMPTY_PATH)`.
+        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        let meta = match file.metadata() {
+            Ok(meta) => meta,
+            Err(error) => {
+                println!("STD fd={fd} metadata_error={}", error.raw_os_error().unwrap_or(-1));
+                continue;
+            }
+        };
+        let mut libc_stat = [0_u64; 18];
+        let mut raw_stat = [0_u64; 18];
+        let mut at_stat = [0_u64; 18];
+        let libc_rc = unsafe { fstat(fd, libc_stat.as_mut_ptr().cast()) };
+        let raw_rc = unsafe { syscall(nr::FSTAT, fd, raw_stat.as_mut_ptr()) };
+        let at_rc = unsafe {
+            syscall(nr::NEWFSTATAT, fd, c"".as_ptr(), at_stat.as_mut_ptr(), AT_EMPTY_PATH)
+        };
+        let same_node = libc_rc == 0
+            && raw_rc == 0
+            && at_rc == 0
+            && [ino(&libc_stat), ino(&raw_stat), ino(&at_stat)].iter().all(|&i| i == meta.ino());
+        let mut statfs = [0_i64; 15];
+        let fs_rc = unsafe { syscall(nr::FSTATFS, fd, statfs.as_mut_ptr()) };
+        let pipefs = fs_rc == 0 && statfs[0] == PIPEFS_MAGIC;
+        let getfl = unsafe { fcntl(fd, F_GETFL) } & 0o3;
+        let tty = unsafe { isatty(fd) };
+        let tty_errno = errno();
+        let seek = unsafe { lseek(fd, 0, 1) };
+        let seek_errno = errno();
+        println!(
+            "STD fd={fd} fifo={} perm={:o} nlink={} size={} blksize={} same_node={same_node} \
+             pipefs={pipefs} access={getfl} isatty={tty}/{tty_errno} lseek={seek}/{seek_errno}",
+            meta.file_type().is_fifo(),
+            meta.mode() & 0o7777,
+            meta.nlink(),
+            meta.size(),
+            meta.blksize(),
+        );
+        nodes.push(meta.ino());
+        devices.push(meta.dev());
+    }
+    nodes.sort();
+    nodes.dedup();
+    devices.dedup();
+    println!("STD nodes={} devices={}", nodes.len(), devices.len());
+
+    let mut pending = -1_i32;
+    let fionread = unsafe { ioctl(0, FIONREAD, &mut pending) };
+    let mut stdin = [0_i32, 1 /* POLLIN */];
+    let ready = unsafe { poll(&mut stdin, 1, 0) };
+    println!(
+        "STD stdin fionread={fionread}/{pending} poll={ready} revents={:#x}",
+        stdin[1] >> 16
+    );
+    let falloc = unsafe { fallocate(1, 0, 0, 1) };
+    let falloc_errno = errno();
+    let advice = unsafe { posix_fadvise(1, 0, 0, 0) };
+    println!("STD stdout fallocate={falloc}/{falloc_errno} fadvise={advice}");
+    let chmod = unsafe { fchmod(1, 0o640) };
+    let after = ManuallyDrop::new(unsafe { File::from_raw_fd(1) }).metadata().unwrap();
+    println!("STD stdout fchmod={chmod} perm={:o}", after.mode() & 0o7777);
+}
+"#;
+
+    #[test]
+    fn native_standard_streams_answer_as_pipes() {
+        let guest = native_build::source_guest("std_streams", STD_STREAMS_SOURCE);
+        let run = common::native::assert_success(guest.command("run", &["--seed", "1"]));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let facts: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.starts_with("STD "))
+            .collect();
+        let stream = |fd: u8, access: u8| {
+            format!(
+                "STD fd={fd} fifo=true perm=600 nlink=1 size=0 blksize=4096 same_node=true \
+                 pipefs=true access={access} isatty=0/25 lseek=-1/29"
+            )
+        };
+        assert_eq!(
+            facts,
+            [
+                stream(0, 0).as_str(),
+                stream(1, 1).as_str(),
+                stream(2, 1).as_str(),
+                "STD nodes=3 devices=1",
+                "STD stdin fionread=0/0 poll=1 revents=0x10",
+                "STD stdout fallocate=-1/29 fadvise=29",
+                "STD stdout fchmod=0 perm=640",
+            ],
+            "{stdout}"
+        );
+    }
+
     /// The seeded scheduler, and PCT with its change points spread over a short
     /// run's decisions rather than the default 2000 the run never reaches.
     const PCT: [&str; 3] = ["--sched-pct=2", "--sched-pct-steps", "150"];

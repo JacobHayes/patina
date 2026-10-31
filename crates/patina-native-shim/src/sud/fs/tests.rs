@@ -58,8 +58,4 @@ fn open_how_is_copied_then_judged_as_the_kernel_does() {
         openat2([O_TRUNC, 0, RESOLVE_CACHED, 0], OPEN_HOW_SIZE),
         -(errno::EAGAIN as i64)
     );
-    assert_eq!(
-        openat2([uapi::O_NOATIME as u64, 0, 0, 0], OPEN_HOW_SIZE),
-        -ENOSYS
-    );
 }

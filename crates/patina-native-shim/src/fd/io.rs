@@ -216,13 +216,13 @@ pub(crate) unsafe fn read_resolved(
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
-unsafe fn fs_write(fd: Fd, source: *const c_void, length: usize) -> isize {
+unsafe fn fs_write(file: Resolved, source: *const c_void, length: usize) -> isize {
     let segment = GuestIovec {
         base: source.cast_mut(),
         len: length,
     };
     // SAFETY: forwarded from this function's own contract.
-    match unsafe { fs_write_segments(fd, Placement::Cursor, &[segment]) } {
+    match unsafe { fs_write_segments(file, Placement::Cursor, &[segment], false) } {
         Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
         Err(errno) => fail(errno) as isize,
     }
@@ -276,7 +276,7 @@ pub(crate) unsafe fn write_resolved(
         FdKind::File | FdKind::Dir | FdKind::OPath => {
             // SAFETY: `write_resolved`'s caller contract keeps `source`
             // readable for `length` bytes; this file path accesses it directly.
-            unsafe { fs_write(Fd(resolved.handle), source, length) }
+            unsafe { fs_write(resolved, source, length) }
         }
         // SAFETY: forwarded from this function's own contract.
         FdKind::Socket => unsafe {
@@ -469,14 +469,21 @@ pub(crate) fn positional_placement(resolved: Resolved, offset: u64, append: bool
 /// and so does a failed one once bytes have moved; the call answers the bytes
 /// moved.
 ///
+/// A write that moved bytes through an `O_DSYNC`/`O_SYNC` description, or
+/// with `sync` (`RWF_DSYNC`/`RWF_SYNC`), makes them durable before the call
+/// returns, through the same `fsync` the descriptor would take
+/// (`generic_write_sync`), and answers that `fsync`'s failure.
+///
 /// # Safety
 /// Each segment must be readable for its length.
 pub(crate) unsafe fn fs_write_segments(
-    fd: Fd,
+    file: Resolved,
     placement: Placement,
     segments: &[GuestIovec],
+    sync: bool,
 ) -> Result<usize, c_int> {
-    with_context(|context| {
+    let fd = Fd(file.handle);
+    let moved = with_context(|context| {
         // Where the first byte lands, when the call decides it: a plain cursor
         // write leaves it to the filesystem.
         #[expect(
@@ -520,7 +527,11 @@ pub(crate) unsafe fn fs_write_segments(
             }
         }
         Ok(moved)
-    })
+    })?;
+    if moved != 0 && (sync || file.status & O_SYNC_STATUS != 0) {
+        crate::fs_sync_handle(fd)?;
+    }
+    Ok(moved)
 }
 
 /// # Safety
@@ -545,7 +556,7 @@ unsafe fn fs_pwrite_resolved(
         len: length,
     };
     // SAFETY: forwarded from this function's own contract.
-    match unsafe { fs_write_segments(Fd(resolved.handle), placement, &[segment]) } {
+    match unsafe { fs_write_segments(resolved, placement, &[segment], false) } {
         Ok(written) => isize::try_from(written).unwrap_or_else(|_| fail(EOVERFLOW) as isize),
         Err(errno) => fail(errno) as isize,
     }

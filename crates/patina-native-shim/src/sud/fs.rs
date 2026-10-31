@@ -148,13 +148,22 @@ pub(super) fn openat_patina_flags(flags: u64) -> u32 {
     if flags & uapi::O_NOCTTY as u64 != 0 {
         patina_flags |= PATINA_O_NOCTTY;
     }
+    if flags & O_PATH == 0 {
+        if flags & uapi::O_DSYNC as u64 != 0 {
+            patina_flags |= PATINA_O_DSYNC;
+        }
+        if flags & uapi::__O_SYNC as u64 != 0 {
+            patina_flags |= PATINA_O_SYNC;
+        }
+    }
     patina_flags
 }
 
 /// The kernel `open(2)` flag bits the deterministic filesystem models. Mirrors
-/// `patina_openat_impl`'s `supported` mask exactly: a bit outside it names
-/// a behavior nothing here implements (`O_TMPFILE`, `O_DIRECT`, `O_SYNC`, …), so
-/// it fails closed rather than being silently dropped.
+/// `patina_openat_impl`'s `supported` mask exactly: any other flag `open(2)`
+/// defines names a behavior nothing here implements (`O_TMPFILE`,
+/// `O_DIRECT`, `O_NOATIME`, `O_ASYNC`), so it stops the run by name
+/// ([`crate::fs::unmodeled_open_flags`]) rather than being silently dropped.
 /// (`O_NONBLOCK` changes the open of exactly one modeled kind — a FIFO, where
 /// it turns the rendezvous with the opposite end into an immediate answer. On a
 /// regular file or a directory it is the no-op it is on every Unix.)
@@ -169,13 +178,33 @@ pub(super) const OPENAT_SUPPORTED_FLAGS: u64 = O_ACCMODE
     | O_DIRECTORY
     | O_PATH
     | O_NONBLOCK
-    | uapi::O_NOCTTY as u64;
+    | uapi::O_NOCTTY as u64
+    | uapi::__O_SYNC as u64
+    | uapi::O_DSYNC as u64;
+
+/// Stop the run by name on a flag `open(2)` defines that the model does not.
+fn refuse_unmodeled(flags: u64) {
+    let unmodeled = flags & !OPENAT_SUPPORTED_FLAGS;
+    if unmodeled == 0 {
+        return;
+    }
+    let names = [
+        (O_DIRECT, "O_DIRECT"),
+        (uapi::__O_TMPFILE as u64, "O_TMPFILE"),
+        (uapi::O_NOATIME as u64, "O_NOATIME"),
+        (uapi::FASYNC as u64, "O_ASYNC"),
+    ];
+    crate::fs::unmodeled_open_flags(
+        names
+            .iter()
+            .filter(|(bit, _)| unmodeled & bit != 0)
+            .map(|(_, name)| *name),
+    )
+}
 
 /// Every flag `open(2)` defines (`VALID_OPEN_FLAGS`): what `openat2` accepts
 /// before refusing the rest, where `openat` silently drops unknown bits.
 const OPEN_VALID_FLAGS: u64 = OPENAT_SUPPORTED_FLAGS
-    | uapi::__O_SYNC as u64
-    | uapi::O_DSYNC as u64
     | uapi::FASYNC as u64
     | O_DIRECT
     | uapi::O_NOATIME as u64
@@ -257,9 +286,7 @@ pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
     if flags & O_PATH != 0 && flags & !OPEN_PATH_FLAGS != 0 {
         return -EINVAL;
     }
-    if flags & !OPENAT_SUPPORTED_FLAGS != 0 {
-        return -ENOSYS;
-    }
+    refuse_unmodeled(flags);
     let path = match guest_path(path) {
         Ok(path) => path,
         Err(errno) => return errno,
@@ -295,8 +322,10 @@ pub(super) fn sys_openat2(dirfd: i64, path: u64, how: u64, size: u64) -> i64 {
 /// open entry applies the same rule (and the umask), so an open of an existing
 /// file carries no mode at all.
 pub(super) fn sys_openat(dirfd: i64, path: u64, flags: u64, mode: u64) -> i64 {
-    if flags & !OPENAT_SUPPORTED_FLAGS != 0 {
-        return -ENOSYS;
+    // `build_open_how` drops a bit `open(2)` does not define, and an `O_PATH`
+    // open keeps only the flags that shape a location.
+    if flags & O_PATH == 0 {
+        refuse_unmodeled(flags & OPEN_VALID_FLAGS);
     }
     let path = match guest_path(path) {
         Ok(path) => path,

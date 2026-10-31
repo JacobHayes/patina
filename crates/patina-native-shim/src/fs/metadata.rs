@@ -1288,14 +1288,10 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     }
     match resolved.kind {
         FdKind::File => {}
-        FdKind::Pipe => return fail(ESPIPE),
+        // The standard streams are pipes.
+        FdKind::Pipe | FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => return fail(ESPIPE),
         FdKind::Dir => return fail(EISDIR),
-        FdKind::OPath
-        | FdKind::Stdin
-        | FdKind::Stdout
-        | FdKind::Stderr
-        | FdKind::MemDevice
-        | FdKind::Socket => return fail(ENODEV),
+        FdKind::OPath | FdKind::MemDevice | FdKind::Socket => return fail(ENODEV),
         #[cfg(target_os = "linux")]
         FdKind::EventFd
         | FdKind::Epoll
@@ -1352,6 +1348,14 @@ pub extern "C" fn patina_fallocate(raw_fd: c_int, mode: u32, offset: i64, length
     let keep_size = mode & FALLOC_FL_KEEP_SIZE != 0;
     let fd = Fd(resolved.handle);
     match with_context(|context| context.fs_allocate(fd, offset, length, operation, keep_size)) {
+        // ext4_fallocate commits the journal for an `O_SYNC`/`O_DSYNC`
+        // description (`f_flags & O_SYNC`) before it returns.
+        Ok(())
+            if resolved.status & O_SYNC_STATUS != 0
+                && let Err(errno) = fs_sync_handle(fd) =>
+        {
+            fail(errno)
+        }
         Ok(()) => {
             #[cfg(target_os = "linux")]
             mem::allocated(fd.0, offset, length, operation, keep_size);

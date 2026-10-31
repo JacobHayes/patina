@@ -201,6 +201,12 @@ fn getfl_to_posix(status: u32) -> c_int {
     if status & crate::O_NONBLOCK != 0 {
         flags |= libc::O_NONBLOCK;
     }
+    if status & crate::O_DSYNC != 0 {
+        flags |= libc::O_DSYNC;
+    }
+    if status & crate::O_SYNC != 0 {
+        flags |= libc::O_SYNC & !libc::O_DSYNC;
+    }
     #[cfg(target_os = "linux")]
     {
         if status & crate::O_PATH != 0 {

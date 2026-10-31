@@ -122,20 +122,43 @@ pub(crate) unsafe fn patina_openat_impl(
 
 unsafe fn implementation(dirfd: c_int, path: *const c_char, flags: c_int, mode: u32) -> c_int {
     crate::patina_note_boundary_symbol(c"open".as_ptr());
-    let supported = libc::O_ACCMODE
-        | libc::O_CREAT
-        | libc::O_TRUNC
-        | libc::O_APPEND
-        | libc::O_EXCL
-        | libc::O_CLOEXEC
-        | libc::O_NOFOLLOW
-        | libc::O_DIRECTORY
-        | libc::O_NONBLOCK
-        | libc::O_NOCTTY;
+    // Linux drops a bit `open(2)` does not define, and an `O_PATH` open keeps
+    // only the flags that shape a location; a defined flag the model has no
+    // behavior for stops the run by name. Darwin's `open` takes the modeled
+    // flags only.
     #[cfg(target_os = "linux")]
-    let supported = supported | libc::O_LARGEFILE | libc::O_PATH;
-    if flags & !supported != 0 {
-        return super::error(libc::ENOSYS);
+    let (unmodeled, asked) = (
+        [
+            (libc::O_DIRECT, "O_DIRECT"),
+            (libc::O_TMPFILE & !libc::O_DIRECTORY, "O_TMPFILE"),
+            (libc::O_NOATIME, "O_NOATIME"),
+            (libc::O_ASYNC, "O_ASYNC"),
+        ],
+        if flags & libc::O_PATH != 0 { 0 } else { flags },
+    );
+    #[cfg(target_os = "macos")]
+    let (unmodeled, asked) = {
+        let supported = libc::O_ACCMODE
+            | libc::O_CREAT
+            | libc::O_TRUNC
+            | libc::O_APPEND
+            | libc::O_EXCL
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_DIRECTORY
+            | libc::O_NONBLOCK
+            | libc::O_NOCTTY
+            | libc::O_SYNC
+            | libc::O_DSYNC;
+        ([(!supported, "an unmodeled flag")], flags)
+    };
+    if unmodeled.iter().any(|(bit, _)| asked & bit != 0) {
+        crate::fs::unmodeled_open_flags(
+            unmodeled
+                .iter()
+                .filter(|(bit, _)| asked & bit != 0)
+                .map(|(_, name)| *name),
+        );
     }
     #[cfg(target_os = "linux")]
     let path_only = flags & libc::O_PATH != 0;
@@ -172,6 +195,17 @@ unsafe fn implementation(dirfd: c_int, path: *const c_char, flags: c_int, mode: 
     ] {
         if flags & source != 0 {
             translated |= target;
+        }
+    }
+    if !path_only {
+        // Linux's `O_SYNC` is `__O_SYNC|O_DSYNC`; Darwin's two are apart.
+        for (source, target) in [
+            (libc::O_DSYNC, crate::O_DSYNC),
+            (libc::O_SYNC & !libc::O_DSYNC, crate::O_SYNC),
+        ] {
+            if flags & source != 0 {
+                translated |= target;
+            }
         }
     }
     let dirfd = if dirfd == libc::AT_FDCWD {

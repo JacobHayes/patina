@@ -138,9 +138,11 @@ fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (
                     (readable | POLLOUT | POLLWRNORM, (efd.write_events, 0))
                 })
         }
-        // Standard input is at end of file.
-        FdKind::Stdin => (POLLIN | POLLRDNORM | POLLHUP, (0, 0)),
-        // The captured streams always accept bytes.
+        // Standard input is an empty pipe whose writer is gone: hung up
+        // (`pipe_poll`).
+        FdKind::Stdin => (POLLHUP, (0, 0)),
+        // The captured streams' pipes always have room: the supervisor
+        // drains them.
         FdKind::Stdout | FdKind::Stderr => (POLLOUT | POLLWRNORM, (0, 0)),
         // `/dev/random`'s `random_poll`, the one memory device poll: readable
         // (and only that) once the pool is ready, which the model's pool is

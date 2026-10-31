@@ -37,13 +37,17 @@ pub(crate) const RLIMIT_NOFILE: usize = 1024;
 /// error at every dispatch site that has to decide what the new kind does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FdKind {
-    /// The guest's standard input: EOF on every read, never a terminal.
+    /// The guest's standard input: the read end of an empty pipe whose writer
+    /// is gone (EOF on every read, never a terminal), on its own pipefs node
+    /// (`thread::pipe::STDIO_PIPE_INOS`).
     Stdin,
     /// Captured standard output (the capture sink the description's `handle`
-    /// names, 1). `dup2(fd, 1)` redirects; `close(1)` then `open` makes number
-    /// 1 an ordinary file — the Linux behavior.
+    /// names, 1): the write end of a pipe the supervisor drains, on its own
+    /// pipefs node. `dup2(fd, 1)` redirects; `close(1)` then `open` makes
+    /// number 1 an ordinary file — the Linux behavior.
     Stdout,
-    /// Captured standard error (sink 2).
+    /// Captured standard error (sink 2), a pipe's write end as standard
+    /// output's is.
     Stderr,
     /// A regular file in the deterministic filesystem; `handle` is the driver
     /// `Fd`.

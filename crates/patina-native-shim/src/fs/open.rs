@@ -50,6 +50,20 @@ fn driver_open(path: &str, flags: OpenFlags) -> Result<Fd, c_int> {
 pub(crate) const DENY_O_PATH_SYMLINK: &str = "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic \
      filesystem has no descriptor for a link entry); failing closed\n";
 
+/// Stop the run on an open asking for `flags`, behaviors `open(2)` defines
+/// that the deterministic filesystem does not model: what `O_DIRECT`
+/// promises (ext4's alignment rules on every transfer), `O_TMPFILE`'s
+/// unnamed file, `O_NOATIME`'s atime exemption and `O_ASYNC`'s `SIGIO`.
+/// One line for both doors, so a raw-syscall guest and a libc guest stop the
+/// same way.
+#[cfg(any(target_os = "linux", patina_posix_exports))]
+pub(crate) fn unmodeled_open_flags<'a>(flags: impl Iterator<Item = &'a str>) -> ! {
+    let flags = flags.collect::<Vec<_>>().join("|");
+    crate::trap_fatal(&format!(
+        "open with {flags} is not modeled by the deterministic filesystem; failing closed"
+    ))
+}
+
 /// A soft, diagnostic deny: the line goes to the CAPTURED stderr (the recorded
 /// stream) and the call answers `ENOSYS`, exactly as the C `patina_posix_deny`
 /// and the SUD `sud_deny` do.
@@ -160,7 +174,7 @@ fn open_mem_device(device: crate::memdev::MemDevice, flags: u32, cloexec: bool) 
         if flags & O_WRITE != 0 && device.draws_entropy() {
             entry.unmodeled("an open for writing (feeding the input pool)");
         }
-        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK)) | O_OPENED
+        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK | O_SYNC_STATUS)) | O_OPENED
     } else {
         if flags & (O_WRITE | O_CREATE | O_TRUNCATE | O_APPEND | O_EXCLUSIVE | O_PATH) != 0
             || flags & O_READ == 0
@@ -214,7 +228,7 @@ fn open_namespace(index: usize, flags: u32, cloexec: bool) -> c_int {
         }
         (
             FdKind::Namespace,
-            O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK)),
+            O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK | O_SYNC_STATUS)),
         )
     };
     nsfs::made(index);
@@ -280,14 +294,14 @@ pub(crate) unsafe fn open_at(
         Err(errno) => return fail(errno),
     };
     // The description's status flags as `F_GETFL` reports them: the access
-    // mode, `O_APPEND`, `O_NONBLOCK`; an `O_PATH` description carries only
+    // mode, `O_APPEND`, `O_NONBLOCK`, `O_DSYNC`/`O_SYNC`; an `O_PATH` description carries only
     // `O_PATH` (the kernel reads no access mode under it). `O_DIRECTORY` stays
     // on a description that asked for it (fs/open.c keeps it in `f_flags`,
     // under `O_PATH` too), which only a directory's can have.
     let status = if path_only {
         O_PATH | (flags & O_DIRECTORY)
     } else {
-        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK)) | O_OPENED
+        (flags & (O_READ | O_WRITE | O_APPEND | O_NONBLOCK | O_SYNC_STATUS)) | O_OPENED
     };
     let kind = if path_only {
         FdKind::OPath
@@ -342,7 +356,7 @@ pub(crate) unsafe fn open_at(
             } else {
                 (
                     OpenFlags::read_only(),
-                    O_READ | O_OPENED | (flags & (O_NONBLOCK | O_DIRECTORY)),
+                    O_READ | O_OPENED | (flags & (O_NONBLOCK | O_DIRECTORY | O_SYNC_STATUS)),
                 )
             };
             match driver_open(&resolved.path, dir_flags) {

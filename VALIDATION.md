@@ -176,9 +176,10 @@ versions, target triple and fingerprint.
   still commits the metadata. A process-crash restart boots from the
   page cache as its disk, so pages a failed writeback dropped, and writeback
   errors nobody saw, do not reach the restarted incarnation. `CrashFs` models
-  ext4 only: `fdatasync` commits like `fsync`, background writeback (dirty
-  expiry, memory pressure) never writes data on its own, and `O_DIRECT` is
-  not modelled.
+  ext4 only: `fdatasync` commits like `fsync` (and so does every write through
+  an `O_SYNC`/`O_DSYNC` description), background writeback (dirty expiry,
+  memory pressure) never writes data on its own, and `O_DIRECT` is not
+  modelled: an open asking for it stops the run by name.
 - **Custom allocators.** Multi-threaded jemalloc has no automated end-to-end test.
 - **Scope.** One record path is one finalized context, so multi-test aggregation
   is unsupported. Arbitrary host DNS, arbitrary FFI, dynamic loading and full

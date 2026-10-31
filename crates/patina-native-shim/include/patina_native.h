@@ -52,6 +52,13 @@ enum {
     /* The opened terminal must not become the caller's controlling terminal:
      * read only by a pseudoterminal slave's open (Linux), never status. */
     PATINA_O_NOCTTY = 1u << 12,
+    /* O_DSYNC: every write through the description makes its data durable
+     * before it returns, as an fdatasync after it would. Status: F_GETFL
+     * reports it. */
+    PATINA_O_DSYNC = 1u << 13,
+    /* The other half of O_SYNC (the kernel's __O_SYNC, which O_SYNC sets with
+     * O_DSYNC): the metadata too, as an fsync would. Status. */
+    PATINA_O_SYNC = 1u << 14,
 };
 
 /*
@@ -66,9 +73,9 @@ enum {
  * allocates them, refcount an open file description, and are never recorded.
  */
 enum {
-    PATINA_FD_STDIN = 0,   /* the guest's standard input: EOF, not a terminal */
-    PATINA_FD_STDOUT = 1,  /* captured standard output */
-    PATINA_FD_STDERR = 2,  /* captured standard error */
+    PATINA_FD_STDIN = 0,   /* standard input: an empty pipe's read end, its writer gone */
+    PATINA_FD_STDOUT = 1,  /* captured standard output: a drained pipe's write end */
+    PATINA_FD_STDERR = 2,  /* captured standard error: a drained pipe's write end */
     PATINA_FD_FILE = 3,    /* a deterministic-filesystem file */
     PATINA_FD_DIR = 4,     /* a directory descriptor (O_DIRECTORY, with or without O_PATH) */
     PATINA_FD_OPATH = 5,   /* an O_PATH descriptor on a non-directory */

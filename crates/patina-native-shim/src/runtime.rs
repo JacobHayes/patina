@@ -789,6 +789,19 @@ pub(crate) fn boundary_point() -> Result<(), c_int> {
     thread::sched_point()
 }
 
+/// The virtual machine's boot instant on the realtime clock, in
+/// nanoseconds: its monotonic clock counts from boot and nothing sets its
+/// realtime clock, so it is their difference at any instant (0 before the
+/// runtime is installed).
+pub(crate) fn boot_instant() -> u64 {
+    crate::with_bookkeeping(|context| {
+        let realtime = context.fs_time_unrecorded()?;
+        let monotonic = context.monotonic_now_unrecorded()?;
+        Ok(realtime.saturating_sub(monotonic))
+    })
+    .unwrap_or(0)
+}
+
 /// The instant the deterministic filesystem would stamp an entry with now, for
 /// a node the shim keeps itself (a pipe's pipefs inode); 0 with no runtime
 /// installed. A clock read, not a boundary effect: it neither marks a boundary

@@ -166,6 +166,10 @@ const PATINA_O_DIRECTORY: u32 = 1 << 11;
 
 const PATINA_O_NOCTTY: u32 = 1 << 12;
 
+const PATINA_O_DSYNC: u32 = 1 << 13;
+
+const PATINA_O_SYNC: u32 = 1 << 14;
+
 // Patina path-resolution flags (see `patina_native.h`).
 const PATINA_RESOLVE_NOFOLLOW: u32 = 1 << 0;
 

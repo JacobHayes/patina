@@ -124,10 +124,13 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
                 immutable: false,
             },
         },
+        // A standard stream is an anonymous pipe's end.
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Node::Pseudo {
+            mode: thread::pipe_inode_metadata(raw_fd).map_or(ANON_INODE_MODE, |m| m.mode),
+            regular: false,
+            immutable: false,
+        },
         FdKind::OPath
-        | FdKind::Stdin
-        | FdKind::Stdout
-        | FdKind::Stderr
         | FdKind::MemDevice
         | FdKind::Socket
         | FdKind::EventFd

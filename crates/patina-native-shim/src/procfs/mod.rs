@@ -483,7 +483,7 @@ static MADE: SpinMutex<BTreeMap<Node, u64>> = SpinMutex::new(BTreeMap::new());
 /// cached; the model keeps the first).
 fn made(node: Node) -> u64 {
     let now = match node {
-        Node::Root | Node::SelfLink | Node::NetLink => crate::volume::boot_instant(),
+        Node::Root | Node::SelfLink | Node::NetLink => crate::boot_instant(),
         _ => crate::fs_time_unrecorded(),
     };
     *MADE.lock().entry(node).or_insert(now)
@@ -698,7 +698,8 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
         );
         handle
     };
-    let status = O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK | O_DIRECTORY));
+    let status =
+        O_READ | O_OPENED | (flags & (O_APPEND | O_NONBLOCK | O_DIRECTORY | crate::O_SYNC_STATUS));
     match install_fd(kind, handle, status, cloexec) {
         Ok(number) => {
             made(node);

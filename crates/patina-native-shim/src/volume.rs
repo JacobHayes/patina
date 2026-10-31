@@ -337,8 +337,8 @@ pub unsafe extern "C" fn patina_statx_extra(
 }
 
 /// The filesystem a descriptor is on (`fdget_raw`: an `O_PATH` descriptor
-/// names its entry on the volume). The captured standard streams have no
-/// modeled node, and answer `EBADF` as `fstat` does.
+/// names its entry on the volume). The standard streams are pipes, on
+/// pipefs.
 fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
     let resolved = resolve_fd(raw_fd)?;
     match resolved.kind {
@@ -359,7 +359,7 @@ fn descriptor_filesystem(raw_fd: c_int) -> Result<Filesystem, c_int> {
         FdKind::Namespace | FdKind::NamespacePath => Ok(Filesystem::Nsfs),
         FdKind::MemDevice => Ok(Filesystem::Devtmpfs),
         FdKind::Proc | FdKind::ProcDir => Ok(Filesystem::Proc),
-        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Err(EBADF),
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Ok(Filesystem::Pipefs),
     }
 }
 
@@ -449,19 +449,6 @@ pub(crate) unsafe fn fstatfs(raw_fd: c_int, out: *mut KernelStatfs) -> crate::ab
 /// (the conformance events compare inode numbers relatively).
 const ANON_INODE_INO: u64 = 69;
 
-/// The virtual machine's boot instant on the realtime clock, in
-/// nanoseconds: its monotonic clock counts from boot and nothing sets its
-/// realtime clock, so it is their difference at any instant (0 before the
-/// runtime is installed).
-pub(crate) fn boot_instant() -> u64 {
-    crate::with_bookkeeping(|context| {
-        let realtime = context.fs_time_unrecorded()?;
-        let monotonic = context.monotonic_now_unrecorded()?;
-        Ok(realtime.saturating_sub(monotonic))
-    })
-    .unwrap_or(0)
-}
-
 /// Whether a descriptor of `kind` is a file on 6.8's one anonymous inode
 /// (`anon_inode_getfile`/`anon_inode_getfd`: `[eventfd]`, `[timerfd]`,
 /// `[signalfd]`, `[eventpoll]`, `inotify`, `[pidfd]` — pidfs came in 6.9 —
@@ -482,7 +469,7 @@ pub(crate) fn on_anon_inode(kind: FdKind) -> bool {
 /// type, one link, empty, on anon_inodefs; every time the instant boot made
 /// it.
 pub(crate) fn anon_inode_metadata() -> crate::PatinaMetadata {
-    let made = crate::PatinaTimestamp::from_nanos(i128::from(boot_instant()));
+    let made = crate::PatinaTimestamp::from_nanos(i128::from(crate::boot_instant()));
     crate::PatinaMetadata {
         kind: crate::PATINA_ENTRY_ANON,
         mode: 0o600,

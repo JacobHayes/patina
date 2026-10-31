@@ -486,6 +486,20 @@ fn main() {
         f.sync_all().unwrap();
         File::open("/").unwrap().sync_all().unwrap();
     }
+    if std::env::args().any(|arg| arg == "--dsync") {
+        // Every write through an `O_DSYNC` description is durable on return;
+        // the crash lands on the next file's creation.
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(target_os = "linux")]
+        const O_DSYNC: i32 = 0o10000;
+        #[cfg(target_os = "macos")]
+        const O_DSYNC: i32 = 0x0040_0000;
+        let f = OpenOptions::new().write(true).custom_flags(O_DSYNC).open(path).unwrap();
+        f.write_all_at(&[b'B'; 16], 0).unwrap();
+        let _ = OpenOptions::new().create(true).write(true).open("/g");
+        println!("not_crashed");
+        return;
+    }
     let f = OpenOptions::new().read(true).write(true).open(path).unwrap();
     if std::env::args().any(|arg| arg == "--mapped") {
         // The overwrite through a shared view sits in the page cache until a
@@ -581,6 +595,36 @@ fn main() {
             machine.contains(&format!("recovered={}", "A".repeat(16))),
             "{machine}"
         );
+    }
+
+    /// A write through an `O_DSYNC` description is durable when it returns,
+    /// as `generic_write_sync` makes it: a machine crash after it keeps the
+    /// overwrite for every seed, where an unsynced one loses it for some.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_crash_keeps_a_write_through_an_o_dsync_description() {
+        let guest = build_guest("dsync", UNSYNCED_OVERWRITE_SOURCE);
+        let creates_g =
+            |op: &Operation| matches!(op, Operation::FsOpen { path, .. } if path == "/g");
+        let (permille, seeds) = crash_after(&guest, &["--dsync"], 0, creates_g, 8);
+        for seed in &seeds {
+            let output = assert_success(guest.command(
+                "run",
+                &[
+                    "--seed",
+                    seed,
+                    crash_flag("machine"),
+                    &permille,
+                    "--",
+                    "--dsync",
+                ],
+            ));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(&format!("recovered={}", "B".repeat(16))),
+                "seed {seed}: {stdout}"
+            );
+        }
     }
 
     // A native guest that follows the parent-directory fsync pattern for namespace

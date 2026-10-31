@@ -196,9 +196,9 @@ unsafe fn cursor_writev(
         };
         let segments = nonempty(segments);
         // SAFETY: forwarded from this function's own contract.
-        let written = unsafe { fs_write_segments(Fd(resolved.handle), placement, &segments) };
+        let written = unsafe { fs_write_segments(resolved, placement, &segments, synced(flags)) };
         return match written {
-            Ok(moved) => sync_written(resolved, moved, flags, None),
+            Ok(moved) => finish(moved, None),
             Err(errno) => finish(0, Some(errno)),
         };
     }
@@ -216,20 +216,12 @@ unsafe fn cursor_writev(
             break;
         }
     }
-    sync_written(resolved, moved, flags, stopped)
+    finish(moved, stopped)
 }
 
-/// `RWF_DSYNC`/`RWF_SYNC` after a write that moved bytes: the durability the
-/// flags promise, through the same `fsync` the descriptor would take.
-fn sync_written(resolved: Resolved, moved: usize, flags: i32, stopped: Option<c_int>) -> isize {
-    if moved != 0
-        && resolved.kind == FdKind::File
-        && flags & (RWF_DSYNC | RWF_SYNC) != 0
-        && let Err(errno) = crate::fs_sync_handle(Fd(resolved.handle))
-    {
-        return fail(errno) as isize;
-    }
-    finish(moved, stopped)
+/// Whether a write's `RWF_*` flags ask for its data to be durable on return.
+fn synced(flags: i32) -> bool {
+    flags & (RWF_DSYNC | RWF_SYNC) != 0
 }
 
 #[unsafe(no_mangle)]
@@ -392,8 +384,8 @@ pub unsafe extern "C" fn patina_pwritev(
     let placement = positional_placement(resolved, offset, flags & RWF_APPEND != 0);
     let segments = nonempty(&segments);
     // SAFETY: each segment is guest memory readable for its length.
-    let moved = match unsafe { fs_write_segments(Fd(resolved.handle), placement, &segments) } {
-        Ok(moved) => sync_written(resolved, moved, flags, None),
+    let moved = match unsafe { fs_write_segments(resolved, placement, &segments, synced(flags)) } {
+        Ok(moved) => finish(moved, None),
         Err(errno) => finish(0, Some(errno)),
     };
     transferred(&resolved, moved, true)

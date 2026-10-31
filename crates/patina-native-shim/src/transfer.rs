@@ -56,6 +56,24 @@ fn notified(input: c_int, output: c_int, moved: isize, output_first: bool) -> is
     moved
 }
 
+/// Stop the run on a splice-family call `call` over a standard stream in a
+/// role the model gives it no transfer for: the streams are pipes, but only a
+/// splice from another pipe into standard output or error moves bytes.
+fn stream_unmodeled(call: &str) -> ! {
+    crate::trap_fatal(&format!(
+        "{call} with a standard stream on this side is not modeled; failing closed"
+    ))
+}
+
+/// Whether a description is a standard stream (a pipe end with no channel
+/// the splice rows can reach).
+fn stream(resolved: &Resolved) -> bool {
+    matches!(
+        resolved.kind,
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr
+    )
+}
+
 /// The pipe a descriptor is, for a splice: an anonymous pipe's or a FIFO's
 /// end.
 fn pipe_of(resolved: &Resolved) -> Option<u64> {
@@ -173,10 +191,17 @@ fn read_file_at(handle: Fd, offset: i64, len: usize) -> Result<Vec<u8>, c_int> {
     with_context(|context| context.fs_read_at(handle, offset, len))
 }
 
-fn write_file_at(handle: Fd, offset: i64, bytes: &[u8]) -> Result<usize, c_int> {
+/// The destination write of a copy, a `sendfile` or a `splice` into the file
+/// `output` opens: through an `O_DSYNC`/`O_SYNC` description it is durable
+/// before the call returns, as every write through one is.
+fn write_file_at(output: &Resolved, offset: i64, bytes: &[u8]) -> Result<usize, c_int> {
+    let handle = Fd(output.handle);
     let offset = u64::try_from(offset).map_err(|_| EINVAL)?;
     let written = with_context(|context| context.fs_write_at(handle, offset, bytes))?;
     crate::mem::written(handle.0, offset, &bytes[..written.min(bytes.len())]);
+    if written != 0 && output.status & crate::O_SYNC_STATUS != 0 {
+        crate::fs_sync_handle(handle)?;
+    }
     Ok(written)
 }
 
@@ -279,7 +304,7 @@ pub unsafe extern "C" fn patina_copy_file_range(
             return Err(EINVAL);
         }
         let bytes = read_file_at(from, source.at, count)?;
-        let moved = write_file_at(to, destination.at, &bytes)?;
+        let moved = write_file_at(&output, destination.at, &bytes)?;
         source.advance(from, moved)?;
         destination.advance(to, moved)?;
         Ok(moved)
@@ -458,8 +483,13 @@ pub unsafe extern "C" fn patina_splice(
             return Err(EBADF);
         }
         let (from_pipe, to_pipe) = (pipe_of(&input), pipe_of(&output));
-        if (from_pipe.is_some() && !off_in.is_null()) || (to_pipe.is_some() && !off_out.is_null()) {
+        if ((from_pipe.is_some() || stream(&input)) && !off_in.is_null())
+            || ((to_pipe.is_some() || stream(&output)) && !off_out.is_null())
+        {
             return Err(ESPIPE);
+        }
+        if stream(&input) || (stream(&output) && from_pipe.is_none()) {
+            stream_unmodeled("splice");
         }
         let flagged = flags & SPLICE_F_NONBLOCK != 0;
         match (from_pipe, to_pipe) {
@@ -486,7 +516,7 @@ pub unsafe extern "C" fn patina_splice(
                             return Err(EINVAL);
                         }
                         let moved = pipe_to_sink(from, len, nonblocking, |bytes| {
-                            write_file_at(to, position.at, bytes)
+                            write_file_at(&output, position.at, bytes)
                         })?;
                         position.advance(to, moved)?;
                         Ok(moved)
@@ -552,6 +582,9 @@ pub extern "C" fn patina_tee(fd_in: c_int, fd_out: c_int, len: usize, flags: u32
         if input.status & O_READ == 0 || output.status & O_WRITE == 0 {
             return Err(EBADF);
         }
+        if stream(&input) || stream(&output) {
+            stream_unmodeled("tee");
+        }
         match (pipe_of(&input), pipe_of(&output)) {
             (Some(from), Some(to)) if thread::splice_pipe(from) != thread::splice_pipe(to) => {
                 let nonblocking = flags & SPLICE_F_NONBLOCK != 0
@@ -601,6 +634,9 @@ pub unsafe extern "C" fn patina_vmsplice(
         let total: usize = segments.iter().map(|segment| segment.len).sum();
         if total == 0 {
             return Ok(0);
+        }
+        if stream(&resolved) {
+            stream_unmodeled("vmsplice");
         }
         let pipe = pipe_of(&resolved).ok_or(EBADF)?;
         // Only the call's own flag: `vmsplice` never reads the pipe's

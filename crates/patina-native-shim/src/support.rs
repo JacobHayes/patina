@@ -151,6 +151,16 @@ pub(crate) const O_OPENED: u32 = 1 << 10;
 /// terminal. Nothing but a pseudoterminal's slave reads it (a no-op on every
 /// other entry), and it is never status.
 pub(crate) const O_NOCTTY: u32 = 1 << 12;
+/// `O_DSYNC`: every write through the description makes its data durable
+/// before it returns (`generic_write_sync`; the model's `fdatasync` is its
+/// `fsync`). A status flag.
+pub(crate) const O_DSYNC: u32 = 1 << 13;
+/// The kernel's `__O_SYNC`, the half `O_SYNC` adds to `O_DSYNC`: the
+/// metadata too. A status flag; the write path needs only [`O_DSYNC`],
+/// which every `O_SYNC` open carries.
+pub(crate) const O_SYNC: u32 = 1 << 14;
+/// The synchronous-write status bits an open keeps on its description.
+pub(crate) const O_SYNC_STATUS: u32 = O_DSYNC | O_SYNC;
 pub(crate) const O_ALL: u32 = O_READ
     | O_WRITE
     | O_CREATE
@@ -162,7 +172,8 @@ pub(crate) const O_ALL: u32 = O_READ
     | O_PATH
     | O_CLOEXEC
     | O_DIRECTORY
-    | O_NOCTTY;
+    | O_NOCTTY
+    | O_SYNC_STATUS;
 /// The status bits `F_SETFL` may change (the kernel ignores every other bit in
 /// the argument, including the access mode).
 pub(crate) const O_SETFL_MASK: u32 = O_APPEND | O_NONBLOCK;

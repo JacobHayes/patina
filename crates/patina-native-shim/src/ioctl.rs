@@ -121,9 +121,11 @@ pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_v
                 Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
                 None => fail(ENOTTY),
             },
-            FdKind::Dir | FdKind::OPath | FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => {
-                fail(ENOTTY)
-            }
+            // A standard stream's pipe holds nothing: standard input's is
+            // empty with its writer gone, and the supervisor drains the
+            // others' as they are written.
+            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => put_int(arg, 0),
+            FdKind::Dir | FdKind::OPath => fail(ENOTTY),
             // A procfs file is a regular one of size 0: the size less the
             // position, as an `int`.
             #[cfg(target_os = "linux")]
@@ -263,13 +265,10 @@ mod vfs {
         /// A procfs file or directory: no file attributes, extent map or
         /// block map, and no `fasync`.
         Proc { directory: bool },
-        /// A captured standard stream, which has no modeled inode.
-        Stream,
     }
 
     fn inode(resolved: &Resolved) -> Inode {
         match resolved.kind {
-            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => Inode::Stream,
             FdKind::Dir => Inode::Volume { directory: true },
             FdKind::File if crate::mem::secret(resolved.handle) => {
                 Inode::Regular { attributes: false }
@@ -279,7 +278,10 @@ mod vfs {
             }
             FdKind::File => Inode::Volume { directory: false },
             FdKind::Namespace => Inode::Regular { attributes: false },
-            FdKind::Pipe | FdKind::Socket => Inode::Special { fasync: true },
+            // A standard stream is a pipe's end.
+            FdKind::Pipe | FdKind::Socket | FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => {
+                Inode::Special { fasync: true }
+            }
             // `random_fasync`; `mem.c`'s devices have none.
             FdKind::MemDevice => Inode::Special {
                 fasync: crate::memdev::MemDevice::of_handle(resolved.handle).draws_entropy(),
@@ -330,7 +332,7 @@ mod vfs {
                     0
                 }
                 Ok(_) => match inode {
-                    Inode::Special { fasync: true } | Inode::Stream => {
+                    Inode::Special { fasync: true } => {
                         stop("FIOASYNC turning on SIGIO delivery", request)
                     }
                     Inode::Volume { .. }
@@ -341,7 +343,6 @@ mod vfs {
             },
             // `inode_get_bytes` of a regular file or directory, a `loff_t`.
             FIOQSIZE => match inode {
-                Inode::Stream => stop("FIOQSIZE on a captured standard stream", request),
                 Inode::Special { .. } => fail(ENOTTY),
                 Inode::Volume { .. } | Inode::Regular { .. } | Inode::Proc { .. } => {
                     match bytes(raw_fd, resolved) {
@@ -357,12 +358,9 @@ mod vfs {
                 }
             },
             // The superblock's block size, as `statfs` reports it.
-            FIGETBSZ => match inode {
-                Inode::Stream => stop("FIGETBSZ on a captured standard stream", request),
-                _ => match crate::volume::block_size(raw_fd) {
-                    Ok(size) => put_int(arg, size),
-                    Err(errno) => fail(errno),
-                },
+            FIGETBSZ => match crate::volume::block_size(raw_fd) {
+                Ok(size) => put_int(arg, size),
+                Err(errno) => fail(errno),
             },
             FIFREEZE | FITHAW if capable(Capability::SysAdmin) => {
                 stop("freezing or thawing a filesystem", request)
@@ -370,7 +368,7 @@ mod vfs {
             FIFREEZE | FITHAW => fail(EPERM),
             // `ioctl_fiemap`: only the volume's inodes map extents.
             FS_IOC_FIEMAP => match inode {
-                Inode::Volume { .. } | Inode::Stream => stop("FS_IOC_FIEMAP", request),
+                Inode::Volume { .. } => stop("FS_IOC_FIEMAP", request),
                 Inode::Regular { .. } | Inode::Special { .. } | Inode::Proc { .. } => {
                     fail(EOPNOTSUPP)
                 }
@@ -382,7 +380,7 @@ mod vfs {
             // request to the file's own ioctl.
             FS_IOC_GETFLAGS | FS_IOC_SETFLAGS | FS_IOC_FSGETXATTR | FS_IOC_FSSETXATTR => {
                 match inode {
-                    Inode::Volume { .. } | Inode::Regular { attributes: true } | Inode::Stream => {
+                    Inode::Volume { .. } | Inode::Regular { attributes: true } => {
                         stop("file attributes", request)
                     }
                     Inode::Regular { attributes: false }
@@ -404,8 +402,9 @@ mod vfs {
                 }
                 Inode::Volume { directory: false }
                 | Inode::Regular { .. }
-                | Inode::Proc { directory: false }
-                | Inode::Stream => stop("a regular file's block map or preallocation", request),
+                | Inode::Proc { directory: false } => {
+                    stop("a regular file's block map or preallocation", request)
+                }
                 Inode::Volume { directory: true }
                 | Inode::Special { .. }
                 | Inode::Proc { directory: true } => return None,

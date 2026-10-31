@@ -66,7 +66,8 @@ impl NetState {
             fifo_channels: BTreeMap::new(),
             next_channel: 0,
             pipe_inodes: BTreeMap::new(),
-            next_pipe_ino: 1,
+            // Past the standard streams' nodes (`pipe::STDIO_PIPE_INOS`).
+            next_pipe_ino: 4,
             #[cfg(target_os = "macos")]
             kqueues: BTreeMap::new(),
             #[cfg(all(target_os = "macos", patina_posix_exports))]
