@@ -109,7 +109,7 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
                     "--mount",
                     None,
                     Value::Required("HOST_DIR", Kind::Path),
-                    "Capture a host directory read-only (contents, modes and mtimes) into the guest filesystem at `/`.",
+                    "Capture a host directory read-only (contents, modes, mtimes and the hard links among its names) into the guest filesystem at `/`.",
                     false,
                 ),
                 f(

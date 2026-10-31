@@ -273,6 +273,35 @@ impl MemFs {
         Ok(self)
     }
 
+    /// Seed a second name, `path`, for the file already seeded at `target`.
+    /// The name must be new, except that an empty directory the initial tree
+    /// starts with (the preseeded `/tmp`) gives way to it.
+    pub fn with_hard_link(mut self, path: &str, target: &str) -> DriverResult<Self> {
+        let path = normalize_path(path)?;
+        let target = normalize_path(target)?;
+        let inode = self
+            .names
+            .get(&target)
+            .copied()
+            .ok_or_else(|| namespace::not_found(&target))?;
+        if self.names.contains_key(&path)
+            || (self.directories.contains_key(&path) && self.has_children(&path))
+        {
+            return Err(patina_dst_abi::EffectError::new(
+                patina_dst_abi::ErrorCode::AlreadyExists,
+                format!("virtual filesystem entry already exists: {path}"),
+            ));
+        }
+        self.directories.remove(&path);
+        self.insert_parent_directories(FsClock::EPOCH, &path);
+        self.inodes
+            .get_mut(&inode)
+            .expect("name references an inode")
+            .links += 1;
+        self.names.insert(path, inode);
+        Ok(self)
+    }
+
     fn allocate_entry_metadata(&mut self, clock: FsClock, mode: u32) -> EntryMetadata {
         let ino = self.next_inode;
         self.next_inode = self.next_inode.checked_add(1).expect("inode IDs exhausted");

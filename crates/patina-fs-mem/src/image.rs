@@ -1,6 +1,6 @@
 //! A deterministic, self-describing wire format for a read-only filesystem tree.
 //!
-//! An [`FsImage`] is an ordered set of directory, file, and symlink entries,
+//! An [`FsImage`] is an ordered set of directory, file, symlink and hard-link entries,
 //! each with the metadata a guest can observe of it (permission bits and
 //! modification time), that encodes to a byte stream and decodes back
 //! identically. It exists so a
@@ -34,6 +34,7 @@ const VERSION: u32 = 2;
 const KIND_DIRECTORY: u8 = 0;
 const KIND_FILE: u8 = 1;
 const KIND_SYMLINK: u8 = 2;
+const KIND_HARD_LINK: u8 = 3;
 
 /// One entry in an [`FsImage`]: an absolute guest path plus its kind,
 /// payload and metadata. File contents and symlink targets travel verbatim;
@@ -58,6 +59,10 @@ pub enum FsImageEntry {
         target: String,
         mtime_nanos: i128,
     },
+    /// A second name for the file entry at `target`, which sorts before
+    /// `path`. It has no metadata of its own: mode and mtime belong to the
+    /// node, which the file entry carries.
+    HardLink { path: String, target: String },
 }
 
 impl FsImageEntry {
@@ -90,27 +95,39 @@ impl FsImageEntry {
         }
     }
 
+    /// A second name, at `path`, for the file entry at `target`.
+    pub fn hard_link(path: impl Into<String>, target: impl Into<String>) -> Self {
+        FsImageEntry::HardLink {
+            path: path.into(),
+            target: target.into(),
+        }
+    }
+
     fn path(&self) -> &str {
         match self {
             FsImageEntry::Directory { path, .. }
             | FsImageEntry::File { path, .. }
-            | FsImageEntry::Symlink { path, .. } => path,
+            | FsImageEntry::Symlink { path, .. }
+            | FsImageEntry::HardLink { path, .. } => path,
         }
     }
 
-    /// The permission bits, or `None` for a symlink.
+    /// The permission bits, or `None` for a symlink or a hard link.
     fn mode(&self) -> Option<u32> {
         match self {
             FsImageEntry::Directory { mode, .. } | FsImageEntry::File { mode, .. } => Some(*mode),
-            FsImageEntry::Symlink { .. } => None,
+            FsImageEntry::Symlink { .. } | FsImageEntry::HardLink { .. } => None,
         }
     }
 
-    fn mtime_nanos(&self) -> i128 {
+    /// The modification time, or `None` for a hard link (its node's is the
+    /// file entry's).
+    fn mtime_nanos(&self) -> Option<i128> {
         match self {
             FsImageEntry::Directory { mtime_nanos, .. }
             | FsImageEntry::File { mtime_nanos, .. }
-            | FsImageEntry::Symlink { mtime_nanos, .. } => *mtime_nanos,
+            | FsImageEntry::Symlink { mtime_nanos, .. } => Some(*mtime_nanos),
+            FsImageEntry::HardLink { .. } => None,
         }
     }
 
@@ -120,6 +137,7 @@ impl FsImageEntry {
             FsImageEntry::Directory { .. } => (KIND_DIRECTORY, &[]),
             FsImageEntry::File { contents, .. } => (KIND_FILE, contents),
             FsImageEntry::Symlink { target, .. } => (KIND_SYMLINK, target.as_bytes()),
+            FsImageEntry::HardLink { target, .. } => (KIND_HARD_LINK, target.as_bytes()),
         }
     }
 }
@@ -146,7 +164,8 @@ impl FsImage {
     /// Encode to the self-describing wire format. Deterministic: identical
     /// entry sets always produce identical bytes. Each entry is its kind, path
     /// and payload, then its permission bits (directories and files only) and
-    /// its modification time.
+    /// its modification time (all but hard links). An image without hard links
+    /// encodes exactly as before they were representable.
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -160,7 +179,9 @@ impl FsImage {
             if let Some(mode) = entry.mode() {
                 bytes.extend_from_slice(&mode.to_le_bytes());
             }
-            bytes.extend_from_slice(&entry.mtime_nanos().to_le_bytes());
+            if let Some(mtime_nanos) = entry.mtime_nanos() {
+                bytes.extend_from_slice(&mtime_nanos.to_le_bytes());
+            }
         }
         bytes
     }
@@ -181,12 +202,16 @@ impl FsImage {
 
     /// The tree's metadata alone: every entry's path, permission bits (a
     /// symlink's, which it has none of, as `u32::MAX`) and modification time.
+    /// A hard link has no metadata of its own and is part of the contents.
     pub fn encode_metadata(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         for entry in &self.entries {
+            let Some(mtime_nanos) = entry.mtime_nanos() else {
+                continue;
+            };
             encode_field(&mut bytes, entry.path().as_bytes());
             bytes.extend_from_slice(&entry.mode().unwrap_or(u32::MAX).to_le_bytes());
-            bytes.extend_from_slice(&entry.mtime_nanos().to_le_bytes());
+            bytes.extend_from_slice(&mtime_nanos.to_le_bytes());
         }
         bytes
     }
@@ -231,6 +256,11 @@ impl FsImage {
                     target: String::from_utf8(payload)
                         .map_err(|_| FsImageError::Malformed("symlink target is not UTF-8"))?,
                     mtime_nanos: reader.take_i128()?,
+                },
+                KIND_HARD_LINK => FsImageEntry::HardLink {
+                    path,
+                    target: String::from_utf8(payload)
+                        .map_err(|_| FsImageError::Malformed("hard link target is not UTF-8"))?,
                 },
                 other => return Err(FsImageError::UnknownKind(other)),
             };
@@ -287,11 +317,19 @@ impl FsImage {
                     }
                     fs.symlink(FsClock::EPOCH, target, path)?;
                 }
+                FsImageEntry::HardLink { path, target } => {
+                    if let Some(parent) = parent_of(path) {
+                        ensure_directory(&mut fs, parent)?;
+                    }
+                    fs = fs.with_hard_link(path, target)?;
+                }
             }
         }
         let mut fs = setup(fs)?;
         for entry in &self.entries {
-            fs.seed_metadata(entry.path(), entry.mode(), entry.mtime_nanos())?;
+            if let Some(mtime_nanos) = entry.mtime_nanos() {
+                fs.seed_metadata(entry.path(), entry.mode(), mtime_nanos)?;
+            }
         }
         Ok(fs)
     }
@@ -302,9 +340,25 @@ impl FsImage {
 /// encoder path.
 fn validate_decoded(entries: &[FsImageEntry]) -> Result<(), FsImageError> {
     let mut previous: Option<&str> = None;
+    let mut files = std::collections::BTreeSet::new();
     for entry in entries {
         let path = entry.path();
         validate_entry_path(path)?;
+        match entry {
+            FsImageEntry::File { .. } => {
+                files.insert(path);
+            }
+            // A hard link names a file entry already seen: strictly earlier,
+            // so the rebuild always links to a node that exists.
+            FsImageEntry::HardLink { target, .. } => {
+                if !files.contains(target.as_str()) {
+                    return Err(FsImageError::Malformed(
+                        "hard link does not name an earlier file entry",
+                    ));
+                }
+            }
+            FsImageEntry::Directory { .. } | FsImageEntry::Symlink { .. } => {}
+        }
         if let Some(previous) = previous
             && path <= previous
         {
@@ -545,6 +599,85 @@ mod tests {
             FsImage::decode(&hand_encode(&[(KIND_FILE, "relative", b"x")])),
             Err(FsImageError::Malformed(_))
         ));
+    }
+
+    /// A hard link survives the round trip and rebuilds as a second name for
+    /// its file's node: one inode, a link count of two, and the file entry's
+    /// mode and mtime on both names.
+    #[test]
+    fn a_hard_link_rebuilds_as_a_second_name_for_its_file() {
+        let image = FsImage::new(vec![
+            FsImageEntry::hard_link("/b/second", "/a/first"),
+            FsImageEntry::File {
+                path: "/a/first".into(),
+                contents: b"shared".to_vec(),
+                mode: 0o640,
+                mtime_nanos: 7 * SECOND,
+            },
+        ]);
+        let decoded = FsImage::decode(&image.encode()).unwrap();
+        assert_eq!(decoded, image);
+        let mut fs = decoded.into_memfs().unwrap();
+        let (first, second) = (
+            fs.metadata("/a/first").unwrap(),
+            fs.metadata("/b/second").unwrap(),
+        );
+        assert_eq!(first.ino, second.ino);
+        assert_eq!((first.nlink, second.nlink), (2, 2));
+        assert_eq!((second.mode, second.mtime_nanos), (0o640, 7 * SECOND));
+
+        // A name the empty tree already has (`/tmp`) is seeded like a file
+        // there would be.
+        let image = FsImage::new(vec![
+            FsImageEntry::file("/a", "x"),
+            FsImageEntry::hard_link("/tmp", "/a"),
+        ]);
+        let mut fs = image.into_memfs().unwrap();
+        assert_eq!(fs.metadata("/a").unwrap().nlink, 2);
+        assert_eq!(fs.metadata("/tmp").unwrap().kind, FsEntryKind::File);
+        let fd = fs
+            .open(FsClock::EPOCH, "/tmp", OpenFlags::read_only())
+            .unwrap();
+        assert_eq!(fs.read(FsClock::EPOCH, fd, 4).unwrap(), b"x");
+
+        // A name already seeded is not linked over, so no link count is
+        // inflated.
+        let fs = MemFs::new()
+            .with_file("/a", "x")
+            .unwrap()
+            .with_file("/b", "y")
+            .unwrap();
+        assert!(fs.with_hard_link("/b", "/a").is_err());
+    }
+
+    /// A hard link must name a file entry that precedes it: one to a missing
+    /// path, to a later file, or to a directory is refused.
+    #[test]
+    fn decode_refuses_a_hard_link_without_an_earlier_file() {
+        let link = |target: &str| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(MAGIC);
+            bytes.extend_from_slice(&VERSION.to_le_bytes());
+            bytes.extend_from_slice(&2u64.to_le_bytes());
+            bytes.push(KIND_DIRECTORY);
+            encode_field(&mut bytes, b"/d");
+            encode_field(&mut bytes, b"");
+            bytes.extend_from_slice(&DIRECTORY_MODE.to_le_bytes());
+            bytes.extend_from_slice(&0i128.to_le_bytes());
+            bytes.push(KIND_HARD_LINK);
+            encode_field(&mut bytes, b"/l");
+            encode_field(&mut bytes, target.as_bytes());
+            bytes
+        };
+        for target in ["/missing", "/z", "/d"] {
+            assert!(
+                matches!(
+                    FsImage::decode(&link(target)),
+                    Err(FsImageError::Malformed(_))
+                ),
+                "{target}"
+            );
+        }
     }
 
     /// The same entry set discovered in two host readdir orders yields

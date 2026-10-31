@@ -115,7 +115,7 @@ pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, Cli
     }
     let mut entries = Vec::new();
     collect_fs_entries(&root, "", &mut entries)?;
-    let image = FsImage::new(entries);
+    let image = FsImage::new(link_shared_files(entries));
     let bytes = image.encode();
     let hash = FsImageHash::of(&image);
 
@@ -140,10 +140,15 @@ pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, Cli
 /// captured: every entry belongs to the guest's own identity. `FsImage::new`
 /// sorts the result, so the host `readdir` order never leaks into the
 /// deterministic image.
+///
+/// A regular file with more than one host name is captured as a file with an
+/// inode key, so [`link_shared_files`] can turn its other names inside the
+/// mount into hard links. Names outside the mount are not seen: such a file
+/// arrives with one name.
 fn collect_fs_entries(
     host_dir: &Path,
     guest_prefix: &str,
-    entries: &mut Vec<FsImageEntry>,
+    entries: &mut Vec<CapturedEntry>,
 ) -> Result<(), CliError> {
     let listing = fs::read_dir(host_dir).map_err(|error| {
         CliError(format!(
@@ -191,33 +196,84 @@ fn collect_fs_entries(
                         host_path.display()
                     ))
                 })?;
-            entries.push(FsImageEntry::Symlink {
-                path: guest_path,
-                target,
-                mtime_nanos,
+            entries.push(CapturedEntry {
+                entry: FsImageEntry::Symlink {
+                    path: guest_path,
+                    target,
+                    mtime_nanos,
+                },
+                inode: None,
             });
         } else if file_type.is_dir() {
-            entries.push(FsImageEntry::Directory {
-                path: guest_path.clone(),
-                mode,
-                mtime_nanos,
+            entries.push(CapturedEntry {
+                entry: FsImageEntry::Directory {
+                    path: guest_path.clone(),
+                    mode,
+                    mtime_nanos,
+                },
+                inode: None,
             });
             collect_fs_entries(&host_path, &guest_path, entries)?;
         } else if file_type.is_file() {
             let contents = fs::read(&host_path).map_err(|error| {
                 CliError(format!("failed to read {}: {error}", host_path.display()))
             })?;
-            entries.push(FsImageEntry::File {
-                path: guest_path,
-                contents,
-                mode,
-                mtime_nanos,
+            let inode = (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()));
+            entries.push(CapturedEntry {
+                entry: FsImageEntry::File {
+                    path: guest_path,
+                    contents,
+                    mode,
+                    mtime_nanos,
+                },
+                inode,
             });
         }
         // Anything else (sockets, devices, fifos) is skipped: a search corpus
         // has none, and the in-memory filesystem cannot model them.
     }
     Ok(())
+}
+
+/// One captured entry, with the host `(device, inode)` of a regular file
+/// that has more than one name.
+struct CapturedEntry {
+    entry: FsImageEntry,
+    inode: Option<(u64, u64)>,
+}
+
+/// Give every group of captured names that share a host inode one node in the
+/// image: the group's first path in sorted order keeps the file entry, and each
+/// other name becomes a hard link to it. The choice depends only on the paths,
+/// never on `readdir` order.
+fn link_shared_files(captured: Vec<CapturedEntry>) -> Vec<FsImageEntry> {
+    use std::collections::BTreeMap;
+
+    let mut first: BTreeMap<(u64, u64), String> = BTreeMap::new();
+    for captured in &captured {
+        if let (Some(inode), FsImageEntry::File { path, .. }) = (captured.inode, &captured.entry) {
+            first
+                .entry(inode)
+                .and_modify(|kept| {
+                    if path < kept {
+                        kept.clone_from(path);
+                    }
+                })
+                .or_insert_with(|| path.clone());
+        }
+    }
+    captured
+        .into_iter()
+        .map(|captured| match (captured.inode, captured.entry) {
+            (Some(inode), FsImageEntry::File { path, .. }) if first[&inode] != path => {
+                FsImageEntry::HardLink {
+                    target: first[&inode].clone(),
+                    path,
+                }
+            }
+            (_, entry) => entry,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,6 +300,52 @@ mod tests {
             FsImageHash::mismatch(&hash, &FsImageHash::of(&edited)),
             Some(MountMismatch::Contents)
         );
+    }
+
+    /// Names that share a host inode inside the mount capture as one file and
+    /// hard links to it, whichever name readdir returns first; a file whose
+    /// other name is outside the mount captures as a plain file.
+    #[test]
+    fn shared_inodes_capture_as_hard_links() {
+        let scratch = tempfile::tempdir().unwrap();
+        let mount = scratch.path().join("mount");
+        fs::create_dir_all(mount.join("sub")).unwrap();
+        fs::write(mount.join("sub/z"), "shared").unwrap();
+        fs::hard_link(mount.join("sub/z"), mount.join("a")).unwrap();
+        fs::hard_link(mount.join("sub/z"), mount.join("m")).unwrap();
+        fs::write(mount.join("inside"), "half").unwrap();
+        fs::hard_link(mount.join("inside"), scratch.path().join("outside")).unwrap();
+
+        let mut captured = Vec::new();
+        collect_fs_entries(&mount, "", &mut captured).unwrap();
+        let image = FsImage::new(link_shared_files(captured));
+        let kinds: Vec<(&str, Option<&str>)> = image
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                FsImageEntry::File { path, .. } => Some((path.as_str(), None)),
+                FsImageEntry::HardLink { path, target } => {
+                    Some((path.as_str(), Some(target.as_str())))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("/a", None),
+                ("/inside", None),
+                ("/m", Some("/a")),
+                ("/sub/z", Some("/a"))
+            ]
+        );
+        use patina_dst_driver_api::FsDriver as _;
+        let mut fs = FsImage::decode(&image.encode())
+            .unwrap()
+            .into_memfs()
+            .unwrap();
+        assert_eq!(fs.metadata("/sub/z").unwrap().nlink, 3);
+        assert_eq!(fs.metadata("/inside").unwrap().nlink, 1);
     }
 
     /// The hash is the component right after the run's own head, a `+fsimg:` in
