@@ -7,8 +7,8 @@ Patina's import audit cannot see (no import symbols) and its instruction scan
 refuses (a `direct-syscall` finding). This is the program that was **unrunnable**
 under the deterministic runtime before syscall-user-dispatch (SUD).
 
-Under SUD the shim arms `PR_SET_SYSCALL_USER_DISPATCH` (allowed region = glibc's
-text, NULL selector) and each raw `syscall` instruction outside glibc delivers a
+Under SUD the shim arms `PR_SET_SYSCALL_USER_DISPATCH` (the allowed region follows
+whoever holds the thread) and each raw `syscall` instruction the guest makes delivers a
 synchronous `SIGSYS` that the shim decodes and routes into the **same** `patina_*`
 runtime entries the C interposers use. So this program observes virtual time, the
 deterministic filesystem, seed-derived entropy, and SimNet — deterministically.
