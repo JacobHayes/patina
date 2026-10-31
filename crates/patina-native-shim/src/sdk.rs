@@ -239,6 +239,52 @@ pub unsafe extern "C" fn patina_reachable(
 }
 
 #[unsafe(no_mangle)]
+/// Declare an SDK site at run time, as a link-time site table entry declares
+/// one before the guest runs: the site is known to the run (a never-reached
+/// `sometimes`/`reachable` still appears as a `declared_site` row) whether or
+/// not it is ever evaluated. For SDKs whose language cannot emit the
+/// `patina_sites` table, such as Go's, which declares each site once when its
+/// package initializes. `kind` is a static-site kind (`STATIC_SITE_KIND_*`);
+/// an unknown kind or malformed text is `EINVAL`. A label already declared or
+/// registered at another site or as another kind aborts as a duplicate, as
+/// the link-time table does.
+///
+/// # Safety
+/// See [`patina_buggify`].
+pub unsafe extern "C" fn patina_declare_site(
+    kind: u8,
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let Some(kind) = BuggifyKind::from_static_site_kind(kind) else {
+        return fail(EINVAL);
+    };
+    // SAFETY: the caller passes live slices.
+    let Some(label) = (unsafe { buggify_label(label, label_len) }) else {
+        return fail(EINVAL);
+    };
+    // SAFETY: the caller passes live slices.
+    let Some(site) = (unsafe { buggify_label(site, site_len) }) else {
+        return fail(EINVAL);
+    };
+    if label.is_empty() || site.is_empty() {
+        return fail(EINVAL);
+    }
+    // A declaration is no effect of the guest's: it records nothing and marks
+    // no boundary, as the link-time table's declarations at install do not.
+    match with_context_bookkeeping(|context| context.declare_static_site(label, site, kind)) {
+        Ok(SiteOutcome::DuplicateLabel) => {
+            abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label)
+        }
+        Ok(_) => 0,
+        Err(errno) => fail(errno),
+    }
+}
+
+#[unsafe(no_mangle)]
 /// `patina_dst::verdict(...)`: report one structured guest verdict.
 ///
 /// The verdict ABI is a SINGLE verb — `kind` is data, not a symbol per kind — so

@@ -367,7 +367,8 @@ replay takes the recorded stride. An instrumented binary's traces carry \
 `--go` builds the Go main package in DIR (Linux): `go build` in cgo mode, linked \
 externally with the shim, so goroutine threads start through the shim's \
 pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
-and -o; other `go build` options follow `--`. `--release` builds the shim in \
+and -o and adds the `patina` build tag, which selects the Go SDK's (`go/patina`) \
+shim-backed sites; other `go build` options follow `--`. `--release` builds the shim in \
 release mode; --instrument is Rust-only. Every Go guest keeps Go's own 8-bit \
 edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
 --guided` work on it; it has no edge hook, so `run --yield-stride` is refused.",

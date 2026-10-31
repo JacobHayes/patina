@@ -34,7 +34,8 @@ native_testbeds() {
   [[ $(uname -s)/$(uname -m) == Linux/x86_64 ]] || return 0
   testbeds/rustix-default/run-patina.sh &&
     testbeds/cap-std-dirfd/run-patina.sh &&
-    testbeds/go-guest/run-patina.sh
+    testbeds/go-guest/run-patina.sh &&
+    testbeds/go-sdk/run-patina.sh
 }
 
 logs=$(mktemp -d "${TMPDIR:-/tmp}/patina-check.XXXXXX") || exit 1

@@ -52,8 +52,11 @@ const GO_LINK_NAME: &str = "patina-guest";
 /// The `go build` options Patina sets itself, so a guest may not pass them.
 const RESERVED_GO_FLAGS: &[&str] = &["ldflags", "o"];
 
-/// The build tag that links the Go runtime's libFuzzer hook glue.
-const METER_TAG: &str = "libfuzzer";
+/// The build tags every Go guest builds with: `libfuzzer` links the Go
+/// runtime's libFuzzer hook glue the meter counts, and `patina` selects the
+/// Go SDK's shim-backed implementation (`go/patina`), as `cfg(patina)` does
+/// for a Rust guest; a plain `go build` leaves the SDK inert.
+const GUEST_TAGS: &[&str] = &["libfuzzer", "patina"];
 /// The compiler flag that instruments comparisons with libFuzzer hooks.
 const METER_GCFLAG: &str = "-d=libfuzzer";
 /// The Go experiment that puts a preemption check on every loop back edge.
@@ -113,7 +116,7 @@ pub(super) fn check_go_args(go_args: &[OsString]) -> Result<(), CliError> {
 
 /// The guest's `go build` options with the meter's settings merged in: the
 /// meter's `-gcflags` first (for every package), each of the guest's own
-/// `-gcflags` values extended with the meter's flag, and the meter's tag added
+/// `-gcflags` values extended with the meter's flag, and the guest tags added
 /// to the guest's `-tags` (or given alone).
 pub(super) fn metered_go_args(go_args: &[OsString]) -> Vec<OsString> {
     let mut merged = vec![OsString::from(format!("-gcflags=all={METER_GCFLAG}"))];
@@ -149,12 +152,13 @@ pub(super) fn metered_go_args(go_args: &[OsString]) -> Vec<OsString> {
         }
     }
     if !tagged {
-        merged.insert(1, OsString::from(format!("-tags={METER_TAG}")));
+        merged.insert(1, OsString::from(format!("-tags={}", GUEST_TAGS.join(","))));
     }
     merged
 }
 
-/// A guest's `-tags` or `-gcflags` value with the meter's tag or flag added.
+/// A guest's `-tags` or `-gcflags` value with the guest tags or the meter's
+/// flag added.
 /// Tags are read in both of the Go command's forms (comma-separated, or the
 /// older space-separated list, quotes dropped) and written back
 /// comma-separated.
@@ -169,8 +173,8 @@ fn metered_value(flag: &str, value: &str) -> String {
     } else {
         value.split(',').collect()
     };
-    tags.retain(|tag| !tag.is_empty() && *tag != METER_TAG);
-    tags.push(METER_TAG);
+    tags.retain(|tag| !tag.is_empty() && !GUEST_TAGS.contains(tag));
+    tags.extend(GUEST_TAGS);
     tags.join(",")
 }
 
@@ -660,7 +664,11 @@ mod tests {
         // No tags or gcflags of the guest's: the meter's alone, first.
         assert_eq!(
             metered_go_args(&strings(&["-trimpath"])),
-            strings(&["-gcflags=all=-d=libfuzzer", "-tags=libfuzzer", "-trimpath"])
+            strings(&[
+                "-gcflags=all=-d=libfuzzer",
+                "-tags=libfuzzer,patina",
+                "-trimpath"
+            ])
         );
         // Each spelling of the guest's own keeps its values and gains the meter's.
         assert_eq!(
@@ -674,7 +682,7 @@ mod tests {
             strings(&[
                 "-gcflags=all=-d=libfuzzer",
                 "-tags",
-                "netgo,libfuzzer",
+                "netgo,libfuzzer,patina",
                 "-gcflags=pkg=-N -d=libfuzzer",
                 "-gcflags",
                 "-l -d=libfuzzer",
@@ -682,8 +690,9 @@ mod tests {
         );
         // Both of the Go command's tag-list forms come back comma-separated.
         for (given, metered) in [
-            ("'netgo osusergo'", "netgo,osusergo,libfuzzer"),
-            ("libfuzzer", "libfuzzer"),
+            ("'netgo osusergo'", "netgo,osusergo,libfuzzer,patina"),
+            ("libfuzzer", "libfuzzer,patina"),
+            ("patina,netgo", "netgo,libfuzzer,patina"),
         ] {
             assert_eq!(metered_value("tags", given), metered, "{given}");
         }
@@ -746,7 +755,7 @@ mod tests {
         assert!(names_toolexec(&inherited));
         // The GOFLAGS tags and gcflags survive the meter's settings.
         let merged = metered_go_args(&inherited);
-        assert!(merged.contains(&OsString::from("-tags=netgo,libfuzzer")));
+        assert!(merged.contains(&OsString::from("-tags=netgo,libfuzzer,patina")));
         assert!(merged.contains(&OsString::from("-gcflags=all=-N -l -d=libfuzzer")));
     }
 

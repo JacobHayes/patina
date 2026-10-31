@@ -108,6 +108,7 @@ jobs:
           testbeds/rustix-default/run-patina.sh
           testbeds/cap-std-dirfd/run-patina.sh
           mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- testbeds/go-guest/run-patina.sh
+          mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-sdk/go.mod)" -- testbeds/go-sdk/run-patina.sh
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-native.sh

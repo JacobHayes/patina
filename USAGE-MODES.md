@@ -45,6 +45,26 @@ environment for the whole run). Gate such constructors out of DST builds (for ex
 `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move environment/logging/filesystem
 setup into `main` or the harness closure.
 
+### Go guests
+
+Go code uses the Go SDK, `github.com/JacobHayes/patina/go/patina` (`go/patina`,
+no dependencies). Go has no macros and cannot emit the link-time site table, so
+a site is a value declared once at package level, which declares it to the
+run (at its `file:line`) before `main`, through the shim's
+`patina_declare_site`:
+
+```go
+var sorted = patina.Always("ledger-sorted")
+var retried = patina.Sometimes("request-retried")
+
+func settle(l []int) { sorted.Check(slices.IsSorted(l)) }
+```
+
+Under Patina, `Always`, `Sometimes` and `Reachable` sites, `IsSimulated`, `Rng`
+and `Param` behave as their Rust counterparts do. `cargo patina build --go` adds the `patina`
+build tag, which links them to the shim; any other build gets inert stand-ins
+with no cgo, so code ships the SDK unconditionally.
+
 ### Native startup environment
 
 Use `cargo patina run --env KEY=VALUE` to supply a native guest's startup map.
@@ -131,3 +151,4 @@ Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
 | `patina-dst-macros` | `crates/patina-macros` | default-off `#[patina_dst::test]` proc macro; no external deps |
 | `patina-dst-harness` | `crates/patina-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
 | `patina-dst-runtime` | `crates/patina-runtime` | the deterministic runtime both modes drive (through the native shim) |
+| Go SDK (Go module) | `go/patina` | mode-1 SDK for Go guests; no dependencies; shim-backed under the `patina` build tag |

@@ -852,6 +852,11 @@ int32_t patina_sometimes(int32_t condition, const uint8_t *label, size_t label_l
                          const uint8_t *site, size_t site_len);
 int32_t patina_reachable(const uint8_t *label, size_t label_len,
                          const uint8_t *site, size_t site_len);
+/* Declare a site at run time, as the patina_sites table does before the guest
+ * runs, for SDKs that cannot emit that table. `kind` is a static-site kind
+ * (1 fault, 2 delay, 3 knob, 4 always, 5 sometimes, 6 reachable). */
+int32_t patina_declare_site(uint8_t kind, const uint8_t *label, size_t label_len,
+                            const uint8_t *site, size_t site_len);
 uint64_t patina_rng(void);
 /* The run parameter `key`'s byte length, copied into `out` when it fits in
  * `out_cap`; -1 when the run has no such parameter. */
