@@ -27,6 +27,7 @@ mod metadata;
 mod native_identity;
 mod recorder;
 mod replay;
+mod stream;
 
 pub use branch::BranchSession;
 pub use bundle::{Timeline, TraceBundle, TraceEvent};
@@ -46,6 +47,7 @@ pub use metadata::{
 pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord, NativeLibraryIdentity};
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;
+pub use stream::TraceStream;
 
 /// The trace bundle format this runtime writes and the only one it reads: a
 /// bundle declaring any other `format_version` is refused with

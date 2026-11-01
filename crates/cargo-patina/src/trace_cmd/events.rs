@@ -71,64 +71,110 @@ impl EventFilters {
     }
 }
 
-pub(crate) fn write_events_human<W: std::io::Write>(
-    out: &mut W,
-    _path: &Path,
-    _timeline: &str,
-    flat: &FlatTrace,
-    filters: &EventFilters,
-) -> Result<(), CliError> {
-    let mut matched = 0u64;
-    let mut emitted = 0u64;
-    match (filters.first, filters.last) {
-        (Some(limit), None) => {
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                if emitted < limit {
-                    write_human_event(out, event)?;
-                    emitted += 1;
-                }
+/// Writes a stream of flattened events as `trace events` prints them: each
+/// event that passes the filters, cut to the first or last N when asked, with
+/// a JSON header and trailer around them in JSON. It holds no event it has
+/// written, so its memory is bounded by `--last`'s window, not the trace.
+pub(crate) struct EventWriter<'a, W> {
+    out: &'a mut W,
+    format: OutputFormat,
+    filters: &'a EventFilters,
+    /// The `--last` window, when one was asked for.
+    ring: Option<(usize, VecDeque<FlatEvent>)>,
+    matched: u64,
+    emitted: u64,
+}
+
+impl<'a, W: std::io::Write> EventWriter<'a, W> {
+    /// Start writing a timeline of `total_events` events.
+    pub(crate) fn new(
+        out: &'a mut W,
+        format: OutputFormat,
+        path: &Path,
+        timeline: &str,
+        total_events: usize,
+        filters: &'a EventFilters,
+    ) -> Result<Self, CliError> {
+        let ring = match (filters.first, filters.last) {
+            (Some(_), Some(_)) => unreachable!("parser rejects --first with --last"),
+            (_, Some(limit)) => {
+                let cap = usize::try_from(limit).map_err(|_| {
+                    CliError::usage(format!(
+                        "--last value {limit} is too large for this platform"
+                    ))
+                })?;
+                // `--last 0` has always printed every match, as no window does.
+                (cap > 0).then(|| (cap, VecDeque::new()))
             }
+            (_, None) => None,
+        };
+        if format == OutputFormat::Json {
+            write_json_line(
+                out,
+                &serde_json::json!({
+                    "schema": EVENTS_SCHEMA,
+                    "path": path.to_string_lossy(),
+                    "timeline": timeline,
+                    "total_events": total_events,
+                    "filters": filters.to_json(),
+                }),
+            )?;
         }
-        (None, Some(limit)) => {
-            let mut ring: VecDeque<&FlatEvent> = VecDeque::new();
-            let cap = usize::try_from(limit).map_err(|_| {
-                CliError::usage(format!(
-                    "--last value {limit} is too large for this platform"
-                ))
-            })?;
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                if ring.len() == cap {
-                    ring.pop_front();
-                }
-                ring.push_back(event);
-            }
-            for event in ring {
-                write_human_event(out, event)?;
-                emitted += 1;
-            }
-        }
-        (None, None) => {
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                write_human_event(out, event)?;
-                emitted += 1;
-            }
-        }
-        (Some(_), Some(_)) => unreachable!("parser rejects --first with --last"),
+        Ok(Self {
+            out,
+            format,
+            filters,
+            ring,
+            matched: 0,
+            emitted: 0,
+        })
     }
-    let _ = (matched, emitted);
-    Ok(())
+
+    /// Take the timeline's next event.
+    pub(crate) fn push(&mut self, event: FlatEvent) -> Result<(), CliError> {
+        if !self.filters.matches(&event) {
+            return Ok(());
+        }
+        self.matched += 1;
+        if let Some((cap, ring)) = &mut self.ring {
+            if ring.len() == *cap {
+                ring.pop_front();
+            }
+            ring.push_back(event);
+            return Ok(());
+        }
+        if self.filters.first.is_none_or(|limit| self.emitted < limit) {
+            self.write(&event)?;
+        }
+        Ok(())
+    }
+
+    /// Write what `--last` kept and, in JSON, the trailer.
+    pub(crate) fn finish(mut self) -> Result<(), CliError> {
+        if let Some((_, ring)) = self.ring.take() {
+            for event in ring {
+                self.write(&event)?;
+            }
+        }
+        if self.format == OutputFormat::Json {
+            write_json_line(
+                self.out,
+                &serde_json::json!({
+                    "matched": self.matched,
+                    "emitted": self.emitted,
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, event: &FlatEvent) -> Result<(), CliError> {
+        self.emitted += 1;
+        match self.format {
+            OutputFormat::Human => write_human_event(self.out, event),
+            OutputFormat::Json => write_json_line(self.out, &event_value(event)),
+        }
+    }
 }
 
 fn write_human_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result<(), CliError> {
@@ -161,87 +207,6 @@ pub(super) fn human_event_line(event: &FlatEvent) -> String {
         vtime,
         notable
     )
-}
-
-pub(crate) fn write_events_jsonl<W: std::io::Write>(
-    out: &mut W,
-    path: &Path,
-    timeline: &str,
-    flat: &FlatTrace,
-    filters: &EventFilters,
-) -> Result<(), CliError> {
-    write_json_line(
-        out,
-        &serde_json::json!({
-            "schema": EVENTS_SCHEMA,
-            "path": path.to_string_lossy(),
-            "timeline": timeline,
-            "total_events": flat.events.len(),
-            "filters": filters.to_json(),
-        }),
-    )?;
-
-    let mut matched = 0u64;
-    let mut emitted = 0u64;
-    match (filters.first, filters.last) {
-        (Some(limit), None) => {
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                if emitted < limit {
-                    write_json_event(out, event)?;
-                    emitted += 1;
-                }
-            }
-        }
-        (None, Some(limit)) => {
-            let mut ring: VecDeque<&FlatEvent> = VecDeque::new();
-            let cap = usize::try_from(limit).map_err(|_| {
-                CliError::usage(format!(
-                    "--last value {limit} is too large for this platform"
-                ))
-            })?;
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                if ring.len() == cap {
-                    ring.pop_front();
-                }
-                ring.push_back(event);
-            }
-            for event in ring {
-                write_json_event(out, event)?;
-                emitted += 1;
-            }
-        }
-        (None, None) => {
-            for event in &flat.events {
-                if !filters.matches(event) {
-                    continue;
-                }
-                matched += 1;
-                write_json_event(out, event)?;
-                emitted += 1;
-            }
-        }
-        (Some(_), Some(_)) => unreachable!("parser rejects --first with --last"),
-    }
-
-    write_json_line(
-        out,
-        &serde_json::json!({
-            "matched": matched,
-            "emitted": emitted,
-        }),
-    )
-}
-
-fn write_json_event<W: std::io::Write>(out: &mut W, event: &FlatEvent) -> Result<(), CliError> {
-    write_json_line(out, &event_value(event))
 }
 
 pub(super) fn event_value(event: &FlatEvent) -> Value {

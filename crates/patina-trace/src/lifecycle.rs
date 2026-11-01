@@ -1,11 +1,12 @@
 //! Incarnation lifecycle markers, construction and validation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use patina_dst_abi::CrashKind;
 use serde::{Deserialize, Serialize};
 
-use crate::{Sha256Digest, Timeline, TraceError, TraceEvent};
+use crate::bundle::{Mark, TimelineShape};
+use crate::{Sha256Digest, TraceError, TraceEvent};
 
 /// One incarnation lifecycle marker in a timeline's global logical order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,11 +44,13 @@ pub enum LifecycleEventKind {
     },
 }
 
-pub(super) fn validate_timeline_lifecycle(timeline: &Timeline) -> Result<(), TraceError> {
+pub(super) fn validate_timeline_lifecycle<T: TimelineShape>(
+    timeline: &T,
+) -> Result<(), TraceError> {
     validate_lifecycle_events(
-        &format!("timeline {}", timeline.id),
-        &timeline.lifecycle,
-        &timeline.decisions,
+        &format!("timeline {}", timeline.id()),
+        timeline.lifecycle(),
+        timeline.marks(),
     )
 }
 
@@ -170,7 +173,7 @@ fn lifecycle_error(label: &str, violation: LifecycleViolation) -> TraceError {
 pub(super) fn validate_lifecycle_events(
     label: &str,
     lifecycle: &[LifecycleEvent],
-    decisions: &[TraceEvent],
+    decisions: impl IntoIterator<Item = Mark>,
 ) -> Result<(), TraceError> {
     if lifecycle.len() < 2 {
         return Err(lifecycle_error(label, LifecycleViolation::TooShort));
@@ -293,8 +296,12 @@ pub(super) fn validate_lifecycle_events(
         return Err(lifecycle_error(label, LifecycleViolation::NotEndedCleanly));
     }
 
+    // The decisions' orders, as runs: a recorded timeline's decisions take
+    // consecutive orders between lifecycle markers, so this stays as small as
+    // the lifecycle however many decisions there are.
+    let mut decision_orders = OrderRuns::default();
     for event in decisions {
-        if !global_orders.insert(event.order) {
+        if global_orders.contains(&event.order) || !decision_orders.insert(event.order) {
             return Err(lifecycle_error(
                 label,
                 LifecycleViolation::OperationReusesOrder {
@@ -325,6 +332,27 @@ pub(super) fn validate_lifecycle_events(
         }
     }
     Ok(())
+}
+
+/// A set of orders kept as inclusive runs of consecutive values.
+#[derive(Default)]
+struct OrderRuns(BTreeMap<u64, u64>);
+
+impl OrderRuns {
+    /// Add `order`, or return false when it is already present.
+    fn insert(&mut self, order: u64) -> bool {
+        if let Some((_, end)) = self.0.range_mut(..=order).next_back() {
+            if order <= *end {
+                return false;
+            }
+            if *end + 1 == order {
+                *end = order;
+                return true;
+            }
+        }
+        self.0.insert(order, order);
+        true
+    }
 }
 
 pub(super) fn active_incarnation_at_order(lifecycle: &[LifecycleEvent], order: u64) -> Option<u64> {

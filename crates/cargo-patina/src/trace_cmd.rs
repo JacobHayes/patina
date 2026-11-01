@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
-use patina_dst_trace::{TraceBundle, TraceError, TraceEvent};
+use patina_dst_trace::{TraceBundle, TraceError, TraceEvent, TraceStream};
 use serde_json::{Map, Value};
 
 use crate::CliError;
@@ -22,10 +22,9 @@ const MAIN_TIMELINE: &str = "main";
 use diff::diff_report;
 use diff::print_diff_human;
 pub(crate) use events::EventFilters;
+use events::EventWriter;
 use events::event_value;
 use events::human_event_line;
-pub(crate) use events::write_events_human;
-pub(crate) use events::write_events_jsonl;
 use info::compact_json_lossy;
 pub(crate) use info::info_value;
 use info::print_info_human;
@@ -140,35 +139,28 @@ fn execute_diff(diff: &TraceDiff) -> Result<i32, CliError> {
     Ok(exit_code)
 }
 
+/// Stream the main timeline's events: the trace is checked, then read one
+/// decision at a time, so memory does not grow with it.
 fn execute_events(events: &TraceEvents) -> Result<i32, CliError> {
-    let (bundle, raw) = load_trace(&events.path)?;
-    let flat = trace_view::flatten(&bundle, &raw, MAIN_TIMELINE)
-        .map_err(|error| trace_error(&events.path, error))?;
-    debug_assert_eq!(
-        flat.kind_counts
-            .values()
-            .map(|stat| stat.count)
-            .sum::<u64>(),
-        flat.events.len() as u64
-    );
+    let path = &events.path;
+    let mut stream = TraceStream::open(path).map_err(|error| trace_error(path, error))?;
+    let total = stream
+        .resolved_len(MAIN_TIMELINE)
+        .and_then(|len| Ok(len + stream.resolved_lifecycle(MAIN_TIMELINE)?.len()))
+        .map_err(|error| trace_error(path, error))?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    match output::options().format {
-        OutputFormat::Human => write_events_human(
-            &mut out,
-            &events.path,
-            MAIN_TIMELINE,
-            &flat,
-            &events.filters,
-        )?,
-        OutputFormat::Json => write_events_jsonl(
-            &mut out,
-            &events.path,
-            MAIN_TIMELINE,
-            &flat,
-            &events.filters,
-        )?,
-    }
+    let mut writer = EventWriter::new(
+        &mut out,
+        output::options().format,
+        path,
+        MAIN_TIMELINE,
+        total,
+        &events.filters,
+    )?;
+    trace_view::for_each_flat_event(&mut stream, MAIN_TIMELINE, |event| writer.push(event))
+        .map_err(|error| trace_error(path, error))??;
+    writer.finish()?;
     Ok(0)
 }
 

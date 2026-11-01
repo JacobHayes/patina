@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use patina_dst_abi::Operation;
 #[cfg(test)]
 use patina_dst_abi::Outcome;
-use patina_dst_trace::{LifecycleEvent, LifecycleEventKind, TraceBundle, TraceError};
+use patina_dst_trace::{
+    LifecycleEvent, LifecycleEventKind, TraceBundle, TraceError, TraceEvent, TraceStream,
+};
 use serde_json::Value;
 
 mod summary;
@@ -232,19 +234,13 @@ pub fn flatten(
 ) -> Result<FlatTrace, TraceError> {
     let resolved = bundle.resolved_timeline(timeline)?;
     let lifecycle = bundle.resolved_lifecycle(timeline)?;
-    let total = resolved.len() + lifecycle.len();
-    let mut current = LaneKey::Main;
-    let mut vtime: Option<u64> = None;
-    let mut vt_min: Option<u64> = None;
-    let mut vt_max: Option<u64> = None;
-    let mut events = Vec::with_capacity(total);
-    let mut lanes: BTreeMap<LaneKey, TaskStat> = BTreeMap::new();
-    let mut kind_counts: BTreeMap<String, KindStat> = BTreeMap::new();
-    let mut category_counts: BTreeMap<Category, u64> = BTreeMap::new();
-    let mut notable = Vec::new();
+    let mut flat = FlatTrace {
+        events: Vec::with_capacity(resolved.len() + lifecycle.len()),
+        ..FlatTrace::default()
+    };
 
     enum Row<'a> {
-        Operation(&'a patina_dst_trace::TraceEvent),
+        Operation(&'a TraceEvent),
         Lifecycle(&'a LifecycleEvent),
     }
 
@@ -255,130 +251,172 @@ pub fn flatten(
         Row::Lifecycle(event) => (event.order, 1u8),
     });
 
+    let mut walk = Walk::default();
     for row in rows {
-        let flat = match row {
-            Row::Operation(event) => {
-                let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
-                let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
-                let kind = op
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                debug_assert_eq!(operation_kind(&event.operation), kind.as_str());
-                let category = Category::of_kind(&kind);
+        let event = match row {
+            Row::Operation(event) => walk.operation(event),
+            Row::Lifecycle(marker) => walk.lifecycle(marker),
+        };
+        flat.tally(&event);
+        if event.notable.is_some() {
+            flat.notable.push(event.clone());
+        }
+        flat.events.push(event);
+    }
+    Ok(flat)
+}
 
-                if let Some(n) = virtual_time_reading(&op, &out) {
-                    vtime = Some(n);
-                }
-                if let Some(n) = vtime {
-                    vt_min = Some(vt_min.map_or(n, |m| m.min(n)));
-                    vt_max = Some(vt_max.map_or(n, |m| m.max(n)));
-                }
+/// Stream one resolved timeline's flattened events to `each`, in the order
+/// [`flatten`] lists them, without holding the timeline: the trace is read one
+/// decision at a time.
+pub fn for_each_flat_event<E>(
+    stream: &mut TraceStream,
+    timeline: &str,
+    mut each: impl FnMut(FlatEvent) -> Result<(), E>,
+) -> Result<Result<(), E>, TraceError> {
+    // Lifecycle markers and decisions each come in increasing order, and a
+    // valid trace never gives two of them the same order, so merging the two
+    // runs is the sort `flatten` does.
+    let lifecycle = stream.resolved_lifecycle(timeline)?;
+    let mut markers = lifecycle.iter().peekable();
+    let mut walk = Walk::default();
+    let streamed = stream.for_each_resolved(timeline, |event| {
+        while let Some(marker) = markers.next_if(|marker| marker.order < event.order) {
+            each(walk.lifecycle(marker))?;
+        }
+        each(walk.operation(&event))
+    })?;
+    if let Err(error) = streamed {
+        return Ok(Err(error));
+    }
+    Ok(markers.try_for_each(|marker| each(walk.lifecycle(marker))))
+}
 
-                // SchedulerNext re-points the current lane; ops before the first decision
-                // (or in a single-threaded run) stay on `main`.
-                if kind == "scheduler_next"
-                    && let Some(id) = out.get("value").and_then(Value::as_u64)
-                {
-                    current = LaneKey::Task(id);
-                }
+/// The state the semantic walk carries from row to row: the lane the scheduler
+/// cursor points at and the last virtual-time reading.
+#[derive(Default)]
+struct Walk {
+    current: Option<u64>,
+    vtime: Option<u64>,
+}
 
-                let lane = match &kind[..] {
-                    // Spawn is issued by the current task; keep the row on the spawner.
-                    "task_spawn" => current,
-                    k if k.starts_with("task_") => op
-                        .get("task")
-                        .and_then(Value::as_u64)
-                        .map(LaneKey::Task)
-                        .unwrap_or(current),
-                    _ => current,
-                };
+impl Walk {
+    fn operation(&mut self, event: &TraceEvent) -> FlatEvent {
+        let op = serde_json::to_value(&event.operation).unwrap_or(Value::Null);
+        let out = serde_json::to_value(&event.outcome).unwrap_or(Value::Null);
+        let kind = op
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        debug_assert_eq!(operation_kind(&event.operation), kind.as_str());
+        let category = Category::of_kind(&kind);
 
-                let stat = lanes.entry(lane).or_default();
-                stat.ops += 1;
-                stat.first_seq.get_or_insert(event.sequence);
-                stat.last_seq = event.sequence;
-                if kind == "task_yield" {
-                    stat.yields += 1;
-                }
-                if kind == "task_park" || kind == "task_park_timed" {
-                    stat.parks += 1;
-                }
-                if kind == "task_spawn"
-                    && let Some(id) = outcome_task(&out)
-                {
-                    let child = lanes.entry(LaneKey::Task(id)).or_default();
-                    if child.label.is_none() {
-                        child.label = op.get("label").and_then(Value::as_str).map(str::to_string);
-                    }
-                }
-                if kind == "task_complete"
-                    && let Some(id) = op.get("task").and_then(Value::as_u64)
-                {
-                    lanes.entry(LaneKey::Task(id)).or_default().completed = true;
-                }
+        if let Some(n) = virtual_time_reading(&op, &out) {
+            self.vtime = Some(n);
+        }
 
-                let detail = summarize(&kind, &op, &out);
-                let note = detect_notable(&kind, &op, &out);
-                FlatEvent {
-                    seq: event.sequence,
-                    order: event.order,
-                    incarnation: Some(event.incarnation),
-                    source: FlatEventSource::Operation,
-                    lane,
-                    category,
-                    kind,
-                    detail,
-                    vtime,
-                    notable: note,
-                    operation: op,
-                    outcome: out,
-                }
-            }
-            Row::Lifecycle(marker) => {
-                let (kind, incarnation, detail, note) = lifecycle_summary(marker);
-                let category = Category::of_kind(&kind);
-                FlatEvent {
-                    seq: marker.order,
-                    order: marker.order,
-                    incarnation,
-                    source: FlatEventSource::Lifecycle,
-                    lane: LaneKey::Main,
-                    category,
-                    kind,
-                    detail,
-                    vtime,
-                    notable: note,
-                    operation: Value::Null,
-                    outcome: Value::Null,
-                }
-            }
+        // SchedulerNext re-points the current lane; ops before the first decision
+        // (or in a single-threaded run) stay on `main`.
+        if kind == "scheduler_next"
+            && let Some(id) = out.get("value").and_then(Value::as_u64)
+        {
+            self.current = Some(id);
+        }
+        let current = self.current.map_or(LaneKey::Main, LaneKey::Task);
+
+        let lane = match &kind[..] {
+            // Spawn is issued by the current task; keep the row on the spawner.
+            "task_spawn" => current,
+            k if k.starts_with("task_") => op
+                .get("task")
+                .and_then(Value::as_u64)
+                .map(LaneKey::Task)
+                .unwrap_or(current),
+            _ => current,
         };
 
-        *category_counts.entry(flat.category).or_insert(0) += 1;
-        let stat = kind_counts.entry(flat.kind.clone()).or_default();
+        let detail = summarize(&kind, &op, &out);
+        let note = detect_notable(&kind, &op, &out);
+        FlatEvent {
+            seq: event.sequence,
+            order: event.order,
+            incarnation: Some(event.incarnation),
+            source: FlatEventSource::Operation,
+            lane,
+            category,
+            kind,
+            detail,
+            vtime: self.vtime,
+            notable: note,
+            operation: op,
+            outcome: out,
+        }
+    }
+
+    fn lifecycle(&self, marker: &LifecycleEvent) -> FlatEvent {
+        let (kind, incarnation, detail, note) = lifecycle_summary(marker);
+        let category = Category::of_kind(&kind);
+        FlatEvent {
+            seq: marker.order,
+            order: marker.order,
+            incarnation,
+            source: FlatEventSource::Lifecycle,
+            lane: LaneKey::Main,
+            category,
+            kind,
+            detail,
+            vtime: self.vtime,
+            notable: note,
+            operation: Value::Null,
+            outcome: Value::Null,
+        }
+    }
+}
+
+impl FlatTrace {
+    /// Fold one flattened event into the rollups.
+    fn tally(&mut self, flat: &FlatEvent) {
+        if flat.source == FlatEventSource::Operation {
+            if let Some(n) = flat.vtime {
+                self.vt_min = Some(self.vt_min.map_or(n, |m| m.min(n)));
+                self.vt_max = Some(self.vt_max.map_or(n, |m| m.max(n)));
+            }
+            let (kind, op, out) = (flat.kind.as_str(), &flat.operation, &flat.outcome);
+            let stat = self.lanes.entry(flat.lane).or_default();
+            stat.ops += 1;
+            stat.first_seq.get_or_insert(flat.seq);
+            stat.last_seq = flat.seq;
+            if kind == "task_yield" {
+                stat.yields += 1;
+            }
+            if kind == "task_park" || kind == "task_park_timed" {
+                stat.parks += 1;
+            }
+            if kind == "task_spawn"
+                && let Some(id) = outcome_task(out)
+            {
+                let child = self.lanes.entry(LaneKey::Task(id)).or_default();
+                if child.label.is_none() {
+                    child.label = op.get("label").and_then(Value::as_str).map(str::to_string);
+                }
+            }
+            if kind == "task_complete"
+                && let Some(id) = op.get("task").and_then(Value::as_u64)
+            {
+                self.lanes.entry(LaneKey::Task(id)).or_default().completed = true;
+            }
+        }
+
+        *self.category_counts.entry(flat.category).or_insert(0) += 1;
+        let stat = self.kind_counts.entry(flat.kind.clone()).or_default();
         stat.count += 1;
         if flat.outcome.get("kind").and_then(Value::as_str) == Some("error") {
             stat.errors += 1;
         }
         stat.bytes_in += bytes_in(&flat.operation) as u64;
         stat.bytes_out += bytes_out(&flat.outcome) as u64;
-        if flat.notable.is_some() {
-            notable.push(flat.clone());
-        }
-        events.push(flat);
     }
-
-    Ok(FlatTrace {
-        events,
-        lanes,
-        kind_counts,
-        category_counts,
-        vt_min,
-        vt_max,
-        notable,
-    })
 }
 
 fn lifecycle_summary(marker: &LifecycleEvent) -> (String, Option<u64>, String, Option<Notable>) {

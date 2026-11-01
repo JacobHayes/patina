@@ -136,10 +136,10 @@ impl Serialize for Decision<'_> {
 }
 
 /// A [`Decision`] as read back, before its derived fields are filled in.
-struct DecisionRecord {
-    operation: Operation,
-    outcome: Outcome,
-    order: Option<u64>,
+pub(crate) struct DecisionRecord {
+    pub(crate) operation: Operation,
+    pub(crate) outcome: Outcome,
+    pub(crate) order: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for DecisionRecord {
@@ -460,230 +460,334 @@ impl TraceBundle {
     }
 
     pub fn validate(&self) -> Result<(), TraceError> {
-        if self.format_version != TRACE_FORMAT_VERSION {
-            return Err(TraceError::UnsupportedVersion {
-                found: self.format_version,
-            });
-        }
-        if self.metadata.time_model != patina_dst_abi::TIME_MODEL {
-            return Err(TraceError::UnsupportedTimeModel {
-                found: self.metadata.time_model,
-            });
-        }
-        if !(1..=patina_dst_abi::MAX_CPUS).contains(&self.metadata.cpus) {
-            return Err(TraceError::Invalid(format!(
-                "trace records {} virtual CPUs; a run has 1 to {}",
-                self.metadata.cpus,
-                patina_dst_abi::MAX_CPUS
-            )));
-        }
-        if self.metadata.fingerprint.is_empty() {
-            return Err(TraceError::Invalid(
-                "trace compatibility fingerprint is empty".into(),
-            ));
-        }
-        // The swarm record must partition cleanly: every selected class was a
-        // candidate, and no class is listed twice. Consumers derive "swarm
-        // dropped this class" as the complement of the two lists, so a record
-        // that is not a clean partition would make that derivation lie.
-        if let Some(swarm) = &self.metadata.swarm {
-            let mut candidates = BTreeSet::new();
-            for class in &swarm.candidate_classes {
-                if !candidates.insert(class.as_str()) {
-                    return Err(TraceError::Invalid(format!(
-                        "swarm candidate class {class:?} is listed more than once"
-                    )));
-                }
-            }
-            let mut selected = BTreeSet::new();
-            for class in &swarm.selected_classes {
-                if !selected.insert(class.as_str()) {
-                    return Err(TraceError::Invalid(format!(
-                        "swarm selected class {class:?} is listed more than once"
-                    )));
-                }
-                if !candidates.contains(class.as_str()) {
-                    return Err(TraceError::Invalid(format!(
-                        "swarm selected class {class:?} was not a candidate; \
-                         the selection must be a subset of the candidates"
-                    )));
-                }
-            }
-        }
-        let Some(main) = self.timelines.first() else {
-            return Err(TraceError::Invalid("trace has no main timeline".into()));
-        };
-        if main.id != MAIN_TIMELINE
-            || main.parent.is_some()
-            || main.from_sequence.is_some()
-            || main.branch_seed.is_some()
-        {
-            return Err(TraceError::Invalid(
-                "the first timeline must be an unbranched main timeline".into(),
-            ));
-        }
-
-        let mut ids = BTreeSet::new();
-        for (timeline_index, timeline) in self.timelines.iter().enumerate() {
-            if timeline.decisions.len() > MAX_TIMELINE_EVENTS {
-                return Err(TraceError::ResourceLimit {
-                    message: format!(
-                        "timeline {} has {} events; limit is {MAX_TIMELINE_EVENTS}",
-                        timeline.id,
-                        timeline.decisions.len()
-                    ),
-                    bytes: None,
-                });
-            }
-            if timeline.id.is_empty() || !ids.insert(timeline.id.clone()) {
-                return Err(TraceError::Invalid(format!(
-                    "timeline id is empty or duplicated: {:?}",
-                    timeline.id
-                )));
-            }
-            let start = if timeline_index == 0 {
-                0
-            } else {
-                let parent = timeline.parent.as_ref().ok_or_else(|| {
-                    TraceError::Invalid(format!("timeline {} has no parent", timeline.id))
-                })?;
-                let parent_index = self.timelines[..timeline_index]
-                    .iter()
-                    .position(|candidate| &candidate.id == parent)
-                    .ok_or_else(|| {
-                        TraceError::Invalid(format!(
-                            "timeline {} refers to missing or later parent {parent}",
-                            timeline.id
-                        ))
-                    })?;
-                let from = timeline.from_sequence.ok_or_else(|| {
-                    TraceError::Invalid(format!("timeline {} has no branch sequence", timeline.id))
-                })?;
-                if timeline.branch_seed.is_none() {
-                    return Err(TraceError::Invalid(format!(
-                        "timeline {} has no branch seed",
-                        timeline.id
-                    )));
-                }
-                let parent_len = self.resolve_by_index(parent_index)?.len() as u64;
-                if from > parent_len {
-                    return Err(TraceError::Invalid(format!(
-                        "timeline {} branches at {from}, beyond parent length {parent_len}",
-                        timeline.id
-                    )));
-                }
-                from
-            };
-            validate_timeline_lifecycle(timeline)?;
-            for (index, event) in timeline.decisions.iter().enumerate() {
-                let expected = start + index as u64;
-                if event.sequence != expected {
-                    return Err(TraceError::Invalid(format!(
-                        "event {index} in timeline {} has sequence {}, expected {expected}",
-                        timeline.id, event.sequence
-                    )));
-                }
-                if index > 0 && event.order <= timeline.decisions[index - 1].order {
-                    return Err(TraceError::Invalid(format!(
-                        "event {index} in timeline {} has non-increasing global order {}",
-                        timeline.id, event.order
-                    )));
-                }
-            }
-        }
-        for index in 0..self.timelines.len() {
-            self.validate_resolved_orders_by_index(index)?;
-        }
-        Ok(())
-    }
-
-    fn validate_resolved_orders_by_index(&self, index: usize) -> Result<(), TraceError> {
-        let timeline = &self.timelines[index];
-        let decisions = self.resolve_by_index(index)?;
-        let lifecycle = self.resolve_lifecycle_by_index(index)?;
-        validate_lifecycle_events(
-            &format!("resolved timeline {}", timeline.id),
-            &lifecycle,
-            &decisions,
-        )?;
-        let mut previous_order = None;
-        for event in &decisions {
-            if previous_order.is_some_and(|previous| event.order <= previous) {
-                return Err(TraceError::Invalid(format!(
-                    "resolved timeline {} operation sequence {} has non-increasing global order {}",
-                    timeline.id, event.sequence, event.order
-                )));
-            }
-            previous_order = Some(event.order);
-        }
-        Ok(())
+        validate_shape(self.format_version, &self.metadata, &self.timelines)
     }
 
     pub fn resolved_timeline(&self, id: &str) -> Result<Vec<TraceEvent>, TraceError> {
         self.validate()?;
-        let index = self
-            .timelines
-            .iter()
-            .position(|timeline| timeline.id == id)
-            .ok_or_else(|| TraceError::UnknownTimeline(id.into()))?;
-        self.resolve_by_index(index)
-    }
-
-    fn resolve_by_index(&self, index: usize) -> Result<Vec<TraceEvent>, TraceError> {
-        let timeline = &self.timelines[index];
-        let Some(parent) = &timeline.parent else {
-            return Ok(timeline.decisions.clone());
-        };
-        let parent_index = self.timelines[..index]
-            .iter()
-            .position(|candidate| &candidate.id == parent)
-            .ok_or_else(|| TraceError::UnknownTimeline(parent.clone()))?;
-        let mut decisions = self.resolve_by_index(parent_index)?;
-        decisions.truncate(timeline.from_sequence.unwrap_or(0) as usize);
-        decisions.extend(timeline.decisions.clone());
-        Ok(decisions)
+        let index = timeline_index(&self.timelines, id)?;
+        Ok(resolve_segments(&self.timelines, index)?
+            .into_iter()
+            .flat_map(|(timeline, count)| self.timelines[timeline].decisions[..count].iter())
+            .cloned()
+            .collect())
     }
 
     pub fn resolved_lifecycle(&self, id: &str) -> Result<Vec<LifecycleEvent>, TraceError> {
         self.validate()?;
-        let index = self
-            .timelines
-            .iter()
-            .position(|timeline| timeline.id == id)
-            .ok_or_else(|| TraceError::UnknownTimeline(id.into()))?;
-        self.resolve_lifecycle_by_index(index)
+        resolve_lifecycle(&self.timelines, timeline_index(&self.timelines, id)?)
+    }
+}
+
+/// What validation reads of one decision: the fields a bundle derives on load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mark {
+    pub(crate) sequence: u64,
+    pub(crate) order: u64,
+    pub(crate) incarnation: u64,
+}
+
+/// What validation reads of one timeline. A loaded [`Timeline`] is one; so is
+/// the structure a streaming read keeps in place of its decisions
+/// ([`crate::TraceStream`]), which is how both are held to the same checks.
+pub(crate) trait TimelineShape {
+    fn id(&self) -> &str;
+    fn parent(&self) -> Option<&str>;
+    fn branch_sequence(&self) -> Option<u64>;
+    fn branch_seed(&self) -> Option<u64>;
+    fn lifecycle(&self) -> &[LifecycleEvent];
+    fn decision_count(&self) -> usize;
+    fn marks(&self) -> impl Iterator<Item = Mark> + '_;
+}
+
+impl TimelineShape for Timeline {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn parent(&self) -> Option<&str> {
+        self.parent.as_deref()
+    }
+    fn branch_sequence(&self) -> Option<u64> {
+        self.from_sequence
+    }
+    fn branch_seed(&self) -> Option<u64> {
+        self.branch_seed
+    }
+    fn lifecycle(&self) -> &[LifecycleEvent] {
+        &self.lifecycle
+    }
+    fn decision_count(&self) -> usize {
+        self.decisions.len()
+    }
+    fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+        self.decisions.iter().map(|event| Mark {
+            sequence: event.sequence,
+            order: event.order,
+            incarnation: event.incarnation,
+        })
+    }
+}
+
+pub(crate) fn timeline_index<T: TimelineShape>(
+    timelines: &[T],
+    id: &str,
+) -> Result<usize, TraceError> {
+    timelines
+        .iter()
+        .position(|timeline| timeline.id() == id)
+        .ok_or_else(|| TraceError::UnknownTimeline(id.into()))
+}
+
+/// Check a bundle's version, metadata and timelines: [`TraceBundle::validate`]
+/// over any [`TimelineShape`].
+pub(crate) fn validate_shape<T: TimelineShape>(
+    format_version: u32,
+    metadata: &RunMetadata,
+    timelines: &[T],
+) -> Result<(), TraceError> {
+    if format_version != TRACE_FORMAT_VERSION {
+        return Err(TraceError::UnsupportedVersion {
+            found: format_version,
+        });
+    }
+    if metadata.time_model != patina_dst_abi::TIME_MODEL {
+        return Err(TraceError::UnsupportedTimeModel {
+            found: metadata.time_model,
+        });
+    }
+    if !(1..=patina_dst_abi::MAX_CPUS).contains(&metadata.cpus) {
+        return Err(TraceError::Invalid(format!(
+            "trace records {} virtual CPUs; a run has 1 to {}",
+            metadata.cpus,
+            patina_dst_abi::MAX_CPUS
+        )));
+    }
+    if metadata.fingerprint.is_empty() {
+        return Err(TraceError::Invalid(
+            "trace compatibility fingerprint is empty".into(),
+        ));
+    }
+    // The swarm record must partition cleanly: every selected class was a
+    // candidate, and no class is listed twice. Consumers derive "swarm
+    // dropped this class" as the complement of the two lists, so a record
+    // that is not a clean partition would make that derivation lie.
+    if let Some(swarm) = &metadata.swarm {
+        let mut candidates = BTreeSet::new();
+        for class in &swarm.candidate_classes {
+            if !candidates.insert(class.as_str()) {
+                return Err(TraceError::Invalid(format!(
+                    "swarm candidate class {class:?} is listed more than once"
+                )));
+            }
+        }
+        let mut selected = BTreeSet::new();
+        for class in &swarm.selected_classes {
+            if !selected.insert(class.as_str()) {
+                return Err(TraceError::Invalid(format!(
+                    "swarm selected class {class:?} is listed more than once"
+                )));
+            }
+            if !candidates.contains(class.as_str()) {
+                return Err(TraceError::Invalid(format!(
+                    "swarm selected class {class:?} was not a candidate; \
+                     the selection must be a subset of the candidates"
+                )));
+            }
+        }
+    }
+    let Some(main) = timelines.first() else {
+        return Err(TraceError::Invalid("trace has no main timeline".into()));
+    };
+    if main.id() != MAIN_TIMELINE
+        || main.parent().is_some()
+        || main.branch_sequence().is_some()
+        || main.branch_seed().is_some()
+    {
+        return Err(TraceError::Invalid(
+            "the first timeline must be an unbranched main timeline".into(),
+        ));
     }
 
-    fn resolve_lifecycle_by_index(&self, index: usize) -> Result<Vec<LifecycleEvent>, TraceError> {
-        let timeline = &self.timelines[index];
-        let Some(parent) = &timeline.parent else {
-            return Ok(timeline.lifecycle.clone());
-        };
-        let parent_index = self.timelines[..index]
-            .iter()
-            .position(|candidate| &candidate.id == parent)
-            .ok_or_else(|| TraceError::UnknownTimeline(parent.clone()))?;
-        let parent_lifecycle = self.resolve_lifecycle_by_index(parent_index)?;
-        let parent_prefix = self.resolve_by_index(parent_index)?;
-        let from = timeline.from_sequence.unwrap_or(0) as usize;
-        let prefix_last = parent_prefix.get(from.saturating_sub(1));
-        let prefix_end_order = prefix_last
-            .map(|event| event.order.saturating_add(1))
-            .unwrap_or(0);
-        let parent_active = prefix_last.map(|event| event.incarnation);
-        let mut lifecycle: Vec<_> = parent_lifecycle
-            .into_iter()
-            .filter(|marker| marker.order < prefix_end_order)
-            .collect();
-        let mut suffix_lifecycle = timeline.lifecycle.clone();
-        if let (Some(active), Some(first)) = (parent_active, suffix_lifecycle.first())
-            && matches!(first.kind, LifecycleEventKind::Start { incarnation } if incarnation == active)
-        {
-            suffix_lifecycle.remove(0);
+    let mut ids = BTreeSet::new();
+    for (timeline_index, timeline) in timelines.iter().enumerate() {
+        if timeline.decision_count() > MAX_TIMELINE_EVENTS {
+            return Err(TraceError::ResourceLimit {
+                message: format!(
+                    "timeline {} has {} events; limit is {MAX_TIMELINE_EVENTS}",
+                    timeline.id(),
+                    timeline.decision_count()
+                ),
+                bytes: None,
+            });
         }
-        lifecycle.extend(suffix_lifecycle);
-        Ok(lifecycle)
+        if timeline.id().is_empty() || !ids.insert(timeline.id()) {
+            return Err(TraceError::Invalid(format!(
+                "timeline id is empty or duplicated: {:?}",
+                timeline.id()
+            )));
+        }
+        let start = if timeline_index == 0 {
+            0
+        } else {
+            let parent = timeline.parent().ok_or_else(|| {
+                TraceError::Invalid(format!("timeline {} has no parent", timeline.id()))
+            })?;
+            let parent_index = timelines[..timeline_index]
+                .iter()
+                .position(|candidate| candidate.id() == parent)
+                .ok_or_else(|| {
+                    TraceError::Invalid(format!(
+                        "timeline {} refers to missing or later parent {parent}",
+                        timeline.id()
+                    ))
+                })?;
+            let from = timeline.branch_sequence().ok_or_else(|| {
+                TraceError::Invalid(format!("timeline {} has no branch sequence", timeline.id()))
+            })?;
+            if timeline.branch_seed().is_none() {
+                return Err(TraceError::Invalid(format!(
+                    "timeline {} has no branch seed",
+                    timeline.id()
+                )));
+            }
+            let parent_len: usize = resolve_segments(timelines, parent_index)?
+                .iter()
+                .map(|(_, count)| count)
+                .sum();
+            let parent_len = parent_len as u64;
+            if from > parent_len {
+                return Err(TraceError::Invalid(format!(
+                    "timeline {} branches at {from}, beyond parent length {parent_len}",
+                    timeline.id()
+                )));
+            }
+            from
+        };
+        validate_timeline_lifecycle(timeline)?;
+        let mut previous_order = None;
+        for (index, event) in timeline.marks().enumerate() {
+            let expected = start + index as u64;
+            if event.sequence != expected {
+                return Err(TraceError::Invalid(format!(
+                    "event {index} in timeline {} has sequence {}, expected {expected}",
+                    timeline.id(),
+                    event.sequence
+                )));
+            }
+            if previous_order.is_some_and(|previous| event.order <= previous) {
+                return Err(TraceError::Invalid(format!(
+                    "event {index} in timeline {} has non-increasing global order {}",
+                    timeline.id(),
+                    event.order
+                )));
+            }
+            previous_order = Some(event.order);
+        }
     }
+    for index in 0..timelines.len() {
+        validate_resolved_orders(timelines, index)?;
+    }
+    Ok(())
+}
+
+fn validate_resolved_orders<T: TimelineShape>(
+    timelines: &[T],
+    index: usize,
+) -> Result<(), TraceError> {
+    let timeline = &timelines[index];
+    let segments = resolve_segments(timelines, index)?;
+    let lifecycle = resolve_lifecycle(timelines, index)?;
+    validate_lifecycle_events(
+        &format!("resolved timeline {}", timeline.id()),
+        &lifecycle,
+        resolved_marks(timelines, &segments),
+    )?;
+    let mut previous_order = None;
+    for event in resolved_marks(timelines, &segments) {
+        if previous_order.is_some_and(|previous| event.order <= previous) {
+            return Err(TraceError::Invalid(format!(
+                "resolved timeline {} operation sequence {} has non-increasing global order {}",
+                timeline.id(),
+                event.sequence,
+                event.order
+            )));
+        }
+        previous_order = Some(event.order);
+    }
+    Ok(())
+}
+
+/// A resolved timeline as the runs of decisions it is made of, in order: each
+/// `(timeline index, count)` is that timeline's first `count` decisions. A
+/// branch is its parent's resolved decisions up to its branch point, then its
+/// own; parents come before their branches, so the runs are in bundle order.
+pub(crate) fn resolve_segments<T: TimelineShape>(
+    timelines: &[T],
+    index: usize,
+) -> Result<Vec<(usize, usize)>, TraceError> {
+    let timeline = &timelines[index];
+    let Some(parent) = timeline.parent() else {
+        return Ok(vec![(index, timeline.decision_count())]);
+    };
+    let parent_index = timelines[..index]
+        .iter()
+        .position(|candidate| candidate.id() == parent)
+        .ok_or_else(|| TraceError::UnknownTimeline(parent.to_owned()))?;
+    let mut segments = resolve_segments(timelines, parent_index)?;
+    let mut keep = timeline.branch_sequence().unwrap_or(0) as usize;
+    segments.retain_mut(|(_, count)| {
+        if keep == 0 {
+            return false;
+        }
+        *count = (*count).min(keep);
+        keep -= *count;
+        true
+    });
+    segments.push((index, timeline.decision_count()));
+    Ok(segments)
+}
+
+fn resolved_marks<'a, T: TimelineShape>(
+    timelines: &'a [T],
+    segments: &'a [(usize, usize)],
+) -> impl Iterator<Item = Mark> + 'a {
+    segments
+        .iter()
+        .flat_map(move |&(timeline, count)| timelines[timeline].marks().take(count))
+}
+
+pub(crate) fn resolve_lifecycle<T: TimelineShape>(
+    timelines: &[T],
+    index: usize,
+) -> Result<Vec<LifecycleEvent>, TraceError> {
+    let timeline = &timelines[index];
+    let Some(parent) = timeline.parent() else {
+        return Ok(timeline.lifecycle().to_vec());
+    };
+    let parent_index = timelines[..index]
+        .iter()
+        .position(|candidate| candidate.id() == parent)
+        .ok_or_else(|| TraceError::UnknownTimeline(parent.to_owned()))?;
+    let parent_lifecycle = resolve_lifecycle(timelines, parent_index)?;
+    let parent_prefix = resolve_segments(timelines, parent_index)?;
+    let from = timeline.branch_sequence().unwrap_or(0) as usize;
+    let prefix_last = resolved_marks(timelines, &parent_prefix).nth(from.saturating_sub(1));
+    let prefix_end_order = prefix_last
+        .map(|event| event.order.saturating_add(1))
+        .unwrap_or(0);
+    let parent_active = prefix_last.map(|event| event.incarnation);
+    let mut lifecycle: Vec<_> = parent_lifecycle
+        .into_iter()
+        .filter(|marker| marker.order < prefix_end_order)
+        .collect();
+    let mut suffix_lifecycle = timeline.lifecycle().to_vec();
+    if let (Some(active), Some(first)) = (parent_active, suffix_lifecycle.first())
+        && matches!(first.kind, LifecycleEventKind::Start { incarnation } if incarnation == active)
+    {
+        suffix_lifecycle.remove(0);
+    }
+    lifecycle.extend(suffix_lifecycle);
+    Ok(lifecycle)
 }
 
 /// Read the declared format version from a decoded bundle when it is present as
@@ -726,7 +830,7 @@ fn require_complete_current_bundle(
     Ok(())
 }
 
-fn enforce_trace_byte_limit(
+pub(crate) fn enforce_trace_byte_limit(
     size: u64,
     max_bytes: u64,
     description: &'static str,
