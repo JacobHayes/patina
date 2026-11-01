@@ -9,15 +9,30 @@ use patina_dst_abi::ErrorCode;
 /// as its ORDINARY sampling outcome, not as the silent-inertness signature the
 /// diagnostic exists to catch. Diagnosing those runs turns the warning — and the
 /// campaign class built on it — into noise that fires on healthy runs. Because
-/// `P(zero fires) <= e^-expected` for any per-op rate, requiring five expected
-/// firings keeps a spurious vacuity verdict under 1%.
-pub const VACUITY_MIN_EXPECTED_FIRES: u64 = 5;
+/// `P(zero fires) <= e^-expected` for any per-op rate, requiring fourteen
+/// expected firings keeps a spurious vacuity verdict under one in a million
+/// runs. A campaign judges every generation, so a looser bound (five expected
+/// firings is under 1% per run) still files healthy knobs as VACUOUS a few
+/// times in every few thousand generations. The bound is on zero DRAWN fires
+/// over independent draws: a class whose drawn fires another class can
+/// pre-empt (a dropped datagram skips its jitter) is outside it.
+pub const VACUITY_MIN_EXPECTED_FIRES: u64 = 14;
+
+/// Opportunities a certain knob (rate 1000 per mille, which fires on every
+/// opportunity it sees) must have had before zero applications are diagnosed.
+/// Zero fires is impossible for a live certain knob, so there is no sampling
+/// noise to outweigh: the floor only keeps a run that barely touched the
+/// knob's path from being judged on it.
+pub const CERTAIN_VACUITY_MIN_OPPORTUNITIES: u64 = 5;
 
 /// Whether a zero-fire outcome is anomalous enough to diagnose as vacuous, given
 /// how many firing opportunities a rate knob actually saw at what rate. This is
 /// the precondition behind every `*_vacuity_diagnosable` flag in
 /// [`FsFaultReport`].
 pub fn vacuity_is_diagnosable(opportunities: u64, permille: u16) -> bool {
+    if permille >= 1000 {
+        return opportunities >= CERTAIN_VACUITY_MIN_OPPORTUNITIES;
+    }
     opportunities.saturating_mul(u64::from(permille)) >= VACUITY_MIN_EXPECTED_FIRES * 1000
 }
 
@@ -28,7 +43,8 @@ pub fn vacuity_is_diagnosable(opportunities: u64, permille: u16) -> bool {
 /// have expected at least [`VACUITY_MIN_EXPECTED_FIRES`] delays. A `0..0` range
 /// (and any range whose draws are all zero) is inert by construction, not
 /// vacuous, so it never diagnoses; a range with `MIN >= 1` delays every eligible
-/// operation and reaches the threshold as soon as there are five of them.
+/// operation and reaches the threshold as soon as there are
+/// [`CERTAIN_VACUITY_MIN_OPPORTUNITIES`] of them.
 ///
 /// Domain-neutral on purpose: every range knob shares this rule — filesystem
 /// latency, DNS latency and network delivery jitter are judged here rather than
@@ -662,5 +678,54 @@ impl NetFaultReport {
     /// is not the same as a knob being inert, so the diagnostic stays silent.
     pub fn had_opportunities(&self) -> bool {
         self.send_ops > 0 || self.connect_ops > 0 || self.stream_ops > 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chance that a live knob, at `permille` over `opportunities`
+    /// independent draws, fires zero times anyway.
+    fn chance_of_zero_fires(opportunities: u64, permille: u16) -> f64 {
+        (1.0 - f64::from(permille) / 1000.0).powf(opportunities as f64)
+    }
+
+    /// A campaign judges every generation, so a zero-fire verdict that healthy
+    /// sampling produces with any real chance turns into VACUOUS signatures on
+    /// healthy knobs over a long run. Whatever the threshold is, a run it
+    /// diagnoses must be one a live knob produces less than once in a million.
+    #[test]
+    fn a_diagnosed_zero_fire_run_is_one_a_live_knob_almost_never_produces() {
+        for permille in 1..=1000u16 {
+            for opportunities in 1..=20_000u64 {
+                if vacuity_is_diagnosable(opportunities, permille) {
+                    let chance = chance_of_zero_fires(opportunities, permille);
+                    assert!(
+                        chance < 1e-6,
+                        "{opportunities} draws at {permille}\u{2030} are diagnosable, \
+                         yet a live knob fires zero times with chance {chance:e}"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A knob that fires on every opportunity cannot fire zero times while
+    /// live, so it is diagnosed within a short run, long before a sampled
+    /// knob is; the stochastic floor must not hold certain knobs back.
+    #[test]
+    fn a_certain_knob_is_diagnosed_within_a_short_run() {
+        let certain = (1..)
+            .find(|&ops| vacuity_is_diagnosable(ops, 1000))
+            .unwrap();
+        let sampled = (1..).find(|&ops| vacuity_is_diagnosable(ops, 999)).unwrap();
+        assert!(
+            certain <= 10,
+            "a certain knob needs {certain} opportunities"
+        );
+        assert!(certain < sampled);
+        assert!(range_vacuity_is_diagnosable(certain, (1, 1)));
     }
 }

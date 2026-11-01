@@ -16,10 +16,10 @@ pub use address::{
     wildcard_bind_keys,
 };
 pub use faults::{
-    ClockFaultReport, CustomOpFaultReport, DnsFaultReport, EMPTY_OP_BREAKDOWN, EntropyFaultReport,
-    FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport, FsOpCounts, NetFaultReport,
-    VACUITY_MIN_EXPECTED_FIRES, epoch_jump_vacuity_is_diagnosable, range_vacuity_is_diagnosable,
-    vacuity_is_diagnosable,
+    CERTAIN_VACUITY_MIN_OPPORTUNITIES, ClockFaultReport, CustomOpFaultReport, DnsFaultReport,
+    EMPTY_OP_BREAKDOWN, EntropyFaultReport, FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport,
+    FsOpCounts, NetFaultReport, VACUITY_MIN_EXPECTED_FIRES, epoch_jump_vacuity_is_diagnosable,
+    range_vacuity_is_diagnosable, vacuity_is_diagnosable,
 };
 pub use filesystem::{FsDriver, XattrNamespace, xattr_permission};
 pub use network::{NetDriver, NetReadiness};

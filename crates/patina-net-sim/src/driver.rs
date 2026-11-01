@@ -747,8 +747,8 @@ impl NetDriver for SimNet {
                 .jitter_nanos
                 .is_some_and(|range| range_vacuity_is_diagnosable(counts.send_ops, range)),
             jitter_applied: counts.jitter_applied,
-            // The base latency applies to every send at rate 1.0, so five sends
-            // are enough to call zero applications anomalous.
+            // The base latency applies to every send at rate 1.0, so a few
+            // sends are enough to call zero applications anomalous.
             latency_vacuity_diagnosable: self.base_latency_nanos > 0
                 && vacuity_is_diagnosable(counts.send_ops, 1000),
             latency_applied: counts.latency_applied,

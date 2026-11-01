@@ -698,10 +698,10 @@ mod tests {
         };
         assert!(bypassed.is_vacuous());
 
-        // DOES NOT FIRE below the expected-firings floor: four eligible ops are
-        // too few to call zero delays anomalous.
+        // DOES NOT FIRE below the expected-firings floor: one eligible op fewer
+        // than the floor is too few to call zero delays anomalous.
         assert!(!patina_dst_driver_api::range_vacuity_is_diagnosable(
-            4,
+            patina_dst_driver_api::CERTAIN_VACUITY_MIN_OPPORTUNITIES - 1,
             (1_000, 1_000)
         ));
 
@@ -712,14 +712,15 @@ mod tests {
             (0, 0)
         ));
 
-        // Rate-aware in between: `0..9` delays nine draws in ten, so it takes six
-        // eligible ops to expect five delays.
+        // Rate-aware in between: `0..9` delays nine draws in ten, so it takes
+        // the floor's worth of delays divided by nine tenths, rounded up.
+        let ops = (patina_dst_driver_api::VACUITY_MIN_EXPECTED_FIRES * 10).div_ceil(9);
         assert!(!patina_dst_driver_api::range_vacuity_is_diagnosable(
-            5,
+            ops - 1,
             (0, 9)
         ));
         assert!(patina_dst_driver_api::range_vacuity_is_diagnosable(
-            6,
+            ops,
             (0, 9)
         ));
     }
