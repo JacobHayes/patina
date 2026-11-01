@@ -7,10 +7,18 @@ import (
 	"sync"
 )
 
-func declareSite(uint8, site) {}
-func always(bool, site)       {}
-func sometimes(bool, site)    {}
-func reachable(site)          {}
+func declareSite(uint8, site)             {}
+func always(bool, site, []any)            {}
+func sometimes(bool, site)                {}
+func reachable(site)                      {}
+func buggify(site, int32) bool            { return false }
+func buggifyDelay(site) bool              { return false }
+func knob(_ site, def, _, _ int64) int64  { return def }
+func verdict(VerdictKind, string, string) {}
+func setupComplete()                      {}
+func lifecycleEvent(string)               {}
+
+func customOp(_ string, _ []byte, _, perform func() []byte) []byte { return perform() }
 
 // IsSimulated reports whether the program runs under Patina: never, in a
 // build without the `patina` tag.

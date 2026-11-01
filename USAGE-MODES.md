@@ -60,10 +60,24 @@ var retried = patina.Sometimes("request-retried")
 func settle(l []int) { sorted.Check(slices.IsSorted(l)) }
 ```
 
-Under Patina, `Always`, `Sometimes` and `Reachable` sites, `IsSimulated`, `Rng`
-and `Param` behave as their Rust counterparts do. `cargo patina build --go` adds the `patina`
-build tag, which links them to the shim; any other build gets inert stand-ins
-with no cgo, so code ships the SDK unconditionally.
+Under Patina the Go SDK lowers to the same shim entry points as the Rust one,
+and each piece behaves as its Rust counterpart does:
+
+| Rust (`patina-dst`) | Go (`go/patina`) |
+|---|---|
+| `always!` / `sometimes!` / `reachable!`, and their `*_family!` | `Always(l).Check(cond, detail...)` / `Sometimes(l).Check(cond)` / `Reachable(l).Mark()`: every declared site is a family, and an `Always` detail names the failing instance in its violation verdict |
+| `buggify!` / `buggify_with_prob!` | `Buggify(l).Fires()` / `.FiresWithProb(p)` |
+| `buggify_delay!` / `buggify_knob!` | `BuggifyDelay(l).Delay()` / `Knob(l, def, lo, hi).Value()` |
+| `verdict`, `VerdictKind` | `Verdict(kind, label, detail)`, `Violation`/`Pass`/`AbortIntent` |
+| `custom_op_bytes[_faultable]` | `CustomOpBytes` / `CustomOpBytesFaultable` |
+| `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) |
+| `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` |
+| `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` |
+| `#[patina_dst::test]` | none: a Go DST target is a main package, swept with `cargo patina run`/`campaign` |
+
+`cargo patina build --go` adds the `patina` build tag, which links them to the
+shim; any other build gets inert stand-ins with no cgo, so code ships the SDK
+unconditionally.
 
 ### Native startup environment
 

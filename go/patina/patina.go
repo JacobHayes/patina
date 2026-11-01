@@ -1,6 +1,9 @@
-// Package patina is Patina's SDK for Go guests: invariant and coverage sites
-// a deterministic simulation run reports on, plus seeded entropy and run
-// parameters.
+// Package patina is Patina's SDK for Go guests: fault sites a deterministic
+// simulation run fires from its seed, invariant and coverage sites it reports
+// on, verdicts, custom operations it records and replays, lifecycle markers,
+// seeded entropy and run parameters. It lowers to the same native-shim entry
+// points as the Rust SDK (patina-dst), so a site, verdict or custom op means
+// the same thing in either language.
 //
 // It is inert outside Patina. `cargo patina build --go` adds the `patina`
 // build tag, which links the sites to the native shim; any other build gets
@@ -13,10 +16,18 @@
 //	var sorted = patina.Always("ledger-sorted")
 //	var retried = patina.Sometimes("request-retried")
 //	var drained = patina.Reachable("queue-drained")
+//	var dropFlush = patina.Buggify("flush-early-drop")
 //
 //	func settle(l []int) {
+//		if dropFlush.Fires() {
+//			return
+//		}
 //		sorted.Check(slices.IsSorted(l))
 //	}
+//
+// A declared site is what the Rust SDK calls a family: one label, any number
+// of callers. The part that varies per caller (a shard, a connection) goes in
+// an Always check's detail, not in its label.
 //
 // A label names one site for the whole program: declaring it twice at
 // different places (or as different kinds) stops the run as a duplicate. Under
@@ -27,7 +38,9 @@
 package patina
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"unicode/utf8"
@@ -39,6 +52,9 @@ const sdkPackage = "github.com/JacobHayes/patina/go/patina"
 
 // Site kinds, as the shim's static-site table numbers them.
 const (
+	kindFault     = 1
+	kindDelay     = 2
+	kindKnob      = 3
 	kindAlways    = 4
 	kindSometimes = 5
 	kindReachable = 6
@@ -85,9 +101,10 @@ type AlwaysSite struct{ s site }
 func Always(label string) *AlwaysSite { return &AlwaysSite{declare(kindAlways, label)} }
 
 // Check reports cond and returns it. Under Patina a false cond is a violation
-// that ends the run.
-func (a *AlwaysSite) Check(cond bool) bool {
-	always(cond, a.s)
+// that ends the run; detail, formatted as fmt.Sprint does and only on a
+// violation, names the failing instance in the run's violation verdict.
+func (a *AlwaysSite) Check(cond bool, detail ...any) bool {
+	always(cond, a.s, detail)
 	return cond
 }
 
@@ -122,3 +139,154 @@ func Reachable(label string) *ReachableSite {
 
 // Mark notes the site reached.
 func (r *ReachableSite) Mark() { reachable(r.s) }
+
+// BuggifySite is a fault site: a rare path a run takes on seed-chosen
+// evaluations, so the code behind it is exercised.
+type BuggifySite struct{ s site }
+
+// Buggify declares a fault site. Call it once per label, at package level.
+//
+//go:noinline
+func Buggify(label string) *BuggifySite { return &BuggifySite{declare(kindFault, label)} }
+
+// Fires reports whether the site fires on this evaluation, at the run's
+// default probability. Under Patina an active site (`cargo patina run
+// --buggify`) fires as a pure function of the seed; outside Patina, and in a
+// run without --buggify, it never does.
+func (b *BuggifySite) Fires() bool { return buggify(b.s, -1) }
+
+// FiresWithProb is Fires at probability p (0 to 1) instead of the run default.
+func (b *BuggifySite) FiresWithProb(p float64) bool {
+	return buggify(b.s, int32(math.Round(min(max(p, 0), 1)*1000)))
+}
+
+// DelaySite injects a deterministic delay through the virtual clock.
+type DelaySite struct{ s site }
+
+// BuggifyDelay declares a delay site. Call it once per label, at package level.
+//
+//go:noinline
+func BuggifyDelay(label string) *DelaySite { return &DelaySite{declare(kindDelay, label)} }
+
+// Delay advances virtual time when the site fires (never a real sleep) and
+// reports whether it did; outside Patina it does nothing.
+func (d *DelaySite) Delay() bool { return buggifyDelay(d.s) }
+
+// KnobSite is a tunable a run perturbs within bounds, so each seed explores
+// a different configuration.
+type KnobSite struct {
+	s              site
+	def, low, high int64
+}
+
+// Knob declares a tunable whose value is def outside Patina and, under
+// Patina, a per-run value in [low, high] for an active site. Call it once per
+// label, at package level.
+//
+//go:noinline
+func Knob(label string, def, low, high int64) *KnobSite {
+	return &KnobSite{declare(kindKnob, label), def, low, high}
+}
+
+// Value is the knob's value for this run.
+func (k *KnobSite) Value() int64 { return knob(k.s, k.def, k.low, k.high) }
+
+// VerdictKind is what a guest concludes about its own run.
+type VerdictKind uint32
+
+// Verdict kinds, numbered as the shim's verdict ABI numbers them.
+const (
+	// Violation: the guest detected a violation of its own invariant.
+	Violation VerdictKind = 1
+	// Pass: the guest confirmed a property held.
+	Pass VerdictKind = 2
+	// AbortIntent: the guest is about to abort on its own invariant, so the
+	// abort is attributed to the guest, not to a Patina refusal.
+	AbortIntent VerdictKind = 3
+)
+
+// Verdict reports a structured outcome about this run under label, which
+// aggregates verdicts across runs, with detail (JSON by convention) recorded
+// verbatim. Under Patina it is recorded in the trace and listed in the run's
+// result verdicts; it never changes control flow. Outside Patina it does
+// nothing. A verdict is not a site: one label may be reported any number of
+// times.
+func Verdict(kind VerdictKind, label, detail string) { verdict(kind, label, detail) }
+
+// SetupComplete marks the boundary between setup and the workload. With
+// `cargo patina run --buggify-after-setup`, fault sites stay inert until it is
+// called (and a run that never calls it fails). It does nothing outside
+// Patina.
+func SetupComplete() { setupComplete() }
+
+// LifecycleEvent marks a named point in the run; it does nothing outside
+// Patina.
+func LifecycleEvent(label string) { lifecycleEvent(label) }
+
+// CustomOpBytes performs one custom operation: an effect Patina does not
+// model (a call to a service outside the simulation, say), wrapped so a run
+// records its result and a replay reproduces it. label names the operation
+// class ("s3.get_object"), not the call; key is its logical input, checked on
+// replay so a different question is refused rather than handed a stale
+// answer.
+//
+// On the record pass perform runs and its bytes are recorded; on replay
+// perform does not run and the recorded bytes come back; an empty result is
+// nil on both. perform must not make calls Patina models (files, clocks,
+// sockets): replay skips it, so the run refuses them. Outside Patina this is
+// just perform().
+func CustomOpBytes(label string, key []byte, perform func() []byte) []byte {
+	return customOp(label, key, nil, perform)
+}
+
+// CustomOpBytesFaultable is CustomOpBytes with a declared failure: onFault
+// produces what the guest receives when a seeded fault fires
+// (`--custom-op-fail-permille`), in which case perform does not run. With
+// the knob off it behaves as CustomOpBytes; outside Patina onFault is never
+// called.
+func CustomOpBytesFaultable(label string, key []byte, onFault, perform func() []byte) []byte {
+	return customOp(label, key, onFault, perform)
+}
+
+// CustomOp is CustomOpBytes with the key and result carried as Go values,
+// encoded as JSON (encoding/json) so they stay legible in the trace. The
+// record pass returns the decoded encoding of perform's value, which is what a
+// replay hands back. Under Patina it panics when a value cannot be encoded,
+// or a recorded result cannot be decoded as T. Outside Patina nothing is
+// encoded.
+func CustomOp[T any](label string, key any, perform func() T) T {
+	return customOpTyped(label, key, nil, perform)
+}
+
+// CustomOpFaultable is CustomOp with a declared failure, as
+// CustomOpBytesFaultable is to CustomOpBytes: onFault's value is what a
+// seeded fault produces.
+func CustomOpFaultable[T any](label string, key any, onFault, perform func() T) T {
+	return customOpTyped(label, key, onFault, perform)
+}
+
+// customOpTyped lowers a typed custom op to the byte protocol, or, outside
+// Patina, just performs it.
+func customOpTyped[T any](label string, key any, onFault, perform func() T) T {
+	if !IsSimulated() {
+		return perform()
+	}
+	encode := func(what string, v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			panic(fmt.Sprintf("patina custom op %q: cannot encode %s: %v", label, what, err))
+		}
+		return b
+	}
+	var fault func() []byte
+	if onFault != nil {
+		fault = func() []byte { return encode("result", onFault()) }
+	}
+	bytes := customOp(label, encode("key", key), fault, func() []byte { return encode("result", perform()) })
+	var value T
+	if err := json.Unmarshal(bytes, &value); err != nil {
+		panic(fmt.Sprintf("patina custom op %q: cannot decode the recorded result: %v; the "+
+			"recording was produced by a guest whose result type no longer matches this one", label, err))
+	}
+	return value
+}
