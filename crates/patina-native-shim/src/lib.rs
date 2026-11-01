@@ -201,7 +201,7 @@ use patina_dst_abi::{
 };
 
 use patina_dst_fs_crash::CrashFs;
-use patina_dst_fs_mem::{FsImage, FsSnapshot, MemFs};
+use patina_dst_fs_mem::{FsImage, FsImageError, FsSnapshot, MemFs};
 use patina_dst_runtime::{
     Bookkeeping, BuggifyKind, Context, CustomOpMode, MAX_TRACE_BYTES, RuntimeBuilder,
     RuntimeConfig, RuntimeError, SiteOutcome, TraceTransport, VerdictKind,

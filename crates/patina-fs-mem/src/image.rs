@@ -15,16 +15,17 @@
 //! was recorded against. Symlinks are preserved verbatim (target string, no
 //! following), matching [`MemFs`]'s inert no-follow symlink model.
 //!
-//! The image also encodes in two halves ([`FsImage::encode_contents`],
-//! [`FsImage::encode_metadata`]), so a corpus hashed by halves can be said to
+//! The image also encodes in two halves ([`FsImage::encode_contents_to`],
+//! [`FsImage::encode_metadata_to`]), so a corpus hashed by halves can be said to
 //! differ from a recorded one in its contents or only in its metadata.
 
 use std::fmt;
+use std::io::{self, Read, Write};
 
 use patina_dst_abi::{DEFAULT_DIRECTORY_CREATE_MODE, DEFAULT_UMASK, FsClock};
 use patina_dst_driver_api::{DriverResult, FsDriver};
 
-use crate::{DIRECTORY_MODE, FILE_MODE, MODE_MASK, MemFs};
+use crate::{DIRECTORY_MODE, FILE_MODE, FileData, MODE_MASK, MemFs};
 
 /// Magic prefix identifying an encoded [`FsImage`] stream.
 const MAGIC: &[u8; 8] = b"PATFSIMG";
@@ -168,60 +169,73 @@ impl FsImage {
     /// encodes exactly as before they were representable.
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
+        self.encode_to(&mut bytes)
+            .expect("writing to a Vec does not fail");
+        bytes
+    }
+
+    /// [`FsImage::encode`] written to `out` as it is produced, so an image
+    /// the size of its corpus is never held a second time.
+    pub fn encode_to(&self, out: &mut impl Write) -> io::Result<()> {
+        out.write_all(MAGIC)?;
+        out.write_all(&VERSION.to_le_bytes())?;
+        out.write_all(&(self.entries.len() as u64).to_le_bytes())?;
         for entry in &self.entries {
             let (kind, payload) = entry.content();
-            bytes.push(kind);
-            encode_field(&mut bytes, entry.path().as_bytes());
-            encode_field(&mut bytes, payload);
+            out.write_all(&[kind])?;
+            encode_field(out, entry.path().as_bytes())?;
+            encode_field(out, payload)?;
             if let Some(mode) = entry.mode() {
-                bytes.extend_from_slice(&mode.to_le_bytes());
+                out.write_all(&mode.to_le_bytes())?;
             }
             if let Some(mtime_nanos) = entry.mtime_nanos() {
-                bytes.extend_from_slice(&mtime_nanos.to_le_bytes());
+                out.write_all(&mtime_nanos.to_le_bytes())?;
             }
         }
-        bytes
+        Ok(())
     }
 
-    /// The tree's contents alone: every entry's kind, path and payload, and
-    /// nothing of its metadata. Together with [`FsImage::encode_metadata`] it
-    /// determines [`FsImage::encode`].
-    pub fn encode_contents(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    /// The tree's contents alone, written to `out`: every entry's kind, path
+    /// and payload, and nothing of its metadata. Together with
+    /// [`FsImage::encode_metadata_to`] it determines [`FsImage::encode`].
+    pub fn encode_contents_to(&self, out: &mut impl Write) -> io::Result<()> {
         for entry in &self.entries {
             let (kind, payload) = entry.content();
-            bytes.push(kind);
-            encode_field(&mut bytes, entry.path().as_bytes());
-            encode_field(&mut bytes, payload);
+            out.write_all(&[kind])?;
+            encode_field(out, entry.path().as_bytes())?;
+            encode_field(out, payload)?;
         }
-        bytes
+        Ok(())
     }
 
-    /// The tree's metadata alone: every entry's path, permission bits (a
-    /// symlink's, which it has none of, as `u32::MAX`) and modification time.
-    /// A hard link has no metadata of its own and is part of the contents.
-    pub fn encode_metadata(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    /// The tree's metadata alone, written to `out`: every entry's path,
+    /// permission bits (a symlink's, which it has none of, as `u32::MAX`) and
+    /// modification time. A hard link has no metadata of its own and is part
+    /// of the contents.
+    pub fn encode_metadata_to(&self, out: &mut impl Write) -> io::Result<()> {
         for entry in &self.entries {
             let Some(mtime_nanos) = entry.mtime_nanos() else {
                 continue;
             };
-            encode_field(&mut bytes, entry.path().as_bytes());
-            bytes.extend_from_slice(&entry.mode().unwrap_or(u32::MAX).to_le_bytes());
-            bytes.extend_from_slice(&mtime_nanos.to_le_bytes());
+            encode_field(out, entry.path().as_bytes())?;
+            out.write_all(&entry.mode().unwrap_or(u32::MAX).to_le_bytes())?;
+            out.write_all(&mtime_nanos.to_le_bytes())?;
         }
-        bytes
+        Ok(())
     }
 
     /// Decode a stream produced by [`FsImage::encode`]. Rejects a truncated or
     /// malformed stream rather than silently producing a partial tree.
     pub fn decode(bytes: &[u8]) -> Result<Self, FsImageError> {
-        let mut reader = Reader::new(bytes);
-        let magic = reader.take(MAGIC.len())?;
-        if magic != MAGIC {
+        Self::decode_from(bytes)
+    }
+
+    /// [`FsImage::decode`] read from `stream` as it decodes: each file's
+    /// contents are read straight into a buffer of their own size, so the
+    /// whole stream is never buffered first.
+    pub fn decode_from(stream: impl Read) -> Result<Self, FsImageError> {
+        let mut reader = Reader { stream };
+        if reader.take_array()? != *MAGIC {
             return Err(FsImageError::BadMagic);
         }
         let version = reader.take_u32()?;
@@ -266,7 +280,7 @@ impl FsImage {
             };
             entries.push(entry);
         }
-        if !reader.is_empty() {
+        if !reader.at_end()? {
             return Err(FsImageError::Malformed("trailing bytes after final entry"));
         }
         // Fail closed: the decoder never trusts its input. Every entry path must
@@ -309,7 +323,7 @@ impl FsImage {
                     if let Some(parent) = parent_of(path) {
                         ensure_directory(&mut fs, parent)?;
                     }
-                    fs = fs.with_file(path, contents.clone())?;
+                    fs = fs.with_file_data(path, FileData::from_bytes(contents))?;
                 }
                 FsImageEntry::Symlink { path, target, .. } => {
                     if let Some(parent) = parent_of(path) {
@@ -436,55 +450,52 @@ fn parent_of(path: &str) -> Option<&str> {
     }
 }
 
-fn encode_field(bytes: &mut Vec<u8>, field: &[u8]) {
-    bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(field);
+fn encode_field(out: &mut impl Write, field: &[u8]) -> io::Result<()> {
+    out.write_all(&(field.len() as u64).to_le_bytes())?;
+    out.write_all(field)
 }
 
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+/// The most of one field read into its buffer at a time: a length the stream
+/// does not hold costs at most this much before it reads as truncated.
+const FIELD_CHUNK: u64 = 64 << 20;
+
+struct Reader<R> {
+    stream: R,
 }
 
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
+impl<R: Read> Reader<R> {
+    /// Whether the stream is exhausted.
+    fn at_end(&mut self) -> Result<bool, FsImageError> {
+        let mut byte = [0_u8; 1];
+        loop {
+            match self.stream.read(&mut byte) {
+                Ok(count) => return Ok(count == 0),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(FsImageError::from(error)),
+            }
+        }
     }
 
-    fn is_empty(&self) -> bool {
-        self.offset >= self.bytes.len()
-    }
-
-    fn take(&mut self, len: usize) -> Result<&'a [u8], FsImageError> {
-        let end = self
-            .offset
-            .checked_add(len)
-            .ok_or(FsImageError::Truncated)?;
-        let slice = self
-            .bytes
-            .get(self.offset..end)
-            .ok_or(FsImageError::Truncated)?;
-        self.offset = end;
-        Ok(slice)
+    fn take_array<const N: usize>(&mut self) -> Result<[u8; N], FsImageError> {
+        let mut bytes = [0_u8; N];
+        self.stream.read_exact(&mut bytes)?;
+        Ok(bytes)
     }
 
     fn take_u8(&mut self) -> Result<u8, FsImageError> {
-        Ok(self.take(1)?[0])
+        Ok(self.take_array::<1>()?[0])
     }
 
     fn take_u32(&mut self) -> Result<u32, FsImageError> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
+        Ok(u32::from_le_bytes(self.take_array()?))
     }
 
     fn take_u64(&mut self) -> Result<u64, FsImageError> {
-        let bytes = self.take(8)?;
-        Ok(u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+        Ok(u64::from_le_bytes(self.take_array()?))
     }
 
     fn take_i128(&mut self) -> Result<i128, FsImageError> {
-        let bytes = self.take(16)?;
-        Ok(i128::from_le_bytes(bytes.try_into().expect("16 bytes")))
+        Ok(i128::from_le_bytes(self.take_array()?))
     }
 
     /// Permission bits: nothing outside `0o7777`.
@@ -496,9 +507,21 @@ impl<'a> Reader<'a> {
         Ok(mode)
     }
 
+    /// A length-prefixed field, read into a buffer reserved for it rather
+    /// than grown as it fills.
     fn take_field(&mut self) -> Result<Vec<u8>, FsImageError> {
-        let len = self.take_u64()?;
-        Ok(self.take(len as usize)?.to_vec())
+        let mut remaining = self.take_u64()?;
+        let mut field = Vec::new();
+        while remaining > 0 {
+            let want = remaining.min(FIELD_CHUNK);
+            field.reserve_exact(want as usize);
+            let read = (&mut self.stream).take(want).read_to_end(&mut field)?;
+            if read as u64 != want {
+                return Err(FsImageError::Truncated);
+            }
+            remaining -= want;
+        }
+        Ok(field)
     }
 
     fn take_string(&mut self) -> Result<String, FsImageError> {
@@ -515,6 +538,17 @@ pub enum FsImageError {
     UnknownKind(u8),
     Truncated,
     Malformed(&'static str),
+    /// The stream failed before the image ended.
+    Read(io::ErrorKind),
+}
+
+impl From<io::Error> for FsImageError {
+    fn from(error: io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::UnexpectedEof => FsImageError::Truncated,
+            kind => FsImageError::Read(kind),
+        }
+    }
 }
 
 impl fmt::Display for FsImageError {
@@ -532,6 +566,9 @@ impl fmt::Display for FsImageError {
             FsImageError::Truncated => write!(formatter, "filesystem image is truncated"),
             FsImageError::Malformed(reason) => {
                 write!(formatter, "malformed filesystem image: {reason}")
+            }
+            FsImageError::Read(kind) => {
+                write!(formatter, "failed to read filesystem image: {kind}")
             }
         }
     }
@@ -564,8 +601,8 @@ mod tests {
         bytes.extend_from_slice(&(entries.len() as u64).to_le_bytes());
         for (kind, path, payload) in entries {
             bytes.push(*kind);
-            encode_field(&mut bytes, path.as_bytes());
-            encode_field(&mut bytes, payload);
+            encode_field(&mut bytes, path.as_bytes()).unwrap();
+            encode_field(&mut bytes, payload).unwrap();
             if *kind != KIND_SYMLINK {
                 bytes.extend_from_slice(&mode.to_le_bytes());
             }
@@ -600,6 +637,69 @@ mod tests {
             FsImage::decode(&hand_encode(&[(KIND_FILE, "relative", b"x")])),
             Err(FsImageError::Malformed(_))
         ));
+    }
+
+    /// A stream that hands over one byte per read, interrupted between reads,
+    /// then fails with `error` once `bytes` run out (or ends, without one).
+    struct Trickle {
+        bytes: Vec<u8>,
+        at: usize,
+        interrupt: bool,
+        error: Option<std::io::ErrorKind>,
+    }
+
+    impl std::io::Read for Trickle {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.interrupt = !self.interrupt;
+            if self.interrupt {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let Some(&byte) = self.bytes.get(self.at) else {
+                return self.error.map_or(Ok(0), |kind| Err(kind.into()));
+            };
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            buffer[0] = byte;
+            self.at += 1;
+            Ok(1)
+        }
+    }
+
+    /// Decoding from a stream that delivers the image a byte at a time gives
+    /// the image the bytes decode to; a stream that ends early is truncated,
+    /// one with bytes after the last entry is malformed, and one that fails is
+    /// a read error, never a partial tree.
+    #[test]
+    fn a_stream_decodes_as_its_bytes_do() {
+        let image = FsImage::new(vec![
+            FsImageEntry::file("/big", vec![7_u8; 3 * 4096 + 5]),
+            FsImageEntry::file("/empty", Vec::new()),
+            FsImageEntry::symlink("/link", "big"),
+            FsImageEntry::hard_link("/same", "/big"),
+        ]);
+        let bytes = image.encode();
+        let trickle = |bytes: &[u8], error| Trickle {
+            bytes: bytes.to_vec(),
+            at: 0,
+            interrupt: false,
+            error,
+        };
+        assert_eq!(FsImage::decode_from(trickle(&bytes, None)), Ok(image));
+        assert_eq!(
+            FsImage::decode_from(trickle(&bytes[..bytes.len() - 100], None)),
+            Err(FsImageError::Truncated)
+        );
+        let trailing = [&bytes[..], b"x"].concat();
+        assert!(matches!(
+            FsImage::decode_from(trickle(&trailing, None)),
+            Err(FsImageError::Malformed(_))
+        ));
+        let failing = trickle(&bytes[..40], Some(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(
+            FsImage::decode_from(failing),
+            Err(FsImageError::Read(std::io::ErrorKind::BrokenPipe))
+        );
     }
 
     /// A hard link survives the round trip and rebuilds as a second name for
@@ -680,13 +780,13 @@ mod tests {
             bytes.extend_from_slice(&VERSION.to_le_bytes());
             bytes.extend_from_slice(&2u64.to_le_bytes());
             bytes.push(KIND_DIRECTORY);
-            encode_field(&mut bytes, b"/d");
-            encode_field(&mut bytes, b"");
+            encode_field(&mut bytes, b"/d").unwrap();
+            encode_field(&mut bytes, b"").unwrap();
             bytes.extend_from_slice(&DIRECTORY_MODE.to_le_bytes());
             bytes.extend_from_slice(&0i128.to_le_bytes());
             bytes.push(KIND_HARD_LINK);
-            encode_field(&mut bytes, b"/l");
-            encode_field(&mut bytes, target.as_bytes());
+            encode_field(&mut bytes, b"/l").unwrap();
+            encode_field(&mut bytes, target.as_bytes()).unwrap();
             bytes
         };
         for target in ["/missing", "/z", "/d"] {

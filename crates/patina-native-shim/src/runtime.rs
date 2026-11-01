@@ -959,21 +959,27 @@ const NATIVE_CRASH_RESTART_EXIT: c_int = 112;
 
 fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    let mut chunk = vec![0_u8; HOST_IO_CHUNK];
-    loop {
-        // SAFETY: The pointer and length describe a live buffer.
-        let count = unsafe { host_read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if count < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
+    io::Read::read_to_end(&mut HostFd(fd), &mut bytes)?;
+    Ok(bytes)
+}
+
+/// A descriptor the supervisor handed over, read through the host's own
+/// `read`.
+struct HostFd(c_int);
+
+impl io::Read for HostFd {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            // SAFETY: The pointer and length describe a live buffer.
+            let count = unsafe { host_read(self.0, buffer.as_mut_ptr().cast(), buffer.len()) };
+            if count >= 0 {
+                return Ok(count as usize);
             }
-            return Err(error);
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
         }
-        if count == 0 {
-            return Ok(bytes);
-        }
-        bytes.extend_from_slice(&chunk[..count as usize]);
     }
 }
 
@@ -1010,14 +1016,15 @@ pub(crate) fn fs_image_base() -> Result<MemFs, RuntimeError> {
                 .map(|snapshot| snapshot.into_memfs())
         }
         (None, Some(fd)) => {
-            let bytes = read_host_fd_to_end(fd).map_err(|error| {
-                RuntimeError::Config(format!(
-                    "failed to read {}: {error}",
+            // Decoded as it is read: the image is as large as its corpus, and
+            // each file lands straight in a buffer of its own size.
+            let stream = io::BufReader::with_capacity(HOST_IO_CHUNK, HostFd(fd));
+            let image = FsImage::decode_from(stream).map_err(|error| match error {
+                FsImageError::Read(kind) => RuntimeError::Config(format!(
+                    "failed to read {}: {kind}",
                     patina_dst_runtime::ENV_FS_IMAGE_FD
-                ))
-            })?;
-            let image = FsImage::decode(&bytes).map_err(|error| {
-                RuntimeError::Config(format!("invalid filesystem image: {error}"))
+                )),
+                error => RuntimeError::Config(format!("invalid filesystem image: {error}")),
             })?;
             rebuilt_image(&image).map_err(|error| {
                 RuntimeError::Config(format!("failed to rebuild filesystem image: {error}"))

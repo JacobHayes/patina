@@ -3,7 +3,7 @@
 use super::*;
 use std::os::unix::fs::MetadataExt;
 
-/// An encoded filesystem image held open in a temporary file, ready to be
+/// An encoded filesystem image held open in an anonymous file, ready to be
 /// duplicated onto the guest's inherited image descriptor, plus its hash for
 /// the run fingerprint: [`FsImageHash`]'s two halves.
 pub(crate) struct FsImageCapture {
@@ -18,11 +18,13 @@ pub(crate) struct FsImageHash;
 
 impl FsImageHash {
     fn of(image: &FsImage) -> String {
-        format!(
-            "{}.{}",
-            short_digest(&image.encode_contents()),
-            short_digest(&image.encode_metadata())
-        )
+        let mut contents = HashWriter(Sha256::new());
+        let mut metadata = HashWriter(Sha256::new());
+        image
+            .encode_contents_to(&mut contents)
+            .and_then(|()| image.encode_metadata_to(&mut metadata))
+            .expect("hashing does not fail");
+        format!("{}.{}", short_digest(contents.0), short_digest(metadata.0))
     }
 
     /// Why a corpus hashing to `current` is not the one a trace recorded as
@@ -86,8 +88,23 @@ pub(crate) fn recorded_image_hash<'a>(recorded: &'a str, head: &str) -> Option<&
     (!hash.is_empty()).then_some(hash)
 }
 
-fn short_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
+/// A hash fed as bytes are written to it, so an image half is hashed without
+/// being held.
+struct HashWriter(Sha256);
+
+impl std::io::Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn short_digest(hash: Sha256) -> String {
+    hash.finalize()
         .iter()
         .take(8)
         .map(|byte| format!("{byte:02x}"))
@@ -95,11 +112,11 @@ fn short_digest(bytes: &[u8]) -> String {
 }
 
 /// Capture `host_dir` into a deterministic [`FsImage`], encode it, and write the
-/// bytes to a rewound anonymous temporary file the child reads over its
+/// bytes to a rewound anonymous file ([`image_scratch`]) the child reads over its
 /// inherited image descriptor. The supervisor runs uninterposed, so reading the
 /// host tree here is sound; the guest only ever sees the rebuilt image.
 pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, CliError> {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Seek, SeekFrom};
 
     let root = fs::canonicalize(host_dir).map_err(|error| {
         CliError(format!(
@@ -116,19 +133,43 @@ pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, Cli
     let mut entries = Vec::new();
     collect_fs_entries(&root, "", &mut entries)?;
     let image = FsImage::new(link_shared_files(entries));
-    let bytes = image.encode();
     let hash = FsImageHash::of(&image);
 
-    let mut file = tempfile::tempfile().map_err(|error| {
+    let file = image_scratch().map_err(|error| {
         CliError(format!(
             "failed to create filesystem image scratch file: {error}"
         ))
     })?;
-    file.write_all(&bytes)
-        .map_err(|error| CliError(format!("failed to write filesystem image: {error}")))?;
+    // Streamed: the encoded image is as large as the corpus.
+    let write_error = |error| CliError(format!("failed to write filesystem image: {error}"));
+    let mut writer = std::io::BufWriter::new(file);
+    image.encode_to(&mut writer).map_err(write_error)?;
+    let mut file = writer
+        .into_inner()
+        .map_err(|error| write_error(error.into_error()))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|error| CliError(format!("failed to rewind filesystem image: {error}")))?;
     Ok(FsImageCapture { file, hash })
+}
+
+/// Where the encoded image waits for the child: anonymous memory on Linux,
+/// where a disk-backed scratch file would put every run's whole corpus
+/// through the filesystem's write path; elsewhere an anonymous temporary file.
+#[cfg(target_os = "linux")]
+fn image_scratch() -> std::io::Result<fs::File> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: a NUL-terminated name and a flag the kernel defines.
+    let fd = unsafe { libc::memfd_create(c"patina-fs-image".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just created and nothing else owns it.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn image_scratch() -> std::io::Result<fs::File> {
+    tempfile::tempfile()
 }
 
 /// Recursively collect `host_dir`'s contents as [`FsImageEntry`] values, mapping
