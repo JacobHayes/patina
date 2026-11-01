@@ -60,20 +60,21 @@ var retried = patina.Sometimes("request-retried")
 func settle(l []int) { sorted.Check(slices.IsSorted(l)) }
 ```
 
-Under Patina the Go SDK lowers to the same shim entry points as the Rust one,
-and each piece behaves as its Rust counterpart does:
+Under Patina the Go SDK, and the Python SDK (see Python guests below), lower to
+the same shim entry points as the Rust one, and each piece behaves as its Rust
+counterpart does:
 
-| Rust (`patina-dst`) | Go (`go/patina`) |
-|---|---|
-| `always!` / `sometimes!` / `reachable!`, and their `*_family!` | `Always(l).Check(cond, detail...)` / `Sometimes(l).Check(cond)` / `Reachable(l).Mark()`: every declared site is a family, and an `Always` detail names the failing instance in its violation verdict |
-| `buggify!` / `buggify_with_prob!` | `Buggify(l).Fires()` / `.FiresWithProb(p)` |
-| `buggify_delay!` / `buggify_knob!` | `BuggifyDelay(l).Delay()` / `Knob(l, def, lo, hi).Value()` |
-| `verdict`, `VerdictKind` | `Verdict(kind, label, detail)`, `Violation`/`Pass`/`AbortIntent` |
-| `custom_op_bytes[_faultable]` | `CustomOpBytes` / `CustomOpBytesFaultable` |
-| `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) |
-| `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` |
-| `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` |
-| `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `cargo patina run`/`campaign` |
+| Rust (`patina-dst`) | Go (`go/patina`) | Python (`patina`) |
+|---|---|---|
+| `always!` / `sometimes!` / `reachable!`, and their `*_family!` | `Always(l).Check(cond, detail...)` / `Sometimes(l).Check(cond)` / `Reachable(l).Mark()`: every declared site is a family, and an `Always` detail names the failing instance in its violation verdict | `Always(l).check(cond, detail)` / `Sometimes(l).check(cond)` / `Reachable(l).mark()`, families alike |
+| `buggify!` / `buggify_with_prob!` | `Buggify(l).Fires()` / `.FiresWithProb(p)` | `Buggify(l).fires()` / `.fires(p)` |
+| `buggify_delay!` / `buggify_knob!` | `BuggifyDelay(l).Delay()` / `Knob(l, def, lo, hi).Value()` | `BuggifyDelay(l).delay()` / `Knob(l, default, low, high).value()` |
+| `verdict`, `VerdictKind` | `Verdict(kind, label, detail)`, `Violation`/`Pass`/`AbortIntent` | `verdict(kind, label, detail)`, `Verdict.VIOLATION`/`PASS`/`ABORT_INTENT` |
+| `custom_op_bytes[_faultable]` | `CustomOpBytes` / `CustomOpBytesFaultable` | `custom_op_bytes(label, key, perform, on_fault=None)` |
+| `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) | `custom_op(label, key, perform, on_fault=None)` (`json`, keys sorted) |
+| `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` | `setup_complete()`, `lifecycle_event(label)` |
+| `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` | `is_simulated()`, `rng()`, `param(key)` (None when absent) |
+| `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `cargo patina run`/`campaign` | none: a Python DST target is an application, swept with `cargo patina run`/`campaign` |
 
 `cargo patina build --go` adds the `patina` build tag, which links them to the
 shim; any other build gets inert stand-ins with no cgo, so code ships the SDK
@@ -108,6 +109,45 @@ and `os.fork` stop the run with the process refusal). The `hashlib` digests
 are CPython's built-in HACL\* implementations, and `zlib` (with `gzip`,
 `zipfile` and `tarfile` compression) is the pinned zlib release, fetched and
 digest-checked as CPython's is, built into the interpreter.
+
+Python code uses the Python SDK, the `patina` package, which every Python guest
+has (frozen beneath the application's roots, so a `patina` of the
+application's own shadows it), over `_patina`, the interpreter's builtin
+binding to the shim. Sites are values declared once at module level, which
+declares them to the run at their `file:line`; the table under Go guests maps
+each piece to its Rust and Go counterpart:
+
+```python
+import patina
+
+ordered = patina.Always("ledger-sorted")
+retried = patina.Sometimes("request-retried")
+
+def settle(ledger):
+    ordered.check(ledger == sorted(ledger), f"ledger={ledger}")
+```
+
+Under plain Python, with `crates/cargo-patina/python/sdk` on the path, the
+package is inert: no site fires, a check returns its condition, a knob its
+default, `rng()` draws a fixed-seed stream and a custom op just performs.
+
+A custom op's `perform` runs on the record pass and not on its replay, so the
+interpreter's compute meter is held across it: its computation takes no
+scheduling point and charges no virtual time, and both passes leave the op
+with the meter restarted at a full stride. Before the op begins, the thread
+hands the interpreter lock to any thread waiting for it, so the handover never
+falls inside the op, where modeled synchronization is refused. Interpreter
+teardown runs unmetered too.
+
+Tracked gap: the meter counts CPython's own comparisons, and `perform` changes
+interpreter state the replay never does (its allocations, the caches and
+specializations it warms), so the code after an op can count a few
+comparisons differently on the two passes. Restarting at a full stride makes
+that unlikely to move a scheduling point, but it can, and the replay then
+stops with a yield-point divergence rather than run a different schedule. A
+`perform` that does little in Python (one call out, its result returned) is
+the least exposed. The cure is a meter that counts the program's own control
+flow rather than the interpreter's comparisons.
 
 ### Native startup environment
 
@@ -196,3 +236,4 @@ Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
 | `patina-dst-harness` | `crates/patina-harness` | mode-2 configure-then-run harness (deps: `patina-dst-runtime`, `serde_json`) |
 | `patina-dst-runtime` | `crates/patina-runtime` | the deterministic runtime both modes drive (through the native shim) |
 | Go SDK (Go module) | `go/patina` | mode-1 SDK for Go guests; no dependencies; shim-backed under the `patina` build tag |
+| Python SDK (package) | `crates/cargo-patina/python/sdk` | mode-1 SDK for Python guests; the `patina` package every Python guest has, over the builtin `_patina`; inert under plain Python |

@@ -60,6 +60,12 @@ const ZLIB_SOURCES: &[&str] = &[
 
 const FREEZE_PY: &str = include_str!("../python/freeze.py");
 const LAUNCHER_C: &str = include_str!("../python/launcher.c");
+/// The Python SDK: the `patina` package, frozen with each application (after
+/// its roots), and `_patina`, its builtin binding to the shim, compiled with
+/// each application against the cached build; neither is part of the cache
+/// key.
+const SDK_PY: &str = include_str!("../python/sdk/patina/__init__.py");
+const SDK_MODULE_C: &str = include_str!("../python/sdk_module.c");
 const METER_C: &str = include_str!("../python/meter.c");
 
 /// How every C file of a Python guest is compiled: position-independent, with
@@ -475,6 +481,9 @@ fn unpacked(cache: &Path, tarball: &Path) -> Result<(PathBuf, String), CliError>
 /// A built CPython's build directory, locked.
 struct Built {
     build: PathBuf,
+    /// The CPython source tree it was built from, and the C compiler.
+    tree: PathBuf,
+    cc: PathBuf,
     lock: fs::File,
 }
 
@@ -632,6 +641,8 @@ fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError>
     let built = Built {
         lock: lock_target_dir(&build)?,
         build: build.clone(),
+        tree: tree.clone(),
+        cc: cc.clone(),
     };
     let done = build.join(".patina-built");
     if reusable && done.is_file() {
@@ -732,6 +743,7 @@ fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError>
         &cc,
         "the Python launcher",
     )?;
+
     compile_c(
         &meter,
         &built.meter(),
@@ -895,6 +907,33 @@ pub(crate) fn prepare_python_app(app: PythonApp<'_>) -> Result<PreparedPython, C
     let built = built_cpython(&cache, app.source)?;
     let workspace = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create a build workspace: {error}")))?;
+    // The SDK, beneath the application's roots on its path.
+    let sdk = workspace.path().join("sdk");
+    let package = sdk.join("patina");
+    fs::create_dir_all(&package).map_err(|error| io_error("failed to create", &package, error))?;
+    let init = package.join("__init__.py");
+    fs::write(&init, SDK_PY).map_err(|error| io_error("failed to write", &init, error))?;
+    let module = workspace.path().join("sdk_module.c");
+    fs::write(&module, SDK_MODULE_C)
+        .map_err(|error| io_error("failed to write", &module, error))?;
+    let sdk_module = workspace.path().join("sdk_module.o");
+    let include = |path: &Path| {
+        let mut flag = OsString::from("-I");
+        flag.push(path);
+        flag
+    };
+    compile_c(
+        &module,
+        &sdk_module,
+        &[
+            include(&built.build),
+            include(&built.tree.join("Include")),
+            OsString::from("-Wno-unused-parameter"),
+        ],
+        workspace.path(),
+        &built.cc,
+        "the Python SDK's module",
+    )?;
     let frozen = workspace.path().join("app.bin");
     let freeze = workspace.path().join("freeze.py");
     fs::write(&freeze, FREEZE_PY).map_err(|error| io_error("failed to write", &freeze, error))?;
@@ -905,7 +944,8 @@ pub(crate) fn prepare_python_app(app: PythonApp<'_>) -> Result<PreparedPython, C
         .arg("--app")
         .arg(app.app)
         .arg(&frozen)
-        .args(app.paths);
+        .args(app.paths)
+        .arg(&sdk);
     let status = command
         .status()
         .map_err(|error| CliError(format!("failed to run the built CPython: {error}")))?;
@@ -924,6 +964,7 @@ pub(crate) fn prepare_python_app(app: PythonApp<'_>) -> Result<PreparedPython, C
         rustc_args.push(crate::shim_build::link_arg(arg));
     };
     link(&built.launcher());
+    link(&sdk_module);
     link(&built.meter());
     for library in static_libraries(&built.build)? {
         link(&library);

@@ -63,7 +63,9 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   virtualenv's site-packages; earlier roots shadow later ones) frozen into the
   executable. The interpreter is isolated and imports nothing from a
   filesystem. Pure-Python only: an extension module refuses the build; package
-  data is not carried; `zlib` is built in, `ssl` is not. Linux only.
+  data is not carried; `zlib` is built in, `ssl` is not. Linux only. Every
+  guest has the Python SDK, `import patina` (inert under plain Python with
+  `crates/cargo-patina/python/sdk` on the path).
 - `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
   `--record PATH` writes a trace. `--env K=V` sets the guest's starting

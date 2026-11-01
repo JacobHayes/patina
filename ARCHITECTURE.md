@@ -78,7 +78,10 @@ trace format.
   of CPython's imports. CPython is compiled with comparison instrumentation,
   whose hooks (`python/meter.c`) hand batches to `patina_compute_point`, as
   the Go meter does: a thread computing without calls still lets the GIL
-  change hands and timers come due.
+  change hands and timers come due. The Python SDK (`python/sdk/patina`) is
+  frozen with each application over `_patina` (`python/sdk_module.c`), a
+  builtin module the launcher registers, which lowers sites, verdicts and
+  custom ops to the shim's `patina_*` entries as the Go SDK does.
 - **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
   configures the run in code, then runs ordinary `std` code under the shim's
   global runtime. a harness binary's `PATINA_HARNESS_V1` marker makes the supervisor set
