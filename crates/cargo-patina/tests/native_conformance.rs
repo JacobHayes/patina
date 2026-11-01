@@ -74,11 +74,8 @@ fn conform(name: &str) {
     }
     let logs = logs_root().join(name.replace('/', "-"));
     let _ = std::fs::remove_dir_all(&logs);
-    let owned = tempfile::Builder::new()
-        .prefix("patina-conformance-")
-        .tempdir()
-        .expect("create the scenario's directory");
-    if let Some((need, reason)) = host::needs_unmet(scenario, owned.path()) {
+    let (owned, unmet) = scratch_dir(scenario, &logs);
+    if let Some((need, reason)) = unmet {
         assert!(
             reason.cause != Cause::Unexpected,
             "detecting what {name} needs failed: {reason}"
@@ -137,6 +134,38 @@ fn conform(name: &str) {
         failures.join("\n"),
         logs.display()
     );
+}
+
+/// The scenario's own directory, and the first need it leaves unmet. It is
+/// made under `$TMPDIR` (short paths: `AF_UNIX` names must fit `sun_path`);
+/// where that filesystem lacks what the scenario needs (a runner's tmpfs has
+/// no ext4/XFS block allocation), under the target dir's `conformance/`
+/// instead, which is on the build's disk. The first directory the scenario
+/// needs nothing more of wins, so a given host always judges the same way.
+fn scratch_dir(
+    scenario: &catalog::Scenario,
+    logs: &Path,
+) -> (tempfile::TempDir, Option<(catalog::Need, host::NotRun)>) {
+    let make = |base: Option<&Path>| {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("patina-conformance-");
+        let made = match base {
+            None => builder.tempdir(),
+            Some(base) => std::fs::create_dir_all(base).and_then(|()| builder.tempdir_in(base)),
+        };
+        made.expect("create the scenario's directory")
+    };
+    let first = make(None);
+    let unmet = host::needs_unmet(scenario, first.path());
+    if unmet.is_none() {
+        return (first, None);
+    }
+    let fallback = make(Some(logs.parent().expect("logs live under conformance/")));
+    match host::needs_unmet(scenario, fallback.path()) {
+        None => (fallback, None),
+        // Neither suits: report what the default directory lacks.
+        Some(_) => (first, unmet),
+    }
 }
 
 /// A planted stream from `origin`: `(op, ret)` events, a check where `op` is
