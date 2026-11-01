@@ -239,7 +239,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   is technically fail-closed but the deny diagnostic then prints on every call in
   a hot loop, which is its own kind of nondeterminism-shaped noise. Reserve the
   named deny for a form with no modeled fallback (`O_PATH|O_NOFOLLOW` on a
-  symlink, which names a link entry nothing here has a descriptor for).
+  namespace file, which names its procfs link, a node nothing here has a
+  descriptor for).
 - Bootstrap and reentrancy paths are load-bearing. Avoid allocations, locks, or
   formatting in early-init/fatal paths unless the path is proven safe under the
   custom allocator and host-collection rules.

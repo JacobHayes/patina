@@ -330,8 +330,8 @@ uint32_t patina_umask(uint32_t mask);
  * way), an O_PATH location, /dev/urandom (PATINA_FD_URANDOM), or a FIFO's pipe
  * endpoint (PATINA_FD_PIPE, because a named pipe's bytes are not filesystem
  * state). PATINA_O_NOFOLLOW leaves a trailing symlink unresolved, which is
- * ELOOP (PATINA_O_PATH|PATINA_O_NOFOLLOW on one is a named deny: no descriptor
- * names a link entry). PATINA_O_CLOEXEC sets FD_CLOEXEC on the number.
+ * ELOOP, except under PATINA_O_PATH, which opens an O_PATH location on the
+ * link itself. PATINA_O_CLOEXEC sets FD_CLOEXEC on the number.
  * `mode` is POSIX open(2)'s third argument: the creation mode, read only when
  * the flags can create the entry and applied under the process umask. A caller
  * without PATINA_O_CREATE passes 0, so the recorded operation carries no

@@ -750,3 +750,27 @@ fn allocate_grows_keeps_or_zeroes_and_answers_the_kernels_errnos() {
         "a directory descriptor is never open for writing, which the kernel checks first"
     );
 }
+
+/// A path-only open of a symlink names the link itself (`O_PATH|O_NOFOLLOW`):
+/// its descriptor reads the link's metadata, follows the link's name through
+/// a rename, and reads nothing; any other open of the link is refused.
+#[test]
+fn a_path_only_open_of_a_symlink_holds_the_link() {
+    let mut fs = MemFs::new().with_file("/f", b"target").unwrap();
+    fs.symlink(FsClock::EPOCH, "f", "/l").unwrap();
+    let link = fs
+        .open(FsClock::EPOCH, "/l", OpenFlags::path_only())
+        .unwrap();
+    let metadata = fs.fd_metadata(link).unwrap();
+    assert_eq!(metadata.kind, FsEntryKind::Symlink);
+    assert_eq!(metadata.ino, fs.metadata("/l").unwrap().ino);
+    fs.rename(FsClock::EPOCH, "/l", "/moved").unwrap();
+    assert_eq!(fs.fd_path(link).unwrap(), "/moved");
+    assert!(fs.read(FsClock::EPOCH, link, 8).is_err());
+    assert_eq!(
+        fs.open(FsClock::EPOCH, "/moved", OpenFlags::read_only())
+            .unwrap_err()
+            .code,
+        ErrorCode::InvalidInput
+    );
+}

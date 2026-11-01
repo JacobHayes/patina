@@ -408,7 +408,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_openat`): `(dirfd, path)` resolves through the one path resolver (working directory, `..`, symlinks to the 40-hop ELOOP limit) and the entry's kind decides the descriptor; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink prints the shared deny and answers ENOSYS.",
+                "Routed by the SUD dispatcher into the same `patina_*` runtime entry the C interposer calls (`patina_openat`): `(dirfd, path)` resolves through the one path resolver (working directory, `..`, symlinks to the 40-hop ELOOP limit) and the entry's kind decides the descriptor; O_PATH and O_DIRECTORY are distinct opens; O_PATH|O_NOFOLLOW on a symlink is an O_PATH descriptor on the link itself.",
                 None,
             )
             .since("2.6.16"),

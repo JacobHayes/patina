@@ -44,12 +44,13 @@ fn driver_open(path: &str, flags: OpenFlags) -> Result<Fd, c_int> {
     })
 }
 
-/// The deny an `O_PATH|O_NOFOLLOW` open of a SYMLINK gets — the one spelling
-/// that names the link entry itself, which the deterministic filesystem has no
-/// descriptor for. One string, emitted from the one open entry both doors call,
-/// so a raw-syscall guest and a libc guest record the same captured stderr.
-pub(crate) const DENY_O_PATH_SYMLINK: &str = "patina: O_PATH|O_NOFOLLOW on a symlink is not modeled (the deterministic \
-     filesystem has no descriptor for a link entry); failing closed\n";
+/// The deny an `O_PATH|O_NOFOLLOW` open of a namespace file gets — the one
+/// spelling that names its procfs magic link itself, which has no descriptor
+/// here. One string, emitted from the one open entry both doors call, so a
+/// raw-syscall guest and a libc guest record the same captured stderr.
+#[cfg(target_os = "linux")]
+pub(crate) const DENY_O_PATH_NAMESPACE_LINK: &str =
+    "patina: O_PATH|O_NOFOLLOW on a namespace file's procfs link is not modeled; failing closed\n";
 
 /// Stop the run on an open asking for `flags`, behaviors `open(2)` defines
 /// that the deterministic filesystem does not model: what `O_DIRECT`
@@ -211,7 +212,7 @@ fn open_namespace(index: usize, flags: u32, cloexec: bool) -> c_int {
             return fail(ENOTDIR);
         }
         if nofollow {
-            return deny(DENY_O_PATH_SYMLINK);
+            return deny(DENY_O_PATH_NAMESPACE_LINK);
         }
         (FdKind::NamespacePath, O_PATH)
     } else {
@@ -338,9 +339,18 @@ pub(crate) unsafe fn open_at(
     let entry = resolved.metadata.map(|metadata| metadata.kind);
     match entry {
         // Reachable only under `O_NOFOLLOW` (the resolver followed otherwise).
+        // In `do_open`'s order: `O_DIRECTORY` is `ENOTDIR`; an `O_PATH` open
+        // names the link itself (`fstat` reads it, `readlinkat(fd, "")` its
+        // target); any other is `ELOOP` (`may_open`).
         Some(FsEntryKind::Symlink) => {
+            if directory {
+                return fail(ENOTDIR);
+            }
             if path_only {
-                return deny(DENY_O_PATH_SYMLINK);
+                return match driver_open(&resolved.path, OpenFlags::path_only()) {
+                    Ok(fd) => bind_fs_handle(fd, FdKind::OPath, status, cloexec),
+                    Err(errno) => fail(errno),
+                };
             }
             fail(ELOOP)
         }

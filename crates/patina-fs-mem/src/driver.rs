@@ -95,6 +95,12 @@ impl FsDriver for MemFs {
                 (node.kind, node.mode)
             };
             match kind {
+                // `O_PATH|O_NOFOLLOW` names the link entry itself (the
+                // resolver hands a symlink here only then): a location
+                // descriptor on the link's node, as for a FIFO or a socket.
+                FsEntryKind::Symlink if flags.path_only => {
+                    return self.allocate_handle(inode, 0, Access::LOCATION, kind);
+                }
                 FsEntryKind::Symlink => {
                     return Err(EffectError::new(
                         ErrorCode::InvalidInput,
