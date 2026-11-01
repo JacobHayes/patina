@@ -196,6 +196,54 @@ impl Context {
         decode_bytes(&operation, outcome)
     }
 
+    /// An open of a file the virtual kernel makes rather than stores (a
+    /// procfs node, by canonical `path`): recorded as
+    /// [`Operation::FsSyntheticOpen`], and faulted, delayed and counted as
+    /// any open is; the content is the native shim's.
+    pub fn fs_open_synthetic(&mut self, path: &str) -> Result<(), RuntimeError> {
+        self.apply_fs_latency()?;
+        let operation = Operation::FsSyntheticOpen { path: path.into() };
+        let expected = self.replay_expected(&operation)?;
+        let actual = match self.filesystem.open_synthetic(path) {
+            Ok(()) => Outcome::Unit,
+            Err(error) => Outcome::Error(error),
+        };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_unit(&operation, outcome)
+    }
+
+    /// How many of `max_len` bytes a read of such a file may return, at `at`
+    /// or its description's position, with `available` there and `allocates`
+    /// on the description's first read ([`Operation::FsSyntheticRead`]).
+    pub fn fs_read_synthetic(
+        &mut self,
+        path: &str,
+        at: Option<u64>,
+        max_len: usize,
+        available: usize,
+        allocates: bool,
+    ) -> Result<usize, RuntimeError> {
+        self.apply_fs_latency()?;
+        let operation = Operation::FsSyntheticRead {
+            path: path.into(),
+            at,
+            max_len,
+            available,
+            allocates,
+        };
+        let expected = self.replay_expected(&operation)?;
+        let actual =
+            match self
+                .filesystem
+                .read_synthetic(max_len, available, at.is_some(), allocates)
+            {
+                Ok(granted) => Outcome::Usize(granted.min(max_len)),
+                Err(error) => Outcome::Error(error),
+            };
+        let outcome = self.reconcile(operation.clone(), expected, actual)?;
+        decode_usize(&operation, outcome)
+    }
+
     /// Positional write (`pwrite`): write at an explicit offset without moving
     /// the file cursor. Recorded as [`Operation::FsWriteAt`]; a crash point like
     /// a cursor write.

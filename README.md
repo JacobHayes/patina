@@ -176,8 +176,9 @@ into the trace so replay reproduces them flag-free.
   `fsync` of a changed inode, `sync`/`syncfs`, or every 5 virtual seconds),
   a file is the prefix that commit recorded, and each block overwritten in
   place since keeps its old or new bytes.
-- **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR),
-  `--fs-short-permille` (short reads/writes), and `--fs-latency-nanos MIN..MAX`
+- **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR,
+  and on procfs, which has no storage, only ENOMEM),
+  `--fs-short-permille` (short reads/writes, procfs's reads too), and `--fs-latency-nanos MIN..MAX`
   (seeded delay before every eligible fs op, so slow I/O reorders against timers
   and peers). `--fs-error-at KIND:N[:ERRNO]` fails the Nth op of a kind (as the
   fs fault report names it: `sync`, `sync_all`, `write`, ...) at any seed, so a

@@ -36,6 +36,12 @@
 //! namespace files by any spelling but `/proc/self/ns/<entry>`
 //! (`crate::nsfs`) and an `O_PATH` open stop the run by name.
 //!
+//! An open, and a read once its text is in hand, are the filesystem's
+//! decisions (`Context::fs_open_synthetic`, `fs_read_synthetic`): the
+//! trace holds them, a short read takes fewer of the bytes, and a fault
+//! fails an open or a description's first read (its buffer's allocation)
+//! with `ENOMEM`, the one error procfs has for a live process.
+//!
 //! The text is made as `seq_file` makes it: at the first read, and again
 //! whenever a read or a seek moves to a position other than where the last
 //! read ended (a seek to the start leaves it to the next read); a read takes
@@ -636,6 +642,9 @@ struct Open {
     read_pos: u64,
     /// The description's position (`f_pos`).
     pos: u64,
+    /// Whether a read has made the description's buffer (`seq_file`'s
+    /// `buf`, allocated at the first read and kept).
+    buffered: bool,
     /// The reads under way that made text with the table's lock released:
     /// each holds the open as the kernel's `fdget` holds the file.
     reading: u32,
@@ -676,6 +685,12 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
     if writes {
         return fail(EACCES);
     }
+    // The open's allocations (its `struct file`, `single_open`'s operations)
+    // are its one way to fail now: the filesystem decides, so a fault
+    // reaches it and the trace holds the open.
+    if let Err(errno) = crate::with_context_raw(|context| context.fs_open_synthetic(&node.path())) {
+        return fail(errno);
+    }
     let kind = if directory {
         FdKind::ProcDir
     } else {
@@ -692,6 +707,7 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
                 text: None,
                 read_pos: 0,
                 pos: 0,
+                buffered: false,
                 reading: 0,
                 released: false,
             },
@@ -843,15 +859,45 @@ fn locked<T>(
 /// `deliver` before the read counts: a delivery that fails (`EFAULT`)
 /// leaves the position where it was. The text is made again when the read
 /// starts anywhere but where the last one ended ([`Open::wants_text`]); a
-/// read of no bytes does nothing (`seq_read_iter`).
+/// read of no bytes does nothing (`seq_read_iter`). With the text in hand,
+/// the filesystem decides how many of the bytes the read may return, or
+/// that it fails (the first read's buffer allocation), so a fault reaches
+/// it and the trace holds it; nothing runs between that decision and the
+/// serving.
 fn read_with(
     handle: u64,
     len: usize,
     at: Option<u64>,
     mut deliver: impl FnMut(&[u8]) -> Result<(), c_int>,
 ) -> Result<Vec<u8>, c_int> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    // The read holds the open from its readying to its serving.
+    let (node, available, allocates) = locked(handle, |open, fresh| {
+        let prepared = open.prepare_step(fresh, len, at);
+        if prepared.is_some() {
+            open.reading += 1;
+        }
+        Ok(prepared)
+    })?;
+    let mut hold = Some(Hold(handle));
+    let granted = crate::with_context_raw(|context| {
+        context.fs_read_synthetic(&node.path(), at, len, available, allocates)
+    })
+    .inspect_err(|_| {
+        // No buffer, so no text: `seq_read_iter` allocates before it
+        // generates, and the next read makes the text afresh.
+        if allocates && let Some(open) = OPENS.lock().1.get_mut(&handle) {
+            open.buffered = false;
+            open.text = None;
+        }
+    })?;
     locked(handle, |open, fresh| {
-        open.read_step(fresh, len, at, &mut deliver)
+        if let Some(hold) = hold.take() {
+            hold.spend(open);
+        }
+        open.read_step(fresh, granted, at, &mut deliver)
     })
 }
 
@@ -921,6 +967,28 @@ impl Open {
             None
         };
         self.serve(text, pos, len, at.is_none(), deliver).map(Some)
+    }
+
+    /// One try at readying a read of `len` bytes at `at` or the position
+    /// now (a [`locked`] step): `None` when it wants text and `fresh` holds
+    /// none; otherwise the text is the one the read serves, and the answer
+    /// is the node, the bytes the text has from there, and whether this
+    /// read makes the description's buffer (which it then holds).
+    fn prepare_step(
+        &mut self,
+        fresh: &mut Option<Vec<u8>>,
+        len: usize,
+        at: Option<u64>,
+    ) -> Option<(Node, usize, bool)> {
+        let pos = at.unwrap_or(self.pos);
+        if self.wants_text(pos, len) {
+            self.text = Some(fresh.take()?);
+            self.read_pos = pos;
+        }
+        let text = self.text.as_deref().unwrap_or_default();
+        let start = usize::try_from(pos).unwrap_or(usize::MAX).min(text.len());
+        let allocates = !std::mem::replace(&mut self.buffered, true);
+        Some((self.node, text.len() - start, allocates))
     }
 
     /// One try at a seek to `target` (a [`locked`] step): `None` when it

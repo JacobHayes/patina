@@ -164,10 +164,15 @@ impl FsFaultOpKind {
     /// Whether an operation of this kind can fail with `errno` on a real
     /// filesystem (the sets `FaultFs` injects from; see its error choice).
     /// `EIO` every kind can. `ENOSPC` the kinds that can allocate, an `open`
-    /// only when it creates; `EINTR` the data-plane calls and `fsync(2)`.
+    /// only when it creates; `EINTR` the data-plane calls and `fsync(2)`;
+    /// `ENOMEM` an `open` and a read of a procfs file, and only those.
     pub const fn can_fail_with(self, errno: FsErrno) -> bool {
         match errno {
             FsErrno::Io => true,
+            FsErrno::NoMemory => matches!(
+                self,
+                FsFaultOpKind::Open | FsFaultOpKind::Read | FsFaultOpKind::ReadAt
+            ),
             FsErrno::NoSpace => matches!(
                 self,
                 FsFaultOpKind::Open
@@ -194,8 +199,8 @@ impl FsFaultOpKind {
     }
 }
 
-/// An errno a filesystem fault can inject: the storage's failures, never the
-/// caller's.
+/// An errno a filesystem fault can inject: the filesystem's failures, never
+/// the caller's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FsErrno {
     /// `EIO`.
@@ -204,16 +209,25 @@ pub enum FsErrno {
     NoSpace,
     /// `EINTR`.
     Interrupted,
+    /// `ENOMEM`: a procfs file's `seq_file` allocation, charged to the
+    /// caller's memory cgroup.
+    NoMemory,
 }
 
 impl FsErrno {
-    pub const ALL: [FsErrno; 3] = [FsErrno::Io, FsErrno::NoSpace, FsErrno::Interrupted];
+    pub const ALL: [FsErrno; 4] = [
+        FsErrno::Io,
+        FsErrno::NoSpace,
+        FsErrno::Interrupted,
+        FsErrno::NoMemory,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
             FsErrno::Io => "EIO",
             FsErrno::NoSpace => "ENOSPC",
             FsErrno::Interrupted => "EINTR",
+            FsErrno::NoMemory => "ENOMEM",
         }
     }
 
@@ -222,6 +236,7 @@ impl FsErrno {
             FsErrno::Io => ErrorCode::Io,
             FsErrno::NoSpace => ErrorCode::NoSpace,
             FsErrno::Interrupted => ErrorCode::Interrupted,
+            FsErrno::NoMemory => ErrorCode::NoMemory,
         }
     }
 }
@@ -243,8 +258,8 @@ impl core::str::FromStr for FsErrorTarget {
     type Err = String;
 
     /// `KIND:N[:ERRNO]`: a kind as the fault report spells it (`sync`,
-    /// `write_at`, ...), an ordinal from 1, and `EIO` (the default), `ENOSPC`
-    /// or `EINTR`, which the kind must be able to fail with.
+    /// `write_at`, ...), an ordinal from 1, and `EIO` (the default), `ENOSPC`,
+    /// `EINTR` or `ENOMEM`, which the kind must be able to fail with.
     fn from_str(text: &str) -> Result<Self, String> {
         let mut parts = text.trim().split(':');
         let (Some(kind), Some(nth)) = (parts.next(), parts.next()) else {
@@ -271,7 +286,7 @@ impl core::str::FromStr for FsErrorTarget {
             Some(name) => FsErrno::ALL
                 .into_iter()
                 .find(|errno| errno.name().eq_ignore_ascii_case(name))
-                .ok_or_else(|| format!("`{name}` is not EIO, ENOSPC or EINTR"))?,
+                .ok_or_else(|| format!("`{name}` is not EIO, ENOSPC, EINTR or ENOMEM"))?,
         };
         if !kind.can_fail_with(errno) {
             return Err(format!(

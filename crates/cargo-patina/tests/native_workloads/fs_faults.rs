@@ -240,3 +240,74 @@ fn calls_without_filesystem_io_draw_no_filesystem_fault() {
         assert_eq!(calm, faulted, "{cwd:?}");
     }
 }
+
+/// procfs's files are the virtual kernel's, but their opens and reads are the
+/// filesystem's decisions like any file's: the trace holds them (so a replay
+/// reconciles them), a short read reaches them at any length, and a failure
+/// reaches them as the one error procfs has for a live process, `ENOMEM`
+/// (never `EIO`, `ENOSPC` or `EINTR`), by rate or by target.
+/// `procfs_fault_probe.rs` reads `/proc/self/stat` and `/proc/self/status`
+/// in 64-byte reads and lists `/proc`. RED before: the shim answered procfs
+/// without the filesystem, so the trace held no procfs open, every read came
+/// back whole and every open succeeded under any fault, and
+/// `--fs-error-at open:1:ENOMEM` did not parse.
+#[cfg(target_os = "linux")]
+#[test]
+fn procfs_opens_and_reads_are_traced_and_faulted() {
+    let g = Guest::assert_build("procfs_fault_probe.rs");
+    let line = |out: &[u8], name: &str| {
+        assert_unique_line_payload(out, &format!("NATIVE_PROCFS {name} ")).to_owned()
+    };
+    let whole = "open=ok short=0 complete=true";
+    let (plain, trace) = g.assert_recorded(1, &[]);
+    assert_eq!(line(&plain.stdout, "stat"), whole);
+    assert_eq!(line(&plain.stdout, "status"), whole);
+    assert_eq!(line(&plain.stdout, "list"), "open=ok self=true");
+    let opened: Vec<String> = patina_dst_trace::TraceBundle::load(&trace)
+        .unwrap()
+        .resolved_timeline("main")
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.operation {
+            patina_dst_abi::Operation::FsSyntheticOpen { path } => Some(path),
+            _ => None,
+        })
+        .collect();
+    let pid = std::path::Path::new(&opened[0])
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        opened,
+        [
+            format!("{pid}/stat"),
+            format!("{pid}/status"),
+            "/proc".into()
+        ]
+    );
+
+    let short = g
+        .assert_run_success(1, &["--fs-short-permille", "1000"])
+        .stdout;
+    for name in ["stat", "status"] {
+        let answer = line(&short, name);
+        assert_ne!(answer, whole, "{name}");
+        assert!(
+            answer.starts_with("open=ok short=") && answer.ends_with(" complete=true"),
+            "{name}: {answer}"
+        );
+    }
+
+    let enomem = format!("open=errno{}", libc::ENOMEM);
+    let targeted = g
+        .assert_run_success(1, &["--fs-error-at", "open:1:ENOMEM"])
+        .stdout;
+    assert_eq!(line(&targeted, "stat"), enomem);
+    assert_eq!(line(&targeted, "status"), whole);
+    let failed = run_seeded(&g, 1, &["--fs-error-permille", "1000"]);
+    for name in ["stat", "status", "list"] {
+        assert_eq!(line(&failed, name), enomem, "{name}");
+    }
+}

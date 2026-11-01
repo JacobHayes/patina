@@ -13,6 +13,26 @@ pub trait FsDriver: Send {
     fn open(&mut self, _clock: FsClock, _path: &str, _flags: OpenFlags) -> DriverResult<Fd> {
         Err(unsupported_filesystem_operation("open"))
     }
+    /// An open of a file the virtual kernel makes rather than stores (a
+    /// procfs node, by its canonical `path`), whose content the native shim
+    /// answers from its own model. No storage is touched, so it succeeds; a
+    /// fault-injecting driver decides the failures such a file has.
+    fn open_synthetic(&mut self, _path: &str) -> DriverResult<()> {
+        Ok(())
+    }
+    /// A read of up to `max_len` bytes from such a file (`positional` for a
+    /// `pread`), which has `available` bytes from where it reads: how many
+    /// it may return, all of them here. `allocates` says it is the
+    /// description's first read, the one that makes its buffer.
+    fn read_synthetic(
+        &mut self,
+        max_len: usize,
+        _available: usize,
+        _positional: bool,
+        _allocates: bool,
+    ) -> DriverResult<usize> {
+        Ok(max_len)
+    }
     /// A cursor read. Updates `atime` under the clock's [`patina_dst_abi::AtimePolicy`].
     fn read(&mut self, _clock: FsClock, _fd: Fd, _max_len: usize) -> DriverResult<Vec<u8>> {
         Err(unsupported_filesystem_operation("read"))

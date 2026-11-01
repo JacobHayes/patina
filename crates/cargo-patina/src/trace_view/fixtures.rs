@@ -221,6 +221,22 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             }]),
         ),
         (
+            Operation::FsSyntheticOpen {
+                path: "/proc/2/stat".into(),
+            },
+            Outcome::Unit,
+        ),
+        (
+            Operation::FsSyntheticRead {
+                path: "/proc/2/stat".into(),
+                at: None,
+                max_len: 64,
+                available: 200,
+                allocates: true,
+            },
+            Outcome::Usize(64),
+        ),
+        (
             Operation::FsRemoveDirectory { path: "/d".into() },
             Outcome::Unit,
         ),

@@ -137,6 +137,8 @@ impl Operation {
             Operation::EntropyFill { .. }
             | Operation::FsRead { .. }
             | Operation::FsReadAt { .. }
+            | Operation::FsSyntheticOpen { .. }
+            | Operation::FsSyntheticRead { .. }
             | Operation::FsMetadata { .. }
             | Operation::FsFdMetadata { .. }
             | Operation::FsInodeMetadata { .. }

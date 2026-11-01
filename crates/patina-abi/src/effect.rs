@@ -240,6 +240,25 @@ pub enum Operation {
     FsRemoveDirectory {
         path: String,
     },
+    /// An open of a file the virtual kernel makes rather than stores (a
+    /// procfs node, by its canonical `path`): the shim answers it from its
+    /// model, and the filesystem decides only whether it fails, as
+    /// [`Outcome::Unit`] or the error.
+    FsSyntheticOpen {
+        path: String,
+    },
+    /// A read of up to `max_len` bytes from such a file, at `at` (`pread`)
+    /// or its description's position: how many of them it may return, as
+    /// [`Outcome::Usize`] (the shim serves the bytes from its model). The
+    /// file has `available` bytes from there, and `allocates` says the read
+    /// is the description's first, the one that makes its buffer.
+    FsSyntheticRead {
+        path: String,
+        at: Option<u64>,
+        max_len: usize,
+        available: usize,
+        allocates: bool,
+    },
     FsRename {
         from: String,
         to: String,

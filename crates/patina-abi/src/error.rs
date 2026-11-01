@@ -58,6 +58,9 @@ pub enum ErrorCode {
     /// wait (`EAGAIN`): `getrandom(GRND_NONBLOCK)` on a random pool that is not
     /// yet initialized.
     WouldBlock,
+    /// The kernel could not allocate what the call needs (`ENOMEM`): a
+    /// procfs file's buffer.
+    NoMemory,
 }
 
 /// A typed effect failure suitable for traces and user-facing diagnostics.
@@ -121,6 +124,7 @@ impl fmt::Display for ErrorCodeDisplay {
             ErrorCode::NoSuchPosition => "no_such_position",
             ErrorCode::FileTooBig => "file_too_big",
             ErrorCode::WouldBlock => "would_block",
+            ErrorCode::NoMemory => "no_memory",
         };
         f.write_str(value)
     }

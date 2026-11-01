@@ -295,7 +295,11 @@ the SUD rows: a door never decides by kind itself.
 - **Filesystem:** the driver (`MemFs`, `CrashFs`) behind the descriptor
   funnels; procfs (`src/procfs/`), memory devices (`src/memdev.rs`),
   nsfs (`src/nsfs.rs`) are typed virtual
-  entries every path operation answers.
+  entries every path operation answers. procfs's content is the shim's,
+  made from state only the shim holds, but its opens and reads are the
+  driver's decisions (`FsDriver::open_synthetic`, `read_synthetic`): the
+  trace holds them, and the fault wrapper fails them only as procfs fails
+  (`ENOMEM`) and shortens its reads.
 - **Sockets** (`src/thread/net.rs`): `patina_sock_*` entries over `SimNet`
   (INET) and the shim's own AF_UNIX/netlink; guest memory goes through
   `uaccess` (`EFAULT`, never a shim fault).

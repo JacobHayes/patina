@@ -48,6 +48,7 @@ fn opened() -> Open {
         text: None,
         read_pos: 0,
         pos: 0,
+        buffered: false,
         reading: 0,
         released: false,
     }

@@ -43,6 +43,8 @@ operation_kinds! {
     Operation::FsSetTimesByPath { .. } => ("fs_set_times_by_path", Fs);
     Operation::FsReadDirectory { .. } => ("fs_read_directory", Fs);
     Operation::FsReadDirectoryFd { .. } => ("fs_read_directory_fd", Fs);
+    Operation::FsSyntheticOpen { .. } => ("fs_synthetic_open", Fs);
+    Operation::FsSyntheticRead { .. } => ("fs_synthetic_read", Fs);
     Operation::FsRemoveDirectory { .. } => ("fs_remove_directory", Fs);
     Operation::FsRename { .. } => ("fs_rename", Fs);
     Operation::FsLink { .. } => ("fs_link", Fs);

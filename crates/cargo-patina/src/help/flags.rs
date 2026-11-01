@@ -94,7 +94,7 @@ const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
         ),
         FaultKnob::FsErrorAt => (
             Value::Required("KIND:N[:ERRNO]", Kind::FsErrorTarget),
-            "Fail the Nth fault-eligible fs op of KIND (as the fs fault report names it: sync, sync_all, write, read_at, ...) with ERRNO (EIO, the default; ENOSPC or EINTR where the op can fail so), whatever the seed (repeatable). A target that never landed makes the fs fault report vacuous.",
+            "Fail the Nth fault-eligible fs op of KIND (as the fs fault report names it: sync, sync_all, write, read_at, ...) with ERRNO (EIO, the default; ENOSPC, EINTR or ENOMEM where the op can fail so: ENOMEM is a procfs open or first read, the only error one has), whatever the seed (repeatable). A target that never landed makes the fs fault report vacuous.",
             KnobGroup::Fault,
         ),
         FaultKnob::FsShortPermille => (

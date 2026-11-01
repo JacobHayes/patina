@@ -224,6 +224,52 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.open(clock, path, flags)
     }
 
+    /// A procfs open fails only as `single_open`'s allocation does
+    /// (`ENOMEM`); see [`choose_error_code`].
+    fn open_synthetic(&mut self, path: &str) -> DriverResult<()> {
+        if let Some(error) = self.maybe_error(FsFaultOp::OpenSynthetic) {
+            return Err(error);
+        }
+        self.inner.open_synthetic(path)
+    }
+
+    /// A procfs read can come back short at any length, and fail only at the
+    /// description's first read, which allocates its `seq_file` buffer
+    /// (`ENOMEM`); a later one reuses it and cannot fail.
+    fn read_synthetic(
+        &mut self,
+        max_len: usize,
+        available: usize,
+        positional: bool,
+        allocates: bool,
+    ) -> DriverResult<usize> {
+        let op = if positional {
+            FsFaultOp::ReadAtSynthetic
+        } else {
+            FsFaultOp::ReadSynthetic
+        };
+        let error = if allocates {
+            self.maybe_error(op)
+        } else {
+            None
+        };
+        let short = self.maybe_short_len(max_len);
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let granted = self.inner.read_synthetic(
+            short.unwrap_or(max_len),
+            available,
+            positional,
+            allocates,
+        )?;
+        // Applied only when it takes bytes the read would have returned.
+        if short.is_some_and(|short| short < available) {
+            self.count_short(op.kind());
+        }
+        Ok(granted)
+    }
+
     fn read(&mut self, clock: FsClock, fd: Fd, max_len: usize) -> DriverResult<Vec<u8>> {
         let error = self.maybe_error(FsFaultOp::Read);
         let short = self.maybe_short_len(max_len);
@@ -770,7 +816,14 @@ fn xattr_write_fault(target: &XattrTarget) -> FsFaultOp {
 
 #[derive(Clone, Copy, Debug)]
 enum FsFaultOp {
-    Open { allocating: bool },
+    Open {
+        allocating: bool,
+    },
+    /// An open of a file the virtual kernel makes (procfs).
+    OpenSynthetic,
+    /// The first read of one, by cursor or position.
+    ReadSynthetic,
+    ReadAtSynthetic,
     Read,
     Write,
     ReadAt,
@@ -800,8 +853,9 @@ impl FsFaultOp {
     /// breakdown row can never spell the same operation differently.
     fn kind(self) -> FsFaultOpKind {
         match self {
-            FsFaultOp::Open { .. } => FsFaultOpKind::Open,
-            FsFaultOp::Read => FsFaultOpKind::Read,
+            FsFaultOp::Open { .. } | FsFaultOp::OpenSynthetic => FsFaultOpKind::Open,
+            FsFaultOp::Read | FsFaultOp::ReadSynthetic => FsFaultOpKind::Read,
+            FsFaultOp::ReadAtSynthetic => FsFaultOpKind::ReadAt,
             FsFaultOp::Write => FsFaultOpKind::Write,
             FsFaultOp::ReadAt => FsFaultOpKind::ReadAt,
             FsFaultOp::WriteAt => FsFaultOpKind::WriteAt,
@@ -826,32 +880,18 @@ impl FsFaultOp {
 
     /// Whether this operation can fail with `errno`: the kind's set
     /// ([`FsFaultOpKind::can_fail_with`]), with an `open` that creates nothing
-    /// unable to run out of space.
+    /// unable to run out of space, a procfs operation able to fail only
+    /// `ENOMEM`, and a stored file's never `ENOMEM`.
     fn can_fail_with(self, errno: FsErrno) -> bool {
         match (self, errno) {
+            (
+                FsFaultOp::OpenSynthetic | FsFaultOp::ReadSynthetic | FsFaultOp::ReadAtSynthetic,
+                errno,
+            ) => errno == FsErrno::NoMemory,
+            (_, FsErrno::NoMemory) => false,
             (FsFaultOp::Open { allocating }, FsErrno::NoSpace) => allocating,
             _ => self.kind().can_fail_with(errno),
         }
-    }
-
-    /// Whether this operation can consume space, and so can plausibly fail
-    /// `ENOSPC`. `Sync` and `SyncAll` are here because a filesystem with
-    /// delayed allocation does the allocation at writeback: `fsync(2)` ERRORS
-    /// lists `ENOSPC` explicitly, and a database's durability path meeting a
-    /// full disk at fsync — not at write — is the canonical storage failure it
-    /// must handle. `unlink(2)`/`rmdir(2)` are deliberately absent: neither
-    /// lists `ENOSPC`, and removing a name does not allocate.
-    fn can_no_space(self) -> bool {
-        self.can_fail_with(FsErrno::NoSpace)
-    }
-
-    /// Whether a signal can land mid-operation and surface as `EINTR`. The
-    /// data-plane calls and `fsync(2)` list it; `open(2)`'s `EINTR` is scoped to
-    /// blocking opens of slow devices and FIFOs, which this filesystem does not
-    /// model, so a regular-file open is not interruptible here, and neither
-    /// `sync(2)` nor `syncfs(2)` can be interrupted.
-    fn can_interrupt(self) -> bool {
-        self.can_fail_with(FsErrno::Interrupted)
     }
 }
 
@@ -883,28 +923,44 @@ impl FsFaultOp {
 /// | mkdir, mknod, rename, link, symlink | `EIO`, `ENOSPC`                |
 /// | unlink, rmdir, readdir, readlink    | `EIO`                          |
 /// | utimensat                           | `EIO`                          |
+/// | procfs open, procfs first read      | `ENOMEM`                       |
+///
+/// `ENOSPC` is for the operations that can consume space (`fsync` and
+/// `sync` too: delayed allocation allocates at writeback); `unlink(2)` and
+/// `rmdir(2)` list none. `EINTR` is for the data-plane calls and `fsync(2)`:
+/// `open(2)`'s is scoped to blocking opens of slow devices and FIFOs, which
+/// this filesystem does not model.
+///
+/// procfs has no storage, so it has none of these. Its one failure on a
+/// node whose process lives is `ENOMEM` from `seq_file`: `single_open`'s
+/// allocation at the open and the buffer `seq_read_iter` allocates at a
+/// description's first read, both `GFP_KERNEL_ACCOUNT`, so a memory cgroup
+/// at its limit fails them. No modeled procfs file returns `EIO`, and
+/// `seq_read_iter` takes its lock uninterruptibly, so neither `EIO` nor
+/// `EINTR` is injected there. A process directory that goes away
+/// mid-walk (`ENOENT`, `ESRCH`) is not injected either: the model's
+/// processes are init, which never exits, and the reader's own; another
+/// thread's directory does go when the thread exits, which the scheduler
+/// explores.
 ///
 /// **Never an error that indicts the CALLER rather than the storage.** `EBADF`,
 /// `EFAULT` and `EINVAL` say the program passed a bad descriptor, pointer or
 /// argument; no disk failure produces one, and injecting one asks the guest to
 /// tolerate its own impossible bug. They are unreachable here by construction:
-/// [`ErrorCode::Io`], [`ErrorCode::NoSpace`] and [`ErrorCode::Interrupted`] are
-/// the only codes this function can return. (`EDQUOT` and `EMFILE`/`ENFILE`
+/// the codes of [`FsErrno`] are the only ones this function can return. (`EDQUOT` and `EMFILE`/`ENFILE`
 /// would also be plausible for the write and open sets, but the driver ABI has
 /// no code for them and `ENOSPC` already exercises the same guest paths.)
 ///
 /// The choice is a pure function of the fault RNG's seeded stream and the
 /// operation, so a seed reproduces the same errno at the same fire.
 fn choose_error_code(rng: &mut SplitMix64, op: FsFaultOp) -> ErrorCode {
-    let mut choices = [ErrorCode::Io, ErrorCode::Io, ErrorCode::Io];
-    let mut len = 1usize;
-    if op.can_no_space() {
-        choices[len] = ErrorCode::NoSpace;
-        len += 1;
-    }
-    if op.can_interrupt() {
-        choices[len] = ErrorCode::Interrupted;
-        len += 1;
+    let mut choices = [ErrorCode::Io; FsErrno::ALL.len()];
+    let mut len = 0usize;
+    for errno in FsErrno::ALL {
+        if op.can_fail_with(errno) {
+            choices[len] = errno.code();
+            len += 1;
+        }
     }
     choices[rng.next_u64() as usize % len]
 }
@@ -914,6 +970,7 @@ fn code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Io => "io",
         ErrorCode::NoSpace => "no_space",
         ErrorCode::Interrupted => "interrupted",
+        ErrorCode::NoMemory => "no_memory",
         _ => "unexpected",
     }
 }
@@ -1002,9 +1059,12 @@ mod tests {
         // Every fault-eligible operation, `open` in both of its shapes. Pinned
         // against the shared kind table below so a new operation cannot slip in
         // untested.
-        const ALL_FAULT_OPS: [FsFaultOp; 22] = [
+        const ALL_FAULT_OPS: [FsFaultOp; 25] = [
             FsFaultOp::Open { allocating: true },
             FsFaultOp::Open { allocating: false },
+            FsFaultOp::OpenSynthetic,
+            FsFaultOp::ReadSynthetic,
+            FsFaultOp::ReadAtSynthetic,
             FsFaultOp::Read,
             FsFaultOp::Write,
             FsFaultOp::ReadAt,
@@ -1042,13 +1102,33 @@ mod tests {
                     "{:?} injected {code:?}",
                     op.kind().name()
                 );
-                // And only from the set the operation could actually return.
-                let allowed = code == ErrorCode::Io
-                    || (code == ErrorCode::NoSpace && op.can_no_space())
-                    || (code == ErrorCode::Interrupted && op.can_interrupt());
+                // And only from the set the operation could actually return:
+                // a procfs operation only `ENOMEM`, a stored file's never.
+                let allowed = FsErrno::ALL
+                    .into_iter()
+                    .any(|errno| errno.code() == code && op.can_fail_with(errno));
                 assert!(allowed, "{} injected {code:?}", op.kind().name());
+                let synthetic = matches!(
+                    op,
+                    FsFaultOp::OpenSynthetic
+                        | FsFaultOp::ReadSynthetic
+                        | FsFaultOp::ReadAtSynthetic
+                );
+                assert_eq!(code == ErrorCode::NoMemory, synthetic, "{op:?}");
             }
         }
+    }
+
+    /// A procfs read's truncation is applied only when the guest gets fewer
+    /// bytes than it would have: a read already bounded by what the file has
+    /// left is unchanged by it.
+    #[test]
+    fn a_synthetic_short_read_counts_only_when_it_takes_bytes() {
+        let mut fs = FaultFs::new(MemFs::new(), 1).short_permille(1000);
+        assert_eq!(fs.read_synthetic(2, 1, false, true).unwrap(), 1);
+        assert_eq!(fs.fault_report().unwrap().shorts_applied, 0);
+        assert!(fs.read_synthetic(64, 64, false, false).unwrap() < 64);
+        assert_eq!(fs.fault_report().unwrap().shorts_applied, 1);
     }
 
     /// Lock bookkeeping keys on `fd_ino`, so it is never faulted even where

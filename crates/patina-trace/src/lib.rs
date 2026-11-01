@@ -127,7 +127,10 @@ pub use replay::Replayer;
 ///   `incarnation` or `order`: all three follow from its position and its
 ///   timeline's lifecycle markers. An order is stored, as a third element,
 ///   only where it does not follow the previous decision's.
-pub const TRACE_FORMAT_VERSION: u32 = 27;
+/// - 28: a procfs open and read are decisions (`fs_synthetic_open`,
+///   `fs_synthetic_read`), so a filesystem fault reaches them. A format 27
+///   trace of a guest that read procfs has none, so it is refused.
+pub const TRACE_FORMAT_VERSION: u32 = 28;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 
