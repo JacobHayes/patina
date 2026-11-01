@@ -11,8 +11,15 @@
 //! door's Rust definition is renamed `patina_impl_<name>`; a door's route
 //! alias (the `dlsym` table's answer) is left undefined under the door's name,
 //! so it names the façade's address. The **façade** is the C seams (the POSIX
-//! object, unchanged) and one generated thunk per Rust door, a tail jump to
-//! its implementation.
+//! object) and one generated thunk per Rust door, a tail jump to its
+//! implementation.
+//!
+//! On ELF each object then takes a fixed footprint (`seal/footprint.rs`): its
+//! loaded sections merged into one per kind at a class size, its unwind table
+//! and absolute pointers padded to class counts, and its references to its
+//! own definitions moved off the GOT to private slots. The guest's own
+//! addresses, which follow the shim's in the final link, therefore change only
+//! when the shim crosses a class, not with what it holds.
 //!
 //! Every other reference engine code makes to a door is the engine's own use
 //! of the host, not a guest's call: `std`'s I/O, locks and panic machinery,
@@ -53,6 +60,7 @@ use crate::CliError;
 use crate::allocator_routing::AllocatorRouting;
 
 mod elf;
+mod footprint;
 mod macho;
 
 /// The façade object's file name.
@@ -85,6 +93,7 @@ pub(super) fn recipe_digest() -> String {
             let mut hasher = Sha256::new();
             hasher.update(include_str!("seal.rs"));
             hasher.update(include_str!("seal/elf.rs"));
+            hasher.update(include_str!("seal/footprint.rs"));
             hasher.update(include_str!("seal/macho.rs"));
             hasher.update(linker_identity());
             crate::hex(&hasher.finalize())
@@ -198,6 +207,10 @@ pub(super) fn seal(
             .arg(&facade),
         "linking the façade",
     )?;
+    if !platform.macho {
+        platform.link_slots(&facade, work, "facade", &BTreeMap::new(), &BTreeSet::new())?;
+        platform.fix_footprint(&facade, work, "facade")?;
+    }
     check_facade(&parse(&read(&facade)?, &facade)?, platform)?;
 
     for (from, to) in [
@@ -849,6 +862,7 @@ impl Platform {
             .collect();
         let keep: BTreeSet<String> = inventory.exports(allocator).collect();
         let weaken: BTreeSet<String> = allocator.iter().cloned().collect();
+        self.link_slots(merged, work, "engine", &bind, &undefine)?;
         elf::rewrite(
             merged,
             &elf::Plan {
@@ -860,7 +874,90 @@ impl Platform {
                 doors: &inventory.doors,
             },
         )
-        .map_err(|error| refuse(format!("localising the engine: {error}")))
+        .map_err(|error| refuse(format!("localising the engine: {error}")))?;
+        self.fix_footprint(merged, work, "engine")
+    }
+
+    /// ELF: link into `object` a private GOT slot for each global definition
+    /// its loaded code reaches through a GOT entry, under the name `bind`
+    /// will rebind the reference to; the names in `skip` become references.
+    fn link_slots(
+        self,
+        object: &Path,
+        work: &Path,
+        stem: &str,
+        bind: &BTreeMap<String, String>,
+        skip: &BTreeSet<String>,
+    ) -> Result<(), CliError> {
+        let targets = footprint::got_targets(&read(object)?, bind, skip)
+            .map_err(|error| refuse(format!("reading the {stem}'s GOT references: {error}")))?;
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let source = work.join(format!("{stem}_slots.s"));
+        write(
+            &source,
+            &(footprint::slots(&targets) + &self.object_notes()),
+        )?;
+        let slots = work.join(format!("{stem}_slots.o"));
+        run(
+            Command::new(cc())
+                .arg("-c")
+                .arg(&source)
+                .arg("-o")
+                .arg(&slots),
+            "assembling the private GOT slots",
+        )?;
+        let linked = work.join(format!("{stem}_slotted.o"));
+        run(
+            self.relocatable_link()
+                .arg(object)
+                .arg(&slots)
+                .arg("-o")
+                .arg(&linked),
+            "linking the private GOT slots",
+        )?;
+        fs::rename(&linked, object)
+            .map_err(|error| refuse(format!("linking the private GOT slots: {error}")))
+    }
+
+    /// ELF: move `object`'s GOT references to its private slots, then give
+    /// it its fixed footprint (`seal/footprint.rs`), in place.
+    fn fix_footprint(self, object: &Path, work: &Path, stem: &str) -> Result<(), CliError> {
+        elf::privatise_got(object)
+            .map_err(|error| refuse(format!("privatising the {stem}'s GOT references: {error}")))?;
+        let plan = footprint::plan(&read(object)?)
+            .map_err(|error| refuse(format!("planning the {stem}'s footprint: {error}")))?;
+        let source = work.join(format!("{stem}_footprint.s"));
+        write(&source, &(plan.pad.clone() + &self.object_notes()))?;
+        let pad = work.join(format!("{stem}_footprint.o"));
+        run(
+            Command::new(cc())
+                .arg("-c")
+                .arg(&source)
+                .arg("-o")
+                .arg(&pad),
+            "assembling the footprint's pad",
+        )?;
+        let script = work.join(format!("{stem}_footprint.ld"));
+        write(&script, &plan.script)?;
+        let fixed = work.join(format!("{stem}_fixed.o"));
+        run(
+            self.relocatable_link()
+                .arg("-T")
+                .arg(&script)
+                .arg(object)
+                .arg(&pad)
+                .arg("-o")
+                .arg(&fixed),
+            "fixing the footprint",
+        )?;
+        footprint::retain(&fixed)
+            .map_err(|error| refuse(format!("retaining the {stem}'s footprint: {error}")))?;
+        footprint::check(&read(&fixed)?, &plan)
+            .map_err(|error| refuse(format!("the {stem}: {error}")))?;
+        fs::rename(&fixed, object)
+            .map_err(|error| refuse(format!("fixing the {stem}'s footprint: {error}")))
     }
 
     /// Mach-O: Apple's relocatable link neither collects garbage nor wraps,

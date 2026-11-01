@@ -7,12 +7,15 @@
 //! ELF orders a symbol table's local symbols before its global ones, so the
 //! symbols this localises move down into the local part, and every reference
 //! to a global symbol's index is renumbered. A COMDAT group whose signature
-//! ends up local stops being COMDAT.
+//! ends up local dissolves.
 //!
 //! The rewrite also binds references: a relocation in a loaded section other
 //! than the unwind table that names a symbol the plan binds names its binding
 //! instead, unless it lies in a door's own definition, which refuses the
 //! rewrite.
+//!
+//! A second pass (`privatise_got`) moves the GOT references to definitions
+//! that have a private slot linked in onto the slot, for the footprint.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -28,8 +31,10 @@ const SHN_UNDEF: u16 = 0;
 const SHN_COMMON: u16 = 0xfff2;
 const SHN_XINDEX: u16 = 0xffff;
 const SHF_ALLOC: u64 = 0x2;
+const SHF_GROUP: u64 = 0x200;
+const SHF_EXCLUDE: u64 = 0x8000_0000;
+const SHT_PROGBITS: u32 = 1;
 const STB_LOCAL: u8 = 0;
-const GRP_COMDAT: u32 = 1;
 const STB_WEAK: u8 = 2;
 const SYMBOL: usize = 24;
 const HEADER: usize = 64;
@@ -283,6 +288,7 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
 
     let locals =
         u32::try_from(first_global + localised.len()).map_err(|error| error.to_string())?;
+    let mut dissolved: Vec<usize> = Vec::new();
     for section in &mut sections {
         if section.link() as usize != symtab_index {
             continue;
@@ -328,13 +334,26 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
                 // The final link keeps one COMDAT group per signature name,
                 // whatever its binding: a guest's group of a name the engine
                 // made local would discard the engine's, leaving its local
-                // definitions in a discarded section. A plain group is never
-                // discarded, and the engine, one object, holds no duplicate.
+                // definitions in a discarded section. Such a group dissolves:
+                // its members become ordinary sections, never discarded (the
+                // engine, one object, holds no duplicate), which the footprint
+                // merges like any other. The emptied group section is
+                // excluded from the final link.
                 if signature < locals {
-                    let flags = read(section.offset(), 4)?;
-                    let flags = u32::from_le_bytes(flags.try_into().expect("four bytes"));
-                    file.write_all_at(&(flags & !GRP_COMDAT).to_le_bytes(), section.offset())
-                        .map_err(|error| error.to_string())?;
+                    let members = read(section.offset(), section.size())?;
+                    dissolved.extend(
+                        members
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .skip(1)
+                            .map(|member| u32::from_le_bytes(*member) as usize),
+                    );
+                    section.set_u32(4, SHT_PROGBITS);
+                    section.set_u64(8, SHF_EXCLUDE);
+                    section.set_u64(32, 0);
+                    section.set_u32(40, 0);
+                    section.set_u32(44, 0);
                 }
             }
             SHT_SYMTAB_SHNDX => {
@@ -348,6 +367,13 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
             }
             _ => {}
         }
+    }
+    for member in dissolved {
+        let section = sections
+            .get_mut(member)
+            .ok_or("a group member out of range")?;
+        let flags = section.flags() & !SHF_GROUP;
+        section.set_u64(8, flags);
     }
     if !refused.is_empty() {
         let pairs: Vec<String> = refused
@@ -371,4 +397,118 @@ pub(super) fn rewrite(path: &Path, plan: &Plan<'_>) -> Result<(), String> {
     let table: Vec<u8> = sections.iter().flat_map(|section| section.header).collect();
     file.write_all_at(&table, shoff)
         .map_err(|error| error.to_string())
+}
+
+/// Point every GOT reference in a loaded section to a symbol with a private
+/// slot (`footprint::slots`, linked in) at the slot instead, in place: the
+/// same load, from the slot rather than a GOT entry. Refuses a reference no
+/// slot load can stand for. Returns how many references moved.
+pub(super) fn privatise_got(path: &Path) -> Result<usize, String> {
+    use object::LittleEndian as LE;
+    use object::elf;
+    use object::read::elf::{ElfFile64, Rela as _, SectionHeader as _};
+
+    use super::footprint::{self, SLOT, SLOTS};
+
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let file = ElfFile64::<LE>::parse(&*bytes).map_err(|error| error.to_string())?;
+    let arch = footprint::arch(&bytes)?;
+    let sections = file.elf_section_table();
+    let symbols = file.elf_symbol_table();
+    let name_of = |header: &elf::SectionHeader64<LE>| {
+        sections
+            .section_name(LE, header)
+            .map_err(|error| error.to_string())
+    };
+    let Some(slot_section) = sections
+        .iter()
+        .position(|header| name_of(header).is_ok_and(|name| name == SLOTS.as_bytes()))
+    else {
+        return Ok(0);
+    };
+
+    // Slot `i` is the symbol `patina_got_<i>` at `8 * i`; each holds the
+    // address its relocation names.
+    let mut slot_symbols = BTreeMap::new();
+    for (index, symbol) in symbols.symbols().iter().enumerate() {
+        let name = symbols
+            .symbol_name(LE, symbol)
+            .map_err(|error| error.to_string())?;
+        if let Some(slot) = name
+            .strip_prefix(SLOT.as_bytes())
+            .and_then(|rest| std::str::from_utf8(rest).ok())
+            .and_then(|rest| rest.parse::<u64>().ok())
+        {
+            slot_symbols.insert(slot * 8, index as u64);
+        }
+    }
+    let rela = |header: &elf::SectionHeader64<LE>| -> Result<&[elf::Rela64<LE>], String> {
+        header
+            .data_as_array(LE, &*bytes)
+            .map_err(|error| error.to_string())
+    };
+    let mut slot_of: BTreeMap<u32, u64> = BTreeMap::new();
+    for header in sections.iter() {
+        if header.sh_type(LE) != elf::SHT_RELA || header.sh_info(LE) as usize != slot_section {
+            continue;
+        }
+        for entry in rela(header)? {
+            let offset = entry.r_offset(LE);
+            let slot = slot_symbols
+                .get(&offset)
+                .ok_or_else(|| format!("no slot symbol at {SLOTS}+{offset:#x}"))?;
+            if entry.r_type(LE, false) != arch.abs64() || entry.r_addend(LE) != 0 {
+                return Err(format!(
+                    "slot at {SLOTS}+{offset:#x} is not a plain pointer"
+                ));
+            }
+            slot_of.insert(entry.r_sym(LE, false), *slot);
+        }
+    }
+
+    let mut patches = Vec::new();
+    for header in sections.iter() {
+        let target = header.sh_info(LE) as usize;
+        if header.sh_type(LE) != elf::SHT_RELA || target == slot_section {
+            continue;
+        }
+        let loaded = sections
+            .section(object::SectionIndex(target))
+            .is_ok_and(|section| {
+                section.sh_flags(LE) & u64::from(elf::SHF_ALLOC) != 0
+                    && name_of(section).is_ok_and(|name| name != b".eh_frame")
+            });
+        if !loaded {
+            continue;
+        }
+        let start = header.sh_offset(LE);
+        for (index, entry) in rela(header)?.iter().enumerate() {
+            let kind = entry.r_type(LE, false);
+            let Some(retarget) = arch.got(kind) else {
+                continue;
+            };
+            let Some(&slot) = slot_of.get(&entry.r_sym(LE, false)) else {
+                continue;
+            };
+            let retarget = retarget
+                .ok_or_else(|| format!("a GOT reference of type {kind} no slot load stands for"))?;
+            if arch.got_addend_free() && entry.r_addend(LE) != 0 {
+                return Err("a GOT reference with an addend".into());
+            }
+            patches.push((
+                start + index as u64 * 24 + 8,
+                (slot << 32) | u64::from(retarget),
+            ));
+        }
+    }
+    drop(file);
+    let out = File::options()
+        .write(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    for (offset, info) in &patches {
+        out.write_all_at(&info.to_le_bytes(), *offset)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(patches.len())
 }

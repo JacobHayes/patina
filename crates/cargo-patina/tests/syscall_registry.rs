@@ -583,6 +583,156 @@ fn an_engine_call_to_a_door_reaches_the_host_not_the_door() {
     assert_ne!(field("guest="), pid, "{output:?}");
 }
 
+/// What the shim holds is not the guest's to see: a guest's own code and
+/// data take the same addresses, and its image the same segments, whatever
+/// the engine holds. An engine grown by a retained member with a little of
+/// every kind of content (code with its unwind entry, on x86_64, read-only, relocated,
+/// zeroed and thread-local data, pointers, and a GOT reference) seals to the
+/// same layout as the pristine one, so a change inside the shim never moves
+/// the guest. On ELF; Mach-O guests are outside the footprint.
+#[cfg(target_os = "linux")]
+#[test]
+fn growing_the_engine_moves_no_guest_address() {
+    use object::read::elf::{ElfFile64, FileHeader as _, ProgramHeader as _};
+    use object::{Object as _, ObjectSymbol as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let posix = compile_posix_object(dir.path());
+    let archive = shim_archive();
+    let got = if cfg!(target_arch = "x86_64") {
+        ".section .rodata.planted_got,\"aR\",@progbits\n.long planted_function@GOTPCREL\n"
+    } else {
+        ".section .text.planted_got,\"axR\",%progbits\n\
+         adrp x0, :got:planted_function\nldr x0, [x0, :got_lo12:planted_function]\nret\n"
+    };
+    // A dependency's member, localised unseen and kept by `retain` alone.
+    let plant = compile_plant(
+        dir.path(),
+        "planted_dependency",
+        &format!(
+            "#define KEPT __attribute__((retain, used))\n\
+             KEPT int planted_function(int x) {{ return x * 7 + 1; }}\n\
+             KEPT const char planted_rodata[24] = \"planted\";\n\
+             KEPT int planted_data[4] = {{1}};\n\
+             KEPT int planted_bss[8];\n\
+             KEPT __thread int planted_tdata = 1;\n\
+             KEPT __thread int planted_tbss[2];\n\
+             KEPT int *planted_pointers[] = {{ planted_data, planted_bss }};\n\
+             KEPT int *const planted_relro[] = {{ planted_data }};\n\
+             __asm__(\"{}\");\n",
+            got.escape_default()
+        ),
+    );
+    if cfg!(target_arch = "aarch64") {
+        // The engine's unwind entries there are LLVM's alone, under CIEs a C
+        // compiler's differ from, and a new kind of CIE is outside the
+        // footprint: the plant's code goes without one.
+        run_tool(
+            common::c_compiler()
+                .args([
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-unwind-tables",
+                    "-c",
+                ])
+                .arg(dir.path().join("planted_dependency.c"))
+                .arg("-o")
+                .arg(&plant),
+        );
+    }
+    let planted = plant_member(&archive, dir.path(), &plant);
+
+    let guest = dir.path().join("guest.c");
+    std::fs::write(
+        &guest,
+        "#include <stdio.h>\n\
+         static int guest_bss[64];\n\
+         int guest_data = 3;\n\
+         const char guest_rodata[] = \"guest\";\n\
+         __thread int guest_tdata = 5;\n\
+         __thread int guest_tbss;\n\
+         static int *const guest_relro[] = { &guest_data };\n\
+         int main(void) {\n\
+             printf(\"%p %p %p %p %p %p\\n\", (void *)guest_bss, (void *)&guest_data,\n\
+                    (void *)guest_rodata, (void *)&guest_tdata, (void *)&guest_tbss,\n\
+                    (void *)guest_relro);\n\
+             return 0;\n\
+         }\n",
+    )
+    .unwrap();
+    let guest_object = dir.path().join("guest.o");
+    run_tool(
+        common::c_compiler()
+            .arg("-c")
+            .arg(&guest)
+            .arg("-o")
+            .arg(&guest_object),
+    );
+    let bytes = std::fs::read(&guest_object).unwrap();
+    let names: BTreeSet<String> = object::File::parse(&*bytes)
+        .unwrap()
+        .symbols()
+        // Not aarch64's mapping symbols (`$x`, `$d`), which every object has.
+        .filter(|symbol| {
+            !symbol.is_undefined()
+                && !symbol.name().unwrap().starts_with('$')
+                && !matches!(
+                    symbol.kind(),
+                    object::SymbolKind::Section | object::SymbolKind::File
+                )
+        })
+        .map(|symbol| symbol.name().unwrap().to_owned())
+        .collect();
+    assert!(names.contains("guest_tbss"), "{names:?}");
+
+    // Every segment, and the address of each of the guest's own definitions.
+    let layout = |archive: &std::path::Path, name: &str| {
+        let work = dir.path().join(name);
+        let sealed = cargo_patina::seal_shim(archive, &posix, &work)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let binary = work.join("guest");
+        run_tool(
+            common::c_compiler()
+                .arg(&guest_object)
+                .args(sealed)
+                .args(common::shim_linker_args(archive, &work))
+                // Collecting, as a Rust guest's link does.
+                .arg("-Wl,--gc-sections")
+                .arg("-o")
+                .arg(&binary),
+        );
+        let bytes = std::fs::read(&binary).unwrap();
+        let elf = ElfFile64::<object::LittleEndian>::parse(&*bytes).unwrap();
+        let endian = object::LittleEndian;
+        let segments: Vec<_> = elf
+            .elf_header()
+            .program_headers(endian, &*bytes)
+            .unwrap()
+            .iter()
+            .map(|segment| {
+                (
+                    segment.p_type(endian),
+                    segment.p_vaddr(endian),
+                    segment.p_memsz(endian),
+                    segment.p_align(endian),
+                )
+            })
+            .collect();
+        let addresses: Vec<(String, u64)> = elf
+            .symbols()
+            .filter_map(|symbol| {
+                let name = symbol.name().ok()?;
+                names
+                    .contains(name)
+                    .then(|| (name.to_owned(), symbol.address()))
+            })
+            .collect();
+        (segments, addresses)
+    };
+    let pristine = layout(&archive, "pristine");
+    assert_eq!(pristine.1.len(), names.len(), "{pristine:?}");
+    assert_eq!(layout(&planted, "planted"), pristine);
+}
+
 /// Compile the C `source` to `<dir>/<member>.o`.
 fn compile_plant(dir: &std::path::Path, member: &str, source: &str) -> std::path::PathBuf {
     let c = dir.join(format!("{member}.c"));

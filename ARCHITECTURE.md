@@ -170,6 +170,28 @@ Darwin alike:
 - the **façade**: the POSIX C object plus one thunk per Rust door that
   tail-jumps to `patina_impl_<name>`.
 
+On ELF both objects take a **fixed footprint** (`seal/footprint.rs`), because
+the guest's own code and data follow the shim's in the final link and a guest
+observes its addresses: Go hashes pointers, so a moved type descriptor
+reshapes a map and the comparisons the compute meter charges, and with them
+virtual time. Each loaded kind of section (code; read-only data and exception
+tables; relocated read-only data; data; zeroed data; thread-local data) is
+merged into one section of a class size (the least 2^k or 3·2^(k-1) above what
+it holds) at a fixed alignment. The unwind table's FDEs and the absolute
+pointers (each a dynamic relocation in a position-independent guest) are
+padded to class counts. The objects' references to their own definitions load
+from private slots instead of GOT entries. The seal checks the result and
+refuses a section it has no kind for. So a guest moves only when the shim
+crosses a class. What stays variable is the shim's interface, which a guest
+links by name: dynamic symbols, the host imports' PLT and GOT entries and copy
+relocations, shared COMDAT groups, init and fini arrays, notes, the
+static-sites table, and the distinct CIEs the final link merges. The count
+assumes the seal's `ld` is GNU's, which strips FDE padding as GNU's final
+link would; an LLVM-sealed object linked by GNU `ld` loses padding the
+count includes. The helper
+objects a build adds (allocator routing, the Go meter, the coverage stubs)
+and Mach-O guests are outside the footprint.
+
 A door therefore has one public address, whether the guest or `dlsym`
 reaches it. Engine code never reaches a door: every other reference it makes
 to a door's name (`std`'s I/O, locks, entropy and panic machinery, and what a
@@ -279,6 +301,8 @@ These concerns are kept out of the interposed data plane:
   picks the same addresses (`src/native_run/layout.rs`): ASLR off for the
   image (`ADDR_NO_RANDOMIZE`; Darwin `_POSIX_SPAWN_DISABLE_ASLR`), the modeled
   8 MiB stack limit, and an initial stack padded to one size in every mode.
+  The sealed shim's fixed footprint (above) keeps the image's own layout
+  from following the shim's contents.
   The shim verifies the layout at installation and stops by name if the host
   ignored it. `--allow-randomized-address-layout` opts out, qualifying the
   run; every trace records `address_layout`, and replay reconciles it both
