@@ -9,13 +9,14 @@ use super::*;
 /// peer run whatever the path, `stat` never answers an unfollowed symlink,
 /// and a directory read never lists a description `dup2` replaced and
 /// reports access to the directory it listed.
-const PATH_RACE_ANSWERS: [(&str, &str); 8] = [
+const PATH_RACE_ANSWERS: [(&str, &str); 9] = [
     ("poll", "seen"),
     ("starve", "none"),
     ("stat_swap", "0"),
     ("getdents_dup2", "stale=0 failed=0"),
     ("getdents_notify", "0"),
     ("dirfd_ops", "none"),
+    ("path_ops", "none"),
     ("fifo_rename", "0"),
     ("rebind_rename", "0"),
 ];

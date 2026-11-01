@@ -32,6 +32,12 @@
 //!   family ([`DIRFD_OPS`]) through the held descriptor. Each acts in the
 //!   held directory whatever its name is now; the answer lists the families
 //!   that ever acted in the other one or failed, or `none`.
+//! - `path_ops`: as `dirfd_ops`, for the call families that take a path
+//!   alone ([`PATH_OPS`]), on a path through `/tmp/d` while its parent is
+//!   renamed. The two directories hold entries the call answers differently,
+//!   so each answer and effect agrees with one walk, through either
+//!   directory, or with none; the answer lists the families where it did not,
+//!   or `none`.
 //! - `fifo_rename`: another thread renames a regular file over a FIFO while
 //!   the main thread opens the FIFO read-write. The name exists throughout,
 //!   so the open reaches one node or the other; the answer counts the opens
@@ -425,6 +431,231 @@ fn dirfd_ops() -> String {
     if wrong.is_empty() { "none".into() } else { wrong.join(",") }
 }
 
+/// One path-only call family (no directory descriptor): what each directory
+/// holds first (`setup`, given its tag), the call on a path under `/tmp/d`
+/// (`act`: `Ok` or its errno), and whether its answer and its effect agree
+/// with one walk of that path, through either directory, or with none (the
+/// name was between renames: `ENOENT`). `landed` reads both directories once
+/// the renames stopped. Each directory's entry is a kind the call answers
+/// differently, so a walk through one and an operation on the other shows.
+struct PathOp {
+    name: &'static str,
+    setup: fn(dir: c_int, tag: u8),
+    act: fn() -> Result<(), i32>,
+    landed: fn(held: c_int, other: c_int, answer: Result<(), i32>) -> bool,
+}
+
+const ENOENT: i32 = 2;
+const EPERM: i32 = 1;
+const EACCES: i32 = 13;
+const EISDIR: i32 = 21;
+const IN_ATTRIB: u32 = 4;
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn answer(ok: bool) -> Result<(), i32> {
+    if ok { Ok(()) } else { Err(errno()) }
+}
+
+fn size(st: &[u8; 256]) -> u64 {
+    u64::from_ne_bytes(st[40..48].try_into().unwrap())
+}
+
+/// The held directory's `f` is a file of two bytes; the other's is `kind`.
+fn file_or(dir: c_int, tag: u8, kind: u32) {
+    if tag == HELD {
+        put(dir, c"f", tag);
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        let fd = unsafe { openat(dir, c"f".as_ptr(), O_WRONLY_APPEND) };
+        // SAFETY: the descriptor just opened, one byte from `tag`.
+        unsafe {
+            assert_eq!(write(fd, (&raw const tag).cast(), 1), 1);
+            close(fd);
+        }
+    } else if kind == S_IFIFO {
+        // SAFETY: as above.
+        assert_eq!(unsafe { mknodat(dir, c"f".as_ptr(), S_IFIFO | 0o600, 0) }, 0);
+    } else {
+        // SAFETY: as above.
+        assert_eq!(unsafe { mkdirat(dir, c"f".as_ptr(), 0o755) }, 0);
+    }
+}
+
+/// Every path-only call family the shim walks a path for.
+const PATH_OPS: &[PathOp] = &[
+    PathOp {
+        name: "truncate",
+        // The other directory's `f` is a directory: `EISDIR` if walked.
+        setup: |dir, tag| file_or(dir, tag, 0),
+        // SAFETY: a NUL-terminated path.
+        act: || answer(unsafe { truncate(c"/tmp/d/f".as_ptr(), 0) } == 0),
+        landed: |held, _, answer| {
+            let len = look(held, c"f").map(|st| size(&st));
+            match answer {
+                Ok(()) => len == Some(0),
+                Err(EISDIR | ENOENT) => len == Some(2),
+                Err(_) => false,
+            }
+        },
+    },
+    PathOp {
+        name: "chdir",
+        // The other directory is not searchable: `EACCES` if walked.
+        setup: |dir, tag| {
+            if tag == OTHER {
+                // SAFETY: a held directory descriptor.
+                assert_eq!(unsafe { fchmod(dir, 0o600) }, 0);
+            }
+        },
+        act: || {
+            // SAFETY: a NUL-terminated path.
+            let changed = unsafe { chdir(c"/tmp/d".as_ptr()) } == 0;
+            let answer = answer(changed);
+            if changed {
+                // Where it went: `.` names the held directory, or it is wrong.
+                let here = look(AT_FDCWD, c".").map(|st| ino(&st));
+                // SAFETY: the absolute root.
+                assert_eq!(unsafe { chdir(c"/".as_ptr()) }, 0);
+                if here != HELD_INO.with(|ino| ino.get()) {
+                    return Err(-1);
+                }
+            }
+            answer
+        },
+        landed: |_, other, answer| {
+            // SAFETY: a held directory descriptor.
+            unsafe { fchmod(other, 0o755) };
+            matches!(answer, Ok(()) | Err(EACCES | ENOENT))
+        },
+    },
+    PathOp {
+        name: "statfs",
+        setup: |dir, tag| file_or(dir, tag, 0),
+        act: || {
+            let mut out = Statfs([0; 128]);
+            // SAFETY: `out` is larger than `struct statfs`.
+            answer(unsafe { statfs(c"/tmp/d/f".as_ptr(), &mut out) } == 0)
+        },
+        landed: |_, _, answer| matches!(answer, Ok(()) | Err(ENOENT)),
+    },
+    PathOp {
+        name: "xattr",
+        // The other directory's `f` is a FIFO, which takes no `user.`
+        // attribute: `EPERM` if walked.
+        setup: |dir, tag| file_or(dir, tag, S_IFIFO),
+        act: || {
+            let value = HELD;
+            // SAFETY: NUL-terminated strings and a one-byte value.
+            let set = unsafe {
+                setxattr(c"/tmp/d/f".as_ptr(), c"user.t".as_ptr(), (&raw const value).cast(), 1, 0)
+            };
+            answer(set == 0)
+        },
+        landed: |held, other, answer| {
+            let tagged = |dir: c_int| {
+                // The FIFO's own `f` takes none; the file's has one exactly
+                // when the call set it.
+                let mut value = 0u8;
+                let path = if dir == held { c"/tmp/d/f" } else { c"/tmp/ro/f" };
+                // SAFETY: NUL-terminated strings and a one-byte buffer.
+                unsafe { getxattr(path.as_ptr(), c"user.t".as_ptr(), (&raw mut value).cast(), 1) == 1 }
+            };
+            match answer {
+                Ok(()) => tagged(held) && !tagged(other),
+                Err(EPERM | ENOENT) => !tagged(held) && !tagged(other),
+                Err(_) => false,
+            }
+        },
+    },
+    PathOp {
+        name: "inotify",
+        // The other directory has no `f`.
+        setup: |dir, tag| {
+            if tag == HELD {
+                put(dir, c"f", tag);
+            }
+        },
+        act: || {
+            // SAFETY: raw inotify calls on a NUL-terminated path.
+            unsafe {
+                let watch = syscall(SYS_INOTIFY_INIT1, IN_NONBLOCK) as c_int;
+                assert!(watch >= 0, "inotify_init1");
+                let wd = syscall(SYS_INOTIFY_ADD_WATCH, watch, c"/tmp/d/f".as_ptr(), IN_ATTRIB);
+                let answer = answer(wd >= 0);
+                WATCH.with(|cell| cell.set(watch));
+                answer
+            }
+        },
+        landed: |held, _, answer| {
+            let watch = WATCH.with(|cell| cell.get());
+            // A watch it added is on the held directory's `f`: changing that
+            // file's mode through the held directory is seen.
+            // SAFETY: a NUL-terminated name relative to a held directory.
+            unsafe { fchmodat(held, c"f".as_ptr(), 0o600, 0) };
+            let mut events = [0u8; 256];
+            // SAFETY: `events` is writable for its length.
+            let len = unsafe { read(watch, events.as_mut_ptr().cast(), events.len()) };
+            // SAFETY: the instance `act` made.
+            unsafe { close(watch) };
+            match answer {
+                Ok(()) => len > 0,
+                Err(ENOENT) => true,
+                Err(_) => false,
+            }
+        },
+    },
+];
+
+/// Room for `struct statfs`, aligned as it is.
+#[repr(C, align(8))]
+struct Statfs([u8; 128]);
+
+thread_local! {
+    static HELD_INO: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static WATCH: std::cell::Cell<c_int> = const { std::cell::Cell::new(-1) };
+}
+
+const AT_FDCWD: c_int = -100;
+const O_WRONLY_APPEND: c_int = 0o2001;
+
+/// Every [`PATH_OPS`] family, `ROUNDS` times each, while another thread
+/// keeps renaming `/tmp/d` aside and another directory over its name.
+fn path_ops() -> String {
+    static STOP: AtomicBool = AtomicBool::new(false);
+    std::fs::create_dir("/tmp/d").unwrap();
+    std::fs::create_dir("/tmp/ro").unwrap();
+    let held = open_dir(c"/tmp/d");
+    let other = open_dir(c"/tmp/ro");
+    HELD_INO.with(|cell| cell.set(look(held, c"").map(|st| ino(&st))));
+    let wrong: Vec<&str> = PATH_OPS
+        .iter()
+        .filter(|op| {
+            (0..ROUNDS).any(|_| {
+                (op.setup)(held, HELD);
+                (op.setup)(other, OTHER);
+                STOP.store(false, SeqCst);
+                let renamer = swapper(&STOP);
+                let answer = (op.act)();
+                STOP.store(true, SeqCst);
+                renamer.join().unwrap();
+                let landed = (op.landed)(held, other, answer);
+                for dir in [held, other] {
+                    // SAFETY: NUL-terminated names; a missing one is fine.
+                    unsafe {
+                        unlinkat(dir, c"f".as_ptr(), 0);
+                        unlinkat(dir, c"f".as_ptr(), AT_REMOVEDIR);
+                    }
+                }
+                !landed
+            })
+        })
+        .map(|op| op.name)
+        .collect();
+    if wrong.is_empty() { "none".into() } else { wrong.join(",") }
+}
+
 unsafe extern "C" {
     fn open(path: *const std::ffi::c_char, flags: c_int, ...) -> c_int;
     fn dup(fd: c_int) -> c_int;
@@ -448,6 +679,23 @@ unsafe extern "C" {
     fn readlinkat(dirfd: c_int, path: *const c_char, buf: *mut u8, len: usize) -> isize;
     fn fchmodat(dirfd: c_int, path: *const c_char, mode: u32, flags: c_int) -> c_int;
     fn utimensat(dirfd: c_int, path: *const c_char, times: *const [i64; 4], flags: c_int) -> c_int;
+    fn truncate(path: *const c_char, length: i64) -> c_int;
+    fn fchmod(fd: c_int, mode: u32) -> c_int;
+    fn chdir(path: *const c_char) -> c_int;
+    fn statfs(path: *const c_char, out: *mut Statfs) -> c_int;
+    fn setxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *const std::ffi::c_void,
+        size: usize,
+        flags: c_int,
+    ) -> c_int;
+    fn getxattr(
+        path: *const c_char,
+        name: *const c_char,
+        value: *mut std::ffi::c_void,
+        size: usize,
+    ) -> isize;
     fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
     fn statx(
         dirfd: c_int,
@@ -662,6 +910,7 @@ fn main() {
         "starve" => starve(),
         "getdents_notify" => getdents_notify().to_string(),
         "dirfd_ops" => dirfd_ops(),
+        "path_ops" => path_ops(),
         "fifo_rename" => fifo_rename().to_string(),
         "rebind_rename" => rebind_rename().to_string(),
         mode => panic!("PATH_RACE_MODE names no race: {mode}"),
