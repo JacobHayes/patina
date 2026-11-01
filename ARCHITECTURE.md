@@ -234,8 +234,14 @@ These concerns are kept out of the interposed data plane:
 - **Captured stdio.** The descriptions 1 and 2 name at startup are capture
   sinks; on Linux each write also goes through to the host descriptor. The
   numbers are ordinary descriptor-table entries; runtime diagnostics write to
-  the sinks directly. C `stdout`/`stderr` are the shim's (`src/posix/stdio.rs`,
-  glibc's buffering rules); any other `FILE*` stops by name.
+  the sinks directly. C stdio is the shim's (`src/posix/stdio.rs`): one
+  stream table holds `stdin`, `stdout`, `stderr` and every stream
+  `fopen`/`fdopen` opens, with the platform libc's buffering, read-ahead and
+  indicator rules (glibc's on Linux, the BSD stdio's on Darwin) over the
+  modeled descriptor calls. Every refill and flush is a guest read or write,
+  so faults reach it and replay reproduces it; each stream's lock is a
+  modeled guest mutex. Any other `FILE*` (a stream a host library made for
+  itself) stops by name.
 - **Environment.** The supervisor clears the ambient environment; the shim
   snapshots the private control plane before erasing it. `--env` supplies the
   guest's startup map, written into reserved initial-stack slots; the trace

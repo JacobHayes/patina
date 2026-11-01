@@ -498,7 +498,14 @@ it refuses pending cancellation by name and never initiates forced unwind.
 Compiled C guests in `native_abi::variadic` exercise pending cancellation at
 the fcntl waiting commands and open doors; entry order is reviewed.
 
-The modeled stdio engine lives in `src/posix/stdio.rs`; Rust printf doors pass
+The modeled stdio engine lives in `src/posix/stdio.rs` (the stream table and
+the write side), `stdio/input.rs` (the read side) and `stdio/files.rs`
+(open, reopen, close, positioning), with `stdio/linux.rs` and
+`stdio/darwin.rs` holding each libc's spellings. A stream is a table entry
+that is never freed (a retired heap stream is reused), so a walk of the
+table or a stale `FILE*` never meets freed memory; its end-of-file and error
+indicators live in the sentinel's flags word at the platform libc's bits,
+where inline bodies and gnulib read and write them. Rust printf doors pass
 `VaList` directly to it. It formats byte buffers with a private resolved host
 vsnprintf, cloning the arguments before the stack pass for the heap fallback.
 Retain the C seams ARCHITECTURE.md enumerates: cancellation, cleanup,
