@@ -209,7 +209,7 @@ pub unsafe extern "C" fn patina_unlink(dirfd: c_int, path: *const c_char) -> c_i
         path_unit(
             dirfd,
             path,
-            paths::RESOLVE_NOFOLLOW,
+            paths::RESOLVE_NOFOLLOW | paths::RESOLVE_LAST_NAME,
             EACCES,
             Context::fs_remove_file,
             Notice::Removed,
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn patina_rmdir(dirfd: c_int, path: *const c_char) -> c_in
         path_unit(
             dirfd,
             path,
-            paths::RESOLVE_NOFOLLOW,
+            paths::RESOLVE_NOFOLLOW | paths::RESOLVE_LAST_NAME,
             EACCES,
             Context::fs_remove_directory,
             Notice::Removed,
@@ -365,12 +365,13 @@ pub unsafe extern "C" fn patina_renameat2(
             EBUSY
         });
     }
-    let from = match paths::resolve(fromfd, &from, paths::RESOLVE_NOFOLLOW) {
+    let last_name = paths::RESOLVE_NOFOLLOW | paths::RESOLVE_LAST_NAME;
+    let from = match paths::resolve(fromfd, &from, last_name) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming"),
         Err(errno) => return fail(errno),
     };
-    let to = match paths::resolve_more(tofd, &to, paths::RESOLVE_NOFOLLOW) {
+    let to = match paths::resolve_more(tofd, &to, last_name) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming onto"),
         Err(errno) => return fail(errno),

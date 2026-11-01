@@ -22,7 +22,9 @@
 //! - the directory lists the open numbers, not a closed one, whose link is
 //!   `ENOENT`, and a listing read a few entries at a time resumes at the next
 //!   open number past one closed meanwhile; `/proc/<pid>/fd` is the caller's
-//!   too.
+//!   too;
+//! - a removal's trailing `/` never follows its final link: `rmdir` of a
+//!   symlink or a descriptor's link with one is `ENOTDIR`.
 use std::ffi::{CString, c_char, c_int, c_long};
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -53,6 +55,7 @@ unsafe extern "C" {
     fn pipe(fds: *mut c_int) -> c_int;
     fn eventfd(initval: u32, flags: c_int) -> c_int;
     fn dup2(old: c_int, new: c_int) -> c_int;
+    fn rmdir(path: *const c_char) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn syscall(number: c_long, ...) -> c_long;
     fn __errno_location() -> *mut c_int;
@@ -299,6 +302,46 @@ fn directories(dir: &Path) {
     );
 }
 
+/// `rmdir(path)`: 0 or the errno.
+fn remove_directory(path: &Path) -> String {
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path.
+    if unsafe { rmdir(path.as_ptr()) } == 0 {
+        "removed".to_owned()
+    } else {
+        format!("errno={}", errno())
+    }
+}
+
+/// A trailing `/` names a removal's final entry as a directory without
+/// following it: a symlink, or a descriptor's link, is `ENOTDIR`, and the
+/// directory behind it stays.
+fn removals(dir: &Path) {
+    let target = dir.join("kept");
+    fs::create_dir(&target).unwrap();
+    symlink(&target, dir.join("to_kept")).unwrap();
+    say(
+        "rmdir_link_slash",
+        format!(
+            "{} kept={}",
+            remove_directory(&dir.join("to_kept/")),
+            target.is_dir()
+        ),
+    );
+    let held = fs::File::open(&target).unwrap();
+    let through = link_of(held.as_raw_fd());
+    say(
+        "rmdir_fd_link_slash",
+        format!(
+            "{} kept={}",
+            remove_directory(&PathBuf::from(format!("{}/", through.display()))),
+            target.is_dir()
+        ),
+    );
+    drop(held);
+    fs::remove_dir(&target).unwrap();
+}
+
 /// A `getdents64` of `/proc/self/fd` with room for an entry or two at a
 /// time resumes at the next open number when the one it stopped before was
 /// closed meanwhile.
@@ -444,6 +487,7 @@ fn main() {
     sockets(&dir);
     files(&dir);
     directories(&dir);
+    removals(&dir);
     resumed_listing();
     anonymous();
     listing(&dir);

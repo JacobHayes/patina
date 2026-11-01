@@ -58,6 +58,11 @@ pub(crate) const RESOLVE_NOFOLLOW: u32 = 1 << 0;
 /// the descriptor's node otherwise (`AT_EMPTY_PATH`, `readlinkat(fd, "")`).
 /// Without it an empty path is `ENOENT`.
 pub(crate) const RESOLVE_EMPTY_PATH: u32 = 1 << 1;
+/// The final component is a name the operation acts on (`filename_parentat`:
+/// a removal's, a rename's): it is never followed, a trailing `/`
+/// notwithstanding, so a trailing `/` on a symlink is `ENOTDIR`. Used with
+/// [`RESOLVE_NOFOLLOW`].
+pub(crate) const RESOLVE_LAST_NAME: u32 = 1 << 8;
 /// The flags a `*at` entry's `AT_*` word decodes onto.
 pub(crate) const RESOLVE_AT_FLAGS: u32 = RESOLVE_NOFOLLOW | RESOLVE_EMPTY_PATH;
 /// Stay beneath the base (`RESOLVE_BENEATH`): a `..` out of it, an absolute
@@ -539,7 +544,8 @@ pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resol
     let requires_directory = path.ends_with('/') || path.ends_with("/.") || path == ".";
     let mut resolved: Vec<String> = components(&base).map(str::to_owned).collect();
     let rules = Rules {
-        nofollow: flags & RESOLVE_NOFOLLOW != 0 && !requires_directory,
+        nofollow: flags & RESOLVE_NOFOLLOW != 0
+            && (!requires_directory || flags & RESOLVE_LAST_NAME != 0),
         no_symlinks: flags & RESOLVE_NO_SYMLINKS != 0,
         beneath: flags & RESOLVE_BENEATH != 0,
         root: if scoped { resolved.len() } else { 0 },

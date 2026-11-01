@@ -12,7 +12,9 @@ fn answers(stdout: &[u8]) -> Vec<&str> {
 
 /// RED before: an `O_PATH|O_NOFOLLOW` open of a symlink was a named deny
 /// (`ENOSYS`), and procfs had no `fd` directory, so a `connect` through a
-/// pinned socket's `/proc/self/fd/<n>` was `ENOENT`. Under patina the probe
+/// pinned socket's `/proc/self/fd/<n>` was `ENOENT`; and `rmdir` of a
+/// symlink (or a descriptor's link) spelled with a trailing `/` followed it
+/// and removed the directory behind it. Under patina the probe
 /// answers as the host does: links read the node's current path or the
 /// pseudo-filesystem's name, a walk through one reaches the held node after
 /// a rename and after an unlink, and the directory lists the open numbers.
