@@ -21,9 +21,12 @@ pub(super) struct FaultCounts {
     /// Datagram sends that reached the fault-decision point (not pre-empted by a
     /// partition) plus `tcp_send`s that enqueued a segment.
     pub(super) send_ops: u64,
-    /// The datagram share of `send_ops`: the only sends duplication applies to,
-    /// so the duplicate class's vacuity is judged against these alone.
+    /// Datagram sends a drop did not pre-empt: the only draws duplication
+    /// takes, so the duplicate class's vacuity is judged against these alone.
     datagram_send_ops: u64,
+    /// Deliveries queued (each datagram copy, each TCP segment): the draws
+    /// jitter and the base latency take. A dropped datagram queues none.
+    pub(super) delivery_ops: u64,
     pub(super) drops_applied: u64,
     pub(super) jitter_applied: u64,
     pub(super) latency_applied: u64,
@@ -168,7 +171,6 @@ impl NetDriver for SimNet {
         // reached the knob-decision point rather than being pre-empted by a
         // partition. Counting does not consume the fault RNG or alter outcomes.
         self.counts.send_ops += 1;
-        self.counts.datagram_send_ops += 1;
         if self.decide_drop() {
             self.counts.drops_applied += 1;
             return Ok(SendReport {
@@ -178,6 +180,7 @@ impl NetDriver for SimNet {
                 disposition: SendDisposition::DroppedByFault,
             });
         }
+        self.counts.datagram_send_ops += 1;
         // A duplicate is an independent copy: it draws its OWN jitter, so the two
         // arrivals can be separated in time and interleave with other traffic
         // rather than being an indistinguishable twin of the original.
@@ -189,6 +192,7 @@ impl NetDriver for SimNet {
         };
         let mut delivery_times = Vec::with_capacity(copies);
         for _ in 0..copies {
+            self.counts.delivery_ops += 1;
             let jitter = self.draw_jitter();
             if jitter > 0 {
                 self.counts.jitter_applied += 1;
@@ -745,12 +749,12 @@ impl NetDriver for SimNet {
             drops_applied: counts.drops_applied,
             jitter_vacuity_diagnosable: self
                 .jitter_nanos
-                .is_some_and(|range| range_vacuity_is_diagnosable(counts.send_ops, range)),
+                .is_some_and(|range| range_vacuity_is_diagnosable(counts.delivery_ops, range)),
             jitter_applied: counts.jitter_applied,
-            // The base latency applies to every send at rate 1.0, so a few
-            // sends are enough to call zero applications anomalous.
+            // The base latency applies to every queued delivery at rate 1.0,
+            // so a few deliveries are enough to call zero applications anomalous.
             latency_vacuity_diagnosable: self.base_latency_nanos > 0
-                && vacuity_is_diagnosable(counts.send_ops, 1000),
+                && vacuity_is_diagnosable(counts.delivery_ops, 1000),
             latency_applied: counts.latency_applied,
             // Duplication copies datagrams only; a TCP segment is never
             // duplicated, so stream sends are no opportunity for it.

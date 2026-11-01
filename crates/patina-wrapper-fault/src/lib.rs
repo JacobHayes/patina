@@ -151,12 +151,13 @@ impl<D> FaultFs<D> {
     /// whether the truncation bound the result: a read truncated to a length the
     /// file never reached anyway perturbs nothing the guest can observe, and
     /// counting it would let a knob that is inert on the exercised I/O path
-    /// report itself as working.
+    /// report itself as working. So is counting the OPPORTUNITY: an error that
+    /// fails the call first pre-empts the draw, which then had nothing to act
+    /// on, and judging the knob on it would call a pre-empted knob inert.
     fn maybe_short_len(&mut self, requested: usize) -> Option<usize> {
         if self.short_permille == 0 || requested <= 1 {
             return None;
         }
-        self.short_opportunities += 1;
         if !permille_fires(&mut self.short_rng, self.short_permille) {
             return None;
         }
@@ -167,7 +168,14 @@ impl<D> FaultFs<D> {
     /// guest reading into a buffer larger than the file has left keeps getting
     /// every available byte no matter how the request was truncated, and that is
     /// an unobserved fault, not an applied one.
-    fn count_short_read(&mut self, kind: FsFaultOpKind, short: Option<usize>, bytes: &[u8]) {
+    fn count_short_read(
+        &mut self,
+        kind: FsFaultOpKind,
+        requested: usize,
+        short: Option<usize>,
+        bytes: &[u8],
+    ) {
+        self.count_short_opportunity(requested);
         if short == Some(bytes.len()) {
             self.count_short(kind);
         }
@@ -175,9 +183,18 @@ impl<D> FaultFs<D> {
 
     /// A fired write truncation is always observable: the caller is told fewer
     /// bytes were written than it asked for.
-    fn count_short_write(&mut self, kind: FsFaultOpKind, short: Option<usize>) {
+    fn count_short_write(&mut self, kind: FsFaultOpKind, requested: usize, short: Option<usize>) {
+        self.count_short_opportunity(requested);
         if short.is_some() {
             self.count_short(kind);
+        }
+    }
+
+    /// A short-eligible operation that reached the inner filesystem: the
+    /// short draw for it was taken, whether or not it fired.
+    fn count_short_opportunity(&mut self, requested: usize) {
+        if self.short_permille != 0 && requested > 1 {
+            self.short_opportunities += 1;
         }
     }
 
@@ -263,6 +280,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
             positional,
             allocates,
         )?;
+        self.count_short_opportunity(max_len);
         // Applied only when it takes bytes the read would have returned.
         if short.is_some_and(|short| short < available) {
             self.count_short(op.kind());
@@ -277,7 +295,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
             return Err(error);
         }
         let bytes = self.inner.read(clock, fd, short.unwrap_or(max_len))?;
-        self.count_short_read(FsFaultOpKind::Read, short, &bytes);
+        self.count_short_read(FsFaultOpKind::Read, max_len, short, &bytes);
         Ok(bytes)
     }
 
@@ -290,7 +308,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         let written = self
             .inner
             .write(clock, fd, &bytes[..short.unwrap_or(bytes.len())])?;
-        self.count_short_write(FsFaultOpKind::Write, short);
+        self.count_short_write(FsFaultOpKind::Write, bytes.len(), short);
         Ok(written)
     }
 
@@ -309,7 +327,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         let bytes = self
             .inner
             .read_at(clock, fd, offset, short.unwrap_or(max_len))?;
-        self.count_short_read(FsFaultOpKind::ReadAt, short, &bytes);
+        self.count_short_read(FsFaultOpKind::ReadAt, max_len, short, &bytes);
         Ok(bytes)
     }
 
@@ -328,7 +346,7 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         let written =
             self.inner
                 .write_at(clock, fd, offset, &bytes[..short.unwrap_or(bytes.len())])?;
-        self.count_short_write(FsFaultOpKind::WriteAt, short);
+        self.count_short_write(FsFaultOpKind::WriteAt, bytes.len(), short);
         Ok(written)
     }
 
@@ -1329,6 +1347,27 @@ mod tests {
                 kind.name()
             );
         }
+    }
+
+    /// An injected error pre-empts the truncation drawn for the same
+    /// operation: the call fails before any bytes move, so the short knob had
+    /// no opportunity there, and a run where both certain knobs are live must
+    /// not report the short knob as inert.
+    #[test]
+    fn a_short_an_error_pre_empts_is_no_opportunity() {
+        let (inner, fd) = fs_with_open_file();
+        let mut fs = FaultFs::new(inner, 1)
+            .error_permille(1000)
+            .short_permille(1000);
+        for _ in 0..patina_dst_driver_api::VACUITY_MIN_EXPECTED_FIRES {
+            assert!(fs.write(FsClock::EPOCH, fd, b"abcdef").is_err());
+        }
+        let report = fs.fault_report().unwrap();
+        assert_eq!(report.shorts_applied, 0);
+        assert!(
+            !report.is_vacuous(),
+            "a short knob every error pre-empted is reported inert: {report:?}"
+        );
     }
 
     #[test]

@@ -535,3 +535,49 @@ fn fault_report_is_vacuous_exactly_on_the_silent_inertness_signature() {
         assert!(report.had_opportunities());
     }
 }
+
+/// A certain drop pre-empts every class drawn after it: a dropped datagram is
+/// never duplicated, jittered or delayed. Those knobs drew nothing, so they
+/// had no opportunity, and a run in which every one of them is live must not
+/// report them as inert. A datagram that survives is an opportunity again.
+#[test]
+fn classes_a_certain_drop_pre_empts_are_not_judged_on_the_dropped_sends() {
+    let floor = patina_dst_driver_api::VACUITY_MIN_EXPECTED_FIRES;
+    let mut net = SimNet::builder()
+        .fault_seed(3)
+        .drop_permille(1000)
+        .duplicate_permille(1000)
+        .jitter_nanos(1, 1)
+        .base_latency_nanos(50)
+        .build()
+        .unwrap();
+    let tx = net.bind("tx").unwrap();
+    net.bind("rx").unwrap();
+    for _ in 0..floor {
+        net.send(tx, "rx", b"lost", 0).unwrap();
+    }
+    let report = net.fault_report().unwrap();
+    assert_eq!(report.drops_applied, floor);
+    assert!(
+        !report.is_vacuous(),
+        "knobs a drop pre-empted are reported inert: {report:?}"
+    );
+
+    // The same knobs with nothing pre-empting them fire on every datagram.
+    let mut net = SimNet::builder()
+        .fault_seed(3)
+        .duplicate_permille(1000)
+        .jitter_nanos(1, 1)
+        .base_latency_nanos(50)
+        .build()
+        .unwrap();
+    let tx = net.bind("tx").unwrap();
+    net.bind("rx").unwrap();
+    for _ in 0..floor {
+        net.send(tx, "rx", b"kept", 0).unwrap();
+    }
+    let report = net.fault_report().unwrap();
+    assert_eq!(report.duplicates_applied, floor);
+    assert!(report.jitter_vacuity_diagnosable && report.latency_vacuity_diagnosable);
+    assert!(!report.is_vacuous());
+}

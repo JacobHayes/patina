@@ -71,6 +71,8 @@ impl SimNet {
         last_delivery: Option<u64>,
     ) -> u64 {
         self.counts.send_ops += 1;
+        // A TCP drop retransmits, so every segment is delivered: one delivery.
+        self.counts.delivery_ops += 1;
         // The base link latency is applied by the caller (it is part of
         // `base_delivery`); count it here so a send path that skipped it reports
         // zero applications against a live knob rather than looking clean.
