@@ -1,10 +1,20 @@
-//! Sentinel streams and libio's write state machine over modeled descriptors.
-//! Sentinels are address tokens, never host FILE objects. State stays behind raw
-//! pointers: scheduler calls and lock-free fatal salvage may reenter the engine.
+//! C stdio over modeled descriptors: the shim's stream table and libio's
+//! buffering state machine, for reading and for writing.
+//!
+//! Every `FILE*` a guest holds is one of the shim's [`File`]s: the three
+//! standard streams, or one `fopen`/`fdopen` made. A `FILE*` names a stream
+//! by address only; any other pointer (a host `FILE`, a stream glibc made for
+//! itself) stops the run by name. The bytes move through the modeled
+//! descriptor calls, so every refill and flush is a guest read or write: a
+//! scheduling point, recorded, and reached by filesystem faults. A stream's
+//! lock is a modeled guest mutex, held across those calls as glibc holds its
+//! own. State stays behind raw pointers: scheduler calls and lock-free fatal
+//! salvage may reenter the engine.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use core::ffi::{CStr, VaList, c_char, c_int, c_void};
 use core::ptr::{self, null_mut};
+use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 #[cfg(target_os = "linux")]
@@ -13,75 +23,204 @@ const BUFSIZ: usize = 8192;
 const BUFSIZ: usize = 1024;
 const EOF: c_int = -1;
 
-/// The object `stdout`/`stderr` point at. Only its address names the stream,
-/// but it is FILE-sized and zeroed (glibc's `struct _IO_FILE` is 216 bytes on
-/// both Linux architectures, checked in `c/posix/stdio.c`; Darwin's is
-/// smaller): the inline `putc_unlocked`/`getc_unlocked` bodies a guest compiles
-/// read its buffer pointers, find them equal, and take their slow path into the
-/// shim (`__overflow`/`__uflow`), and `ferror_unlocked`'s inline reads its
-/// flags, where the stream's error indicator is mirrored (Linux).
+mod files;
+mod input;
+
+/// The object a `FILE*` points at. Only its address names the stream, but it
+/// is FILE-sized and zeroed but for the fields below (glibc's `struct
+/// _IO_FILE` is 216 bytes on both Linux architectures, checked in
+/// `c/posix/stdio.c`; Darwin's is smaller): the inline
+/// `putc_unlocked`/`getc_unlocked` bodies a guest compiles read its buffer
+/// pointers (or Darwin's counts), find no room, and take their slow path into
+/// the shim (`__overflow`/`__uflow`, `__swbuf`/`__srget`). The stream's
+/// end-of-file and error indicators LIVE in its flags word, at the platform
+/// libc's bits, so the inline `feof_unlocked`/`ferror_unlocked`/
+/// `clearerr_unlocked` bodies and gnulib's `fseterr` (which sets the error bit
+/// itself) agree with the shim's calls; the descriptor number is mirrored
+/// where the inline `fileno_unlocked` reads it.
 #[repr(C, align(8))]
 struct Sentinel {
-    flags: c_int,
-    rest: [u8; 212],
-}
-impl Sentinel {
-    const fn new() -> Self {
-        Self {
-            flags: 0,
-            rest: [0; 212],
-        }
-    }
+    bytes: [u8; 216],
 }
 // glibc's `sizeof(FILE)`, which `c/posix/stdio.c` asserts beside it.
 #[cfg(target_os = "linux")]
 const _: () = assert!(size_of::<Sentinel>() == 216);
-static mut OUT_TOKEN: Sentinel = Sentinel::new();
-static mut ERR_TOKEN: Sentinel = Sentinel::new();
-/// glibc's `_IO_ERR_SEEN`, the error indicator bit of `_flags`.
+
+/// The flags word's place and the indicator bits: glibc's `_flags` (an `int`
+/// at offset 0, `_IO_EOF_SEEN`/`_IO_ERR_SEEN`) and `_fileno` (offset 112 on
+/// LP64); Darwin's `_flags` (a `short` at 16, `__SEOF`/`__SERR`) and `_file`
+/// (a `short` at 18).
 #[cfg(target_os = "linux")]
-const ERR_SEEN: c_int = 0x20;
-#[cfg_attr(target_os = "linux", unsafe(export_name = "stdout"))]
-#[cfg_attr(target_os = "macos", unsafe(export_name = "__stdoutp"))]
-pub static mut STDOUT: *mut libc::FILE = (&raw mut OUT_TOKEN).cast();
-#[cfg_attr(target_os = "linux", unsafe(export_name = "stderr"))]
-#[cfg_attr(target_os = "macos", unsafe(export_name = "__stderrp"))]
-pub static mut STDERR: *mut libc::FILE = (&raw mut ERR_TOKEN).cast();
+mod layout {
+    pub(super) type Word = core::ffi::c_int;
+    pub(super) const FLAGS: usize = 0;
+    pub(super) const EOF_SEEN: Word = 0x10;
+    pub(super) const ERR_SEEN: Word = 0x20;
+    pub(super) const FILENO: usize = 112;
+    pub(super) type FdWord = core::ffi::c_int;
+}
+#[cfg(target_os = "macos")]
+mod layout {
+    pub(super) type Word = i16;
+    pub(super) const FLAGS: usize = 16;
+    pub(super) const EOF_SEEN: Word = 0x20;
+    pub(super) const ERR_SEEN: Word = 0x40;
+    pub(super) const FILENO: usize = 18;
+    pub(super) type FdWord = i16;
+}
+
+impl Sentinel {
+    const fn new(fd: c_int) -> Self {
+        let mut bytes = [0; 216];
+        let fd = (fd as layout::FdWord).to_ne_bytes();
+        let mut at = 0;
+        while at < fd.len() {
+            bytes[layout::FILENO + at] = fd[at];
+            at += 1;
+        }
+        Self { bytes }
+    }
+}
 
 // libc omits Darwin's recursive static initializer; preserve the header signature.
 #[cfg(target_os = "macos")]
 const fn darwin_lock() -> libc::pthread_mutex_t {
     let mut lock = libc::PTHREAD_MUTEX_INITIALIZER;
     // SAFETY: the local mutex value has libc's C layout; this initializes its
-    // recursive-kind field before the value is published to either stream.
+    // recursive-kind field before the value is published to any stream.
     unsafe {
         (&raw mut lock).cast::<libc::c_long>().write(0x32aaaba2);
     }
     lock
 }
 
+/// What a stream may do, from the mode that opened it: glibc's
+/// `_IO_NO_READS`/`_IO_NO_WRITES`/`_IO_IS_APPENDING`.
+#[derive(Clone, Copy)]
+struct Access {
+    read: bool,
+    write: bool,
+    append: bool,
+}
+
 struct Stream {
     fd: c_int,
+    access: Access,
     unbuffered: bool,
     line: bool,
+    /// The buffer holds output (put mode); otherwise it holds input from
+    /// `get_pos` to `get_end`.
     putting: bool,
-    error: bool,
     buffer: Buffer,
     inline_len: usize,
     area: bool,
     used: usize,
     end: usize,
+    get_pos: usize,
+    get_end: usize,
+    /// Bytes `ungetc` pushed back that the buffer could not take back, read
+    /// before the buffer, last pushed first: glibc's backup area.
+    pushback: Vec<u8>,
     lock: libc::pthread_mutex_t,
     storage: [u8; 8192],
     shortbuf: u8,
-    /// `fclose` closed it: any later call on it is undefined natively, and
-    /// stops here.
-    closed: bool,
 }
-#[derive(Clone, Copy)]
-enum StreamId {
-    Out,
-    Err,
+
+/// A stream's place in the table's life cycle. A heap stream `fclose`
+/// retires is free for the next open to reuse, never freed: a walk of the
+/// table, or a stale `FILE*`, never meets freed memory. A standard stream is
+/// never reused; once closed, a call on it stops by name.
+const FREE: u8 = 0;
+const OPEN: u8 = 1;
+const CLOSED: u8 = 2;
+
+/// One stream: what a `FILE*` points at (`token` first, so the two
+/// addresses are one) and the stream's state.
+#[repr(C)]
+pub(crate) struct File {
+    token: Sentinel,
+    state: Stream,
+    /// The next stream in the table: every stream ever made, newest first.
+    next: *mut File,
+    life: AtomicU8,
+    standard: bool,
+}
+
+impl Stream {
+    const fn new(fd: c_int, access: Access, unbuffered: bool) -> Self {
+        Self {
+            fd,
+            access,
+            unbuffered,
+            line: false,
+            putting: false,
+            buffer: Buffer::Unallocated,
+            inline_len: 0,
+            area: false,
+            used: 0,
+            end: 0,
+            get_pos: 0,
+            get_end: 0,
+            pushback: Vec::new(),
+            #[cfg(target_os = "linux")]
+            lock: libc::PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP,
+            #[cfg(target_os = "macos")]
+            lock: darwin_lock(),
+            storage: [0; 8192],
+            shortbuf: 0,
+        }
+    }
+}
+
+impl File {
+    const fn standard(fd: c_int, access: Access, unbuffered: bool, next: *mut File) -> Self {
+        Self {
+            token: Sentinel::new(fd),
+            state: Stream::new(fd, access, unbuffered),
+            next,
+            life: AtomicU8::new(OPEN),
+            standard: true,
+        }
+    }
+}
+
+const READ: Access = Access {
+    read: true,
+    write: false,
+    append: false,
+};
+const WRITE: Access = Access {
+    read: false,
+    write: true,
+    append: false,
+};
+static mut STDIN_FILE: File = File::standard(0, READ, false, null_mut());
+static mut STDOUT_FILE: File = File::standard(1, WRITE, false, &raw mut STDIN_FILE);
+static mut STDERR_FILE: File = File::standard(2, WRITE, true, &raw mut STDOUT_FILE);
+/// The newest stream in the table; the list ends at the standard streams.
+static TABLE: AtomicPtr<File> = AtomicPtr::new(&raw mut STDERR_FILE);
+
+#[cfg_attr(target_os = "linux", unsafe(export_name = "stdin"))]
+#[cfg_attr(target_os = "macos", unsafe(export_name = "__stdinp"))]
+pub static mut STDIN: *mut libc::FILE = (&raw mut STDIN_FILE).cast();
+#[cfg_attr(target_os = "linux", unsafe(export_name = "stdout"))]
+#[cfg_attr(target_os = "macos", unsafe(export_name = "__stdoutp"))]
+pub static mut STDOUT: *mut libc::FILE = (&raw mut STDOUT_FILE).cast();
+#[cfg_attr(target_os = "linux", unsafe(export_name = "stderr"))]
+#[cfg_attr(target_os = "macos", unsafe(export_name = "__stderrp"))]
+pub static mut STDERR: *mut libc::FILE = (&raw mut STDERR_FILE).cast();
+
+/// A stream the shim made: the one handle every engine function takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StreamId(*mut File);
+
+impl StreamId {
+    fn stdout() -> Self {
+        Self(&raw mut STDOUT_FILE)
+    }
+    fn file(self) -> *mut libc::FILE {
+        self.0.cast()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -102,43 +241,16 @@ enum PutOutcome {
     FlushError,
 }
 
-impl Stream {
-    const fn new(fd: c_int, unbuffered: bool) -> Self {
-        Self {
-            fd,
-            unbuffered,
-            line: false,
-            putting: false,
-            error: false,
-            buffer: Buffer::Unallocated,
-            inline_len: 0,
-            area: false,
-            used: 0,
-            end: 0,
-            #[cfg(target_os = "linux")]
-            lock: libc::PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP,
-            #[cfg(target_os = "macos")]
-            lock: darwin_lock(),
-            storage: [0; 8192],
-            shortbuf: 0,
-            closed: false,
-        }
-    }
-}
-static mut OUT: Stream = Stream::new(1, false);
-static mut ERR: Stream = Stream::new(2, true);
-
 fn stream_ptr(stream: StreamId) -> *mut Stream {
-    match stream {
-        StreamId::Out => &raw mut OUT,
-        StreamId::Err => &raw mut ERR,
-    }
+    // SAFETY: a `StreamId` is only made for a table entry, which lives for the
+    // process.
+    unsafe { &raw mut (*stream.0).state }
 }
 
 unsafe fn buffer_ptr(stream: StreamId) -> *mut u8 {
     let state = stream_ptr(stream);
-    // SAFETY: the selected stream is a process-lifetime static, and its buffer
-    // variant identifies storage owned by that stream or a raw caller buffer.
+    // SAFETY: the selected stream is a process-lifetime table entry, and its
+    // buffer variant identifies storage owned by that stream or a raw caller buffer.
     unsafe {
         match (*state).buffer {
             Buffer::Unallocated => null_mut(),
@@ -152,7 +264,7 @@ unsafe fn buffer_ptr(stream: StreamId) -> *mut u8 {
 
 unsafe fn buffer_len(stream: StreamId) -> usize {
     let state = stream_ptr(stream);
-    // SAFETY: the selected stream is a process-lifetime static; the active
+    // SAFETY: the selected stream is a process-lifetime table entry; the active
     // buffer variant carries its borrowed length or selects the stored inline length.
     unsafe {
         match (*state).buffer {
@@ -165,40 +277,92 @@ unsafe fn buffer_len(stream: StreamId) -> usize {
     }
 }
 
-/// Set a stream's error indicator, in its state and in its sentinel's flags.
-unsafe fn set_error(stream: StreamId, error: bool) {
-    let (state, token) = match stream {
-        StreamId::Out => (&raw mut OUT, &raw mut OUT_TOKEN),
-        StreamId::Err => (&raw mut ERR, &raw mut ERR_TOKEN),
-    };
-    // SAFETY: both are process-lifetime statics the caller serializes.
+fn flags_word(stream: StreamId) -> *mut layout::Word {
+    // SAFETY: the sentinel is the entry's first field and the flags word lies
+    // within it, aligned for its type.
     unsafe {
-        (*state).error = error;
-        // Darwin's FILE keeps its flags elsewhere; its inline bodies never
-        // reach them through a sentinel.
-        #[cfg(target_os = "linux")]
-        {
-            (*token).flags = if error { ERR_SEEN } else { 0 };
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = token;
+        (&raw mut (*stream.0).token.bytes)
+            .cast::<u8>()
+            .add(layout::FLAGS)
+            .cast()
     }
 }
-pub(crate) fn sentinel_fd(stream: *mut libc::FILE) -> c_int {
-    if stream == (&raw mut OUT_TOKEN).cast() {
-        1
-    } else if stream == (&raw mut ERR_TOKEN).cast() {
-        2
-    } else {
-        -1
+/// Whether an indicator bit is set in the stream's flags word.
+unsafe fn indicator(stream: StreamId, bit: layout::Word) -> bool {
+    // SAFETY: the flags word is in a process-lifetime entry; a guest's inline
+    // body may write it, so it is read volatile.
+    unsafe { flags_word(stream).read_volatile() & bit != 0 }
+}
+/// Set or clear an indicator bit in the stream's flags word.
+unsafe fn set_indicator(stream: StreamId, bit: layout::Word, on: bool) {
+    let word = flags_word(stream);
+    // SAFETY: as `indicator`; the caller serializes the stream.
+    unsafe {
+        let flags = word.read_volatile();
+        word.write_volatile(if on { flags | bit } else { flags & !bit });
+    }
+}
+/// Set a stream's error indicator.
+unsafe fn set_error(stream: StreamId, error: bool) {
+    // SAFETY: forwarded from the caller.
+    unsafe { set_indicator(stream, layout::ERR_SEEN, error) }
+}
+unsafe fn has_error(stream: StreamId) -> bool {
+    // SAFETY: forwarded from the caller.
+    unsafe { indicator(stream, layout::ERR_SEEN) }
+}
+unsafe fn set_eof(stream: StreamId, eof: bool) {
+    // SAFETY: forwarded from the caller.
+    unsafe { set_indicator(stream, layout::EOF_SEEN, eof) }
+}
+unsafe fn at_eof(stream: StreamId) -> bool {
+    // SAFETY: forwarded from the caller.
+    unsafe { indicator(stream, layout::EOF_SEEN) }
+}
+/// Give a stream a descriptor, mirrored where inline `fileno` bodies read it.
+unsafe fn set_fd(stream: StreamId, fd: c_int) {
+    // SAFETY: the stream is a process-lifetime entry its caller serializes;
+    // the mirror lies within the sentinel, aligned for its type.
+    unsafe {
+        (*stream_ptr(stream)).fd = fd;
+        (&raw mut (*stream.0).token.bytes)
+            .cast::<u8>()
+            .add(layout::FILENO)
+            .cast::<layout::FdWord>()
+            .write_volatile(fd as layout::FdWord);
+    }
+}
+
+/// The table entry a `FILE*` names, whatever its life, or `None`.
+fn entry(stream: *mut libc::FILE) -> Option<StreamId> {
+    let mut at = TABLE.load(Ordering::Acquire);
+    while !at.is_null() {
+        if at.cast() == stream {
+            return Some(StreamId(at));
+        }
+        // SAFETY: table entries are never freed, and `next` is written once,
+        // before the entry is published.
+        at = unsafe { (*at).next };
+    }
+    None
+}
+/// The descriptor of an open stream the shim made, or -1.
+#[cfg(target_os = "linux")]
+pub(crate) fn stream_fd(stream: *mut libc::FILE) -> c_int {
+    match entry(stream) {
+        // SAFETY: the entry lives for the process.
+        Some(id) if unsafe { (*id.0).life.load(Ordering::Acquire) } == OPEN => {
+            // SAFETY: as above.
+            unsafe { (*stream_ptr(id)).fd }
+        }
+        _ => -1,
     }
 }
 pub(crate) fn trap(symbol: &CStr) -> ! {
     for bytes in [
-        b"patina: stdio call on a FILE* that is not the shim's stdout or stderr: ".as_slice(),
+        b"patina: stdio call on a FILE* that is not a stream the shim opened: ".as_slice(),
         symbol.to_bytes(),
-        b"; glibc's own streams (its stdin, one fopen or fdopen made) are not modeled; failing \
-closed\n",
+        b"; a host FILE (one a host library made for itself) is not modeled; failing closed\n",
     ] {
         // SAFETY: each static diagnostic slice is readable for its exact length
         // and the synchronous captured-stdio entry consumes it before return.
@@ -210,19 +374,16 @@ closed\n",
     crate::host_abort()
 }
 /// The shim's stream a call names: every stdio door's one way to its stream.
-/// Any other `FILE*` (glibc's own stdin, stdout or stderr, or one `fopen` or
-/// `fdopen` made) stops the run by name, as does a stream `fclose` closed.
+/// Any other `FILE*` stops the run by name, as does a stream `fclose`
+/// closed.
 fn stream_of(stream: *mut libc::FILE, symbol: &CStr) -> StreamId {
-    let id = match sentinel_fd(stream) {
-        1 => StreamId::Out,
-        2 => StreamId::Err,
-        _ => trap(symbol),
+    let Some(id) = entry(stream) else {
+        trap(symbol)
     };
-    // SAFETY: the selected stream is a process-lifetime static; the flag is
-    // set once, by fclose under the stream's lock.
-    if unsafe { (*stream_ptr(id)).closed } {
+    // SAFETY: the entry lives for the process.
+    if unsafe { (*id.0).life.load(Ordering::Acquire) } != OPEN {
         crate::trap_fatal(&format!(
-            "{} on a standard stream after fclose closed it",
+            "{} on a stream after fclose closed it",
             symbol.to_string_lossy()
         ));
     }
@@ -251,6 +412,15 @@ unsafe fn write_out(stream: StreamId, data: *const u8, length: usize) -> usize {
     // SAFETY: callers guarantee `data` is readable for `length`; the stream
     // state is process-lifetime storage and writes advance only within that range.
     unsafe {
+        // The BSD stdio's append stream over a descriptor without
+        // `O_APPEND` (one `fdopen` made) seeks to the end before it writes.
+        #[cfg(target_os = "macos")]
+        if (*s).access.append
+            && length > 0
+            && (crate::patina_fd_getfl((*s).fd) as u32) & crate::O_APPEND == 0
+        {
+            let _ = crate::abi::libc_result(crate::fd::seek((*s).fd, 0, 2), -1);
+        }
         let mut done = 0;
         while done < length {
             super::cancel(c"write");
@@ -269,8 +439,8 @@ unsafe fn write_out(stream: StreamId, data: *const u8, length: usize) -> usize {
 }
 unsafe fn allocate(stream: StreamId) {
     let s = stream_ptr(stream);
-    // SAFETY: stream state is static and protected by its stream lock except
-    // during teardown, where the root task is the only writer.
+    // SAFETY: stream state is a table entry protected by its stream lock
+    // except during teardown, where the root task is the only writer.
     unsafe {
         let mut size = BUFSIZ;
         let saved = super::get_errno();
@@ -299,8 +469,11 @@ unsafe fn allocate(stream: StreamId) {
                 }
             }
         } else {
+            // glibc's `_IO_file_doallocate` leaves a failed fstat's errno
+            // behind; the standard descriptors answer fstat on a host pipe.
             let kind = crate::patina_fd_kind((*s).fd);
-            if kind == crate::fdtable::FdKind::Stdout.wire()
+            if kind == crate::fdtable::FdKind::Stdin.wire()
+                || kind == crate::fdtable::FdKind::Stdout.wire()
                 || kind == crate::fdtable::FdKind::Stderr.wire()
             {
                 crate::abi::restore_host_errno(saved);
@@ -312,8 +485,8 @@ unsafe fn allocate(stream: StreamId) {
 }
 unsafe fn allocbuf(stream: StreamId) {
     let s = stream_ptr(stream);
-    // SAFETY: the stream's state is static and the caller holds its lock or is
-    // on a teardown path where no competing task can mutate it.
+    // SAFETY: the stream's state is a table entry and the caller holds its
+    // lock or is on a teardown path where no competing task can mutate it.
     unsafe {
         if !matches!((*s).buffer, Buffer::Unallocated) {
             return;
@@ -329,7 +502,7 @@ unsafe fn allocbuf(stream: StreamId) {
 unsafe fn new_do_write(stream: StreamId, data: *const u8, length: usize) -> usize {
     let s = stream_ptr(stream);
     // SAFETY: the data range is readable for the synchronous modeled write and
-    // stream fields remain static across that callout.
+    // stream fields remain valid across that callout.
     unsafe {
         let count = write_out(stream, data, length);
         (*s).area = true;
@@ -360,7 +533,16 @@ unsafe fn overflow(stream: StreamId, byte: c_int) -> c_int {
     // SAFETY: callers serialize this stream; allocation establishes a buffer
     // before its first write and the state machine bounds `used` by its length.
     unsafe {
+        if !(*s).access.write {
+            // glibc's `_IO_NO_WRITES`: the error indicator and `EBADF`.
+            set_error(stream, true);
+            super::errno(libc::EBADF);
+            return EOF;
+        }
         if !(*s).putting || !(*s).area {
+            if !(*s).putting && !input::leave_get_mode(stream) {
+                return EOF;
+            }
             if !(*s).area {
                 allocbuf(stream);
             }
@@ -391,10 +573,10 @@ unsafe fn overflow(stream: StreamId, byte: c_int) -> c_int {
 }
 unsafe fn room(stream: StreamId) -> usize {
     let s = stream_ptr(stream);
-    // SAFETY: the caller reads process-lifetime stream state under its lock or
-    // during single-threaded teardown.
+    // SAFETY: the caller reads table-entry state under its lock or during
+    // single-threaded teardown.
     unsafe {
-        if (*s).area {
+        if (*s).area && (*s).putting {
             (*s).end.saturating_sub((*s).used)
         } else {
             0
@@ -437,8 +619,8 @@ unsafe fn default_put(stream: StreamId, mut data: *const u8, length: usize) -> u
     }
 }
 /// # Safety
-/// `data` points to `length` readable bytes; `stream` names one of the two
-/// process-lifetime stream states, and its borrowed buffer remains live.
+/// `data` points to `length` readable bytes; `stream` names a table entry,
+/// and its borrowed buffer remains live.
 unsafe fn put(stream: StreamId, mut data: *const u8, length: usize) -> PutOutcome {
     let s = stream_ptr(stream);
     // SAFETY: the caller guarantees readable input and serializes this stream;
@@ -495,7 +677,7 @@ unsafe fn put(stream: StreamId, mut data: *const u8, length: usize) -> PutOutcom
         PutOutcome::Written(length - to_do)
     }
 }
-unsafe fn putc(stream: StreamId, byte: u8) -> c_int {
+unsafe fn put_one(stream: StreamId, byte: u8) -> c_int {
     // SAFETY: callers serialize the stream and overflow allocates before writing
     // when there is no current buffer.
     unsafe {
@@ -506,35 +688,56 @@ unsafe fn putc(stream: StreamId, byte: u8) -> c_int {
         c_int::from(byte)
     }
 }
+/// Write out what the stream buffered for output.
 unsafe fn sync(stream: StreamId) -> c_int {
     let s = stream_ptr(stream);
     // SAFETY: callers hold the stream lock or execute during single-threaded
     // teardown, and flush observes the same protected state.
     unsafe {
-        if (*s).area && (*s).used > 0 && flush(stream) != 0 {
+        if (*s).putting && (*s).area && (*s).used > 0 && flush(stream) != 0 {
             EOF
         } else {
             0
         }
     }
 }
+/// Every open stream, newest first, as the table holds them.
+fn for_each_open(mut visit: impl FnMut(StreamId)) {
+    let mut at = TABLE.load(Ordering::Acquire);
+    while !at.is_null() {
+        // SAFETY: entries are never freed; `next` is written before publication.
+        unsafe {
+            if (*at).life.load(Ordering::Acquire) == OPEN {
+                visit(StreamId(at));
+            }
+            at = (*at).next;
+        }
+    }
+}
+/// glibc's exit flush (`_IO_cleanup`): every stream's pending output.
 pub(super) extern "C" fn flush_at_exit() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: shutdown runs after guest tasks stop and owns the stream state.
-    unsafe {
-        sync(StreamId::Out);
-    }
+    for_each_open(|stream| {
+        // SAFETY: shutdown runs after guest tasks stop and owns stream state.
+        unsafe {
+            sync(stream);
+        }
+    });
 }
 /// # Safety
 /// `bytes` points to writable pointer storage; called on terminating paths.
 pub(super) unsafe extern "C" fn take_pending(bytes: *mut *const c_void) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let stream = StreamId::Out;
+    let stream = StreamId::stdout();
     let state = stream_ptr(stream);
     // SAFETY: the shutdown caller supplies writable pointer storage; teardown
     // owns stdout state, and its inline buffer outlives the returned pointer.
     unsafe {
-        let used = if (*state).area { (*state).used } else { 0 };
+        let used = if (*state).area && (*state).putting {
+            (*state).used
+        } else {
+            0
+        };
         bytes.write(buffer_ptr(stream).cast());
         (*state).used = 0;
         used
@@ -645,7 +848,7 @@ pub(crate) unsafe fn format_buffer(
     unsafe { formatter(buffer, length, format, args) }
 }
 /// # Safety
-/// Format/arguments obey printf's ABI; explicit streams must be sentinels.
+/// Format/arguments obey printf's ABI; explicit streams must be the shim's.
 pub(crate) unsafe fn format_to(
     stream: *mut libc::FILE,
     format: *const c_char,
@@ -653,19 +856,21 @@ pub(crate) unsafe fn format_to(
     use_stdout: bool,
 ) -> c_int {
     let s = if use_stdout {
-        StreamId::Out
+        // SAFETY: the `stdout` variable is read by value; the guest may have
+        // pointed it at another stream, as glibc's printf honours.
+        stream_of(unsafe { STDOUT }, c"printf")
     } else {
         stream_of(stream, c"fprintf")
     };
     // SAFETY: the caller forwards printf-compatible arguments and explicit
-    // streams are reduced to the two sentinel states.
-    unsafe { vprintf(s, Fortify::Off, format, args) }
+    // streams are reduced to table entries.
+    unsafe { vprintf_to(s, Fortify::Off, format, args) }
 }
 /// `__fprintf_chk`'s engine: [`format_to`] on an explicit stream under
 /// glibc's fortify `flag`.
 ///
 /// # Safety
-/// Format/arguments obey printf's ABI; the stream must be a sentinel.
+/// Format/arguments obey printf's ABI; the stream must be the shim's.
 #[cfg(target_os = "linux")]
 pub(crate) unsafe fn format_to_checked(
     stream: *mut libc::FILE,
@@ -675,9 +880,9 @@ pub(crate) unsafe fn format_to_checked(
 ) -> c_int {
     let s = stream_of(stream, c"__fprintf_chk");
     // SAFETY: forwarded from this function's contract.
-    unsafe { vprintf(s, Fortify::Level(flag), format, args) }
+    unsafe { vprintf_to(s, Fortify::Level(flag), format, args) }
 }
-unsafe fn vprintf(
+unsafe fn vprintf_to(
     stream: StreamId,
     fortify: Fortify,
     format: *const c_char,
@@ -728,7 +933,16 @@ unsafe extern "C" fn vfprintf(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the C caller supplies the format and va_list under vfprintf's ABI.
-    unsafe { vprintf(stream_of(stream, c"vfprintf"), Fortify::Off, format, args) }
+    unsafe { vprintf_to(stream_of(stream, c"vfprintf"), Fortify::Off, format, args) }
+}
+/// # Safety
+/// Format and arguments obey vprintf's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn vprintf(format: *const c_char, args: VaList<'_>) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the C caller supplies the format and va_list under vprintf's ABI;
+    // `stdout` is read by value.
+    unsafe { vprintf_to(stream_of(STDOUT, c"vprintf"), Fortify::Off, format, args) }
 }
 /// glibc's fortified `vfprintf` (`_FORTIFY_SOURCE` lowers `vfprintf` onto it):
 /// the same stream door, formatting under the caller's check level.
@@ -746,14 +960,10 @@ unsafe extern "C" fn __vfprintf_chk(
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"__vfprintf_chk");
     // SAFETY: the C caller supplies the format and va_list under vfprintf's ABI.
-    unsafe { vprintf(s, Fortify::Level(flag), format, args) }
+    unsafe { vprintf_to(s, Fortify::Level(flag), format, args) }
 }
-/// # Safety
-/// String is readable and NUL-terminated; stream obeys fputs's contract.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fputs");
+unsafe fn fputs_impl(string: *const c_char, stream: *mut libc::FILE, symbol: &CStr) -> c_int {
+    let s = stream_of(stream, symbol);
     // SAFETY: the C contract supplies a readable NUL-terminated string; locking
     // serializes stream state for the modeled write loop.
     unsafe {
@@ -762,23 +972,33 @@ unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -> c_
         let taken = put(s, string.cast(), length);
         unlock(s, held);
         if taken == PutOutcome::Written(length) {
-            1
+            // glibc answers 1; Darwin the bytes written.
+            if cfg!(target_os = "macos") {
+                length.min(c_int::MAX as usize) as c_int
+            } else {
+                1
+            }
         } else {
             EOF
         }
     }
 }
 /// # Safety
-/// The source holds size*count bytes; stream obeys fwrite's contract.
+/// String is readable and NUL-terminated; stream obeys fputs's contract.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn fwrite(
+unsafe extern "C" fn fputs(string: *const c_char, stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fputs_impl(string, stream, c"fputs") }
+}
+unsafe fn fwrite_impl(
     pointer: *const c_void,
     size: usize,
     count: usize,
     stream: *mut libc::FILE,
+    symbol: &CStr,
 ) -> usize {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fwrite");
+    let s = stream_of(stream, symbol);
     let request = size.wrapping_mul(count);
     if request == 0 {
         return 0;
@@ -796,18 +1016,32 @@ unsafe extern "C" fn fwrite(
     }
 }
 /// # Safety
+/// The source holds size*count bytes; stream obeys fwrite's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fwrite(
+    pointer: *const c_void,
+    size: usize,
+    count: usize,
+    stream: *mut libc::FILE,
+) -> usize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fwrite_impl(pointer, size, count, stream, c"fwrite") }
+}
+/// # Safety
 /// String is readable and NUL-terminated.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn puts(string: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: the C contract supplies a readable NUL-terminated string; stdout
-    // is static and its recursive lock protects both writes.
+    // is a table entry and its recursive lock protects both writes.
     unsafe {
-        let s = StreamId::Out;
+        let s = stream_of(STDOUT, c"puts");
         let length = libc::strlen(string);
         let held = lock(s);
         let mut result = EOF;
-        if put(s, string.cast(), length) == PutOutcome::Written(length) && putc(s, b'\n') != EOF {
+        if put(s, string.cast(), length) == PutOutcome::Written(length) && put_one(s, b'\n') != EOF
+        {
             result = if length < c_int::MAX as usize {
                 (length + 1) as c_int
             } else {
@@ -819,11 +1053,11 @@ unsafe extern "C" fn puts(string: *const c_char) -> c_int {
     }
 }
 unsafe fn put_byte(stream: StreamId, character: c_int) -> c_int {
-    // SAFETY: the selected stream is static and its recursive mutex protects
-    // insertion and any modeled write performed by overflow.
+    // SAFETY: the selected stream is a table entry and its recursive mutex
+    // protects insertion and any modeled write performed by overflow.
     unsafe {
         let held = lock(stream);
-        let result = putc(stream, character as u8);
+        let result = put_one(stream, character as u8);
         unlock(stream, held);
         result
     }
@@ -831,71 +1065,113 @@ unsafe fn put_byte(stream: StreamId, character: c_int) -> c_int {
 #[unsafe(no_mangle)]
 extern "C" fn putchar(character: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stdout is a process-lifetime stream selected by this fixed door.
-    unsafe { put_byte(StreamId::Out, character) }
+    // SAFETY: `stdout` names a table entry.
+    unsafe { put_byte(stream_of(STDOUT, c"putchar"), character) }
 }
 #[unsafe(no_mangle)]
 extern "C" fn fputc(character: c_int, stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stream_of accepts only the two sentinel FILE tokens.
+    // SAFETY: stream_of accepts only the shim's streams.
     unsafe { put_byte(stream_of(stream, c"fputc"), character) }
 }
+/// `putc`: `fputc` (`std::endl`, `put`).
+#[unsafe(no_mangle)]
+extern "C" fn putc(character: c_int, stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: stream_of accepts only the shim's streams.
+    unsafe { put_byte(stream_of(stream, c"putc"), character) }
+}
 unsafe fn locked_flush(stream: StreamId) -> c_int {
-    // SAFETY: the stream is static; its recursive mutex protects flush and any
-    // modeled write loop it invokes.
+    // SAFETY: the stream is a table entry; its recursive mutex protects the
+    // flush and any modeled write loop or seek it makes.
     unsafe {
         let held = lock(stream);
-        let result = sync(stream);
+        let result = input::sync_input(stream);
         unlock(stream, held);
         result
+    }
+}
+unsafe fn fflush_impl(stream: *mut libc::FILE, symbol: &CStr) -> c_int {
+    // SAFETY: null flushes every open stream's output (glibc's
+    // `_IO_flush_all`); a non-null FILE* is checked against the table first.
+    unsafe {
+        if stream.is_null() {
+            let mut result = 0;
+            for_each_open(|stream| {
+                let held = lock(stream);
+                if sync(stream) != 0 {
+                    result = EOF;
+                }
+                unlock(stream, held);
+            });
+            result
+        } else {
+            locked_flush(stream_of(stream, symbol))
+        }
     }
 }
 #[unsafe(no_mangle)]
 extern "C" fn fflush(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: null flushes the two process-lifetime streams; non-null FILE* is
-    // checked against their sentinels before its state is accessed.
-    unsafe {
-        if stream.is_null() {
-            let out = locked_flush(StreamId::Out);
-            let err = locked_flush(StreamId::Err);
-            if out == 0 && err == 0 { 0 } else { EOF }
-        } else {
-            locked_flush(stream_of(stream, c"fflush"))
-        }
-    }
+    // SAFETY: forwarded.
+    unsafe { fflush_impl(stream, c"fflush") }
+}
+fn ferror_impl(stream: *mut libc::FILE, symbol: &CStr) -> c_int {
+    let s = stream_of(stream, symbol);
+    // SAFETY: stream_of selects a table entry; the indicator lives in its flags.
+    c_int::from(unsafe { has_error(s) })
 }
 #[unsafe(no_mangle)]
 extern "C" fn ferror(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"ferror");
-    let state = stream_ptr(s);
-    // SAFETY: stream_of selects a static state, and locking protects the error
-    // bit read from concurrent stream operations.
+    ferror_impl(stream, c"ferror")
+}
+fn feof_impl(stream: *mut libc::FILE, symbol: &CStr) -> c_int {
+    let s = stream_of(stream, symbol);
+    // SAFETY: stream_of selects a table entry; the indicator lives in its flags.
+    c_int::from(unsafe { at_eof(s) })
+}
+#[unsafe(no_mangle)]
+extern "C" fn feof(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    feof_impl(stream, c"feof")
+}
+fn clearerr_impl(stream: *mut libc::FILE, symbol: &CStr) {
+    let s = stream_of(stream, symbol);
+    // SAFETY: stream_of selects a table entry; locking protects the update.
     unsafe {
         let held = lock(s);
-        let result = c_int::from((*state).error);
+        set_error(s, false);
+        set_eof(s, false);
         unlock(s, held);
-        result
     }
 }
 #[unsafe(no_mangle)]
 extern "C" fn clearerr(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"clearerr");
-    // SAFETY: stream_of selects a static state, and locking protects the error
-    // bit update from concurrent stream operations.
-    unsafe {
-        let held = lock(s);
-        set_error(s, false);
-        unlock(s, held);
+    clearerr_impl(stream, c"clearerr");
+}
+fn fileno_impl(stream: *mut libc::FILE, symbol: &CStr) -> c_int {
+    let s = stream_of(stream, symbol);
+    // SAFETY: stream_of selected a table entry.
+    let fd = unsafe { (*stream_ptr(s)).fd };
+    if fd < 0 {
+        super::errno(libc::EBADF);
     }
+    fd
+}
+/// `fileno`: the descriptor a stream reads or writes, as libc reports it
+/// whatever that number now names.
+#[unsafe(no_mangle)]
+extern "C" fn fileno(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    fileno_impl(stream, c"fileno")
 }
 #[unsafe(no_mangle)]
 extern "C" fn flockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stream_of accepts only sentinel tokens whose static locks live
-    // for the process lifetime.
+    // SAFETY: stream_of accepts only table entries whose locks live for the
+    // process lifetime.
     unsafe {
         lock(stream_of(stream, c"flockfile"));
     }
@@ -903,8 +1179,8 @@ extern "C" fn flockfile(stream: *mut libc::FILE) {
 #[unsafe(no_mangle)]
 extern "C" fn funlockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stream_of accepts only sentinels; the teardown check preserves
-    // the existing rule about whether this call releases the stream lock.
+    // SAFETY: stream_of accepts only table entries; the teardown check
+    // preserves the existing rule about whether this call releases the lock.
     unsafe {
         unlock(
             stream_of(stream, c"funlockfile"),
@@ -912,5 +1188,44 @@ extern "C" fn funlockfile(stream: *mut libc::FILE) {
         );
     }
 }
+/// `perror`: `"S: MESSAGE\n"` (just the message for a null or empty `S`)
+/// on `stderr`, the message being `strerror`'s for the errno on entry.
+///
+/// # Safety
+/// The prefix is null or a readable, NUL-terminated string.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn perror(prefix: *const c_char) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let number = super::get_errno();
+    type Strerror = unsafe extern "C" fn(c_int) -> *const c_char;
+    static HOST: OnceLock<Strerror> = OnceLock::new();
+    let strerror = *HOST.get_or_init(|| {
+        // SAFETY: the private resolver returns the host's `strerror`, whose
+        // ABI is exactly `Strerror`.
+        unsafe {
+            core::mem::transmute::<*mut c_void, Strerror>(crate::host::hostapi::resolve(
+                c"strerror",
+            ))
+        }
+    });
+    // SAFETY: the `stderr` variable is read by value.
+    let s = stream_of(unsafe { STDERR }, c"perror");
+    // SAFETY: the prefix is null or a C string by contract; the host's
+    // message is a C string; the stream lock serializes the puts.
+    unsafe {
+        let message = strerror(number);
+        let held = lock(s);
+        if !prefix.is_null() && prefix.read() != 0 {
+            put(s, prefix.cast(), libc::strlen(prefix));
+            put(s, b": ".as_ptr(), 2);
+        }
+        put(s, message.cast(), libc::strlen(message));
+        put_one(s, b'\n');
+        unlock(s, held);
+        crate::abi::restore_host_errno(number);
+    }
+}
+#[cfg(target_os = "macos")]
+mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;

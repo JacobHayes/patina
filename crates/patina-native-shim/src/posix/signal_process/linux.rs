@@ -438,8 +438,8 @@ unsafe extern "C" fn psignal(sig: c_int, prefix: *const c_char) {
         numbered(&mut unknown, b"Unknown signal ", sig);
         unknown.as_ptr()
     };
-    // SAFETY: STDERR is the initialized thread-local sentinel stream slot used by this door.
-    let fd = super::super::stdio::sentinel_fd(unsafe { super::super::stdio::STDERR });
+    // SAFETY: the `stderr` variable is read by value.
+    let fd = super::super::stdio::stream_fd(unsafe { super::super::stdio::STDERR });
     if fd < 0 {
         super::super::stdio::trap(c"psignal")
     }

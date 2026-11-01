@@ -305,7 +305,7 @@ pub fn native_deny_trap_armed(bytes: &[u8]) -> Result<Vec<NativeDenyTrap>, Targe
 /// when the guest references NONE of them directly (normalized names, ELF).
 ///
 /// These are reached through paths a defined/undefined-reference scan cannot see —
-/// the `printf` family and the `stdout`/`stderr` sentinel globals are what keep
+/// the `printf` family and the `stdin`/`stdout`/`stderr` stream globals are what keep
 /// glibc's OWN internal stdio away from the sentinel `FILE` handles (an
 /// un-interposed glibc `printf` aborts on the sentinel), and the deterministic-IO
 /// interposers (`open`/`read`/`write`/`close`, `pthread_create`) are the runtime's
@@ -322,6 +322,7 @@ pub const NATIVE_LINUX_LIVE_INTERPOSERS: &[&str] = &[
     "puts",
     "putchar",
     "fputc",
+    "stdin",
     "stdout",
     "stderr",
     "open",

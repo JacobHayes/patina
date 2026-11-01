@@ -1,4 +1,6 @@
-//! Linux buffering controls and assertion diagnostics.
+//! The Linux port: glibc's buffering controls and its spellings of the
+//! stdio calls (the `_unlocked`, `_IO_` and `64` names, the fortified
+//! `_chk` entries, the inline bodies' slow paths, `stdio_ext.h`).
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use super::*;
@@ -137,58 +139,19 @@ extern "C" fn setlinebuf(stream: *mut libc::FILE) {
     }
 }
 
-// The character, positioning and lifetime calls made on `stdout`/`stderr`
-// beside the ones above: libstdc++'s `stdio_sync_filebuf` (`std::cout`,
-// `std::cerr`, `std::clog`), which binds those objects to the shim's
-// sentinels, and the alternate spellings and inline slow paths a C guest
-// reaches (`fgetc`, `*_unlocked`, `_IO_getc`/`_IO_putc`, `__uflow`/
-// `__overflow`, `_IO_flockfile`). Every one must be the shim's: glibc's would
-// read a sentinel as a FILE. Like every stdio door they take their stream
-// through `stream_of`, which stops by name on any other `FILE*`: no glibc
-// stream (its stdin, or one an allowed host `fopen` made) is read or written.
+// Every glibc spelling takes its stream through `stream_of`, which stops by
+// name on any other `FILE*`: libstdc++'s `stdio_sync_filebuf` (`std::cout`,
+// `std::cin`) binds the shim's standard streams, and a C guest reaches the
+// `_unlocked` and `_IO_` names and the inline bodies' slow paths. The
+// unlocked spellings take the stream's (recursive) lock all the same.
 
 /// A byte written by `putc` and its spellings: `fputc`'s model.
 fn put_char(character: c_int, stream: *mut libc::FILE, symbol: &CStr) -> c_int {
     let s = stream_of(stream, symbol);
-    // SAFETY: stream_of selected a process-lifetime sentinel stream.
+    // SAFETY: stream_of selected a table entry.
     unsafe { put_byte(s, character) }
 }
 
-/// A read from a standard output stream, as glibc's `_IO_NO_READS` streams
-/// answer it: leaving put mode flushes pending output, then the read fails
-/// with `EBADF` and sets the error indicator. EOF if the flush failed.
-unsafe fn refuse_read(stream: StreamId) -> c_int {
-    let s = stream_ptr(stream);
-    // SAFETY: the selected stream is static and its recursive mutex protects
-    // the flush and the indicator update.
-    unsafe {
-        let held = lock(stream);
-        if sync(stream) == 0 {
-            // glibc's get mode collapses the write area: the next write
-            // starts a new one.
-            (*s).putting = false;
-            (*s).area = false;
-            set_error(stream, true);
-            super::super::errno(libc::EBADF);
-        }
-        unlock(stream, held);
-    }
-    EOF
-}
-
-/// A byte read by `getc` and its spellings.
-fn get_char(stream: *mut libc::FILE, symbol: &CStr) -> c_int {
-    let s = stream_of(stream, symbol);
-    // SAFETY: stream_of selected a process-lifetime sentinel stream.
-    unsafe { refuse_read(s) }
-}
-
-/// `putc`: `fputc` (`std::endl`, `put`).
-#[unsafe(no_mangle)]
-extern "C" fn putc(character: c_int, stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    put_char(character, stream, c"putc")
-}
 #[unsafe(no_mangle)]
 extern "C" fn putc_unlocked(character: c_int, stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -207,7 +170,8 @@ extern "C" fn _IO_putc(character: c_int, stream: *mut libc::FILE) -> c_int {
 #[unsafe(no_mangle)]
 extern "C" fn putchar_unlocked(character: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    put_char(character, (&raw mut OUT_TOKEN).cast(), c"putchar_unlocked")
+    // SAFETY: the `stdout` variable is read by value.
+    put_char(character, unsafe { STDOUT }, c"putchar_unlocked")
 }
 
 /// `__overflow`: the slow path of the inline `putc_unlocked` bodies. A byte
@@ -216,7 +180,7 @@ extern "C" fn putchar_unlocked(character: c_int) -> c_int {
 extern "C" fn __overflow(stream: *mut libc::FILE, character: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let s = stream_of(stream, c"__overflow");
-    // SAFETY: stream_of selected a process-lifetime sentinel stream.
+    // SAFETY: stream_of selected a table entry.
     unsafe {
         if character == EOF {
             locked_flush(s)
@@ -227,187 +191,283 @@ extern "C" fn __overflow(stream: *mut libc::FILE, character: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn getc(stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"getc")
-}
-#[unsafe(no_mangle)]
-extern "C" fn fgetc(stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"fgetc")
-}
-#[unsafe(no_mangle)]
 extern "C" fn getc_unlocked(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"getc_unlocked")
+    input::get_char(stream, c"getc_unlocked")
 }
 #[unsafe(no_mangle)]
 extern "C" fn fgetc_unlocked(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"fgetc_unlocked")
+    input::get_char(stream, c"fgetc_unlocked")
 }
 #[unsafe(no_mangle)]
 extern "C" fn _IO_getc(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"_IO_getc")
-}
-/// `getchar` and `getchar_unlocked` read glibc's own `stdin`, which is not
-/// modeled: a named stop, never a read of the host's descriptor 0.
-#[unsafe(no_mangle)]
-extern "C" fn getchar() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::trap_fatal("getchar reads glibc's own stdin, which is not modeled")
+    input::get_char(stream, c"_IO_getc")
 }
 #[unsafe(no_mangle)]
 extern "C" fn getchar_unlocked() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::trap_fatal("getchar_unlocked reads glibc's own stdin, which is not modeled")
+    // SAFETY: the `stdin` variable is read by value.
+    input::get_char(unsafe { STDIN }, c"getchar_unlocked")
 }
 /// `__uflow`: the slow path of the inline `getc_unlocked` bodies.
 #[unsafe(no_mangle)]
 extern "C" fn __uflow(stream: *mut libc::FILE) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    get_char(stream, c"__uflow")
-}
-
-/// `fileno`: the descriptor a standard stream writes, as glibc reports it
-/// whatever that number now names.
-#[unsafe(no_mangle)]
-extern "C" fn fileno(stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fileno");
-    // SAFETY: stream_of selected a process-lifetime stream; its fd never
-    // changes.
-    unsafe { (*stream_ptr(s)).fd }
+    input::get_char(stream, c"__uflow")
 }
 
 /// # Safety
 /// The destination holds size*count bytes; stream obeys fread's contract.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn fread(
-    _pointer: *mut c_void,
+unsafe extern "C" fn fread_unlocked(
+    pointer: *mut c_void,
     size: usize,
     count: usize,
     stream: *mut libc::FILE,
 ) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fread");
-    if size.wrapping_mul(count) != 0 {
-        // SAFETY: stream_of selected a sentinel stream; nothing is copied out.
-        unsafe { refuse_read(s) };
-    }
-    0
+    // SAFETY: forwarded from the C contract.
+    unsafe { input::fread_impl(pointer, size, count, stream, c"fread_unlocked") }
 }
-
-/// `ungetc`: `EOF` changes nothing; a byte pushed back onto a standard
-/// output stream (glibc keeps a pushback area even there) is a named stop:
-/// the pushback is not modeled.
+/// glibc's `__fread_chk`: `fread` into a buffer of `capacity` bytes; a
+/// request past it (or one whose size overflows) is the fortify abort.
+unsafe fn fread_checked(
+    pointer: *mut c_void,
+    capacity: usize,
+    size: usize,
+    count: usize,
+    stream: *mut libc::FILE,
+    symbol: &CStr,
+) -> usize {
+    let Some(request) = size.checked_mul(count) else {
+        super::super::chk_fail()
+    };
+    if request > capacity {
+        super::super::chk_fail()
+    }
+    // SAFETY: forwarded from the C contract; the request fits the buffer.
+    unsafe { input::fread_impl(pointer, size, count, stream, symbol) }
+}
+/// # Safety
+/// The destination holds `capacity` bytes; stream obeys fread's contract.
 #[unsafe(no_mangle)]
-extern "C" fn ungetc(character: c_int, stream: *mut libc::FILE) -> c_int {
+unsafe extern "C" fn __fread_chk(
+    pointer: *mut c_void,
+    capacity: usize,
+    size: usize,
+    count: usize,
+    stream: *mut libc::FILE,
+) -> usize {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    stream_of(stream, c"ungetc");
-    if character == EOF {
-        return EOF;
+    // SAFETY: forwarded from the C contract.
+    unsafe { fread_checked(pointer, capacity, size, count, stream, c"__fread_chk") }
+}
+/// # Safety
+/// The destination holds `capacity` bytes; stream obeys fread's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __fread_unlocked_chk(
+    pointer: *mut c_void,
+    capacity: usize,
+    size: usize,
+    count: usize,
+    stream: *mut libc::FILE,
+) -> usize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe {
+        fread_checked(
+            pointer,
+            capacity,
+            size,
+            count,
+            stream,
+            c"__fread_unlocked_chk",
+        )
     }
-    crate::trap_fatal("ungetc onto a standard output stream: its pushback area is not modeled")
+}
+/// # Safety
+/// The buffer holds `count` writable bytes; stream obeys fgets's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fgets_unlocked(
+    buffer: *mut c_char,
+    count: c_int,
+    stream: *mut libc::FILE,
+) -> *mut c_char {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { input::fgets_impl(buffer, count, usize::MAX, stream, c"fgets_unlocked") }
+}
+/// glibc's `__fgets_chk`: `fgets` reading at most the buffer's `capacity`;
+/// a line that fills it is the fortify abort.
+unsafe fn fgets_checked(
+    buffer: *mut c_char,
+    capacity: usize,
+    count: c_int,
+    stream: *mut libc::FILE,
+    symbol: &CStr,
+) -> *mut c_char {
+    // SAFETY: forwarded from the C contract; the engine reads at most
+    // `capacity` bytes and aborts before terminating a line that fills them.
+    unsafe { input::fgets_impl(buffer, count, capacity, stream, symbol) }
+}
+/// # Safety
+/// The buffer holds `capacity` writable bytes; stream obeys fgets's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __fgets_chk(
+    buffer: *mut c_char,
+    capacity: usize,
+    count: c_int,
+    stream: *mut libc::FILE,
+) -> *mut c_char {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fgets_checked(buffer, capacity, count, stream, c"__fgets_chk") }
+}
+/// # Safety
+/// The buffer holds `capacity` writable bytes; stream obeys fgets's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __fgets_unlocked_chk(
+    buffer: *mut c_char,
+    capacity: usize,
+    count: c_int,
+    stream: *mut libc::FILE,
+) -> *mut c_char {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fgets_checked(buffer, capacity, count, stream, c"__fgets_unlocked_chk") }
+}
+/// `__getdelim`: the name glibc's inline `getline` body calls.
+///
+/// # Safety
+/// `line` and `capacity` obey getdelim's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __getdelim(
+    line: *mut *mut c_char,
+    capacity: *mut usize,
+    delimiter: c_int,
+    stream: *mut libc::FILE,
+) -> isize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { input::getdelim_impl(line, capacity, delimiter, stream, c"__getdelim") }
+}
+/// # Safety
+/// String is readable and NUL-terminated; stream obeys fputs's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fputs_unlocked(string: *const c_char, stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fputs_impl(string, stream, c"fputs_unlocked") }
+}
+/// # Safety
+/// The source holds size*count bytes; stream obeys fwrite's contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fwrite_unlocked(
+    pointer: *const c_void,
+    size: usize,
+    count: usize,
+    stream: *mut libc::FILE,
+) -> usize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { fwrite_impl(pointer, size, count, stream, c"fwrite_unlocked") }
+}
+#[unsafe(no_mangle)]
+extern "C" fn fflush_unlocked(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded.
+    unsafe { fflush_impl(stream, c"fflush_unlocked") }
+}
+#[unsafe(no_mangle)]
+extern "C" fn feof_unlocked(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    feof_impl(stream, c"feof_unlocked")
+}
+#[unsafe(no_mangle)]
+extern "C" fn ferror_unlocked(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    ferror_impl(stream, c"ferror_unlocked")
+}
+#[unsafe(no_mangle)]
+extern "C" fn clearerr_unlocked(stream: *mut libc::FILE) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    clearerr_impl(stream, c"clearerr_unlocked");
+}
+#[unsafe(no_mangle)]
+extern "C" fn fileno_unlocked(stream: *mut libc::FILE) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    fileno_impl(stream, c"fileno_unlocked")
 }
 
-/// `ftello64`: the descriptor's offset plus the bytes still buffered, as
-/// glibc's `do_ftell` counts them; a stream on a capture or a pipe answers
-/// `ESPIPE`.
+/// `ftello64`/`fseeko64`: glibc's 64-bit names, the same calls on LP64.
 #[unsafe(no_mangle)]
 extern "C" fn ftello64(stream: *mut libc::FILE) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"ftello64");
-    let state = stream_ptr(s);
-    // SAFETY: the selected stream is static and its recursive mutex protects
-    // the buffered count read beside the descriptor's offset.
-    unsafe {
-        let held = lock(s);
-        let mut position = crate::abi::libc_result(crate::fd::seek((*state).fd, 0, 1), -1);
-        if position >= 0 && (*state).putting && (*state).area {
-            position += (*state).used as i64;
-        }
-        unlock(s, held);
-        position
-    }
+    files::ftello_impl(stream, c"ftello64")
 }
-
-/// `fseeko64`: flush pending output, then move the descriptor's offset; 0 or
-/// -1 with the descriptor's error. A whence other than `SEEK_SET`,
-/// `SEEK_CUR` or `SEEK_END` is `EINVAL` first.
 #[unsafe(no_mangle)]
 extern "C" fn fseeko64(stream: *mut libc::FILE, offset: i64, whence: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fseeko64");
-    if !(0..=2).contains(&whence) {
-        super::super::errno(libc::EINVAL);
-        return -1;
-    }
-    let state = stream_ptr(s);
-    // SAFETY: the selected stream is static and its recursive mutex protects
-    // the flush and the mode change around the descriptor seek.
-    unsafe {
-        let held = lock(s);
-        let result = if sync(s) != 0 {
-            -1
-        } else {
-            (*state).putting = false;
-            (*state).area = false;
-            let moved =
-                crate::abi::libc_result(crate::fd::seek((*state).fd, offset, whence as u32), -1);
-            if moved < 0 { -1 } else { 0 }
-        };
-        unlock(s, held);
-        result
-    }
+    files::fseeko_impl(stream, offset, whence, c"fseeko64")
 }
-
-/// `fclose`: flush, close the stream's descriptor, and retire the stream:
-/// 0, or `EOF` when the flush or the close failed (the stream is closed
-/// either way, as glibc's is). A later call on it stops by name.
-#[unsafe(no_mangle)]
-extern "C" fn fclose(stream: *mut libc::FILE) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let s = stream_of(stream, c"fclose");
-    let state = stream_ptr(s);
-    // SAFETY: the selected stream is static and its recursive mutex protects
-    // the flush and the retirement.
-    unsafe {
-        let held = lock(s);
-        let flushed = sync(s);
-        let closed = crate::patina_close((*state).fd);
-        (*state).closed = true;
-        unlock(s, held);
-        if flushed == 0 && closed == 0 { 0 } else { EOF }
-    }
-}
-
-/// `freopen` onto a standard stream opens a file through glibc's FILE
-/// layer, which is not modeled: a named stop.
-///
 /// # Safety
-/// The path and mode are C strings or null, as freopen's contract.
+/// Path and mode are NUL-terminated strings.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn freopen(
-    _path: *const c_char,
-    _mode: *const c_char,
+unsafe extern "C" fn fopen64(path: *const c_char, mode: *const c_char) -> *mut libc::FILE {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: forwarded from the C contract.
+    unsafe { files::fopen_impl(path, mode) }
+}
+/// # Safety
+/// Path is null or a C string; mode is a C string.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn freopen64(
+    path: *const c_char,
+    mode: *const c_char,
     stream: *mut libc::FILE,
 ) -> *mut libc::FILE {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    stream_of(stream, c"freopen");
-    crate::trap_fatal(
-        "freopen of a standard stream: reopening through glibc's FILE layer is not modeled",
-    )
+    // SAFETY: forwarded from the C contract.
+    unsafe { files::freopen_impl(path, mode, stream, c"freopen64") }
+}
+
+/// `__fpending` (`stdio_ext.h`): the output bytes buffered.
+#[unsafe(no_mangle)]
+extern "C" fn __fpending(stream: *mut libc::FILE) -> usize {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let s = stream_of(stream, c"__fpending");
+    let state = stream_ptr(s);
+    // SAFETY: the stream is a table entry; glibc reads the count unlocked.
+    unsafe {
+        if (*state).putting && (*state).area {
+            (*state).used
+        } else {
+            0
+        }
+    }
+}
+/// `__fpurge` (`stdio_ext.h`): discard the buffered output and input,
+/// pushback included.
+#[unsafe(no_mangle)]
+extern "C" fn __fpurge(stream: *mut libc::FILE) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    let s = stream_of(stream, c"__fpurge");
+    // SAFETY: the stream is a table entry; glibc purges it unlocked.
+    unsafe {
+        (*stream_ptr(s)).used = 0;
+        input::drop_input(s);
+    }
 }
 
 /// `_IO_flockfile`/`_IO_funlockfile`: glibc's internal spellings of
-/// `flockfile`/`funlockfile`, which would lock the sentinel's (absent) lock.
+/// `flockfile`/`funlockfile`.
 #[unsafe(no_mangle)]
 extern "C" fn _IO_flockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stream_of accepts only sentinels whose static locks live for
-    // the process lifetime.
+    // SAFETY: stream_of accepts only table entries whose locks live for the
+    // process lifetime.
     unsafe {
         lock(stream_of(stream, c"_IO_flockfile"));
     }
@@ -415,8 +475,8 @@ extern "C" fn _IO_flockfile(stream: *mut libc::FILE) {
 #[unsafe(no_mangle)]
 extern "C" fn _IO_funlockfile(stream: *mut libc::FILE) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: stream_of accepts only sentinels; the teardown check preserves
-    // funlockfile's rule about whether this call releases the stream lock.
+    // SAFETY: stream_of accepts only table entries; the teardown check
+    // preserves funlockfile's rule about whether this call releases the lock.
     unsafe {
         unlock(
             stream_of(stream, c"_IO_funlockfile"),

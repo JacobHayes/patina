@@ -1374,6 +1374,12 @@ symbol_rows! {
         SymbolStatus::Modeled,
     ),
     s(
+        "stdin",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::ControlPlane,
+    ),
+    s(
         "stdout",
         Platform::Linux,
         Serves::LibcOnly,
@@ -1382,6 +1388,12 @@ symbol_rows! {
     s(
         "stderr",
         Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::ControlPlane,
+    ),
+    s(
+        "__stdinp",
+        Platform::Darwin,
         Serves::LibcOnly,
         SymbolStatus::ControlPlane,
     ),
