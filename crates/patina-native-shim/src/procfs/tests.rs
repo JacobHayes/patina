@@ -203,7 +203,7 @@ fn walked(start: Node, path: &str, nofollow: bool, no_symlinks: bool) -> Result<
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect();
-    walk(start, &mut remaining, nofollow, no_symlinks, &mut 0)
+    walk(start, &mut remaining, nofollow, no_symlinks, false, &mut 0)
 }
 
 fn me() -> i32 {
@@ -374,6 +374,11 @@ fn net_leads_to_the_callers_socket_tables() {
 fn a_directory_links_the_directories_it_lists() {
     let mut directories = vec![Node::Root];
     while let Some(dir) = directories.pop() {
+        // Init's descriptors are root's to list.
+        if dir == Node::Fds(Process::INIT.pid()) {
+            assert_eq!(listing(dir).map(|_| ()), Err(EACCES));
+            continue;
+        }
         let listed: Vec<Node> = listing(dir).unwrap()[2..]
             .iter()
             .filter(|entry| entry.kind == FsEntryKind::Directory)

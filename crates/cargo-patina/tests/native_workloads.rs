@@ -18,6 +18,9 @@ mod fs_faults;
 #[cfg(target_os = "linux")]
 #[path = "native_workloads/path_races.rs"]
 mod path_races;
+#[cfg(target_os = "linux")]
+#[path = "native_workloads/proc_fd.rs"]
+mod proc_fd;
 #[path = "native_workloads/two_copy.rs"]
 mod two_copy;
 

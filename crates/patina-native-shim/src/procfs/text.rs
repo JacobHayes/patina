@@ -173,7 +173,9 @@ pub(super) fn generate(node: Node) -> Result<Vec<u8>, c_int> {
         | Node::Process(_)
         | Node::Tasks(_)
         | Node::Thread(..)
-        | Node::Net(_) => crate::trap_fatal("a procfs directory or link has no text"),
+        | Node::Net(_)
+        | Node::Fds(_)
+        | Node::FdLink(..) => crate::trap_fatal("a procfs directory or link has no text"),
     };
     Ok(text.into_bytes())
 }

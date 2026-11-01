@@ -126,6 +126,12 @@ pub(crate) enum Virtual {
     /// A node of procfs, mounted at `/proc` (`crate::procfs`).
     #[cfg(target_os = "linux")]
     Proc(crate::procfs::Node),
+    /// What the caller's descriptor of this number holds, reached through
+    /// its `/proc/<pid>/fd` link, when no path names it: a volume node whose
+    /// last name is gone, or a socket's, a pipe's or an anonymous inode. Only
+    /// a `stat` and a `connect` are modeled on it.
+    #[cfg(target_os = "linux")]
+    Held(c_int),
 }
 
 impl Virtual {
@@ -143,6 +149,12 @@ impl Virtual {
             Virtual::Tty => TTY.to_owned(),
             #[cfg(target_os = "linux")]
             Virtual::Proc(node) => node.path(),
+            #[cfg(target_os = "linux")]
+            Virtual::Held(number) => format!(
+                "what {} holds",
+                crate::procfs::Node::FdLink(crate::identity::Process::current().pid(), number)
+                    .path()
+            ),
         }
     }
 
@@ -256,6 +268,10 @@ pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved,
         Resolution::Virtual(entry @ Virtual::Proc(node)) if node.is_directory() => {
             entry.unmodeled("holding as the working or root directory")
         }
+        #[cfg(target_os = "linux")]
+        Resolution::Virtual(entry @ Virtual::Held(_)) => {
+            entry.unmodeled("holding as the working or root directory")
+        }
         // The devices, the namespace files and procfs's files are no
         // directories.
         Resolution::Virtual(_) => return Err(ENOTDIR),
@@ -337,6 +353,13 @@ fn metadata(path: &str) -> Result<Option<FsMetadata>, c_int> {
         Err(errno) if errno == ENOENT => Ok(None),
         Err(errno) => Err(errno),
     }
+}
+
+/// The path the node a driver handle holds has now (a lookup of the walk:
+/// [`namei`]); `ENOENT` once its last name is gone.
+#[cfg(target_os = "linux")]
+pub(crate) fn node_path(fd: Fd) -> Result<String, c_int> {
+    namei(|context| context.fs_fd_path_unrecorded(fd))
 }
 
 fn components(path: &str) -> impl Iterator<Item = &str> {
@@ -536,8 +559,8 @@ pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resol
             &mut hops,
         );
         match walked? {
-            Some(resolution) => return Ok(resolution),
-            None => resolved.clear(),
+            InProcfs::Done(resolution) => return Ok(resolution),
+            InProcfs::From(base) => resolved = base,
         }
     }
     if !remaining.iter().any(|component| component == "..") {
@@ -623,8 +646,8 @@ pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resol
                     requires_directory,
                     &mut hops,
                 )? {
-                    Some(resolution) => return Ok(resolution),
-                    None => resolved.clear(),
+                    InProcfs::Done(resolution) => return Ok(resolution),
+                    InProcfs::From(base) => resolved = base,
                 }
             }
             Step::Done(path, metadata) => {
@@ -642,12 +665,24 @@ pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resol
     }
 }
 
+/// Where a resolution's walk through procfs leaves it.
+#[cfg(target_os = "linux")]
+enum InProcfs {
+    /// Resolved.
+    Done(Resolution),
+    /// On the volume, at this directory: the walk goes on from it with what
+    /// remains.
+    From(Vec<String>),
+}
+
 /// The rest of a resolution in procfs, from `start`
 /// (`crate::procfs::walk`): the node it ends at (`ENOTDIR` for a file under
-/// a trailing `/`), or `None` when it left procfs by `..` at its root, the
-/// walk going on from the volume's root with what remains (a mount crossing
-/// `RESOLVE_NO_XDEV` refuses, `EXDEV`). A scoped resolution through procfs
-/// is not modeled.
+/// a trailing `/`); the volume's root when it left procfs by `..` at its
+/// root (a mount crossing `RESOLVE_NO_XDEV` refuses, `EXDEV`); or what a
+/// descriptor's link jumped to. A jump to a volume node ends at the node
+/// itself, a symlink unfollowed (`nd_jump_link` lands on the inode), or goes
+/// on from it when it is a directory (`ENOTDIR` through anything else). A
+/// scoped resolution through procfs is not modeled.
 #[cfg(target_os = "linux")]
 fn in_procfs(
     start: crate::procfs::Node,
@@ -656,19 +691,67 @@ fn in_procfs(
     flags: u32,
     requires_directory: bool,
     hops: &mut usize,
-) -> Result<Option<Resolution>, c_int> {
+) -> Result<InProcfs, c_int> {
     if flags & (RESOLVE_BENEATH | RESOLVE_IN_ROOT) != 0 {
         Virtual::Proc(start).unmodeled("a scoped resolution (RESOLVE_BENEATH, RESOLVE_IN_ROOT) in");
     }
-    match crate::procfs::walk(start, remaining, rules.nofollow, rules.no_symlinks, hops)? {
+    let no_magic_links = flags & RESOLVE_NO_MAGICLINKS != 0;
+    let walked = crate::procfs::walk(
+        start,
+        remaining,
+        rules.nofollow,
+        rules.no_symlinks,
+        no_magic_links,
+        hops,
+    )?;
+    let directory_only = |entry: Virtual| {
+        if requires_directory {
+            Err(ENOTDIR)
+        } else {
+            Ok(InProcfs::Done(Resolution::Virtual(entry)))
+        }
+    };
+    match walked {
+        crate::procfs::Walked::At(node) if !node.is_directory() => {
+            directory_only(Virtual::Proc(node))
+        }
         crate::procfs::Walked::At(node) => {
-            if requires_directory && !node.is_directory() {
-                return Err(ENOTDIR);
-            }
-            Ok(Some(Resolution::Virtual(Virtual::Proc(node))))
+            Ok(InProcfs::Done(Resolution::Virtual(Virtual::Proc(node))))
         }
         crate::procfs::Walked::Left if flags & RESOLVE_NO_XDEV != 0 => Err(EXDEV),
-        crate::procfs::Walked::Left => Ok(None),
+        crate::procfs::Walked::Left => Ok(InProcfs::From(Vec::new())),
+        // A jump out of procfs crosses a mount (`nd_jump_link`).
+        crate::procfs::Walked::Entry(_) | crate::procfs::Walked::Volume(_)
+            if flags & RESOLVE_NO_XDEV != 0 =>
+        {
+            Err(EXDEV)
+        }
+        crate::procfs::Walked::Entry(entry) => directory_only(entry),
+        crate::procfs::Walked::Volume(path) => {
+            // The jump lands on the node, past its ancestors' search
+            // permission, which the model's lookups by name would charge.
+            let metadata = match metadata(&path) {
+                Err(errno) if errno == EACCES => crate::trap_fatal(&format!(
+                    "a jump through a descriptor's link in {} to {path}, under a directory the \
+                     caller may not search, is not modeled; failing closed",
+                    Virtual::Proc(start).path()
+                )),
+                found => found?,
+            };
+            let directory = metadata.is_some_and(|found| found.kind == FsEntryKind::Directory);
+            if directory && !remaining.is_empty() {
+                return Ok(InProcfs::From(
+                    components(&path).map(str::to_owned).collect(),
+                ));
+            }
+            if !directory && (requires_directory || !remaining.is_empty()) {
+                return Err(ENOTDIR);
+            }
+            Ok(InProcfs::Done(Resolution::Volume(Resolved {
+                path,
+                metadata,
+            })))
+        }
     }
 }
 

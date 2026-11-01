@@ -427,6 +427,9 @@ pub(crate) unsafe fn statfs(
         Ok(paths::Resolution::Virtual(paths::Virtual::Proc(_))) => {
             copy_out(Filesystem::Proc.describe(), out)
         }
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Held(_))) => {
+            entry.unmodeled("the filesystem statistics")
+        }
         Err(errno) => Err(crate::abi::failed(errno)),
     }
 }

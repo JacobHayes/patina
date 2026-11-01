@@ -12,8 +12,14 @@
 //!   `/proc/net`, one to `self/net`;
 //! * the machine-wide files (`0444`, root's): `stat`, `uptime`, `vmstat`,
 //!   `loadavg` and `meminfo` ([`text`]);
-//! * `/proc/<pid>` (`0555`, the process's owner) with its `task` and `net`
-//!   directories and its `status` and `stat` (`0444`);
+//! * `/proc/<pid>` (`0555`, the process's owner) with its `task`, `fd` and
+//!   `net` directories and its `status` and `stat` (`0444`);
+//! * `/proc/<pid>/fd` (`0500`, the process's owner; init's the caller may
+//!   not read, `EACCES`), a magic link per open descriptor of the caller
+//!   ([`fd`]): it reads the held node's path now or a pseudo-filesystem's
+//!   name (`socket:[ino]`, `pipe:[ino]`, `anon_inode:[eventfd]`, …), and a
+//!   walk through it lands on what the descriptor holds, so a pinned node is
+//!   reached after a rename or an unlink;
 //! * `/proc/<pid>/task` (`0555`, the process's owner), a directory per
 //!   thread by id (the thread census's: the live ones, and the leader as a
 //!   zombie once it has exited while another lives; init has its one), each
@@ -71,7 +77,11 @@
 //! machine-wide files, `/proc/net` and the socket tables were read live on
 //! an x86_64 7.0 host, not on the pinned 6.8, and a process's and a
 //! thread's are the model's own; a directory's `d_off` cookies count its
-//! entries, as the volume's do.
+//! entries, as the volume's do. A descriptor's link to a node whose last
+//! name is gone, or to a FIFO's end, stops the run when read (the model
+//! keeps no name for it); through a link to what no path names (such a node,
+//! a socket, a pipe, an anonymous inode) only `stat` and `connect` are
+//! modeled, and a socket's open is `ENXIO`; every other call stops the run.
 
 use crate::fdtable::FdKind;
 use crate::identity::Process;
@@ -86,9 +96,11 @@ use patina_dst_abi::{FsDirectoryEntry, FsEntryKind};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_int;
 
+mod fd;
 mod net;
 mod text;
 
+pub(crate) use fd::{Held, unlinked_handle};
 pub(crate) use net::NetFile;
 
 #[cfg(test)]
@@ -124,6 +136,10 @@ pub(crate) enum Node {
     Net(i32),
     /// A socket table in it.
     NetFile(i32, NetFile),
+    /// A process's descriptors, `/proc/<pid>/fd`.
+    Fds(i32),
+    /// One descriptor's magic link, `/proc/<pid>/fd/<n>` ([`fd`]).
+    FdLink(i32, i32),
 }
 
 /// A machine-wide file.
@@ -170,6 +186,8 @@ const NET_LINK_INO: u64 = 0xF000_0003;
 const PROCESS_INO_BASE: u64 = 0x1_0000;
 /// Where it numbers the threads' nodes, past every process's.
 const THREAD_INO_BASE: u64 = 1 << 40;
+/// Where it numbers the descriptors' links, past every thread's.
+const FD_INO_BASE: u64 = 1 << 56;
 /// The task flags `<pid>/stat` reports (`PF_RANDOMIZE`: each process was
 /// executed with address-space randomization, the default persona).
 pub(super) const PF_RANDOMIZE: u32 = 0x0040_0000;
@@ -195,6 +213,8 @@ impl Node {
             }
             Node::Net(pid) => format!("{ROOT}/{pid}/net"),
             Node::NetFile(pid, file) => format!("{ROOT}/{pid}/net/{}", net::name(file)),
+            Node::Fds(pid) => format!("{ROOT}/{pid}/fd"),
+            Node::FdLink(pid, number) => format!("{ROOT}/{pid}/fd/{number}"),
         }
     }
 
@@ -202,14 +222,22 @@ impl Node {
     pub(crate) fn is_directory(self) -> bool {
         matches!(
             self,
-            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) | Node::Net(_)
+            Node::Root
+                | Node::Process(_)
+                | Node::Tasks(_)
+                | Node::Thread(..)
+                | Node::Net(_)
+                | Node::Fds(_)
         )
     }
 
     /// The directory `..` names from it: the root's is itself.
     fn parent(self) -> Node {
         match self {
-            Node::Of(pid, _) | Node::Tasks(pid) | Node::Net(pid) => Node::Process(pid),
+            Node::Of(pid, _) | Node::Tasks(pid) | Node::Net(pid) | Node::Fds(pid) => {
+                Node::Process(pid)
+            }
+            Node::FdLink(pid, _) => Node::Fds(pid),
             Node::Thread(pid, _) => Node::Tasks(pid),
             Node::OfThread(pid, tid, _) => Node::Thread(pid, tid),
             Node::NetFile(pid, _) => Node::Net(pid),
@@ -221,10 +249,13 @@ impl Node {
 
     fn kind(self) -> FsEntryKind {
         match self {
-            Node::Root | Node::Process(_) | Node::Tasks(_) | Node::Thread(..) | Node::Net(_) => {
-                FsEntryKind::Directory
-            }
-            Node::SelfLink | Node::NetLink => FsEntryKind::Symlink,
+            Node::Root
+            | Node::Process(_)
+            | Node::Tasks(_)
+            | Node::Thread(..)
+            | Node::Net(_)
+            | Node::Fds(_) => FsEntryKind::Directory,
+            Node::SelfLink | Node::NetLink | Node::FdLink(..) => FsEntryKind::Symlink,
             Node::Machine(_) | Node::Of(..) | Node::OfThread(..) | Node::NetFile(..) => {
                 FsEntryKind::File
             }
@@ -243,6 +274,8 @@ impl Node {
             | Node::Thread(pid, _)
             | Node::OfThread(pid, ..)
             | Node::Net(pid)
+            | Node::Fds(pid)
+            | Node::FdLink(pid, _)
                 if pid != Process::INIT.pid() =>
             {
                 PATINA_FS_PROC_OWN
@@ -275,6 +308,8 @@ impl Node {
             Node::Thread(pid, tid) => thread(pid, tid, 0),
             Node::OfThread(pid, tid, OfProcess::Status) => thread(pid, tid, 1),
             Node::OfThread(pid, tid, OfProcess::Stat) => thread(pid, tid, 2),
+            Node::Fds(pid) => process(pid, 5),
+            Node::FdLink(pid, number) => FD_INO_BASE + (((pid as u64) << 24) | number as u64),
         }
     }
 }
@@ -338,6 +373,9 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
         }
         Node::Process(pid) if name == "task" => Ok(Node::Tasks(pid)),
         Node::Process(pid) if name == "net" => Ok(Node::Net(pid)),
+        Node::Process(pid) if name == "fd" => Ok(Node::Fds(pid)),
+        // Init's (root's `0500`) the caller may not search.
+        Node::Fds(pid) if pid != Process::current().pid() => Err(EACCES),
         Node::Process(pid) => OF_PROCESS
             .iter()
             .find(|(_, each)| *each == name)
@@ -365,12 +403,19 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
             .find(|(_, each)| *each == name)
             .map(|(file, _)| Node::NetFile(pid, *file))
             .ok_or(ENOENT),
+        // `proc_lookupfd_common`: a number as `name_to_int` reads one,
+        // open now.
+        Node::Fds(pid) => pid_name(name)
+            .filter(|number| fd::is_open(*number))
+            .map(|number| Node::FdLink(pid, number))
+            .ok_or(ENOENT),
         Node::SelfLink
         | Node::NetLink
         | Node::Machine(_)
         | Node::Of(..)
         | Node::OfThread(..)
-        | Node::NetFile(..) => Err(ENOTDIR),
+        | Node::NetFile(..)
+        | Node::FdLink(..) => Err(ENOTDIR),
     }
 }
 
@@ -409,18 +454,29 @@ pub(crate) enum Walked {
     /// Out of procfs by `..` at its root: the walk goes on from the root of
     /// the volume with what remains.
     Left,
+    /// Through a descriptor's link onto the volume node it holds, by that
+    /// node's path now: the walk goes on from the node with what remains.
+    Volume(String),
+    /// Through a descriptor's link onto an entry the resolver answers
+    /// itself (no directory), with nothing left to walk.
+    Entry(Virtual),
 }
 
 /// Walk `remaining` from `start` as `link_path_walk` does: `.` stays, `..`
 /// goes up (out of procfs at its root), a component through a file is
 /// `ENOTDIR`, and a link (`self`, `net`) is followed, its target walked from
 /// the link's directory (one of the walk's `hops`; `ELOOP` under
-/// `no_symlinks`), unless it is the final component and `nofollow`.
+/// `no_symlinks`), unless it is the final component and `nofollow`. A
+/// descriptor's link is followed the same way (`ELOOP` under
+/// `no_magic_links` too) by jumping to what the descriptor holds
+/// ([`fd::held`]): a procfs node the walk goes on from, a volume node it
+/// leaves for, or another entry, through which nothing is found (`ENOTDIR`).
 pub(crate) fn walk(
     start: Node,
     remaining: &mut VecDeque<String>,
     nofollow: bool,
     no_symlinks: bool,
+    no_magic_links: bool,
     hops: &mut usize,
 ) -> Result<Walked, c_int> {
     let mut node = start;
@@ -439,6 +495,26 @@ pub(crate) fn walk(
                     return namespaces(pid, remaining);
                 }
                 let next = lookup(node, name)?;
+                if let Node::FdLink(_, number) = next
+                    && !(nofollow && remaining.is_empty())
+                {
+                    if no_symlinks || no_magic_links {
+                        return Err(ELOOP);
+                    }
+                    *hops += 1;
+                    if *hops > SYMLINK_HOPS {
+                        return Err(ELOOP);
+                    }
+                    match fd::held(number)? {
+                        Held::Proc(held) => node = held,
+                        Held::Volume(path) => return Ok(Walked::Volume(path)),
+                        Held::Entry(entry) if remaining.is_empty() => {
+                            return Ok(Walked::Entry(entry));
+                        }
+                        Held::Entry(_) => return Err(ENOTDIR),
+                    }
+                    continue;
+                }
                 match link_target(next) {
                     Some(target) if !(nofollow && remaining.is_empty()) => {
                         if no_symlinks {
@@ -502,20 +578,37 @@ fn made(node: Node) -> u64 {
 /// processes; a process directory's is two plus its `task` and `net`
 /// directories (`pid_entry_nlink` of the entries modeled), `task`'s two
 /// plus its threads, and a thread's or a `net` directory's two, with no
-/// subdirectory modeled.
+/// subdirectory modeled. A process's `fd` directory is `0500`, its size
+/// the descriptors open (`proc_fd_getattr`); a descriptor's link has the
+/// description's access as its mode and size 64 (`proc_fd_instantiate`).
 pub(crate) fn metadata(node: Node) -> PatinaMetadata {
     let made = PatinaTimestamp::from_nanos(i128::from(made(node)));
-    let (kind, mode) = match node.kind() {
-        FsEntryKind::Directory => (PATINA_ENTRY_DIRECTORY, 0o555),
-        FsEntryKind::Symlink => (PATINA_ENTRY_SYMLINK, 0o777),
-        _ => (PATINA_ENTRY_FILE, 0o444),
+    let (kind, mode) = match node {
+        Node::Fds(_) => (PATINA_ENTRY_DIRECTORY, 0o500),
+        Node::FdLink(_, number) => (PATINA_ENTRY_SYMLINK, fd::mode(number)),
+        _ => match node.kind() {
+            FsEntryKind::Directory => (PATINA_ENTRY_DIRECTORY, 0o555),
+            FsEntryKind::Symlink => (PATINA_ENTRY_SYMLINK, 0o777),
+            _ => (PATINA_ENTRY_FILE, 0o444),
+        },
     };
     let nlink = match node {
         Node::Root => 2 + crate::identity::processes().len() as u32,
-        Node::Process(_) => 4,
+        Node::Process(_) => 5,
         Node::Tasks(pid) => 2 + threads(pid).len() as u32,
-        Node::Thread(..) | Node::Net(_) => 2,
+        Node::Thread(..) | Node::Net(_) | Node::Fds(_) => 2,
         _ => 1,
+    };
+    let length = match node {
+        Node::Fds(pid) if pid == Process::current().pid() => fd::numbers().len() as u64,
+        // Init's descriptors are another process's, whose table the model
+        // does not keep.
+        Node::Fds(pid) => crate::trap_fatal(&format!(
+            "the size of {ROOT}/{pid}/fd, another process's descriptor count, is not modeled; \
+             failing closed"
+        )),
+        Node::FdLink(..) => 64,
+        _ => 0,
     };
     PatinaMetadata {
         kind,
@@ -524,7 +617,7 @@ pub(crate) fn metadata(node: Node) -> PatinaMetadata {
         fs: node.fs(),
         rdev_major: 0,
         rdev_minor: 0,
-        length: 0,
+        length,
         blocks: 0,
         ino: node.ino(),
         atime: made,
@@ -535,13 +628,30 @@ pub(crate) fn metadata(node: Node) -> PatinaMetadata {
 }
 
 /// What a symlink reads: `self`'s target, the caller's pid, and `net`'s,
-/// `self/net`; `None` for a node that is no link.
+/// `self/net`; `None` for a node that is no link. A descriptor's link reads
+/// what [`fd::text`] answers (`ENOENT` once it is closed).
 pub(crate) fn link_target(node: Node) -> Option<String> {
     match node {
         Node::SelfLink => Some(Process::current().pid().to_string()),
         Node::NetLink => Some("self/net".to_owned()),
         _ => None,
     }
+}
+
+/// What `readlink` reads from `node`: [`link_target`], or a descriptor's
+/// link's text; `EINVAL` for a node that is no link.
+pub(crate) fn read_link(node: Node) -> Result<String, c_int> {
+    match node {
+        Node::FdLink(_, number) => fd::text(number),
+        _ => link_target(node).ok_or(EINVAL),
+    }
+}
+
+/// Whether the caller may read `node`: every node but another process's
+/// `fd` directory (root's `0500`, and the caller holds no
+/// `CAP_DAC_READ_SEARCH`).
+fn readable(node: Node) -> bool {
+    !matches!(node, Node::Fds(pid) if pid != Process::current().pid())
 }
 
 /// A directory's entries now, `.` and `..` first (the root's `..` is itself,
@@ -554,6 +664,9 @@ pub(crate) fn listing(dir: Node) -> Result<Vec<FsDirectoryEntry>, c_int> {
         && !threads(pid).contains(&tid)
     {
         return Err(ENOENT);
+    }
+    if !readable(dir) {
+        return Err(EACCES);
     }
     let entry = |name: &str, node: Node| FsDirectoryEntry {
         name: name.to_owned(),
@@ -578,6 +691,7 @@ pub(crate) fn listing(dir: Node) -> Result<Vec<FsDirectoryEntry>, c_int> {
         }
         Node::Process(pid) => {
             entries.push(entry("task", Node::Tasks(pid)));
+            entries.push(entry("fd", Node::Fds(pid)));
             entries.push(entry("net", Node::Net(pid)));
             entries.extend(
                 OF_PROCESS
@@ -600,12 +714,18 @@ pub(crate) fn listing(dir: Node) -> Result<Vec<FsDirectoryEntry>, c_int> {
                 .iter()
                 .map(|(file, name)| entry(name, Node::NetFile(pid, *file))),
         ),
+        Node::Fds(pid) => {
+            for number in fd::numbers() {
+                entries.push(entry(&number.to_string(), Node::FdLink(pid, number)));
+            }
+        }
         Node::SelfLink
         | Node::NetLink
         | Node::Machine(_)
         | Node::Of(..)
         | Node::OfThread(..)
-        | Node::NetFile(..) => {}
+        | Node::NetFile(..)
+        | Node::FdLink(..) => {}
     }
     Ok(entries)
 }
@@ -614,13 +734,27 @@ pub(crate) fn listing(dir: Node) -> Result<Vec<FsDirectoryEntry>, c_int> {
 /// `position` passes over before it returns any: `position` of them, but
 /// for a thread the last call could not return (`unreturned`), which
 /// `proc_task_readdir` resumes at while it lives (`first_tid`'s `f_version`
-/// hint), wherever the threads before it have gone.
+/// hint), wherever the threads before it have gone; and in a process's `fd`
+/// directory, whose position is a descriptor number (`proc_readfd_common`),
+/// the first number open at or past the one the last call could not
+/// return, whatever was closed before it.
 pub(crate) fn resume(
     dir: Node,
     entries: &[FsDirectoryEntry],
     position: u64,
     unreturned: Option<&[u8]>,
 ) -> u64 {
+    if let (Node::Fds(_), Some(name)) = (dir, unreturned)
+        && position > 2
+        && let Some(next) = std::str::from_utf8(name).ok().and_then(pid_name)
+    {
+        let at = entries
+            .iter()
+            .skip(2)
+            .position(|entry| pid_name(&entry.name).is_some_and(|number| number >= next))
+            .unwrap_or(entries.len() - 2);
+        return at as u64 + 2;
+    }
     if let (Node::Tasks(_), Some(name)) = (dir, unreturned)
         && position > 2
         && let Some(index) = entries
@@ -671,12 +805,15 @@ pub(crate) fn open(node: Node, flags: u32, cloexec: bool) -> c_int {
     if flags & (O_CREATE | O_EXCLUSIVE) == O_CREATE | O_EXCLUSIVE {
         return fail(EEXIST);
     }
-    if link_target(node).is_some() {
+    if node.kind() == FsEntryKind::Symlink {
         return fail(ELOOP);
     }
     let directory = node.is_directory();
     if flags & O_DIRECTORY != 0 && !directory {
         return fail(ENOTDIR);
+    }
+    if !readable(node) {
+        return fail(EACCES);
     }
     let writes = flags & (O_WRITE | O_TRUNCATE) != 0;
     if directory && (writes || flags & O_CREATE != 0) {

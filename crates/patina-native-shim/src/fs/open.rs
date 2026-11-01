@@ -151,6 +151,25 @@ fn open_virtual(entry: paths::Virtual, flags: u32, cloexec: bool) -> c_int {
         paths::Virtual::Tty => fail(ENXIO),
         #[cfg(target_os = "linux")]
         paths::Virtual::Proc(node) => crate::procfs::open(node, flags, cloexec),
+        // A socket's sockfs inode opens nothing (`sock_no_open`) but under
+        // `O_PATH`; no other reopen of what a descriptor holds is modeled.
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Held(number)
+            if flags & O_PATH == 0
+                && crate::resolve_fd(number).is_ok_and(|held| held.kind == FdKind::Socket) =>
+        {
+            // `do_open`'s order: an exclusive create finds it, a directory
+            // open finds no directory, then the open itself.
+            if flags & (O_CREATE | O_EXCLUSIVE) == O_CREATE | O_EXCLUSIVE {
+                fail(EEXIST)
+            } else if flags & O_DIRECTORY != 0 {
+                fail(ENOTDIR)
+            } else {
+                fail(ENXIO)
+            }
+        }
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Held(_) => entry.unmodeled("an open"),
     }
 }
 
@@ -338,7 +357,8 @@ pub(crate) unsafe fn open_at(
         || open_flags.exclusive;
     let entry = resolved.metadata.map(|metadata| metadata.kind);
     match entry {
-        // Reachable only under `O_NOFOLLOW` (the resolver followed otherwise).
+        // Reachable under `O_NOFOLLOW` (the resolver followed otherwise) and
+        // through a descriptor's procfs link, which lands on the link.
         // In `do_open`'s order: `O_DIRECTORY` is `ENOTDIR`; an `O_PATH` open
         // names the link itself (`fstat` reads it, `readlinkat(fd, "")` its
         // target); any other is `ELOOP` (`may_open`).

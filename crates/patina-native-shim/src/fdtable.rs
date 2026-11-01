@@ -538,6 +538,17 @@ impl GuestFdTable {
         })
     }
 
+    /// The numbers that name a description now, ascending.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn numbers(&self) -> Vec<c_int> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_some())
+            .map(|(index, _)| index as c_int)
+            .collect()
+    }
+
     pub(crate) fn kind(&self, fd: c_int) -> Option<FdKind> {
         self.resolve(fd).map(|resolved| resolved.kind)
     }

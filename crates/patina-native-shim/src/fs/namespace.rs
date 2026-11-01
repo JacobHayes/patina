@@ -597,14 +597,32 @@ pub(crate) unsafe fn read_link(
         // procfs's one link names the caller's process directory.
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(paths::Virtual::Proc(node))) => {
-            return match crate::procfs::link_target(node) {
-                Some(target) => copy_link(&target, buf, len),
-                None => Err(crate::abi::failed(EINVAL)),
+            return match crate::procfs::read_link(node) {
+                Ok(target) => copy_link(&target, buf, len),
+                Err(errno) => Err(crate::abi::failed(errno)),
             };
         }
         // The terminal nodes are no links either.
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(_)) => return Err(crate::abi::failed(EINVAL)),
+        // An `O_PATH` descriptor whose node has no name left (a link unlinked
+        // after it was opened `O_PATH|O_NOFOLLOW`) still reads it; the model
+        // reads a link only by its name. Judged after the walk's scheduling
+        // point, so no unlink comes between.
+        #[cfg(target_os = "linux")]
+        Err(errno)
+            if errno == ENOENT
+                && path.is_empty()
+                && resolve_fd(dirfd).is_ok_and(|resolved| {
+                    resolved.kind == FdKind::OPath
+                        && paths::node_path(Fd(resolved.handle)) == Err(ENOENT)
+                }) =>
+        {
+            crate::trap_fatal(
+                "readlinkat(fd, \"\") on an O_PATH descriptor whose node was unlinked is not \
+                 modeled; failing closed",
+            )
+        }
         Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match resolved.metadata.map(|metadata| metadata.kind) {
@@ -728,6 +746,11 @@ pub unsafe extern "C" fn patina_resolve_path(
         #[cfg(target_os = "linux")]
         Ok(paths::Resolution::Virtual(paths::Virtual::Proc(node))) => {
             (node.path(), crate::procfs::metadata(node).kind)
+        }
+        // What a descriptor holds has no path when it is reached so.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(entry @ paths::Virtual::Held(_))) => {
+            entry.unmodeled("the canonical path")
         }
         Err(errno) => return fail(errno) as isize,
     };

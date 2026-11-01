@@ -201,11 +201,25 @@ fn make_node(path: &str) -> Result<paths::Resolved, c_int> {
 fn find(name: &UnixName, ty: i32) -> Result<c_int, c_int> {
     let handle = match name {
         UnixName::Path(path) => {
-            let resolved = match paths::resolve(paths::AT_FDCWD, &path_of(path)?, 0)? {
-                paths::Resolution::Volume(resolved) => resolved,
+            let metadata = match paths::resolve(paths::AT_FDCWD, &path_of(path)?, 0)? {
+                paths::Resolution::Volume(resolved) => resolved.metadata.ok_or(ENOENT)?,
+                // Through a descriptor's procfs link: a socket's own sockfs
+                // inode, which no name binds, or a node whose names are
+                // gone, found by its inode as by a name.
+                #[cfg(target_os = "linux")]
+                paths::Resolution::Virtual(paths::Virtual::Held(number))
+                    if crate::resolve_fd(number).is_ok_and(|held| held.kind == FdKind::Socket) =>
+                {
+                    return Err(ECONNREFUSED);
+                }
+                #[cfg(target_os = "linux")]
+                paths::Resolution::Virtual(paths::Virtual::Held(number))
+                    if let Some(handle) = crate::procfs::unlinked_handle(number) =>
+                {
+                    crate::with_context(|context| context.fs_fd_metadata_unrecorded(handle))?
+                }
                 paths::Resolution::Virtual(entry) => entry.unmodeled("connecting a socket"),
             };
-            let metadata = resolved.metadata.ok_or(ENOENT)?;
             // `unix_find_bsd`: write permission on the node (the one
             // identity owns every entry, so its owner bits), then its kind.
             if metadata.mode & 0o200 == 0 {

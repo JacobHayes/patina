@@ -363,6 +363,13 @@ pub(crate) unsafe fn metadata_at(
     };
     let resolved = match paths::resolve(dirfd, &path, flags) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
+        // What a descriptor holds, reached through its procfs link, is what
+        // its `fstat` reads.
+        #[cfg(target_os = "linux")]
+        Ok(paths::Resolution::Virtual(paths::Virtual::Held(number))) => {
+            // SAFETY: as this function's own contract for `out`.
+            return unsafe { fd_metadata_with(number, out, lookup, false) };
+        }
         Ok(paths::Resolution::Virtual(entry)) => {
             return match virtual_metadata(entry, flags & paths::RESOLVE_NOFOLLOW != 0) {
                 Some(metadata) => write_patina_metadata(metadata, out),
@@ -508,7 +515,10 @@ fn virtual_setattr(entry: paths::Virtual, operation: &str) -> c_int {
         #[cfg(target_os = "linux")]
         paths::Virtual::Ptmx => true,
         #[cfg(target_os = "linux")]
-        paths::Virtual::Namespace(_) | paths::Virtual::Tty | paths::Virtual::Proc(_) => false,
+        paths::Virtual::Namespace(_)
+        | paths::Virtual::Tty
+        | paths::Virtual::Proc(_)
+        | paths::Virtual::Held(_) => false,
     };
     match entry {
         #[cfg(target_os = "linux")]
@@ -556,6 +566,9 @@ fn virtual_metadata(entry: paths::Virtual, nofollow: bool) -> Option<PatinaMetad
         paths::Virtual::Ptmx | paths::Virtual::Tty => None,
         #[cfg(target_os = "linux")]
         paths::Virtual::Proc(node) => Some(crate::procfs::metadata(node)),
+        // [`metadata_at`] reads it as its descriptor's.
+        #[cfg(target_os = "linux")]
+        paths::Virtual::Held(_) => None,
     }
 }
 
@@ -638,6 +651,32 @@ pub(crate) unsafe fn fd_metadata_full(
     out: *mut PatinaMetadata,
     lookup: MetadataLookup,
 ) -> c_int {
+    // SAFETY: per this function's contract.
+    unsafe { fd_metadata_with(raw_fd, out, lookup, true) }
+}
+
+/// [`fd_metadata_full`], its filesystem read taking the call's scheduling
+/// point (`scheduled`) or none, inside a call that took it already (a path
+/// walk's through a descriptor's procfs link, which holds the descriptor
+/// from the walk to the read as `nd_jump_link`'s path reference does).
+///
+/// # Safety
+/// `out` must point to a writable `struct patina_metadata`.
+unsafe fn fd_metadata_with(
+    raw_fd: c_int,
+    out: *mut PatinaMetadata,
+    lookup: MetadataLookup,
+    scheduled: bool,
+) -> c_int {
+    let read = |invoke: &mut dyn FnMut(
+        &mut Context,
+    ) -> Result<patina_dst_abi::FsMetadata, RuntimeError>| {
+        if scheduled {
+            with_context(invoke)
+        } else {
+            with_context_raw(invoke)
+        }
+    };
     // A FIFO descriptor is a pipe endpoint, not a filesystem descriptor: the
     // filesystem knows the ENTRY but holds no handle to ask about. What the
     // descriptor holds is the NODE, so the filesystem is asked about the inode —
@@ -651,7 +690,7 @@ pub(crate) unsafe fn fd_metadata_full(
     // an unlinked-but-open entry. There is no open-time copy to fall back to,
     // because a copy is a stale cache one field over from the cached path.
     if let Some(node) = thread::fifo_ino(raw_fd) {
-        return match with_context(|context| lookup.of_inode(context, node)) {
+        return match read(&mut |context| lookup.of_inode(context, node)) {
             Ok(metadata) => write_metadata(metadata, out),
             Err(errno) => fail(errno),
         };
@@ -691,7 +730,7 @@ pub(crate) unsafe fn fd_metadata_full(
         Err(errno) => return fail(errno),
     };
     mem::inspecting(fd.0);
-    match with_context(|context| lookup.of_fd(context, fd)) {
+    match read(&mut |context| lookup.of_fd(context, fd)) {
         Ok(metadata) => write_metadata(metadata, out),
         Err(errno) => fail(errno),
     }
