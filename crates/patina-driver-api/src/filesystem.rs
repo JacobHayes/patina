@@ -498,6 +498,19 @@ pub trait FsDriver: Send {
     ) -> DriverResult<Fd> {
         Err(unsupported_filesystem_operation("anonymous files"))
     }
+    /// A regular file that no name reaches, holding `contents`, on a new
+    /// read-only handle: the guest's supplied standard input, as `< FILE`
+    /// opens it and the file is then unlinked. The runtime makes it for
+    /// itself before the guest runs, so it is never faulted and draws
+    /// nothing; the guest's own reads of it are ordinary reads and fault as
+    /// any file's do. It lives while a descriptor holds it.
+    fn create_input_file_unfaulted(
+        &mut self,
+        _clock: FsClock,
+        _contents: &[u8],
+    ) -> DriverResult<Fd> {
+        Err(unsupported_filesystem_operation("supplied input files"))
+    }
     /// `F_GET_SEALS`: the seal set of `fd`'s node. A node that cannot be
     /// sealed — every node of a filesystem without anonymous files — is
     /// [`patina_dst_abi::ErrorCode::InvalidInput`], the kernel's `EINVAL`.

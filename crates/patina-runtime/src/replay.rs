@@ -247,6 +247,26 @@ pub(super) fn reconcile_replay_guest_cwd(
     Ok(recorded.map(str::to_owned))
 }
 
+/// Reconcile a recorded trace's authoritative standard-input bytes with any
+/// supplied to the replaying process: none supplied adopts the recorded ones;
+/// supplied bytes must match them exactly (a trace without any had the empty
+/// pipe) or replay fails closed.
+pub(super) fn reconcile_replay_guest_stdin(
+    config: &RuntimeConfig,
+    recorded: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    if let Some(supplied) = config.guest_stdin.as_deref()
+        && Some(supplied) != recorded
+    {
+        return Err(RuntimeError::Config(
+            "replay --stdin is not the standard input this trace recorded; the trace is \
+             authoritative, so omit the flag (or supply the matching file)"
+                .into(),
+        ));
+    }
+    Ok(recorded.map(<[u8]>::to_vec))
+}
+
 /// The realtime epoch an installed clock driver runs on: its realtime reading
 /// minus its monotonic one, both read unrecorded (the values are a pure
 /// function of the clock's configuration, as `Context::fs_clock` relies on).

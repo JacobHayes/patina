@@ -67,6 +67,8 @@ mod native_replay;
 mod native_scheduling;
 #[path = "end_to_end/native_sdk.rs"]
 mod native_sdk;
+#[path = "end_to_end/native_stdin.rs"]
+mod native_stdin;
 #[path = "end_to_end/output.rs"]
 mod output;
 #[path = "end_to_end/package_routing.rs"]

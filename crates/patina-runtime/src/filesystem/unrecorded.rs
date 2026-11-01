@@ -82,6 +82,24 @@ impl Context {
         Ok(self.filesystem.open_path_unfaulted(clock, path)?)
     }
 
+    /// The guest's supplied standard input as an unlinked read-only regular
+    /// file ([`FsDriver::create_input_file_unfaulted`]), made UNRECORDED,
+    /// never faulted, with no latency and no crash point: the shim makes it
+    /// at install, before the guest runs, from the bytes the trace holds, so
+    /// replay makes the same file at the same point. `None` when the run
+    /// supplied none.
+    pub fn fs_create_guest_stdin_unrecorded(&mut self) -> Result<Option<Fd>, RuntimeError> {
+        let Some(contents) = self.guest_stdin.take() else {
+            return Ok(None);
+        };
+        let clock = self.fs_clock()?;
+        let fd = self
+            .filesystem
+            .create_input_file_unfaulted(clock, &contents);
+        self.guest_stdin = Some(contents);
+        Ok(Some(fd?))
+    }
+
     /// Release a handle [`Self::fs_open_path_unrecorded`] opened, UNRECORDED
     /// and with no crash point: the embedder lets go of its own
     /// handle (the native shim's working directory, replaced by a `chdir`) at

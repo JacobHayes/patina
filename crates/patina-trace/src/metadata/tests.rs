@@ -52,6 +52,7 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
     .with_tsc(Some(true))
     .with_guest_argv(Some(vec!["--replay-commands".into(), "3,1,2".into()]))
     .with_guest_cwd(Some("/work".into()))
+    .with_guest_stdin(Some(b"b\na\n\0\xff".to_vec()))
     .with_guest_env(Some(BTreeMap::from([(
         "RUST_LOG".to_string(),
         "debug".to_string(),
@@ -78,6 +79,7 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
         "tsc",
         "guest_argv",
         "guest_cwd",
+        "guest_stdin",
         "guest_env",
     ] {
         assert!(!text.contains(field), "{field} written when unset: {text}");

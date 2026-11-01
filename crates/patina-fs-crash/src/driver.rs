@@ -103,6 +103,15 @@ impl FsDriver for CrashFs {
         Ok(fd)
     }
 
+    /// Process state as an anonymous file is: no name reaches it, so the
+    /// committed image never carries it.
+    fn create_input_file_unfaulted(&mut self, clock: FsClock, contents: &[u8]) -> DriverResult<Fd> {
+        self.tick(clock);
+        let fd = self.live.create_input_file_unfaulted(clock, contents)?;
+        self.description_opened(fd);
+        Ok(fd)
+    }
+
     fn seals(&mut self, fd: Fd) -> DriverResult<u32> {
         self.live.seals(fd)
     }

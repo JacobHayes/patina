@@ -126,6 +126,12 @@ impl Replayer {
         self.metadata.guest_cwd.as_deref()
     }
 
+    /// The guest's standard-input bytes recorded into the trace. `None` when
+    /// standard input was the default empty pipe.
+    pub fn guest_stdin(&self) -> Option<&[u8]> {
+        self.metadata.guest_stdin.as_deref()
+    }
+
     /// The DNS host table recorded into the trace, authoritative on replay.
     /// `None` for a trace recorded without one.
     pub const fn dns_config(&self) -> Option<&DnsConfigRecord> {

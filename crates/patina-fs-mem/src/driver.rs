@@ -1277,6 +1277,42 @@ impl FsDriver for MemFs {
         Ok(())
     }
 
+    /// [`FsDriver::create_input_file_unfaulted`]: an unlinked node, as
+    /// [`FsDriver::create_anonymous`] makes one, that no seal applies to and
+    /// whose handle only reads.
+    fn create_input_file_unfaulted(&mut self, clock: FsClock, contents: &[u8]) -> DriverResult<Fd> {
+        let node = self.next_inode;
+        self.next_inode = self.next_inode.checked_add(1).ok_or_else(|| {
+            EffectError::new(ErrorCode::NoSpace, "virtual inode numbers exhausted")
+        })?;
+        self.inodes.insert(
+            node,
+            Inode {
+                kind: FsEntryKind::File,
+                contents: FileData::from_bytes(contents),
+                links: 0,
+                openers: 0,
+                times: Times::created(clock),
+                mode: 0o644,
+                seals: None,
+                huge_page: 0,
+            },
+        );
+        let access = Access {
+            readable: true,
+            writable: false,
+            append: false,
+            path_only: false,
+        };
+        match self.allocate_handle(node, 0, access, FsEntryKind::File) {
+            Ok(fd) => Ok(fd),
+            Err(error) => {
+                self.inodes.remove(&node);
+                Err(error)
+            }
+        }
+    }
+
     /// [`FsDriver::create_anonymous`]: a node with no name, alive while a
     /// descriptor holds it, exactly an unlinked file's lifetime.
     fn create_anonymous(

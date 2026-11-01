@@ -149,6 +149,11 @@ impl BranchSession {
         self.bundle.metadata.guest_cwd.as_deref()
     }
 
+    /// The guest's standard-input bytes inherited from the parent trace.
+    pub fn guest_stdin(&self) -> Option<&[u8]> {
+        self.bundle.metadata.guest_stdin.as_deref()
+    }
+
     /// The virtual realtime epoch inherited from the parent trace.
     pub const fn realtime_epoch_nanos(&self) -> u64 {
         self.bundle.metadata.realtime_epoch_nanos

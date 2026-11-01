@@ -746,6 +746,10 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
         self.inner.metadata_unfaulted(path)
     }
 
+    fn create_input_file_unfaulted(&mut self, clock: FsClock, contents: &[u8]) -> DriverResult<Fd> {
+        self.inner.create_input_file_unfaulted(clock, contents)
+    }
+
     fn read_link_unfaulted(&mut self, clock: FsClock, path: &str) -> DriverResult<String> {
         self.inner.read_link_unfaulted(clock, path)
     }

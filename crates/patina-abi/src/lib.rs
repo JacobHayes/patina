@@ -34,9 +34,10 @@ mod filesystem;
 /// 128-bit integers, so an `i128` never reaches it as one.
 pub mod nanos;
 mod network;
-/// `Option` wrapper over [`bytes_base64`]: `None` serializes as JSON null,
-/// `Some(bytes)` as the base64 payload, exactly like `bytes_base64`.
-mod option_bytes_base64;
+/// `Option` wrapper over `bytes_base64`: `None` serializes as JSON null,
+/// `Some(bytes)` as the base64 payload. Public for the trace metadata's own
+/// optional byte fields (`#[serde(with = "patina_dst_abi::option_bytes_base64")]`).
+pub mod option_bytes_base64;
 mod verdict;
 
 pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};

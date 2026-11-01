@@ -339,6 +339,17 @@ pub struct RunMetadata {
     /// default). `chdir` is guest-driven and unrecorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_cwd: Option<String>,
+    /// The bytes the guest's standard input held (native `run --stdin FILE`):
+    /// descriptor 0 is an unlinked read-only regular file with these contents,
+    /// as `< FILE` makes it. Authoritative on replay, so a flag-free replay
+    /// reads the same input. Absent (`None`) when standard input was the
+    /// default empty pipe.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "patina_dst_abi::option_bytes_base64"
+    )]
+    pub guest_stdin: Option<Vec<u8>>,
     /// The run parameters (`run --param KEY=VALUE`, or a harness's
     /// `.param()` defaults) the guest reads through `patina_dst::param`,
     /// authoritative on replay so a flag-free replay reproduces
@@ -498,6 +509,7 @@ impl RunMetadata {
             guest_argv: None,
             guest_env: None,
             guest_cwd: None,
+            guest_stdin: None,
             params: BTreeMap::new(),
             schedule_policy: None,
             swarm: None,
@@ -575,6 +587,14 @@ impl RunMetadata {
     #[must_use]
     pub fn with_guest_cwd(mut self, guest_cwd: Option<String>) -> Self {
         self.guest_cwd = guest_cwd;
+        self
+    }
+
+    /// Attach the guest's standard-input bytes recorded into the trace.
+    /// `None` records nothing (standard input was the empty pipe).
+    #[must_use]
+    pub fn with_guest_stdin(mut self, guest_stdin: Option<Vec<u8>>) -> Self {
+        self.guest_stdin = guest_stdin;
         self
     }
 

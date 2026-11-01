@@ -95,6 +95,11 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Recorded native guest initial working directory from run --cwd, restored on replay.",
     },
     EnvVar {
+        name: "PATINA_RT_GUEST_STDIN_FD",
+        scope: "protocol",
+        doc: "Inherited descriptor holding the run --stdin bytes the guest's descriptor 0 reads; recorded and restored on replay.",
+    },
+    EnvVar {
         name: "PATINA_RT_REALTIME_EPOCH_NANOS",
         scope: "protocol",
         doc: "Virtual realtime epoch in Unix-time nanoseconds (mirrors --realtime-epoch); recorded and restored on replay.",

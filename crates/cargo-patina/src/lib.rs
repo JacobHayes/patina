@@ -357,6 +357,10 @@ struct NativeRunInvocation {
     /// deterministic filesystem. The image hash is folded into the run
     /// fingerprint so replay rejects a different corpus.
     mount: Option<PathBuf>,
+    /// Host file whose bytes are the guest's standard input (`--stdin`): read
+    /// by the supervisor, streamed over an inherited descriptor, recorded into
+    /// the trace, and on replay checked against the recording.
+    stdin: Option<PathBuf>,
     /// `--allow-randomized-address-layout`: launch the guest with the host's
     /// address-space randomization and inherited stack limit instead of the
     /// fixed layout, qualifying the run's determinism. Recorded into the trace;

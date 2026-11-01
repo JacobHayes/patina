@@ -20,9 +20,9 @@ use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
     ENV_COVERAGE_FD, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV,
-    ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_INITIAL_STACK, ENV_MODE,
-    ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
-    NATIVE_INITIAL_STACK_TRAILER_SLOTS,
+    ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_GUEST_STDIN_FD,
+    ENV_INITIAL_STACK, ENV_MODE, ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED,
+    ENV_STEP_BUDGET, ENV_TRACE_FD, GUEST_STDIN_MAX_BYTES, NATIVE_INITIAL_STACK_TRAILER_SLOTS,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, native_binary_has_sud_marker,
@@ -59,6 +59,47 @@ use child::wait_native_child_once;
 #[cfg(all(test, unix))]
 pub(super) use child::{NativeChildStatus, native_child_status};
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
+
+/// `--stdin HOST_FILE`'s bytes: at most [`GUEST_STDIN_MAX_BYTES`], since
+/// the trace records them whole.
+fn read_guest_stdin(path: &Path) -> Result<Vec<u8>, CliError> {
+    use std::io::Read;
+
+    let failed = |error: std::io::Error| {
+        CliError(format!(
+            "failed to read --stdin {}: {error}",
+            path.display()
+        ))
+    };
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(failed)?
+        .take(GUEST_STDIN_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(failed)?;
+    if bytes.len() > GUEST_STDIN_MAX_BYTES {
+        return Err(CliError(format!(
+            "--stdin {} holds more than {GUEST_STDIN_MAX_BYTES} bytes, the most a trace records",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// `bytes` in a rewound scratch file, the descriptor the guest inherits.
+fn stage_guest_stdin(bytes: &[u8]) -> Result<fs::File, CliError> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let scratch = |error: std::io::Error| {
+        CliError(format!(
+            "failed to stage --stdin in a scratch file: {error}"
+        ))
+    };
+    let mut file = tempfile::tempfile().map_err(scratch)?;
+    file.write_all(bytes).map_err(scratch)?;
+    file.seek(SeekFrom::Start(0)).map_err(scratch)?;
+    Ok(file)
+}
 
 /// The fingerprint hash (`<contents>.<metadata>`) a run's `--mount` of
 /// `host_dir` folds into its trace, for a caller that pins a corpus across
@@ -241,6 +282,29 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         None => None,
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
+    // A supplied standard input travels the same way: read here (a FIFO or a
+    // terminal too, once), held in a scratch file every incarnation reads
+    // from the start, and recorded by the runtime into the trace. On replay
+    // the trace's bytes are authoritative, so different ones are refused
+    // here, before the guest starts.
+    let stdin_file = match &invocation.stdin {
+        Some(path) => {
+            let bytes = read_guest_stdin(path)?;
+            if let (NativeRunMode::Replay { path: trace, .. }, Some(bundle)) =
+                (&invocation.mode, &replay_trace)
+                && bundle.metadata.guest_stdin.as_deref() != Some(bytes.as_slice())
+            {
+                return Err(CliError::usage(format!(
+                    "replay --stdin {} is not the standard input trace {} recorded; the trace \
+                     is authoritative, so omit --stdin or supply the recorded bytes",
+                    path.display(),
+                    trace.display()
+                )));
+            }
+            Some(stage_guest_stdin(&bytes)?)
+        }
+        None => None,
+    };
     // A harness binary installs the runtime itself, after applying its own
     // configuration; the image says so, on every run and replay.
     let harness = image.remember("harness", || {
@@ -561,6 +625,14 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 fds.push(image.file.as_raw_fd());
             }
             (None, None) => {}
+        }
+        if let Some(file) = &stdin_file {
+            use std::io::{Seek, SeekFrom};
+            (&*file).seek(SeekFrom::Start(0)).map_err(|error| {
+                CliError(format!("failed to rewind the --stdin scratch file: {error}"))
+            })?;
+            command.env(ENV_GUEST_STDIN_FD, file.as_raw_fd().to_string());
+            fds.push(file.as_raw_fd());
         }
         layout::pin(
             &mut command,

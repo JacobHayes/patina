@@ -133,6 +133,13 @@ embeds and defers runtime installation on its own; no flag is needed on `run` or
                     "The guest's initial working directory: an absolute path in the deterministic filesystem that must exist as a directory (default `/`; recorded and restored on replay).",
                     false,
                 ),
+                f(
+                    "--stdin",
+                    None,
+                    Value::Required("HOST_FILE", Kind::Path),
+                    "The guest's standard input, as `< HOST_FILE`: descriptor 0 is an unlinked read-only regular file holding its bytes (at most 4 MiB), whose reads fault as any file's do (recorded and restored on replay; default an empty pipe).",
+                    false,
+                ),
                 // The label a RECORDING carries: the supervisor composes it (base
                 // label plus the `+buggify`/`+pct`/`+swarm` components the run
                 // really armed), the runtime writes it into the trace, and replay
@@ -554,6 +561,13 @@ only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
                 None,
                 Value::Required("HOST_DIR", Kind::Path),
                 "Re-supply the host corpus whose hash (contents, then modes and mtimes) the fingerprint verifies.",
+                false,
+            ),
+            f(
+                "--stdin",
+                None,
+                Value::Required("HOST_FILE", Kind::Path),
+                "The standard input the trace recorded, which replay restores without it; bytes that differ from the recording's are refused.",
                 false,
             ),
             f(

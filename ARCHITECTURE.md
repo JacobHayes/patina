@@ -249,7 +249,12 @@ These concerns are kept out of the interposed data plane:
 - **Trace channel.** The supervisor passes an inherited host descriptor
   (`PATINA_RT_TRACE_FD`); the shim reads and writes bundles through private host
   aliases, never through the interposed file symbols.
-- **Captured stdio.** The descriptions 1 and 2 name at startup are capture
+- **Captured stdio.** Descriptor 0 is an empty pipe at startup; `--stdin
+  FILE` makes it instead an unlinked read-only regular file of FILE's bytes,
+  made at install with no fault drawn. The trace records the bytes, capped,
+  and replay restores them, refusing different ones. Its reads are filesystem
+  reads, so they fault like any file's.
+  The descriptions 1 and 2 name at startup are capture
   sinks; on Linux each write also goes through to the host descriptor. The
   numbers are ordinary descriptor-table entries; runtime diagnostics write to
   the sinks directly. C stdio is the shim's (`src/posix/stdio.rs`): one

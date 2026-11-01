@@ -940,6 +940,21 @@ fn control_fs_image_fd() -> Result<Option<i32>, RuntimeError> {
         .transpose()
 }
 
+/// The bytes on `PATINA_RT_GUEST_STDIN_FD` (`run --stdin FILE`), or `None`
+/// when the supervisor supplied no standard input.
+fn control_guest_stdin() -> Result<Option<Vec<u8>>, RuntimeError> {
+    let name = patina_dst_runtime::ENV_GUEST_STDIN_FD;
+    let Some(value) = control_env(name).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let fd = value.parse().map_err(|_| {
+        RuntimeError::Config(format!("{name} must be a non-negative descriptor number"))
+    })?;
+    read_host_fd_to_end(fd)
+        .map(Some)
+        .map_err(|error| RuntimeError::Config(format!("failed to read {name}: {error}")))
+}
+
 const NATIVE_CRASH_RESTART_EXIT: c_int = 112;
 
 fn read_host_fd_to_end(fd: c_int) -> io::Result<Vec<u8>> {
@@ -1196,6 +1211,10 @@ pub(crate) fn runtime_config_from_control_plane()
     // The guest's initial working directory travels the same control plane and
     // is recorded the same way; `install` opens it before the run starts.
     config = config.apply_guest_cwd_env(control_env)?;
+    // Supplied standard-input bytes ride an inherited descriptor, as the
+    // mounted image does, and are recorded the same way; `install` makes
+    // descriptor 0 the file that holds them.
+    config = config.with_guest_stdin(control_guest_stdin()?)?;
     config = config.apply_realtime_epoch_env(control_env)?;
     config = config.apply_hostname_env(control_env)?;
     config = config.apply_cpus_env(control_env)?;
@@ -1300,6 +1319,18 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     if let Err(error) = paths::install_cwd(&mut context.bookkeeping()) {
         record_init_error(error.to_string());
         return fail(runtime_errno(&error));
+    }
+    // A supplied standard input (`--stdin FILE`) is the file `< FILE` opens:
+    // descriptor 0 becomes an unlinked read-only regular file holding the
+    // bytes, so every read, seek and stat of it is the filesystem's, faults
+    // included.
+    match context.fs_create_guest_stdin_unrecorded() {
+        Ok(Some(fd)) => fd_table().lock().make_stdin_file(fd.0),
+        Ok(None) => {}
+        Err(error) => {
+            record_init_error(error.to_string());
+            return fail(runtime_errno(&error));
+        }
     }
     // Guest memory is copied through `process_vm_readv`/`writev` on this
     // process (`uaccess`); a host that refuses them refuses the run by name.

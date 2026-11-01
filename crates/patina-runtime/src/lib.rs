@@ -275,6 +275,18 @@ pub const ENV_GUEST_ENV: &str = "PATINA_RT_GUEST_ENV_JSON";
 /// closed; the value is canonicalized lexically (`.` and `//` dropped).
 pub const ENV_GUEST_CWD: &str = "PATINA_RT_GUEST_CWD";
 
+/// Inherited host descriptor holding the bytes of the guest's standard input
+/// (native `run --stdin FILE`). The shim reads it to end before the guest runs
+/// and makes descriptor 0 an unlinked read-only regular file with those bytes,
+/// as `< FILE` would. The bytes are recorded into trace metadata (at most
+/// [`GUEST_STDIN_MAX_BYTES`]) and are authoritative on replay. Unset leaves
+/// standard input the empty pipe.
+pub const ENV_GUEST_STDIN_FD: &str = "PATINA_RT_GUEST_STDIN_FD";
+
+/// The most bytes a supplied standard input may hold: the trace carries them
+/// whole, so the bound keeps a recording a recording rather than a corpus.
+pub const GUEST_STDIN_MAX_BYTES: usize = 4 << 20;
+
 /// The run's virtual realtime epoch as Unix-time nanoseconds (decimal `u64`):
 /// what `ClockKind::Realtime` reads at monotonic zero. Set by `run
 /// --realtime-epoch`, which accepts an RFC 3339 UTC timestamp and forwards its
@@ -546,6 +558,7 @@ pub struct Context {
     params: BTreeMap<String, String>,
     guest_env: BTreeMap<String, String>,
     guest_cwd: Option<String>,
+    guest_stdin: Option<Vec<u8>>,
     hostname: String,
     cpus: u32,
     yield_stride: u32,
@@ -982,6 +995,12 @@ impl Context {
     /// the starting point the run was configured with.
     pub fn guest_cwd(&self) -> Option<&str> {
         self.guest_cwd.as_deref()
+    }
+
+    /// The bytes the guest's standard input holds, as configured or replayed
+    /// (`None`: standard input is the empty pipe).
+    pub fn guest_stdin(&self) -> Option<&[u8]> {
+        self.guest_stdin.as_deref()
     }
 
     /// The node name the guest's virtual kernel reports (`uname`'s

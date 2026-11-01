@@ -39,7 +39,8 @@ pub(crate) const RLIMIT_NOFILE: usize = 1024;
 pub(crate) enum FdKind {
     /// The guest's standard input: the read end of an empty pipe whose writer
     /// is gone (EOF on every read, never a terminal), on its own pipefs node
-    /// (`thread::pipe::STDIO_PIPE_INOS`).
+    /// (`thread::pipe::STDIO_PIPE_INOS`). A run given `--stdin` binds a
+    /// [`FdKind::File`] at 0 instead ([`GuestFdTable::make_stdin_file`]).
     Stdin,
     /// Captured standard output (the capture sink the description's `handle`
     /// names, 1): the write end of a pipe the supervisor drains, on its own
@@ -342,6 +343,26 @@ impl GuestFdTable {
                 .expect("the three standard descriptors fit any limit");
         }
         table
+    }
+
+    /// Make descriptor 0's description the read-only regular file `handle`
+    /// names, as `< FILE` does: the shim's install, before the guest runs,
+    /// when the run supplied standard input. Whatever number 0 then shares
+    /// its description with (nothing, before the guest runs) follows.
+    pub(crate) fn make_stdin_file(&mut self, handle: u64) {
+        let desc = self
+            .slots
+            .first()
+            .copied()
+            .flatten()
+            .expect("descriptor 0 is bound at install")
+            .desc;
+        let description = self
+            .descriptions
+            .get_mut(&desc)
+            .expect("a bound description exists");
+        description.kind = FdKind::File;
+        description.handle = handle;
     }
 
     /// The bound no new number reaches (`EMFILE`, `F_DUPFD`'s `EINVAL`).

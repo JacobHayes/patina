@@ -5,17 +5,16 @@ use std::fmt;
 use serde::de::{self, Visitor};
 use serde::{Deserializer, Serializer};
 
-pub(crate) fn serialize<S: Serializer>(
-    bytes: &Option<Vec<u8>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
+/// Serialize `Some(bytes)` as base64 and `None` as null.
+pub fn serialize<S: Serializer>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error> {
     match bytes {
         Some(bytes) => serializer.serialize_some(&super::bytes_base64::Encoded(bytes)),
         None => serializer.serialize_none(),
     }
 }
 
-pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+/// Read null or a base64 string; malformed base64 is an error.
+pub fn deserialize<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Vec<u8>>, D::Error> {
     deserializer.deserialize_option(OptionalPayloadVisitor)

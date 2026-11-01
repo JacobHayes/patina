@@ -342,6 +342,7 @@ pub(crate) fn parse_native_run_from(
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
+        stdin: args.path("--stdin"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }
@@ -409,6 +410,7 @@ pub(crate) fn parse_native_replay(
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
         mount: args.path("--mount"),
+        stdin: args.path("--stdin"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
 }

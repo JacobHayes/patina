@@ -11,9 +11,10 @@ use crate::replay::{
     buggify_record, dns_record, fault_record, guest_env_record, installed_clock_epoch,
     reconcile_replay_address_layout, reconcile_replay_boot_origin, reconcile_replay_buggify,
     reconcile_replay_cpus, reconcile_replay_dns, reconcile_replay_faults,
-    reconcile_replay_guest_cwd, reconcile_replay_guest_env, reconcile_replay_hostname,
-    reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy, reconcile_replay_sud,
-    reconcile_replay_tsc, reconcile_replay_yield_stride, schedule_policy_record, watchdog_record,
+    reconcile_replay_guest_cwd, reconcile_replay_guest_env, reconcile_replay_guest_stdin,
+    reconcile_replay_hostname, reconcile_replay_realtime_epoch, reconcile_replay_schedule_policy,
+    reconcile_replay_sud, reconcile_replay_tsc, reconcile_replay_yield_stride,
+    schedule_policy_record, watchdog_record,
 };
 use crate::schedule::ScheduleTracker;
 use crate::scheduler::{DetScheduler, SchedulePolicy};
@@ -226,6 +227,8 @@ impl RuntimeBuilder {
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
         // Same contract for the guest's initial working directory.
         let mut replay_guest_cwd_override: Option<String> = None;
+        // Same contract for the guest's standard input.
+        let mut replay_guest_stdin_override: Option<Option<Vec<u8>>> = None;
         // The recorded run parameters replace whatever the replaying process
         // supplied: a harness re-installs its `.param()` defaults on replay, and
         // the recording already holds those merged with the run's overrides.
@@ -260,6 +263,7 @@ impl RuntimeBuilder {
                         .with_guest_argv(self.config.guest_argv.clone())
                         .with_guest_env(guest_env_record(&self.config))
                         .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_guest_stdin(self.config.guest_stdin.clone())
                         .with_params(self.config.params.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
@@ -293,6 +297,7 @@ impl RuntimeBuilder {
                         .with_guest_argv(self.config.guest_argv.clone())
                         .with_guest_env(guest_env_record(&self.config))
                         .with_guest_cwd(self.config.guest_cwd.clone())
+                        .with_guest_stdin(self.config.guest_stdin.clone())
                         .with_params(self.config.params.clone())
                         .with_dns(dns_record(&self.config))
                         .with_sud(self.config.sud)
@@ -330,6 +335,10 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_guest_stdin_override = Some(reconcile_replay_guest_stdin(
+                    &self.config,
+                    replayer.guest_stdin(),
+                )?);
                 replay_params_override = Some(replayer.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
@@ -387,6 +396,10 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
+                replay_guest_stdin_override = Some(reconcile_replay_guest_stdin(
+                    &self.config,
+                    replayer.guest_stdin(),
+                )?);
                 replay_params_override = Some(replayer.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
@@ -449,6 +462,10 @@ impl RuntimeBuilder {
                 )?);
                 replay_guest_cwd_override =
                     reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
+                replay_guest_stdin_override = Some(reconcile_replay_guest_stdin(
+                    &self.config,
+                    session.guest_stdin(),
+                )?);
                 replay_params_override = Some(session.params().clone());
                 replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
                     &self.config,
@@ -508,6 +525,10 @@ impl RuntimeBuilder {
         // resolves the recording's relative paths against the same directory.
         if let Some(guest_cwd) = replay_guest_cwd_override {
             self.config.guest_cwd = Some(guest_cwd);
+        }
+        // And standard input, so a flag-free replay reads the recorded bytes.
+        if let Some(guest_stdin) = replay_guest_stdin_override {
+            self.config.guest_stdin = guest_stdin;
         }
         if let Some(params) = replay_params_override {
             self.config.params = params;
@@ -734,6 +755,7 @@ impl RuntimeBuilder {
             params: self.config.params,
             guest_env: self.config.guest_env,
             guest_cwd: self.config.guest_cwd,
+            guest_stdin: self.config.guest_stdin,
             cpus,
             yield_stride: self.config.yield_stride,
             hostname: self

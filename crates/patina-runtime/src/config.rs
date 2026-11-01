@@ -6,8 +6,8 @@ use crate::reports::ReportConfig;
 use crate::scheduler::SchedulePolicy;
 use crate::{
     DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_BUGGIFY_ACTIVATION_PERMILLE, DEFAULT_BUGGIFY_CUTOFF_NANOS,
-    DEFAULT_BUGGIFY_FIRE_PERMILLE, DEFAULT_REALTIME_EPOCH_NANOS, ENV_GUEST_CWD, HOSTNAME_MAX_BYTES,
-    RuntimeError,
+    DEFAULT_BUGGIFY_FIRE_PERMILLE, DEFAULT_REALTIME_EPOCH_NANOS, ENV_GUEST_CWD,
+    GUEST_STDIN_MAX_BYTES, HOSTNAME_MAX_BYTES, RuntimeError,
 };
 use std::collections::BTreeMap;
 
@@ -147,6 +147,10 @@ pub struct RuntimeConfig {
     /// restored on replay. Not a fingerprint input. The live cwd (`chdir`) is
     /// process state the native shim keeps; only the starting point is here.
     pub(super) guest_cwd: Option<String>,
+    /// The bytes of the guest's standard input (native `run --stdin FILE`), or
+    /// `None` for the empty pipe. Recorded into trace metadata when supplied
+    /// and authoritative on replay. Not a fingerprint input.
+    pub(super) guest_stdin: Option<Vec<u8>>,
     /// The run's virtual realtime epoch (Unix-time nanoseconds read by
     /// `ClockKind::Realtime` at monotonic zero), or `None` for
     /// [`DEFAULT_REALTIME_EPOCH_NANOS`]. `Some` only when supplied explicitly
@@ -232,6 +236,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -263,6 +268,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -299,6 +305,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -336,6 +343,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -374,6 +382,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -418,6 +427,7 @@ impl RuntimeConfig {
             guest_argv: None,
             guest_env: BTreeMap::new(),
             guest_cwd: None,
+            guest_stdin: None,
             realtime_epoch_nanos: None,
             hostname: None,
             cpus: None,
@@ -648,6 +658,26 @@ impl RuntimeConfig {
     /// embedders). Validated and canonicalized exactly as [`ENV_GUEST_CWD`] is.
     pub fn with_guest_cwd(mut self, guest_cwd: Option<&str>) -> Result<Self, RuntimeError> {
         self.guest_cwd = guest_cwd.map(validate_guest_cwd).transpose()?;
+        Ok(self)
+    }
+
+    /// The bytes of the guest's standard input, or `None` for the empty pipe.
+    pub fn guest_stdin(&self) -> Option<&[u8]> {
+        self.guest_stdin.as_deref()
+    }
+
+    /// Supply the guest's standard input. More than [`GUEST_STDIN_MAX_BYTES`]
+    /// fails closed.
+    pub fn with_guest_stdin(mut self, guest_stdin: Option<Vec<u8>>) -> Result<Self, RuntimeError> {
+        if let Some(bytes) = &guest_stdin
+            && bytes.len() > GUEST_STDIN_MAX_BYTES
+        {
+            return Err(RuntimeError::Config(format!(
+                "--stdin holds {} bytes; at most {GUEST_STDIN_MAX_BYTES} are recorded",
+                bytes.len()
+            )));
+        }
+        self.guest_stdin = guest_stdin;
         Ok(self)
     }
 
