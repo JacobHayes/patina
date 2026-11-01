@@ -537,8 +537,8 @@ mod stdio_lifecycle {
     ///   `fgetc`, the `__overflow`/`__uflow` slow paths of the inline bodies),
     ///   glibc's internal lock spellings and `fclose`.
     ///
-    /// `getchar` (glibc's own stdin), `freopen` of a standard stream and any
-    /// other `FILE*` stop by name.
+    /// `freopen` with a null path (reopening a stream's own file) and a
+    /// `FILE*` the shim did not open stop by name.
     #[cfg(target_os = "linux")]
     #[test]
     fn standard_stream_calls_match_the_host() {
@@ -564,11 +564,7 @@ mod stdio_lifecycle {
                 assert_eq!(text(&patina.stdout), text(&host.stdout), "{opt} {case}");
             }
             if opt == "-O0" {
-                for (case, stop) in [
-                    ("getchar", "getchar reads glibc's own stdin"),
-                    ("freopen", "freopen of a standard stream"),
-                    ("foreign", "not the shim's stdout or stderr: fputc"),
-                ] {
+                for (case, stop) in [("freopen", "freopen"), ("foreign", "fputc")] {
                     let stopped = seeded(&g.binary, case, 1);
                     let stderr = text(&stopped.stderr);
                     assert_eq!(stopped.status.signal(), Some(6), "{case}: {stderr}");
@@ -582,12 +578,10 @@ mod stdio_lifecycle {
     /// call it makes on them must be the shim's: `std::endl` and `put` (putc),
     /// `tellp` (fseeko64/ftello64) give the host's output, after the C++
     /// runtime's own constructor ran (before Patina's runtime is installed)
-    /// through interposed calls. `cin` reads glibc's own `stdin`, which the
-    /// shim does not model: a named stop, never a host read.
+    /// through interposed calls. `cin` reads the shim's `stdin`, at its end.
     #[cfg(target_os = "linux")]
     #[test]
     fn cxx_standard_streams_match_the_host() {
-        use std::os::unix::process::ExitStatusExt;
         let native = tempfile::tempdir().unwrap();
         let host = native.path().join("cxx-guest");
         assert_success(
@@ -605,10 +599,121 @@ mod stdio_lifecycle {
         assert!(text(&native.stdout).contains("CXX_STDIO_ENDL"));
         assert_eq!(text(&patina.stdout), text(&native.stdout));
         assert_eq!(text(&patina.stderr), text(&native.stderr));
-        let cin = seeded(&g.binary, "cin", 1);
-        assert_eq!(cin.status.signal(), Some(6), "{}", text(&cin.stderr));
-        let refusal = text(&cin.stderr);
-        assert!(refusal.contains("getc"), "{refusal}");
+        let host_cin = assert_success(standalone_output(&host, &["cin"], &[]));
+        let cin = assert_success(seeded(&g.binary, "cin", 1));
+        assert_eq!(text(&cin.stdout), text(&host_cin.stdout));
+    }
+
+    /// `stdio_input_probe.c` over the POSIX layer, with the product link's
+    /// dead-section removal: otherwise the C link retains unused std archive
+    /// sections and their unrelated host imports.
+    fn input_probe() -> Guest {
+        let strip = if cfg!(target_os = "linux") {
+            "-Wl,--gc-sections"
+        } else {
+            "-Wl,-dead_strip"
+        };
+        assert_build_c_guest_with_flags("stdio_input_probe.c", CLink::PosixShim, &[strip])
+    }
+
+    /// C stdio's input and file streams (`stdio_input_probe.c`): `fopen`,
+    /// `fdopen`, `freopen` and `fclose`; `fgets`, `getc`, `ungetc`, `fread`,
+    /// `getline` and `getdelim`; the positioning calls and the indicators, on
+    /// a file and on stdin (and stdin reopened onto a file), report what the
+    /// host's libc reports, run after run and in replay. Every read short
+    /// (`--fs-short-permille 1000`) changes nothing a caller sees: each call
+    /// reads again until it has its answer.
+    #[test]
+    fn file_and_input_streams_match_the_host() {
+        let native = assert_build_c_guest("stdio_input_probe.c", CLink::Unlinked);
+        let g = input_probe();
+        for case in ["file", "stdin"] {
+            let dir = tempfile::tempdir().unwrap();
+            // The model's stdin is an empty pipe; so is the host's here (an
+            // inherited /dev/null is a character device, whose first refill
+            // Darwin's libc probes with `isatty`, leaving `ENOTTY`).
+            let (stdin, writer) = std::io::pipe().unwrap();
+            drop(writer);
+            let host = assert_success(
+                crate::common::output_with_deadline(
+                    std::process::Command::new(&native.binary)
+                        .env_clear()
+                        .args([case, dir.path().to_str().unwrap()])
+                        .stdin(stdin),
+                    std::time::Duration::from_secs(20),
+                )
+                .expect("the native probe exceeded 20s"),
+            );
+            assert!(!host.stdout.is_empty(), "{case}");
+            let patina = g.assert_run_success(1, &["--", case, "/tmp"]);
+            assert_eq!(text(&patina.stdout), text(&host.stdout), "{case}");
+            let short =
+                g.assert_run_success(1, &["--fs-short-permille", "1000", "--", case, "/tmp"]);
+            assert_eq!(
+                text(&short.stdout),
+                text(&host.stdout),
+                "{case}, short reads"
+            );
+        }
+    }
+
+    /// A Rust program reading a file and stdin through C stdio
+    /// (`stdio_input_probe.rs`) prints what it prints natively.
+    #[test]
+    fn a_rust_program_reads_through_c_stdio_as_natively() {
+        let g = Guest::assert_build("stdio_input_probe.rs");
+        let patina = g.assert_run_success(1, &[]);
+        assert_eq!(
+            text(&patina.stdout),
+            text(&native_stdout("stdio_input_probe.rs"))
+        );
+    }
+
+    /// An injected read error reaches a stream as the platform libc reports
+    /// one: the call that met it answers nothing (`fgets` NULL, `fread` 0)
+    /// with errno `EIO` and the error indicator set, nothing is lost (the
+    /// next call after `clearerr` reads the same bytes), and an error after
+    /// part of a record ends it (glibc hands the part back; the BSD stdio
+    /// answers -1).
+    #[test]
+    fn input_streams_answer_read_errors_as_the_platform_libc() {
+        let g = input_probe();
+        let run = |target: &str, case: &str| {
+            text(
+                &g.assert_run_success(1, &["--fs-error-at", target, "--", case, "/tmp"])
+                    .stdout,
+            )
+            .to_owned()
+        };
+        let first = run("read:1:EIO", "faults");
+        assert!(
+            first.starts_with(
+                "fgets=[NULL]\n  fgets errno=5\n  fgets feof=0\n  fgets ferror=1\n\
+                 fgets=[alpha\\n]\n"
+            ),
+            "{first}"
+        );
+        assert!(first.contains("getline line 0 length=5\n"), "{first}");
+        assert!(first.contains("getline line 1 length=5\n"), "{first}");
+        let second = run("read:2:EIO", "faults");
+        assert!(
+            second.starts_with("fgets=[alpha\\n]\n")
+                && second.contains("fgets=[beta\\n]\n")
+                && second.contains("  getline errno=5\n  getline feof=0\n  getline ferror=1\n"),
+            "{second}"
+        );
+        assert_eq!(
+            second.contains("getline line 0 length=5\n"),
+            cfg!(target_os = "linux"),
+            "{second}"
+        );
+        let fread = run("read:1:EIO", "fread-fault");
+        assert!(
+            fread.starts_with(
+                "fread=0\n  fread errno=5\n  fread feof=0\n  fread ferror=1\nfread big=10000\n"
+            ),
+            "{fread}"
+        );
     }
 }
 

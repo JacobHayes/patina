@@ -1,7 +1,7 @@
 // The C++ standard streams over the shim's stdio: libstdc++'s
 // stdio_sync_filebuf writes characters with putc (`std::endl`, `put`),
 // strings with fwrite, and asks positions with fseeko64/ftello64 (`tellp`).
-// `cin` reads glibc's own `stdin` through getc: argv[1] `cin` exercises it.
+// `cin` reads `stdin` through getc and ungetc: argv[1] `cin` exercises it.
 #include <iostream>
 #include <string>
 

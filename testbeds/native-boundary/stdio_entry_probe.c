@@ -7,9 +7,9 @@
  * builds it at -O0 (calls) and -O2 (glibc's inline bodies), runs it natively
  * (unlinked) and under the shim on a pipe, and requires the same report.
  * It ends with glibc's internal lock spellings and `fclose(stdout)`, whose
- * flush reaches the pipe. argv[1] `getchar` reads stdin instead, `freopen`
- * reopens stdout and `foreign` writes to a stream fmemopen made: each a named
- * stop under the shim. `modes` and `chars` run the buffering-mode and
+ * flush reaches the pipe. argv[1] `freopen` reopens stdin's own file (a null
+ * path) and `foreign` writes to a stream fmemopen made: each a named stop
+ * under the shim. `modes` and `chars` run the buffering-mode and
  * character/positioning reports linked in from `stdio_modes_probe.c` and
  * `stdio_chars_probe.c`.
  */
@@ -57,12 +57,8 @@ int stdio_chars(void);
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "modes") == 0) return stdio_modes();
     if (argc > 1 && strcmp(argv[1], "chars") == 0) return stdio_chars();
-    if (argc > 1 && strcmp(argv[1], "getchar") == 0) {
-        printf("getchar=%d\n", getchar());
-        return 0;
-    }
     if (argc > 1 && strcmp(argv[1], "freopen") == 0) {
-        printf("freopen=%d\n", freopen("/dev/null", "w", stdout) != NULL);
+        printf("freopen=%d\n", freopen(NULL, "r", stdin) != NULL);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "foreign") == 0) {
