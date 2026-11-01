@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import datetime
 import decimal
+import gzip
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ import re
 import sys
 import threading
 import time
+import zlib
 
 import ledger
 import tally
@@ -43,6 +45,8 @@ fact("json", json.dumps({"b": [1, 2], "a": None}, sort_keys=True))
 fact("decimal", decimal.Decimal("1.10") + decimal.Decimal("2.205"))
 fact("sha256", hashlib.sha256(b"patina").hexdigest()[:16])
 fact("blake2b", hashlib.blake2b(b"patina", digest_size=8).hexdigest())
+packed = gzip.compress(b"patina " * 64, mtime=0)
+fact("zlib", f"{zlib.crc32(b'patina'):08x} {len(packed)} {gzip.decompress(packed) == b'patina ' * 64}")
 fact("re", re.sub(r"(\w+)@(\w+)", r"\2 at \1", "dst@patina"))
 
 

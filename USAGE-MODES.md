@@ -103,10 +103,11 @@ cargo patina build app/ --python --python-path .venv/lib/python3.14/site-package
 A directory without an `__init__.py` is a namespace package. What a Python
 guest does not have: extension modules (a compiled module under a root refuses
 the build, by name), package data (files beside the modules are not carried),
-`ssl` and `zlib` (the recipe builds neither library yet), and child processes
-(`subprocess` and `os.fork` stop the run with the process refusal). The
-`hashlib` digests are CPython's built-in HACL\*
-implementations.
+`ssl` (the recipe builds no TLS library), and child processes (`subprocess`
+and `os.fork` stop the run with the process refusal). The `hashlib` digests
+are CPython's built-in HACL\* implementations, and `zlib` (with `gzip`,
+`zipfile` and `tarfile` compression) is the pinned zlib release, fetched and
+digest-checked as CPython's is, built into the interpreter.
 
 ### Native startup environment
 

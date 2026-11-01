@@ -27,18 +27,36 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The CPython release a Python guest runs by default.
+/// A pinned source release: CPython's, or a library the recipe builds.
 pub(crate) struct Release {
+    pub(crate) name: &'static str,
     pub(crate) version: &'static str,
     pub(crate) url: &'static str,
     pub(crate) sha256: &'static str,
 }
 
+/// The CPython a Python guest runs by default.
 pub(crate) const CPYTHON: Release = Release {
+    name: "CPython",
     version: "3.14.8",
     url: "https://www.python.org/ftp/python/3.14.8/Python-3.14.8.tar.xz",
     sha256: "c2215904f02b175596dc49351585104f4bc20341e1c47378b26a2c274360ce73",
 };
+
+/// zlib, built into the interpreter for `zlib` (and so `gzip`, `zipfile`
+/// and `tarfile`'s compression): portable C over the C library's file calls.
+pub(crate) const ZLIB: Release = Release {
+    name: "zlib",
+    version: "1.3.2",
+    url: "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz",
+    sha256: "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+};
+
+/// zlib's library sources (its Makefile's `OBJZ` and `OBJG`).
+const ZLIB_SOURCES: &[&str] = &[
+    "adler32", "compress", "crc32", "deflate", "gzclose", "gzlib", "gzread", "gzwrite", "infback",
+    "inffast", "inflate", "inftrees", "trees", "uncompr", "zutil",
+];
 
 const FREEZE_PY: &str = include_str!("../python/freeze.py");
 const LAUNCHER_C: &str = include_str!("../python/launcher.c");
@@ -93,7 +111,6 @@ pub(crate) const RECIPE: Recipe = Recipe {
             &[
                 "_bz2",
                 "_lzma",
-                "zlib",
                 "_ssl",
                 "_hashlib",
                 "_sqlite3",
@@ -213,9 +230,8 @@ pub(crate) const RECIPE: Recipe = Recipe {
             ],
         ),
         (
-            "host libraries the build must not reach: zlib (until the recipe builds it), gettext and the backtrace library",
+            "host libraries the build must not reach: gettext and the backtrace library",
             &[
-                ("ac_cv_header_zlib_h", "no"),
                 ("ac_cv_header_libintl_h", "no"),
                 ("ac_cv_header_execinfo_h", "no"),
             ],
@@ -335,9 +351,11 @@ fn run_logged(mut command: Command, what: &str, log: &Path) -> Result<(), CliErr
 /// The pinned release's tarball in the cache, fetched and checked first if
 /// it is not there yet. The download lands in a directory of its own and is
 /// moved into place only once its digest matches.
-fn pinned_tarball(cache: &Path) -> Result<PathBuf, CliError> {
-    let directory = cache.join("downloads").join(CPYTHON.sha256);
-    let name = CPYTHON.url.rsplit('/').next().unwrap_or("cpython.tar.xz");
+/// `release`'s tarball, fetched into the cache once and checked against its
+/// digest.
+fn pinned_tarball(cache: &Path, release: &Release) -> Result<PathBuf, CliError> {
+    let directory = cache.join("downloads").join(release.sha256);
+    let name = release.url.rsplit('/').next().unwrap_or("source.tar");
     let tarball = directory.join(name);
     if tarball.is_file() {
         return Ok(tarball);
@@ -348,8 +366,8 @@ fn pinned_tarball(cache: &Path) -> Result<PathBuf, CliError> {
         .map_err(|error| CliError(format!("failed to create a download directory: {error}")))?;
     let fetched = partial.path().join(name);
     eprintln!(
-        "patina: fetching CPython {} from {}",
-        CPYTHON.version, CPYTHON.url
+        "patina: fetching {} {} from {}",
+        release.name, release.version, release.url
     );
     let status = Command::new("curl")
         .args([
@@ -360,21 +378,34 @@ fn pinned_tarball(cache: &Path) -> Result<PathBuf, CliError> {
             "--output",
         ])
         .arg(&fetched)
-        .arg(CPYTHON.url)
+        .arg(release.url)
         .status()
-        .map_err(|error| CliError(format!("failed to run curl to fetch CPython: {error}")))?;
+        .map_err(|error| {
+            CliError(format!(
+                "failed to run curl to fetch {}: {error}",
+                release.name
+            ))
+        })?;
     if !status.success() {
+        let instead = if release.name == CPYTHON.name {
+            format!(
+                "; pass --python-source with a CPython {} source tarball or tree instead",
+                release.version
+            )
+        } else {
+            String::new()
+        };
         return Err(CliError(format!(
-            "fetching {} failed ({status}); pass --python-source with a CPython {} source tarball or tree instead",
-            CPYTHON.url, CPYTHON.version
+            "fetching {} failed ({status}){instead}",
+            release.url
         )));
     }
     let bytes = fs::read(&fetched).map_err(|error| io_error("failed to read", &fetched, error))?;
     let digest = sha256_hex(&bytes);
-    if digest != CPYTHON.sha256 {
+    if digest != release.sha256 {
         return Err(CliError(format!(
             "{} has sha256 {digest}, not the pinned {}; refusing it",
-            CPYTHON.url, CPYTHON.sha256
+            release.url, release.sha256
         )));
     }
     fs::create_dir_all(&directory)
@@ -406,7 +437,7 @@ fn unpacked(cache: &Path, tarball: &Path) -> Result<(PathBuf, String), CliError>
         match (entries.pop(), entries.is_empty()) {
             (Some(tree), true) if tree.join("configure").is_file() => Ok(tree),
             _ => Err(CliError(format!(
-                "{} does not unpack to one CPython source tree",
+                "{} does not unpack to one source tree",
                 tarball.display()
             ))),
         }
@@ -469,6 +500,44 @@ impl Built {
     fn meter(&self) -> PathBuf {
         self.build.join("patina-meter.o")
     }
+
+    fn zlib(&self) -> PathBuf {
+        self.build.join("zlib").join("libz.a")
+    }
+}
+
+/// zlib's static library, compiled from `tree` as the recipe compiles C,
+/// metered as CPython is.
+fn build_zlib(tree: &Path, built: &Built, cc: &Path) -> Result<(), CliError> {
+    let library = built.zlib();
+    let directory = library.parent().unwrap_or(&built.build).to_path_buf();
+    fs::create_dir_all(&directory)
+        .map_err(|error| io_error("failed to create", &directory, error))?;
+    let mut objects = Vec::new();
+    for source in ZLIB_SOURCES {
+        let object = directory.join(format!("{source}.o"));
+        let mut compile = controlled(cc, cc);
+        compile
+            .args(C_FLAGS)
+            .args([
+                "-c",
+                "-O2",
+                "-DHAVE_UNISTD_H",
+                "-DHAVE_STDARG_H",
+                METER_CFLAGS,
+            ])
+            .arg("-I")
+            .arg(tree)
+            .arg(tree.join(format!("{source}.c")))
+            .arg("-o")
+            .arg(&object);
+        run_logged(compile, "compiling zlib", &directory.join("zlib.log"))?;
+        objects.push(object);
+    }
+    let _ = fs::remove_file(&library);
+    let mut archive = controlled("ar", cc);
+    archive.arg("rcs").arg(&library).args(&objects);
+    run_logged(archive, "archiving zlib", &directory.join("ar.log"))
 }
 
 /// The C compiler every compilation of the build uses (`CC`, or `cc`), found
@@ -527,7 +596,7 @@ fn controlled(program: impl AsRef<std::ffi::OsStr>, cc: &Path) -> Command {
 fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError> {
     let (tree, source_key, reusable) = match source {
         PythonSource::Pinned => {
-            let tarball = pinned_tarball(cache)?;
+            let tarball = pinned_tarball(cache, &CPYTHON)?;
             let (tree, digest) = unpacked(cache, &tarball)?;
             (tree, digest, true)
         }
@@ -549,9 +618,10 @@ fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError>
         }
     };
     let cc = compiler()?;
+    let (zlib, zlib_key) = unpacked(cache, &pinned_tarball(cache, &ZLIB)?)?;
     let key = sha256_hex(
         format!(
-            "{source_key}\n{}\n{}\n{FREEZE_PY}\n{LAUNCHER_C}\n{METER_C}\n{METER_CFLAGS}\n{}",
+            "{source_key}\n{zlib_key}\n{}\n{}\n{FREEZE_PY}\n{LAUNCHER_C}\n{METER_C}\n{METER_CFLAGS}\n{}",
             RECIPE.fingerprint(),
             compiler_identity(&cc)?,
             env!("PATINA_BUILD_TARGET"),
@@ -567,12 +637,32 @@ fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError>
     if reusable && done.is_file() {
         return Ok(built);
     }
+    let meter = build.join("patina-meter.c");
+    fs::write(&meter, METER_C).map_err(|error| io_error("failed to write", &meter, error))?;
+    let inert = build.join("patina-meter-inert.o");
+    compile_c(
+        &meter,
+        &inert,
+        &["-DPATINA_PYTHON_METER_INERT"],
+        &build,
+        &cc,
+        "the inert compute meter",
+    )?;
+    build_zlib(&zlib, &built, &cc)?;
     if !build.join("Makefile").is_file() {
         eprintln!(
             "patina: building CPython from {} (once per source and recipe; this takes a few minutes)",
             tree.display()
         );
         let mut configure = controlled(tree.join("configure"), &cc);
+        // zlib, found where the recipe built it and nowhere on the host; its
+        // test programs link the inert meter for its instrumentation.
+        configure
+            .env("ZLIB_CFLAGS", format!("-I{}", zlib.display()))
+            .env(
+                "ZLIB_LIBS",
+                format!("{} {}", built.zlib().display(), inert.display()),
+            );
         configure
             .current_dir(&build)
             .args(RECIPE.options)
@@ -585,17 +675,6 @@ fn built_cpython(cache: &Path, source: &PythonSource) -> Result<Built, CliError>
         )?;
     }
     withdraw(&build.join("pyconfig.h"), RECIPE.withdrawn)?;
-    let meter = build.join("patina-meter.c");
-    fs::write(&meter, METER_C).map_err(|error| io_error("failed to write", &meter, error))?;
-    let inert = build.join("patina-meter-inert.o");
-    compile_c(
-        &meter,
-        &inert,
-        &["-DPATINA_PYTHON_METER_INERT"],
-        &build,
-        &cc,
-        "the inert compute meter",
-    )?;
     let jobs = std::thread::available_parallelism().map_or(4, usize::from);
     let mut make = controlled("make", &cc);
     make.current_dir(&build)
@@ -849,6 +928,7 @@ pub(crate) fn prepare_python_app(app: PythonApp<'_>) -> Result<PreparedPython, C
     for library in static_libraries(&built.build)? {
         link(&library);
     }
+    link(&built.zlib());
     rustc_args.push(OsString::from("-C"));
     rustc_args.push(OsString::from("link-arg=-lm"));
     Ok(PreparedPython {

@@ -6,10 +6,10 @@
 # module, a package and a namespace package from site-packages/ (frozen in with
 # --python-path as the path finder resolves it: the app's module shadows the
 # site-packages one of its name, and the package a module beside it), and
-# exercises the standard library, pure and C: json, decimal, the
-# HACL* hashes, re, dataclasses, seeded randomness, the virtual clocks, local
-# time in a POSIX rule zone, asyncio, a thread computing without calls stopped by
-# another (the compute meter), and the guest filesystem. It prints one
+# exercises the standard library, pure and C: json, decimal, the HACL* hashes,
+# zlib and gzip, re, dataclasses, seeded randomness, the virtual clocks, local
+# time in a POSIX rule zone, asyncio, a thread computing without calls stopped
+# by another (the compute meter), and the guest filesystem. It prints one
 # PYTHON_GUEST line per fact.
 #
 # It asserts:
@@ -91,6 +91,7 @@ expect namespace "hello patina"
 expect json '{"a": null, "b": [1, 2]}'
 expect decimal "3.305"
 expect sha256 "d94f56e94b0baa93"
+expect zlib "7c22221c 32 True"
 expect re "patina at dst"
 expect dataclass "Point(x=1, y=2)"
 expect slept "0.25"
