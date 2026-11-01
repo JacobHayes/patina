@@ -2,7 +2,9 @@
 //! 2.39) over the virtual machine.
 //!
 //! glibc reads `TZ` the first time `localtime_r` runs and keeps the answer
-//! (`tzset_internal` with `always` 0), so the zone here is chosen once too:
+//! (`tzset_internal` with `always` 0); `tzset`, `mktime` and `strftime`'s
+//! `%Z` read it again when it changed (`always` 1), and so does [`current`].
+//! Reading it:
 //!
 //! * unset `TZ` names the default file `/etc/localtime`, an empty one names
 //!   UTC, a leading `:` is dropped, and a name without a leading `/` is looked
@@ -21,7 +23,8 @@
 //! deterministic filesystem, so nothing is recorded.
 
 use std::ffi::{CStr, CString, c_char, c_int};
-use std::sync::OnceLock;
+
+use crate::SpinMutex;
 
 const SECS_PER_DAY: i64 = 86_400;
 /// glibc's `TZDEFAULT` and `TZDIR` on Ubuntu 24.04.
@@ -120,6 +123,13 @@ fn intern(name: &[u8]) -> &'static CStr {
     Box::leak(name.into_boxed_c_str())
 }
 
+/// `t` broken down in UTC, as `gmtime_r` answers with no leap seconds: its
+/// zone name is "GMT", as glibc's. `EOVERFLOW` for a year past `int`.
+#[cfg(patina_posix_exports)]
+pub(crate) fn universal(t: i64) -> Result<PatinaTm, c_int> {
+    utc(c"GMT").local(t)
+}
+
 fn utc(name: &'static CStr) -> Zone {
     let rule = Rule {
         name,
@@ -206,6 +216,112 @@ impl Zone {
         tm.gmtoff = rule.offset;
         tm.zone = rule.name.as_ptr();
         Ok(tm)
+    }
+}
+
+// The tzname face, for strftime's door.
+#[cfg(patina_posix_exports)]
+impl Zone {
+    /// The name of standard (`isdst` false) or daylight time (`tzname`).
+    pub(crate) fn name(&self, isdst: bool) -> &'static CStr {
+        self.rules[usize::from(isdst)].name
+    }
+}
+
+// The mktime face, for the posix doors.
+#[cfg(any(all(test, target_os = "linux"), patina_posix_exports))]
+impl Zone {
+    /// `mktime` (`__mktime_internal`): the instant whose local time is `tm`'s
+    /// fields (each may be out of range, and is carried into the next), and
+    /// that instant broken down again. `tm.isdst` positive or zero reads the
+    /// fields as daylight or standard time, as glibc does, even where that
+    /// time is not in effect (lending the offset of the nearest time it is);
+    /// negative asks the zone. A time the zone skips or repeats reads as the
+    /// time asked for, and otherwise as standard time: glibc's answer there
+    /// turns on its previous calls. `EOVERFLOW` when the instant or its year does
+    /// not fit.
+    pub(crate) fn mktime(&self, tm: &PatinaTm) -> Result<(i64, PatinaTm), c_int> {
+        let floor_div = |a: i64, b: i64| a.div_euclid(b);
+        // glibc searches with the seconds held to a minute (a leap second
+        // may matter there) and adds the rest back after.
+        let clamped = tm.sec.clamp(0, 59);
+        let mon = i64::from(tm.mon);
+        let year = i64::from(tm.year) + 1900 + floor_div(mon, 12);
+        let mon = mon.rem_euclid(12);
+        // Days from 1970-01-01 to the first of the month (civil-from-days
+        // inverted, with March-based years).
+        let (y, m) = if mon < 2 {
+            (year - 1, mon + 10)
+        } else {
+            (year, mon - 2)
+        };
+        let era = floor_div(y, 400);
+        let yoe = y - era * 400;
+        let doy = (153 * m + 2) / 5;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468 + i64::from(tm.mday) - 1;
+        let local = days
+            .checked_mul(SECS_PER_DAY)
+            .and_then(|secs| secs.checked_add(i64::from(tm.hour) * 3600))
+            .and_then(|secs| secs.checked_add(i64::from(tm.min) * 60))
+            .and_then(|secs| secs.checked_add(i64::from(clamped)))
+            .ok_or(EOVERFLOW)?;
+        let reading = |isdst: bool| {
+            local
+                .checked_sub(self.rules[usize::from(isdst)].offset)
+                .ok_or(EOVERFLOW)
+        };
+        let isdst_of = |t: i64| self.local(t).map(|tm| tm.isdst != 0);
+        let standard = reading(false)?;
+        let daylight = reading(true)?;
+        // The reading the zone agrees with: standard time first, and standard
+        // time again for a time the zone skips.
+        let natural = if !isdst_of(standard)? {
+            standard
+        } else if isdst_of(daylight)? {
+            daylight
+        } else {
+            standard
+        };
+        let t = match tm.isdst {
+            isdst if isdst < 0 => natural,
+            isdst => {
+                let want = isdst > 0;
+                let wanted = reading(want)?;
+                if isdst_of(wanted)? == want {
+                    wanted
+                } else {
+                    // glibc's search: the nearest time, a week apart either
+                    // way out to some seven years, whose `isdst` is the one
+                    // asked for lends its offset; with none, daylight time is
+                    // taken to be an hour ahead.
+                    const STRIDE: i64 = 601_200;
+                    const BOUND: i64 = 457_243_200 / 2 + STRIDE;
+                    let found = (1..)
+                        .map(|step| step * STRIDE)
+                        .take_while(|delta| *delta < BOUND)
+                        .flat_map(|delta| [natural.checked_sub(delta), natural.checked_add(delta)])
+                        .flatten()
+                        .find_map(|probe| {
+                            self.local(probe)
+                                .ok()
+                                .filter(|tm| (tm.isdst != 0) == want)
+                                .map(|tm| tm.gmtoff)
+                        });
+                    match found {
+                        Some(offset) => local.checked_sub(offset).ok_or(EOVERFLOW)?,
+                        None => {
+                            let shift = 3600 * (i64::from(isdst_of(natural)?) - i64::from(want));
+                            natural.checked_add(shift).ok_or(EOVERFLOW)?
+                        }
+                    }
+                }
+            }
+        };
+        let t = t
+            .checked_add(i64::from(tm.sec) - i64::from(clamped))
+            .ok_or(EOVERFLOW)?;
+        Ok((t, self.local(t)?))
     }
 }
 
@@ -502,12 +618,88 @@ fn offtime(t: i64, offset: i64) -> Result<PatinaTm, c_int> {
     Ok(tm)
 }
 
-/// The zone the first `localtime_r` chose.
-static ZONE: OnceLock<Zone> = OnceLock::new();
+/// The zone `tzset_internal` last read, and the `TZ` it read it from
+/// (`old_tz`, after glibc's `""` and `:` rewrites).
+struct Current {
+    zone: Zone,
+    tz: Vec<u8>,
+}
+
+static CURRENT: SpinMutex<Option<Current>> = SpinMutex::new(None);
+
+/// glibc's `tzset_internal`: the zone in effect. The first call reads `TZ`;
+/// later calls keep that zone unless `reread` (glibc's `always`: `tzset`,
+/// `mktime`, and `strftime`'s `%Z` of a time with no zone name), and even then
+/// keep it while `TZ` is the string it was read from, as glibc compares it.
+/// A zoneinfo file where glibc would read one is a named fatal naming `op`.
+/// `settings` reads `TZ` and `TZDIR`.
+pub(crate) fn current(op: &str, settings: &dyn Fn() -> Settings, reread: bool) -> Zone {
+    loop {
+        let (tz, tzdir) = settings();
+        if let Some(zone) = cached(tz.as_deref(), reread) {
+            return zone;
+        }
+        let zone = chosen(op, tz.as_deref(), tzdir.as_deref());
+        // Chosen outside the lock: the choice reads the filesystem, a
+        // scheduling point, and a task spinning on a lock another task holds
+        // would wait on the host with the baton. Published only while the
+        // settings are still the ones it was chosen for (read again with no
+        // scheduling point between), so a choice another task's later
+        // settings overtook is chosen again rather than replacing theirs.
+        let mut current = CURRENT.lock();
+        if settings() == (tz.clone(), tzdir) {
+            let tz = normalized(tz.as_deref())
+                .unwrap_or(TZ_DEFAULT.as_bytes())
+                .to_vec();
+            *current = Some(Current { zone, tz });
+            return zone;
+        }
+    }
+}
+
+/// `TZ` and `TZDIR`, each unset or its value.
+pub(crate) type Settings = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// `TZ` as glibc compares it with the zone in effect's.
+fn normalized(tz: Option<&[u8]>) -> Option<&[u8]> {
+    tz.map(|tz| match tz {
+        [] => &b"Universal"[..],
+        [b':', rest @ ..] => rest,
+        tz => tz,
+    })
+}
+
+/// The zone in effect, unless `reread` and `tz` is not the string it was
+/// read from.
+fn cached(tz: Option<&[u8]>, reread: bool) -> Option<Zone> {
+    let current = CURRENT.lock();
+    let current = current.as_ref()?;
+    (!reread || normalized(tz) == Some(current.tz.as_slice())).then_some(current.zone)
+}
+
+/// The zone `tz` and `tzdir` name, a zoneinfo file a named fatal.
+fn chosen(op: &str, tz: Option<&[u8]>, tzdir: Option<&[u8]>) -> Zone {
+    let chosen = Zone::choose(tz, tzdir, |path| {
+        // A zone file is a regular file on the volume; the entropy device and
+        // a namespace file are none.
+        matches!(
+            crate::paths::resolve(crate::paths::AT_FDCWD, path, 0),
+            Ok(crate::paths::Resolution::Volume(resolved)) if resolved
+                .metadata
+                .is_some_and(|metadata| metadata.kind == crate::FsEntryKind::File)
+        )
+    });
+    match chosen {
+        Ok(zone) => zone,
+        Err(ZoneFile(path)) => crate::trap_fatal(&format!(
+            "{op}: TZ names the zoneinfo file {path}, which exists in the deterministic filesystem; zoneinfo (TZif) files are not modeled; failing closed"
+        )),
+    }
+}
 
 #[unsafe(no_mangle)]
-/// Convert `t` to local time in the zone `TZ` named at the first call (see
-/// the module doc). 0 with `out` filled, or -1 with patina_errno `EOVERFLOW`.
+/// Convert `t` to local time in the zone in effect (see the module doc and
+/// [`current`]). 0 with `out` filled, or -1 with patina_errno `EOVERFLOW`.
 /// A zoneinfo file where glibc would read one is a named fatal.
 ///
 /// # Safety
@@ -519,34 +711,16 @@ pub unsafe extern "C" fn patina_localtime(
     out: *mut PatinaTm,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: NULL or NUL-terminated, per the contract.
-    let text = |value: *const c_char| (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) });
-    // Chosen outside the cell: the choice reads the filesystem, a scheduling
-    // point, and a task waiting on a cell another task is filling would wait
-    // on the host with the baton. Racing first calls each choose, alike.
-    let zone = ZONE.get().cloned().unwrap_or_else(|| {
-        let chosen = Zone::choose(
-            text(tz).map(CStr::to_bytes),
-            text(tzdir).map(CStr::to_bytes),
-            |path| {
-                // A zone file is a regular file on the volume; the entropy
-                // device and a namespace file are none.
-                matches!(
-                    crate::paths::resolve(crate::paths::AT_FDCWD, path, 0),
-                    Ok(crate::paths::Resolution::Volume(resolved)) if resolved
-                        .metadata
-                        .is_some_and(|metadata| metadata.kind == crate::FsEntryKind::File)
-                )
-            },
-        );
-        match chosen {
-            Ok(zone) => zone,
-            Err(ZoneFile(path)) => crate::trap_fatal(&format!(
-                "localtime_r: TZ names the zoneinfo file {path}, which exists in the deterministic filesystem; zoneinfo (TZif) files are not modeled; failing closed"
-            )),
+    let text = |value: *const c_char| {
+        if value.is_null() {
+            return None;
         }
-    });
-    let zone = ZONE.get_or_init(|| zone);
+        // SAFETY: nonnull, and NUL-terminated per the contract.
+        let value = unsafe { CStr::from_ptr(value) };
+        Some(value.to_bytes().to_vec())
+    };
+    let settings = (text(tz), text(tzdir));
+    let zone = current("localtime_r", &|| settings.clone(), false);
     match zone.local(t) {
         Ok(tm) => {
             // SAFETY: writable, per the contract.
@@ -739,6 +913,84 @@ mod tests {
                     name,
                 );
                 assert_eq!(ours.map(|tm| fields(&tm)), Ok(expected), "{zone} {t}");
+                if t.abs() < 10_000_000_000 {
+                    mktime_agrees(zone, &model, &native);
+                }
+            }
+        }
+    }
+
+    /// `mktime` of `base`'s fields, and of them carried out of range, read
+    /// each way `tm_isdst` asks, agrees with the host's: the instant, the
+    /// normalized fields, or the overflow. A time the zone skips or repeats
+    /// is left out: glibc's answer there turns on its previous calls.
+    #[cfg(target_os = "linux")]
+    fn mktime_agrees(zone: &str, model: &Zone, base: &libc::tm) {
+        let shifts: [[c_int; 6]; 5] = [
+            [0; 6],
+            [0, 13, 40, 0, 0, 0],
+            [0, -14, -400, -30, 0, 0],
+            [0, 0, 0, 0, 90, 70],
+            [1, 0, 0, 1, -59, -3600],
+        ];
+        for shift in shifts {
+            for isdst in [-1, 0, 1] {
+                let mut native = *base;
+                native.tm_year += shift[0];
+                native.tm_mon += shift[1];
+                native.tm_mday += shift[2];
+                native.tm_hour += shift[3];
+                native.tm_min += shift[4];
+                native.tm_sec += shift[5];
+                native.tm_isdst = isdst;
+                let input = PatinaTm {
+                    sec: native.tm_sec,
+                    min: native.tm_min,
+                    hour: native.tm_hour,
+                    mday: native.tm_mday,
+                    mon: native.tm_mon,
+                    year: native.tm_year,
+                    isdst,
+                    ..PatinaTm::default()
+                };
+                {
+                    // Where glibc searches: the seconds held to a minute.
+                    let readings = [false, true].map(|dst| {
+                        let mut tm = input;
+                        tm.sec = tm.sec.clamp(0, 59);
+                        tm.isdst = c_int::from(dst);
+                        model
+                            .mktime(&tm)
+                            .is_ok_and(|(_, local)| local.isdst == c_int::from(dst))
+                    });
+                    if readings[0] == readings[1] {
+                        continue;
+                    }
+                }
+                let case = format!("{zone} {input:?}");
+                // SAFETY: a valid, writable `struct tm`.
+                let t = unsafe { libc::mktime(&mut native) };
+                let ours = model.mktime(&input);
+                if t == -1 && ours.is_err() {
+                    continue;
+                }
+                let (ours_t, ours_tm) = ours.expect(&case);
+                assert_eq!(ours_t, t, "{case}");
+                assert_eq!(
+                    fields(&ours_tm).1,
+                    [
+                        native.tm_year,
+                        native.tm_mon,
+                        native.tm_mday,
+                        native.tm_hour,
+                        native.tm_min,
+                        native.tm_sec,
+                        native.tm_wday,
+                        native.tm_yday,
+                        native.tm_isdst,
+                    ],
+                    "{case}"
+                );
             }
         }
     }

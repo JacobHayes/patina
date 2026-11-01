@@ -66,6 +66,7 @@ core::arch::global_asm!(
 .endm
 PATINA_DOOR acct
 PATINA_DOOR chroot
+PATINA_DOOR clock_settime
 PATINA_DOOR delete_module
 PATINA_DOOR fsconfig
 PATINA_DOOR fsmount
@@ -124,6 +125,7 @@ PATINA_DOOR swapoff
 PATINA_DOOR swapon
 PATINA_DOOR sysinfo
 PATINA_DOOR tgkill
+PATINA_DOOR times
 PATINA_DOOR tkill
 PATINA_DOOR umount2
 PATINA_DOOR uname
@@ -178,6 +180,7 @@ core::arch::global_asm!(
 .endm
 PATINA_DOOR acct
 PATINA_DOOR chroot
+PATINA_DOOR clock_settime
 PATINA_DOOR delete_module
 PATINA_DOOR fsconfig
 PATINA_DOOR fsmount
@@ -234,6 +237,7 @@ PATINA_DOOR swapoff
 PATINA_DOOR swapon
 PATINA_DOOR sysinfo
 PATINA_DOOR tgkill
+PATINA_DOOR times
 PATINA_DOOR tkill
 PATINA_DOOR umount2
 PATINA_DOOR uname

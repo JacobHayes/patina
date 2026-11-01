@@ -165,6 +165,29 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             yield_object.as_deref(),
             &rustc,
         ),
+        NativeBuildTarget::Python { app, paths, source } => {
+            let prepared =
+                crate::python_build::prepare_python_app(crate::python_build::PythonApp {
+                    app: &app,
+                    paths: &paths,
+                    source: &source,
+                })?;
+            build_native_source(
+                &prepared.main,
+                invocation
+                    .output
+                    .as_deref()
+                    .expect("a Python native-build requires --output"),
+                DEFAULT_NATIVE_EDITION,
+                invocation.release,
+                &object,
+                &built_shim,
+                &allocator,
+                yield_object.as_deref(),
+                &prepared.rustc_args,
+                &rustc,
+            )
+        }
         NativeBuildTarget::Go {
             package_dir,
             go_args,

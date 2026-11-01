@@ -79,6 +79,35 @@ and each piece behaves as its Rust counterpart does:
 shim; any other build gets inert stand-ins with no cgo, so code ships the SDK
 unconditionally.
 
+### Python guests
+
+`cargo patina build app.py --python --output app` (or a directory with a
+`__main__.py`) builds a Python application as a native guest, on Linux
+(x86_64 and aarch64; on macOS CPython reaches C library calls the shim does
+not yet model on Darwin, so the build refuses). Patina builds
+CPython statically by its own recipe, from the pinned release (fetched once,
+checked against its digest and cached with its build) or the
+`--python-source` tarball or tree, and freezes the standard library and the
+application into the executable: the interpreter imports nothing from a
+filesystem and ignores the environment, so a run imports the same code
+everywhere. Arguments after `--` on `run` are `sys.argv[1:]`.
+
+Third-party pure-Python packages come in with `--python-path DIR`, once per
+root, earlier roots shadowing later ones as on `sys.path`; a virtualenv's
+dependencies are its site-packages directory:
+
+```sh
+cargo patina build app/ --python --python-path .venv/lib/python3.14/site-packages --output app
+```
+
+A directory without an `__init__.py` is a namespace package. What a Python
+guest does not have: extension modules (a compiled module under a root refuses
+the build, by name), package data (files beside the modules are not carried),
+`ssl` and `zlib` (the recipe builds neither library yet), and child processes
+(`subprocess` and `os.fork` stop the run with the process refusal). The
+`hashlib` digests are CPython's built-in HACL\*
+implementations.
+
 ### Native startup environment
 
 Use `cargo patina run --env KEY=VALUE` to supply a native guest's startup map.

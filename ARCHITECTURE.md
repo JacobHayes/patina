@@ -64,6 +64,21 @@ trace format.
   hook. Go records no pcs, so the covmap gives its edges the zero (unknown)
   site and `cargo patina coverage` attributes each to its package by the
   counter's `<package>..stmp_N` symbol.
+- **Python.** `cargo patina build <SCRIPT.py|DIR> --python` builds CPython
+  statically by a fixed recipe (`crates/cargo-patina/src/python_build.rs`):
+  every extension module in `libpython`, none needing a library the recipe
+  does not build, and the C library functions the shim has no model for
+  hidden from `configure` by reasoned group, a recipe test failing once the
+  shim serves one. The pinned release is fetched once, checked against its
+  digest and cached with its build. The built interpreter compiles the
+  standard library, the application and its `--python-path` roots to
+  bytecode (`python/freeze.py`), which the executable embeds; the launcher
+  (`python/launcher.c`) hands them to an isolated interpreter as frozen
+  modules, so a run imports nothing from a filesystem and the audit sees all
+  of CPython's imports. CPython is compiled with comparison instrumentation,
+  whose hooks (`python/meter.c`) hand batches to `patina_compute_point`, as
+  the Go meter does: a thread computing without calls still lets the GIL
+  change hands and timers come due.
 - **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
   configures the run in code, then runs ordinary `std` code under the shim's
   global runtime. a harness binary's `PATINA_HARNESS_V1` marker makes the supervisor set

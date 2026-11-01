@@ -228,6 +228,8 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "malloc",
         "posix_memalign",
         "realloc",
+        // `malloc` and a copy of the caller's string into the new block.
+        "strdup",
     ];
     // Size queries read the allocator's own chunk headers.
     const ALLOCATOR_QUERIES: &[&str] = &["malloc_size", "malloc_usable_size"];
@@ -267,6 +269,12 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "strerror",
         "strerror_r",
         "strlen",
+        // Bounded append, and the first byte of a set: caller memory only,
+        // the same family as `strcat_chk`/`strcspn`.
+        "strncat",
+        "strpbrk",
+        // A zeroing `memset` the compiler may not elide: caller memory only.
+        "explicit_bzero",
         "strncasecmp",
         "strncmp",
         "strncpy",
@@ -284,12 +292,20 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         // optionally writing an end pointer back into caller memory. Pure
         // caller-memory read/compute with no boundary effect, same family as the
         // `strlen`/`strcmp` intrinsics above. Both Mach-O `_strtol` and ELF
-        // `strtol` normalize onto this common entry. (`strtoul` and the other
-        // radix/float parsers are deliberately NOT here — this is an exact list,
-        // never a prefix, so an unlisted parser stays denied as `unknown-import`.)
-        // `atoi` is `strtol` in base 10 with no end pointer.
+        // `strtol` normalize onto this common entry. This is an exact list,
+        // never a prefix, so an unlisted parser (the float parsers among them)
+        // stays denied as `unknown-import`. `atoi` is `strtol` in base 10 with
+        // no end pointer.
         "atoi",
         "strtol",
+        // The same parse at another width or signedness (the C library's
+        // `strtoll`/`strtoul`), and over a wide string (`wcstol`).
+        "strtoll",
+        "strtoul",
+        "wcstol",
+        // Tokenizing a caller-owned string in place through a caller-owned
+        // save pointer: the reentrant form, which keeps no state of its own.
+        "strtok_r",
         // In-place sort of a caller-owned array through a caller-supplied
         // comparator: it reads and permutes only caller memory and takes no
         // boundary effect of its own. The comparator is guest code, which meets
@@ -298,6 +314,34 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         // libc build, and a run is always replayed against the same libc.
         "qsort",
     ];
+    // The wide-character forms of the string intrinsics above: each reads or
+    // writes only caller-owned `wchar_t` arrays (`wcstok` through the
+    // caller's save pointer), with no locale and no boundary effect.
+    const WIDE_STRING: &[&str] = &[
+        "wcschr", "wcscmp", "wcscpy", "wcslen", "wcsncmp", "wcsncpy", "wcsrchr", "wcstok",
+        "wmemchr", "wmemcmp",
+    ];
+    // Conversions and comparisons that depend on the current locale, which
+    // is the C locale for the whole run: the shim defines `setlocale` and
+    // answers only the built-in C/POSIX locale (the virtual machine ships no
+    // locale data), so libc's locale state never leaves its initial C value.
+    // In it these are pure functions of caller memory: multibyte (ASCII)
+    // to and from wide characters, collation as plain comparison and
+    // transformation as a copy, and the C locale's constant numeric and
+    // `nl_langinfo` tables.
+    const C_LOCALE: &[&str] = &[
+        "localeconv",
+        "mbrtowc",
+        "mbstowcs",
+        "nl_langinfo",
+        "wcscoll",
+        "wcstombs",
+        "wcsxfrm",
+    ];
+    // Address text conversions: dotted or colon text to and from the binary
+    // address in caller memory (`inet_ntoa` into libc's static buffer). No
+    // resolver is consulted.
+    const ADDRESS_TEXT: &[&str] = &["inet_aton", "inet_ntoa", "inet_ntop", "inet_pton"];
     // Compiler-rt/libgcc 128-bit integer arithmetic intrinsics: pure functions
     // of their register/stack operands with no boundary effect. Rust u128/i128
     // math lowers to these; macOS resolves them statically from
@@ -358,6 +402,10 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "pthread_rwlockattr_setkind_np",
         "pthread_self",
         "pthread_setspecific",
+        // Records the contention scope in the caller's attributes; Linux and
+        // Darwin have only the system scope, which the shim's `pthread_create`
+        // gives every thread anyway.
+        "pthread_attr_setscope",
     ];
     // Unwind/personality routines walk in-process frames or transfer control to
     // language runtimes; they do not perform host I/O, time, entropy, or waits.
@@ -502,6 +550,12 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "fminf",
         "fmax",
         "fmaxf",
+        // Error functions, the next representable value, and a sine and
+        // cosine of one argument written to two caller-owned slots.
+        "erf",
+        "erfc",
+        "nextafter",
+        "sincos",
     ];
     // Pure formatting/parsing and generic search over CALLER-OWNED memory, in the
     // C locale (the deterministic environment carries no LC_* so the locale is
@@ -525,6 +579,9 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         "sscanf",
         "vsnprintf",
         "vsnprintf_chk",
+        // The non-fortified forms of the same formats into the caller's buffer.
+        "snprintf",
+        "sprintf",
     ];
     // Floating-point rounding-mode environment. `fegetround`/`fesetround` read
     // and set the CURRENT-THREAD FP rounding mode — thread-local, process-local
@@ -537,6 +594,9 @@ const COMMON_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(ALLOCATOR, HEAP),
         AllowedImports::exact(ALLOCATOR_QUERIES, Never),
         AllowedImports::exact(MEMORY_AND_STRING, Never),
+        AllowedImports::exact(WIDE_STRING, Never),
+        AllowedImports::exact(C_LOCALE, Never),
+        AllowedImports::exact(ADDRESS_TEXT, Never),
         AllowedImports::exact(COMPILER_ARITHMETIC, Never),
         AllowedImports::exact(
             IMMEDIATE_EXIT,
@@ -678,7 +738,8 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
 const ELF_ALLOWLIST: &[AllowedImports] = {
     // glibc errno is thread-local process state. The shim sets errno after
     // deterministic boundary failures; the host accessor only returns its slot.
-    const ERRNO: &[&str] = &["errno_location"];
+    // `h_errno` is its thread-local sibling for the resolver's legacy calls.
+    const ERRNO: &[&str] = &["errno_location", "h_errno_location"];
     // ELF/glibc startup, TLS, and finalizer glue with process-local effects.
     const STARTUP_AND_TLS_GLUE: &[&str] = &[
         "cxa_atexit",
@@ -696,7 +757,14 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
     // pool by it), and the running glibc's version string. Constant for a
     // given host+binary, and the trace fingerprint already pins the
     // toolchain/host pairing.
-    const FIXED_PROCESS_METADATA: &[&str] = &["getauxval", "getpagesize", "gnu_get_libc_version"];
+    // `__libc_current_sigrtmin` is `SIGRTMIN`: the first real-time signal
+    // glibc leaves its callers, a constant of the loaded glibc.
+    const FIXED_PROCESS_METADATA: &[&str] = &[
+        "getauxval",
+        "getpagesize",
+        "gnu_get_libc_version",
+        "libc_current_sigrtmin",
+    ];
     // Backtrace metadata walks already-loaded ELF program headers.
     const BACKTRACE_IMAGE_GLUE: &[&str] = &["dl_iterate_phdr"];
     // The loader's lookup of the loaded object containing an address, which
@@ -716,10 +784,20 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
     // state read. `__sched_cpucount` is `CPU_COUNT`: it pops the set bits of a
     // caller-owned `cpu_set_t`, pure arithmetic over caller memory (distinct from
     // `sched_getcpu`, which reads the live CPU id and IS interposed to the virtual one).
-    const PURE_COMPUTE: &[&str] = &["ctype_b_loc", "sched_cpucount"];
+    // `__ctype_tolower_loc`/`__ctype_toupper_loc` are the same kind of table
+    // behind `tolower`/`toupper`.
+    const PURE_COMPUTE: &[&str] = &[
+        "ctype_b_loc",
+        "ctype_tolower_loc",
+        "ctype_toupper_loc",
+        "sched_cpucount",
+    ];
+    // `CPU_ALLOC`/`CPU_FREE`: a `malloc` of a CPU set's size and its `free`.
+    const CPU_SET_ALLOCATOR: &[&str] = &["sched_cpualloc", "sched_cpufree"];
     // The XPG strerror_r alias is the pure message formatter behind
     // std::io::Error display.
-    const ERROR_HELPERS: &[&str] = &["xpg_strerror_r"];
+    // `hstrerror` is the resolver's message table, as `strerror` is errno's.
+    const ERROR_HELPERS: &[&str] = &["xpg_strerror_r", "hstrerror"];
     // ld.so's restartable-sequence layout words (`__rseq_offset`, `__rseq_size`,
     // `__rseq_flags`): constants of the loaded glibc naming where each thread's
     // rseq area sits from the thread pointer. The area itself is the virtual
@@ -744,6 +822,7 @@ const ELF_ALLOWLIST: &[AllowedImports] = {
         AllowedImports::exact(PROGRAM_BREAK, HEAP),
         AllowedImports::exact(BYTE_ORDER, Never),
         AllowedImports::exact(PURE_COMPUTE, Never),
+        AllowedImports::exact(CPU_SET_ALLOCATOR, HEAP),
         AllowedImports::exact(ERROR_HELPERS, Never),
         AllowedImports::exact(RSEQ_LAYOUT, Never),
     ]
@@ -903,6 +982,7 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         "getaddrinfo",
         "getnameinfo",
         "gethostbyname",
+        "gethostbyaddr",
         // Interface lookups (a host networking utility stack — hyper-util —
         // links `if_nametoindex` dormant). The shim answers them from the
         // virtual interface table; classified so a raw non-shim import reads as
@@ -994,6 +1074,16 @@ fn native_escape_category(symbol: &str) -> Option<&'static str> {
         // conversions a fixed virtual zone, never the host's.
         "localtime_r",
         "tzset",
+        // The same zone's inverse and its formatter (which renders `%Z` and
+        // `%s` from it), the UTC breakdown (which libc reads its zone files
+        // for, as leap seconds), and the CPU clocks the process reads.
+        "mktime",
+        "gmtime_r",
+        "strftime",
+        "wcsftime",
+        "clock",
+        "times",
+        "clock_settime",
     ];
     // (c) Entropy: deterministic bytes come from the seeded RNG; a raw import
     // draws real host entropy.

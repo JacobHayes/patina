@@ -345,6 +345,7 @@ pub(super) const BUILD: Verb = Verb {
         "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
         "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
         "cargo patina build <GO PACKAGE DIR> --go [--go-test] --output <PATH> [--release] [-- GO BUILD OPTIONS]",
+        "cargo patina build <SCRIPT.py|DIR> --python --output <PATH> [--python-path DIR]... [--python-source TARBALL|DIR] [--release]",
     ],
     prose: "\
 `build` packages the native linked-shim target: it \
@@ -374,7 +375,17 @@ edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
 --guided` work on it; it has no edge hook, so `run --yield-stride` is refused. \
 `--go-test` builds the package's test binary (`go test -c`) instead of a main \
 package, so a package's own tests run as a guest: give `go test` flags such as \
-`-test.run` and `-test.v` to `run` after `--`.",
+`-test.run` and `-test.v` to `run` after `--`.\n\
+\n\
+`--python` builds a Python application (Linux): a script, run as its module, or a \
+directory, run as its `__main__.py`. Patina builds CPython (the pinned release, \
+fetched once and checked against its digest, or the --python-source tarball or \
+tree) statically by its own recipe, caches it, and freezes the standard library, \
+the application and each --python-path root (a virtualenv's site-packages, say; \
+earlier roots shadow later ones) into the executable, so the interpreter imports \
+nothing from a filesystem and runs isolated from the environment. Pure-Python \
+modules only: an extension module refuses the build, and package data is not \
+carried. Arguments after `--` on `run` reach the program as `sys.argv[1:]`.",
     families: &[fam(Family::Sole, "`build`", None)],
     groups: &[Group {
         title: "Build options",
@@ -438,6 +449,33 @@ package, so a package's own tests run as a guest: give `go test` flags such as \
                     false,
                 ),
                 "--go",
+            ),
+            f(
+                "--python",
+                None,
+                Value::None,
+                "Build the path as a Python application frozen into a statically built CPython.",
+                false,
+            ),
+            needs(
+                f(
+                    "--python-path",
+                    None,
+                    Value::Required("DIR", Kind::Path),
+                    "Freeze the modules under DIR too (a site-packages directory, say); repeatable.",
+                    true,
+                ),
+                "--python",
+            ),
+            needs(
+                f(
+                    "--python-source",
+                    None,
+                    Value::Required("TARBALL|DIR", Kind::Path),
+                    "Build CPython from this source tarball or tree instead of the pinned release.",
+                    false,
+                ),
+                "--python",
             ),
         ],
     }],

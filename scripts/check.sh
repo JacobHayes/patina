@@ -31,6 +31,7 @@ esac
 # whose runtime issues raw syscalls) run only on x86_64 Linux.
 native_testbeds() {
   testbeds/fifo-ipc/run-patina.sh || return
+  testbeds/python-guest/run-patina.sh || return
   [[ $(uname -s)/$(uname -m) == Linux/x86_64 ]] || return 0
   testbeds/rustix-default/run-patina.sh &&
     testbeds/cap-std-dirfd/run-patina.sh &&

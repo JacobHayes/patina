@@ -182,6 +182,8 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 /// row, this list and the definition in lockstep or the gate fails closed.
 const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     // process (patina_process_trap): spawn/exec/wait.
+    ("execv", "process"),
+    ("execve", "process"),
     ("execvp", "process"),
     ("fork", "process"),
     ("pidfd_getpid", "process"),
@@ -214,6 +216,11 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("IORegistryEntryCreateCFProperty", "host-introspection"),
     ("IORegistryEntryGetName", "host-introspection"),
     ("IOServiceGetMatchingServices", "host-introspection"),
+    // network: the host-database resolver faces, which read the host's
+    // resolver configuration and name service; getaddrinfo is the modeled one.
+    ("gethostbyaddr", "network"),
+    ("gethostbyname", "network"),
+    ("getnameinfo", "network"),
     // filesystem: AFP byte-range locking, unreachable on the APFS volume.
     ("fsctl", "filesystem"),
     // macos-framework: CoreFoundation/Security helpers

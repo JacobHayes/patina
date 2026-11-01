@@ -147,6 +147,9 @@ mod layout;
 #[cfg(target_os = "linux")]
 mod limits;
 mod localtime;
+// strftime's and wcsftime's formatter (C locale), over the zone model.
+#[cfg(any(test, patina_posix_exports))]
+mod strftime;
 // Memory mappings, and the page cache behind a mapped file. See `mem/mod.rs`.
 mod mem;
 // The memory devices, `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`

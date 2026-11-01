@@ -46,6 +46,7 @@ mod native_build;
 mod native_run;
 mod output;
 mod parse;
+mod python_build;
 mod render;
 mod rollup;
 mod run_cache;
@@ -217,7 +218,8 @@ struct NativeBuildInvocation {
 
 /// What `build` compiles for the native target: a single Rust source linked
 /// directly with `rustc`, a whole Cargo package driven through its own
-/// `cargo build`, or a Go main package driven through `go build`.
+/// `cargo build`, a Go main package driven through `go build`, or a Python
+/// application frozen into CPython.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NativeBuildTarget {
     Source {
@@ -237,6 +239,14 @@ enum NativeBuildTarget {
         package_dir: PathBuf,
         go_args: Vec<OsString>,
         test: bool,
+    },
+    /// A Python application (`--python`): a script or a directory with a
+    /// `__main__.py`, frozen with the `--python-path` roots into a statically
+    /// built CPython linked with the shim ([`python_build`]).
+    Python {
+        app: PathBuf,
+        paths: Vec<PathBuf>,
+        source: python_build::PythonSource,
     },
 }
 

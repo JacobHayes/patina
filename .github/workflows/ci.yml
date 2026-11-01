@@ -102,6 +102,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo doc --workspace --no-deps --locked
       - run: testbeds/fifo-ipc/run-patina.sh
+      - run: testbeds/python-guest/run-patina.sh
       # The SUD-only testbeds, and Go (whose runtime issues raw syscalls): x86_64.
       - if: matrix.runner == 'ubuntu-latest'
         run: |

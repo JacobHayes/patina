@@ -121,7 +121,7 @@ source-first native libtest harness mode for one exact test target.
 |---|---|---|
 | `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
 | `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
-| `build` | Build the shim-linked native binary, or a Go main package (`--go`, Linux). | `cargo patina build ./pkg --output app` |
+| `build` | Build the shim-linked native binary, a Go main package (`--go`, Linux), or a Python application frozen into CPython (`--python`, Linux). | `cargo patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |

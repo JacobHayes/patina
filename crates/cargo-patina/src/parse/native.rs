@@ -106,6 +106,9 @@ pub(crate) fn parse_native_build(
     if args.flag("--go") {
         return parse_go_build(&args, path, output, release, instrument, rustc_args);
     }
+    if args.flag("--python") {
+        return parse_python_build(&args, path, output, release, instrument, rustc_args);
+    }
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
             return Err(CliError::usage(format!(
@@ -188,6 +191,55 @@ fn parse_go_build(
             package_dir: path,
             go_args,
             test,
+        },
+        output: Some(output),
+        release,
+        instrument,
+    })
+}
+
+/// A `build --python` of the script or application directory `path`. It
+/// takes no trailing options: the interpreter is built by Patina's recipe.
+fn parse_python_build(
+    args: &cli::Args,
+    path: PathBuf,
+    output: Option<PathBuf>,
+    release: bool,
+    instrument: bool,
+    trailing: Vec<OsString>,
+) -> Result<NativeBuildInvocation, CliError> {
+    for (flag, given) in [
+        ("--edition", args.string("--edition").is_some()),
+        ("--package", args.string("--package").is_some()),
+        ("--bin", args.string("--bin").is_some()),
+    ] {
+        if given {
+            return Err(CliError::usage(format!(
+                "{flag} applies to a Rust build, not a Python application (--python)"
+            )));
+        }
+    }
+    if instrument {
+        return Err(CliError::usage(
+            "--instrument instruments Rust code through LLVM; a Python application (--python) takes no --instrument",
+        ));
+    }
+    if let Some(argument) = trailing.first() {
+        return Err(CliError::usage(format!(
+            "a Python application (--python) takes no trailing build options ({argument:?})"
+        )));
+    }
+    let output =
+        output.ok_or_else(|| CliError::usage("build --python requires --output <PATH>"))?;
+    let source = args.path("--python-source").map_or(
+        crate::python_build::PythonSource::Pinned,
+        crate::python_build::PythonSource::Given,
+    );
+    Ok(NativeBuildInvocation {
+        target: NativeBuildTarget::Python {
+            app: path,
+            paths: args.paths("--python-path"),
+            source,
         },
         output: Some(output),
         release,

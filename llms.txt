@@ -55,6 +55,15 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   start through the shim's `pthread_create`. Patina sets `-ldflags` and `-o`
   and refuses them in the pass-through options; other `go build` options pass
   through. The `go` on PATH builds it (pin it with `GOTOOLCHAIN` or mise).
+- `cargo patina build <SCRIPT.py|DIR> --python --output PATH [--python-path DIR]... [--python-source TARBALL|DIR] [--release]`
+  Build a Python application (a script, or a directory with `__main__.py`)
+  as a native guest: CPython built statically by Patina's recipe (the pinned
+  release fetched once and digest-checked, or `--python-source`) and cached,
+  with the standard library, the application and each `--python-path` root (a
+  virtualenv's site-packages; earlier roots shadow later ones) frozen into the
+  executable. The interpreter is isolated and imports nothing from a
+  filesystem. Pure-Python only: an extension module refuses the build; package
+  data is not carried; no `ssl`/`zlib` yet.
 - `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
   `--record PATH` writes a trace. `--env K=V` sets the guest's starting

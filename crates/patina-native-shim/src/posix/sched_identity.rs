@@ -153,6 +153,29 @@ extern "C" fn getegid() -> libc::gid_t {
 #[unsafe(no_mangle)]
 extern "C" fn sysconf(name: c_int) -> c_long {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    configuration(name)
+}
+
+/// glibc's internal spelling, which its `PTHREAD_STACK_MIN` macro expands to
+/// (`__sysconf (__SC_THREAD_STACK_MIN_VALUE)`): the same answers.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+extern "C" fn __sysconf(name: c_int) -> c_long {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    configuration(name)
+}
+
+fn configuration(name: c_int) -> c_long {
+    // glibc's floor, `PTHREAD_STACK_MIN_CONST`: its answer on every host
+    // whose signal frame minimum is under a quarter of it.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if name == libc::_SC_THREAD_STACK_MIN {
+        return 16384;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if name == libc::_SC_THREAD_STACK_MIN {
+        return 131072;
+    }
     if name == libc::_SC_PAGESIZE {
         return 4096;
     }

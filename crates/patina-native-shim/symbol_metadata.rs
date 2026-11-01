@@ -50,6 +50,7 @@ pub fn read(path: &Path) -> Vec<Symbol> {
                 "deny(host-introspection)" => (false, Some("host-introspection".to_owned())),
                 "deny(macos-framework)" => (false, Some("macos-framework".to_owned())),
                 "deny(filesystem)" => (false, Some("filesystem".to_owned())),
+                "deny(network)" => (false, Some("network".to_owned())),
                 _ => panic!("unknown symbol metadata status: {status}"),
             };
             let architecture = match *architecture {

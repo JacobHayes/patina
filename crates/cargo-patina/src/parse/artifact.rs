@@ -187,6 +187,9 @@ pub(super) fn apply_package_selection(
             NativeBuildTarget::Go { .. } => Err(CliError::usage(
                 "--package and --bin apply to a Cargo-package build, not a Go package",
             )),
+            NativeBuildTarget::Python { .. } => Err(CliError::usage(
+                "--package and --bin apply to a Cargo-package build, not a Python application",
+            )),
         },
         ArtifactRef::Prebuilt(_) => Err(CliError::usage(
             "--package and --bin select a member to build; they do not apply to an already-built artifact",

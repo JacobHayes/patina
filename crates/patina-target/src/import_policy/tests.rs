@@ -97,7 +97,7 @@ fn the_pure_compute_allowlist_does_not_capture_effectful_neighbours() {
         ("fprintf", MachO, "unknown-import"),
         ("printf", MachO, "unknown-import"),
         ("__isoc99_scanf", Elf, "unknown-import"),
-        ("strtoul", Elf, "unknown-import"),
+        ("strtod", Elf, "unknown-import"),
         // PRNG state and draws beside libm, and process spawning.
         ("drand48", MachO, "unknown-import"),
         ("random", Elf, "unknown-import"),

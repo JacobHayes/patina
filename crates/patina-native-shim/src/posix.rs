@@ -13,6 +13,7 @@ mod fs;
 #[cfg(target_os = "linux")]
 mod ipc;
 mod lifecycle;
+mod locale;
 mod memory;
 mod net;
 mod privileged;

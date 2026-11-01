@@ -458,6 +458,15 @@ impl Args {
         self.matches.get_one::<OsString>(name).map(PathBuf::from)
     }
 
+    /// Every occurrence of a repeatable `Kind::Path` flag, in order.
+    pub(crate) fn paths(&self, name: &str) -> Vec<PathBuf> {
+        let _ = self.flag_of(name);
+        self.matches
+            .get_many::<OsString>(name)
+            .map(|values| values.map(PathBuf::from).collect())
+            .unwrap_or_default()
+    }
+
     /// A `u64`-grammar value. The grammar already ran, so the reparse cannot
     /// fail.
     pub(crate) fn u64(&self, name: &str) -> Option<u64> {

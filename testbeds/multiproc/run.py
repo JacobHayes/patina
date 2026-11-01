@@ -21,7 +21,7 @@ EXPECTED = {
     "fanout": ("runtime", "posix_spawnattr_init"),
     "pipeline": ("runtime", "posix_spawnattr_init"),
     "forkwait-c": ("runtime", "fork"),
-    "forkwait-cxx": ("audit", "setlocale"),
+    "forkwait-cxx": ("audit", "newlocale"),
     "buildlike": ("runtime", "posix_spawnattr_init"),
     "sigchld": ("runtime", "fork"),
     "failed-exec-enoent": ("runtime", "execvp"),
@@ -32,7 +32,7 @@ EXPECTED = {
     "fd-sharing": ("runtime", "fork"),
     "last-writer-eof": ("runtime", "fork"),
     "epipe-sigpipe": ("runtime", "fork"),
-    "queued-signals": ("audit", "__libc_current_sigrtmin"),
+    "queued-signals": ("runtime", "fork"),
     "shared-futex": ("runtime", "fork"),
 }
 

@@ -63,6 +63,26 @@ extern "C" fn fork() -> libc::pid_t {
 }
 
 /// # Safety
+/// path and argv follow libc's execv argument contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn execv(_path: *const c_char, _argv: *const *mut c_char) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    process_trap(c"execv")
+}
+
+/// # Safety
+/// path, argv and envp follow libc's execve argument contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn execve(
+    _path: *const c_char,
+    _argv: *const *mut c_char,
+    _envp: *const *mut c_char,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    process_trap(c"execve")
+}
+
+/// # Safety
 /// file and argv follow libc's execvp argument contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char) -> c_int {

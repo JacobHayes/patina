@@ -168,6 +168,18 @@ symbol_rows! {
         SymbolStatus::Partial,
     ),
     s(
+        "__sysconf",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Partial,
+    ),
+    s(
+        "setlocale",
+        Platform::Both,
+        Serves::LibcOnly,
+        SymbolStatus::Partial,
+    ),
+    s(
         "sysinfo",
         Platform::Linux,
         Serves::Syscalls(&["sysinfo"]),
@@ -1006,6 +1018,18 @@ symbol_rows! {
         SymbolStatus::Deny("process"),
     ),
     s(
+        "execv",
+        Platform::Both,
+        Serves::Syscalls(&["execve"]),
+        SymbolStatus::Deny("process"),
+    ),
+    s(
+        "execve",
+        Platform::Both,
+        Serves::Syscalls(&["execve"]),
+        SymbolStatus::Deny("process"),
+    ),
+    s(
         "execvp",
         Platform::Both,
         Serves::Syscalls(&["execve"]),
@@ -1308,6 +1332,24 @@ symbol_rows! {
         SymbolStatus::Partial,
     ),
     s(
+        "getnameinfo",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Deny("network"),
+    ),
+    s(
+        "gethostbyname",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Deny("network"),
+    ),
+    s(
+        "gethostbyaddr",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Deny("network"),
+    ),
+    s(
         "freeaddrinfo",
         Platform::Both,
         Serves::LibcOnly,
@@ -1371,6 +1413,18 @@ symbol_rows! {
         "eventfd",
         Platform::Linux,
         Serves::Syscalls(&["eventfd2"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "eventfd_read",
+        Platform::Linux,
+        Serves::Syscalls(&["read"]),
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "eventfd_write",
+        Platform::Linux,
+        Serves::Syscalls(&["write"]),
         SymbolStatus::Modeled,
     ),
     s(

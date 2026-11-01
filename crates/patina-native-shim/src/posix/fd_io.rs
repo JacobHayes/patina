@@ -43,6 +43,41 @@ unsafe extern "C" fn write(fd: c_int, source: *const c_void, length: usize) -> i
     let result = unsafe { crate::fd::patina_write(fd, source, length) };
     crate::abi::libc_result(crate::abi::from_model(result), result)
 }
+/// eventfd_read: glibc's eight-byte `read` of the counter, 0 when the whole
+/// value arrived and -1 otherwise.
+///
+/// # Safety
+/// `value` follows eventfd_read's output contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn eventfd_read(fd: c_int, value: *mut u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    cancel(c"eventfd_read");
+    // SAFETY: the caller's output contract is the model read's buffer contract.
+    let result = unsafe { crate::fd::patina_read(fd, value.cast(), 8) };
+    whole_counter(crate::abi::libc_result(
+        crate::abi::from_model(result),
+        result,
+    ))
+}
+/// eventfd_write: glibc's eight-byte `write` of the addend, 0 when the whole
+/// value went and -1 otherwise.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+extern "C" fn eventfd_write(fd: c_int, value: u64) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    cancel(c"eventfd_write");
+    // SAFETY: a local eight-byte source for the model write.
+    let result = unsafe { crate::fd::patina_write(fd, (&raw const value).cast(), 8) };
+    whole_counter(crate::abi::libc_result(
+        crate::abi::from_model(result),
+        result,
+    ))
+}
+#[cfg(target_os = "linux")]
+fn whole_counter(transferred: isize) -> c_int {
+    if transferred == 8 { 0 } else { -1 }
+}
 /// # Safety
 /// `destination` follows pread's buffer contract.
 #[unsafe(no_mangle)]
