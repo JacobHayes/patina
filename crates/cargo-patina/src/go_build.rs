@@ -114,6 +114,66 @@ pub(super) fn check_go_args(go_args: &[OsString]) -> Result<(), CliError> {
     Ok(())
 }
 
+/// `go test` options that govern running the tests, not building them: `go
+/// test -c` accepts them and builds a binary they never reach.
+const GO_TEST_RUN_FLAGS: &[&str] = &[
+    "args",
+    "bench",
+    "benchmem",
+    "benchtime",
+    "blockprofile",
+    "blockprofilerate",
+    "count",
+    "coverprofile",
+    "cpu",
+    "cpuprofile",
+    "failfast",
+    "fullpath",
+    "fuzz",
+    "fuzzcachedir",
+    "fuzzminimizetime",
+    "fuzztime",
+    "json",
+    "list",
+    "memprofile",
+    "memprofilerate",
+    "mutexprofile",
+    "mutexprofilefraction",
+    "outputdir",
+    "parallel",
+    "run",
+    "short",
+    "shuffle",
+    "skip",
+    "timeout",
+    "trace",
+    "v",
+    "vet",
+];
+
+/// Refuse, for a `--go-test` build, a `go test` option that only takes effect
+/// when `go test` runs the tests: built in, it would be silently inert. The
+/// test binary takes it at run time, as `-test.NAME` after `run --`.
+pub(super) fn check_go_test_args(go_args: &[OsString]) -> Result<(), CliError> {
+    for arg in go_args {
+        let Some(text) = arg.to_str() else { continue };
+        let name = text
+            .strip_prefix("--")
+            .or_else(|| text.strip_prefix('-'))
+            .map(|flag| flag.split_once('=').map_or(flag, |(name, _)| name));
+        if let Some(name) = name
+            && GO_TEST_RUN_FLAGS.contains(&name)
+        {
+            return Err(CliError::usage(format!(
+                "go test option {text:?} runs tests rather than building them, so `go test -c` \
+                 would ignore it; give it to the test guest instead: `cargo patina run <TEST BINARY> \
+                 -- -test.{name}...`"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The guest's `go build` options with the meter's settings merged in: the
 /// meter's `-gcflags` first (for every package), each of the guest's own
 /// `-gcflags` values extended with the meter's flag, and the guest tags added
@@ -465,17 +525,31 @@ pub(super) fn go_ldflags(objects: &[&Path], allocator: &[OsString]) -> Result<St
     ))
 }
 
-/// Build the Go main package in `package_dir` with the shim linked and
-/// install it at `output`.
+/// The Go package a `build --go` builds: its directory, whether its test
+/// binary (`go test -c`) is built rather than the main package, and the
+/// guest's own `go build` options.
+pub(super) struct GoPackage<'a> {
+    pub(super) dir: &'a Path,
+    pub(super) test: bool,
+    pub(super) args: &'a [OsString],
+}
+
+/// Build the Go main package in `package.dir` with the shim linked and
+/// install it at `output`; with `package.test`, build the package's test
+/// binary (`go test -c`) instead, which runs the package's tests as its main.
 pub(super) fn build_go_package(
-    package_dir: &Path,
+    package: GoPackage<'_>,
     output: &Path,
     object: &Path,
     meter: &Path,
     shim: &BuiltNativeShim,
     allocator: &[OsString],
-    go_args: &[OsString],
 ) -> Result<PathBuf, CliError> {
+    let GoPackage {
+        dir: package_dir,
+        test,
+        args: go_args,
+    } = package;
     if !cfg!(target_os = "linux") {
         return Err(CliError(
             "Go guests build on Linux only: the shim's Go link uses linker wraps the Darwin linker lacks".into(),
@@ -512,7 +586,11 @@ pub(super) fn build_go_package(
         .current_dir(package_dir)
         .env("CGO_ENABLED", "1")
         .env("GOEXPERIMENT", metered_experiment(&experiment))
-        .arg("build")
+        .args(if test {
+            &["test", "-c"][..]
+        } else {
+            &["build"][..]
+        })
         .arg("-o")
         .arg(&linked)
         .arg("-ldflags")
@@ -525,15 +603,17 @@ pub(super) fn build_go_package(
             "failed to run `go build` (is a Go toolchain on PATH?): {error}"
         ))
     })?;
+    let verb = if test { "go test -c" } else { "go build" };
     if !status.success() {
         return Err(CliError(format!(
-            "building the Go package {} with the Patina shim failed",
+            "building the Go package {} with the Patina shim failed (`{verb}`)",
             package_dir.display()
         )));
     }
     let bytes = std::fs::read(&linked).map_err(|error| {
         CliError(format!(
-            "`go build` reported success but left no program at {}: {error}",
+            "`{verb}` reported success but left no program at {} (a package without \
+             test files builds no test binary): {error}",
             linked.display()
         ))
     })?;

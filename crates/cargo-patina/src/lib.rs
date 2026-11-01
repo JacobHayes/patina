@@ -231,10 +231,12 @@ enum NativeBuildTarget {
         bin: Option<String>,
     },
     /// A Go main package (`--go`): built by `go build` in cgo mode and linked
-    /// externally with the shim ([`go_build`]).
+    /// externally with the shim ([`go_build`]). With `test` (`--go-test`) the
+    /// package's test binary is built instead, by `go test -c`.
     Go {
         package_dir: PathBuf,
         go_args: Vec<OsString>,
+        test: bool,
     },
 }
 

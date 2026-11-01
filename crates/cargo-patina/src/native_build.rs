@@ -168,8 +168,13 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
         NativeBuildTarget::Go {
             package_dir,
             go_args,
+            test,
         } => crate::go_build::build_go_package(
-            &package_dir,
+            crate::go_build::GoPackage {
+                dir: &package_dir,
+                test,
+                args: &go_args,
+            },
             invocation
                 .output
                 .as_deref()
@@ -183,7 +188,6 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             )?,
             &built_shim,
             &built_shim.allocator_linker_args(&host_target)?,
-            &go_args,
         ),
     }
 }

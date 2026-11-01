@@ -28,6 +28,9 @@
 #       edges to the guest's own package; the guest has no edge hook, so
 #       `--yield-stride` is refused;
 #   [7] a `--guided` campaign over the guest folds that coverage.
+#   [8] `build --go --go-test` builds the package's tests (main_test.go) into
+#       a guest that runs them and passes, and a planted failing test fails
+#       the guest.
 ###############################################################################
 set -uo pipefail
 
@@ -183,5 +186,25 @@ if ! "$PATINA" patina campaign "$built" --gens 3 --guided --out-dir "$out/campai
   cat "$out/campaign.out" >&2; exit 1
 fi
 
+echo "==> [8] --go-test builds the package's tests into a guest that runs them"
+if ! "$PATINA" patina build "$here" --go --go-test --output "$out/go-guest.test" --release -- -trimpath \
+    >"$out/test-build.out" 2>&1; then
+  echo "go-guest: FAIL [8] patina build --go --go-test failed" >&2
+  cat "$out/test-build.out" >&2; exit 1
+fi
+if ! "$PATINA" patina run "$out/go-guest.test" --seed 1 -- -test.v >"$out/tests.out" 2>&1 \
+  || ! grep -q -- '--- PASS: TestComputeIsCancelled' "$out/tests.out" \
+  || ! grep -q -- '--- PASS: TestTempDirRoundTrip' "$out/tests.out" \
+  || ! grep -q -- '--- SKIP: TestPlantedFailure' "$out/tests.out"; then
+  echo "go-guest: FAIL [8] the package's tests did not all run and pass under patina" >&2
+  cat "$out/tests.out" >&2; exit 1
+fi
+"$PATINA" patina run "$out/go-guest.test" --seed 1 --env GO_GUEST_PLANT_FAILURE=1 \
+  -- -test.run TestPlantedFailure >"$out/tests-planted.out" 2>&1
+if [[ $? == 0 ]] || ! grep -q -- '--- FAIL: TestPlantedFailure' "$out/tests-planted.out"; then
+  echo "go-guest: FAIL [8] a failing test did not fail the test guest" >&2
+  cat "$out/tests-planted.out" >&2; exit 1
+fi
+
 grep -E "$expected" "$out/run1.out"
-echo "GO_GUEST_LEGS_RAN legs=audit-clean,run,seed-stable,record-replay,seed-sweep,coverage,campaign"
+echo "GO_GUEST_LEGS_RAN legs=audit-clean,run,seed-stable,record-replay,seed-sweep,coverage,campaign,go-test"

@@ -344,7 +344,7 @@ pub(super) const BUILD: Verb = Verb {
     synopsis: &[
         "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
         "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
-        "cargo patina build <GO PACKAGE DIR> --go --output <PATH> [--release] [-- GO BUILD OPTIONS]",
+        "cargo patina build <GO PACKAGE DIR> --go [--go-test] --output <PATH> [--release] [-- GO BUILD OPTIONS]",
     ],
     prose: "\
 `build` packages the native linked-shim target: it \
@@ -371,7 +371,10 @@ and -o and adds the `patina` build tag, which selects the Go SDK's (`go/patina`)
 shim-backed sites; other `go build` options follow `--`. `--release` builds the shim in \
 release mode; --instrument is Rust-only. Every Go guest keeps Go's own 8-bit \
 edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
---guided` work on it; it has no edge hook, so `run --yield-stride` is refused.",
+--guided` work on it; it has no edge hook, so `run --yield-stride` is refused. \
+`--go-test` builds the package's test binary (`go test -c`) instead of a main \
+package, so a package's own tests run as a guest: give `go test` flags such as \
+`-test.run` and `-test.v` to `run` after `--`.",
     families: &[fam(Family::Sole, "`build`", None)],
     groups: &[Group {
         title: "Build options",
@@ -425,6 +428,16 @@ edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
                 Value::None,
                 "Build the path as a Go main package, cgo mode, externally linked with the shim (Linux).",
                 false,
+            ),
+            needs(
+                f(
+                    "--go-test",
+                    None,
+                    Value::None,
+                    "Build the Go package's test binary (`go test -c`) instead of a main package.",
+                    false,
+                ),
+                "--go",
             ),
         ],
     }],

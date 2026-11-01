@@ -73,7 +73,7 @@ and each piece behaves as its Rust counterpart does:
 | `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) |
 | `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` |
 | `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` |
-| `#[patina_dst::test]` | none: a Go DST target is a main package, swept with `cargo patina run`/`campaign` |
+| `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `cargo patina run`/`campaign` |
 
 `cargo patina build --go` adds the `patina` build tag, which links them to the
 shim; any other build gets inert stand-ins with no cgo, so code ships the SDK

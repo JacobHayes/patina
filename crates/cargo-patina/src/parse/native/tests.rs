@@ -138,7 +138,9 @@ fn parses_a_go_build_with_its_go_build_options() {
         NativeBuildTarget::Go {
             package_dir,
             go_args,
+            test,
         } => {
+            assert!(!test);
             assert_eq!(package_dir, PathBuf::from("./cmd/tool"));
             assert_eq!(go_args, strings(&["-trimpath", "-tags", "netgo"]));
         }
@@ -150,9 +152,48 @@ fn parses_a_go_build_with_its_go_build_options() {
         &["pkg", "--go"][..],
         &["pkg", "--go", "--output", "o", "--edition", "2021"],
         &["pkg", "--go", "--output", "o", "--", "-ldflags=-s"],
+        // A test-binary build is a Go build: without --go it would be inert.
+        &["pkg", "--go-test", "--output", "o"],
+        // A `go test` option that runs tests is inert in a test-binary build.
+        &[
+            "pkg",
+            "--go",
+            "--go-test",
+            "--output",
+            "o",
+            "--",
+            "-run",
+            "^TestKeep$",
+        ],
+        &[
+            "pkg",
+            "--go",
+            "--go-test",
+            "--output",
+            "o",
+            "--",
+            "--count=2",
+        ],
+        &["pkg", "--go", "--go-test", "--output", "o", "--", "-v"],
     ] {
         assert!(parse_native_build(strings(refused)).is_err(), "{refused:?}");
     }
+    let tests = parse_native_build(strings(&[
+        "pkg",
+        "--go",
+        "--go-test",
+        "--output",
+        "o",
+        "--",
+        "-tags",
+        "netgo",
+        "-race",
+    ]))
+    .expect("a Go test-binary build with build options parses");
+    assert!(matches!(
+        tests.target,
+        NativeBuildTarget::Go { test: true, .. }
+    ));
 }
 
 #[test]

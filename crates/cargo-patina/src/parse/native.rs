@@ -178,11 +178,16 @@ fn parse_go_build(
         ));
     }
     crate::go_build::check_go_args(&go_args)?;
+    let test = args.flag("--go-test");
+    if test {
+        crate::go_build::check_go_test_args(&go_args)?;
+    }
     let output = output.ok_or_else(|| CliError::usage("build --go requires --output <PATH>"))?;
     Ok(NativeBuildInvocation {
         target: NativeBuildTarget::Go {
             package_dir: path,
             go_args,
+            test,
         },
         output: Some(output),
         release,
