@@ -355,3 +355,36 @@ fn inode_metadata_rolls_back_to_the_last_commit() {
     assert_eq!((metadata.mode, metadata.mtime_nanos), (0o600, 10));
     assert_eq!(xattr(&mut fs, "/f"), b"committed");
 }
+
+/// An image whose `/tmp` or `/dev` is a symlink or a file in place of the
+/// directory the empty tree starts with survives a crash as that entry.
+#[test]
+fn a_crash_keeps_an_image_entry_at_a_preseeded_directory() {
+    for path in ["/tmp", "/dev"] {
+        let mut initial = MemFs::new();
+        initial.yield_preseeded(path);
+        initial.symlink(FsClock::EPOCH, "elsewhere", path).unwrap();
+        let mut fs = CrashFs::new(initial);
+        let mut restored = fs
+            .crash_and_snapshot(FsClock::EPOCH, CrashKind::Machine)
+            .unwrap()
+            .into_memfs();
+        assert_eq!(
+            restored.metadata(path).unwrap().kind,
+            FsEntryKind::Symlink,
+            "{path}"
+        );
+
+        let initial = MemFs::new().with_file(path, b"x").unwrap();
+        let mut fs = CrashFs::new(initial);
+        let mut restored = fs
+            .crash_and_snapshot(FsClock::EPOCH, CrashKind::Machine)
+            .unwrap()
+            .into_memfs();
+        assert_eq!(
+            restored.metadata(path).unwrap().kind,
+            FsEntryKind::File,
+            "{path}"
+        );
+    }
+}

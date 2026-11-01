@@ -62,7 +62,8 @@ pub(crate) unsafe fn read_dir_after_point(
         Err(errno) => return Err(crate::abi::failed(errno)),
     };
     match with_context_raw(|context| context.fs_read_directory_fd(fd)) {
-        Ok(listed) => {
+        Ok(mut listed) => {
+            with_memory_devices(fd, &mut listed);
             let state = Box::new(ReadDirState {
                 entries: listed,
                 position: 0,
@@ -73,6 +74,35 @@ pub(crate) unsafe fn read_dir_after_point(
             Ok(())
         }
         Err(errno) => Err(crate::abi::failed(errno)),
+    }
+}
+
+/// `/dev`'s listing names the memory devices too. They exist whatever the
+/// image holds (the resolver names them lexically,
+/// [`crate::memdev`]), so a listing of `/dev` that left them out would
+/// disagree with a stat of `/dev/null` beside it. A name the image also
+/// holds is listed once, as the device the path resolves to.
+fn with_memory_devices(fd: Fd, listed: &mut Vec<FsDirectoryEntry>) {
+    let Ok(path) = with_bookkeeping(|bookkeeping| bookkeeping.fs_fd_path_unrecorded(fd)) else {
+        return;
+    };
+    if path != "/dev" {
+        return;
+    }
+    for device in crate::memdev::MemDevice::ALL {
+        let Some(name) = device
+            .path()
+            .strip_prefix("/dev/")
+            .filter(|_| device.exists())
+        else {
+            continue;
+        };
+        listed.retain(|entry| entry.name != name);
+        listed.push(FsDirectoryEntry {
+            name: name.to_owned(),
+            kind: FsEntryKind::CharDevice,
+            ino: device.ino(),
+        });
     }
 }
 

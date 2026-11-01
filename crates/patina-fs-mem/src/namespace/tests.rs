@@ -310,3 +310,24 @@ fn a_whiteout_rename_leaves_a_whiteout_at_the_old_name() {
     assert_eq!(fs.metadata("/g").unwrap().kind, FsEntryKind::File);
     assert_eq!(fs.metadata("/h").unwrap().nlink, 2);
 }
+
+/// `/dev` is a mount point: renaming it, renaming or exchanging over it and
+/// removing it are busy, while entries under it move as anywhere else.
+#[test]
+fn the_dev_mount_point_cannot_be_moved_or_removed() {
+    let mut fs = MemFs::new();
+    fs.create_directory(FsClock::EPOCH, "/other", 0o755)
+        .unwrap();
+    let busy = |result: patina_dst_driver_api::DriverResult<()>| {
+        result.is_err_and(|error| error.code == ErrorCode::Busy)
+    };
+    assert!(busy(fs.rename(FsClock::EPOCH, "/dev", "/moved")));
+    assert!(busy(fs.rename(FsClock::EPOCH, "/other", "/dev")));
+    assert!(busy(fs.exchange(FsClock::EPOCH, "/other", "/dev")));
+    assert!(busy(fs.remove_directory(FsClock::EPOCH, "/dev")));
+    assert_eq!(fs.metadata("/dev").unwrap().kind, FsEntryKind::Directory);
+    fs.create_directory(FsClock::EPOCH, "/dev/shm", 0o755)
+        .unwrap();
+    fs.rename(FsClock::EPOCH, "/dev/shm", "/dev/shm2").unwrap();
+    fs.remove_directory(FsClock::EPOCH, "/dev/shm2").unwrap();
+}

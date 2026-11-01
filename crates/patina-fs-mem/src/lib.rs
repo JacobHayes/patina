@@ -241,6 +241,12 @@ pub struct MemFs {
 /// `setxattr(2)`'s flags: the name must be new / must exist.
 pub const XATTR_CREATE: u32 = 1;
 
+/// The directories every tree starts with ([`MemFs::new`]).
+pub(crate) const PRESEEDED: [&str; 2] = ["/tmp", "/dev"];
+
+/// The directories that are mount points in every tree: `/dev`, devtmpfs.
+pub(crate) const MOUNT_POINTS: [&str; 1] = ["/dev"];
+
 pub const XATTR_REPLACE: u32 = 2;
 
 impl MemFs {
@@ -255,7 +261,26 @@ impl MemFs {
         filesystem.directories.insert("/".into(), root);
         let tmp = filesystem.allocate_entry_metadata(FsClock::EPOCH, DIRECTORY_MODE);
         filesystem.directories.insert("/tmp".into(), tmp);
+        // `/dev`, where the memory devices (`/dev/null`, ...) live: a program
+        // that opens it, or a sandbox rooted at it, finds a directory, as on
+        // any host. The devices themselves are the runtime's, not entries.
+        let dev = filesystem.allocate_entry_metadata(FsClock::EPOCH, DIRECTORY_MODE);
+        filesystem.directories.insert("/dev".into(), dev);
         filesystem
+    }
+
+    /// An image entry seeded at a directory the initial tree starts with
+    /// (`/tmp`, `/dev`) replaces it while it is still empty: an image whose
+    /// `/tmp` or `/dev` is a file or a symlink keeps that entry. Image
+    /// reconstruction and crash recovery call it before seeding each name
+    /// that is not a directory.
+    pub fn yield_preseeded(&mut self, path: &str) {
+        if PRESEEDED.contains(&path)
+            && self.directories.contains_key(path)
+            && !self.has_children(path)
+        {
+            self.directories.remove(path);
+        }
     }
 
     /// Seed a file into the initial image. It is stamped at the epoch, like the
@@ -267,6 +292,7 @@ impl MemFs {
     /// Seed a file with sparse contents, holes and reservations as they are.
     pub fn with_file_data(mut self, path: &str, contents: FileData) -> DriverResult<Self> {
         let path = normalize_path(path)?;
+        self.yield_preseeded(&path);
         self.insert_parent_directories(FsClock::EPOCH, &path);
         let inode = self.allocate_inode(FsClock::EPOCH, FsEntryKind::File, contents, FILE_MODE);
         self.names.insert(path, inode);
@@ -275,7 +301,7 @@ impl MemFs {
 
     /// Seed a second name, `path`, for the file already seeded at `target`.
     /// The name must be new, except that an empty directory the initial tree
-    /// starts with (the preseeded `/tmp`) gives way to it.
+    /// starts with (the preseeded `/tmp` or `/dev`) gives way to it.
     pub fn with_hard_link(mut self, path: &str, target: &str) -> DriverResult<Self> {
         let path = normalize_path(path)?;
         let target = normalize_path(target)?;

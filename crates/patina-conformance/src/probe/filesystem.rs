@@ -1011,6 +1011,34 @@ impl Probe {
 
     // ---- directory listings ------------------------------------------------------
 
+    /// Every entry of directory `fd`, read to the end with unrecorded
+    /// `getdents64` calls. Nothing is recorded: this is for checking that a
+    /// directory holds certain names when the rest of its listing (a host's
+    /// `/dev`, say) is the host's business.
+    pub fn getdents64_all_unrecorded(&self, fd: i32) -> Vec<Dirent> {
+        let mut entries = Vec::new();
+        let mut buf = vec![0u8; 1 << 16];
+        loop {
+            let result = self.call_unrecorded(
+                Syscall::N_getdents64,
+                [
+                    fd as i64,
+                    buf.as_mut_ptr() as i64,
+                    buf.len() as i64,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+            if result <= 0 {
+                return entries;
+            }
+            entries.extend(decode_dirents(&buf[..result as usize], 19, |record| {
+                record[18]
+            }));
+        }
+    }
+
     /// One `getdents64` call decoded with each entry's `d_off` cookie, in the
     /// filesystem's order. Only the byte count and the number of entries are
     /// recorded: which entries a partial buffer holds, and the cookies, are

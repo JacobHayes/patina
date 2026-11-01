@@ -22,6 +22,9 @@
 //!   (`EPERM`); `FIONREAD` goes to the device's ioctl: `random_ioctl`
 //!   refuses it (`EINVAL`), and `mem.c`'s devices have none (`ENOTTY`).
 //!
+//! * `/dev` is a directory whose listing names each device as a character
+//!   device (`DT_CHR`), whatever else it holds.
+//!
 //! Nothing here writes to an entropy device (which feeds the input pool), and
 //! the entropy devices' bytes are not recorded: they are the host's own.
 
@@ -129,12 +132,30 @@ pub fn run(p: &Probe) {
     p.require("statx of the root names its mount", root.is_some());
     let epfd = p.epoll_create1(EPOLL_CLOEXEC);
     p.require("epoll_create1", epfd >= 0);
+    listing(p);
     for device in &DEVICES {
         node(p, device, root);
         io(p, device, epfd);
         paths(p, device);
     }
     p.close(epfd);
+}
+
+/// `/dev` opens as a directory and lists every device as `DT_CHR`.
+fn listing(p: &Probe) {
+    let dir = p.openat(AT_FDCWD, "/dev", O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
+    p.require("open /dev as a directory", dir >= 0);
+    let entries = p.getdents64_all_unrecorded(dir);
+    for device in &DEVICES {
+        let name = device.path.strip_prefix("/dev/").expect("a /dev path");
+        p.check(
+            &format!("/dev's listing names {name} as a character device"),
+            entries
+                .iter()
+                .any(|entry| entry.name == name && entry.kind == DT_CHR),
+        );
+    }
+    p.close(dir);
 }
 
 /// The node, by path and by descriptor.

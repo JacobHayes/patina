@@ -138,6 +138,7 @@ impl CrashFs {
             let first = paths.iter().next().expect("file group is non-empty");
             next = next.with_file_data(first, contents)?;
             for path in paths.iter().skip(1) {
+                next.yield_preseeded(path);
                 next.link(FsClock::EPOCH, first, path)?;
             }
         }
@@ -154,8 +155,10 @@ impl CrashFs {
         for (target, paths) in symlinks_by_inode.values() {
             let mut paths = paths.iter();
             let first = paths.next().expect("symlink group is non-empty");
+            next.yield_preseeded(first);
             next.symlink(FsClock::EPOCH, target, first)?;
             for path in paths {
+                next.yield_preseeded(path);
                 next.link(FsClock::EPOCH, first, path)?;
             }
         }
@@ -179,8 +182,10 @@ impl CrashFs {
                 FsEntryKind::Socket => FsNode::Socket,
                 _ => FsNode::Whiteout,
             };
+            next.yield_preseeded(first);
             next.make_node(FsClock::EPOCH, first, node, RECONSTRUCTION_FILE_MODE)?;
             for path in paths {
+                next.yield_preseeded(path);
                 next.link(FsClock::EPOCH, first, path)?;
             }
         }

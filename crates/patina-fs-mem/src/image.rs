@@ -315,6 +315,7 @@ impl FsImage {
                     if let Some(parent) = parent_of(path) {
                         ensure_directory(&mut fs, parent)?;
                     }
+                    fs.yield_preseeded(path);
                     fs.symlink(FsClock::EPOCH, target, path)?;
                 }
                 FsImageEntry::HardLink { path, target } => {
@@ -639,6 +640,25 @@ mod tests {
             .open(FsClock::EPOCH, "/tmp", OpenFlags::read_only())
             .unwrap();
         assert_eq!(fs.read(FsClock::EPOCH, fd, 4).unwrap(), b"x");
+
+        // An image whose `/tmp` or `/dev` is a file or a symlink keeps that
+        // entry in place of the directory the empty tree starts with.
+        for path in ["/tmp", "/dev"] {
+            let image = FsImage::new(vec![FsImageEntry::symlink(path, "elsewhere")]);
+            let mut fs = image.into_memfs().unwrap();
+            assert_eq!(
+                fs.metadata(path).unwrap().kind,
+                FsEntryKind::Symlink,
+                "{path}"
+            );
+            let image = FsImage::new(vec![FsImageEntry::file(path, "x")]);
+            let mut fs = image.into_memfs().unwrap();
+            assert_eq!(fs.metadata(path).unwrap().kind, FsEntryKind::File, "{path}");
+            let fd = fs
+                .open(FsClock::EPOCH, path, OpenFlags::read_only())
+                .unwrap();
+            assert_eq!(fs.read(FsClock::EPOCH, fd, 4).unwrap(), b"x", "{path}");
+        }
 
         // A name already seeded is not linked over, so no link count is
         // inflated.

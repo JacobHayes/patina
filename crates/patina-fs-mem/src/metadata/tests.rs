@@ -440,11 +440,11 @@ fn a_set_time_is_truncated_to_the_filesystems_range_never_refused_or_wrapped() {
 #[test]
 fn a_directory_link_count_is_two_plus_its_subdirectories() {
     let mut fs = MemFs::new();
-    // `/` holds `/tmp` in the initial image.
-    assert_eq!(fs.metadata("/").unwrap().nlink, 3);
+    // `/` holds `/tmp` and `/dev` in the initial image.
+    assert_eq!(fs.metadata("/").unwrap().nlink, 4);
     fs.create_directory(FsClock::EPOCH, "/d", 0o755).unwrap();
     assert_eq!(fs.metadata("/d").unwrap().nlink, 2);
-    assert_eq!(fs.metadata("/").unwrap().nlink, 4);
+    assert_eq!(fs.metadata("/").unwrap().nlink, 5);
     fs.create_directory(FsClock::EPOCH, "/d/a", 0o755).unwrap();
     fs.create_directory(FsClock::EPOCH, "/d/a/deeper", 0o755)
         .unwrap();

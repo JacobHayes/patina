@@ -112,7 +112,7 @@ impl MemDevice {
     /// Its inode number on devtmpfs, as the pinned host's nodes read live
     /// (devtmpfs numbers its nodes in the order boot makes them).
     #[cfg(any(target_os = "linux", patina_posix_exports))]
-    const fn ino(self) -> u64 {
+    pub(crate) const fn ino(self) -> u64 {
         match self {
             MemDevice::Null => 5,
             MemDevice::Zero => 7,

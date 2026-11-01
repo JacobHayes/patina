@@ -900,6 +900,7 @@ impl FsDriver for MemFs {
 
     fn remove_directory(&mut self, clock: FsClock, path: &str) -> DriverResult<()> {
         let path = normalize_entry_path(path)?;
+        refuse_mount_point(&[&path], |path| self.directories.contains_key(path))?;
         self.resolve_guard(&path)?;
         self.check_directory_write(parent_path(&path))?;
         if path == "/" {
@@ -937,6 +938,7 @@ impl FsDriver for MemFs {
     fn rename(&mut self, clock: FsClock, from: &str, to: &str) -> DriverResult<()> {
         let from = normalize_entry_path(from)?;
         let to = normalize_entry_path(to)?;
+        refuse_mount_point(&[&from, &to], |path| self.directories.contains_key(path))?;
         self.resolve_guard(&from)?;
         self.resolve_guard(&to)?;
         self.check_directory_write(parent_path(&from))?;
@@ -1004,6 +1006,9 @@ impl FsDriver for MemFs {
     fn exchange(&mut self, clock: FsClock, first: &str, second: &str) -> DriverResult<()> {
         let first = normalize_entry_path(first)?;
         let second = normalize_entry_path(second)?;
+        refuse_mount_point(&[&first, &second], |path| {
+            self.directories.contains_key(path)
+        })?;
         self.resolve_guard(&first)?;
         self.resolve_guard(&second)?;
         self.check_directory_write(parent_path(&first))?;
@@ -1362,3 +1367,20 @@ impl FsDriver for MemFs {
 
 #[cfg(test)]
 mod tests;
+
+/// `/dev` is a mount point on every host (devtmpfs), and the memory devices
+/// under it exist whatever the image holds: renaming it, renaming over it or
+/// removing it is `EBUSY`, as a mount point's is. (An image whose `/dev` is
+/// not a directory has no mount point there.)
+fn refuse_mount_point(paths: &[&str], is_directory: impl Fn(&str) -> bool) -> DriverResult<()> {
+    match paths
+        .iter()
+        .find(|path| crate::MOUNT_POINTS.contains(path) && is_directory(path))
+    {
+        Some(path) => Err(EffectError::new(
+            ErrorCode::Busy,
+            format!("virtual mount point is busy: {path}"),
+        )),
+        None => Ok(()),
+    }
+}
