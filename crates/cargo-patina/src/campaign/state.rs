@@ -573,6 +573,12 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if let Some(cpus) = spec.cpus {
         map.insert("cpus".into(), cpus.into());
     }
+    if let Some(mount) = &spec.mount {
+        map.insert(
+            "mount".into(),
+            serde_json::json!({"dir": mount.dir, "hash": mount.hash}),
+        );
+    }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
     }
@@ -719,6 +725,9 @@ pub(super) fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, CliErro
 /// which built every generation's run.
 pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliError> {
     verify_artifact_identity(&state.artifact)?;
+    if let Some(mount) = &state.spec.mount {
+        verify_mount_corpus(mount)?;
+    }
     let current = crate::supervisor_identity::supervisor_sha256()?.to_string();
     match &state.supervisor_sha256 {
         recorded if *recorded != current => Err(CliError(format!(
@@ -729,6 +738,28 @@ pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliErro
         ))),
         _ => Ok(()),
     }
+}
+
+/// The mounted corpus must still be the one the campaign recorded: a
+/// generation captures the directory afresh, so a changed corpus would put two
+/// different inputs into one campaign's outcomes and coverage.
+fn verify_mount_corpus(mount: &super::spec::Mount) -> Result<(), CliError> {
+    let current = crate::native_run::mount_corpus_hash(Path::new(&mount.dir)).map_err(|error| {
+        CliError(format!(
+            "campaign out-dir records --mount {} but it cannot be captured: {error}; start a new \
+             out-dir if the corpus moved",
+            mount.dir
+        ))
+    })?;
+    if current != mount.hash {
+        return Err(CliError(format!(
+            "campaign out-dir records --mount {} with corpus hash {} but it now hashes {current}; \
+             the corpus changed since this campaign started. Restore it, or start a new out-dir \
+             for the new corpus.",
+            mount.dir, mount.hash
+        )));
+    }
+    Ok(())
 }
 
 fn verify_artifact_identity(recorded: &ArtifactIdentity) -> Result<(), CliError> {
@@ -1021,6 +1052,36 @@ mod tests {
     use super::*;
     use crate::sdk_report::CoverageTally;
     use std::fs;
+
+    #[test]
+    fn a_continuation_refuses_a_corpus_that_changed() {
+        let corpus = tempfile::tempdir().unwrap();
+        fs::write(corpus.path().join("f"), b"bad").unwrap();
+        let mount = super::super::spec::absolute_mount(corpus.path().to_str().unwrap()).unwrap();
+        verify_mount_corpus(&mount).expect("the recorded corpus verifies");
+        fs::write(corpus.path().join("f"), b"good").unwrap();
+        let error = verify_mount_corpus(&mount).expect_err("a changed corpus is refused");
+        assert!(error.0.contains(&mount.hash), "{}", error.0);
+        fs::remove_dir_all(corpus.path()).unwrap();
+        assert!(
+            verify_mount_corpus(&mount).is_err(),
+            "a missing corpus is refused"
+        );
+    }
+
+    #[test]
+    fn a_continuation_ignores_an_environment_mount_default() {
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("PATINA_MOUNT", "/does-not-exist") };
+        let parsed = super::super::parse(
+            ["--resume", "--out-dir", "somewhere"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect(),
+        );
+        unsafe { std::env::remove_var("PATINA_MOUNT") };
+        assert!(parsed.is_ok(), "{:?}", parsed.err().map(|error| error.0));
+    }
 
     #[test]
     fn sites_load_validates_resume_watermark() {

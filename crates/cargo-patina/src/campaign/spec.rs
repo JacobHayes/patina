@@ -142,6 +142,12 @@ pub struct CampaignSpec {
     /// [`Self::address_layout`]: a campaign's state always records it (the
     /// default unless the operator chose one).
     pub cpus: Option<u32>,
+    /// The host directory every generation's guest filesystem is captured
+    /// from (`--mount`), forwarded to every child `run` and every reproduce
+    /// command (a replay re-supplies it so the fingerprint can verify the
+    /// corpus). Invocation shape like [`Self::cpus`]; stored absolute so the
+    /// reproduce commands work from any directory.
+    pub mount: Option<Mount>,
     /// Generic liveness-watchdog budget (virtual nanoseconds), applied every
     /// generation when set.
     pub watchdog_nanos: Option<u64>,
@@ -197,6 +203,7 @@ impl Default for CampaignSpec {
             allow_unsupported_symbols: None,
             address_layout: None,
             cpus: None,
+            mount: None,
             watchdog_nanos: None,
             compute_watchdog_ms: None,
             converge_nanos: None,
@@ -287,6 +294,29 @@ impl CampaignSpec {
                         .map_err(|error| CliError(format!("campaign spec {error}")))?;
                     self.cpus = Some(cpus as u32);
                 }
+                // A spec file names a directory; a campaign's recorded state
+                // carries the directory and the corpus hash it started from.
+                "mount" => {
+                    self.mount = Some(match val {
+                        serde_json::Value::String(dir) => Mount::unresolved(dir),
+                        serde_json::Value::Object(recorded) => {
+                            let field = |name: &str| {
+                                recorded.get(name).and_then(|v| v.as_str()).ok_or_else(|| {
+                                    CliError(format!("mount.{name} must be a string"))
+                                })
+                            };
+                            let hash = field("hash")?;
+                            if hash.is_empty() {
+                                return Err(CliError("mount.hash must not be empty".into()));
+                            }
+                            Mount {
+                                dir: field("dir")?.to_string(),
+                                hash: hash.to_string(),
+                            }
+                        }
+                        _ => return Err(CliError("mount must be a directory path".into())),
+                    });
+                }
                 "allow_symbols" => {
                     let array = val
                         .as_array()
@@ -347,7 +377,7 @@ impl CampaignSpec {
                          fault_scale_permille, \
                          dns_entries, \
                          allow_symbols, allow_unsupported_symbols, address_layout, \
-                         cpus, watchdog_nanos, \
+                         cpus, mount, watchdog_nanos, \
                          compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
                          allow_unmet_sometimes, verify, or classify"
                     )));
@@ -602,6 +632,56 @@ pub(super) fn classify_rules_to_json(rules: &ClassifyRules) -> serde_json::Value
         map.insert("exit_codes".into(), serde_json::Value::Object(codes));
     }
     serde_json::Value::Object(map)
+}
+
+/// A campaign's mounted corpus: the absolute directory every generation and
+/// reproduce command names, and the corpus hash the campaign started from, so
+/// a continuation against a corpus that changed is refused rather than mixing
+/// two inputs in one campaign.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mount {
+    pub dir: String,
+    pub hash: String,
+}
+
+impl Mount {
+    /// A directory as the operator named it, before a fresh campaign
+    /// resolves it ([`resolve_mount`]): parsing touches no filesystem.
+    pub(crate) fn unresolved(dir: &str) -> Self {
+        Mount {
+            dir: dir.to_string(),
+            hash: String::new(),
+        }
+    }
+}
+
+/// Resolve a fresh campaign's `--mount` to its absolute directory and corpus
+/// hash, refusing one that is not a directory before any generation runs.
+pub(crate) fn resolve_mount(spec: &mut CampaignSpec) -> Result<(), CliError> {
+    if let Some(mount) = &spec.mount {
+        spec.mount = Some(absolute_mount(&mount.dir)?);
+    }
+    Ok(())
+}
+
+/// A `--mount` directory as an absolute [`Mount`] with its corpus hash: a
+/// relative path would resolve against whichever directory a later
+/// `--extend`, `--resume` or pasted reproduce command runs from.
+pub(crate) fn absolute_mount(dir: &str) -> Result<Mount, CliError> {
+    let path = std::path::Path::new(dir);
+    if !path.is_dir() {
+        return Err(CliError(format!(
+            "campaign --mount {dir:?} is not a directory"
+        )));
+    }
+    let absolute = std::fs::canonicalize(path)
+        .map_err(|error| CliError(format!("campaign --mount {dir:?}: {error}")))?;
+    let hash = crate::native_run::mount_corpus_hash(&absolute)?;
+    let dir = absolute
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| CliError(format!("campaign --mount {dir:?} is not a UTF-8 path")))?;
+    Ok(Mount { dir, hash })
 }
 
 #[cfg(test)]

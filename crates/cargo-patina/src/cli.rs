@@ -235,6 +235,19 @@ pub(crate) fn without_env_defaults(command: String) -> String {
     }
 }
 
+/// A reproduce command's words joined for a POSIX shell: the leading verb
+/// literal as is, every later word (a path, a flag value, a guest argument)
+/// quoted when it needs it, so a pasted command passes each word intact.
+pub(crate) fn shell_words(parts: &[String]) -> String {
+    let mut words = parts.iter();
+    let mut line = words.next().cloned().unwrap_or_default();
+    for word in words {
+        line.push(' ');
+        line.push_str(&shell_quote(OsStr::new(word)));
+    }
+    line
+}
+
 /// Quote one word for a POSIX shell, leaving a plain word bare.
 pub(crate) fn shell_quote(value: &OsStr) -> String {
     let text = value.to_string_lossy();

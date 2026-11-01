@@ -91,6 +91,9 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 .get_or_insert(patina_dst_trace::AddressLayout::Fixed);
             // Likewise its CPU count, so a continuation pins it.
             spec.cpus.get_or_insert(patina_dst_abi::DEFAULT_CPUS);
+            // And its corpus, absolute and hashed, so a continuation can tell
+            // whether it changed.
+            super::spec::resolve_mount(&mut spec)?;
             CampaignState::fresh(
                 identity,
                 spec,

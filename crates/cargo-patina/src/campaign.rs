@@ -297,8 +297,8 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
 
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
 /// draw: the pre-run gate surface (`--allow`,
-/// `--allow-unsupported-symbols`), `--allow-randomized-address-layout` and
-/// `--cpus`. Every generation gets them verbatim.
+/// `--allow-unsupported-symbols`), `--allow-randomized-address-layout`,
+/// `--cpus` and `--mount`. Every generation gets them verbatim.
 ///
 /// Their own function because the reproduce commands need exactly this set and
 /// nothing else. Native replay restores every semantic input from the trace, but
@@ -333,6 +333,9 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
     }
     if let Some(cpus) = spec.cpus {
         push_run_flag(&mut flags, "--cpus", RunValue::Int(u64::from(cpus)));
+    }
+    if let Some(mount) = &spec.mount {
+        push_run_flag(&mut flags, "--mount", RunValue::Text(mount.dir.clone()));
     }
     flags
 }

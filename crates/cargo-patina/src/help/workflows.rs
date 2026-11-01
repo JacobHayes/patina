@@ -6,7 +6,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [-- GUEST ARGS]",
+        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR] [-- GUEST ARGS]",
         "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -280,6 +280,13 @@ refused by name.",
                     doc: "The number of CPUs every generation's guest sees (default 4, at most 1024); recorded in the campaign's state and pinned on --extend/--resume.",
                     ..CPUS_FLAG
                 },
+                f(
+                    "--mount",
+                    None,
+                    Value::Required("HOST_DIR", Kind::Path),
+                    "Capture HOST_DIR into every generation's guest filesystem at `/`, as `run --mount` does; recorded (absolute) in the campaign's state, pinned on --extend/--resume, and re-supplied to every reproduce command.",
+                    false,
+                ),
             ],
         },
     ],

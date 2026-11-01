@@ -167,10 +167,11 @@ mod registry {
                     verb.name
                 );
                 // The verb's own flags are present; a DIFFERENT verb's unique flag is
-                // not. `run`'s `--mount` (re-supplying a host corpus) is unique to
-                // run/replay, so it never appears in, say, `build`'s payload.
+                // not. `run`'s `--mount` (a host corpus) is unique to run/replay
+                // and the campaign that forwards it, so it never appears in, say,
+                // `build`'s payload.
                 let names = flag_names(&json["verb"]["flag_groups"]);
-                if verb.name != "run" && verb.name != "replay" {
+                if !matches!(verb.name, "run" | "replay" | "campaign") {
                     assert!(
                         !names.contains("--mount"),
                         "{}'s payload leaked run's unique --mount flag",

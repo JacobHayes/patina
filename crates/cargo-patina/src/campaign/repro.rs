@@ -28,7 +28,7 @@ pub(super) fn reproduce_command(
             trace.to_string(),
         ];
         parts.extend(invocation.iter().cloned());
-        return crate::cli::without_env_defaults(parts.join(" "));
+        return crate::cli::without_env_defaults(crate::cli::shell_words(&parts));
     }
     let mut parts = vec![
         "cargo patina run".to_string(),
@@ -59,7 +59,7 @@ pub(super) fn reproduce_command(
     // The generation ran as an isolated child from these flags alone (see
     // `expect_this_supervisor`), so the printed command must not pick up the
     // operator's flag defaults either.
-    crate::cli::without_env_defaults(parts.join(" "))
+    crate::cli::without_env_defaults(crate::cli::shell_words(&parts))
 }
 
 /// The generation flags and invocation shape a reproduce command is built from,
@@ -291,6 +291,91 @@ mod tests {
                     "trace={trace:?} wrote_coverage={wrote_coverage}: {command}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_mounted_corpus_reaches_every_generation_and_reproduce_command() {
+        let corpus = tempfile::tempdir().unwrap();
+        // A space in the path: every reproduce form must pass it as one word.
+        let nested = corpus.path().join("my image");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("f"), b"one").unwrap();
+        // A relative spelling is stored absolute, so a continuation or a
+        // pasted reproduce command run from elsewhere names the same corpus.
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(corpus.path()).unwrap();
+        let parsed = parse(
+            ["art", "--mount", "my image"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        );
+        let mut spec = parsed.unwrap().spec;
+        let resolved = super::super::spec::resolve_mount(&mut spec);
+        std::env::set_current_dir(previous).unwrap();
+        resolved.unwrap();
+        let absolute = std::fs::canonicalize(&nested).unwrap();
+        let mount = spec.mount.clone().expect("the corpus is recorded");
+        assert_eq!(mount.dir, absolute.to_str().unwrap());
+        assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+        let flags = invocation_flags(&spec);
+        assert_eq!(flags, ["--mount", absolute.to_str().unwrap()]);
+        let derived = derive_flags(&spec, &generation_hash(0, 0));
+        assert_eq!(derived.iter().filter(|flag| *flag == "--mount").count(), 1);
+        // A replay re-supplies the corpus so its fingerprint verifies, and a
+        // re-run captures it again; a guest argument with spaces stays one word.
+        let quoted = crate::cli::shell_quote(absolute.as_os_str());
+        assert!(quoted.starts_with('\''), "{quoted}");
+        for trace in [None, Some("stop.patina")] {
+            let command = reproduce_command(
+                Path::new("guest"),
+                7,
+                &derived,
+                &flags,
+                &["{\"a\": 1}".to_string()],
+                trace,
+                "g.patina",
+            );
+            assert!(
+                command.contains(&format!("--mount {quoted}")),
+                "trace={trace:?}: {command}"
+            );
+            if trace.is_none() {
+                assert!(command.ends_with("-- '{\"a\": 1}'"), "{command}");
+            }
+        }
+        // The campaign pins the corpus it started from: a changed corpus is
+        // refused rather than mixed into the same campaign.
+        let mut state_spec = spec_to_json(&spec);
+        let reloaded = spec_from_state_json(&state_spec).unwrap();
+        assert_eq!(reloaded.mount, Some(mount.clone()));
+        std::fs::write(nested.join("f"), b"two").unwrap();
+        let changed = super::super::spec::absolute_mount(absolute.to_str().unwrap()).unwrap();
+        assert_ne!(
+            changed.hash, mount.hash,
+            "the corpus hash must see a content change"
+        );
+        state_spec["mount"]["hash"] = serde_json::Value::String(changed.hash.clone());
+        assert_eq!(
+            spec_from_state_json(&state_spec).unwrap().mount,
+            Some(changed)
+        );
+        // A corpus that is not a directory is refused before any generation
+        // runs, not in every generation's child run.
+        let file = corpus.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        for dir in [file.as_path(), &corpus.path().join("missing")] {
+            let args = ["art", "--mount", dir.to_str().unwrap()]
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+            let mut spec = parse(args).unwrap().spec;
+            assert!(
+                super::super::spec::resolve_mount(&mut spec).is_err(),
+                "{}",
+                dir.display()
+            );
         }
     }
 

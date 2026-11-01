@@ -141,6 +141,20 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(cpus) = args.u32("--cpus") {
         spec.cpus = Some(cpus);
     }
+    // A continuation's recorded spec is authoritative, so an environment
+    // default (PATINA_MOUNT) is not resolved there, where it would be ignored.
+    if let Some(dir) = args
+        .path("--mount")
+        .filter(|_| matches!(mode, CampaignMode::Fresh))
+    {
+        let dir = dir.to_str().ok_or_else(|| {
+            CliError(format!(
+                "campaign --mount {} is not a UTF-8 path",
+                dir.display()
+            ))
+        })?;
+        spec.mount = Some(super::spec::Mount::unresolved(dir));
+    }
     if let Some(value) = args.u64("--compute-watchdog-ms") {
         spec.compute_watchdog_ms = Some(value);
     }

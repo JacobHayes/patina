@@ -288,7 +288,7 @@ pub(super) fn repro_command(oracle: &KnobOracle, knobs: &[Knob]) -> String {
         parts.extend(oracle.guest_args.iter().cloned());
     }
     // The oracle ran it as an isolated child from these flags alone.
-    crate::cli::without_env_defaults(parts.join(" "))
+    crate::cli::without_env_defaults(crate::cli::shell_words(&parts))
 }
 
 #[cfg(test)]

@@ -59,6 +59,13 @@ use child::wait_native_child_once;
 #[cfg(all(test, unix))]
 pub(super) use child::{NativeChildStatus, native_child_status};
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
+
+/// The fingerprint hash (`<contents>.<metadata>`) a run's `--mount` of
+/// `host_dir` folds into its trace, for a caller that pins a corpus across
+/// runs (a campaign and its continuations).
+pub(crate) fn mount_corpus_hash(host_dir: &Path) -> Result<String, CliError> {
+    Ok(build_fs_image_file(host_dir)?.hash)
+}
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
 pub(super) use gate::target_has_sud;
