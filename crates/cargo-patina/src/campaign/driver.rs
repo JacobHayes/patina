@@ -32,7 +32,7 @@ use crate::CliError;
 use crate::guided::{GuidanceDecision, GuidanceTally};
 use crate::sdk_report::CoverageTally;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliError> {
     let CampaignInvocation {
@@ -413,6 +413,9 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             verdicts: run.facts.facts.verdicts.clone(),
             verification,
         };
+        if state.spec.generation_log {
+            append_generation_log(&out_dir, &outcome)?;
+        }
         if outcome.is_notable() {
             state.notable_runs.push(outcome.clone());
         }
@@ -533,4 +536,95 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         flush_stdout();
     }
     Ok(exit_code)
+}
+
+/// Append one generation's record to `<out>/generations.jsonl` (`--generation-log`).
+///
+/// A run killed mid-write leaves an unterminated last line; it is cut back to
+/// the last complete record before appending, so a resumed generation's
+/// record is never glued onto a torn one. Each record goes out in one write.
+fn append_generation_log(out_dir: &Path, outcome: &GenerationOutcome) -> Result<(), CliError> {
+    use std::io::{Seek as _, SeekFrom, Write as _};
+    let path = out_dir.join("generations.jsonl");
+    let error =
+        |error: std::io::Error| CliError(format!("generation log {}: {error}", path.display()));
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(error)?;
+    cut_torn_tail(&mut file).map_err(error)?;
+    file.seek(SeekFrom::End(0)).map_err(error)?;
+    let mut line = outcome.to_json().to_string();
+    line.push('\n');
+    file.write_all(line.as_bytes()).map_err(error)
+}
+
+/// Cut an unterminated last line off `file`, keeping every complete
+/// newline-terminated record; reads only the tail (in bounded chunks).
+fn cut_torn_tail(file: &mut fs::File) -> std::io::Result<()> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let len = file.seek(SeekFrom::End(0))?;
+    if len == 0 {
+        return Ok(());
+    }
+    let mut last = [0u8];
+    file.seek(SeekFrom::Start(len - 1))?;
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+    let mut keep = 0;
+    let mut end = len;
+    let mut chunk = vec![0u8; GENERATION_LOG_CHUNK];
+    while end > 0 {
+        let start = end.saturating_sub(chunk.len() as u64);
+        let buf = &mut chunk[..(end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(buf)?;
+        if let Some(at) = buf.iter().rposition(|byte| *byte == b'\n') {
+            keep = start + at as u64 + 1;
+            break;
+        }
+        end = start;
+    }
+    file.set_len(keep)
+}
+
+const GENERATION_LOG_CHUNK: usize = 64 * 1024;
+
+#[cfg(test)]
+mod generation_log_tests {
+    use super::{GENERATION_LOG_CHUNK, cut_torn_tail};
+    use std::fs;
+
+    fn cut(content: &[u8]) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("generations.jsonl");
+        fs::write(&path, content).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        cut_torn_tail(&mut file).unwrap();
+        drop(file);
+        fs::read(&path).unwrap()
+    }
+
+    #[test]
+    fn only_an_unterminated_last_line_is_cut() {
+        assert_eq!(cut(b""), b"");
+        assert_eq!(cut(b"{\"a\":1}\n{\"b\":2}\n"), b"{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(cut(b"{\"a\":1}\n{\"b"), b"{\"a\":1}\n");
+        assert_eq!(cut(b"{\"torn"), b"");
+        // A torn line longer than one read chunk, after a complete record.
+        let mut long = b"{\"a\":1}\n".to_vec();
+        long.extend(std::iter::repeat_n(b'x', 3 * GENERATION_LOG_CHUNK + 7));
+        assert_eq!(cut(&long), b"{\"a\":1}\n");
+        let torn_only = vec![b'x'; 2 * GENERATION_LOG_CHUNK];
+        assert_eq!(cut(&torn_only), b"");
+    }
 }

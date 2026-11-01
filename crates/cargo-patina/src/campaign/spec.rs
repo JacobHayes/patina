@@ -160,6 +160,10 @@ pub struct CampaignSpec {
     pub heal_after_nanos: Option<u64>,
     /// Also write a wave-14 `--report` HTML for each failing generation.
     pub report: bool,
+    /// Append every generation's record (seed, flags, class, verdicts) to
+    /// `<out>/generations.jsonl`, so an external judge can re-run any
+    /// generation, not only the notable ones `campaign-state.json` keeps.
+    pub generation_log: bool,
     /// Report native edge-coverage plateau after this many generations without a
     /// new edge; 0 disables the plateau flag.
     pub plateau_after: u64,
@@ -209,6 +213,7 @@ impl Default for CampaignSpec {
             converge_nanos: None,
             heal_after_nanos: None,
             report: false,
+            generation_log: false,
             plateau_after: DEFAULT_PLATEAU_AFTER,
             guided: false,
             allow_unmet_sometimes: None,
@@ -362,6 +367,7 @@ impl CampaignSpec {
                 "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
                 "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
                 "report" => self.report = json_bool(key, val)?,
+                "generation_log" => self.generation_log = json_bool(key, val)?,
                 "plateau_after" => self.plateau_after = json_u64(key, val)?,
                 "guided" => self.guided = json_bool(key, val)?,
                 "allow_unmet_sometimes" => {

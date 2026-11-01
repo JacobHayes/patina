@@ -121,6 +121,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         spec.fault_scale_permille = value;
     }
     spec.report |= args.flag("--report-failures");
+    spec.generation_log |= args.flag("--generation-log");
     if args.flag("--no-verify") {
         spec.verify = false;
     }

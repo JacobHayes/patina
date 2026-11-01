@@ -202,4 +202,65 @@ fn main() {
         }
         assert!(!unknown_out.exists(), "a refused campaign wrote an out-dir");
     }
+
+    /// `--generation-log` records every generation once, across a
+    /// continuation (even after a torn last record), with the seed, flags and class the campaign used: here
+    /// every generation is notable, so each record must equal its notable run.
+    /// Without the flag no log is written.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn the_generation_log_records_every_generation_as_the_campaign_ran_it() {
+        let fixture = fixture();
+        let plain = fresh(&fixture, &fixture.cwd.join("plain"), "2", "--faults");
+        assert!(plain["spec"].get("generation_log").is_none());
+        assert!(!fixture.cwd.join("plain").join("generations.jsonl").exists());
+
+        let out = fixture.cwd.join("logged");
+        let output = campaign(
+            &fixture.cwd,
+            &[
+                fixture.module.to_str().unwrap(),
+                "--gens",
+                "3",
+                "--faults",
+                "--generation-log",
+                "--spec",
+                fixture.spec.to_str().unwrap(),
+                "--out-dir",
+                out.to_str().unwrap(),
+            ],
+        );
+        assert_ran(&output);
+        // A run killed mid-record leaves a torn last line; the continuation
+        // must not glue its first record onto it.
+        let log_path = out.join("generations.jsonl");
+        let mut torn = fs::read(&log_path).unwrap();
+        torn.extend_from_slice(b"{\"generation\":");
+        fs::write(&log_path, torn).unwrap();
+        assert_ran(&campaign(
+            &fixture.cwd,
+            &["--extend", "2", "--out-dir", out.to_str().unwrap()],
+        ));
+        let state = campaign_state_without_invocations(&out.join("campaign-state.json"));
+        assert_eq!(
+            state["spec"]["generation_log"], true,
+            "the continuation kept the log on"
+        );
+        let log: Vec<serde_json::Value> = fs::read_to_string(out.join("generations.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let generations: Vec<u64> = log
+            .iter()
+            .map(|record| record["generation"].as_u64().unwrap())
+            .collect();
+        assert_eq!(generations, vec![0, 1, 2, 3, 4]);
+        assert_eq!(runs(&state).len(), log.len());
+        for (record, run) in log.iter().zip(runs(&state)) {
+            for key in ["generation", "seed", "flags", "class"] {
+                assert_eq!(record[key], run[key], "{key} differs:\n{record:#}\n{run:#}");
+            }
+        }
+    }
 }

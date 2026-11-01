@@ -600,6 +600,11 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if !spec.classify.is_empty() {
         map.insert("classify".into(), classify_rules_to_json(&spec.classify));
     }
+    // Off by default, so only the opt-in is recorded (older states stay
+    // canonical).
+    if spec.generation_log {
+        map.insert("generation_log".into(), true.into());
+    }
     // Verification is on by default, so only the opt-out is recorded.
     if !spec.verify {
         map.insert("verify".into(), false.into());
