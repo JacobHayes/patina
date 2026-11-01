@@ -164,6 +164,9 @@ pub const SCENARIO: Scenario = Scenario {
     symbols: &[
         "fsync",
         "fdatasync",
+        "sync",
+        "syncfs",
+        "sync_file_range",
         "syscall",
         "openat",
         "write",

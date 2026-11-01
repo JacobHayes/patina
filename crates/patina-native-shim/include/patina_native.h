@@ -636,16 +636,12 @@ intptr_t patina_splice(int32_t fd_in, int64_t *off_in, int32_t fd_out, int64_t *
 intptr_t patina_tee(int32_t fd_in, int32_t fd_out, size_t len, uint32_t flags);
 intptr_t patina_vmsplice(int32_t fd, const void *vector, int64_t count, uint32_t flags);
 /*
- * Linux page-cache advice and writeback, validated as the kernel validates
- * them over a filesystem with no page cache: posix_fadvise/readahead/
- * sync_file_range are no-ops past their refusals; sync makes the volume
- * durable and never fails; syncfs makes the descriptor's filesystem durable.
+ * Linux page-cache advice, validated as the kernel validates it over a
+ * filesystem with no page cache: posix_fadvise/readahead are no-ops past
+ * their refusals.
  */
 int32_t patina_fadvise(int32_t fd, int64_t offset, int64_t length, int32_t advice);
 int32_t patina_readahead(int32_t fd, int64_t offset, size_t count);
-int32_t patina_sync_file_range(int32_t fd, int64_t offset, int64_t length, uint32_t flags);
-int32_t patina_sync(void);
-int32_t patina_syncfs(int32_t fd);
 #endif
 /*
  * The one modeled identity (uid/gid 1000): the ONE accessor getuid/geteuid,

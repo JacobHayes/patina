@@ -80,7 +80,7 @@ impl Vehicle {
     pub fn call(self, row: Syscall, args: Args) -> i64 {
         match self {
             Vehicle::Libc => libc_door(row, args),
-            Vehicle::Syscall => fold_errno(syscall_door(row, args)),
+            Vehicle::Syscall => door(|| syscall_door(row, args)),
             #[cfg(target_arch = "x86_64")]
             Vehicle::Raw => raw_syscall(row.number(), args),
         }
@@ -98,6 +98,35 @@ pub fn fold_errno(result: i64) -> i64 {
     } else {
         result
     }
+}
+
+/// Clear errno before a libc door, so [`fold_door`] sees what the door itself
+/// set: an errno left over from an earlier call would otherwise pass for the
+/// answer of a door that fails without setting one.
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    // SAFETY: glibc's errno cell of the calling thread.
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+/// [`fold_errno`] after [`clear_errno`]: a `-1` with errno still clear is a
+/// door that failed without saying why, which no kernel answers, so the probe
+/// aborts, a death no native run shares: the leg fails on every host.
+#[cfg(target_os = "linux")]
+fn fold_door(result: i64) -> i64 {
+    if result == -1 && errno() == 0 {
+        eprintln!("a libc door answered -1 and left errno unset");
+        std::process::abort();
+    }
+    fold_errno(result)
+}
+
+/// A libc door's answer in the kernel convention, `call` issued with errno
+/// clear and judged by [`fold_door`].
+#[cfg(target_os = "linux")]
+pub fn door(call: impl FnOnce() -> i64) -> i64 {
+    clear_errno();
+    fold_door(call())
 }
 
 /// glibc's `syscall(2)` with the row's number.
@@ -165,15 +194,150 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
+/// The rows the `libc` vehicle spells as glibc's `syscall(2)` because the
+/// shim defines no libc door serving them: glibc does not wrap the row (the
+/// NUMA rows libnuma wraps, `membarrier`, `getdents`, `ustat`, the sandboxing
+/// probes), glibc no longer issues it (`eventfd`, which its wrapper spells
+/// `eventfd2`; `fchmodat2`, whose flags glibc's `fchmodat` emulates over it),
+/// or the shim does not define glibc's wrapper, whose import would make the
+/// pre-run import audit refuse the whole probe binary (fanotify's are named
+/// traps). A scenario made only of such rows runs through the `syscall`
+/// vehicle alone. Once the shim defines a door serving one of these rows the
+/// `libc` vehicle has to call it, or what that door answers goes unobserved
+/// (`a_row_spelled_as_syscall_has_no_shim_door`).
+#[cfg(target_os = "linux")]
+macro_rules! without_shim_door {
+    () => {
+        Syscall::N_epoll_pwait2
+            | Syscall::N_fanotify_init
+            | Syscall::N_fanotify_mark
+            | Syscall::N_brk
+            | Syscall::N_mincore
+            | Syscall::N_memfd_secret
+            | Syscall::N_membarrier
+            | Syscall::N_remap_file_pages
+            | Syscall::N_pkey_mprotect
+            | Syscall::N_pkey_alloc
+            | Syscall::N_pkey_free
+            | Syscall::N_map_shadow_stack
+            | Syscall::N_mbind
+            | Syscall::N_set_mempolicy
+            | Syscall::N_get_mempolicy
+            | Syscall::N_migrate_pages
+            | Syscall::N_move_pages
+            | Syscall::N_set_mempolicy_home_node
+            | Syscall::N_fchmodat2
+            | Syscall::N_preadv2
+            | Syscall::N_pwritev2
+            | Syscall::N_inotify_init1
+            | Syscall::N_inotify_add_watch
+            | Syscall::N_settimeofday
+            | Syscall::N_adjtimex
+            | Syscall::N_clock_adjtime
+            | Syscall::N_syslog
+            | Syscall::N_personality
+            | Syscall::N_prlimit64
+            | Syscall::N_getpriority
+            | Syscall::N_setpriority
+            | Syscall::N_ioprio_get
+            | Syscall::N_ioprio_set
+            | Syscall::N_sched_getscheduler
+            | Syscall::N_sched_setscheduler
+            | Syscall::N_sched_getparam
+            | Syscall::N_sched_setparam
+            | Syscall::N_sched_get_priority_max
+            | Syscall::N_sched_get_priority_min
+            | Syscall::N_sched_rr_get_interval
+            | Syscall::N_sched_getattr
+            | Syscall::N_sched_setattr
+            | Syscall::N_getcpu
+            | Syscall::N_getresuid
+            | Syscall::N_getresgid
+            | Syscall::N_setfsuid
+            | Syscall::N_setfsgid
+            | Syscall::N_getgroups
+            | Syscall::N_capget
+            | Syscall::N_capset
+            | Syscall::N_sethostname
+            | Syscall::N_setdomainname
+            | Syscall::N_landlock_create_ruleset
+            | Syscall::N_seccomp
+    };
+}
+
+/// [`without_shim_door`]'s rows that only x86_64 numbers.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+macro_rules! without_shim_door_x86_64 {
+    () => {
+        Syscall::N_epoll_create
+            | Syscall::N_eventfd
+            | Syscall::N_getpgrp
+            | Syscall::N_sysfs
+            | Syscall::N_getdents
+            | Syscall::N_ustat
+    };
+}
+
 /// The glibc symbol of the same name, folded to the kernel result convention.
 /// A row glibc has no wrapper for is spelled `syscall(2)`, the same door glibc
 /// itself would use.
 #[cfg(target_os = "linux")]
 fn libc_door(row: Syscall, a: Args) -> i64 {
     use libc::*;
+    clear_errno();
     // SAFETY: the scenario owns every pointer it passes in `a`.
     let result: i64 = unsafe {
         match row {
+            without_shim_door!() => syscall_door(row, a),
+            #[cfg(target_arch = "x86_64")]
+            without_shim_door_x86_64!() => syscall_door(row, a),
+            // glibc's `timer_*` wrappers take and answer its own `timer_t`
+            // handle where the rows take the kernel's timer id: the libc
+            // spelling of a row is glibc's `syscall(2)`.
+            Syscall::N_timer_create
+            | Syscall::N_timer_settime
+            | Syscall::N_timer_gettime
+            | Syscall::N_timer_getoverrun
+            | Syscall::N_timer_delete => syscall_door(row, a),
+            // sync(2) answers nothing and never fails.
+            Syscall::N_sync => {
+                sync();
+                0
+            }
+            Syscall::N_syncfs => syncfs(a[0] as c_int) as i64,
+            Syscall::N_sync_file_range => sync_file_range(
+                a[0] as c_int,
+                a[1] as off64_t,
+                a[2] as off64_t,
+                a[3] as c_uint,
+            ) as i64,
+            Syscall::N_getitimer => getitimer(a[0] as c_int, a[1] as *mut itimerval) as i64,
+            Syscall::N_setitimer => setitimer(
+                a[0] as c_int,
+                a[1] as *const itimerval,
+                a[2] as *mut itimerval,
+            ) as i64,
+            // alarm(2) never fails and its result is the previous alarm's
+            // seconds; no errno fold applies.
+            #[cfg(target_arch = "x86_64")]
+            Syscall::N_alarm => return i64::from(alarm(a[0] as c_uint)),
+            Syscall::N_times => times(a[0] as *mut tms) as i64,
+            Syscall::N_clock_settime => {
+                clock_settime(a[0] as clockid_t, a[1] as *const timespec) as i64
+            }
+            Syscall::N_clock_getres => {
+                clock_getres(a[0] as clockid_t, a[1] as *mut timespec) as i64
+            }
+            Syscall::N_timerfd_create => timerfd_create(a[0] as clockid_t, a[1] as c_int) as i64,
+            Syscall::N_timerfd_settime => timerfd_settime(
+                a[0] as c_int,
+                a[1] as c_int,
+                a[2] as *const itimerspec,
+                a[3] as *mut itimerspec,
+            ) as i64,
+            Syscall::N_timerfd_gettime => {
+                timerfd_gettime(a[0] as c_int, a[1] as *mut itimerspec) as i64
+            }
             Syscall::N_read => read(a[0] as c_int, a[1] as *mut c_void, a[2] as size_t) as i64,
             Syscall::N_write => write(a[0] as c_int, a[1] as *const c_void, a[2] as size_t) as i64,
             Syscall::N_openat => openat(
@@ -234,6 +398,11 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_dup3 => dup3(a[0] as c_int, a[1] as c_int, a[2] as c_int) as i64,
             Syscall::N_close_range => {
                 close_range(a[0] as c_uint, a[1] as c_uint, a[2] as c_int) as i64
+            }
+            // F_GETOWN answers a process-group owner as its negated id, so
+            // -1 with errno clear is process group 1, not a failure.
+            Syscall::N_fcntl if a[1] as c_int == F_GETOWN => {
+                return fold_errno(fcntl(a[0] as c_int, F_GETOWN) as i64);
             }
             Syscall::N_fcntl => fcntl(a[0] as c_int, a[1] as c_int, a[2] as c_long) as i64,
             Syscall::N_flock => flock(a[0] as c_int, a[1] as c_int) as i64,
@@ -368,17 +537,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[3] as c_int,
                 a[4] as *mut timespec,
             ) as i64,
-            // Readiness rows whose glibc wrapper the shim does not define
-            // (`epoll_pwait2`, `epoll_create`) or that glibc no longer issues
-            // (`eventfd`, which its wrapper spells `eventfd2`): the libc
-            // spelling is glibc's `syscall(2)` until the shim defines the
-            // wrapper.
-            Syscall::N_epoll_pwait2 => syscall_door(row, a),
-            #[cfg(target_arch = "x86_64")]
-            Syscall::N_epoll_create | Syscall::N_eventfd => syscall_door(row, a),
-            // fanotify: glibc wraps both rows, the shim defines neither (they
-            // are named traps).
-            Syscall::N_fanotify_init | Syscall::N_fanotify_mark => syscall_door(row, a),
             Syscall::N_epoll_create1 => epoll_create1(a[0] as c_int) as i64,
             Syscall::N_epoll_ctl => epoll_ctl(
                 a[0] as c_int,
@@ -704,31 +862,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
                 a[4] as c_int,
             ) as i64,
             Syscall::N_msgctl => msgctl(a[0] as c_int, a[1] as c_int, a[2] as *mut msqid_ds) as i64,
-            // Memory and IPC rows whose glibc wrapper the shim does not define
-            // (`brk`, `mincore`, the kernel rows under
-            // glibc's `mq_*`, `pkey_*`, `remap_file_pages`) or that glibc
-            // does not wrap at all
-            // (`membarrier`, `memfd_secret`, `map_shadow_stack`, the NUMA
-            // rows libnuma wraps): importing such a wrapper would
-            // make the pre-run import audit refuse the whole probe binary, so
-            // the libc spelling is glibc's own `syscall(2)` until the shim
-            // defines it. A scenario made only of such rows runs through
-            // the `syscall` vehicle alone, not `syscall(2)` twice.
-            Syscall::N_brk
-            | Syscall::N_mincore
-            | Syscall::N_memfd_secret
-            | Syscall::N_membarrier
-            | Syscall::N_remap_file_pages
-            | Syscall::N_pkey_mprotect
-            | Syscall::N_pkey_alloc
-            | Syscall::N_pkey_free
-            | Syscall::N_map_shadow_stack
-            | Syscall::N_mbind
-            | Syscall::N_set_mempolicy
-            | Syscall::N_get_mempolicy
-            | Syscall::N_migrate_pages
-            | Syscall::N_move_pages
-            | Syscall::N_set_mempolicy_home_node => syscall_door(row, a),
             // glibc's thin wrappers of the process-descriptor rows (2.36) and
             // of the calling process's memory by pid (2.15), which the shim
             // defines.
@@ -818,21 +951,6 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             | Syscall::N_query_module
             | Syscall::N_get_kernel_syms
             | Syscall::N_uselib => syscall_door(row, a),
-            // fchmodat2, whose flags glibc's fchmodat emulates over it, and
-            // rows whose glibc wrapper the shim does not define (no symbol
-            // row): the probe binary importing such a wrapper
-            // would be refused whole by the pre-run import audit, so until the
-            // shim defines it the libc spelling is glibc's own `syscall(2)`,
-            // and the symbol stays in the coverage report.
-            Syscall::N_fchmodat2
-            | Syscall::N_sync
-            | Syscall::N_syncfs
-            | Syscall::N_sync_file_range
-            | Syscall::N_preadv2
-            | Syscall::N_pwritev2
-            | Syscall::N_inotify_init1
-            | Syscall::N_inotify_add_watch => syscall_door(row, a),
-            // The time, identity, scheduling and limit rows whose glibc
             // symbol the shim defines: the libc spelling is that wrapper
             // (`setuid`/`setgid`/`setgroups`/`setsid`/`setpgid` are the
             // shim's deny-traps; `sched_getaffinity` answers 0 where the row
@@ -866,68 +984,10 @@ fn libc_door(row: Syscall, a: Args) -> i64 {
             Syscall::N_setpgid => setpgid(a[0] as pid_t, a[1] as pid_t) as i64,
             #[cfg(target_arch = "x86_64")]
             Syscall::N_time => time(a[0] as *mut time_t) as i64,
-            // The time, identity, scheduling and limit rows whose glibc
-            // wrapper the shim does not define (importing it would make the
-            // pre-run import audit refuse the whole probe binary) or that
-            // glibc does not wrap (`timer_*` ids and `getpriority`'s raw
-            // answer differ from glibc's wrappers), and `clock_getres`, whose
-            // wrapper the shim defines but this table does not yet call: the
-            // libc spelling is glibc's own `syscall(2)`.
-            Syscall::N_clock_getres
-            | Syscall::N_getitimer
-            | Syscall::N_setitimer
-            | Syscall::N_timer_create
-            | Syscall::N_timer_settime
-            | Syscall::N_timer_gettime
-            | Syscall::N_timer_getoverrun
-            | Syscall::N_timer_delete
-            | Syscall::N_timerfd_create
-            | Syscall::N_timerfd_settime
-            | Syscall::N_timerfd_gettime
-            | Syscall::N_times
-            | Syscall::N_settimeofday
-            | Syscall::N_clock_settime
-            | Syscall::N_adjtimex
-            | Syscall::N_clock_adjtime
-            | Syscall::N_syslog
-            | Syscall::N_personality
-            | Syscall::N_prlimit64
-            | Syscall::N_getpriority
-            | Syscall::N_setpriority
-            | Syscall::N_ioprio_get
-            | Syscall::N_ioprio_set
-            | Syscall::N_sched_getscheduler
-            | Syscall::N_sched_setscheduler
-            | Syscall::N_sched_getparam
-            | Syscall::N_sched_setparam
-            | Syscall::N_sched_get_priority_max
-            | Syscall::N_sched_get_priority_min
-            | Syscall::N_sched_rr_get_interval
-            | Syscall::N_sched_getattr
-            | Syscall::N_sched_setattr
-            | Syscall::N_getcpu
-            | Syscall::N_getresuid
-            | Syscall::N_getresgid
-            | Syscall::N_setfsuid
-            | Syscall::N_setfsgid
-            | Syscall::N_getgroups
-            | Syscall::N_capget
-            | Syscall::N_capset
-            | Syscall::N_sethostname
-            | Syscall::N_setdomainname => syscall_door(row, a),
-            #[cfg(target_arch = "x86_64")]
-            Syscall::N_alarm | Syscall::N_getpgrp | Syscall::N_sysfs => syscall_door(row, a),
-            // Legacy rows glibc has no wrapper for (`getdents`; `ustat`, whose
-            // wrapper glibc 2.28 dropped).
-            #[cfg(target_arch = "x86_64")]
-            Syscall::N_getdents | Syscall::N_ustat => syscall_door(row, a),
-            // Sandboxing probes glibc has no wrapper for: glibc's own
-            // spelling is `syscall(2)`.
-            Syscall::N_landlock_create_ruleset | Syscall::N_seccomp => syscall_door(row, a),
             other => panic!("{}: no libc spelling in the probe API", other.name()),
         }
     };
-    fold_errno(result)
+    fold_door(result)
 }
 
 /// The inline `syscall` instruction: the exact direct-syscall class the
@@ -1015,4 +1075,49 @@ pub fn errno_name(code: i32) -> String {
         _ => return format!("E#{code}"),
     };
     name.to_string()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use patina_dst_syscalls::{Os, SYMBOLS, SYSCALLS, Serves, SymbolStatus};
+
+    fn spelled_as_syscall(row: Syscall) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        if matches!(row, without_shim_door_x86_64!()) {
+            return true;
+        }
+        matches!(row, without_shim_door!())
+    }
+
+    /// A row the `libc` vehicle spells as `syscall(2)` for want of a shim
+    /// door has none: glibc's wrapper of the row's name, serving the row and
+    /// modeled or partial in the shim on this OS, is a door no scenario's
+    /// `libc` leg reaches.
+    #[test]
+    fn a_row_spelled_as_syscall_has_no_shim_door() {
+        let undriven: Vec<String> = SYSCALLS
+            .iter()
+            .filter(|row| spelled_as_syscall(row.id))
+            .flat_map(|row| {
+                SYMBOLS
+                    .iter()
+                    .filter(move |symbol| {
+                        symbol.name == row.name
+                            && matches!(symbol.serves, Serves::Syscalls(rows) if rows.contains(&row.name))
+                            && symbol.platform.defines_on(Os::host())
+                            && matches!(
+                                symbol.status,
+                                SymbolStatus::Modeled | SymbolStatus::Partial
+                            )
+                    })
+                    .map(move |symbol| format!("{} (row {})", symbol.name, row.name))
+            })
+            .collect();
+        assert!(
+            undriven.is_empty(),
+            "the libc vehicle spells these rows as syscall(2), yet the shim defines a door \
+             serving them: {undriven:?}"
+        );
+    }
 }

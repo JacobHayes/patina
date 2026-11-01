@@ -1161,7 +1161,7 @@ macro_rules! early_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_sync`: every change on the volume made durable (the crash model checkpoints); never fails, and a writeback error it meets stays for fsync and syncfs to report.",
+                "Routed into `advice::sync`: every change on the volume made durable (the crash model checkpoints); never fails, and a writeback error it meets stays for fsync and syncfs to report.",
                 None,
             ),
             Syscall::N_acct => r(

@@ -175,8 +175,7 @@ impl Probe {
         let tv = Self::timeval_pair(times);
         let tv_ptr = tv.as_ref().map_or(std::ptr::null(), |t| t.as_ptr());
         // SAFETY: a NUL-terminated path and two timevals or NULL.
-        let result =
-            crate::vehicle::fold_errno(unsafe { libc::lutimes(c.as_ptr(), tv_ptr) }.into());
+        let result = crate::vehicle::door(|| unsafe { libc::lutimes(c.as_ptr(), tv_ptr) }.into());
         let builder = self.rec.event("lutimes", result).arg("path", path);
         self.timeval_args(builder, times).emit();
         result
@@ -188,7 +187,7 @@ impl Probe {
         let tv = Self::timeval_pair(times);
         let tv_ptr = tv.as_ref().map_or(std::ptr::null(), |t| t.as_ptr());
         // SAFETY: two timevals or NULL.
-        let result = crate::vehicle::fold_errno(unsafe { libc::futimes(fd, tv_ptr) }.into());
+        let result = crate::vehicle::door(|| unsafe { libc::futimes(fd, tv_ptr) }.into());
         let builder = self.rec.event("futimes", result);
         let builder = self.fd_arg(builder, "fd", fd);
         self.timeval_args(builder, times).emit();

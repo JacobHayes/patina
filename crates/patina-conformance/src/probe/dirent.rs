@@ -255,7 +255,7 @@ impl Probe {
     pub fn closedir_null(&self) -> i64 {
         // SAFETY: glibc checks the stream for NULL before using it.
         let result =
-            crate::vehicle::fold_errno(i64::from(unsafe { libc::closedir(std::ptr::null_mut()) }));
+            crate::vehicle::door(|| i64::from(unsafe { libc::closedir(std::ptr::null_mut()) }));
         self.rec
             .event("closedir", result)
             .arg("dirp", "NULL")
@@ -282,7 +282,7 @@ impl Probe {
     /// `closedir(dir)`, which also closes the stream's descriptor.
     pub fn closedir(&self, dir: Dir) -> i64 {
         // SAFETY: an open stream, consumed here.
-        let result = crate::vehicle::fold_errno(i64::from(unsafe { libc::closedir(dir.0) }));
+        let result = crate::vehicle::door(|| i64::from(unsafe { libc::closedir(dir.0) }));
         self.rec.event("closedir", result).emit();
         result
     }

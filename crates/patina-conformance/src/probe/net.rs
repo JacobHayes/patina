@@ -17,7 +17,7 @@
 use super::{Probe, SIGSET_BYTES, cstr, neg, printable, read_vector, write_vector};
 use crate::observe::{Id, Norm};
 use crate::record::EventBuilder;
-use crate::vehicle::{Args, Vehicle, fold_errno};
+use crate::vehicle::{Args, Vehicle, door};
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};

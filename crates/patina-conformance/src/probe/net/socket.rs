@@ -246,9 +246,7 @@ impl Probe {
         let result = match self.vehicle {
             // SAFETY: the buffer holds `data.len()` bytes.
             Vehicle::Libc => {
-                fold_errno(
-                    unsafe { libc::send(fd, data.as_ptr().cast(), data.len(), flags) } as i64,
-                )
+                door(|| unsafe { libc::send(fd, data.as_ptr().cast(), data.len(), flags) } as i64)
             }
             _ => self.call(Syscall::N_sendto, args),
         };
@@ -274,7 +272,7 @@ impl Probe {
         let result = match self.vehicle {
             // SAFETY: the buffer holds `len` bytes.
             Vehicle::Libc => {
-                fold_errno(unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), len, flags) } as i64)
+                door(|| unsafe { libc::recv(fd, buf.as_mut_ptr().cast(), len, flags) } as i64)
             }
             _ => self.call(Syscall::N_recvfrom, args),
         };

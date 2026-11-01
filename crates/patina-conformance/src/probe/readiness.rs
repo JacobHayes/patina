@@ -56,10 +56,12 @@ impl Probe {
         let result = self.call(Syscall::N_epoll_wait, args);
         #[cfg(not(target_arch = "x86_64"))]
         let result = match self.vehicle {
-            // SAFETY: the buffer holds `maxevents` entries.
-            Vehicle::Libc => crate::vehicle::fold_errno(unsafe {
-                libc::epoll_wait(epfd, events.as_mut_ptr(), maxevents, timeout_ms)
-            } as i64),
+            Vehicle::Libc => {
+                // SAFETY: the buffer holds `maxevents` entries.
+                crate::vehicle::door(|| unsafe {
+                    libc::epoll_wait(epfd, events.as_mut_ptr(), maxevents, timeout_ms)
+                } as i64)
+            }
             Vehicle::Syscall => self.call(Syscall::N_epoll_pwait, args),
         };
         let builder = self

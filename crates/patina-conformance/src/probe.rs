@@ -573,7 +573,7 @@ impl Probe {
     #[cfg(not(target_arch = "x86_64"))]
     fn legacy(&self, libc_door: impl FnOnce() -> i64, row: Syscall, args: Args) -> i64 {
         match self.vehicle {
-            Vehicle::Libc => crate::vehicle::fold_errno(libc_door()),
+            Vehicle::Libc => crate::vehicle::door(libc_door),
             Vehicle::Syscall => self.call(row, args),
         }
     }

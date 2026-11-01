@@ -866,20 +866,22 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
         })
     }),
     // ---- page-cache advice and writeback ----
-    (
-        Syscall::N_sync,
-        |_, _| ret_i32(crate::advice::patina_sync()),
-    ),
+    (Syscall::N_sync, |_, _| {
+        crate::abi::raw(crate::advice::sync().map(|()| 0))
+    }),
     (Syscall::N_syncfs, |_, a| {
-        ret_i32(crate::advice::patina_syncfs(arg_fd(a[0]) as c_int))
+        crate::abi::raw(crate::advice::syncfs(arg_fd(a[0]) as c_int).map(|()| 0))
     }),
     (Syscall::N_sync_file_range, |_, a| {
-        ret_i32(crate::advice::patina_sync_file_range(
-            arg_fd(a[0]) as c_int,
-            a[1] as i64,
-            a[2] as i64,
-            a[3] as u32,
-        ))
+        crate::abi::raw(
+            crate::advice::sync_file_range(
+                arg_fd(a[0]) as c_int,
+                a[1] as i64,
+                a[2] as i64,
+                a[3] as u32,
+            )
+            .map(|()| 0),
+        )
     }),
     (Syscall::N_readahead, |_, a| {
         ret_i32(crate::advice::patina_readahead(

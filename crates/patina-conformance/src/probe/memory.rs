@@ -12,7 +12,7 @@
 use super::{Probe, cstr, page_size};
 use crate::observe::{Id, Norm};
 use crate::record::EventBuilder;
-use crate::vehicle::{Vehicle, fold_errno};
+use crate::vehicle::{Vehicle, door};
 use patina_dst_syscalls::Syscall;
 use serde_json::Value;
 
@@ -241,7 +241,7 @@ impl Probe {
         let spec = (len, prot, flags, fd, offset);
         let result = match self.vehicle {
             // SAFETY: the scenario owns the hint and the descriptor.
-            Vehicle::Libc => fold_errno(unsafe {
+            Vehicle::Libc => door(|| unsafe {
                 libc::mmap64(
                     hint.raw as *mut libc::c_void,
                     len,

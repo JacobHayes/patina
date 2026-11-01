@@ -27,6 +27,7 @@ use std::ffi::c_int;
 
 use patina_dst_abi::Fd;
 
+use crate::abi::{Errno, SysResult};
 use crate::fdtable::{FdKind, Resolved};
 use crate::{EBADF, EINVAL, EOPNOTSUPP, ESPIPE, O_READ, fail, fdget, set_errno, thread, uaccess};
 
@@ -236,7 +237,6 @@ pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> 
     }
 }
 
-#[unsafe(no_mangle)]
 /// `sync_file_range(2)`: no durability to promise, so once the kernel's
 /// refusals pass — the descriptor first (`EBADF`), then the flags and the range
 /// (`EINVAL` for an unknown flag, a negative offset or end, or a range that
@@ -244,38 +244,36 @@ pub(crate) fn cachestat(raw_fd: c_int, range: usize, out: usize, flags: u32) -> 
 /// it only waits: with `WAIT_BEFORE` or `WAIT_AFTER`, a regular file or a
 /// directory reports the writeback error its description has not seen, once
 /// (`file_fdatawait_range`).
-pub extern "C" fn patina_sync_file_range(
+pub(crate) fn sync_file_range(
     raw_fd: c_int,
     offset: i64,
     length: i64,
     flags: u32,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered(fdget(raw_fd).and_then(|resolved| {
-        let end = offset.wrapping_add(length);
-        if flags & !SYNC_FILE_RANGE_VALID != 0 || offset < 0 || end < 0 || end < offset {
-            return Err(EINVAL);
-        }
-        if !has_mapping(&resolved) {
-            return Err(ESPIPE);
-        }
-        if flags & SYNC_FILE_RANGE_WAIT != 0 && resolved.kind.is_fs() {
-            let handle = Fd(resolved.handle);
-            crate::with_context(|context| context.fs_wait_writeback(handle))?;
-        }
-        Ok(())
-    }))
+) -> SysResult<()> {
+    fdget(raw_fd)
+        .and_then(|resolved| {
+            let end = offset.wrapping_add(length);
+            if flags & !SYNC_FILE_RANGE_VALID != 0 || offset < 0 || end < 0 || end < offset {
+                return Err(EINVAL);
+            }
+            if !has_mapping(&resolved) {
+                return Err(ESPIPE);
+            }
+            if flags & SYNC_FILE_RANGE_WAIT != 0 && resolved.kind.is_fs() {
+                let handle = Fd(resolved.handle);
+                crate::with_context(|context| context.fs_wait_writeback(handle))?;
+            }
+            Ok(())
+        })
+        .map_err(Errno::new)
 }
 
-#[unsafe(no_mangle)]
 /// `sync(2)`: every change on the volume becomes durable. Never fails: a
 /// writeback error it meets stays for `fsync` and `syncfs` to report.
-pub extern "C" fn patina_sync() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered(crate::fs_sync_volume())
+pub(crate) fn sync() -> SysResult<()> {
+    crate::fs_sync_volume().map_err(Errno::new)
 }
 
-#[unsafe(no_mangle)]
 /// `syncfs(2)`: the filesystem a descriptor is on made durable. An empty slot
 /// or an `O_PATH` descriptor is `EBADF` (`fdget`); a descriptor on the volume
 /// syncs it and reports the writeback error on it the descriptor's open file
@@ -283,31 +281,32 @@ pub extern "C" fn patina_sync() -> c_int {
 /// socket, an eventfd) has nothing to write back. A FIFO on the volume syncs
 /// it, but its description is the pipe's, not the filesystem's, so it
 /// reports nothing (a divergence: natively it reports like any other).
-pub extern "C" fn patina_syncfs(raw_fd: c_int) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    answered(fdget(raw_fd).and_then(|resolved| match resolved.kind {
-        FdKind::File | FdKind::Dir => crate::fs_sync_volume_through(Fd(resolved.handle)),
-        FdKind::Pipe if thread::pipe_filesystem(raw_fd) == Some(crate::PATINA_FS_VOLUME) => {
-            crate::fs_sync_volume()
-        }
-        FdKind::OPath
-        | FdKind::Stdin
-        | FdKind::Stdout
-        | FdKind::Stderr
-        | FdKind::MemDevice
-        | FdKind::Socket
-        | FdKind::EventFd
-        | FdKind::TimerFd
-        | FdKind::Inotify
-        | FdKind::SignalFd
-        | FdKind::Epoll
-        | FdKind::Pidfd
-        | FdKind::Namespace
-        | FdKind::NamespacePath
-        | FdKind::Proc
-        | FdKind::ProcDir
-        | FdKind::Pipe => Ok(()),
-    }))
+pub(crate) fn syncfs(raw_fd: c_int) -> SysResult<()> {
+    fdget(raw_fd)
+        .and_then(|resolved| match resolved.kind {
+            FdKind::File | FdKind::Dir => crate::fs_sync_volume_through(Fd(resolved.handle)),
+            FdKind::Pipe if thread::pipe_filesystem(raw_fd) == Some(crate::PATINA_FS_VOLUME) => {
+                crate::fs_sync_volume()
+            }
+            FdKind::OPath
+            | FdKind::Stdin
+            | FdKind::Stdout
+            | FdKind::Stderr
+            | FdKind::MemDevice
+            | FdKind::Socket
+            | FdKind::EventFd
+            | FdKind::TimerFd
+            | FdKind::Inotify
+            | FdKind::SignalFd
+            | FdKind::Epoll
+            | FdKind::Pidfd
+            | FdKind::Namespace
+            | FdKind::NamespacePath
+            | FdKind::Proc
+            | FdKind::ProcDir
+            | FdKind::Pipe => Ok(()),
+        })
+        .map_err(Errno::new)
 }
 
 #[cfg(test)]

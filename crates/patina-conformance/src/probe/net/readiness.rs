@@ -181,7 +181,7 @@ impl Probe {
         #[cfg(not(target_arch = "x86_64"))]
         let result = match self.vehicle {
             // SAFETY: local sets and timeval.
-            Vehicle::Libc => fold_errno(unsafe {
+            Vehicle::Libc => door(|| unsafe {
                 libc::select(
                     nfds,
                     &mut read,

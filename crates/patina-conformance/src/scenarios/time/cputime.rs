@@ -112,6 +112,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_times, Syscall::N_getrusage],
-    symbols: &["syscall", "getrusage", "sysconf", "clock_gettime"],
+    symbols: &["syscall", "getrusage", "sysconf", "clock_gettime", "times"],
     ..DEFAULTS
 };

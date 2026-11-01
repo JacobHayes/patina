@@ -559,7 +559,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_sync_file_range`: the kernel refusals (EBADF, then EINVAL for flags and range, then ESPIPE for a node without a mapping) then, since it promises no durability, nothing but a WAIT flag's check of the file's writeback errors: one its description has not seen is reported once, as fsync reports it.",
+                "Routed into `advice::sync_file_range`: the kernel refusals (EBADF, then EINVAL for flags and range, then ESPIPE for a node without a mapping) then, since it promises no durability, nothing but a WAIT flag's check of the file's writeback errors: one its description has not seen is reported once, as fsync reports it.",
                 None,
             ),
             Syscall::N_vmsplice => r(
@@ -768,7 +768,7 @@ macro_rules! late_rows {
                 $id,
                 Family::Fs,
                 Disposition::Modeled,
-                "Routed into `patina_syncfs`: fdget (O_PATH EBADF); a volume descriptor makes the volume durable and reports the volume's writeback error its description has not seen, once; a pseudo-filesystem one (pipe, socket, eventfd) has nothing to write back.",
+                "Routed into `advice::syncfs`: fdget (O_PATH EBADF); a volume descriptor makes the volume durable and reports the volume's writeback error its description has not seen, once; a pseudo-filesystem one (pipe, socket, eventfd) has nothing to write back.",
                 None,
             ),
             Syscall::N_sendmmsg => r(

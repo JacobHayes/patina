@@ -50,7 +50,9 @@ systems.
   `testbeds/native-boundary/README.md`.
 - **Syscall conformance** (`crates/patina-conformance`): one scenario per
   behavior, run natively (the oracle) and under Patina through every vehicle the
-  architecture has.
+  architecture has. The `libc` vehicle calls the shim's wrapper of every row
+  it defines one for, and a wrapper that fails without setting errno kills the
+  probe, which fails the leg on every host.
 - **Native smoke** (`scripts/smoke-native.sh`): one ordinary `std` program
   compared across seeds, record and replay, and cold and warm builds, plus a
   canonical result literal.

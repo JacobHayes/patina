@@ -234,13 +234,13 @@ extern "C" fn fdatasync(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 extern "C" fn sync() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::advice::patina_sync();
+    let _ = crate::advice::sync();
 }
 /// `syncfs(2)` through `fd`.
 #[unsafe(no_mangle)]
 extern "C" fn syncfs(fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::advice::patina_syncfs(fd)
+    crate::abi::libc_result(crate::advice::syncfs(fd).map(|()| 0), -1)
 }
 /// `sync_file_range(2)`, a cancellation point.
 #[unsafe(no_mangle)]
@@ -252,7 +252,10 @@ extern "C" fn sync_file_range(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     cancel(c"sync_file_range");
-    crate::advice::patina_sync_file_range(fd, offset, nbytes, flags)
+    crate::abi::libc_result(
+        crate::advice::sync_file_range(fd, offset, nbytes, flags).map(|()| 0),
+        -1,
+    )
 }
 #[unsafe(no_mangle)]
 extern "C" fn lseek64(fd: c_int, offset: libc::off64_t, whence: c_int) -> libc::off64_t {

@@ -7,7 +7,7 @@
 
 use super::{Probe, StatView, Statfs, cstr, filled, lens_of, read_vector, write_vector};
 use crate::observe::{Id, Norm};
-use crate::vehicle::fold_errno;
+use crate::vehicle::door;
 use libc::c_int;
 
 // The 64-bit layouts are the plain ones on every 64-bit Linux target.
@@ -34,7 +34,7 @@ impl Probe {
     pub fn open64(&self, path: &str, flags: i32, mode: u32) -> i32 {
         let c = cstr(path);
         // SAFETY: a NUL-terminated path; the mode is read only with O_CREAT.
-        let result = fold_errno(unsafe { libc::open64(c.as_ptr(), flags, mode) }.into());
+        let result = door(|| unsafe { libc::open64(c.as_ptr(), flags, mode) }.into());
         self.rec
             .event("open64", result)
             .arg("path", path)
@@ -48,7 +48,7 @@ impl Probe {
     pub fn openat64(&self, dirfd: i32, path: &str, flags: i32, mode: u32) -> i32 {
         let c = cstr(path);
         // SAFETY: a NUL-terminated path; the mode is read only with O_CREAT.
-        let result = fold_errno(unsafe { libc::openat64(dirfd, c.as_ptr(), flags, mode) }.into());
+        let result = door(|| unsafe { libc::openat64(dirfd, c.as_ptr(), flags, mode) }.into());
         let builder = self.rec.event("openat64", result);
         self.fd_arg(builder, "dirfd", dirfd)
             .arg("path", path)
@@ -77,14 +77,16 @@ impl Probe {
         let c = path.map(cstr);
         let c_path = c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         // SAFETY: a NUL-terminated path and a stat64-sized buffer (or NULL).
-        let result = fold_errno(i64::from(unsafe {
-            match by {
-                StatBy::Path(_) => libc::stat64(c_path, buf),
-                StatBy::Link(_) => libc::lstat64(c_path, buf),
-                StatBy::Fd(fd) => libc::fstat64(fd, buf),
-                StatBy::At(dirfd, _, flags) => libc::fstatat64(dirfd, c_path, buf, flags),
-            }
-        }));
+        let result = door(|| {
+            i64::from(unsafe {
+                match by {
+                    StatBy::Path(_) => libc::stat64(c_path, buf),
+                    StatBy::Link(_) => libc::lstat64(c_path, buf),
+                    StatBy::Fd(fd) => libc::fstat64(fd, buf),
+                    StatBy::At(dirfd, _, flags) => libc::fstatat64(dirfd, c_path, buf, flags),
+                }
+            })
+        });
         let builder = self.rec.event(op, result);
         let builder = match by {
             StatBy::Path(path) | StatBy::Link(path) => builder.arg("path", path),
@@ -108,9 +110,9 @@ impl Probe {
         let c = cstr(path);
         let mut st = Statfs::default();
         // SAFETY: a NUL-terminated path and a statfs64-sized buffer.
-        let result = fold_errno(i64::from(unsafe {
-            libc::statfs64(c.as_ptr(), (&mut st as *mut Statfs).cast())
-        }));
+        let result = door(|| {
+            i64::from(unsafe { libc::statfs64(c.as_ptr(), (&mut st as *mut Statfs).cast()) })
+        });
         let builder = self.rec.event("statfs64", result).arg("path", path);
         self.statfs64_emit(builder, result, st)
     }
@@ -119,9 +121,8 @@ impl Probe {
     pub fn fstatfs64(&self, fd: i32) -> (i64, Option<Statfs>) {
         let mut st = Statfs::default();
         // SAFETY: a statfs64-sized buffer.
-        let result = fold_errno(i64::from(unsafe {
-            libc::fstatfs64(fd, (&mut st as *mut Statfs).cast())
-        }));
+        let result =
+            door(|| i64::from(unsafe { libc::fstatfs64(fd, (&mut st as *mut Statfs).cast()) }));
         let builder = self.rec.event("fstatfs64", result);
         let builder = self.fd_arg(builder, "fd", fd);
         self.statfs64_emit(builder, result, st)
@@ -147,9 +148,7 @@ impl Probe {
         let (mut buffers, iov) = read_vector(lens);
         // SAFETY: every iovec names a live buffer of its length.
         let result =
-            fold_errno(
-                unsafe { libc::preadv64(fd, iov.as_ptr(), iov.len() as c_int, offset) } as i64,
-            );
+            door(|| unsafe { libc::preadv64(fd, iov.as_ptr(), iov.len() as c_int, offset) } as i64);
         let segments = filled(&mut buffers, result);
         let builder = self.rec.event("preadv64", result);
         let builder = self
@@ -170,8 +169,8 @@ impl Probe {
         let iov = write_vector(segments);
         // SAFETY: every iovec names a live buffer of its length, only read.
         let result =
-            fold_errno(
-                unsafe { libc::pwritev64(fd, iov.as_ptr(), iov.len() as c_int, offset) } as i64,
+            door(
+                || unsafe { libc::pwritev64(fd, iov.as_ptr(), iov.len() as c_int, offset) } as i64,
             );
         let builder = self.rec.event("pwritev64", result);
         self.fd_arg(builder, "fd", fd)
@@ -183,7 +182,7 @@ impl Probe {
 
     pub fn lseek64(&self, fd: i32, offset: i64, whence: i32) -> i64 {
         // SAFETY: plain values.
-        let result = fold_errno(unsafe { libc::lseek64(fd, offset, whence) });
+        let result = door(|| unsafe { libc::lseek64(fd, offset, whence) });
         let builder = self.rec.event("lseek64", result);
         self.fd_arg(builder, "fd", fd)
             .arg("offset", offset)
@@ -194,7 +193,7 @@ impl Probe {
 
     pub fn ftruncate64(&self, fd: i32, len: i64) -> i64 {
         // SAFETY: plain values.
-        let result = fold_errno(unsafe { libc::ftruncate64(fd, len) }.into());
+        let result = door(|| unsafe { libc::ftruncate64(fd, len) }.into());
         let builder = self.rec.event("ftruncate64", result);
         self.fd_arg(builder, "fd", fd).arg("len", len).emit();
         result
@@ -203,7 +202,7 @@ impl Probe {
     pub fn truncate64(&self, path: &str, len: i64) -> i64 {
         let c = cstr(path);
         // SAFETY: a NUL-terminated path.
-        let result = fold_errno(unsafe { libc::truncate64(c.as_ptr(), len) }.into());
+        let result = door(|| unsafe { libc::truncate64(c.as_ptr(), len) }.into());
         self.rec
             .event("truncate64", result)
             .arg("path", path)
@@ -214,7 +213,7 @@ impl Probe {
 
     pub fn fallocate64(&self, fd: i32, mode: i32, offset: i64, len: i64) -> i64 {
         // SAFETY: plain values.
-        let result = fold_errno(unsafe { libc::fallocate64(fd, mode, offset, len) }.into());
+        let result = door(|| unsafe { libc::fallocate64(fd, mode, offset, len) }.into());
         let builder = self.rec.event("fallocate64", result);
         self.fd_arg(builder, "fd", fd)
             .arg("mode", mode)
@@ -240,7 +239,7 @@ impl Probe {
     /// `fcntl64(fd, cmd, arg)` for the integer-argument commands.
     pub fn fcntl64(&self, fd: i32, cmd: i32, arg: i64) -> i64 {
         // SAFETY: an integer-argument command.
-        let result = fold_errno(unsafe { fcntl64(fd, cmd, arg) }.into());
+        let result = door(|| unsafe { fcntl64(fd, cmd, arg) }.into());
         let builder = self.rec.event("fcntl64", result);
         let builder = self
             .fd_arg(builder, "fd", fd)
@@ -276,8 +275,7 @@ impl Probe {
         lock.l_start = start;
         lock.l_len = len;
         // SAFETY: a lock command with a live flock64.
-        let result =
-            fold_errno(unsafe { fcntl64(fd, cmd, &mut lock as *mut libc::flock64) }.into());
+        let result = door(|| unsafe { fcntl64(fd, cmd, &mut lock as *mut libc::flock64) }.into());
         let builder = self.rec.event("fcntl64", result);
         let builder = self
             .fd_arg(builder, "fd", fd)

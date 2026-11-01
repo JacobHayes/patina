@@ -67,6 +67,13 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
 - Interposer semantics should match the public path they replace. Raw-syscall
   dispatch, SUD handling, and C ABI entry points should route through the same
   runtime behavior as the corresponding POSIX interposer whenever possible.
+- A model entry no C code calls is a Rust function answering `SysResult`, not
+  an `extern "C"` int that fails as -1 with the error in the model's own errno
+  cell: the libc door projects it with `abi::libc_result` (which writes the
+  guest's errno) and the SUD row with `abi::raw`, so neither can hand the
+  guest a -1 with errno unset. The conformance `libc` vehicle clears errno
+  before every door and aborts on a -1 that leaves it clear, and it drives
+  every door that serves a row (`a_row_spelled_as_syscall_has_no_shim_door`).
 - There is ONE descriptor table (`src/fdtable.rs`), and every guest number goes
   through it. A real guest mixes the two doors in one object's lifetime:
   `cap-std` opens its base directory through std (libc → the C interposer) and
