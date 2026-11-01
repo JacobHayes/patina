@@ -60,16 +60,31 @@ pub(crate) fn fs_handle(raw_fd: c_int) -> Result<Fd, c_int> {
 /// the creating step's own Context closure, which takes no scheduling point,
 /// so no other task takes the number between them; the caller installs the
 /// result before its next scheduling point.
+#[cfg(target_os = "linux")]
 pub(crate) fn with_free_number<T>(
     create: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
-    with_context(|context| {
-        let free = fd_table().lock().ensure_free(1);
-        match free {
-            Ok(()) => create(context).map(Ok),
-            Err(errno) => Ok(Err(errno)),
-        }
-    })?
+    with_context(|context| free_number_then(context, create))?
+}
+
+/// [`with_free_number`] without its scheduling point: the open of a node a
+/// path walk ([`crate::paths::resolve`]) just found, which took the call's
+/// point already, so no other task changes the node in between.
+pub(crate) fn with_free_number_walked<T>(
+    create: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, c_int> {
+    with_context_raw(|context| free_number_then(context, create))?
+}
+
+fn free_number_then<T>(
+    context: &mut Context,
+    create: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<Result<T, c_int>, RuntimeError> {
+    let free = fd_table().lock().ensure_free(1);
+    match free {
+        Ok(()) => create(context).map(Ok),
+        Err(errno) => Ok(Err(errno)),
+    }
 }
 
 /// `EMFILE` unless `count` guest numbers are free, through

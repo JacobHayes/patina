@@ -9,12 +9,15 @@ use super::*;
 /// peer run whatever the path, `stat` never answers an unfollowed symlink,
 /// and a directory read never lists a description `dup2` replaced and
 /// reports access to the directory it listed.
-const PATH_RACE_ANSWERS: [(&str, &str); 5] = [
+const PATH_RACE_ANSWERS: [(&str, &str); 8] = [
     ("poll", "seen"),
     ("starve", "none"),
     ("stat_swap", "0"),
     ("getdents_dup2", "stale=0 failed=0"),
     ("getdents_notify", "0"),
+    ("dirfd_ops", "none"),
+    ("fifo_rename", "0"),
+    ("rebind_rename", "0"),
 ];
 
 /// RED before, each on its own: a call whose path walk failed took no
@@ -29,6 +32,14 @@ const PATH_RACE_ANSWERS: [(&str, &str); 5] = [
 /// installing the old directory's snapshot under the number `dup2` gave to
 /// the other one, and it reported access to the directory the number named
 /// before that scheduling point while it listed the one named after it.
+/// Every directory-relative call but stat took a second scheduling point
+/// between the walk and the operation, so a rename in between made it act
+/// in the directory renamed over the held one's old name (`openat(fd, ".")`
+/// opened it, `unlinkat(fd, "f")` removed its `f`), or fail; a
+/// FIFO open took one before it held the walked inode, so a file renamed
+/// over the FIFO reclaimed it and the open failed `ENOENT`; and a refused
+/// second `bind` removed its node by name after one, deleting a file renamed
+/// over it.
 #[test]
 fn path_and_directory_calls_are_one_step_against_other_threads() {
     let g = Guest::assert_build("path_race_probe.rs");

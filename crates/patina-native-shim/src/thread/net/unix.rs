@@ -177,17 +177,17 @@ fn make_node(path: &str) -> Result<paths::Resolved, c_int> {
         return Err(EADDRINUSE);
     }
     let mode = 0o777 & !paths::umask();
-    crate::with_context(|context| context.fs_make_node(&resolved.path, FsNode::Socket, mode))
+    crate::with_context_raw(|context| context.fs_make_node(&resolved.path, FsNode::Socket, mode))
         .map_err(|errno| {
-            if errno == crate::EEXIST {
-                EADDRINUSE
-            } else {
-                errno
-            }
-        })?;
+        if errno == crate::EEXIST {
+            EADDRINUSE
+        } else {
+            errno
+        }
+    })?;
     #[cfg(target_os = "linux")]
     crate::fsnotify::created(&resolved.path);
-    match paths::resolve(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
+    match paths::resolve_more(paths::AT_FDCWD, path, paths::RESOLVE_NOFOLLOW)? {
         paths::Resolution::Volume(made) if made.metadata.is_some() => Ok(made),
         paths::Resolution::Volume(_) => Err(ENOENT),
         paths::Resolution::Virtual(entry) => entry.unmodeled("binding a socket"),
@@ -276,7 +276,9 @@ pub(super) fn bind(handle: c_int, bytes: &[u8]) -> Result<(), c_int> {
                 // The kernel refuses a second bind only after the node
                 // exists, then takes the node back out (`vfs_unlink`).
                 drop(state);
-                let removed = crate::with_context(|context| context.fs_remove_file(&target));
+                // The node this call just made, in the same step: no other
+                // task renames something else over its name first.
+                let removed = crate::with_context_raw(|context| context.fs_remove_file(&made.path));
                 #[cfg(target_os = "linux")]
                 if let (Ok(()), Some(before)) = (removed, &made.metadata) {
                     crate::fsnotify::removed(&made.path, before);

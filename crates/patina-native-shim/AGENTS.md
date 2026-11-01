@@ -41,7 +41,10 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   its read) takes its scheduling point first (`boundary_point`;
   `paths::resolve` takes it on every answer, an early refusal and a virtual
   entry too) and then runs through `with_context_raw`, so no other task
-  changes the node in between.
+  changes the node in between. That holds for every operation on a walked
+  path (open, through `with_free_number_walked`; removal, creation, rename,
+  link, the attribute setters), and a call's second walk (a rename's or a
+  link's other name) takes `paths::resolve_more`, which takes no point.
 - A shared symbol allowance is not a fix. If a host effect escapes, first add or
   harden detection so the class fails loudly, then model, interpose, or deny-trap
   the specific surface.

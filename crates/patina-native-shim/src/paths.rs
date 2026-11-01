@@ -37,7 +37,7 @@ use crate::fdtable::FdKind;
 use crate::memdev::MemDevice;
 use crate::{
     EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, mark_boundary,
-    resolve_fd, with_bookkeeping, with_context,
+    resolve_fd, with_bookkeeping, with_context, with_context_raw,
 };
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
@@ -274,7 +274,7 @@ pub(crate) fn searchable_directory(dirfd: c_int, path: &str) -> Result<Resolved,
 /// working directory.
 pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
     let resolved = searchable_directory(dirfd, path)?;
-    let fd = with_context(|context| context.fs_open_path_unrecorded(&resolved.path))?;
+    let fd = with_context_raw(|context| context.fs_open_path_unrecorded(&resolved.path))?;
     #[cfg(target_os = "linux")]
     crate::fsnotify::bound(fd, &resolved.path);
     replace_cwd(fd)
@@ -458,8 +458,20 @@ enum Step {
 /// point alone: an answer that needs no filesystem needs no runtime either
 /// (other tasks exist only under one), and every lookup that does reach the
 /// filesystem installs it or fails closed ([`namei`]).
+///
+/// That point is the call's only one: the operation on what the walk found
+/// runs through [`with_context_raw`](crate::with_context_raw), and a second
+/// walk of the same call (a rename's or a link's other name) through
+/// [`resolve_more`], so no other task renames or removes anything between
+/// the walk and the operation, as none can inside the kernel's call.
 pub(crate) fn resolve(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution, c_int> {
     crate::thread::sched_point()?;
+    resolve_more(dirfd, path, flags)
+}
+
+/// [`resolve`] without its scheduling point: a further walk inside a call
+/// whose first walk already took it.
+pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resolution, c_int> {
     if path.len() >= PATH_MAX {
         return Err(ENAMETOOLONG);
     }

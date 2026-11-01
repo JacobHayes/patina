@@ -32,10 +32,11 @@ pub(crate) fn fifo_changed(raw_fd: c_int, mask: u32) {
 }
 
 /// The driver open of canonical `path` for a new descriptor, while a number
-/// is free for it ([`with_free_number`]); the handle holds the name it was
+/// is free for it ([`with_free_number_walked`]: the walk that found `path`
+/// took the call's scheduling point); the handle holds the name it was
 /// opened through (`fsnotify::bind`) from the same step.
 fn driver_open(path: &str, flags: OpenFlags) -> Result<Fd, c_int> {
-    with_free_number(|context| {
+    with_free_number_walked(|context| {
         let fd = context.fs_open(path, flags)?;
         #[cfg(target_os = "linux")]
         let _ = fsnotify::bind(&mut context.bookkeeping(), fd, path);

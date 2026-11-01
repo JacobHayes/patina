@@ -737,7 +737,7 @@ pub unsafe extern "C" fn patina_chmod(
             | FsEntryKind::CharDevice,
         ) => {}
     }
-    match with_context(|context| context.fs_set_mode(&resolved.path, mode)) {
+    match with_context_raw(|context| context.fs_set_mode(&resolved.path, mode)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             fsnotify::on_path(&resolved.path, fsnotify::IN_ATTRIB);
@@ -932,7 +932,9 @@ pub unsafe extern "C" fn patina_utimensat(
     if resolved.metadata.is_none() {
         return fail(ENOENT);
     }
-    match with_context(|context| context.fs_set_times_by_path_spec(&resolved.path, atime, mtime)) {
+    match with_context_raw(|context| {
+        context.fs_set_times_by_path_spec(&resolved.path, atime, mtime)
+    }) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             fsnotify::on_path(&resolved.path, shown);
@@ -1092,7 +1094,7 @@ pub unsafe extern "C" fn patina_chown(
         Err(errno) => return fail(errno),
     };
     let result = if metadata.kind == FsEntryKind::Symlink {
-        with_context(|context| {
+        with_context_raw(|context| {
             context.fs_set_times_by_path(
                 &resolved.path,
                 Some(metadata.atime_nanos),
@@ -1100,7 +1102,7 @@ pub unsafe extern "C" fn patina_chown(
             )
         })
     } else {
-        with_context(|context| context.fs_set_mode(&resolved.path, mode))
+        with_context_raw(|context| context.fs_set_mode(&resolved.path, mode))
     };
     match result {
         Ok(()) => {
@@ -1216,7 +1218,7 @@ pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, leng
             FsEntryKind::File => metadata.ino,
         },
     };
-    match with_context(|context| context.fs_set_len_by_path(&resolved.path, length)) {
+    match with_context_raw(|context| context.fs_set_len_by_path(&resolved.path, length)) {
         Ok(()) => {
             mem::resized_ino(ino, length);
             #[cfg(target_os = "linux")]

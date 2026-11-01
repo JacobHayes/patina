@@ -26,7 +26,22 @@
 //!   directory. A `getdents64` reports access to the directory it lists, so
 //!   a read that listed `b` reported `b`'s access, not `a`'s. The answer
 //!   counts the rounds where it did not.
-use std::ffi::{c_int, c_long};
+//! - `dirfd_ops`: the main thread holds directory `d` open, and another
+//!   thread keeps renaming it aside and a second directory over its name,
+//!   and back, while the main thread makes each directory-relative call
+//!   family ([`DIRFD_OPS`]) through the held descriptor. Each acts in the
+//!   held directory whatever its name is now; the answer lists the families
+//!   that ever acted in the other one or failed, or `none`.
+//! - `fifo_rename`: another thread renames a regular file over a FIFO while
+//!   the main thread opens the FIFO read-write. The name exists throughout,
+//!   so the open reaches one node or the other; the answer counts the opens
+//!   that failed.
+//! - `rebind_rename`: a bound socket binds again to a free name, which the
+//!   kernel refuses after it made the name's node, then removes that node;
+//!   another thread renames a regular file over the name meanwhile. The
+//!   removal takes the node the call made, never the renamed file; the answer
+//!   counts the rounds that lost it.
+use std::ffi::{CStr, c_char, c_int, c_long};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::os::unix::fs::symlink;
 
@@ -52,13 +67,397 @@ const SYS_INOTIFY_INIT1: c_long = 26;
 const SYS_INOTIFY_ADD_WATCH: c_long = 27;
 const IN_NONBLOCK: c_int = 0o4000;
 const IN_ACCESS: u32 = 1;
+const O_PATH: c_int = 0o10000000;
+const O_WRONLY_CREAT: c_int = 0o101;
+
+/// Keep renaming `d` aside and `ro` over its name, and back, until `stop`.
+fn swapper(stop: &'static AtomicBool) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(SeqCst) {
+            std::fs::rename("/tmp/d", "/tmp/t").unwrap();
+            std::fs::rename("/tmp/ro", "/tmp/d").unwrap();
+            std::fs::rename("/tmp/d", "/tmp/ro").unwrap();
+            std::fs::rename("/tmp/t", "/tmp/d").unwrap();
+        }
+    })
+}
+
+fn fifo_rename() -> usize {
+    (0..ROUNDS)
+        .filter(|_| {
+            // SAFETY: a NUL-terminated path.
+            assert_eq!(unsafe { mkfifo(c"/tmp/fifo".as_ptr(), 0o600) }, 0, "mkfifo");
+            std::fs::write("/tmp/regular", b"regular").unwrap();
+            let peer =
+                std::thread::spawn(|| std::fs::rename("/tmp/regular", "/tmp/fifo").unwrap());
+            // SAFETY: a NUL-terminated path; `O_RDWR` never waits for a peer.
+            let fd = unsafe { open(c"/tmp/fifo".as_ptr(), 2) };
+            if fd >= 0 {
+                // SAFETY: the descriptor just opened.
+                unsafe { close(fd) };
+            }
+            peer.join().unwrap();
+            std::fs::remove_file("/tmp/fifo").unwrap();
+            fd < 0
+        })
+        .count()
+}
+
+fn rebind_rename() -> usize {
+    use std::os::fd::AsRawFd;
+    let name = b"/tmp/second";
+    let mut addr = [0u8; 110];
+    addr[..2].copy_from_slice(&1u16.to_ne_bytes());
+    addr[2..2 + name.len()].copy_from_slice(name);
+    (0..ROUNDS)
+        .filter(|_| {
+            let sock = std::os::unix::net::UnixDatagram::bind("/tmp/first").unwrap();
+            std::fs::write("/tmp/regular", b"regular").unwrap();
+            let peer =
+                std::thread::spawn(|| std::fs::rename("/tmp/regular", "/tmp/second").unwrap());
+            // SAFETY: a sockaddr_un `addr` holds, with its length.
+            let rebound = unsafe { bind(sock.as_raw_fd(), addr.as_ptr(), (3 + name.len()) as u32) };
+            assert_eq!(rebound, -1, "a second bind is refused");
+            peer.join().unwrap();
+            let lost = std::fs::read("/tmp/second").map_or(true, |bytes| bytes != b"regular");
+            drop(sock);
+            std::fs::remove_file("/tmp/first").unwrap();
+            let _ = std::fs::remove_file("/tmp/second");
+            lost
+        })
+        .count()
+}
+
+/// A file `name` in `dir` holding `tag`, as `dir`'s own.
+fn put(dir: c_int, name: &CStr, tag: u8) {
+    // SAFETY: a NUL-terminated name relative to a held directory.
+    let fd = unsafe { openat(dir, name.as_ptr(), O_WRONLY_CREAT, 0o644) };
+    assert!(fd >= 0, "create {name:?}: {}", std::io::Error::last_os_error());
+    // SAFETY: `fd` is the file just opened; one byte from `tag`.
+    unsafe {
+        assert_eq!(write(fd, (&raw const tag).cast(), 1), 1);
+        close(fd);
+    }
+}
+
+/// `name`'s statx in `dir` (`""`: `dir` itself), not following a trailing
+/// symlink, or `None`.
+fn look(dir: c_int, name: &CStr) -> Option<[u8; 256]> {
+    let mut out = Statx([0; 256]);
+    let flags = AT_SYMLINK_NOFOLLOW | if name.is_empty() { AT_EMPTY_PATH } else { 0 };
+    // SAFETY: `out` is larger than `struct statx`.
+    let found = unsafe { statx(dir, name.as_ptr(), flags, 0xfff, &mut out) } == 0;
+    found.then_some(out.0)
+}
+
+/// Room for `struct statx`, aligned as it is.
+#[repr(C, align(8))]
+struct Statx([u8; 256]);
+
+fn has(dir: c_int, name: &CStr) -> bool {
+    look(dir, name).is_some()
+}
+
+/// `statx` fields: `stx_mode` (u16 at 28), `stx_ino` (u64 at 32) and
+/// `stx_mtime.tv_sec` (i64 at 112).
+fn mode(st: &[u8; 256]) -> u32 {
+    u32::from(u16::from_ne_bytes([st[28], st[29]]))
+}
+fn ino(st: &[u8; 256]) -> u64 {
+    u64::from_ne_bytes(st[32..40].try_into().unwrap())
+}
+fn mtime(st: &[u8; 256]) -> i64 {
+    i64::from_ne_bytes(st[112..120].try_into().unwrap())
+}
+
+/// The byte file `name` in `dir` holds.
+fn tag_of(dir: c_int, name: &CStr) -> Option<u8> {
+    // SAFETY: a NUL-terminated name relative to a held directory.
+    let fd = unsafe { openat(dir, name.as_ptr(), 0) };
+    if fd < 0 {
+        return None;
+    }
+    let mut byte = 0;
+    // SAFETY: one writable byte; `fd` is the file just opened.
+    let got = unsafe { read(fd, (&raw mut byte).cast(), 1) };
+    // SAFETY: as above.
+    unsafe { close(fd) };
+    (got == 1).then_some(byte)
+}
+
+/// One directory-relative call family: what each directory holds first
+/// (`setup`, given the directory's tag), the call through the held one
+/// (`act`), and whether what it did happened in the held directory and
+/// nowhere else (`landed`, read once the renames stopped).
+struct DirfdOp {
+    name: &'static str,
+    setup: fn(dir: c_int, tag: u8),
+    act: fn(held: c_int) -> bool,
+    landed: fn(held: c_int, other: c_int, acted: bool) -> bool,
+}
+
+const HELD: u8 = b'h';
+const OTHER: u8 = b'o';
+const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
+const AT_REMOVEDIR: c_int = 0x200;
+const AT_EMPTY_PATH: c_int = 0x1000;
+const S_IFMT: u32 = 0o170000;
+const S_IFREG: u32 = 0o100000;
+const S_IFIFO: u32 = 0o10000;
+const STAMP: i64 = 1_000_000;
+
+fn nothing(_: c_int, _: u8) {}
+
+fn acted(_: c_int, _: c_int, acted: bool) -> bool {
+    acted
+}
+
+fn file_f(dir: c_int, tag: u8) {
+    put(dir, c"f", tag);
+}
+
+fn file_a(dir: c_int, tag: u8) {
+    put(dir, c"a", tag);
+}
+
+/// Every directory-relative call family the shim walks a path for. A new
+/// family belongs here: its walk and its operation must be one step against
+/// a thread renaming the directory, as they are in the kernel.
+const DIRFD_OPS: &[DirfdOp] = &[
+    DirfdOp {
+        name: "open_dot",
+        setup: nothing,
+        act: |held| {
+            // SAFETY: a NUL-terminated path relative to a held directory.
+            let fd = unsafe { openat(held, c".".as_ptr(), O_PATH | O_RDONLY_DIRECTORY) };
+            if fd < 0 {
+                return false;
+            }
+            let same = matches!(
+                (look(fd, c""), look(held, c"")),
+                (Some(reached), Some(held)) if ino(&reached) == ino(&held)
+            );
+            // SAFETY: the descriptor just opened.
+            unsafe { close(fd) };
+            same
+        },
+        landed: acted,
+    },
+    DirfdOp {
+        name: "open_read",
+        setup: file_f,
+        act: |held| tag_of(held, c"f") == Some(HELD),
+        landed: acted,
+    },
+    DirfdOp {
+        name: "open_create",
+        setup: nothing,
+        act: |held| {
+            // SAFETY: a NUL-terminated name relative to a held directory.
+            let fd = unsafe { openat(held, c"n".as_ptr(), O_WRONLY_CREAT, 0o644) };
+            if fd >= 0 {
+                // SAFETY: the descriptor just opened.
+                unsafe { close(fd) };
+            }
+            fd >= 0
+        },
+        landed: |held, other, acted| acted && has(held, c"n") && !has(other, c"n"),
+    },
+    DirfdOp {
+        name: "stat",
+        // The held directory's `f` is a file, the other's a directory.
+        setup: |dir, tag| {
+            if tag == HELD {
+                put(dir, c"f", tag);
+            } else {
+                // SAFETY: a NUL-terminated name relative to a held directory.
+                assert_eq!(unsafe { mkdirat(dir, c"f".as_ptr(), 0o755) }, 0);
+            }
+        },
+        act: |held| look(held, c"f").is_some_and(|st| mode(&st) & S_IFMT == S_IFREG),
+        landed: acted,
+    },
+    DirfdOp {
+        name: "access",
+        // Only the held directory has an `f`.
+        setup: |dir, tag| {
+            if tag == HELD {
+                put(dir, c"f", tag);
+            }
+        },
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        act: |held| unsafe { faccessat(held, c"f".as_ptr(), 0, 0) } == 0,
+        landed: acted,
+    },
+    DirfdOp {
+        name: "unlink",
+        setup: file_f,
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        act: |held| unsafe { unlinkat(held, c"f".as_ptr(), 0) } == 0,
+        landed: |held, other, acted| acted && !has(held, c"f") && has(other, c"f"),
+    },
+    DirfdOp {
+        name: "mkdir",
+        setup: nothing,
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        act: |held| unsafe { mkdirat(held, c"m".as_ptr(), 0o755) } == 0,
+        landed: |held, other, acted| acted && has(held, c"m") && !has(other, c"m"),
+    },
+    DirfdOp {
+        name: "rmdir",
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        setup: |dir, _| assert_eq!(unsafe { mkdirat(dir, c"m".as_ptr(), 0o755) }, 0),
+        // SAFETY: as above.
+        act: |held| unsafe { unlinkat(held, c"m".as_ptr(), AT_REMOVEDIR) } == 0,
+        landed: |held, other, acted| acted && !has(held, c"m") && has(other, c"m"),
+    },
+    DirfdOp {
+        name: "mknod",
+        setup: nothing,
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        act: |held| unsafe { mknodat(held, c"p".as_ptr(), S_IFIFO | 0o600, 0) } == 0,
+        landed: |held, other, acted| acted && has(held, c"p") && !has(other, c"p"),
+    },
+    DirfdOp {
+        name: "symlink",
+        setup: nothing,
+        // SAFETY: NUL-terminated strings; the link is relative to a held directory.
+        act: |held| unsafe { symlinkat(c"target".as_ptr(), held, c"s".as_ptr()) } == 0,
+        landed: |held, other, acted| acted && has(held, c"s") && !has(other, c"s"),
+    },
+    DirfdOp {
+        name: "readlink",
+        setup: |dir, tag| {
+            let target: &CStr = if tag == HELD { c"held" } else { c"other" };
+            // SAFETY: NUL-terminated strings; the link is relative to a held directory.
+            assert_eq!(unsafe { symlinkat(target.as_ptr(), dir, c"s".as_ptr()) }, 0);
+        },
+        act: |held| {
+            let mut buf = [0u8; 16];
+            // SAFETY: `buf` is writable for its length.
+            let len = unsafe { readlinkat(held, c"s".as_ptr(), buf.as_mut_ptr(), buf.len()) };
+            len >= 0 && &buf[..len as usize] == b"held"
+        },
+        landed: acted,
+    },
+    DirfdOp {
+        name: "rename",
+        setup: file_a,
+        // SAFETY: NUL-terminated names relative to the held directory.
+        act: |held| unsafe { renameat(held, c"a".as_ptr(), held, c"b".as_ptr()) } == 0,
+        landed: |held, other, acted| {
+            acted
+                && tag_of(held, c"b") == Some(HELD)
+                && !has(held, c"a")
+                && has(other, c"a")
+                && !has(other, c"b")
+        },
+    },
+    DirfdOp {
+        name: "link",
+        setup: file_a,
+        // SAFETY: NUL-terminated names relative to the held directory.
+        act: |held| unsafe { linkat(held, c"a".as_ptr(), held, c"b".as_ptr(), 0) } == 0,
+        landed: |held, other, acted| {
+            acted && tag_of(held, c"b") == Some(HELD) && !has(other, c"b")
+        },
+    },
+    DirfdOp {
+        name: "chmod",
+        setup: file_f,
+        // SAFETY: a NUL-terminated name relative to a held directory.
+        act: |held| unsafe { fchmodat(held, c"f".as_ptr(), 0o600, 0) } == 0,
+        landed: |held, other, acted| {
+            let perm = |dir| look(dir, c"f").map(|st| mode(&st) & 0o777);
+            acted && perm(held) == Some(0o600) && perm(other) == Some(0o644)
+        },
+    },
+    DirfdOp {
+        name: "utimens",
+        setup: file_f,
+        act: |held| {
+            let times = [STAMP, 0, STAMP, 0];
+            // SAFETY: two timespecs; a NUL-terminated name relative to a held directory.
+            unsafe { utimensat(held, c"f".as_ptr(), &times, 0) == 0 }
+        },
+        landed: |held, other, acted| {
+            let stamp = |dir| look(dir, c"f").map(|st| mtime(&st));
+            acted && stamp(held) == Some(STAMP) && stamp(other) != Some(STAMP)
+        },
+    },
+];
+
+/// Every [`DIRFD_OPS`] family, `ROUNDS` times each, while another thread
+/// keeps renaming the held directory aside and the other over its name.
+fn dirfd_ops() -> String {
+    static STOP: AtomicBool = AtomicBool::new(false);
+    std::fs::create_dir("/tmp/d").unwrap();
+    std::fs::create_dir("/tmp/ro").unwrap();
+    let held = open_dir(c"/tmp/d");
+    let other = open_dir(c"/tmp/ro");
+    let wrong: Vec<&str> = DIRFD_OPS
+        .iter()
+        .filter(|op| {
+            (0..ROUNDS).any(|_| {
+                (op.setup)(held, HELD);
+                (op.setup)(other, OTHER);
+                STOP.store(false, SeqCst);
+                let renamer = swapper(&STOP);
+                let acted = (op.act)(held);
+                STOP.store(true, SeqCst);
+                renamer.join().unwrap();
+                let landed = (op.landed)(held, other, acted);
+                for dir in [held, other] {
+                    for name in [c"f", c"n", c"a", c"b", c"s", c"p"] {
+                        // SAFETY: NUL-terminated names; a missing one is fine.
+                        unsafe { unlinkat(dir, name.as_ptr(), 0) };
+                    }
+                    for name in [c"f", c"m"] {
+                        // SAFETY: as above.
+                        unsafe { unlinkat(dir, name.as_ptr(), AT_REMOVEDIR) };
+                    }
+                }
+                !landed
+            })
+        })
+        .map(|op| op.name)
+        .collect();
+    if wrong.is_empty() { "none".into() } else { wrong.join(",") }
+}
 
 unsafe extern "C" {
     fn open(path: *const std::ffi::c_char, flags: c_int, ...) -> c_int;
     fn dup(fd: c_int) -> c_int;
     fn dup2(old: c_int, new: c_int) -> c_int;
     fn close(fd: c_int) -> c_int;
-    fn read(fd: c_int, buf: *mut u8, len: usize) -> isize;
+    fn read(fd: c_int, buf: *mut std::ffi::c_void, len: usize) -> isize;
+    fn write(fd: c_int, buf: *const std::ffi::c_void, len: usize) -> isize;
+    fn openat(dirfd: c_int, path: *const std::ffi::c_char, flags: c_int, ...) -> c_int;
+    fn unlinkat(dirfd: c_int, path: *const std::ffi::c_char, flags: c_int) -> c_int;
+    fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int;
+    fn mknodat(dirfd: c_int, path: *const c_char, mode: u32, dev: u64) -> c_int;
+    fn renameat(from_dir: c_int, from: *const c_char, to_dir: c_int, to: *const c_char) -> c_int;
+    fn linkat(
+        from_dir: c_int,
+        from: *const c_char,
+        to_dir: c_int,
+        to: *const c_char,
+        flags: c_int,
+    ) -> c_int;
+    fn symlinkat(target: *const c_char, dirfd: c_int, path: *const c_char) -> c_int;
+    fn readlinkat(dirfd: c_int, path: *const c_char, buf: *mut u8, len: usize) -> isize;
+    fn fchmodat(dirfd: c_int, path: *const c_char, mode: u32, flags: c_int) -> c_int;
+    fn utimensat(dirfd: c_int, path: *const c_char, times: *const [i64; 4], flags: c_int) -> c_int;
+    fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int;
+    fn statx(
+        dirfd: c_int,
+        path: *const c_char,
+        flags: c_int,
+        mask: u32,
+        out: *mut Statx,
+    ) -> c_int;
+    fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> c_int;
+    fn bind(fd: c_int, addr: *const u8, len: u32) -> c_int;
     fn syscall(number: c_long, ...) -> c_long;
 }
 
@@ -151,7 +550,7 @@ fn getdents_notify() -> usize {
             replacer.join().unwrap();
             let mut events = [0u8; 4096];
             // SAFETY: `events` is writable for its length.
-            let len = unsafe { read(watch, events.as_mut_ptr(), events.len()) };
+            let len = unsafe { read(watch, events.as_mut_ptr().cast(), events.len()) };
             let events = &events[..len.max(0) as usize];
             // SAFETY: descriptors this round opened.
             unsafe {
@@ -262,6 +661,9 @@ fn main() {
         "getdents_dup2" => getdents_dup2(),
         "starve" => starve(),
         "getdents_notify" => getdents_notify().to_string(),
+        "dirfd_ops" => dirfd_ops(),
+        "fifo_rename" => fifo_rename().to_string(),
+        "rebind_rename" => rebind_rename().to_string(),
         mode => panic!("PATH_RACE_MODE names no race: {mode}"),
     };
     println!("NATIVE_PATH_RACE {mode} {answer}");

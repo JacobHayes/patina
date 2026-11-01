@@ -649,9 +649,11 @@ pub(crate) fn fifo_open(
     };
     // The channel is the node's one reference: taken when it comes into
     // existence, dropped when it is reclaimed. Outside the state lock, like
-    // every other runtime call from this module.
+    // every other runtime call from this module, and in the open's walked
+    // step (no scheduling point since the walk found the node), so no other
+    // task renames over the name and reclaims the inode first.
     if opened_channel
-        && let Err(errno) = super::with_context(|context| context.fs_retain_inode(ino))
+        && let Err(errno) = crate::with_context_raw(|context| context.fs_retain_inode(ino))
     {
         abandon(number);
         wake_all(woken);

@@ -48,7 +48,7 @@ unsafe fn path_unit(
         Ok(paths::Resolution::Virtual(_)) => return fail(virtual_answer),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| invoke(context, &resolved.path)) {
+    match with_context_raw(|context| invoke(context, &resolved.path)) {
         Ok(()) => {
             self::notice(notice, &resolved);
             set_errno(0);
@@ -171,9 +171,9 @@ pub unsafe extern "C" fn patina_mknod(
     }
     let mode = (mode & 0o7777) & !paths::umask();
     let result = if node == FsNode::Fifo {
-        with_context(|context| context.fs_make_fifo(&resolved.path, mode))
+        with_context_raw(|context| context.fs_make_fifo(&resolved.path, mode))
     } else {
-        with_context(|context| context.fs_make_node(&resolved.path, node, mode))
+        with_context_raw(|context| context.fs_make_node(&resolved.path, node, mode))
     };
     match result {
         Ok(()) => {
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn patina_renameat2(
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming"),
         Err(errno) => return fail(errno),
     };
-    let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
+    let to = match paths::resolve_more(tofd, &to, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved,
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("renaming onto"),
         Err(errno) => return fail(errno),
@@ -383,13 +383,13 @@ pub unsafe extern "C" fn patina_renameat2(
         if to.metadata.is_none() {
             return fail(ENOENT);
         }
-        with_context(|context| context.fs_exchange(&from.path, &to.path))
+        with_context_raw(|context| context.fs_exchange(&from.path, &to.path))
     } else if flags & RENAME_NOREPLACE != 0 && to.metadata.is_some() {
         Err(EEXIST)
     } else if flags & RENAME_WHITEOUT != 0 {
-        with_context(|context| context.fs_rename_whiteout(&from.path, &to.path))
+        with_context_raw(|context| context.fs_rename_whiteout(&from.path, &to.path))
     } else {
-        with_context(|context| context.fs_rename(&from.path, &to.path))
+        with_context_raw(|context| context.fs_rename(&from.path, &to.path))
     };
     match result {
         Ok(()) => {
@@ -480,13 +480,13 @@ pub unsafe extern "C" fn patina_link(
         Ok(paths::Resolution::Virtual(entry)) => entry.unmodeled("linking"),
         Err(errno) => return fail(errno),
     };
-    let to = match paths::resolve(tofd, &to, paths::RESOLVE_NOFOLLOW) {
+    let to = match paths::resolve_more(tofd, &to, paths::RESOLVE_NOFOLLOW) {
         Ok(paths::Resolution::Volume(resolved)) => resolved.path,
         // The new name exists (`filename_create`).
         Ok(paths::Resolution::Virtual(_)) => return fail(EEXIST),
         Err(errno) => return fail(errno),
     };
-    match with_context(|context| context.fs_link(&from.path, &to)) {
+    match with_context_raw(|context| context.fs_link(&from.path, &to)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             if let Some(source) = &from.metadata {
@@ -623,7 +623,7 @@ pub(crate) unsafe fn read_link(
             return Err(crate::abi::failed(EINVAL));
         }
     }
-    match with_context(|context| context.fs_read_link(&resolved.path)) {
+    match with_context_raw(|context| context.fs_read_link(&resolved.path)) {
         Ok(target) => copy_link(&target, buf, len),
         Err(errno) => Err(crate::abi::failed(errno)),
     }

@@ -23,11 +23,12 @@ use std::slice;
 
 use patina_dst_abi::{EffectError, Fd, XattrTarget};
 use patina_dst_driver_api::xattr_permission;
+use patina_dst_runtime::{Context, RuntimeError};
 
 use crate::fdtable::FdKind;
 use crate::{
     E2BIG, EFAULT, EINVAL, ENOENT, EOPNOTSUPP, EPERM, ERANGE, fdget, path_from_c, paths, set_errno,
-    thread, with_context,
+    thread, with_context, with_context_raw,
 };
 
 /// `XATTR_NAME_MAX` / `XATTR_SIZE_MAX` / `XATTR_LIST_MAX`.
@@ -98,6 +99,20 @@ unsafe fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
         return Err(ENOENT);
     }
     Ok(Node::Volume(XattrTarget::Path(resolved.path)))
+}
+
+/// The attribute call on `target`. A path target is the node the call's
+/// walk found, whose scheduling point the walk took ([`paths::resolve`]),
+/// so it runs with no other task between the two; a descriptor's or an
+/// inode's takes the call's point here.
+fn on_target<T>(
+    target: &XattrTarget,
+    invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
+) -> Result<T, c_int> {
+    match target {
+        XattrTarget::Path(_) => with_context_raw(invoke),
+        _ => with_context(invoke),
+    }
 }
 
 /// The FIFO endpoint a descriptor row names, whose node an inode target is.
@@ -241,7 +256,7 @@ pub(crate) unsafe fn getxattr(
             )));
         }
     };
-    match with_context(|context| context.fs_get_xattr(&target, &name)) {
+    match on_target(&target, |context| context.fs_get_xattr(&target, &name)) {
         Ok(bytes) => crate::abi::from_model(copy_out(&bytes, value, size.min(XATTR_SIZE_MAX))),
         Err(errno) => Err(crate::abi::failed(errno)),
     }
@@ -265,7 +280,7 @@ pub(crate) unsafe fn listxattr(
         Ok(Node::Pseudo { .. }) => return crate::abi::from_model(copy_out(&[], list, size)),
         Err(errno) => return Err(crate::abi::failed(errno)),
     };
-    match with_context(|context| context.fs_list_xattr(&target)) {
+    match on_target(&target, |context| context.fs_list_xattr(&target)) {
         Ok(bytes) => crate::abi::from_model(copy_out(&bytes, list, size)),
         Err(errno) => Err(crate::abi::failed(errno)),
     }
@@ -332,7 +347,9 @@ pub(crate) unsafe fn setxattr(
             )));
         }
     };
-    match with_context(|context| context.fs_set_xattr(&target, &name, bytes, flags as u32)) {
+    match on_target(&target, |context| {
+        context.fs_set_xattr(&target, &name, bytes, flags as u32)
+    }) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
@@ -387,7 +404,7 @@ pub(crate) unsafe fn removexattr(
             )));
         }
     };
-    match with_context(|context| context.fs_remove_xattr(&target, &name)) {
+    match on_target(&target, |context| context.fs_remove_xattr(&target, &name)) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             crate::fsnotify::xattr_changed(&target, fifo_end(by, raw_fd));
