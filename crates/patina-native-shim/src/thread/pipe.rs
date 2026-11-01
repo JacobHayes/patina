@@ -63,7 +63,7 @@ pub(crate) struct PipeChannel {
 /// Real pipes carry a fixed-capacity kernel buffer (Linux's default is 64 KiB);
 /// match it so a writer that outruns its reader parks on a full buffer exactly
 /// as it would on the host, rather than buffering without bound.
-const PIPE_CAPACITY: usize = 64 * 1024;
+pub(crate) const PIPE_CAPACITY: usize = 64 * 1024;
 /// `PIPE_BUF`: the largest write a pipe takes whole or not at all.
 #[cfg(target_os = "linux")]
 pub(crate) const PIPE_BUF: usize = 4096;
@@ -1294,12 +1294,13 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
         Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
-        // A standard stream's pipe keeps the default sixteen pages; nothing
-        // resizes it (`F_SETPIPE_SZ` on one stops).
+        // A standard stream's pipe: its capacity, the default sixteen pages
+        // until `F_SETPIPE_SZ` resizes it.
         #[cfg(target_os = "linux")]
         Ok(resolved) if stdio_ino(&resolved).is_some() => {
+            let capacity = lock_state().net.stdio_pipe_sizes[resolved.handle as usize];
             super::set_errno(0);
-            return (16 * crate::PAGE_SIZE) as c_int;
+            return c_int::try_from(capacity).unwrap_or_else(|_| super::fail(super::EOVERFLOW));
         }
         Ok(_) => return super::fail(EINVAL),
         Err(errno) => return super::fail(errno),
@@ -1319,24 +1320,28 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 /// `fcntl(F_SETPIPE_SZ)`: resize the buffer the way `fs/pipe.c:round_pipe_size`
-/// does — at least one page, rounded up to a power of two, at most the
-/// unprivileged maximum (`EPERM` above it) — and refuse (`EBUSY`) to shrink
-/// below the bytes currently buffered. Returns the new capacity.
+/// does — the size an unsigned int (`EINVAL` past 2^31), at least one page
+/// (so 0 is one page), rounded up to a power of two, at most the unprivileged
+/// maximum (`EPERM` above it) — and refuse (`EBUSY`) to shrink
+/// below the bytes currently buffered. Returns the new capacity. A standard
+/// stream's pipe resizes too: its capacity is all there is to change, since
+/// its input's writer is gone with nothing left in it and the supervisor
+/// drains its outputs as they are written, so none ever holds a byte.
 pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let end = match class_entry(guest_fd) {
-        Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
-        #[cfg(target_os = "linux")]
-        Ok(resolved) if stdio_ino(&resolved).is_some() => crate::trap_fatal(
-            "fcntl(F_SETPIPE_SZ) on a standard stream is not modeled; failing closed",
-        ),
-        Ok(_) => return super::fail(EINVAL),
+    let resolved = match class_entry(guest_fd) {
+        Ok(resolved) => resolved,
         Err(errno) => return super::fail(errno),
     };
-    let Ok(requested) = usize::try_from(size) else {
+    #[cfg(target_os = "linux")]
+    let stream = stdio_ino(&resolved).map(|_| resolved.handle as usize);
+    #[cfg(not(target_os = "linux"))]
+    let stream: Option<usize> = None;
+    if resolved.kind != FdKind::Pipe && stream.is_none() {
         return super::fail(EINVAL);
-    };
-    if requested == 0 {
+    }
+    let requested = size as u32 as usize;
+    if requested > 1 << 31 {
         return super::fail(EINVAL);
     }
     let rounded = requested.max(PIPE_PAGE).next_power_of_two();
@@ -1344,6 +1349,12 @@ pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
         return super::fail(EPERM);
     }
     let mut state = lock_state();
+    if let Some(stream) = stream {
+        state.net.stdio_pipe_sizes[stream] = rounded;
+        super::set_errno(0);
+        return c_int::try_from(rounded).unwrap_or_else(|_| super::fail(super::EOVERFLOW));
+    }
+    let end = resolved.handle as c_int;
     let Some(channel) = pipe_size_channel(&state, end)
         .and_then(|channel| state.net.pipe_channels.get_mut(&channel))
     else {

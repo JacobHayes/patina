@@ -29,6 +29,9 @@ pub(crate) struct NetState {
     /// ([`PipeInode`]), keyed by their inode number.
     pub(crate) pipe_inodes: BTreeMap<u64, PipeInode>,
     pub(crate) next_pipe_ino: u64,
+    /// The capacity of each standard stream's pipe (`handle` 0, 1, 2), which
+    /// `F_SETPIPE_SZ` changes and `F_GETPIPE_SZ` answers.
+    pub(crate) stdio_pipe_sizes: [usize; 3],
     // Virtual kqueue readiness reactors, keyed by registry id. The
     // descriptor table holds the description (a `dup`/`F_DUPFD` of a kqueue
     // fd — tokio's IO driver clones its selector this way — is a second
@@ -68,6 +71,7 @@ impl NetState {
             pipe_inodes: BTreeMap::new(),
             // Past the standard streams' nodes (`pipe::STDIO_PIPE_INOS`).
             next_pipe_ino: 4,
+            stdio_pipe_sizes: [pipe::PIPE_CAPACITY; 3],
             #[cfg(target_os = "macos")]
             kqueues: BTreeMap::new(),
             #[cfg(all(target_os = "macos", patina_posix_exports))]

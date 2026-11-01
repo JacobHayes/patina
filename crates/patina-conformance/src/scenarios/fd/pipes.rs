@@ -80,6 +80,18 @@ pub fn run(p: &Probe) {
         p.fcntl(rd, F_SETPIPE_SZ, 4096) >= 4096,
     );
     p.check(
+        "F_SETPIPE_SZ rounds up to a power of two pages, and F_GETPIPE_SZ answers it",
+        p.fcntl(rd, F_SETPIPE_SZ, 5000) == 8192 && p.fcntl(rd, F_GETPIPE_SZ, 0) == 8192,
+    );
+    p.check(
+        "F_SETPIPE_SZ of 0 is one page",
+        p.fcntl(rd, F_SETPIPE_SZ, 0) == 4096,
+    );
+    p.check(
+        "an F_SETPIPE_SZ size past 2^31 is EINVAL",
+        p.fcntl(rd, F_SETPIPE_SZ, -1) == neg(EINVAL),
+    );
+    p.check(
         "dup of a closed descriptor is EBADF",
         p.dup(4000) == neg(EBADF),
     );

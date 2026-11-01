@@ -490,7 +490,9 @@ fn main() {
     // as 6.8 answers a pipe end (`S_IFIFO|0600`, one link, empty, a page-sized
     // block, its own pipefs node), and so do the calls a program asks of a
     // stream before using it (`F_GETFL`, `isatty`, `lseek`, `fstatfs`,
-    // `poll`, `FIONREAD`, `fallocate`, `posix_fadvise`, `fchmod`).
+    // `poll`, `FIONREAD`, `fallocate`, `posix_fadvise`, `fchmod`), and
+    // `F_SETPIPE_SZ` resizes a stream's pipe as it resizes any other (`cat`
+    // asks it of a FIFO standard input).
     const STD_STREAMS_SOURCE: &str = r#"
 use std::fs::File;
 use std::mem::ManuallyDrop;
@@ -508,6 +510,7 @@ unsafe extern "C" {
     fn fallocate(fd: i32, mode: i32, offset: i64, len: i64) -> i32;
     fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
     fn fchmod(fd: i32, mode: u32) -> i32;
+    fn dup(fd: i32) -> i32;
     fn __errno_location() -> *mut i32;
 }
 
@@ -527,6 +530,8 @@ mod nr {
 const AT_EMPTY_PATH: i64 = 0x1000;
 const F_GETFL: i32 = 3;
 const FIONREAD: u64 = 0x541b;
+const F_SETPIPE_SZ: i32 = 1031;
+const F_GETPIPE_SZ: i32 = 1032;
 const PIPEFS_MAGIC: i64 = 0x5049_5045;
 
 fn errno() -> i32 {
@@ -603,6 +608,13 @@ fn main() {
     let chmod = unsafe { fchmod(1, 0o640) };
     let after = ManuallyDrop::new(unsafe { File::from_raw_fd(1) }).metadata().unwrap();
     println!("STD stdout fchmod={chmod} perm={:o}", after.mode() & 0o7777);
+    for fd in [0, 1] {
+        let before = unsafe { fcntl(fd, F_GETPIPE_SZ) };
+        let set = unsafe { fcntl(fd, F_SETPIPE_SZ, 100_000) };
+        let through_dup = unsafe { fcntl(dup(fd), F_GETPIPE_SZ) };
+        let zero = unsafe { fcntl(fd, F_SETPIPE_SZ, 0) };
+        println!("STD fd={fd} pipe_sz={before} set={set} dup_get={through_dup} zero={zero}");
+    }
 }
 "#;
 
@@ -631,6 +643,8 @@ fn main() {
                 "STD stdin fionread=0/0 poll=1 revents=0x10",
                 "STD stdout fallocate=-1/29 fadvise=29",
                 "STD stdout fchmod=0 perm=640",
+                "STD fd=0 pipe_sz=65536 set=131072 dup_get=131072 zero=4096",
+                "STD fd=1 pipe_sz=65536 set=131072 dup_get=131072 zero=4096",
             ],
             "{stdout}"
         );
