@@ -170,9 +170,9 @@ shim-backed harness, explicit-context simulator) and which crate each needs.
 
 **The generated registry is the truth. Never write a flag from memory, from an
 old transcript, or from another document — including this one.** Flags have been
-renamed; help text and the parsers are both generated from one registry, and a
-gate checks every flag token in the project's docs and shell scripts against it.
-Four commands cover essentially everything.
+renamed, and documents (this one included) are not checked against the
+registry; help text and the parsers are both generated from it. Four commands
+cover essentially everything.
 
 **1. Start at the index.** It lists every verb with its summary and usage forms,
 the global flags, and the environment protocol:
