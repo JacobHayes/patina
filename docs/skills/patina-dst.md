@@ -286,8 +286,9 @@ A DST run's most dangerous output is a *false* `Violation`: a buggy oracle, or a
 guest that observed the wrong thing, emits a verdict indistinguishable from a
 real bug. In practice false positives come from the guest and its oracle far more
 often than from the runtime — the runtime is small and heavily gated; your guest
-is new code. So treat a red verdict as a hypothesis, not a conclusion, and
-confirm it before you report a bug:
+is new code, and a new oracle's first hits are mostly its own mistakes. So treat
+a red verdict as a hypothesis, not a conclusion, and confirm it before you
+report a bug:
 
 - **Reproduce it outside Patina, in the smallest faithful harness.** A plain
   `std` test, or the system-under-test's own fault-injection test double, driving
@@ -304,10 +305,65 @@ confirm it before you report a bug:
   back to its path through the `open` that produced it). "The guest cried
   data-loss, but the trace shows the SUT never touched the resource under test" is
   a harness bug, not a finding. The trace is ground truth and outranks the oracle.
+- **Fix a false positive in the observer, never suppress it.** Witness and
+  observer code is code. Fix it with a red/green test (the planted bug still
+  fires, the false case no longer does), then rejudge earlier results with the
+  fixed oracle.
 
-The discipline that keeps the runtime honest — a check that cannot fail is a bug
-— applies to your oracle too: an oracle never shown to fire on a *planted* real
-defect has not earned trust.
+## A clean result counts only behind a live oracle
+
+A clean round means "no enabled oracle fired". That proves nothing until each
+oracle has shown it can fire.
+
+- **Prove every oracle live before its silence counts.** Plant the bug it exists
+  to catch and confirm it fires; run a matching control and confirm it stays
+  quiet. Do both through the real reporting path (the same build, run, trace and
+  judging steps the campaign uses), not a unit test of the predicate: one
+  trailing `echo "rc:$?"` in every generated script can blind an oracle for a
+  whole corpus while its unit tests pass. Re-prove it when the guest, Patina or
+  the judging code changes.
+- **Count eligibility.** Record, per oracle, how many runs it could judge and why
+  it skipped the rest. Zero eligible runs, a missing trace, or a missing marker
+  or report is a coverage failure, never a pass.
+- **A flag that fires on every run is broken,** and so is an assertion that ends
+  every run on a leg: it carries no information and hides everything after it.
+  Adjudicate it, then fix the cause (the code under test, or more often the
+  assertion or oracle) rather than labelling it with a signature. The usual cause
+  is an assertion that can't tell the code under test from what its caller
+  supplies, such as an "internal panic" check that counts a panic raised by the
+  embedder's own callback, writer or reader.
+- **Fix known findings that mask an oracle before running more campaigns.** A
+  known-finding signature that absorbs a whole oracle on a leg (every new leak
+  triaged as the known leak) leaves that oracle blind there. Make signatures
+  demand specific evidence, such as the fault that fired, count a run with a
+  known hit as unjudged rather than clean, and measure what share of compute
+  only re-hits known findings.
+- **Record where each finding came from:** a Patina assertion, a hunt oracle, or
+  a probe outside Patina. Patina supplies the compute and the reproducibility;
+  the oracles you design decide what it can find.
+
+## Running campaigns: identity and budget
+
+- **A seed or trace belongs to one binary.** A seed rerun against a rebuilt
+  guest is a different run, and replay refuses a trace recorded from another
+  executable. Pin or copy the guest per campaign, and rejudge or rerun only
+  against that copy; a campaign out-dir already refuses to resume once its
+  artifact changes. Runs are deterministic, so keep traces only for flagged runs
+  (Patina's campaign keeps only failure traces) and rerun a passing seed to
+  regenerate its trace.
+- **Keep per-run records small.** Record facts per run, not copies of large
+  per-run text (output tails, the full site report): repeated per run, that text
+  outgrows everything else by orders of magnitude. Compress it or record it once,
+  and prune clean runs' artefacts as you go.
+- **Size concurrency to the host.** Admit concurrent runs by memory, counting the
+  guest's whole process tree, and start at about as many jobs as there are
+  cores; go higher only if measured throughput rises.
+- **Mind the crash handler.** A fatal `always!` violation ends the run with
+  SIGABRT once its verdict is recorded. With a piped `core_pattern` (apport,
+  systemd-coredump) the kernel starts the handler for core-dumping deaths even
+  with `RLIMIT_CORE` at 0, so a campaign whose violations abort can spawn a
+  handler per violating run. Check the host's `core_pattern` and
+  `core_pipe_limit` before a long campaign.
 
 ## Guest patterns that survive the runtime
 
@@ -336,11 +392,17 @@ class of confusing first-run failures.
   sockets) fails closed with a pre-init diagnostic naming the symbol. The
   pattern: compile the constructor out under your DST cfg and initialize
   explicitly from `main`.
-- **Vary workloads from the deterministic RNG, never argv.** Campaigns hold
+- **Draw variation from Patina, not from argv or fixed legs.** Campaigns hold
   guest arguments constant across generations by design — argv is identity, not
-  exploration. Derive per-run workload shape (seeds, paths, sizes) inside the
-  guest from the runtime's entropy; every generation then explores differently
-  while staying replayable from its trace alone.
+  exploration. Derive the workload's shape (seeds, paths, sizes) and the
+  harness's own choices as an embedder (when to close or cancel, a writer that
+  blocks or errors, which config variant) from the runtime's entropy or
+  `buggify!`, rather than enumerating them as fixed legs. Faults, scheduling and
+  harness choices are then explored together, and every generation stays
+  replayable from its trace alone: the workload makes its random choices through
+  the SDK, as in Antithesis. A campaign of one seed with no faults uses Patina as
+  a deterministic sandbox and tracer only. That is valid, but say so: it samples
+  one schedule and injects no fault.
 - **The guest environment starts empty.** Nothing leaks in from the host. If a
   run needs a variable (`RUST_BACKTRACE=1` is the common one), inject it
   explicitly through the run verb's env-injection flag — it becomes part of the
@@ -360,7 +422,13 @@ class of confusing first-run failures.
   most common false verdict is an oracle asserting what the author *assumed* the
   system does rather than what it is specified to do. Pin expectations to the
   spec (or a reference implementation), and prefer a differential oracle over a
-  hand-written one wherever a reference exists. And confirm the oracle actually
+  hand-written one wherever a reference exists. With neither, compare related
+  runs (a metamorphic oracle): faulted against baseline, a stricter config
+  against the base, changed against unchanged state outside the SUT's scope, a
+  dry-run or check API against the real call. State each relation precisely:
+  equality holds only where neither side was faulted, or both were faulted
+  alike; a run faulted on one side only is held to a weaker relation, such as
+  "differs only by reporting the error". And confirm the oracle actually
   exercised what it claims to check — a recovery probe that targets the wrong
   resource, or state the system served from a live instance instead of the
   recovery path, greens without testing anything.

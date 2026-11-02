@@ -78,7 +78,12 @@ counterpart does:
 
 `cargo patina build --go` adds the `patina` build tag, which links them to the
 shim; any other build gets inert stand-ins with no cgo, so code ships the SDK
-unconditionally.
+unconditionally. Keep a guest's own assertion wrappers inert natively the same
+way, behind the `patina` tag. Put an expensive observer (one that re-walks a
+tree or snapshots state to check an assertion) behind a separate tag that the
+`patina` tag implies, such as `//go:build patina || myapp_observe`: every Patina
+build carries it, and a native build opts in. A guest's own `-tags` pass through
+`build --go`.
 
 ### Python guests
 

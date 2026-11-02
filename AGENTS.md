@@ -114,6 +114,8 @@ Prefer JSON when parsing results programmatically.
   provably fires (red-before/green-after) before or alongside the point fix.
   Per "Structure before tests", the strongest detector is the type or lint
   that rejects the class at compile time.
+  A false positive from an observer or report (a race probe, a vacuity
+  verdict) is fixed in the observer with a red/green test, never suppressed.
 - **No cruft.** No deprecation aliases, compatibility shims, or dual code
   paths for renamed surfaces — migrate every caller and doc in the same change.
 - **Determinism claims are verified, not asserted.** Byte-identical repeats,
@@ -144,6 +146,10 @@ Prefer JSON when parsing results programmatically.
   build artifacts are single-writer while a run is live.
 - Convert incidents into detectors, or into one line of current guidance in
   the relevant `AGENTS.md`, never into narrative.
+- When hunting bugs with Patina, a clean result counts only behind oracles
+  proven live and eligible; report it with that evidence and with each
+  finding's source (the skill's "A clean result counts only behind a live
+  oracle").
 
 ## Naming
 
