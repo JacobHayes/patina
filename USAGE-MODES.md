@@ -232,7 +232,10 @@ keeps failing the way the original did, and prints the reduced command.
 ## Crate map
 
 Package names are `patina-dst-*`; the workspace directories drop the `-dst-`
-(e.g. `crates/patina-runtime`). See ARCHITECTURE.md for the full layout.
+(e.g. `crates/patina-runtime`). See ARCHITECTURE.md for the full layout. A
+project depends on the Rust crates by the git tag of the release its `patina`
+tool is, and on the Go module at the same version
+([README: Install](./README.md#install)).
 
 | Crate | Directory | Role |
 |---|---|---|

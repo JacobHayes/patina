@@ -18,8 +18,8 @@ patina campaign ./my-server --gens 1000                # hunt for failing seeds
 ```
 
 Patina is **experimental**. It is developed in the open, validated hard (see
-[VALIDATION.md](./VALIDATION.md)), and not yet published to crates.io — build it
-from source. APIs and the trace format will change.
+[VALIDATION.md](./VALIDATION.md)), and released as a standalone tool (see
+[Install](#install)). APIs and the trace format will change.
 
 ## Why
 
@@ -49,17 +49,63 @@ your app and its dependencies      (unchanged)
 The boundary **fails closed**: an effect Patina does not model is a loud,
 pre-run refusal — never a silent escape to the host.
 
-## Quickstart
+## Install
 
-Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.1 in
-`rust-toolchain.toml`, which rustup installs on first use.
+Patina is one binary, `patina`, released for Linux (x86_64 and arm64, built on
+Ubuntu 24.04) and macOS (Apple silicon):
 
 ```sh
-git clone https://github.com/JacobHayes/patina
-cd patina
-cargo build --release -p cargo-patina
-export PATH="$PWD/target/release:$PATH"    # `patina` now resolves
+curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 ```
+
+That checks the download against the release's checksums and installs
+`~/.local/bin/patina`. Append `-s -- --version 0.1.0` to choose a release and
+`--prefix DIR` to install `DIR/bin/patina`. With [mise](https://mise.jdx.dev/):
+`mise use -g github:JacobHayes/patina`.
+
+The binary carries everything it links into a guest, as source it compiles with
+your toolchain on first use (cached under `~/.cache/patina`, or
+`~/Library/Caches/patina` on macOS). From the machine it needs:
+
+| To build | The machine needs |
+|---|---|
+| Rust guests | Rust 1.99 or newer (`cargo`, `rustc`), a C compiler (`cc`), and crates.io for the runtime's dependencies on the first build |
+| Go guests (Linux x86_64) | the same, and Go |
+| Python guests (Linux) | the same, and `make`, `curl` and `tar`; the first build downloads the pinned CPython source unless `--python-source` names a copy |
+
+A project takes the SDK from the same release as the tool:
+
+```toml
+# Cargo.toml
+[dev-dependencies]
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }
+```
+
+```sh
+go get github.com/JacobHayes/patina/go/patina@v0.1.0    # Go
+```
+
+The tool and the SDK must share a release line (`0.1.x` with `0.1.x`); a
+package build that finds another names both and how to match them. Python
+guests need no dependency: the tool carries the `patina` module.
+
+In CI, install the tool before the tests. For GitHub Actions:
+
+```yaml
+- run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.1.0
+- run: cargo test    # #[patina_dst::test] finds patina on PATH
+```
+
+Inside a container, a guest needs the `personality` system call, which
+Docker's default seccomp profile refuses: Patina turns address-space
+randomization off for every guest. Run the container with
+`--security-opt seccomp=unconfined` (or a profile that permits it), or pass
+`--allow-randomized-address-layout` for qualified determinism.
+
+On another platform, or to build it yourself:
+`cargo install --locked --git https://github.com/JacobHayes/patina --tag v0.1.0 cargo-patina`.
+
+## Quickstart
 
 Save this as `lottery.rs` — plain `std`, nothing Patina-specific:
 
@@ -141,8 +187,8 @@ For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
 Rust test function. Plain `cargo test` then discovers `patina` through
 `PATINA_CLI` (absolute path) or `patina` on `PATH`, rebuilds the same
-libtest target shim-linked, and sweeps the test (20 seeds by default). Missing
-CLI discovery is a test failure, never a skip.
+libtest target shim-linked, and sweeps the test (20 seeds by default). A
+missing tool is a test failure that prints the install line, never a skip.
 
 Any flag can be defaulted from the environment as `PATINA_<FLAG>` (`--seed` ->
 `PATINA_SEED`, `--format` -> `PATINA_FORMAT`); a typed flag still wins, and help
@@ -348,9 +394,9 @@ silently:
 - **Experimental**: APIs, CLI, and the trace format are unstable; traces are
   tied to the exact binary and config that produced them (by design), and a
   trace from another format version is refused rather than upgraded.
-- **Not on crates.io**: build from source. The workspace crates are published
-  under `patina-dst-*` names; the SDK crate is `patina-dst`, used as
-  `patina_dst::` in code.
+- **Not on crates.io**: the tool comes from GitHub releases and the SDK from
+  the release's git tag (see [Install](#install)). The SDK crate is
+  `patina-dst`, used as `patina_dst::` in code.
 - **No process spawning**: `fork`/`posix_spawn` and friends are denied
   (a guest that reaches them aborts deterministically). One process per run.
 - **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see

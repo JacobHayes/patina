@@ -42,6 +42,11 @@ and ast-grep, so run cargo and the repository scripts through `mise run` or
 4. **Get an independent review** before landing a change to the native shim,
    to record/replay or scheduling determinism, or to the containment boundary
    (audit, instruction scan, traps). Other changes land on green CI.
+5. **Release** by setting the workspace version (`workspace.package` and the
+   `workspace.dependencies` entries in `Cargo.toml`, and the tags the README
+   and tutorial show), landing that, and pushing the tag `vX.Y.Z` on it:
+   `.github/workflows/release.yml` builds, smokes and publishes. Run that
+   workflow by hand first; it does everything but publish.
 
 A test that flakes under Patina is a determinism bug until proven otherwise:
 fix it, never retry it. Prove a behavior change with a planted failure: the

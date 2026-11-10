@@ -475,7 +475,8 @@ These outlast any flag rename.
 ## Verify you have it right
 
 A two-minute check that the whole path works on this machine, using nothing but
-a scratch file:
+a scratch file and `patina` on `PATH` (the repository README's Install section
+has the one-line installer):
 
 ```sh
 cat > /tmp/snippet.rs <<'EOF'

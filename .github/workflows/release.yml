@@ -1,0 +1,120 @@
+name: Release
+
+# A `v*` tag builds the patina tool for every released platform, proves each
+# archive the way an adopter would use it, and only then publishes the GitHub
+# release. A manual run does all of that except publish. The weekly run
+# installs the latest published release with the documented one-liner, so a
+# release that stops installing or working on a fresh machine does not go
+# unnoticed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  schedule:
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # Build one platform's archive, install it from the archive with install.sh,
+  # and run the adopter smoke against it with the SDK at this commit.
+  build:
+    if: github.event_name != 'schedule'
+    name: Build / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux builds on the release Patina is validated on, so the binary
+        # asks for no newer C library than that.
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-toolchain
+      - run: cargo build --release --locked -p cargo-patina --bin patina --target ${{ matrix.target }}
+      - name: A release tag names the version it builds
+        if: github.ref_type == 'tag'
+        run: test "v$(target/${{ matrix.target }}/release/patina --version | sed -n '1s/^patina //p')" = "$GITHUB_REF_NAME"
+      - name: Package
+        run: |
+          mkdir dist
+          tar -czf "dist/patina-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" patina -C "$PWD" LICENSE-APACHE
+          (cd dist && shasum -a 256 patina-*.tar.gz >SHA256SUMS)
+      # Go guests run on x86_64 Linux only.
+      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: testbeds/go-sdk/go.mod
+          cache: false
+      - name: Install from the archive and run the adopter smoke
+        env:
+          PATINA_RELEASE_URL: file://${{ github.workspace }}/dist
+        run: |
+          # The smoke's projects live outside this checkout, where its
+          # toolchain file does not reach.
+          export RUSTUP_TOOLCHAIN="$(awk -F'"' '/^channel/ {print $2}' rust-toolchain.toml)"
+          sh install.sh --prefix "$RUNNER_TEMP/patina"
+          export PATH="$RUNNER_TEMP/patina/bin:$PATH"
+          scripts/install-smoke.sh ${{ matrix.target == 'x86_64-unknown-linux-gnu' && '--go' || '' }} "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: patina-${{ matrix.target }}
+          path: dist/patina-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  # Publish the release, and the tag the Go module is fetched by: a module in
+  # a subdirectory is versioned by a tag that carries its path.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && sha256sum patina-*.tar.gz >SHA256SUMS && cat SHA256SUMS)
+          git push origin "HEAD:refs/tags/go/patina/$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            dist/patina-*.tar.gz dist/SHA256SUMS install.sh
+
+  # Install the published release as the README says and run the adopter
+  # smoke with the SDK at the release's tag, on a current stable toolchain.
+  published:
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || needs.publish.result == 'success') }}
+    needs: publish
+    name: Published / ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      # Only for the smoke script and the Go version the Go testbed pins.
+      - uses: actions/checkout@v7
+        with:
+          path: patina-checkout
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: patina-checkout/testbeds/go-sdk/go.mod
+          cache: false
+      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
+      - run: |
+          tag="v$(patina --version | sed -n '1s/^patina //p')"
+          patina-checkout/scripts/install-smoke.sh ${{ matrix.runner == 'ubuntu-24.04' && '--go' || '' }} "$tag"

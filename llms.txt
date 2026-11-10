@@ -14,6 +14,20 @@ Patina has no host fallback: a supported `std` call is deterministic or the run
 fails closed (a missed interposer is a refusal, never a silent escape). A trace
 carries its seed, fault config, and buggify config, so `replay` is flag-free.
 
+## Install
+
+- Tool: `curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh`
+  installs `~/.local/bin/patina` (append `-s -- --version X.Y.Z` or
+  `--prefix DIR`); or `mise use -g github:JacobHayes/patina`. Released for
+  Linux x86_64 and arm64 and macOS arm64.
+- The machine supplies the guest's toolchain: Rust 1.99+ and `cc` for every
+  guest, Go for `--go`, `make`/`curl`/`tar` for `--python`.
+- Rust SDK: `patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "vX.Y.Z" }`
+  (`features = ["macros"]` for `#[patina_dst::test]`). Go SDK:
+  `go get github.com/JacobHayes/patina/go/patina@vX.Y.Z`. Use the tag of the
+  installed tool (`patina --version`): a package build refuses an SDK from
+  another release line by name.
+
 ## Targets
 
 Every run is native and interposed: a Mach-O/ELF binary linked against the shim

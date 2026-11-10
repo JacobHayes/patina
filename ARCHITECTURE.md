@@ -101,7 +101,7 @@ Package names are `patina-dst-*`; directories under `crates/` drop the
 `-dst-`.
 
 ```text
-cargo-patina                # the CLI
+cargo-patina                # the CLI: the `patina` binary (and the same tool as `cargo patina`)
 patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-light)
 patina-dst-macros           # the SDK's proc macros
 patina-dst-harness          # configure-then-run harness under the shim

@@ -29,10 +29,15 @@ document names directories and evidence shapes, not test functions.
 | `mise run conformance:coverage` | registry entries no scenario covers or excludes (a report; exits 1 while any remain) |
 | `mise run audit-corpus` | ecosystem symbol-audit corpus against committed per-platform expectations |
 | `mise run bench` | native-versus-Patina overhead measurement (not a gate) |
+| `scripts/install-smoke.sh REF` | the adopter path, with an installed `patina` and nothing of the checkout: a new package on the SDK from GitHub at REF passes a `#[patina_dst::test]` under plain `cargo test` and fails it once the tool is hidden, and its program builds, runs and replays (`--go`: a Go guest on the Go SDK too) |
 
 CI is the landing gate. Every push runs the workspace suite and the testbeds on
 Linux x86_64 and aarch64 and on macOS, plus the audit corpus; a nightly run adds
 the long workq and pubsub campaigns and the advisory audit of every lockfile.
+The release workflow builds each platform's archive, installs it with
+`install.sh` and runs the install smoke before it publishes; it repeats the
+smoke against the published release, installed with the README's one-liner,
+after publishing and every week.
 Evidence is platform-local: a Linux run does not
 verify the Darwin legs, and trace hashes are not compared across operating
 systems.

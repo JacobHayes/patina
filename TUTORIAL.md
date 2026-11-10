@@ -5,18 +5,15 @@ cooperative-SUT SDK (`buggify!`), sweeps seeds until a planted bug fires, then
 records that run, replays it byte-for-byte, and renders its timeline to a
 self-contained HTML page. Every command here is run against the current CLI.
 
-Prerequisites: build the CLI once from the workspace root — `cargo build
---release -p cargo-patina` — and use `target/release/patina` (shown as
-`patina` below). No extra toolchain is needed for the native target.
+Prerequisites: `patina` on `PATH` ([install it](./README.md#install)), Rust and
+a C compiler.
 
 ## 1. A small program with a latent bug
 
-Create a standalone package `ledger/` (its own empty `[workspace]` keeps it out of
-the Patina workspace):
+Create a package `ledger/`:
 
 `ledger/Cargo.toml`
 ```toml
-[workspace]
 [package]
 name = "ledger"
 version = "0.1.0"
@@ -26,10 +23,10 @@ publish = false
 name = "ledger"
 path = "src/main.rs"
 [dependencies]
-# Path to your checkout's crates/patina (package name `patina-dst`, used as
-# `patina_dst::` in code). The SDK's default features are the dependency-light
-# macro set; a plain `cargo build` leaves every macro a no-op.
-patina-dst = { path = "../patina/crates/patina" }
+# The SDK from the release your `patina` is (`patina --version`); package
+# `patina-dst`, used as `patina_dst::` in code. Its default features are the
+# dependency-light macro set; a plain `cargo build` leaves every macro a no-op.
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0" }
 ```
 
 `ledger/src/main.rs`
@@ -214,7 +211,8 @@ reproduce:
   patina replay target/patina/dst/.../guest target/patina/dst/.../seed-5.patina
 ```
 
-If `patina` is not discoverable, the test fails loudly instead of skipping.
+If `patina` is not discoverable, the test fails with the install line instead
+of skipping.
 
 ## 9. Name resolution as a fault domain
 
