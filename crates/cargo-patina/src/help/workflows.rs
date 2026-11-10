@@ -479,9 +479,11 @@ single-run oracle can preserve.\n\
 \n\
 `minimize --params` reduces a failing run's parameters instead: it drops and shrinks \
 the --param values of the command after `--` (those before the command's own `--`), \
-re-running the command with each candidate set. A candidate still fails when it exits \
-with the original's non-zero status, so a candidate that fails differently is not \
-mistaken for the failure. The reduced command is printed as the reproduction.",
+re-running the command with each candidate set. The command must be a `patina run`: \
+each candidate is judged by its result envelope, and still fails when its run reports \
+the original's result and guest exit, so a candidate that fails differently is not \
+mistaken for the failure, and a command that reports no run is refused. The reduced \
+command is printed as the reproduction.",
     families: &[
         fam(
             Family::Generation,

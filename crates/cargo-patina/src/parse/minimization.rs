@@ -102,6 +102,17 @@ fn parse_minimize_params(
         } else if let Some(entry) = word.to_str().and_then(|text| text.strip_prefix("--param=")) {
             OsString::from(entry)
         } else {
+            // Candidates are judged by their result envelope, which this verb
+            // asks each one for.
+            if word
+                .to_str()
+                .is_some_and(|text| text == "--format" || text.starts_with("--format="))
+            {
+                return Err(CliError::usage(
+                    "minimize --params: the command must not set --format; candidates are \
+                     run with --format json",
+                ));
+            }
             head.push(word.clone());
             continue;
         };

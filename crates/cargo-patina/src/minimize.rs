@@ -116,6 +116,20 @@ impl ParamsMinimize {
         words.extend(self.tail.iter().cloned());
         words
     }
+
+    /// The command as a candidate is judged: asked for its result envelope,
+    /// ahead of the command's own `--`.
+    fn oracle_command(&self, params: &BTreeMap<String, String>) -> Vec<OsString> {
+        let mut words = self.head.clone();
+        words.push(OsString::from("--format"));
+        words.push(OsString::from("json"));
+        for (key, value) in params {
+            words.push(OsString::from("--param"));
+            words.push(OsString::from(format!("{key}={value}")));
+        }
+        words.extend(self.tail.iter().cloned());
+        words
+    }
 }
 
 pub(crate) fn execute(invocation: MinimizeInvocation) -> Result<i32, CliError> {
@@ -125,12 +139,32 @@ pub(crate) fn execute(invocation: MinimizeInvocation) -> Result<i32, CliError> {
     }
 }
 
-/// How a candidate ended: its exit code, or the signal that killed it, so two
-/// different fatal signals are two different failures.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Ending {
-    Code(i32),
-    Signal(i32),
+/// How a candidate `patina run` ended, read off its `patina.result/v1`
+/// envelope: the result it reported, and the guest's own exit code or the
+/// signal that killed it, so two different failures stay two.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ending {
+    result: String,
+    guest_code: Option<i64>,
+    guest_signal: Option<i64>,
+}
+
+impl Ending {
+    fn of_envelope(envelope: &serde_json::Value) -> Self {
+        Self {
+            result: envelope
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            guest_code: envelope
+                .pointer("/guest_exit/code")
+                .and_then(serde_json::Value::as_i64),
+            guest_signal: envelope
+                .pointer("/guest_exit/signal")
+                .and_then(serde_json::Value::as_i64),
+        }
+    }
 }
 
 /// The `PATINA_<FLAG>` variable that defaults `--param`. A candidate runs
@@ -140,43 +174,52 @@ fn param_env() -> Option<String> {
     crate::cli::flag("run", "--param").env_name()
 }
 
-/// Run one candidate of a `--params` reduction to its ending, its output
-/// discarded: only the ending is judged.
-fn ending_of(words: &[OsString]) -> Result<Ending, CliError> {
-    use std::os::unix::process::ExitStatusExt;
+/// Run one candidate of a `--params` reduction and read how its run ended, or
+/// `None` when the command reported no run at all: it printed no
+/// `patina.result/v1` run envelope, so it is not a `patina run`, or patina
+/// refused it before any guest ran.
+fn ending_of(words: &[OsString]) -> Result<Option<Ending>, CliError> {
     let mut command = Command::new(&words[0]);
     command
         .args(&words[1..])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(name) = param_env() {
         command.env_remove(name);
     }
-    let status = command.status().map_err(|error| {
+    let output = command.output().map_err(|error| {
         CliError(format!(
             "failed to run {}: {error}",
             words[0].to_string_lossy()
         ))
     })?;
-    Ok(match (status.code(), status.signal()) {
-        (Some(code), _) => Ending::Code(code),
-        (None, signal) => Ending::Signal(signal.unwrap_or(-1)),
-    })
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(crate::campaign::run_envelope(&stdout)
+        .filter(|envelope| envelope.get("guest_exit").is_some())
+        .as_ref()
+        .map(Ending::of_envelope))
 }
 
 /// Reduce the command's parameters; the reduced set and the commands run.
 fn minimize_params(
     invocation: &ParamsMinimize,
 ) -> Result<(BTreeMap<String, String>, u64), CliError> {
-    // The target is the original command's own failure: a candidate still
-    // fails only when it ends the same way (exit code or fatal signal), so a candidate
-    // that fails differently (a usage error, a refusal) is not mistaken for
-    // the failure being minimized.
-    let target = ending_of(&invocation.command(&invocation.params))?;
-    if target == Ending::Code(0) {
+    // The target is the original run's own failure, as patina reported it: a
+    // candidate still fails only when its run ends the same way (the same
+    // result, guest exit code and signal), so a candidate that fails
+    // differently (a usage error, a refusal) is not mistaken for the failure
+    // being minimized. A command that reports no run is not one this verb can
+    // judge, whatever its exit status.
+    let Some(target) = ending_of(&invocation.oracle_command(&invocation.params))? else {
+        return Err(CliError::usage(
+            "minimize --params: the command after `--` reported no run result, so there is \
+             nothing to minimize; it must be a `patina run` that starts its guest",
+        ));
+    };
+    if target.result == "ok" {
         return Err(CliError(
-            "minimize --params: the command succeeds with its parameters, so there is no \
+            "minimize --params: the run succeeds with its parameters, so there is no \
              failure to preserve"
                 .into(),
         ));
@@ -184,7 +227,7 @@ fn minimize_params(
     let mut calls = 1_u64;
     let reduced = params::reduce(&invocation.params, |candidate| {
         calls += 1;
-        Ok(ending_of(&invocation.command(candidate))? == target)
+        Ok(ending_of(&invocation.oracle_command(candidate))?.as_ref() == Some(&target))
     })?;
     Ok((reduced, calls))
 }

@@ -50,7 +50,7 @@ pub use classify::{
     CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,
     recognize_verdicts, signature,
 };
-pub(crate) use generation::GenerationRun;
+pub(crate) use generation::{GenerationRun, run_envelope};
 pub use parse::{CampaignInvocation, parse};
 pub(crate) use planes::FAULT_PLANE_NAMES;
 pub use planes::{FaultPlane, FaultPlanes};
