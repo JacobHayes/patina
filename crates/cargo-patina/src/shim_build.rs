@@ -1,8 +1,8 @@
 //! Embedded shim sources, toolchain agreement, builds, and object staging.
 
 use crate::native_build::{
-    PATINA_GO_METER_C, PATINA_SANCOV_C, PATINA_SANCOV_STUB_C, hash_file_contents,
-    host_target_triple,
+    PATINA_GO_METER_C, PATINA_SANCOV_C, PATINA_SANCOV_STUB_C, PATINA_SDK_STUB_C,
+    hash_file_contents, host_target_triple,
 };
 use crate::{CliError, hash_bytes, hash_os, hex, output, shim_cache};
 use patina_dst_trace::lock_exclusive;
@@ -888,6 +888,25 @@ pub(super) const PATINA_GO_METER_OBJECT: ShimObject = ShimObject {
         "-Werror",
     ],
     what: "the Patina Go compute meter",
+};
+
+/// Weak stand-ins for the shim entries the SDK calls, linked whole-graph when
+/// the build links a program without the shim: see the object's source.
+pub(super) const PATINA_SDK_STUB_OBJECT: ShimObject = ShimObject {
+    object_name: "patina_sdk_stub.o",
+    source_name: "patina_sdk_stub.c",
+    source: PATINA_SDK_STUB_C,
+    header: None,
+    companion_sources: &[],
+    cc_flags: &[
+        "-std=c11",
+        "-fno-stack-protector",
+        "-fPIC",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    what: "the Patina SDK stand-ins",
 };
 
 /// The weak SanitizerCoverage stubs. Unlike every other shim object this one is

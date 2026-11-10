@@ -237,6 +237,74 @@ fn import_is_linked() {
         }
     }
 
+    /// A package whose own binary calls the SDK, with an integration test:
+    /// Cargo builds the binary beside the test, compiled for Patina like
+    /// every crate of the build but linked without the shim. The test still
+    /// builds, and its own SDK calls reach the runtime: it is simulated and
+    /// its fault site fires, where the binary's stand-ins would abort.
+    #[test]
+    fn an_integration_test_builds_beside_a_binary_that_calls_the_sdk() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        write_sdk_fixture(
+            root,
+            r#"
+fn main() {
+    println!("{} {}", patina_dst::is_simulated(), patina_dst::rng());
+    patina_dst::lifecycle::setup_complete();
+    patina_dst::lifecycle::event!("workload");
+    patina_dst::reachable!("started");
+    let batch = patina_dst::buggify_knob!("batch", 64_i64, 1, 1024);
+    let fired = patina_dst::buggify!("rare") || patina_dst::buggify_delay!("slow");
+    patina_dst::sometimes!(fired, "rare-fired");
+    patina_dst::always!(batch > 0, "batch-positive");
+    let fetched: u32 = patina_dst::custom_op("fetch", &"key", || 7);
+    patina_dst::verdict(patina_dst::VerdictKind::Pass, "done", "{}");
+    println!("{fetched} {:?}", patina_dst::param("mode"));
+}
+"#,
+        );
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("tests/dst.rs"),
+            r#"
+#[test]
+fn the_sdk_reaches_the_runtime() {
+    assert!(patina_dst::is_simulated());
+    assert!(patina_dst::buggify_with_prob!("always-fires", 1.0));
+}
+"#,
+        )
+        .unwrap();
+        let ran = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            root,
+            &[
+                "test",
+                ".",
+                "--harness-target",
+                "dst",
+                "--exact",
+                "the_sdk_reaches_the_runtime",
+                "--seed",
+                "1",
+                "--buggify",
+                "--buggify-activation-permille",
+                "1000",
+                "--format",
+                "json",
+            ],
+        );
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&ran.stdout).unwrap_or_else(|error| panic!("{error}: {ran:?}"));
+        assert_eq!(
+            (envelope["result"].as_str(), ran.status.code()),
+            (Some("ok"), Some(0)),
+            "{envelope:#}\n{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+    }
+
     /// `test` ends in the class of the seed's own run, with the attribution
     /// and exit status that follow from it: the vocabulary and the table are
     /// `run`'s.

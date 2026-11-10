@@ -3,9 +3,10 @@
 use crate::harness::{cargo_metadata, metadata_target_dir};
 use crate::native_run::target_has_sud;
 use crate::shim_build::{
-    BuiltNativeShim, PATINA_GO_METER_OBJECT, PATINA_SANCOV_STUB_OBJECT, RustcInvocation,
-    apply_rustc_env, build_native_shim, check_native_toolchain_agreement, link_arg,
-    lock_target_dir, prepare_shim_sources, stage_instrumentation_object, stage_shim_object,
+    BuiltNativeShim, PATINA_GO_METER_OBJECT, PATINA_SANCOV_STUB_OBJECT, PATINA_SDK_STUB_OBJECT,
+    RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
+    link_arg, lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
+    stage_shim_object,
 };
 use crate::{
     ArtifactRef, BuildSpec, CliError, NativeBuildInvocation, NativeBuildTarget, hex, output,
@@ -26,6 +27,10 @@ pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c"
 /// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
 /// under `--instrument`, alongside (and overridden by) `PATINA_SANCOV_C`.
 pub(super) const PATINA_SANCOV_STUB_C: &str = include_str!("../c/patina_sancov_stub.c");
+/// Weak stand-ins for the SDK's shim entries, for a program a Patina build
+/// compiles without the shim: a package's own binary, built beside the
+/// integration test the build was asked for.
+pub(super) const PATINA_SDK_STUB_C: &str = include_str!("../c/patina_sdk_stub.c");
 /// Marker string the instrumented build's hook embeds; `run` looks for it in the
 /// binary to know it carries the edge hook (counters and `--yield-stride`), and
 /// to fold that into the compatibility fingerprint.
@@ -448,7 +453,7 @@ fn build_native_package(
     }
     let selected = select_native_package_bin(manifest, package, bin, Some(rustc))?;
     let sancov_stub = stage_sancov_stub(shim, yield_object.is_some(), host_target)?;
-    let rustflags = native_package_rustflags(sancov_stub.as_deref(), host_target);
+    let rustflags = native_package_rustflags(sancov_stub.as_deref(), None, host_target);
 
     let mut command = Command::new(&rustc.cargo_command);
     command
@@ -692,16 +697,22 @@ pub(super) fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliE
 /// every crate it compiles from source in the invocation, which is exactly what
 /// `cfg(patina)`-gated guest/dependency code and edge instrumentation
 /// need. The shim's *link* arguments must not be whole-graph and live in
-/// [`native_package_link_args`] instead — with one exception, `sancov_stub`,
-/// which is a link argument precisely because the instrumentation above is
-/// whole-graph (see [`PATINA_SANCOV_STUB_OBJECT`]).
+/// [`native_package_link_args`] instead, with two exceptions, each a link
+/// argument precisely because something above is whole-graph: `sancov_stub`
+/// answers the instrumentation (see [`PATINA_SANCOV_STUB_OBJECT`]), and
+/// `sdk_stub` answers `cfg(patina_shim)` in a program built without the shim
+/// (see [`PATINA_SDK_STUB_OBJECT`]).
 ///
 /// Nothing here keys the shim's bytes. Every shim link input reaches the link
 /// under a path named by its content ([`publish_native_shim`],
 /// [`stage_shim_object`]), and Cargo fingerprints both this string and the
 /// `cargo rustc --` link arguments, so a changed input is a changed argument and
 /// the guest relinks.
-pub(super) fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str) -> OsString {
+pub(super) fn native_package_rustflags(
+    sancov_stub: Option<&Path>,
+    sdk_stub: Option<&Path>,
+    target: &str,
+) -> OsString {
     let mut tokens: Vec<OsString> = Vec::new();
     if let Some(existing) = env::var_os("RUSTFLAGS") {
         for part in existing.to_string_lossy().split_whitespace() {
@@ -735,6 +746,10 @@ pub(super) fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str)
         }
         tokens.push(OsString::from("-C"));
         tokens.push(link_arg(sancov_stub));
+    }
+    if let Some(sdk_stub) = sdk_stub {
+        tokens.push(OsString::from("-C"));
+        tokens.push(link_arg(sdk_stub));
     }
     let mut encoded = OsString::new();
     for (index, token) in tokens.iter().enumerate() {
@@ -774,6 +789,17 @@ pub(super) fn hash_file_contents(hasher: &mut Sha256, path: &Path) -> Result<(),
     }
     hasher.update(length.to_le_bytes());
     Ok(())
+}
+
+/// Stage [`PATINA_SDK_STUB_OBJECT`], with a stand-in for each shim entry the
+/// SDK calls.
+pub(super) fn stage_sdk_stub(shim: &BuiltNativeShim, target: &str) -> Result<PathBuf, CliError> {
+    let entries: Vec<String> = patina_dst::__rt::SHIM_ENTRIES
+        .iter()
+        .map(|entry| format!("X({entry})"))
+        .collect();
+    let defines = [format!("-DPATINA_SDK_ENTRIES(X)={}", entries.join(" "))];
+    stage_shim_object(&shim.objects, &PATINA_SDK_STUB_OBJECT, target, &defines)
 }
 
 /// Stage [`PATINA_SANCOV_STUB_OBJECT`] when the build is instrumented. The stubs
@@ -926,8 +952,8 @@ mod tests {
 
         // The injected flags reflect it: present for aarch64-linux, absent for
         // x86_64-linux.
-        let x86 = native_package_rustflags(None, "x86_64-unknown-linux-gnu");
-        let arm = native_package_rustflags(None, "aarch64-unknown-linux-gnu");
+        let x86 = native_package_rustflags(None, None, "x86_64-unknown-linux-gnu");
+        let arm = native_package_rustflags(None, None, "aarch64-unknown-linux-gnu");
         assert!(!x86.to_string_lossy().contains("rustix_use_libc"));
         assert!(arm.to_string_lossy().contains("rustix_use_libc"));
     }
@@ -948,7 +974,7 @@ mod tests {
         let sancov_stub = directory.join("patina_sancov_stub.o");
 
         for stub in [None, Some(sancov_stub.as_path())] {
-            let rustflags = native_package_rustflags(stub, "x86_64-unknown-linux-gnu");
+            let rustflags = native_package_rustflags(stub, None, "x86_64-unknown-linux-gnu");
             let rustflags = rustflags.to_string_lossy().into_owned();
             assert!(rustflags.contains("patina_shim"));
             // Edge instrumentation is codegen, not linking: it must stay

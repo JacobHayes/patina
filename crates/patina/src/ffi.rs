@@ -1,6 +1,24 @@
 //! Native shim ABI declarations.
 
-unsafe extern "C" {
+/// Declare the shim's entries, and list their names.
+///
+/// The declarations exist only in a build that links the shim. The names are
+/// always there: a build for Patina also compiles programs it does not link
+/// to the shim (a package's own binary, built beside the integration test
+/// Patina was asked for), and the tool gives each a stand-in for every entry.
+macro_rules! shim_entries {
+    ($(pub fn $name:ident($($argument:ident: $type:ty),* $(,)?) $(-> $result:ty)?;)*) => {
+        #[cfg(patina_shim)]
+        unsafe extern "C" {
+            $(pub fn $name($($argument: $type),*) $(-> $result)?;)*
+        }
+
+        /// The name of every shim entry the SDK calls.
+        pub const SHIM_ENTRIES: &[&str] = &[$(stringify!($name)),*];
+    };
+}
+
+shim_entries! {
     pub fn patina_is_simulated() -> i32;
     pub fn patina_buggify(
         label: *const u8,

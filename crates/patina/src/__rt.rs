@@ -11,6 +11,7 @@ pub use crate::test_harness::{DstTest, DstTestReturn, assert_test_return, orches
 
 #[cfg(patina_shim)]
 use crate::ffi;
+pub use crate::ffi::SHIM_ENTRIES;
 
 pub use calls::{
     always, buggify, buggify_delay, buggify_knob, lifecycle_event, lifecycle_setup_complete,

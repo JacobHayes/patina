@@ -2,7 +2,7 @@
 
 use crate::native_build::{
     NATIVE_AUDIT_METADATA_ARGS, host_target_triple, native_package_link_args,
-    native_package_rustflags, stage_sancov_stub,
+    native_package_rustflags, stage_sancov_stub, stage_sdk_stub,
 };
 use crate::parse::knob_flag_pairs;
 use crate::shim_build::{
@@ -165,7 +165,6 @@ fn build_native_harness(
     let yield_object =
         stage_instrumentation_object(&built_shim, invocation.instrument, &host_target)?;
     let sancov_stub = stage_sancov_stub(&built_shim, yield_object.is_some(), &host_target)?;
-    let rustflags = native_package_rustflags(sancov_stub.as_deref(), &host_target);
     let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
     let target_dir = metadata_target_dir(&metadata)?;
     let selected = select_native_harness_target(
@@ -173,6 +172,15 @@ fn build_native_harness(
         &invocation.harness_target,
         invocation.package.as_deref(),
     )?;
+    // Cargo builds a package's binaries beside its integration tests, and the
+    // shim's link arguments reach the test alone. A binary that calls the SDK
+    // links against the stand-ins instead.
+    let sdk_stub = match selected.kind {
+        HarnessTargetKind::Test => Some(stage_sdk_stub(&built_shim, &host_target)?),
+        HarnessTargetKind::Lib | HarnessTargetKind::Bin => None,
+    };
+    let rustflags =
+        native_package_rustflags(sancov_stub.as_deref(), sdk_stub.as_deref(), &host_target);
 
     let mut command = Command::new(&rustc.cargo_command);
     command

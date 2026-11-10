@@ -235,11 +235,10 @@ pub mod lifecycle {
 #[doc(hidden)]
 pub mod __rt;
 
-/// FFI into the native shim. Present only when the shim is actually linked
+/// FFI into the native shim. Declared only when the shim is actually linked
 /// (`cfg(patina_shim)`, injected by `patina build`). Under a plain
 /// `cargo build` these symbols are never referenced, so nothing is left
 /// unresolved at link time.
-#[cfg(patina_shim)]
 mod ffi;
 
 #[doc(hidden)]
