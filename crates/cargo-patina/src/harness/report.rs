@@ -407,19 +407,23 @@ impl Outcome<'_> {
                 println!("    replay: {replay}");
             }
         }
-        let mut stops: BTreeMap<String, usize> = BTreeMap::new();
+        // What kept tests from running, most common first: one line per
+        // class and stop, its numbers (a step count, a thread) left out so
+        // one cause is one line.
+        let mut stops: BTreeMap<(RunClass, String), usize> = BTreeMap::new();
         for problem in problems
             .iter()
-            .filter(|problem| problem.class == RunClass::Unsupported)
+            .filter(|problem| matches!(problem.class, RunClass::Unsupported | RunClass::Timeout))
         {
-            *stops.entry(Self::problem_why(problem)).or_insert(0) += 1;
+            let key = (problem.class, without_numbers(&Self::problem_why(problem)));
+            *stops.entry(key).or_insert(0) += 1;
         }
         if !stops.is_empty() {
-            println!("\nnot supported by Patina, by what was reached:");
+            println!("\ncould not run under Patina, by what stopped it:");
             let mut stops: Vec<_> = stops.into_iter().collect();
             stops.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            for (stop, count) in stops {
-                println!("  {count:>6}  {stop}");
+            for ((class, stop), count) in stops {
+                println!("  {count:>6}  {:<12} {stop}", class.as_str());
             }
         }
         let not_ok = problems.len();
@@ -523,4 +527,23 @@ impl Outcome<'_> {
         }
         document
     }
+}
+
+/// `text` with each run of digits read as `N`, so stops that differ only in
+/// a count or an id group together.
+pub(crate) fn without_numbers(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_number = false;
+    for character in text.chars() {
+        if character.is_ascii_digit() {
+            if !in_number {
+                out.push('N');
+            }
+            in_number = true;
+        } else {
+            out.push(character);
+            in_number = false;
+        }
+    }
+    out
 }

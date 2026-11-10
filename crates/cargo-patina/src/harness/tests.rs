@@ -300,6 +300,10 @@ fn why_names_the_panic_or_the_stop() {
         "panicked at src/lib.rs:5:26: assertion failed"
     );
     assert_eq!(report::why(&run("", Some("stopped"))), "stopped");
+    assert_eq!(
+        report::without_numbers("task=3 steps=1249 at 0x30"),
+        "task=N steps=N at NxN"
+    );
     let case = TestCase {
         target: 0,
         name: "m::t".into(),
