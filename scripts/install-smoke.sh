@@ -94,9 +94,9 @@ round_trip() {
 example() {
   local name=$1
   cp -R "$examples/$name" "$work/$name"
-  sed -i.orig -E "s|$repository, tag = \"[^\"]*\"|$pin|" "$work/$name/Cargo.toml"
-  ! cmp -s "$work/$name/Cargo.toml" "$work/$name/Cargo.toml.orig" \
+  grep -q "$repository, tag = \"" "$work/$name/Cargo.toml" \
     || fail "$name: its manifest names no SDK release to set to $ref"
+  sed -i.orig -E "s|$repository, tag = \"[^\"]*\"|$pin|" "$work/$name/Cargo.toml"
   rm "$work/$name/Cargo.toml.orig"
 }
 # A command that must end in a finding (status 1), its output kept.

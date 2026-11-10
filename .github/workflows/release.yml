@@ -5,7 +5,7 @@ name: Release
 # release. A manual run does all of that except publish. The weekly run
 # installs the latest published release with the documented one-liner, so a
 # release that stops installing or working on a fresh machine does not go
-# unnoticed.
+# unnoticed; a manual run ends with that check too.
 on:
   push:
     tags: ["v*"]
@@ -95,7 +95,7 @@ jobs:
   # Install the published release as the README says and run the adopter
   # smoke with the SDK at the release's tag, on a current stable toolchain.
   published:
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || needs.publish.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.publish.result == 'success') }}
     needs: publish
     name: Published / ${{ matrix.runner }}
     strategy:
