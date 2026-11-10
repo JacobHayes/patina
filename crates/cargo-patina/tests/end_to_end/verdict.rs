@@ -91,9 +91,12 @@ mod tests {
         let workspace = native_workspace();
         let bin = verdict_guest();
 
-        // The envelope carries the verdicts structurally, in call order.
+        // The envelope carries the verdicts structurally, in call order. The
+        // guest returns from `main` after its violation verdict, and the run
+        // fails all the same: a reported violation outvotes a clean exit.
         let trace = directory.path().join("verdict.patina");
-        let recorded = invoke(
+        let recorded = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "run",
@@ -111,6 +114,9 @@ mod tests {
         let stdout = String::from_utf8_lossy(&recorded.stdout);
         let value: serde_json::Value = serde_json::from_str(stdout.trim())
             .unwrap_or_else(|error| panic!("envelope was not one JSON object: {error}\n{stdout}"));
+        assert_eq!(recorded.status.code(), Some(1), "{value}");
+        assert_eq!(value["result"], "violation", "{value}");
+        assert_eq!(value["guest_exit"]["code"], 0, "{value}");
         let verdicts = value["verdicts"]
             .as_array()
             .unwrap_or_else(|| panic!("envelope carried no verdicts[]: {value}"));
@@ -145,10 +151,13 @@ mod tests {
         // recording ran under `--format json`, which folds guest stderr into the
         // envelope rather than re-emitting it, so its lines come from there.
         let recorded_lines = verdict_lines_in(value["stderr"].as_str().unwrap_or_default());
-        let replayed = invoke(
+        // The human-format replay fails the same way, with no envelope asked.
+        let replayed = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
         );
+        assert_eq!(replayed.status.code(), Some(1), "{replayed:?}");
         assert_eq!(
             recorded_lines,
             verdict_lines(&replayed),

@@ -361,14 +361,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The structured run-facts channel. A native guest is FULLY interposed, so
     // the document cannot travel over a path — it rides an inherited host
     // descriptor the shim writes through its private host aliases, exactly like
-    // the trace bundle and the coverage map.
-    let facts_file = if output::facts_active() {
+    // the trace bundle and the coverage map. Every run carries it, whatever its
+    // output format: the run's result is judged from these facts, and a
+    // verdict the guest reported must fail a run nobody asked JSON of.
+    let facts_file =
         Some(tempfile::tempfile().map_err(|error| {
             CliError(format!("failed to create the run-facts channel: {error}"))
-        })?)
-    } else {
-        None
-    };
+        })?);
 
     // Restore the guest arguments for a replay from the trace's recorded argv, so
     // a bare replay reproduces them without the `--` section being re-passed; a

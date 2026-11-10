@@ -28,7 +28,6 @@ mod reports;
 pub use capture::Captured;
 pub use capture::capture_active;
 pub use capture::end_guest_line;
-pub use capture::facts_active;
 pub use capture::json_active;
 pub use capture::parse_facts;
 pub use envelope::CRASH_REPLAY_DIVERGED;

@@ -40,14 +40,6 @@ pub fn json_active() -> bool {
     options().is_json()
 }
 
-/// Whether this invocation wants the runtime's structured `patina.runfacts/v1`
-/// document: whenever the run's outcome is classified (the JSON envelope, a
-/// render or failure report). A plain human run installs no channel at all and
-/// the guest is byte-for-byte unaffected.
-pub fn facts_active() -> bool {
-    capture_active()
-}
-
 /// Parse the facts read back off the channel. The runtime appends a complete
 /// document at each point the process might die and again at finish, so the
 /// LAST complete (newline-terminated) document is the run's state; a torn final

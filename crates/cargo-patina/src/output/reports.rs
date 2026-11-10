@@ -130,7 +130,12 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
     }
 
     if opts.is_json() {
-        let mut env = Envelope::new(report.verb, &classification, captured.exit_code);
+        let exit_code = if failed && captured.exit_code == 0 {
+            1
+        } else {
+            captured.exit_code
+        };
+        let mut env = Envelope::new(report.verb, &classification, exit_code);
         env.family = Some(report.family.to_string());
         env.artifact = Some(report.artifact.to_string());
         env.fingerprint = report.fingerprint.clone();
@@ -175,6 +180,15 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.emit();
     }
 
+    // A run whose guest exited 0 is still a failed run when the facts say so
+    // (a violation verdict, a liveness finding): the process status follows
+    // the classification, never the guest's status alone.
+    if failed && captured.exit_code == 0 {
+        if !opts.is_json() {
+            eprintln!("patina: the guest exited 0 but the run reported a {classification}");
+        }
+        return Ok(1);
+    }
     Ok(captured.exit_code)
 }
 
@@ -188,9 +202,6 @@ fn classify(
     refusal: Option<&Refusal>,
     supervisor_infra: bool,
 ) -> String {
-    if exit_code == 0 {
-        return "ok".to_string();
-    }
     let findings = facts
         .and_then(|facts| facts.get("runtime_findings"))
         .and_then(serde_json::Value::as_array)
@@ -215,6 +226,11 @@ fn classify(
     let buggify_misuse = refusal.is_some_and(|refusal| refusal.class.starts_with("buggify_"));
     if violation_verdict || buggify_misuse {
         return "violation".to_string();
+    }
+    // Past the findings a guest's exit status cannot outvote, a clean exit is
+    // a clean run.
+    if exit_code == 0 {
+        return "ok".to_string();
     }
     let replay_diverged = facts.is_some_and(|facts| facts.get("replay_divergence").is_some());
     if refusal.is_some() || supervisor_infra || replay_diverged {
