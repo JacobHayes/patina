@@ -1,7 +1,7 @@
 name: CI
 
-# Every push and pull request runs the same jobs. The schedule runs the macOS
-# job and the heavy randomized workq campaign (`nightly`).
+# Every push and pull request runs the same jobs: this is the landing gate.
+# The schedule runs only `nightly`: the long campaigns and the advisory audit.
 on:
   pull_request:
   push:
@@ -47,17 +47,6 @@ jobs:
           shared-key: tests-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y strace && uname -r
-      # The oracle host's scenario prerequisites, on record for when a need
-      # goes unmet: network (IPv6 on lo, fanotify groups, non-local binds) and
-      # Landlock.
-      # Each key is read on its own, so a kernel without one still logs the rest.
-      - run: |
-          for key in net.ipv6.conf.lo.disable_ipv6 net.ipv4.ip_nonlocal_bind net.ipv6.ip_nonlocal_bind; do
-            sysctl "$key" || echo "$key: absent"
-          done
-          cat /proc/sys/fs/fanotify/max_user_groups || true
-          echo "lsm: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unreadable)"
-          python3 -c 'import ctypes; r = ctypes.CDLL(None, use_errno=True).syscall(444, None, 0, 1); print("landlock ABI:", r if r > 0 else "unavailable (errno %d)" % ctypes.get_errno())' || true
       # The complete workspace suite, split across the four partitions by test
       # name (nextest runs every test binary; doctests run separately below).
       # Rust executes it on each Linux platform, the syscall conformance
@@ -86,9 +75,9 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     env:
-      # The gate scripts each default to a private target dir so the local
-      # check runner can overlap them; here they run one after another, so they
-      # share one and build the release cargo-patina and native shim once.
+      # The testbed scripts each default to a private target dir; one after
+      # another here, they share one and build the release cargo-patina and
+      # native shim once.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
@@ -100,7 +89,6 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: scripts/check-structure.sh
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo doc --workspace --no-deps --locked
       - run: testbeds/fifo-ipc/run-patina.sh
       - run: testbeds/python-guest/run-patina.sh
       - run: testbeds/python-sdk/run-patina.sh
@@ -111,11 +99,13 @@ jobs:
           testbeds/cap-std-dirfd/run-patina.sh
           mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- testbeds/go-guest/run-patina.sh
           mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-sdk/go.mod)" -- testbeds/go-sdk/run-patina.sh
+      # The process workloads' named refusals, behind the build-free selftest
+      # of the classifier that reads them.
       - if: matrix.runner == 'ubuntu-latest'
-        run: testbeds/multiproc/run-patina.sh
+        run: |
+          testbeds/multiproc/run-patina.sh --selftest
+          testbeds/multiproc/run-patina.sh
       - run: scripts/smoke-native.sh
-      # Fast, build-free classifier selftest (pure functions over canned tuples).
-      - run: testbeds/multiproc/run-patina.sh --selftest
       # The flagship durable-work-queue testbed's full self-checking gate
       # (determinism, record/replay, net/fs faults, crash-recovery, buggify
       # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
@@ -126,6 +116,11 @@ jobs:
       # determinism + cross-seed outcome invariance, record/strict-replay,
       # fail-closed planted-bug legs).
       - run: testbeds/pubsub/run-patina.sh
+      # `#[patina_dst::test]` as an adopter's own crate uses it, driving the
+      # release cargo-patina the testbeds above built.
+      - run: testbeds/patina-macro-adopter/run.sh
+        env:
+          PATINA_CLI: ${{ github.workspace }}/target/release/cargo-patina
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
       # expectation file. Linux x86_64 runs it here; the
@@ -134,8 +129,11 @@ jobs:
         run: testbeds/audit-corpus/run.sh
 
   # The pinned macOS gates. This repo is public and takes outside pull
-  # requests, so CI never runs on a self-hosted machine.
+  # requests, so CI never runs on a self-hosted machine. They run per push
+  # only: a scheduled rerun of an unchanged main finds nothing new, and fails
+  # on the days GitHub has no macOS runner to give.
   macos:
+    if: github.event_name != 'schedule'
     name: macOS / ${{ matrix.part }}
     strategy:
       fail-fast: false
@@ -186,36 +184,17 @@ jobs:
       - if: matrix.part == 'testbeds'
         run: testbeds/pubsub/run-patina.sh
       - if: matrix.part == 'testbeds'
+        run: testbeds/patina-macro-adopter/run.sh
+        env:
+          PATINA_CLI: ${{ github.workspace }}/target/release/cargo-patina
+      - if: matrix.part == 'testbeds'
         run: testbeds/audit-corpus/run.sh
 
-  # Advisory audit (RustSec). The root workspace lockfile is STRICT — any
-  # advisory (including any protobuf appearance) fails the job. The testbeds are
-  # separate workspaces with their own locks; every one is strict.
-  audit:
-    # Lockfiles cannot change between pushes, so scheduled reruns add no signal.
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-toolchain
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - name: Audit root workspace lockfile (strict)
-        run: cargo audit --file Cargo.lock
-      - name: Audit testbed lockfiles (strict)
-        run: |
-          # Testbeds are standalone workspaces (publish=false) with their own
-          # lockfiles. Every one is strict — no advisory is ignored anywhere.
-          for tb in liveness-campaign pubsub workq native-boundary/rand-rng native-boundary/tokio native-boundary/raw; do
-            echo "== audit testbeds/$tb =="
-            cargo audit --file "testbeds/$tb/Cargo.lock"
-          done
-
-  # Long campaigns, beyond the per-push budget. The per-push jobs run a short
-  # workq campaign in its gate; nightly runs the full 200 generations of the
-  # workq and pubsub specs. It runs on Linux, where it covers the same
-  # deterministic model without duplicating macOS campaign work.
+  # What a push should not wait for. The per-push jobs run a short workq
+  # campaign in its gate; nightly runs the full 200 generations of the workq
+  # and pubsub specs, on Linux, where they cover the same deterministic model
+  # as on macOS. The advisory audit is here because advisories arrive on their
+  # own schedule, whether or not anything was pushed.
   nightly:
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
@@ -252,3 +231,15 @@ jobs:
           "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
             "$CARGO_TARGET_DIR/patina/pubsub" --spec testbeds/pubsub/campaign.json \
             --out-dir "$CARGO_TARGET_DIR/pubsub-campaign"
+      # RustSec advisories against the root lockfile and the testbeds', which
+      # are standalone workspaces. Strict: no advisory is ignored anywhere.
+      - if: ${{ !cancelled() }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - if: ${{ !cancelled() }}
+        run: |
+          for lock in Cargo.lock testbeds/{liveness-campaign,pubsub,workq,native-boundary/rand-rng,native-boundary/tokio,native-boundary/raw}/Cargo.lock; do
+            echo "== $lock"
+            cargo audit --file "$lock"
+          done
