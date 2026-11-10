@@ -79,7 +79,6 @@ fn main() {
     //   cursor error. Dropping the recording's final TaskYield(+scheduler_next)
     //   pair synthesizes the on-disk shape the Darwin join-teardown race produced,
     //   so this proves the detector without needing the race to fire.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_yield_stride_tears_down_covers_and_classifies_divergence() {
         let dir = tempdir().unwrap();
@@ -168,7 +167,6 @@ fn main() {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn assert_covmap_has_magic_and_report(path: &Path, output: &Output) {
         let bytes =
             fs::read(path).unwrap_or_else(|error| panic!("missing covmap {path:?}: {error}"));
@@ -188,7 +186,6 @@ fn main() {
     // A guest that produces every end-of-run diagnostic a single native run can:
     // concurrent workers (schedule report) and fault-eligible filesystem traffic
     // (fs-fault report), with the swarm/liveness/policy/SDK reports armed by flags.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const REPORT_KNOB_SOURCE: &str = r#"
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -233,7 +230,6 @@ fn main() {
     // presentation, never run semantics, so the recorded bytes — and with them the
     // fingerprint and everything replay reconciles — must be identical whether the
     // reports printed or not.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_report_knobs_suppress_every_report_without_touching_the_trace() {
         let guest = native_build::source_guest("reports", REPORT_KNOB_SOURCE);
@@ -370,7 +366,6 @@ fn main() {
     // root-task yield count is one short of what a faithful replay executes.
     // Traces are compact, greppable JSON, so editing the decision list directly is
     // a faithful stand-in for a genuinely divergent recording.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn drop_trailing_task_yield(source: &Path, dest: &Path) {
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
@@ -395,7 +390,6 @@ fn main() {
     // can fall between the read and the write), and writes it back plus one. No
     // interposed call sits in the window, so it is reachable only through the
     // edge hook's scheduling points.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const ATOMICS_RACE_SOURCE: &str = r#"
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -433,7 +427,6 @@ fn main() {
     // One instrumented binary, two strides: at stride 0 the window is
     // unreachable at every seed, at stride 1 some seed loses an update, and
     // that seed's recording replays to the same failure from the trace alone.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_yield_stride_reaches_an_atomics_only_race_that_stride_zero_cannot() {
         let dir = tempdir().unwrap();

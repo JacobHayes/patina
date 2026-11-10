@@ -35,8 +35,6 @@ pub struct RenderInput<'a> {
     pub raw: &'a Value,
     pub trace_path: &'a str,
     pub artifact: &'a str,
-    /// Target family label: `native` or `cargo`.
-    pub family: &'a str,
     /// The resolved timeline id being rendered (usually `main`).
     pub timeline: &'a str,
     /// Present when the run ended in a violation/failure; rendered as a prominent
@@ -71,7 +69,6 @@ pub struct FailureSummary {
 pub fn render_trace_file(
     trace_path: &str,
     artifact: &str,
-    family: &str,
     timeline: &str,
     failure: Option<FailureSummary>,
 ) -> Result<String, TraceError> {
@@ -89,7 +86,6 @@ pub fn render_trace_file(
         raw: &raw,
         trace_path,
         artifact,
-        family,
         timeline,
         failure,
     }))
@@ -233,8 +229,7 @@ fn write_header(
     };
     let _ = writeln!(
         html,
-        "<h1>Patina trace timeline</h1>\n<p class=\"subtitle\">{} · <code>{}</code> · timeline <code>{}</code> · {} events across {} lanes · {}</p>",
-        esc(input.family),
+        "<h1>Patina trace timeline</h1>\n<p class=\"subtitle\"><code>{}</code> · timeline <code>{}</code> · {} events across {} lanes · {}</p>",
         esc(input.artifact),
         esc(input.timeline),
         total,
@@ -603,7 +598,6 @@ mod tests {
             raw: &raw,
             trace_path: "run.patina",
             artifact: "demo",
-            family: "native",
             timeline: "main",
             failure: None,
         })
@@ -636,7 +630,6 @@ mod tests {
             raw: &raw,
             trace_path: "run.patina",
             artifact: "demo",
-            family: "native",
             timeline: "main",
             failure: Some(FailureSummary {
                 result_line: "GUEST_VIOLATION two-leaders term=4".into(),

@@ -93,9 +93,8 @@ pub(crate) fn knobs_of(args: &cli::Args) -> Result<KnobValues, CliError> {
 
 /// The `PATINA_*` control-plane pairs carrying this invocation's knobs to the
 /// guest, in [`FaultKnob::ALL`] order, unset knobs omitted so a run that
-/// configured none sets nothing. The native and cargo subprocesses receive them
-/// as real environment variables, so both families apply the identical protocol
-/// the native shim reads.
+/// configured none sets nothing. The guest receives them as real environment
+/// variables, the protocol the native shim reads.
 pub(crate) fn knob_env_pairs(knobs: &KnobValues) -> Result<Vec<(&'static str, String)>, CliError> {
     let mut pairs = Vec::new();
     for knob in FaultKnob::ALL {

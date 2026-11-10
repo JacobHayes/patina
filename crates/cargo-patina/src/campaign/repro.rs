@@ -136,14 +136,9 @@ pub(super) fn render_failure_report(
     let reports_dir = out_dir.join("reports");
     std::fs::create_dir_all(&reports_dir).ok()?;
     let dest = reports_dir.join(format!("generation-{generation}.html"));
-    let html = crate::render::render_trace_file(
-        trace,
-        &artifact.display().to_string(),
-        "native",
-        "main",
-        None,
-    )
-    .ok()?;
+    let html =
+        crate::render::render_trace_file(trace, &artifact.display().to_string(), "main", None)
+            .ok()?;
     std::fs::write(&dest, html).ok()?;
     Some(dest.display().to_string())
 }

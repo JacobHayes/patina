@@ -1,5 +1,4 @@
 //! Ecosystem and std lowering: every fixture is independently targetable.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 use common::native::*;
 

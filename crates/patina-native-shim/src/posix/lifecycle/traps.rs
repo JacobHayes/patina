@@ -146,7 +146,7 @@ fn splitmix64(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// AT_RANDOM determinization (SUD-DESIGN.md §9 slice 3). The kernel seeds the
+/// AT_RANDOM determinization. The kernel seeds the
 /// auxv AT_RANDOM entry with 16 random bytes that glibc consumes at startup
 /// for the stack canary and pointer guard and that a guest can read via
 /// getauxval(AT_RANDOM). glibc dereferences the pointer during startup, so it
@@ -183,7 +183,7 @@ unsafe fn determinize_at_random(envp: *const *const c_char) {
     }
 }
 
-/// Close the vDSO escape (SUD-DESIGN.md §6): AT_SYSINFO_EHDR becomes
+/// Close the vDSO escape: AT_SYSINFO_EHDR becomes
 /// AT_IGNORE, so getauxval(AT_SYSINFO_EHDR) answers 0, rustix finds no vDSO
 /// and falls back to a raw clock_gettime, which SUD traps. glibc consumed the
 /// auxv before this scrub (host aliases keep working).

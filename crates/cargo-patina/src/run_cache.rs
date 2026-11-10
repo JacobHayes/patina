@@ -125,7 +125,6 @@ fn store(name: &str, value: &str) {
 /// Whether the process's file size limit lets it write a file of `len` bytes.
 /// A run under a lower limit would otherwise die of `SIGXFSZ` writing an entry
 /// it could do without, before it reports anything.
-#[cfg(unix)]
 fn file_size_limit_admits(len: usize) -> bool {
     #[repr(C)]
     struct Rlimit {
@@ -142,11 +141,6 @@ fn file_size_limit_admits(len: usize) -> bool {
     };
     // SAFETY: `limit` is a writable rlimit.
     unsafe { getrlimit(RLIMIT_FSIZE, &mut limit) == 0 && limit.current >= len as u64 }
-}
-
-#[cfg(not(unix))]
-fn file_size_limit_admits(_len: usize) -> bool {
-    true
 }
 
 /// `<patina cache>/run-cache/<build ID of this patina>`.

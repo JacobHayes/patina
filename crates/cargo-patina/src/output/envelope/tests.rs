@@ -7,7 +7,6 @@ use super::*;
 #[test]
 fn envelope_omits_fields_nothing_produced() {
     let mut env = Envelope::new("audit", "ok", 0);
-    env.family = Some("native".into());
     env.findings = vec!["libc::open".into()];
     let json = env.to_json();
     assert_eq!(json["schema"], ENVELOPE_SCHEMA);

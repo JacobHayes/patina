@@ -113,7 +113,6 @@ fn incomplete_shim_source_bundle_is_repaired() {
 /// is the class-level detector for restored-bundle Cargo freshness, mutable
 /// output handoff, and cross-bundle concurrent builds (not just key strings).
 #[test]
-#[cfg(unix)]
 fn concurrent_shim_bundles_link_their_own_archives_after_a_bundle_restore() {
     let cache = tempfile::tempdir().unwrap();
     let make_bundle = |key: &'static str, answer: u32, lock_tail: &str| {

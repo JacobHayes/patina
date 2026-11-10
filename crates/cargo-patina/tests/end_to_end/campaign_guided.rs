@@ -39,7 +39,6 @@ fn main() {
 
     /// `source` built with `--instrument`, so a campaign has edge coverage
     /// to steer by.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn coverage_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
         let path = directory.join(format!("{name}.rs"));
         fs::write(&path, source).unwrap();
@@ -87,7 +86,6 @@ fn main() {
     // its own fold. The torn generation has to be novel (its own entry is in the
     // store) and exploited (it consults the ancestor set), or the tear proves
     // nothing; the test picks the first such generation from the fresh run.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_guided_steers_reproducibly_across_a_tear_and_differs_from_unguided() {
         let directory = tempdir().unwrap();
@@ -320,7 +318,6 @@ fn main() {
     // novel. With the bootstrap excluded from the ancestor pool that leaves nothing
     // to steer toward, which must surface as an unguided-identical stream AND a loud
     // vacuity line — never as steering that quietly resamples the baseline.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_guided_reports_vacuous_when_only_the_bootstrap_was_novel() {
         let directory = tempdir().unwrap();

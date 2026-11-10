@@ -3,7 +3,6 @@
 use super::*;
 use crate::run_cache::{self, Image};
 use patina_dst_target::LoadSet;
-#[cfg(unix)]
 /// Does `policy` downgrade the denied import `escape` from a hard error to a
 /// warning? Matches the raw import name and its underscore-stripped alias so an
 /// operator can pass either `_os_unfair_lock_lock` or `os_unfair_lock_lock`.
@@ -130,7 +129,7 @@ deterministically): {list}",
 /// keeps the workaround. macOS never reaches here for rustix (it uses libc), so
 /// its classification is moot. This is a build-time target decision (which cfg
 /// to inject), distinct from the run-time [`kernel_supports_sud`] probe (whether
-/// THIS kernel can trap). SUD-DESIGN.md §9.
+/// THIS kernel can trap).
 pub(crate) fn target_has_sud(target: &str) -> bool {
     target.starts_with("x86_64") && target.contains("linux")
 }
@@ -239,7 +238,7 @@ fn judge(
         }
     };
 
-    // syscall-user-dispatch downgrade (SUD-DESIGN.md §7.1): a `direct-syscall`
+    // syscall-user-dispatch downgrade: a `direct-syscall`
     // *instruction* finding is trapped into the deterministic runtime at run time
     // — not an escape — iff BOTH (a) the binary carries the shim's SUD dispatch
     // marker and (b) the live kernel probe says SUD is available. Both conditions

@@ -143,7 +143,6 @@ fn parse_format(value: &str) -> Result<OutputFormat, CliError> {
 /// imports.
 pub fn emit_audit(
     verb: &str,
-    family: &str,
     artifact: &str,
     findings: Vec<String>,
     finding_details: Vec<serde_json::Value>,
@@ -154,7 +153,6 @@ pub fn emit_audit(
     }
     let result = if exit_code == 0 { "ok" } else { "violation" };
     let mut env = Envelope::new(verb, result, exit_code);
-    env.family = Some(family.to_string());
     env.artifact = Some(artifact.to_string());
     env.findings = findings;
     env.finding_details = finding_details;
@@ -162,12 +160,11 @@ pub fn emit_audit(
 }
 
 /// Emit a verb's envelope for the build path, hashing the produced artifact.
-pub fn emit_build(family: &str, output_path: &Path) {
+pub fn emit_build(output_path: &Path) {
     if !options().is_json() {
         return;
     }
     let mut env = Envelope::new("build", "ok", 0);
-    env.family = Some(family.to_string());
     env.output_path = Some(output_path.to_string_lossy().into_owned());
     if let Ok(bytes) = std::fs::read(output_path) {
         // digest 0.11's output array no longer implements LowerHex; encode bytes.
@@ -214,7 +211,6 @@ pub(crate) fn emit_native_mismatch_refusal(
     mismatch: Option<&'static str>,
 ) {
     let mut env = Envelope::new("run", "error", 2);
-    env.family = Some("native".into());
     env.artifact = Some(artifact.to_string_lossy().into_owned());
     env.refusal = Some(Refusal {
         class: class.into(),

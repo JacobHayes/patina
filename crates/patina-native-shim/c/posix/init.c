@@ -26,7 +26,7 @@ extern void patina_cleanup_push(struct _pthread_cleanup_buffer *buffer, void (*r
 extern void patina_cleanup_pop(struct _pthread_cleanup_buffer *buffer, int execute);
 
 /* ==========================================================================
- * The SIGSYS handler for syscall-user-dispatch (SUD-DESIGN.md): Rust decodes
+ * The SIGSYS handler for syscall-user-dispatch: Rust decodes
  * the trap (provenance, a guest restorer's rt_sigreturn, the registers) and
  * completes it (frame fixups, the return register) around the dispatch and
  * the deliveries of this handler's exit (delivery.c), which a handler may

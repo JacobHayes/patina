@@ -1,6 +1,6 @@
 # Crash-restart protocol
 
-This note pins the crash-restart protocol surface for `--machine-crash-permille` and `--process-crash-permille`. Native runs use it for seeded runs, `--record`, and `replay`. The cargo family refuses both by name.
+This note pins the crash-restart protocol surface for `--machine-crash-permille` and `--process-crash-permille`. Runs use it for seeded runs, `--record`, and `replay`.
 
 ## Where a crash lands
 

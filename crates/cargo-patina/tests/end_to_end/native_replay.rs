@@ -21,7 +21,6 @@ use super::*;
 ///   and [`IDENTITY_PROBE_TAG`], kept in the image by `#[used]`, is a byte the
 ///   guest never reads: flipping it changes the executable and nothing the
 ///   guest does, so only the build identity tells the two apart.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const PROBE_SOURCE: &str = r#"
 unsafe extern "C" {
     fn patina_clock_now(clock: u32, nanos: *mut u64) -> i32;
@@ -142,7 +141,6 @@ fn main() {
 /// lint, which pins the *source* call sites of the window predicate to the same
 /// list, so a new bootstrap-window path cannot be added without both the lint
 /// and a leg here.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
     "clock",
     "clock-until",
@@ -155,11 +153,9 @@ const BOOTSTRAP_WINDOW_ENTRY_POINTS: &[&str] = &[
 ];
 
 /// The inert tag in [`PROBE_SOURCE`], found in the built executable.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const IDENTITY_PROBE_TAG: &[u8] = b"PATINA-IDENTITY-PROBE0";
 
 /// Copy `source` to `dest` with one byte of its inert tag changed.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn flip_identity_probe_byte(source: &Path, dest: &Path) {
     let mut bytes = fs::read(source).unwrap();
     let at = bytes
@@ -174,7 +170,6 @@ fn flip_identity_probe_byte(source: &Path, dest: &Path) {
 /// Rewrite `source` into `dest` without `metadata.native`, as a trace recorded
 /// before build identities, or by something other than the native supervisor,
 /// reads.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn strip_native_identity(source: &Path, dest: &Path) {
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
     let removed = value["metadata"].as_object_mut().unwrap().remove("native");

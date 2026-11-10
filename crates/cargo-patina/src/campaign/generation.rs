@@ -11,7 +11,6 @@ use std::process::Command;
 /// limit, an operator, or this campaign's own timeout backstop. Never a finding.
 pub(super) const SIGKILL: i32 = 9;
 
-#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
@@ -151,7 +150,6 @@ pub(crate) fn child_facts(
     // envelope's `guest_exit.signal` is the authority when there is one (it is
     // the GUEST's death, one process further in); the child's fills in when
     // there is not.
-    #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
         facts.signal = facts.signal.or(status.signal());
@@ -341,7 +339,6 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
         // lock through the descriptor it inherited: the sweep that follows would
         // spare that file as a live recorder's. The generation is over when its
         // last process is.
-        #[cfg(unix)]
         await_process_group_exit(child.id(), KILLED_GROUP_EXIT_BOUND);
     }
     let stdout_bytes = stdout_reader.join().unwrap_or_default();
@@ -425,7 +422,6 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
 }
 
 fn kill_generation_process_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
     {
         let pgid = -(child.id() as i32);
         // SAFETY: `kill` is called with a process-group id created for this
@@ -443,7 +439,6 @@ fn kill_generation_process_tree(child: &mut std::process::Child) {
 /// the campaign stops waiting for it. A killed process normally exits within
 /// milliseconds even on a loaded host; one that outlasts this is stuck in the
 /// kernel (uninterruptible I/O) or is an orphaned zombie nobody reaps.
-#[cfg(unix)]
 const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Wait until no process of the SIGKILLed generation process group `pgid`
@@ -459,7 +454,6 @@ const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_s
 /// that outlasts `bound` is reported and left: the campaign cannot do more than
 /// SIGKILL, and a scratch file that then survives the sweep is the loud trace
 /// of it.
-#[cfg(unix)]
 fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
     use std::time::{Duration, Instant};
 
@@ -505,7 +499,6 @@ mod tests {
     /// A child that refuses because it is another supervisor build stops the
     /// campaign, naming the supervisor, instead of being filed as one more
     /// generation's result.
-    #[cfg(unix)]
     #[test]
     fn a_child_of_another_supervisor_build_stops_the_campaign() {
         let mut child = Command::new("/bin/sh");
@@ -537,7 +530,6 @@ mod tests {
     /// the out-dir invariant itself (no scratch of any name survives a timed-out
     /// generation), and `await_process_group_exit` is the one choke point every
     /// timeout kill passes through before `run_generation` returns.
-    #[cfg(unix)]
     #[test]
     fn a_killed_generation_is_swept_only_after_its_last_process_is_gone() {
         use std::os::fd::AsRawFd;

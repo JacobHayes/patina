@@ -36,7 +36,6 @@ mod tests {
     // Patina help. `--budget` bounds recorded boundary operations, and one
     // operation is below any real guest's needs, so an honored budget shows up as
     // the explicit StepBudgetExceeded failure.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn run_and_audit_route_a_native_artifact() {
         let directory = tempdir().unwrap();

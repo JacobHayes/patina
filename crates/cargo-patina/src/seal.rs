@@ -207,7 +207,7 @@ pub(super) fn seal(
             .arg(&facade),
         "linking the façade",
     )?;
-    if !platform.macho {
+    if !platform.macho() {
         platform.link_slots(&facade, work, "facade", &BTreeMap::new(), &BTreeSet::new())?;
         platform.fix_footprint(&facade, work, "facade")?;
     }
@@ -281,7 +281,7 @@ impl Inventory {
             let Ok(file) = object::File::parse(data) else {
                 continue;
             };
-            if platform.macho && !macho::splits_at_symbols(data).map_err(refuse)? {
+            if platform.macho() && !macho::splits_at_symbols(data).map_err(refuse)? {
                 unsplittable.insert(String::from_utf8_lossy(member.name()).into_owned());
             }
             if workspace {
@@ -335,7 +335,7 @@ impl Inventory {
         let escapes: BTreeSet<String> = referenced
             .difference(&defined)
             .filter_map(|name| {
-                shim_host_alias_violation(&platform.symbol(name), platform.macho, &allow)
+                shim_host_alias_violation(&platform.symbol(name), platform.macho(), &allow)
                     .map(|category| format!("{name} ({category})"))
             })
             .collect();
@@ -419,7 +419,7 @@ fn toolchain_glue(name: &str) -> bool {
 
 /// The symbol registry's rows defined on `platform`'s OS.
 fn rows(platform: Platform) -> BTreeSet<&'static str> {
-    let os = if platform.macho {
+    let os = if platform.macho() {
         Os::Darwin
     } else {
         Os::Linux
@@ -539,32 +539,38 @@ fn cc() -> OsString {
     std::env::var_os("CC").unwrap_or_else(|| "cc".into())
 }
 
-/// The object format and architecture the seal emits for: ELF on Linux,
-/// Mach-O on Darwin, each on x86_64 or aarch64.
-#[derive(Clone, Copy, Debug)]
-struct Platform {
-    macho: bool,
-    aarch64: bool,
+/// The object format and architecture the seal emits for: ELF on Linux
+/// (x86_64 or aarch64), Mach-O on Darwin (aarch64 only).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Platform {
+    ElfX86_64,
+    ElfAarch64,
+    MachO,
 }
 
 impl Platform {
     fn of(file: &object::File<'_>) -> Result<Self, CliError> {
-        let macho = match file.format() {
-            BinaryFormat::Elf => false,
-            BinaryFormat::MachO => true,
-            other => return Err(refuse(format!("no seal for {other:?} objects"))),
-        };
-        let aarch64 = match file.architecture() {
-            object::Architecture::X86_64 => false,
-            object::Architecture::Aarch64 => true,
-            other => return Err(refuse(format!("no seal for {other:?}"))),
-        };
-        Ok(Self { macho, aarch64 })
+        match (file.format(), file.architecture()) {
+            (BinaryFormat::Elf, object::Architecture::X86_64) => Ok(Self::ElfX86_64),
+            (BinaryFormat::Elf, object::Architecture::Aarch64) => Ok(Self::ElfAarch64),
+            (BinaryFormat::MachO, object::Architecture::Aarch64) => Ok(Self::MachO),
+            (format, architecture) => Err(refuse(format!(
+                "no seal for {format:?} {architecture:?} objects"
+            ))),
+        }
+    }
+
+    fn macho(self) -> bool {
+        self == Self::MachO
+    }
+
+    fn aarch64(self) -> bool {
+        self != Self::ElfX86_64
     }
 
     /// The symbol a C name is in this format's objects.
     fn symbol(self, name: &str) -> String {
-        if self.macho {
+        if self.macho() {
             format!("_{name}")
         } else {
             name.to_owned()
@@ -575,7 +581,7 @@ impl Platform {
     /// Apple's otherwise makes them local, and the façade and the engine
     /// reach each other's.
     fn relocatable_link(self) -> Command {
-        if self.macho {
+        if self.macho() {
             let mut command = Command::new(cc());
             command.args(["-r", "-nostdlib", "-Wl,-keep_private_externs"]);
             return command;
@@ -593,13 +599,12 @@ impl Platform {
         let mut text = String::from("\t.text\n");
         for door in doors {
             let (name, target) = (self.symbol(door), self.symbol(&format!("{IMPL}{door}")));
-            let body = match (self.macho, self.aarch64) {
-                (false, true) => format!("\thint 34\n\tb {target}\n"),
-                (false, false) => format!("\tendbr64\n\tjmp {target}\n"),
-                (true, true) => format!("\tb {target}\n"),
-                (true, false) => format!("\tjmp {target}\n"),
+            let body = match self {
+                Self::ElfAarch64 => format!("\thint 34\n\tb {target}\n"),
+                Self::ElfX86_64 => format!("\tendbr64\n\tjmp {target}\n"),
+                Self::MachO => format!("\tb {target}\n"),
             };
-            if self.macho {
+            if self.macho() {
                 write!(text, "\t.globl {name}\n\t.p2align 4\n{name}:\n{body}")
             } else {
                 write!(
@@ -619,10 +624,10 @@ impl Platform {
     /// aarch64 BTI | PAC, so the object keeps the program's control-flow
     /// marking.
     fn object_notes(self) -> String {
-        if self.macho {
+        if self.macho() {
             return "\t.subsections_via_symbols\n".to_owned();
         }
-        let property = if self.aarch64 {
+        let property = if self.aarch64() {
             "0xc0000000"
         } else {
             "0xc0000002"
@@ -651,14 +656,14 @@ impl Platform {
         let resolver = self.symbol(HOST_SYMBOL);
         let unbound = self.symbol(HOST_UNBOUND);
         let text_section = |name: &str| {
-            if self.macho {
+            if self.macho() {
                 "__TEXT,__text,regular,pure_instructions".to_owned()
             } else {
                 format!(".text.{name},\"ax\",%progbits")
             }
         };
         let typed = |name: &str| {
-            if self.macho {
+            if self.macho() {
                 (String::new(), String::new())
             } else {
                 (
@@ -673,7 +678,7 @@ impl Platform {
             let stub = self.symbol(&host(door));
             let slot = self.symbol(&format!("patina_slot_{door}"));
             let name = self.symbol(&format!("patina_name_{door}"));
-            let (slot_section, name_section) = if self.macho {
+            let (slot_section, name_section) = if self.macho() {
                 (
                     "__DATA,__data".to_owned(),
                     "__TEXT,__cstring,cstring_literals".to_owned(),
@@ -684,18 +689,17 @@ impl Platform {
                     format!(".rodata.{name},\"a\",%progbits"),
                 )
             };
-            let (body, bind) = match (self.macho, self.aarch64) {
-                (macho, false) => (
+            let (body, bind) = match self {
+                Self::ElfX86_64 => (
                     format!(
-                        "{landing}\tmovq {slot}(%rip), %r11\n\ttestq %r11, %r11\n\tjz 1f\n\tjmp *%r11\n\
-                         1:\tleaq {name}(%rip), %rdi\n\tjmp {unbound}\n",
-                        landing = if macho { "" } else { "\tendbr64\n" },
+                        "\tendbr64\n\tmovq {slot}(%rip), %r11\n\ttestq %r11, %r11\n\tjz 1f\n\tjmp *%r11\n\
+                         1:\tleaq {name}(%rip), %rdi\n\tjmp {unbound}\n"
                     ),
                     format!(
                         "\tleaq {name}(%rip), %rdi\n\tcall {resolver}\n\tmovq %rax, {slot}(%rip)\n"
                     ),
                 ),
-                (false, true) => (
+                Self::ElfAarch64 => (
                     format!(
                         "\thint 34\n\tadrp x16, {slot}\n\tldr x16, [x16, :lo12:{slot}]\n\
                          \tcbz x16, 1f\n\tbr x16\n\
@@ -706,7 +710,7 @@ impl Platform {
                          \tadrp x16, {slot}\n\tstr x0, [x16, :lo12:{slot}]\n"
                     ),
                 ),
-                (true, true) => (
+                Self::MachO => (
                     format!(
                         "\tadrp x16, {slot}@PAGE\n\tldr x16, [x16, {slot}@PAGEOFF]\n\
                          \tcbz x16, 1f\n\tbr x16\n\
@@ -732,13 +736,11 @@ impl Platform {
         // The binder, an ordinary function of no arguments: one resolver call
         // per slot. One push (a frame record on aarch64) aligns the stack for
         // the calls.
-        let (prologue, epilogue) = if self.aarch64 {
+        let (prologue, epilogue) = if self.aarch64() {
             (
                 "\tstp x29, x30, [sp, #-16]!\n\tmov x29, sp\n",
                 "\tldp x29, x30, [sp], #16\n\tret\n",
             )
-        } else if self.macho {
-            ("\tpushq %rbx\n", "\tpopq %rbx\n\tret\n")
         } else {
             ("\tendbr64\n\tpushq %rbx\n", "\tpopq %rbx\n\tret\n")
         };
@@ -778,7 +780,7 @@ impl Platform {
                 .arg(&bindings),
             "assembling the host bindings",
         )?;
-        if self.macho {
+        if self.macho() {
             self.link_macho_engine(inventory, allocator, staticlib, &bindings, &merged)?;
         } else {
             self.link_elf_engine(inventory, allocator, staticlib, &bindings, work, &merged)?;

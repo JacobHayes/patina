@@ -1,7 +1,7 @@
 # Patina
 
 > Patina is a deterministic-simulation runtime for Rust. It runs ordinary `std`
-> programs (single Rust sources, whole Cargo packages, or WebAssembly modules)
+> programs (single Rust sources or whole Cargo packages)
 > under a cooperative scheduler, a virtual clock, an in-memory filesystem, and a
 > simulated network, so every run is a pure function of a seed. Runs are recorded
 > to a trace and replayed byte-for-byte. Seed-driven fault injection (crashes,
@@ -254,9 +254,9 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   Print a target-local kernel-entry inventory and its C symbol layer (default:
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
   aarch64 inventories pinned BSD, Mach, ARM-special and platform entries,
-  preserving guards and invalid slots without claiming raw-entry models.
+  preserving guarded alternatives and invalid slots by name without claiming raw-entry models.
   Darwin x86_64 is not inventoried. Shared JSON schema: `patina.syscalls/v3`.
-  Row identity is `(namespace, nr, subcode)`; `variants` carry source status.
+  Row identity is `(namespace, nr, subcode)`; `variants` name each source alternative.
   Linux runtime fields are under each row's `linux` object (`disposition`,
   `closes_in`, `since`, etc.); ABI is `metadata.linux.virtual_abi`. Which
   conformance scenario covers a row is `mise run conformance:coverage`'s

@@ -476,18 +476,10 @@ pub(super) fn run_as_toolexec(arguments: Vec<OsString>) -> Result<i32, CliError>
     }
     let mut command = Command::new(&tool);
     command.args(&tool_args);
-    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let error = command.exec();
         Err(CliError(format!("failed to run {tool:?}: {error}")))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command
-            .status()
-            .map_err(|error| CliError(format!("failed to run {tool:?}: {error}")))?;
-        Ok(status.code().unwrap_or(1))
     }
 }
 

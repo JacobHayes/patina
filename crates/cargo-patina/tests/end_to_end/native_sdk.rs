@@ -10,7 +10,6 @@ use super::*;
 /// `setup_complete`, a declared-but-never-called harness bug under
 /// `--buggify-after-setup`. The `naps` run parameter sets how many sleeps the
 /// run makes; five or more fail it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sdk_main() -> String {
     let registry = patina_dst::SDK_SITE_MACROS
         .iter()
@@ -53,13 +52,11 @@ fn sdk_main() -> String {
 
 /// The Cargo target directory the SDK guest builds into, shared with the
 /// fixture that checks a build never picks up another package's binary.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn shared_sdk_target() -> PathBuf {
     common::guest_target_dir("sdk-shared-target")
 }
 
 /// The SDK guest's package directory and binary, built once per run.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sdk_guest() -> (PathBuf, PathBuf) {
     let binary = super::run_facts::shared_guest("native-sdk-guest", |directory| {
         let package = directory.join("pkg");

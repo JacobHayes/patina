@@ -366,7 +366,7 @@ pub fn native_missing_live_interposers(
 }
 
 /// The shim's own host control-plane symbols the pre-run gate tolerates in a
-/// `patina native-build` binary for the current platform.
+/// `patina build` binary for the current platform.
 ///
 /// Under the host-alias doctrine (see the native shim's `hostapi` module and
 /// ARCHITECTURE.md "Host-alias doctrine") the shim reaches every host vehicle —

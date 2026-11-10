@@ -1,6 +1,5 @@
 mod common;
 use common::{invoke, invoke_unchecked, invoke_with, native_workspace};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use common::{invoke_in_with_env, invoke_with_deadline};
 
 use std::collections::BTreeMap;
@@ -8,7 +7,6 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

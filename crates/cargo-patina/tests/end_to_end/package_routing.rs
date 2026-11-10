@@ -10,7 +10,6 @@ mod tests {
     // root package) forces the selection: without `--package` the build cannot pick a
     // member. `audit` builds the selected member with the shim linked and audits the
     // true residual; `run` builds the same selection and executes it.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn audit_and_run_select_workspace_member_with_package_and_bin() {
         let directory = tempdir().unwrap();
@@ -97,7 +96,6 @@ mod tests {
     // * `build .` from inside the package directory succeeds.
     // * A bare `run` from inside a package names no artifact and is refused,
     //   never run.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn package_dir_positional_is_a_source_for_run_record_replay_and_build() {
         let directory = tempdir().unwrap();
@@ -185,7 +183,6 @@ mod tests {
     // a prebuilt binary of that package does: one refused package (an
     // uninterposed process-class import kept behind an opaque branch) is judged
     // the same way on both paths (the allowed path is the package-dir test above).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn run_package_dir_and_its_prebuilt_binary_get_the_same_gate_verdict() {
         let directory = tempdir().unwrap();

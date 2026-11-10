@@ -5,7 +5,6 @@ use super::*;
 
 /// Class detector for private watchdog startup entering the guest scheduler.
 /// Point pairing: native_harness_selects_same_named_library_binary_and_integration_test.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_watchdog_helpers_leave_guest_scheduling_and_panics_alone() {
     let directory = tempdir().unwrap();

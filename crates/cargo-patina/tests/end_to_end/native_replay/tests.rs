@@ -7,7 +7,6 @@ use super::*;
 /// refuses any other, guest argv is restored, an incomplete trace is refused
 /// before exec, a guest abort finalizes per platform, and a fail-closed replay
 /// init reaches the guest through every bootstrap-window entry point.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_replay_ties_the_trace_to_its_build_and_argv() {
     let guest = native_build::source_guest("replay_probe", PROBE_SOURCE);
@@ -32,7 +31,6 @@ fn native_replay_ties_the_trace_to_its_build_and_argv() {
 /// answer without calling `ensure_runtime`: the bootstrap-window arms take an
 /// answer path that never consults the stored init error unless the shim checks
 /// it there, and `stdout` would exit 0 with its output dropped.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn replay_init_error_reaches_every_bootstrap_window_entry_point(guest: &common::native::Guest) {
     let workspace = native_workspace();
     let bin = guest.binary.to_str().unwrap();
@@ -185,7 +183,6 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
 
 /// An explicit guest abort under `--record`: Linux finalizes the trace and
 /// reports the signal death; macOS reports an infra failure and no trace.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::Guest) {
     let directory = guest.dir.path();
     let bin = &guest.binary;
@@ -275,7 +272,6 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
 
 /// An empty, truncated or metadata-incomplete trace is refused with the CLI
 /// error exit before the guest is executed.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn incomplete_traces_are_refused_before_guest_exec(guest: &common::native::Guest) {
     let incomplete_metadata = format!(
         r#"{{"format_version":{},"metadata":{{"root_seed":1}},"timelines":[]}}"#,
@@ -316,7 +312,6 @@ fn incomplete_traces_are_refused_before_guest_exec(guest: &common::native::Guest
 /// non-default `-- ARGS`, a mismatched `--` section is refused up front naming
 /// both argv lists, a matching one is accepted, and a trace without the field
 /// still replays with explicit arguments.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn guest_argv_is_restored_on_replay(guest: &common::native::Guest) {
     let trace = guest.dir.path().join("argv.patina");
     let args = ["alpha", "--tick-millis", "50"];
@@ -366,7 +361,6 @@ fn guest_argv_is_restored_on_replay(guest: &common::native::Guest) {
 /// inert byte away, a trace from another supervisor build of the same version,
 /// and a trace with no identity. Rebuilding the one source, under another output
 /// name, reproduces the executable, so a source-first replay matches.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn the_trace_names_its_build_and_refuses_any_other(
     guest: &common::native::Guest,
     trace: &Path,

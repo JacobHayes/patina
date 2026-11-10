@@ -1,5 +1,4 @@
 //! Patina-only containment, with planted failures beside the positive controls.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 #[path = "native_containment/layout.rs"]
 mod layout;
@@ -888,7 +887,6 @@ mod linux {
 /// Every reference in the program's load set is judged by the image it binds
 /// to: application libraries are audited as the executable is, and what the
 /// loader would run before the shim's containment is refused before it can.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod load_set {
     use super::*;
     use std::path::{Path, PathBuf};

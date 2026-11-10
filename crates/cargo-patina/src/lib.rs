@@ -33,7 +33,6 @@ mod aux_store;
 mod campaign;
 mod cli;
 mod coverage;
-#[cfg(unix)]
 mod crash_restart;
 mod go_build;
 mod guided;
@@ -71,7 +70,7 @@ use parse::{ParseResult, current_verb, locate_positionals, parse};
 use shim_build::lock_target_dir;
 
 const DEFAULT_NATIVE_FINGERPRINT: &str = "patina-native";
-/// The fixed, machine-independent `argv[0]` every native guest sees. `native-run`
+/// The fixed, machine-independent `argv[0]` every native guest sees. `run`
 /// resolves the guest binary to an absolute host path (tempdir-specific,
 /// machine-specific) to exec it, so passing that path through as `argv[0]` would
 /// leak a non-portable string into the guest's `std::env::args().next()` — a
@@ -84,14 +83,10 @@ const NATIVE_GUEST_ARGV0: &str = "patina-guest";
 // the child discovers them from `PATINA_RT_TRACE_FD` / `PATINA_RT_FS_IMAGE_FD`. Keeping
 // the actual numbers avoids a macOS fork/exec edge where pre-exec
 // relocation onto fixed low fds could still leave those fds closed after exec.
-#[cfg(unix)]
 const F_GETFD: i32 = 1;
-#[cfg(unix)]
 const F_SETFD: i32 = 2;
-#[cfg(unix)]
 const FD_CLOEXEC: i32 = 1;
 
-#[cfg(unix)]
 unsafe extern "C" {
     // Darwin arm64 passes anonymous arguments on the stack. A fixed-arity
     // declaration would place F_SETFD's argument in the wrong location.
@@ -100,7 +95,6 @@ unsafe extern "C" {
 
 // The one shared binding must satisfy the real C-variadic ABI, including on
 // Darwin arm64. A fixed-arity declaration cannot inhabit this function type.
-#[cfg(unix)]
 const _: unsafe extern "C" fn(i32, i32, ...) -> i32 = fcntl;
 
 #[cfg(target_os = "linux")]
@@ -340,7 +334,7 @@ struct NativeRunInvocation {
     /// Schedule-invariant: recorded (informational) but NOT fingerprinted.
     liveness: NativeLiveness,
     /// Extra symbols to treat as known-safe in the pre-run audit gate, beyond
-    /// the baked shim control-plane vehicle. Mirrors `native-audit --allow`.
+    /// the baked shim control-plane vehicle. Mirrors `audit --allow`.
     allow: BTreeSet<String>,
     /// How the pre-run gate treats symbols that are neither interposed nor
     /// known-safe.
@@ -391,7 +385,7 @@ impl KnobValues {
     }
 }
 
-/// Cooperative-SUT (buggify) knobs for `native-run`, forwarded to the guest as
+/// Cooperative-SUT (buggify) knobs for `run`, forwarded to the guest as
 /// validated raw strings through the `PATINA_RT_BUGGIFY*` control plane. Presence
 /// of the enclosing `Option` means `--buggify` was passed (buggify enabled).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -407,7 +401,7 @@ struct NativeBuggify {
     after_setup: bool,
 }
 
-/// Exploration scheduling-policy and swarm knobs for `native-run`, forwarded to
+/// Exploration scheduling-policy and swarm knobs for `run`, forwarded to
 /// the guest as validated raw strings through the `PATINA_SCHED_*`/`PATINA_RT_SWARM`
 /// control plane. Each is default-off; enabling a non-default policy or swarm
 /// folds a fingerprint component so a policy trace never cross-replays with a
@@ -448,7 +442,7 @@ struct NativeLiveness {
     heal_after: Option<String>,
 }
 
-/// The escape hatch for `native-run`'s pre-run default-deny gate. By default an
+/// The escape hatch for `run`'s pre-run default-deny gate. By default an
 /// unsupported symbol on the blocking/effect surface is a hard error before the
 /// guest runs; the operator can downgrade specific symbols (or all) to a loud
 /// warning for programs that carry unsupported surface never reached by the
@@ -609,20 +603,9 @@ fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-#[cfg(unix)]
 fn hash_os(hasher: &mut Sha256, value: &OsStr) {
     use std::os::unix::ffi::OsStrExt;
     hash_bytes(hasher, value.as_bytes());
-}
-
-#[cfg(windows)]
-fn hash_os(hasher: &mut Sha256, value: &OsStr) {
-    use std::os::windows::ffi::OsStrExt;
-    let bytes = value
-        .encode_wide()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-    hash_bytes(hasher, &bytes);
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -666,7 +649,7 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use native_run::{NativeChildStatus, native_child_status};
 #[cfg(test)]
 use patina_dst_trace::create_scratch;

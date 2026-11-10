@@ -696,7 +696,7 @@ const MACHO_ALLOWLIST: &[AllowedImports] = {
     const STACK_PROBE: &[&str] = &["chkstk_darwin"];
     // Returns pointers to in-process environment and argument-vector storage.
     // The shim scrubs environ at startup; argv is the supervisor-controlled
-    // program arguments (native-run sets them and clears the child environment),
+    // program arguments (patina run sets them and clears the child environment),
     // so `std::env::args()` reading them stays deterministic. These accessors
     // only hand back those pointers — no host effect.
     const ARGV_ENV_STORAGE: &[&str] = &["NSGetEnviron", "NSGetArgc", "NSGetArgv"];

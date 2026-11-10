@@ -18,7 +18,6 @@ use super::*;
 ///   `patina_dst::param`, with `naps` sleeps;
 /// * `boundary`: an interposed `std::fs` effect before the harness installs;
 /// * `early-write`: captured output before the harness installs.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const HARNESS_SRC: &str = r#"
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -160,7 +159,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 "#;
 
 /// The [`HARNESS_SRC`] guest, built once per run.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn harness_guest() -> PathBuf {
     super::run_facts::shared_guest("harness-guest", |directory| {
         let package = directory.join("pkg");
@@ -180,13 +178,10 @@ pub(super) fn harness_guest() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::harness_guest;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use common::assert_success;
 
     /// The single `HARNESS_OUT ...` line the harness guest prints.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn harness_out_line(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -203,7 +198,6 @@ mod tests {
 
     /// Parse `elapsed=N` (virtual monotonic nanoseconds observed through std's
     /// clock) from a harness output line.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn harness_elapsed(line: &str) -> u128 {
         line.split("elapsed=")
             .nth(1)
@@ -213,7 +207,6 @@ mod tests {
     }
 
     /// A run of the harness binary in `mode` at seed 1, with the guest's arguments last.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn harness_run(bin: &Path, mode: &str, extra: &[&str]) -> Output {
         let mut args = vec!["run", bin.to_str().unwrap(), "--seed", "1"];
         args.extend_from_slice(extra);
@@ -226,7 +219,6 @@ mod tests {
     // Knobs a harness turns on in code are recorded with the policy part of the
     // fingerprint computed by the runtime, so the trace replays with no flag on
     // the command line and a replay that arms them differently still fails closed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_harness_that_enables_buggify_in_code_records_and_replays_without_flags() {
         let bin = harness_guest();
@@ -282,7 +274,6 @@ mod tests {
     // application code: a configured sleep jitter shifts the std-clock elapsed
     // reading by exactly the jitter, so the overlay reached the same
     // `RuntimeConfig` field the CLI `--sleep-jitter-nanos` sets.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn harness_fails_closed_outside_patina_and_each_service_records_and_replays() {
         let bin = harness_guest();
@@ -383,7 +374,6 @@ mod tests {
     // `patina_dst::param`, a `run --param` for the same key overrides its
     // default, and the merged set records and replays from the trace alone,
     // stack addresses included.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn harness_params_merge_under_the_cli_and_replay_from_the_trace() {
         let bin = harness_guest();
@@ -416,7 +406,6 @@ mod tests {
     // no auto-init is allowed, so the shim aborts loudly. A guest write is a
     // boundary effect too, though capture answers it with no context installed: the
     // install that follows refuses. Either way the application code never proceeds.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn harness_boundary_effects_before_install_fail_closed() {
         let bin = harness_guest();

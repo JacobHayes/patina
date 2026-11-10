@@ -1,7 +1,6 @@
 //! Native pre-run gates, trace channels, and child execution.
 
 use crate::audit::{native_escape_summary, push_native_escape_provenance_lines};
-#[cfg(unix)]
 use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
@@ -15,7 +14,6 @@ use crate::run_cache::Image;
 use crate::{
     CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
 };
-#[cfg(unix)]
 use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
@@ -53,10 +51,8 @@ const ENVP_SLOT_PREFIX: &str = "_PATINA_ENVP_SLOT_";
 pub(super) use child::NATIVE_CRASH_RESTART_EXIT;
 use child::encode_guest_argv;
 use child::reconcile_replay_argv;
-#[cfg(unix)]
-#[cfg(unix)]
 use child::wait_native_child_once;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(super) use child::{NativeChildStatus, native_child_status};
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
 
@@ -116,7 +112,6 @@ pub(crate) use trace::TRACE_CHANNEL_UNAVAILABLE;
 use trace::TraceCommitFailure;
 use trace::write_unsupported_sidecar;
 
-#[cfg(unix)]
 pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<i32, CliError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -804,7 +799,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let exit = output::finalize_run(
         output::RunReport {
             verb: "run",
-            family: "native",
             artifact: &artifact,
             trace_path,
             trace_facts,
@@ -832,11 +826,4 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         );
     }
     Ok(exit)
-}
-
-#[cfg(not(unix))]
-pub(super) fn execute_native_run(_invocation: NativeRunInvocation) -> Result<i32, CliError> {
-    Err(CliError(
-        "native-run requires a Unix host for the PATINA_RT_TRACE_FD supervisor channel".into(),
-    ))
 }

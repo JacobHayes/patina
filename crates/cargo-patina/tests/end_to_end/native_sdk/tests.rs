@@ -3,7 +3,6 @@
 use super::*;
 use common::native::Guest;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
     let (_, binary) = sdk_guest();
@@ -89,7 +88,6 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
 // `run --param` reaches the guest through `patina_dst::param`, and the trace
 // carries it: the parameter changes how many boundary operations the run makes,
 // and a flag-free replay reproduces the recording.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
     let (_, binary) = sdk_guest();
@@ -122,7 +120,6 @@ fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
 // `minimize --params` reduces a failing native run's parameters: a candidate
 // still fails when the run exits as the original did, so the irrelevant
 // parameter goes and the load-bearing one shrinks to the smallest failing value.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn minimize_params_reduces_a_failing_native_runs_parameters() {
     let (_, binary) = sdk_guest();
@@ -159,7 +156,6 @@ fn minimize_params_reduces_a_failing_native_runs_parameters() {
 // together. Every declared macro, a newly added registry row included, emits a
 // linked descriptor at its own source line though no run reaches it, and a
 // campaign fails coverage on the never-called `reachable!`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
     let (_, binary) = sdk_guest();
@@ -218,7 +214,6 @@ fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
 /// package's binary runs its own: artifact discovery reads Cargo's target
 /// directory rather than assuming a binary name. The target is the SDK guest's,
 /// and this package is new on every run.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn an_sdk_build_into_a_shared_target_dir_does_not_reuse_another_binary() {
     sdk_guest();

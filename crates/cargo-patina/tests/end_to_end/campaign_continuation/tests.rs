@@ -3,7 +3,6 @@
 use super::*;
 
 /// A guest that spins forever, built once per run and shared.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn spin_forever_guest() -> PathBuf {
     super::super::run_facts::shared_guest("spin-forever", |directory| {
         build_facts_guest(
@@ -14,7 +13,6 @@ fn spin_forever_guest() -> PathBuf {
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_timeout_does_not_save_incomplete_trace() {
     let workspace = native_workspace();
@@ -88,7 +86,6 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
 /// included), the sites store, the coverage store's bytes and the persisted
 /// state all match, the continuation runs under the recorded spec (here a
 /// non-default seed base), and the state records both invocations.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_extend_equals_fresh_campaign() {
     let workspace = native_workspace();
@@ -225,7 +222,6 @@ fn campaign_extend_equals_fresh_campaign() {
     assert_eq!(state["invocations"].as_array().unwrap().len(), 2);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_resume_after_interruption_matches_fresh_campaign() {
     let workspace = native_workspace();
@@ -404,7 +400,6 @@ fn main() {
 /// artifact that changed or vanished. A continuation that is allowed reports
 /// cumulative progress, and a child launched by another build refuses before
 /// it runs anything.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn campaign_continuation_refusals_are_loud() {
     let directory = tempdir().unwrap();
@@ -609,7 +604,6 @@ fn campaign_continuation_refusals_are_loud() {
 /// process group, outside the campaign's, and its guest here would spin
 /// forever: with nobody left to enforce the timeout backstop, a surviving
 /// group would run on beside the `--resume` that re-runs the same generation.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_killed_campaign_takes_its_generation_with_it() {
     let workspace = native_workspace();
@@ -673,7 +667,6 @@ fn a_killed_campaign_takes_its_generation_with_it() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct HostProcess {
     pid: u32,
     ppid: u32,
@@ -681,7 +674,6 @@ struct HostProcess {
 }
 
 /// Every host process, read from `ps` (POSIX, the same on Linux and macOS).
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_table() -> Vec<HostProcess> {
     let listing = Command::new("ps")
         .args(["-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid="])
@@ -703,7 +695,6 @@ fn process_table() -> Vec<HostProcess> {
 }
 
 /// Whether any process remains in the process group `pgid`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn process_group_alive(pgid: u32) -> bool {
     unsafe extern "C" {
         #[link_name = "kill"]

@@ -6,7 +6,6 @@ mod tests {
 
     // Errors, short transfers and latency on the native family, each seen by the
     // guest, reported non-vacuous on stderr, and reproduced by a flag-free replay.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_fs_faults_and_latency_reach_the_guest_report_and_replay() {
         let guest = native_build::source_guest("fs_fault", FS_FAULT_SOURCE);

@@ -1,6 +1,6 @@
 //! Shared hierarchical rollups for inventory-style reports.
 //!
-//! The rollup contract is intentionally independent of `sites`: callers provide
+//! Callers provide
 //! attributed leaves (crate/module plus a bucket name such as `driven` or
 //! `covered`) and receive deterministic crate→module summaries. Coverage-depth reuses this module with edge buckets rather than
 //! growing a parallel grouping implementation.

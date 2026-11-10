@@ -1,5 +1,4 @@
 //! Real C/raw doors paired with the signals state/wait and fatal-policy detectors.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 use common::native::*;
 

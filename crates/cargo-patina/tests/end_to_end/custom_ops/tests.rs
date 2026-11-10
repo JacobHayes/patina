@@ -17,7 +17,6 @@ use super::*;
 /// The campaign: the knob is a first-class banded knob, so a bug reachable only
 /// under a particular custom-op failure PATTERN is found by ordinary campaign
 /// exploration and classified through the guest's own verdict.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn native_custom_ops_record_replay_fault_and_drive_a_campaign() {
     let directory = tempdir().unwrap();
@@ -41,7 +40,6 @@ fn native_custom_ops_record_replay_fault_and_drive_a_campaign() {
     campaign_finds_a_planted_mishandling(directory.path(), bin);
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     let workspace = native_workspace();
     let trace = directory.join("custom-op.patina");
@@ -147,7 +145,6 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
 /// The typed API over the same substrate: a struct result is recorded and
 /// replayed identically without running `perform`, and a faultable typed op
 /// hands the guest its declared `Err` under the knob and replays it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
     let workspace = native_workspace();
     let run = |args: &[&str]| invoke(workspace, args);
@@ -200,7 +197,6 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
     let workspace = native_workspace();
     // Knob off: the declared failure is never reached, both closures run.
@@ -305,7 +301,6 @@ fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn campaign_finds_a_planted_mishandling(directory: &Path, bin: &str) {
     let workspace = native_workspace();
     let campaign = |out: &Path, custom_op_faults: bool| {

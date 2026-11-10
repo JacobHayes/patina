@@ -2,14 +2,12 @@
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::super::run_facts::{outcome_guest, shared_sdk_guest};
     use super::super::*;
 
     // Gate: a `patina-dst-harness` binary is sweepable with no flag. The binary
     // carries its own marker, so every generation's child `run` defers runtime
     // installation and the guest's install succeeds.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_sweeps_a_harness_binary_without_a_flag() {
         let directory = tempdir().unwrap();
@@ -65,7 +63,6 @@ mod tests {
     //   classified from rules its own campaign spec declares, with zero guest
     //   changes; without the rules the same guest is OK, so it is the spec that
     //   classifies, never the string, and a malformed rule is a loud spec error.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_classifies_each_guest_outcome_by_its_attribution() {
         let directory = tempdir().unwrap();
@@ -156,7 +153,6 @@ mod tests {
     // A campaign asked for a mode its artifact cannot serve is refused by name, never
     // swept in a different mode than the operator asked for. A plain native binary
     // (no yield points) has no edge coverage, so `--guided` has no novelty signal.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_refuses_guided_without_a_novelty_signal() {
         let directory = tempdir().unwrap();

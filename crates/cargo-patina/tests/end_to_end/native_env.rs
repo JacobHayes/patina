@@ -95,7 +95,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_env_and_cwd_are_modeled_process_state() {
         let guest = native_build::source_guest("env_cwd", ENV_CWD_SOURCE);

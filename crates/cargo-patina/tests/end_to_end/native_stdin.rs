@@ -37,7 +37,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn supplied_stdin_is_a_recorded_faultable_file_and_replay_checks_a_resupplied_one() {
         let guest = native_build::source_guest("stdin", STDIN_SOURCE);

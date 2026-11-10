@@ -70,7 +70,6 @@ const _: () = {
 /// what is polled even if the number now names another one (the kernel's
 /// `(fd, struct file)` interest key). `None` for a number that names
 /// nothing.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) fn fd_poll(
     state: &ThreadRuntime,
@@ -84,7 +83,6 @@ pub(super) fn fd_poll(
 /// The kind, class handle and status flags of what a readiness source names:
 /// the retained description `desc` when given, else what the number `fd`
 /// names now. `None` for either naming nothing.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 fn resolve_source(fd: c_int, desc: Option<DescId>) -> Option<(FdKind, u64, u32)> {
     let table = super::fd_table().lock();
@@ -100,7 +98,6 @@ fn resolve_source(fd: c_int, desc: Option<DescId>) -> Option<(FdKind, u64, u32)>
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (u64, u64)) {
     use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
@@ -200,7 +197,6 @@ fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (
 /// `pipe_poll`: the read side is readable while bytes are queued and hung
 /// up once no writer is left; the write side is writable while there is
 /// room and in error once no reader is left.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
     use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
@@ -262,7 +258,6 @@ pub(super) enum ReadyDir {
 /// Where a task parked on a readiness fan-in enqueued itself, so it can be
 /// unlinked on resume regardless of which source woke it. Reactor-neutral: a
 /// kqueue or epoll frontend both watch the same virtual pipe/socket queues.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[derive(Clone, Copy)]
 pub(super) enum WaiterLoc {
     PipeOpen(u64),
@@ -338,7 +333,6 @@ impl WaiterLoc {
 /// call to wake anyone, so the registration also carries the earliest such
 /// delivery among the watched sockets, and the park ends there
 /// ([`ReadinessWait::bounded`]).
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) fn register_readiness_waiters(
     state: &mut ThreadRuntime,
@@ -440,14 +434,12 @@ pub(super) fn register_readiness_waiters(
 /// A readiness fan-in registration ([`register_readiness_waiters`]): the
 /// waiter queues it joined and the earliest delivery in flight to a watched
 /// socket.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(super) struct ReadinessWait {
     wait: Wait,
     next_arrival: Option<u64>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 impl ReadinessWait {
     /// The wait to park on and the deadline it parks until: the caller's own
@@ -459,7 +451,6 @@ impl ReadinessWait {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
@@ -470,7 +461,6 @@ fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 
 /// Unlink `me` from every queue [`register_readiness_waiters`] enqueued it on,
 /// so a later wake of that queue never targets an already-resumed task.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[WaiterLoc]) {
     let remove = |queue: &mut WaitQueue<VecDeque<TaskId>>| {
         if let Some(index) = queue.iter().position(|task| *task == me) {

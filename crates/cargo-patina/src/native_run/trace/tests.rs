@@ -21,7 +21,6 @@ fn identity() -> NativeIdentityRecord {
 /// identity into a recording: a recorder that writes none (one linked before
 /// identities existed, or one that is not told about them) still commits a
 /// trace that names its build, so it replays against that build.
-#[cfg(unix)]
 #[test]
 fn commit_stamps_the_build_identity_into_a_trace_the_recorder_left_without_one() {
     use std::io::Write;
@@ -60,7 +59,6 @@ fn commit_stamps_the_build_identity_into_a_trace_the_recorder_left_without_one()
 /// missing artifact. Liveness is the recorder's lock on its file, never its
 /// pid: a pid is reused, and one in another pid namespace or owned by
 /// another user reads as dead to `kill(pid, 0)`.
-#[cfg(unix)]
 #[test]
 fn the_scratch_sweep_spares_a_live_recorders_file() {
     let directory = tempfile::tempdir().unwrap();
@@ -91,7 +89,6 @@ fn the_scratch_sweep_spares_a_live_recorders_file() {
 /// case the guest's own status is the run's answer. Both cases still remove
 /// the scratch file, so nothing unreplayable is left behind for a later
 /// `replay` to trip over.
-#[cfg(unix)]
 #[test]
 fn commit_failures_are_classified_by_what_the_channel_saw() {
     use patina_dst_trace::abandoned_trace_marker;

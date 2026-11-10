@@ -71,7 +71,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     // the surface `run` enforces; the shim's own `dlsym` vehicle is admitted
     // by its binding in both.
     //
-    // syscall-user-dispatch (SUD-DESIGN.md §7.1): a `direct-syscall` *instruction*
+    // syscall-user-dispatch: a `direct-syscall` *instruction*
     // finding in a SUD-dispatch-capable binary is not a hard escape — at run time
     // it is trapped and routed by SUD (on a kernel that has it). `audit` is
     // static (no live kernel probe), so it reports BOTH outcomes: runnable under
@@ -140,7 +140,6 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
                 details.extend(host_identity_details(&host_identity));
                 output::emit_audit(
                     "audit",
-                    "native",
                     &resolved.path.display().to_string(),
                     findings,
                     details,
@@ -188,7 +187,6 @@ named frozen-clock-churn abort.",
     if output::options().is_json() {
         output::emit_audit(
             "audit",
-            "native",
             &resolved.path.display().to_string(),
             findings,
             host_identity_details(&host_identity),
@@ -250,14 +248,7 @@ fn emit_native_audit_violation(
         // binary was refused, and dropping them here would make the class visible
         // on some outcomes and silent on others.
         details.extend(host_identity_details(host_identity));
-        output::emit_audit(
-            "audit",
-            "native",
-            &path.display().to_string(),
-            findings,
-            details,
-            2,
-        );
+        output::emit_audit("audit", &path.display().to_string(), findings, details, 2);
     } else {
         eprintln!("{}", render_native_escapes_grouped(denied));
         if let Some(note) = render_thread_pointer_note(denied) {

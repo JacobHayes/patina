@@ -83,7 +83,6 @@ pub(super) fn native_identity_refusal(
 
 /// An anonymous file holding `bundle`, the trace channel a replaying guest
 /// reads.
-#[cfg(unix)]
 pub(super) fn guest_trace_channel(bundle: &TraceBundle) -> Result<fs::File, CliError> {
     let bytes = bundle
         .to_bytes()

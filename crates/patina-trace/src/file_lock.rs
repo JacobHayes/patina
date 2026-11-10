@@ -62,7 +62,6 @@ fn retry_interrupted(mut acquire: impl FnMut() -> io::Result<()>) -> io::Result<
 
 /// Whether `path` names the file `file` has open. False once the name is
 /// unlinked or names a different file.
-#[cfg(unix)]
 pub fn path_names(path: &Path, file: &File) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     let open = file.metadata()?;
@@ -71,14 +70,6 @@ pub fn path_names(path: &Path, file: &File) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-#[cfg(not(unix))]
-pub fn path_names(_path: &Path, _file: &File) -> io::Result<bool> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "file identity is unsupported on this platform",
-    ))
 }
 
 /// Create a scratch file beside `path` to write it through and rename onto it:
@@ -149,7 +140,20 @@ pub fn remove_dead_scratch(path: &Path) {
     }
 }
 
-#[cfg(all(test, unix))]
+fn scratch_prefix(path: &Path) -> io::Result<OsString> {
+    let file_name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("trace path has no file name: {}", path.display()),
+        )
+    })?;
+    let mut prefix = OsString::from(".");
+    prefix.push(file_name);
+    prefix.push(".tmp.");
+    Ok(prefix)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -192,17 +196,4 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
     }
-}
-
-fn scratch_prefix(path: &Path) -> io::Result<OsString> {
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("trace path has no file name: {}", path.display()),
-        )
-    })?;
-    let mut prefix = OsString::from(".");
-    prefix.push(file_name);
-    prefix.push(".tmp.");
-    Ok(prefix)
 }

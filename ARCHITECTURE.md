@@ -123,7 +123,7 @@ patina-dst-native-shim      # libc/pthread/dispatch/syscall interposition + SUD
 ```text
 abi -> driver-api -> concrete drivers
 abi -> trace
-concrete drivers + trace -> runtime -> async -> patina-dst -> cargo-patina
+concrete drivers + trace -> runtime -> native-shim -> cargo-patina
 ```
 
 Native shims and the harness depend on the runtime boundary; they never
@@ -143,8 +143,8 @@ cache dir; `PATINA_SHIM_TARGET_DIR` moves the shim build). Cache rules:
 - entries are content-addressed, published by rename, and trusted only after a
   completion marker written last; `rm -rf` of the cache is always safe between
   builds;
-- each catalog has one lock; consumers hold kernel leases, so pruning never
-  removes an entry in use;
+- each catalog has one lock; a take touches the entry's `.used` marker under
+  it, and pruning removes only entries idle for a day;
 - guest links read only published `artifacts/` entries, never Cargo scratch
   state;
 - every patina Cargo build holds `.patina-build.lock` in its target
@@ -220,8 +220,8 @@ satisfy the export guard and extend the ABI acceptance cases.
 ### Allocator routing
 
 The link wraps Rust's four allocator entry points (`--wrap`) and links a jump
-object (`c/patina_allocator_routing.S`, names generated from the shim archive
-by `src/allocator_routing.rs`). An allocation made while the shim owns the
+object (`cargo-patina/c/patina_allocator_routing.S`, names generated from the
+shim archive by `cargo-patina/src/allocator_routing.rs`). An allocation made while the shim owns the
 thread comes from the shim's arena (`patina-native-shim/src/arena.rs`, one
 region at a fixed address); any other goes to the guest's allocator. A block
 is freed by the allocator whose range holds it. Darwin's linker has no
@@ -407,7 +407,7 @@ try-lock runtime locks.
 Concrete drivers implement capabilities: `MemFs`, `CrashFs` (an ext4-style
 journal: commits, delayed allocation, torn in-place overwrites),
 `SimNet`, `VirtualClock`, `SeededEntropy`, `DetScheduler`. Wrapper drivers
-compose around them (`FaultNet`). Record and replay live at the runtime
+compose around them (`FaultFs`). Record and replay live at the runtime
 boundary, not in drivers, so they compose with any driver stack. Every
 `Context` has every driver: a slot the builder is not handed gets the
 standard one.

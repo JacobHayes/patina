@@ -1,6 +1,5 @@
 //! ABI-door and scheduler integration pins. Unlike the Linux host-oracle
 //! probes these also execute on macOS and Linux arm64, and pin virtual time.
-#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 #[cfg(target_os = "linux")]
 #[path = "native_abi/sysv_ipc.rs"]

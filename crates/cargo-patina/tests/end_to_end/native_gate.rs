@@ -416,7 +416,7 @@ fn main() {
     // `environment` (getenv/setenv/... are all interposed, so no shim-linked binary
     // can import an uninterposed one) and `unmanaged-thread` (pthread_create is
     // interposed; the C `escape_probe.c` used by native_containment imports it and
-    // native-audit rejects it as `unmanaged-thread`).
+    // patina audit rejects it as `unmanaged-thread`).
     //
     // The `process` representative is `killpg`, deliberately NOT a spawn-family
     // symbol (`fork`/`posix_spawn*`/`waitpid`/...) nor `kill`: the spawn family is now
@@ -435,7 +435,6 @@ fn main() {
     // Linux interposes every public signal-wait representative; Darwin does
     // not interpose sigsuspend. glibc's exported __sigsuspend alias remains an
     // import and normalizes to the same signals-timers classifier entry.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const SIGNALS_TIMERS_IMPORT: &str = r#"
 unsafe extern "C" {
     #[cfg_attr(target_os = "linux", link_name = "__sigsuspend")]
@@ -564,7 +563,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
         assert!(!String::from_utf8_lossy(&refused.stdout).contains("PLANT_RAN"));
     }
 
-    // Gate-level per-class detection: native-run refuses a guest reaching one
+    // Gate-level per-class detection: patina run refuses a guest reaching one
     // uninterposed symbol of each class, naming every class. Demonstrably able to
     // fail — it depends on the run being refused with each label present.
     #[cfg(target_os = "macos")]
@@ -625,7 +624,6 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
 
     // Class pairing: the default-deny import gate and symbol normalization.
     // Shares the signal-family representative with the macOS per-class guest.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_run_prerun_gate_refuses_signals_timers_escape() {
         let directory = tempdir().unwrap();
@@ -831,7 +829,6 @@ fn main() {
     // The dynamic-loading surface an extension loader links (`libloading`:
     // `dlopen`, `dlerror`, `dlclose`), reached only when the guest is asked to
     // load something; `assert` reaches a `debug_assert!` instead.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const EXTENSION_LOADER_SOURCE: &str = r#"
 use std::ffi::{c_char, c_int, c_void};
 unsafe extern "C" {
@@ -868,7 +865,6 @@ fn main() {
     // deterministic-IO interposers are reached through glibc-internal paths a
     // defined/undefined scan cannot see, so the guest references none of them
     // directly, yet every one must survive the link.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_run_dlopen_is_a_deny_trap_and_release_strips_debug_asserts() {
         let directory = tempdir().unwrap();

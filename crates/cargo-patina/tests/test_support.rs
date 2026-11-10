@@ -1,4 +1,3 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
 mod common;
 
 /// Deadline cleanup never broadens a child group into a user-wide signal. The

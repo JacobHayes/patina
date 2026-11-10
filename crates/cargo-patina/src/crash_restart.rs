@@ -14,7 +14,6 @@ use std::path::Path;
 /// How a crashing run is supervised: the crash kinds it may take, the seed
 /// its handoff seal key derives from, and what each incarnation's trace
 /// channel carries.
-#[cfg(unix)]
 pub(super) struct CrashRestartPlan {
     /// The kinds a crash may be: those whose rate is live, or a replay's
     /// recorded one.
@@ -23,7 +22,6 @@ pub(super) struct CrashRestartPlan {
     trace: CrashRestartTrace,
 }
 
-#[cfg(unix)]
 enum CrashRestartTrace {
     /// A seeded run has no trace channel.
     Seeded,
@@ -40,7 +38,6 @@ enum CrashRestartTrace {
 /// or not a crash then lands; a replay is supervised when its trace records a
 /// crash, and replays that crash where the recording took it, never drawing
 /// one of its own.
-#[cfg(unix)]
 pub(super) fn crash_restart_plan(
     invocation: &NativeRunInvocation,
     replay_trace: Option<TraceBundle>,
@@ -79,7 +76,6 @@ pub(super) fn crash_restart_plan(
     Ok(Some(CrashRestartPlan { kinds, seed, trace }))
 }
 
-#[cfg(unix)]
 fn crash_restart_replay_plan(
     path: &Path,
     bundle: TraceBundle,
@@ -99,7 +95,6 @@ fn crash_restart_replay_plan(
 
 /// The descriptors one incarnation is launched with. Everything else about the
 /// launch is common to the run.
-#[cfg(unix)]
 pub(super) struct IncarnationLaunch<'a> {
     pub(super) incarnation: u64,
     /// The incarnation's trace channel, for a record or replay.
@@ -118,7 +113,6 @@ pub(super) struct IncarnationLaunch<'a> {
 /// What a restarted incarnation boots from: the recovered filesystem, in place
 /// of the run's base image, and the realtime the crashed incarnation's clock
 /// had reached, which its own realtime carries on from.
-#[cfg(unix)]
 pub(super) struct RestartBoot<'a> {
     pub(super) snapshot: &'a fs::File,
     pub(super) previous_realtime_nanos: u64,
@@ -127,7 +121,6 @@ pub(super) struct RestartBoot<'a> {
 /// A supervised crash-restart run: its merged guest output and status, the
 /// `crash_restart` envelope field, and, for a record, the trace bytes to
 /// commit.
-#[cfg(unix)]
 pub(super) struct CrashRestartRun {
     pub(super) captured: output::Captured,
     pub(super) report: serde_json::Value,
@@ -137,7 +130,6 @@ pub(super) struct CrashRestartRun {
 /// A replay that departed from the recording at or before the crash: incarnation
 /// 1 never runs, and the run keeps incarnation 0's output and envelope, with
 /// the named divergence as its last stderr line and a failing status.
-#[cfg(unix)]
 fn crash_replay_divergence(
     mut first: output::Captured,
     first_host_pid: u32,
@@ -174,7 +166,6 @@ fn crash_replay_divergence(
 /// Incarnation 0 reached its crash point and could not carry out the crash:
 /// patina's failure, so the run is an infra refusal naming `reason`, with the
 /// crash attempted and not reached, and incarnation 1 never runs.
-#[cfg(unix)]
 fn crash_failed(
     mut first: output::Captured,
     first_host_pid: u32,
@@ -206,7 +197,6 @@ fn crash_failed(
 }
 
 /// Everything incarnation 0 wrote to its crash-report pipe.
-#[cfg(unix)]
 fn read_crash_reports(mut reader: std::io::PipeReader) -> Result<Vec<u8>, CliError> {
     use std::io::Read;
 
@@ -222,7 +212,6 @@ fn read_crash_reports(mut reader: std::io::PipeReader) -> Result<Vec<u8>, CliErr
 /// when it handed over, and `Some(Err(reason))` when the crash failed. An
 /// attempt with no outcome (the incarnation died in the handoff), and bytes
 /// that are not whole reports, are failed crashes too.
-#[cfg(unix)]
 fn crash_attempt(bytes: Vec<u8>, first: &output::Captured) -> Option<Result<(), String>> {
     let Some(reports) = CrashReport::decode_all(&bytes) else {
         return Some(Err(format!(
@@ -251,7 +240,6 @@ fn crash_attempt(bytes: Vec<u8>, first: &output::Captured) -> Option<Result<(), 
 
 /// What a record's incarnation 0 wrote to its trace channel, for a run that
 /// ends with that incarnation.
-#[cfg(unix)]
 fn read_record_segment(
     trace: &CrashRestartTrace,
     channel: Option<&fs::File>,
@@ -273,7 +261,6 @@ fn read_record_segment(
 /// crash comes at a different point, or hands over a different filesystem,
 /// than the recorded one: the recovered filesystem is re-derived by the
 /// replay, never read from the trace.
-#[cfg(unix)]
 pub(super) fn supervise_crash_restart(
     plan: &CrashRestartPlan,
     mut launch: impl FnMut(IncarnationLaunch<'_>) -> Result<(output::Captured, u32), CliError>,
@@ -491,7 +478,6 @@ pub(super) fn supervise_crash_restart(
 /// are what the trace channel carries, so the commit reports the loss exactly
 /// as it would for a run that never restarted. A joined trace over the size
 /// budget is abandoned, with its `PATINA_INFRA` line in the run's stderr.
-#[cfg(unix)]
 fn join_recorded_incarnations(
     crashed: Vec<u8>,
     handoff: &patina_dst_trace::VerifiedIncarnationHandoff,
@@ -532,7 +518,6 @@ fn join_recorded_incarnations(
 }
 
 /// An anonymous host file holding `contents`, rewound for the child to read.
-#[cfg(unix)]
 pub(crate) fn scratch_file(purpose: &str, contents: &[u8]) -> Result<fs::File, CliError> {
     use std::io::{Seek, Write};
 
@@ -545,7 +530,6 @@ pub(crate) fn scratch_file(purpose: &str, contents: &[u8]) -> Result<fs::File, C
 }
 
 /// Everything a child wrote into a scratch channel.
-#[cfg(unix)]
 fn read_scratch_file(file: &fs::File, purpose: &str) -> Result<Vec<u8>, CliError> {
     use std::io::{Read, Seek};
 
@@ -559,7 +543,6 @@ fn read_scratch_file(file: &fs::File, purpose: &str) -> Result<Vec<u8>, CliError
 
 /// A supervisor line in the run's stderr: appended to captured output, or
 /// printed where the guest's own stderr went.
-#[cfg(unix)]
 fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
     if captured.captured {
         output::end_guest_line(&mut captured.stderr);
@@ -572,7 +555,6 @@ fn append_supervisor_line(captured: &mut output::Captured, line: &str) {
 
 /// The handoff seal key: a function of the run's seed, so the record and the
 /// replay of one run derive the same key.
-#[cfg(unix)]
 fn crash_handoff_key(seed: u64) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"patina-native-crash-restart-handoff-key/v3");
@@ -582,7 +564,6 @@ fn crash_handoff_key(seed: u64) -> [u8; 32] {
 
 /// Append the supervisor's human `PATINA_INFRA native_run` line to the run's
 /// stderr: the guest's death signal and any trace the run left incomplete.
-#[cfg(unix)]
 pub(super) fn append_native_infra_marker(
     captured: &mut output::Captured,
     signal: Option<i32>,

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs, io};
 
-// The native link recipe is packaged into `patina` so `native-build` can
+// The native link recipe is packaged into `patina` so `build` can
 // reproduce it without the source tree: the POSIX shim C layer and its header
 // are embedded, compiled below the user program, and linked against the
 // `patina-dst-native-shim` staticlib. The C text is sourced from the shim crate

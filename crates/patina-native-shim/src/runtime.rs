@@ -414,12 +414,12 @@ pub(crate) static STARTUP_CONSTRUCTOR_FINISHED: AtomicBool = AtomicBool::new(fal
 pub(crate) static LAST_BOUNDARY_SYMBOL: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Guarantee a deterministic runtime is installed before a boundary call, or
-/// fail closed. Ordinary programs built with `patina native-build` do not
+/// fail closed. Ordinary programs built with `patina build` do not
 /// call `patina_init_from_env` themselves: the packaged startup path installs
 /// the runtime from the supervisor protocol. This is the belt-and-suspenders
 /// path — if the constructor has not run yet (static-init ordering) but the
 /// protocol is present, it initializes now; if the protocol is absent the
-/// binary is being run outside `patina native-run`, which is a hard,
+/// binary is being run outside `patina run`, which is a hard,
 /// clearly reported error rather than a silent seeded-zero run.
 pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     if slot().lock().is_some() {
@@ -911,7 +911,7 @@ pub(crate) fn control_trace_fd() -> Result<Option<i32>, RuntimeError> {
 }
 
 /// Parse `PATINA_RT_FS_IMAGE_FD` from the control plane, mirroring `control_trace_fd`.
-/// Present only when `native-run --mount` streamed a captured host directory.
+/// Present only when `run --mount` streamed a captured host directory.
 fn control_restart_snapshot_fd() -> Result<Option<i32>, RuntimeError> {
     control_env(patina_dst_runtime::ENV_RESTART_SNAPSHOT_FD)
         .filter(|value| !value.is_empty())
@@ -984,7 +984,7 @@ impl io::Read for HostFd {
 }
 
 /// Build the deterministic filesystem for a native run. When
-/// `PATINA_RT_FS_IMAGE_FD` is set (`native-run --mount`), rebuild the streamed
+/// `PATINA_RT_FS_IMAGE_FD` is set (`run --mount`), rebuild the streamed
 /// read-only corpus image and wrap it in the same crash-modeling `CrashFs` used
 /// otherwise, so the crash knobs compose identically with a mount.
 /// Absent the knob, an empty `CrashFs`, exactly as before. `FsImage::decode`
@@ -1232,7 +1232,7 @@ pub(crate) fn runtime_config_from_control_plane()
     config = config.with_reports(control_reports());
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
-    // diverging mid-run (SUD-DESIGN.md §7.3). `None` on every non-SUD run.
+    // diverging mid-run. `None` on every non-SUD run.
     config = config.with_sud(sud_armed_metadata());
     // Same reconciliation contract for the timestamp-counter trap: a trace
     // recorded with rdtsc/rdtscp answered from the virtual clock cannot be

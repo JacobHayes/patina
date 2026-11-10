@@ -17,7 +17,6 @@ pub struct CoverageReport {
 
 pub struct RunReport<'a> {
     pub verb: &'a str,
-    pub family: &'a str,
     pub artifact: &'a str,
     /// The on-disk trace path for a record/replay run, or `None` for a plain
     /// seeded run (no trace was written).
@@ -111,7 +110,6 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             let html = render::render_trace_file(
                 &trace.to_string_lossy(),
                 report.artifact,
-                report.family,
                 report.timeline,
                 failure,
             )
@@ -136,7 +134,6 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             captured.exit_code
         };
         let mut env = Envelope::new(report.verb, &classification, exit_code);
-        env.family = Some(report.family.to_string());
         env.artifact = Some(report.artifact.to_string());
         env.fingerprint = report.fingerprint.clone();
         env.seed = report.seed;

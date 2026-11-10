@@ -13,7 +13,6 @@ mod tests {
     // The split is staged hermetically: a proxy reports an identity its concrete
     // sysroot compiler cannot reproduce. The propagation gate above the link must
     // refuse it. The hostile-proxy success test is the class-level pairing.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn an_unverifiable_guest_compiler_is_refused_before_the_link() {
         let directory = tempdir().unwrap();
@@ -94,7 +93,6 @@ mod tests {
 
     // Class-level detector: per-directory selectors must never be re-entered after
     // materializing the guest compiler. Both ambient tools are hostile in the cache.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn assert_no_bundle_toolchain_pin(cache: &Path) {
         let mut bundles = 0;
         for entry in fs::read_dir(cache).unwrap() {
@@ -119,7 +117,6 @@ mod tests {
         assert!(bundles > 0, "no extracted bundles were inspected");
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_hostile_per_directory_proxy_builds_with_the_guest_compiler() {
         let directory = tempdir().unwrap();
@@ -238,7 +235,6 @@ mod tests {
 
     // Refusal matrix paired with the hostile-proxy propagation detector. Every
     // planted failure must stop before Cargo or the link, naming a concrete remedy.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn unmaterializable_guest_toolchains_refuse_without_fallback() {
         let directory = tempdir().unwrap();
@@ -337,7 +333,6 @@ mod tests {
     /// CLI resolves it (`XDG_CACHE_HOME`, else the platform's per-user cache under
     /// `HOME`). Created here so a caller can canonicalize it before the CLI's first
     /// unpack.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn shim_source_cache() -> PathBuf {
         let root = match env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
             Some(xdg) => PathBuf::from(xdg),

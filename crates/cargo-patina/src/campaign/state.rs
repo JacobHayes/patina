@@ -1020,7 +1020,6 @@ impl CampaignLock {
 
 /// Take a non-blocking whole-file write record lock on `file`; contention is
 /// [`std::io::ErrorKind::WouldBlock`].
-#[cfg(unix)]
 fn lock_out_dir(file: &File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     // SAFETY: `flock` is plain old data; all-zero is a valid value, and the
@@ -1042,13 +1041,6 @@ fn lock_out_dir(file: &File) -> std::io::Result<()> {
             _ => return Err(error),
         }
     }
-}
-
-/// Elsewhere the fork inheritance above does not exist, and the handle lock
-/// std takes is the process's own.
-#[cfg(not(unix))]
-fn lock_out_dir(file: &File) -> std::io::Result<()> {
-    patina_dst_trace::lock_exclusive(file, false)
 }
 
 #[cfg(test)]

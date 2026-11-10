@@ -66,7 +66,6 @@ mod tests {
     //   sentinels; mimalloc and aws-lc error output) lands on the captured streams.
     // * `pthread_once` (aws-lc's lazy init) runs its routine exactly once, keyed
     //   on the control block's address.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const LIBC_SURFACE_SOURCE: &str = r#"
 use std::ffi::{CStr, CString};
 use std::io::Error;
@@ -204,7 +203,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_libc_surface_answers_from_the_model() {
         let guest = native_build::source_guest("libc_surface", LIBC_SURFACE_SOURCE);

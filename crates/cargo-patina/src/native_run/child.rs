@@ -56,12 +56,10 @@ or pass them byte-for-byte identically.",
     }
 }
 
-#[cfg(unix)]
 pub(crate) struct InheritedFdGuard {
     saved: Vec<(i32, i32)>,
 }
 
-#[cfg(unix)]
 impl InheritedFdGuard {
     pub(super) fn clear_cloexec(fds: &[i32]) -> Result<Self, CliError> {
         let mut saved = Vec::with_capacity(fds.len());
@@ -113,7 +111,6 @@ impl InheritedFdGuard {
     }
 }
 
-#[cfg(unix)]
 impl Drop for InheritedFdGuard {
     fn drop(&mut self) {
         for (fd, flags) in self.saved.drain(..) {
@@ -124,7 +121,6 @@ impl Drop for InheritedFdGuard {
     }
 }
 
-#[cfg(unix)]
 pub(super) fn spawn_native_child(
     command: &mut Command,
     binary: &Path,
@@ -144,14 +140,12 @@ pub(super) fn spawn_native_child(
     Ok((child, guard))
 }
 
-#[cfg(unix)]
 pub(crate) struct NativeChildStatus {
     pub(crate) exit_code: i32,
     pub(crate) signal: Option<i32>,
     pub(crate) core: bool,
 }
 
-#[cfg(unix)]
 pub(crate) fn native_child_status(status: ExitStatus) -> NativeChildStatus {
     use std::os::unix::process::ExitStatusExt;
 
@@ -178,7 +172,6 @@ pub(crate) fn native_child_status(status: ExitStatus) -> NativeChildStatus {
 
 pub(crate) const NATIVE_CRASH_RESTART_EXIT: i32 = 112;
 
-#[cfg(unix)]
 pub(super) fn wait_native_child_once(
     command: &mut Command,
     binary: &Path,

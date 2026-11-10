@@ -2,7 +2,6 @@
 
 use super::*;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn active_toolchain_binary(name: &str) -> PathBuf {
     let sysroot = Command::new("rustc")
         .args(["--print", "sysroot"])
@@ -25,7 +24,6 @@ pub(super) fn active_toolchain_binary(name: &str) -> PathBuf {
 
 // Write a minimal plain Cargo package (no Patina dependency) with a single
 // binary whose `main.rs` is `main`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn write_plain_package(root: &Path, name: &str, main: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -108,7 +106,6 @@ pub(super) fn campaign_json_stdout(output: &Output) -> serde_json::Value {
 
 /// Build the planted-liveness-bug guest (`testbeds/liveness-campaign`) into
 /// `output`, staging its Cargo build under this test build's target directory.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn build_liveness_guest(output: &Path) {
     let workspace = native_workspace();
     let fixture = workspace.join("testbeds/liveness-campaign");
@@ -172,7 +169,6 @@ pub(super) fn stdout_line_with(output: &Output, needle: &str) -> String {
 /// advance-on-spin this guest hung forever at 100% CPU: virtual time only moved
 /// through a recorded sleep and the loop issues none, so `elapsed` was 0 on
 /// every iteration and the exit condition was unreachable.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) const CALIBRATION_SPIN_SOURCE: &str = r#"
 use std::time::Instant;
 
@@ -194,7 +190,6 @@ fn main() {
 }
 "#;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) const FS_FAULT_SOURCE: &str = r#"
 use std::env;
 use std::fs::OpenOptions;
@@ -421,19 +416,17 @@ pub(super) fn result_line(output: &Output) -> String {
 // ---- Cooperative-SUT (buggify) SDK, end to end -------------------------------
 //
 // A whole package depending on the `patina` crate's default-feature SDK, built
-// and run through native-build/native-run. Verifies that buggify fires
+// and run through patina build/patina run. Verifies that buggify fires
 // deterministically, reports its sites, records and replays
 // byte-identically without re-supplying `--buggify`, and that a duplicate label
 // aborts with the fatal marker.
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sdk_fixture_package_name(root: &Path) -> String {
     let mut hash = DefaultHasher::new();
     root.hash(&mut hash);
     format!("buggify-sdk-fixture-{:016x}", hash.finish())
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn write_sdk_fixture(root: &Path, main: &str) {
     fs::create_dir_all(root.join("src")).unwrap();
     let package_name = sdk_fixture_package_name(root);
@@ -449,7 +442,6 @@ pub(super) fn write_sdk_fixture(root: &Path, main: &str) {
     fs::write(root.join("src/main.rs"), main).unwrap();
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn assert_campaign_sites_carry_identities(binary: &Path, expected_labels: &[&str]) {
     let directory = tempdir().unwrap();
     let out = directory.path().join("campaign");
@@ -489,7 +481,6 @@ pub(super) fn assert_campaign_sites_carry_identities(binary: &Path, expected_lab
 // A guest that reuses the same label at two different call sites: a fatal
 // duplicate, aborting with the marker. With literal labels the link-time site
 // table catches it at install, before the first evaluation.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) const BUGGIFY_DUP_MAIN: &str = r#"
 fn main() {
     let _ = patina_dst::buggify!("same-label");
@@ -498,7 +489,6 @@ fn main() {
 }
 "#;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn assert_native_harness_prerun_refusal(
     name: &str,
     exact: &str,
@@ -597,7 +587,6 @@ pub(super) fn assert_native_harness_prerun_refusal(
 
 /// Write a harness fixture crate at `dir` whose `main.rs` is `main_rs`, with a
 /// path dependency on the workspace `patina-dst-harness`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
     fs::create_dir_all(dir.join("src")).unwrap();
     let harness_path = native_workspace().join("crates/patina-harness");
@@ -615,7 +604,6 @@ pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
 }
 
 /// Build a harness fixture into `out` through `patina build`.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
     invoke(
         native_workspace(),
@@ -639,7 +627,6 @@ pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
 // without the flag.
 
 /// Run a campaign and return its output, without asserting success.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn campaign_run(out: &Path, guest: &Path, extra: &[&str]) -> Output {
     let mut args = vec![
         "campaign",
@@ -657,7 +644,6 @@ pub(super) fn campaign_run(out: &Path, guest: &Path, extra: &[&str]) -> Output {
     invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args)
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn build_facts_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
     let path = directory.join(format!("{name}.rs"));
     fs::write(&path, source).unwrap();

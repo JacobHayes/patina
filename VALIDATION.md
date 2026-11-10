@@ -71,8 +71,8 @@ systems.
 | Level | Scope | Status |
 |---|---|---|
 | V0 | workspace quality: fmt, clippy and the suite in CI | standing |
-| V1 | deterministic vertical slice at the explicit `Context` boundary | complete |
-| V2 | cooperative scheduling, SimNet, wrappers, branching, async executor | complete |
+| V1 | deterministic vertical slice at the `Context` boundary | complete |
+| V2 | cooperative scheduling, SimNet, fault wrappers | complete |
 | V3 | native linked-shim target: interposition, audit gate, threads, reactors, SUD | partial |
 | V4 | trace hardening, crash models, host capture, minimization, budgets | partial |
 | V5 | cooperative-SUT SDK (`buggify!`, `always!`, `sometimes!`) | partial |

@@ -101,8 +101,6 @@ variable takes that prefix. Execution verbs accept `--format json`
 - Crate directories are `crates/patina-*`; published packages are
   `patina-dst-*` (`crates/patina-runtime` is `patina-dst-runtime`), and the SDK
   at `crates/patina` is `patina-dst`, used as `patina_dst::`.
-- The two families are **cargo** (an in-process Cargo package or test) and
-  **native** (a shim-linked binary).
 - Write docs in clear, concise, present-tense language.
 - Shell scripts are loud on failure and never pass vacuously.
 - Measure rather than guess: quote a duration only when observed, and answer

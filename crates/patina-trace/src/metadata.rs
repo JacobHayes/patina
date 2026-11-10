@@ -385,7 +385,7 @@ pub struct RunMetadata {
     /// replay is refused UP FRONT rather than diverging mid-run: a binary with
     /// raw inline syscalls can only run armed, so replaying its `sud:true` trace
     /// on a kernel without SUD (or vice versa) is reconciled fail-closed before
-    /// the first op is replayed. SUD-DESIGN.md §7.3.
+    /// the first op is replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sud: Option<bool>,
     /// Whether the timestamp-counter trap (`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`)

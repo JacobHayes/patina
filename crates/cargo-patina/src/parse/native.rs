@@ -247,7 +247,7 @@ fn parse_python_build(
     })
 }
 
-/// Classify a `native-build` path by shape (no filesystem access, so parsing
+/// Classify a `build` path by shape (no filesystem access, so parsing
 /// stays pure): a `.rs` file is a single source, and anything else — a
 /// directory or a `Cargo.toml` — is a Cargo package. Existence is checked when
 /// the build runs.

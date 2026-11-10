@@ -9,7 +9,6 @@ use patina_dst_target::NativeEscape;
 /// CONTAINING symbol its provenance names matches too — scoped to that one
 /// function, never `all`. A symbol finding keeps matching only by its own
 /// (stable) name; a crate name is not a symbol.
-#[cfg(unix)]
 #[test]
 fn unsupported_only_matches_an_instruction_finding_by_its_containing_symbol() {
     use patina_dst_target::NativeProvenance;

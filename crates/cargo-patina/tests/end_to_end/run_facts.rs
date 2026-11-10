@@ -6,7 +6,6 @@ use super::*;
 /// The binary `build` produces in the directory it is given, built once per
 /// nextest run under this test build's target base and shared by every test
 /// that names it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn shared_guest(name: &str, build: impl FnOnce(&Path) -> PathBuf) -> PathBuf {
     static IN_PROCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _serial = IN_PROCESS
@@ -22,7 +21,6 @@ pub(super) fn shared_guest(name: &str, build: impl FnOnce(&Path) -> PathBuf) -> 
 
 /// An SDK guest package (`patina-dst` dependency, `main` as its source) built
 /// once per nextest run through `patina build` and shared by name.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn shared_sdk_guest(name: &str, main: &str) -> PathBuf {
     shared_guest(name, |directory| {
         let package = directory.join("pkg");
@@ -56,7 +54,6 @@ pub(super) fn shared_sdk_guest(name: &str, main: &str) -> PathBuf {
 ///   that on macOS), so a `--format json` envelope is one ~200 KiB line;
 /// * `level-one`: exit 0 after printing a failure only the guest's own dialect
 ///   names.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const OUTCOME_SOURCE: &str = r#"
 use std::time::Duration;
 
@@ -97,7 +94,6 @@ fn main() {
 "#;
 
 /// The [`OUTCOME_SOURCE`] guest.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn outcome_guest() -> PathBuf {
     shared_guest("outcome-guest", |directory| {
         build_facts_guest(directory, "outcome", OUTCOME_SOURCE)
@@ -120,7 +116,6 @@ mod tests {
     /// Parse the whitespace-delimited `k=v` fields of a `PATINA_*` report line. Used
     /// ONLY by the test, to prove the structured plane and the printed line describe
     /// the same run — patina itself never reads a line back.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn report_line_fields(stderr: &str, marker: &str) -> BTreeMap<String, String> {
         let line = stderr
             .lines()
@@ -134,7 +129,6 @@ mod tests {
     }
 
     /// The envelope of `patina <arguments>`, whatever its exit status.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn envelope(arguments: &[&str]) -> serde_json::Value {
         let output = invoke_with_deadline(
             env!("CARGO_BIN_EXE_patina"),
@@ -156,7 +150,6 @@ mod tests {
     /// owns, a liveness finding survives the abort that follows it, and a
     /// refusal is attributed only when patina refused: a guest's own abort is
     /// a signal death with no refusal.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_envelope_carries_runtime_facts_and_attributes_only_patinas_refusals() {
         let guest = outcome_guest();

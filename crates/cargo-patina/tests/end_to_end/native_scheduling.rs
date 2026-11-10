@@ -8,7 +8,6 @@ mod tests {
     // hang) and replays, and the same spin stopped by `--budget` under `--record`
     // still leaves a truncated but loadable trace: the stop flushes the
     // recording before it aborts.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_calibration_busy_wait_converges_and_a_budget_stop_keeps_its_trace() {
         let guest = native_build::source_guest("calibration_spin", CALIBRATION_SPIN_SOURCE);

@@ -6,14 +6,12 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 pub mod native;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod process_group;
 
 use object::read::archive::ArchiveFile;
@@ -435,7 +433,6 @@ pub fn invoke_unchecked(executable: &str, directory: &Path, arguments: &[&str]) 
 /// Capture both output streams concurrently until the child and pipe readers finish.
 /// On deadline, kill the entire process group and return `None`: descendants may
 /// keep output pipes open even after the supervisor exits.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn invoke_with_deadline(
     executable: &str,
     directory: &Path,
@@ -451,7 +448,6 @@ pub fn invoke_with_deadline(
 }
 
 /// Capture a configured command using the same process-group deadline as CLI runs.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option<Output> {
     match output_by_deadline(command, deadline) {
         Deadlined::Finished(output) => Some(output),
@@ -467,7 +463,6 @@ pub fn output_with_deadline(command: &mut Command, deadline: Duration) -> Option
 }
 
 /// How [`output_by_deadline`] ended.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub enum Deadlined {
     Finished(Output),
     /// The deadline passed: the whole process group was killed and the child
@@ -480,7 +475,6 @@ pub enum Deadlined {
 
 /// [`output_with_deadline`], answering a killed run's partial output rather
 /// than dropping it.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn output_by_deadline(command: &mut Command, deadline: Duration) -> Deadlined {
     output_until(command, deadline, |_| false)
 }
@@ -489,7 +483,6 @@ pub fn output_by_deadline(command: &mut Command, deadline: Duration) -> Deadline
 /// every poll and, answering true, has the run killed then (the same group
 /// kill and reap as the deadline). A caller that confirms a hang this way
 /// tells the two kills apart itself.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn output_until(
     command: &mut Command,
     deadline: Duration,
@@ -527,7 +520,6 @@ pub fn output_until(
     })
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_pipe(mut pipe: impl std::io::Read) -> Vec<u8> {
     let mut bytes = Vec::new();
     pipe.read_to_end(&mut bytes).unwrap();

@@ -9,7 +9,6 @@ mod tests {
     /// reached the guest (a failed open or write, or a short write); otherwise it
     /// exits 7, so every generation is a notable run whose drawn flags the
     /// campaign records.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const FS_WRITER: &str = r#"
 use std::io::Write;
 
@@ -36,7 +35,6 @@ fn main() {
         cwd: PathBuf,
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn fixture() -> Fixture {
         let directory = tempdir().unwrap();
         let module = build_facts_guest(directory.path(), "fs-writer", FS_WRITER);
@@ -120,7 +118,6 @@ fn main() {
     /// every-plane control shows fs faults do reach this guest), the out-dir
     /// records the subset, a continuation keeps it and refuses a new one, and
     /// an unknown plane is a usage error naming the valid planes.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_plane_subset_never_draws_another_plane_and_a_continuation_keeps_it() {
         let fixture = fixture();
@@ -207,7 +204,6 @@ fn main() {
     /// continuation (even after a torn last record), with the seed, flags and class the campaign used: here
     /// every generation is notable, so each record must equal its notable run.
     /// Without the flag no log is written.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_generation_log_records_every_generation_as_the_campaign_ran_it() {
         let fixture = fixture();

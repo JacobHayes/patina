@@ -340,7 +340,7 @@ pub(super) fn scan_instruction_ranges(
 /// plus the top nibble of the low-12-bit page offset being zero is a ~2^-52
 /// per-offset false-positive, effectively never a coincidence. A `vsyscall`
 /// finding is NOT `direct-syscall`, so it is never SUD-downgradable — it always
-/// refuses (see [`native_escape_is_sud_manageable`]). SUD-DESIGN.md §6.3.
+/// refuses (see [`native_escape_is_sud_manageable`]).
 fn scan_vsyscall_references(
     data: &[u8],
     name: &str,

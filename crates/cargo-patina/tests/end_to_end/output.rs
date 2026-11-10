@@ -8,7 +8,6 @@ mod tests {
     // trace has multiple task lanes and fs ops to render. With the `fail` argument
     // it fails loudly with a violation marker instead, for the per-failure report
     // and the `violation` classification.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const RENDER_GUEST_SOURCE: &str = r#"
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -38,7 +37,6 @@ fn main() {
 "#;
 
     /// One JSON object on stdout.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn envelope(output: &Output) -> serde_json::Value {
         let stdout = String::from_utf8_lossy(&output.stdout);
         serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
@@ -50,7 +48,6 @@ fn main() {
     // a stable, parseable shape, and the HTML timeline (`--render`/`--report`) is a
     // pure read-only consumer: rendering a trace does not change its bytes, and
     // rendering with no trace on disk is a clear error, not a silent no-op.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_json_envelopes_and_html_timelines() {
         let directory = tempdir().unwrap();
@@ -218,7 +215,6 @@ fn main() {
     }
 
     /// Count flattened v5 events (operations plus lifecycle markers) in the main timeline.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn trace_event_count(trace: &Path) -> usize {
         let value: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
         value["timelines"][0]["decisions"].as_array().unwrap().len()

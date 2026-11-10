@@ -19,7 +19,6 @@ mod tests {
     // `echo` — a loopback TCP stream of eight 2-byte segments answered with
     //   their checksum: a reliable stream never loses data, so the result is
     //   invariant under the net fault knobs.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const NET_SOURCE: &str = r#"
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
@@ -146,7 +145,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_net_routes_resolves_and_applies_latency_and_faults() {
         let guest = native_build::source_guest("net", NET_SOURCE);

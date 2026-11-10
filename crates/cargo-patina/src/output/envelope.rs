@@ -13,7 +13,6 @@ pub struct Envelope {
     verb: String,
     result: String,
     exit_code: i32,
-    pub(crate) family: Option<String>,
     pub(crate) artifact: Option<String>,
     pub(super) fingerprint: Option<String>,
     pub(super) seed: Option<u64>,
@@ -71,7 +70,6 @@ impl Envelope {
             verb: verb.to_string(),
             result: result.to_string(),
             exit_code,
-            family: None,
             artifact: None,
             fingerprint: None,
             seed: None,
@@ -107,9 +105,6 @@ impl Envelope {
         m.insert("verb".into(), Value::from(self.verb.clone()));
         m.insert("result".into(), Value::from(self.result.clone()));
         m.insert("exit_code".into(), Value::from(self.exit_code));
-        if let Some(v) = &self.family {
-            m.insert("family".into(), Value::from(v.clone()));
-        }
         if let Some(v) = &self.artifact {
             m.insert("artifact".into(), Value::from(v.clone()));
         }

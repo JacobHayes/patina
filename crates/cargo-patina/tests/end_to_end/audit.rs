@@ -257,7 +257,6 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
     // and a Patina-built binary audits without the raw-audit banner. Replaying
     // the unchanged source reproduces a recording of the artifact; after a
     // behaviour-changing edit, source-first replay fails closed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_source_is_first_class_for_run_audit_and_replay() {
         let directory = tempdir().unwrap();
@@ -372,7 +371,6 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_audit_attributes_unsupported_imports_to_dependency_crates() {
         let directory = tempdir().unwrap();
@@ -617,7 +615,6 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
     // escape categories stay meaningful) under a loud stderr banner. A
     // Patina-built binary defines the shim control-plane marker and audits with no
     // banner (`native_source_is_first_class_for_run_audit_and_replay`).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn audit_prebuilt_non_shim_binary_fails_closed_unless_raw() {
         let directory = tempdir().unwrap();

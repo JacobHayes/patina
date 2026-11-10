@@ -1,5 +1,5 @@
 //! Packaged startup and finalization. An ordinary program built with `
-//! patina native-build` needs no Patina-specific init calls: the boundary sits
+//! patina build` needs no Patina-specific init calls: the boundary sits
 //! below application code. The constructor installs the deterministic runtime
 //! from the PATINA_* protocol (idempotent) and registers finalization through
 //! atexit, so record mode is finalized on any normal exit path (main return or

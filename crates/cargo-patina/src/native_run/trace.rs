@@ -83,7 +83,6 @@ impl NativeTraceSink {
         })
     }
 
-    #[cfg(unix)]
     pub(super) fn file(&self) -> &fs::File {
         self.file.as_ref().expect("trace sink is live until commit")
     }

@@ -18,8 +18,7 @@
 //! Soundness: the trap is synchronous — it *is* the guest's own effect boundary,
 //! semantically identical to the guest having called an interposed `read()` — so
 //! re-entering the deterministic runtime (taking `lock_state`, parking on the
-//! baton) is exactly what every C interposer already does. See `SUD-DESIGN.md`
-//! §4.2. The one invariant that must hold is that only guest code reaches the
+//! baton) is exactly what every C interposer already does. The one invariant that must hold is that only guest code reaches the
 //! boundary. Guest code a shim entry calls while it owns the thread (its C
 //! allocator, say) does reach it, and its call nests in the entry's; a trap
 //! taken, or a libc door called, beneath a dispatch (however it was entered:
@@ -389,7 +388,7 @@ pub unsafe extern "C" fn patina_sud_dispatch(
     // `c_long` is `i64` on the LP64 Linux targets this module compiles for, so it
     // matches the `i64` syscall-number table and dispatch signature directly.
     //
-    // Thread-provenance invariant (SUD-DESIGN.md §4.2 invariant 1, restated): the
+    // Thread-provenance invariant: the
     // trapping thread is a managed task OR the pre-activation main thread —
     // identical thread-semantics to the interposer entries. The main thread holds
     // its task id from the startup constructor on (`MAIN_TASK`) but is only

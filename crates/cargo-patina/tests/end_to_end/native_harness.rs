@@ -4,7 +4,6 @@
 mod tests {
     use super::super::*;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         let directory = tempdir().unwrap();
@@ -145,7 +144,6 @@ mod tests {
 
     /// Portable class pairing for the executable-metadata pin. An import refusal
     /// happens before guest launch on every native platform, not just x86-64 Linux.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_harness_import_refusal_has_no_trace() {
         assert_native_harness_prerun_refusal(
@@ -168,7 +166,6 @@ fn import_is_linked() {
     /// target: every target carries a canary that fails only under Patina, so a
     /// wrong target or an empty filter cannot look like success. Class pairing:
     /// the target-kind/package selection matrix in lib.rs.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_harness_selects_same_named_library_binary_and_integration_test() {
         let directory = tempdir().unwrap();
@@ -229,7 +226,6 @@ fn import_is_linked() {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn create_native_harness_fixture(root: &Path) {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(

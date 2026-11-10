@@ -90,7 +90,7 @@ pub mod registry;
 // Syscall-user-dispatch (SUD) dispatch table — Linux only. The C layer arms SUD
 // and installs the SIGSYS handler; this module owns the per-arch decode and the
 // routing of trapped raw syscalls into the same `patina_*` entry points the C
-// interposers use. See `sud.rs` and `SUD-DESIGN.md`.
+// interposers use.
 #[cfg(target_os = "linux")]
 mod sud;
 

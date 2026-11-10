@@ -168,7 +168,7 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
 
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
-/// set, `native-run` streams a read-only host directory tree into the guest and
+/// set, `run` streams a read-only host directory tree into the guest and
 /// the shim rebuilds it as the deterministic filesystem instead of an empty one,
 /// so a fully interposed guest sees a fixed corpus without touching the host.
 /// The image's hash is folded into the run fingerprint, so replay rejects a

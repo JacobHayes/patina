@@ -6,7 +6,6 @@ mod tests {
 
     /// The planted-liveness-bug guest (`testbeds/liveness-campaign`), built once
     /// per run.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn liveness_guest() -> PathBuf {
         super::super::run_facts::shared_guest("liveness-guest", |directory| {
             let guest = directory.join("liveness-guest");
@@ -16,7 +15,6 @@ mod tests {
     }
 
     /// An SDK guest with one `sometimes!` site, satisfied or never satisfied.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sometimes_gate_guest(label: &str, satisfied: bool) -> PathBuf {
         let main = format!(
             "fn main() {{\n    patina_dst::lifecycle::setup_complete();\n    patina_dst::sometimes!(std::hint::black_box({satisfied}), \"{label}\");\n}}\n"
@@ -27,7 +25,6 @@ mod tests {
     /// A campaign given a source builds it once, into the out-dir, and sweeps
     /// that one binary: every generation of a guest that always fails the same
     /// way shares one signature, and the finding reproduces under replay.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_source_first_campaign_builds_once_and_reproduces_its_finding() {
         let directory = tempdir().unwrap();
@@ -54,7 +51,6 @@ mod tests {
 
     /// A declared `always!` no generation evaluates is reported, never gated: the
     /// campaign stays green and the store lists it as unregistered.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_reports_a_never_evaluated_always_without_gating() {
         let main = "fn main() {\n    patina_dst::lifecycle::setup_complete();\n    patina_dst::always!(true, \"evaluated-always\");\n    if std::hint::black_box(false) {\n        patina_dst::always!(true, \"dormant-always\");\n    }\n}\n";
@@ -103,7 +99,6 @@ mod tests {
     /// A site family is declared at link time: a family that never runs is in
     /// the store before any generation reaches it, and one that runs registers
     /// once however many instances call it.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_declares_site_families_before_they_run() {
         let main = r#"patina_dst::always_family!(DORMANT, "dormant-family");
@@ -153,7 +148,6 @@ fn main() {
         assert!(row("live-family")["evals"].as_u64().unwrap() >= 3);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
         let directory = tempdir().unwrap();
@@ -241,7 +235,6 @@ fn main() {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     // End-to-end coverage for `patina campaign` + the liveness watchdog over
     // the buggify-driven planted-bug guest, under `--buggify --swarm`: the campaign
     // catches the planted liveness violation, deduplicates the signature across the
@@ -403,7 +396,6 @@ fn main() {
         );
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     // Swarm fault-class deselection stays coherent end to end (SlateDB feedback item
     // 9). `--swarm` applies a seed-derived subset of the enabled classes, so some
     // generations run WITHOUT buggify even though the operator asked for it. That

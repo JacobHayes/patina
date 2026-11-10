@@ -76,7 +76,6 @@ fn record_and_replay_cross_scheduler_network_clock_and_filesystem() {
 /// the claim was a sentinel file that only `Drop` removed: the path stayed
 /// refused as "another Patina recorder may be active" forever. The child is
 /// this test re-executed; it reserves the path and aborts.
-#[cfg(unix)]
 #[test]
 fn a_recorder_that_dies_without_unwinding_leaves_its_path_recordable() {
     use std::os::unix::process::ExitStatusExt;

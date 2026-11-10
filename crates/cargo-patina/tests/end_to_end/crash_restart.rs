@@ -9,7 +9,6 @@ mod tests {
     use patina_dst_abi::Operation;
     use std::collections::BTreeSet;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const NATIVE_CRASH_RESTART_CANARY_SOURCE: &str = r#"
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -81,12 +80,10 @@ fn main() {
 }
 "#;
     /// A well-formed digest no recovered filesystem has.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const FORGED_SNAPSHOT_DIGEST: &str =
         "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
     /// Build the single-file guest `source` as `name` into a scratch directory.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn build_guest(name: &str, source: &str) -> Guest {
         let dir = tempdir().unwrap();
         let binary = build_facts_guest(dir.path(), name, source);
@@ -94,7 +91,6 @@ fn main() {
     }
 
     /// The lifecycle marker kinds of a trace's main timeline, in order.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn lifecycle(trace: &Path) -> Vec<String> {
         let bundle: serde_json::Value = serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
         bundle["timelines"][0]["lifecycle"]
@@ -107,7 +103,6 @@ fn main() {
 
     /// Rewrite `trace` through `edit` into `tampered.patina` beside it. Traces are
     /// compact JSON, so an edit here is exactly a hand-altered artifact.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn tamper_trace(trace: &Path, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
         let mut bundle: serde_json::Value =
             serde_json::from_slice(&fs::read(trace).unwrap()).unwrap();
@@ -120,7 +115,6 @@ fn main() {
     /// Where to crash a guest: the rate, and `count` seeds that each crash it
     /// right after the `nth` operation `matches` selects in a crash-free
     /// recording of `guest_args`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn crash_after(
         guest: &Guest,
         guest_args: &[&str],
@@ -153,7 +147,6 @@ fn main() {
     }
 
     /// Whether `operation` writes exactly `bytes`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn writes(operation: &Operation, bytes: &[u8]) -> bool {
         matches!(
             operation,
@@ -164,7 +157,6 @@ fn main() {
 
     /// Replay `trace` against the canary, expecting a named crash-replay
     /// divergence, and return the replay's stderr.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn replay_crash_divergence(canary: &Guest, trace: &Path) -> String {
         let replayed = canary.command("replay", &[trace.to_str().unwrap()]);
         let stderr = String::from_utf8_lossy(&replayed.stderr).into_owned();
@@ -191,7 +183,6 @@ fn main() {
     /// incarnations, the envelope describes the restart, a rate whose draw
     /// never hits runs one incarnation, and a replay refuses a trace whose
     /// handed-over state or restarted incarnation was altered.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_restarts_a_fresh_incarnation_and_its_replay_refuses_divergence() {
         let canary = build_guest("crash_restart", NATIVE_CRASH_RESTART_CANARY_SOURCE);
@@ -376,7 +367,6 @@ fn main() {
     /// A guest that reports, in each incarnation, its first entropy draw and
     /// its realtime, and in incarnation 1 the last realtime incarnation 0 read
     /// and the timestamp it left on the file it wrote that reading to.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const NATIVE_INCARNATION_STREAMS_SOURCE: &str = r#"
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -417,7 +407,6 @@ fn main() {
 }
 "#;
     /// The `STREAMS` lines of a run's output, each as its `key=value` fields.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn streams_report(stdout: &[u8]) -> Vec<BTreeMap<String, String>> {
         String::from_utf8_lossy(stdout)
             .lines()
@@ -434,7 +423,6 @@ fn main() {
             .collect()
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_restarted_incarnation_draws_fresh_streams_and_carries_realtime_forward() {
         let guest = build_guest("incarnation_streams", NATIVE_INCARNATION_STREAMS_SOURCE);
@@ -466,7 +454,6 @@ fn main() {
     // A guest that establishes a durable 16-byte baseline, then issues one
     // UNSYNCED positional overwrite, after which the run crashes. The guest
     // reopens cold and prints the recovered image.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const UNSYNCED_OVERWRITE_SOURCE: &str = r#"
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -525,7 +512,6 @@ fn main() {
     /// point: a process crash keeps the overwrite every time, and a machine
     /// crash keeps it or the durable baseline, each for some seed, while one
     /// seed reproduces its image.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_kind_decides_what_an_unsynced_overwrite_leaves() {
         let guest = build_guest("overwrite", UNSYNCED_OVERWRITE_SOURCE);
@@ -564,7 +550,6 @@ fn main() {
     /// A process crash keeps what a store through a shared view left in the
     /// page cache with no write-back yet, and a machine crash loses it with
     /// the other unsynced writes.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_kind_decides_what_an_unwritten_mapped_store_leaves() {
         let guest = build_guest("mapped", UNSYNCED_OVERWRITE_SOURCE);
@@ -600,7 +585,6 @@ fn main() {
     /// A write through an `O_DSYNC` description is durable when it returns,
     /// as `generic_write_sync` makes it: a machine crash after it keeps the
     /// overwrite for every seed, where an unsynced one loses it for some.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_keeps_a_write_through_an_o_dsync_description() {
         let guest = build_guest("dsync", UNSYNCED_OVERWRITE_SOURCE);
@@ -633,7 +617,6 @@ fn main() {
     // rename can lose the destination; with the parent fsync, a crash after the dir
     // fsync preserves it. This is the SlateDB local-object-store pattern that used
     // to be impossible because File::open(parent_dir) returned EISDIR under Patina.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const NAMESPACE_DURABILITY_SOURCE: &str = r#"
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -689,7 +672,6 @@ fn main() {
     /// Without the parent-directory fsync, a machine crash right after the
     /// rename can lose the destination; with it, a crash right after the
     /// directory fsync never does, under either kind, and its recording replays.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_directory_fsync_guards_namespace_durability_and_replays() {
         let guest = build_guest("namespace", NAMESPACE_DURABILITY_SOURCE);
@@ -759,7 +741,6 @@ fn main() {
     }
 
     /// The `--format json` envelope of a run that may fail.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn run_envelope(guest: &Guest, arguments: &[&str]) -> serde_json::Value {
         let output = guest.command("run", arguments);
         serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -775,7 +756,6 @@ fn main() {
     // holding a file, created and removed as a dropped `TempDir` does. The
     // `early-exit` step instead exits at once, with a status patina once used
     // for a failed crash, before any crash point.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const REMOVAL_THEN_CRASH_SOURCE: &str = r#"
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -811,7 +791,6 @@ fn main() {
 "#;
 
     /// The removal guest, built once and shared by the tests that crash it.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn removal_guest() -> Guest {
         let binary = super::super::run_facts::shared_guest("crash-removal", |dir| {
             build_facts_guest(dir, "removal", REMOVAL_THEN_CRASH_SOURCE)
@@ -827,7 +806,6 @@ fn main() {
     /// eight records fsynced by then. Whether a crash was attempted never rests
     /// on the guest's exit status: a guest that exits before any crash point is
     /// a run that exited without a crash, whatever status it chose.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_after_a_removal_restarts_and_an_early_exit_attempts_none() {
         let guest = removal_guest();
@@ -862,7 +840,6 @@ fn main() {
     }
 
     /// Whether `operation` is an fsync.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn is_sync(operation: &Operation) -> bool {
         matches!(operation, Operation::FsSync { .. })
     }
@@ -929,7 +906,6 @@ fn main() {
     // export the recovered image. With `readv`, the crash point is instead the
     // write-back a vectored read makes between its segments: the first segment
     // copies into a shared view of the file the second reads.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const UNEXPORTABLE_CRASH_SOURCE: &str = r#"
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -991,7 +967,6 @@ fn main() {
     /// refusal, the crash is attempted and not reached, and the guest is never
     /// handed an errno for it, even from inside a vectored read. Where to crash
     /// is found on the one-block variant, whose operations are the same.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_crash_that_cannot_be_exported_is_an_infra_refusal() {
         let guest = build_guest("unexportable", UNEXPORTABLE_CRASH_SOURCE);
@@ -1062,7 +1037,6 @@ fn main() {
     /// show. Each incarnation
     /// first draws entropy until a low byte: draws a trace reducer can delete,
     /// since a later draw's answer ends the loop as well.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const ACKED_LOG_SOURCE: &str = r#"
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -1122,7 +1096,6 @@ fn main() {
     /// and passes the fixed guest (green); and `minimize` reduces a crash
     /// generation's fault knobs, keeping the crash it needs and recording a
     /// two-incarnation trace.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_campaign_crash_plane_catches_an_unsynced_log() {
         let guest = build_guest("acked_log", ACKED_LOG_SOURCE);
@@ -1221,7 +1194,6 @@ fn main() {
     }
 
     /// The first generation of a campaign out-dir classed `class`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn envelope_generation(out: &Path, class: &str) -> String {
         let state: serde_json::Value =
             serde_json::from_slice(&fs::read(out.join("campaign-state.json")).unwrap()).unwrap();

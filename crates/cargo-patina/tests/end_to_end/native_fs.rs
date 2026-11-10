@@ -299,7 +299,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_fs_surface_answers_from_the_deterministic_filesystem() {
         let guest = native_build::source_guest("fs_surface", FS_SURFACE_SOURCE);
@@ -349,7 +348,6 @@ fn main() {
     /// `--mount` composes with `--record`/`replay`, which hands the child two
     /// inherited descriptors at once, and a replay against a corpus that moved is
     /// refused before the guest runs, naming what moved.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn mount_composes_with_record_and_replay(guest: &common::native::Guest) {
         // A label holding what the corpus component looks like: the hash is
         // read where patina put it, not out of the label.
@@ -458,7 +456,6 @@ fn main() {
 
     /// The line a mode of `source` prints first when built with plain `rustc` and
     /// run natively, without Patina.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn native_run_of(source: &str, directory: &Path, args: &[&str]) -> String {
         let source_path = directory.join("native.rs");
         fs::write(&source_path, source).unwrap();
@@ -490,7 +487,6 @@ fn main() {
     // A guest/static constructor can run before Patina's startup constructor. If it
     // reaches an effectful interposed API, fail closed with the ctor-specific
     // diagnostic rather than the misleading not-launched/runtime-missing path.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_ctor_preinit_open_reports_static_constructor_diagnostic() {
         let directory = tempdir().unwrap();

@@ -33,7 +33,6 @@ use super::*;
 //            and serves a placeholder as though it were real data. The bug is
 //            reachable only under a specific fault PATTERN (two in a row), so
 //            finding it is campaign work rather than a single run's.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const CUSTOM_OP_SDK_MAIN: &str = r#"
 use std::sync::atomic::{AtomicU32, Ordering};
 

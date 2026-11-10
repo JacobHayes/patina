@@ -16,7 +16,6 @@ mod tests {
     /// non-Rust guest would use. The `pass` verdict on the way in is load-bearing:
     /// the catching generation reports BOTH a pass and a violation, and the
     /// auto-derived target must contain only the violation.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const SHORT_WRITE_SOURCE: &str = r#"
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -64,7 +63,6 @@ fn main() {
 "#;
 
     /// The generation completion line of a successful `minimize --generation`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn completion_line(output: &Output) -> String {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -86,7 +84,6 @@ fn main() {
     /// and NOT the pass the same generation reported, the vector shrinks to the
     /// knob that matters, the standalone command it hands back still fails, and
     /// the answer is the same however many candidates it evaluates at once.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn minimize_generation_reduces_the_fault_vector_to_the_campaigns_own_verdict() {
         let workspace = native_workspace();
@@ -256,7 +253,6 @@ fn main() {
     /// trace that replays flag-free: the run is finalized before the violation
     /// aborts it, so the reducer's recording of the reduced knobs is a trace like
     /// any other.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn minimize_generation_reduces_an_always_violation() {
         let workspace = native_workspace();
@@ -340,7 +336,6 @@ fn main() {
     /// A guest that prints the marker, exits 3 when a filesystem fault reaches
     /// it, and otherwise leaves a custom operation open at exit, which the
     /// runtime refuses at shutdown on every platform.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const CUSTOM_OP_SOURCE: &str = r#"
 use std::io::Write;
 
@@ -380,7 +375,6 @@ fn main() {
 "#;
 
     /// The [`CUSTOM_OP_SOURCE`] guest.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn custom_op_guest() -> PathBuf {
         super::super::run_facts::shared_guest("minimize-custom-op", |directory| {
             build_facts_guest(directory, "custom_op", CUSTOM_OP_SOURCE)
@@ -388,7 +382,6 @@ fn main() {
     }
 
     /// Run a one-generation campaign of the custom-op guest in `mode`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn custom_op_campaign(
         guest: &Path,
         out: &Path,
@@ -417,7 +410,6 @@ fn main() {
     /// A knob candidate that still prints the marker but ends in a patina
     /// refusal is not the generation's failure: dropping the fault knob must not
     /// be accepted on the strength of the marker alone.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn minimize_keeps_the_knob_whose_removal_ends_in_a_refusal() {
         let workspace = native_workspace();

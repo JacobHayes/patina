@@ -122,7 +122,7 @@ fn build_noted(
 pub(super) fn execute_native_build(invocation: NativeBuildInvocation) -> Result<i32, CliError> {
     let path = run_native_build(invocation)?;
     if output::options().is_json() {
-        output::emit_build("native", &path);
+        output::emit_build(&path);
     } else {
         println!("PATINA_BUILD output={}", path.display());
     }
@@ -160,7 +160,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             invocation
                 .output
                 .as_deref()
-                .expect("single-source native-build requires --output"),
+                .expect("single-source patina build requires --output"),
             &edition,
             invocation.release,
             &object,
@@ -199,7 +199,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
                 invocation
                     .output
                     .as_deref()
-                    .expect("a Python native-build requires --output"),
+                    .expect("a Python patina build requires --output"),
                 DEFAULT_NATIVE_EDITION,
                 invocation.release,
                 &object,
@@ -223,7 +223,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
             invocation
                 .output
                 .as_deref()
-                .expect("a Go native-build requires --output"),
+                .expect("a Go patina build requires --output"),
             &object,
             &stage_shim_object(
                 &built_shim.objects,
@@ -511,7 +511,7 @@ fn build_native_package(
     Ok(final_path)
 }
 
-/// The package and binary a package `native-build` resolves to, and the
+/// The package and binary a package `build` resolves to, and the
 /// target dir Cargo builds it in.
 pub(super) struct SelectedNativeBin {
     pub(super) package: String,
@@ -519,7 +519,7 @@ pub(super) struct SelectedNativeBin {
     pub(super) target_dir: PathBuf,
 }
 
-/// Resolve which package and which binary target `native-build` should compile,
+/// Resolve which package and which binary target `build` should compile,
 /// failing closed on ambiguity rather than guessing. `cargo metadata` enumerates
 /// the workspace members and their targets without touching the network for a
 /// path-only graph.
@@ -724,7 +724,7 @@ pub(super) fn native_package_rustflags(sancov_stub: Option<&Path>, target: &str)
     // On a SUD-capable target (x86_64 Linux) we DROP the injection: the shim
     // arms SUD and traps the raw syscalls into the deterministic runtime, so
     // the workaround is unnecessary — and keeping it would be a permanent dual
-    // path (SUD-DESIGN.md §9). No-cruft: a single conditional, no dead config.
+    // path. No-cruft: a single conditional, no dead config.
     if !target_has_sud(target) {
         tokens.push(OsString::from("--cfg"));
         tokens.push(OsString::from("rustix_use_libc"));
@@ -931,7 +931,6 @@ mod tests {
         assert!(target_has_sud("x86_64-unknown-linux-musl"));
         assert!(!target_has_sud("aarch64-unknown-linux-gnu")); // no SUD yet
         assert!(!target_has_sud("aarch64-apple-darwin")); // rustix uses libc
-        assert!(!target_has_sud("x86_64-apple-darwin"));
 
         // The injected flags reflect it: present for aarch64-linux, absent for
         // x86_64-linux.

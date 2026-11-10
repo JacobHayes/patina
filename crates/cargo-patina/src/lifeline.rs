@@ -20,17 +20,14 @@ use crate::CliError;
 /// The environment variable naming the inherited read end in a child.
 const ENV_LIFELINE_FD: &str = "PATINA_RT_LIFELINE_FD";
 
-#[cfg(unix)]
 const SIGKILL: i32 = 9;
 
-#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
 /// Tie `command`'s process to this one: it runs in a process group of its own,
 /// which it kills once this process is gone.
-#[cfg(unix)]
 pub(crate) fn tie(command: &mut Command) -> Result<(), CliError> {
     use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::process::CommandExt;
@@ -67,15 +64,9 @@ pub(crate) fn tie(command: &mut Command) -> Result<(), CliError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub(crate) fn tie(_command: &mut Command) -> Result<(), CliError> {
-    Ok(())
-}
-
 /// In a child [`tie`] started, watch the lifeline, and kill this process group
 /// once the parent is gone. Called first in the entry point, before this
 /// process starts a thread or runs anything.
-#[cfg(unix)]
 pub(crate) fn watch() -> Result<(), CliError> {
     use std::io::Read;
     use std::os::fd::FromRawFd;
@@ -120,10 +111,5 @@ pub(crate) fn watch() -> Result<(), CliError> {
             unsafe { kill(0, SIGKILL) };
         })
         .map_err(|error| CliError(format!("failed to start the lifeline watcher: {error}")))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn watch() -> Result<(), CliError> {
     Ok(())
 }

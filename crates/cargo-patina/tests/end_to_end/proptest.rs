@@ -17,7 +17,6 @@ mod tests {
     // with the first failing case and the number of cases tried. Every one of
     // those is drawn from the seeded RNG, so the whole search is a function of
     // the run seed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const PROPTEST_MAIN: &str = r#"
 use std::cell::{Cell, RefCell};
 
@@ -68,7 +67,6 @@ fn main() {
 }
 "#;
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn proptest_guest() -> Guest {
         let dir = tempdir().unwrap();
         let root = dir.path().join("pkg");
@@ -92,12 +90,10 @@ fn main() {
         Guest { dir, binary }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn digest_line(output: &Output) -> String {
         marker_line(output, "PROPTEST_DIGEST")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn marker_line(output: &Output, marker: &str) -> String {
         std::str::from_utf8(&output.stdout)
             .unwrap()
@@ -117,7 +113,6 @@ fn main() {
     /// records and replays it), a different seed generates different ones, and
     /// stock shrinking reaches the minimal failing case with the whole search
     /// replaying from the trace.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn stock_proptest_generates_and_shrinks_from_the_run_seed() {
         let guest = proptest_guest();

@@ -4,7 +4,6 @@ use super::*;
 
 // Class-level pairing: signals-family M4 direct-termination conformance;
 // exercise both wait-status core bits for the SAME signal, not a signal table.
-#[cfg(unix)]
 #[test]
 fn guest_exit_reports_the_core_flag() {
     use std::os::unix::process::ExitStatusExt;

@@ -21,8 +21,8 @@ pub(super) const PR_GET_AUXV: u32 = 0x4155_5856;
 /// from here so a raw `prctl(PR_GET_AUXV)` serves the SAME determinized auxv the
 /// shim already produced in memory — `AT_RANDOM` replaced with seed-derived
 /// bytes and `AT_SYSINFO_EHDR` renamed to `AT_IGNORE` — instead of the kernel's
-/// pristine `saved_auxv`, which would reintroduce the entropy / vDSO escape
-/// (SUD-DESIGN.md §6, §9). `0` until startup captures it; a trap seeing `0` fails
+/// pristine `saved_auxv`, which would reintroduce the entropy / vDSO escape.
+/// `0` until startup captures it; a trap seeing `0` fails
 /// closed rather than serve garbage (see [`sys_prctl`]).
 #[unsafe(no_mangle)]
 pub static PATINA_SUD_AUXV_BASE: AtomicUsize = AtomicUsize::new(0);

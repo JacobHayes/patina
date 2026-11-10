@@ -4,7 +4,6 @@ use super::*;
 
 /// Build the single-file guest `source` into a fresh scratch directory, which
 /// also holds the traces the shared determinism helpers record.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn source_guest(name: &str, source: &str) -> common::native::Guest {
     let dir = tempdir().unwrap();
     let binary = build_facts_guest(dir.path(), name, source);
@@ -15,14 +14,13 @@ pub(super) fn source_guest(name: &str, source: &str) -> common::native::Guest {
 mod tests {
     use super::super::*;
 
-    // Whole Cargo-package `native-build`: a package with a path dependency and a
+    // Whole Cargo-package `build`: a package with a path dependency and a
     // build script builds under Patina control into an `--output` whose directory
     // does not exist yet, passes the strict audit with no allowances, varies with
     // the seed and records/replays byte-identically, while multi-bin ambiguity
-    // fails closed. `native-build` builds the `patina-dst-native-shim` staticlib
+    // fails closed. `build` builds the `patina-dst-native-shim` staticlib
     // from the surrounding Patina workspace, so it runs with the workspace as its
     // working directory while the fixture is addressed by absolute path.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_build_package_audits_records_and_fails_closed() {
         let directory = tempdir().unwrap();
@@ -58,7 +56,7 @@ mod tests {
         // binary: the shim's control-plane `dlsym` is allowed without a flag.
         invoke(workspace, &["audit", clean.to_str().unwrap()]);
 
-        // The package binary runs under native-run with seed variation and
+        // The package binary runs under patina run with seed variation and
         // byte-identical record/replay through the supervisor; the recorded run is
         // a second process at the first run's seed.
         let seeded = package_result(&invoke(
@@ -139,7 +137,6 @@ mod tests {
     // dependency like this still links clean under `-fPIC`, so that rung of the
     // original report remains unreproduced synthetically. Exercised under
     // `--instrument`, whose extra object travels the same path.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
         let directory = tempdir().unwrap();
@@ -209,13 +206,11 @@ mod tests {
     /// Symbols that exist only because the shim's C object and staticlib were on a
     /// link line: the POSIX layer's constructor-retained `environ` accessor and the
     /// `--instrument` hook's scheduling point.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_install", b"patina_yield_point"];
 
     /// Whether `image`'s symbol table names `symbol`. Symbol names are stored as
     /// plain NUL-terminated strings in both Mach-O and ELF string tables, so a byte
     /// search reads both without shelling out to `nm`/`objdump`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn contains_symbol(image: &[u8], symbol: &[u8]) -> bool {
         image.windows(symbol.len()).any(|window| window == symbol)
     }
@@ -223,7 +218,6 @@ mod tests {
     /// Locate the `cdylib-dep` shared library Cargo built alongside the guest.
     /// Cargo may place intermediates outside `target/` (the `build-dir` setting), so
     /// ask `cargo metadata` for both directories and search each.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn find_dependency_cdylib(manifest: &Path) -> std::path::PathBuf {
         let metadata = Command::new(env!("CARGO"))
             .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -271,7 +265,6 @@ mod tests {
         cdylibs.remove(0)
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn collect_files(directory: &Path, into: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = fs::read_dir(directory) else {
             return;
@@ -310,7 +303,6 @@ mod tests {
     // guest output rather than a rebuild count, a machine-global `build.build-dir`
     // redirect — the setting that hid this bug, since deleting the guest's local
     // `target/` no longer busts anything — cannot make this pass vacuously.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn changed_shim_staticlib_bytes_relink_the_guest() {
         let directory = tempdir().unwrap();
@@ -455,7 +447,6 @@ mod tests {
     // from its content (`stage_shim_object`, `publish_native_shim`), and
     // `changed_shim_staticlib_bytes_relink_the_guest` holds the converse, that
     // changed bytes still relink.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn guest_link_is_immune_to_cargo_rewriting_its_shim_copy() {
         let directory = tempdir().unwrap();
@@ -539,7 +530,6 @@ mod tests {
     /// The staticlib the primer build just produced. The base is persistent, so
     /// it can also hold other compilers' or profiles' work dirs; Cargo re-uplifts
     /// the archive on every build, so the current one is the newest.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn find_private_shim_staticlib(target_base: &Path) -> PathBuf {
         let mut files = Vec::new();
         // Mutate only Cargo scratch, never the immutable published link inputs.
@@ -557,7 +547,6 @@ mod tests {
     // staticlib's bytes differ per generation AND the difference is visible in the
     // linked guest: the fixture calls the probe, so the linker must pull this member
     // in and the returned value reaches the guest's stdout.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn append_relink_probe(scratch: &Path, staticlib: &Path, generation: u32) {
         let source = scratch.join("patina_relink_probe.c");
         fs::write(
@@ -595,14 +584,12 @@ mod tests {
     /// A concurrent patina build caught mid-uplift: it holds `dir`'s build
     /// lock and its Cargo has put back only a prefix of `artifact`. Dropping it
     /// finishes the uplift and releases the lock.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct TornUplift {
         artifact: PathBuf,
         whole: PathBuf,
         _lock: fs::File,
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl TornUplift {
         /// Start one, unless a build already holds `dir`'s lock — a concurrent build
         /// would wait for it rather than uplift.
@@ -644,7 +631,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl Drop for TornUplift {
         fn drop(&mut self) {
             let finished = fs::rename(&self.whole, &self.artifact);
@@ -669,7 +655,6 @@ mod tests {
     // native harness, and the shim publish that
     // `guest_link_is_immune_to_cargo_rewriting_its_shim_copy` pins) holds
     // `lock_target_dir` from before its Cargo invocation through the read.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn guest_copy_out_is_immune_to_a_concurrent_uplift() {
         use std::io::{BufRead, BufReader};
@@ -787,7 +772,6 @@ mod tests {
     // where the same package on this line's SDK builds. The stand-in SDK is an
     // empty library that links either way, so only the version check tells
     // the two builds apart.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_package_on_another_release_lines_sdk_is_refused() {
         let directory = tempdir().unwrap();
@@ -836,7 +820,6 @@ mod tests {
         assert!(!directory.path().join("999.0.0/built").exists());
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn package_result(output: &Output) -> String {
         let stdout = String::from_utf8(output.stdout.clone()).unwrap();
         assert!(
@@ -855,7 +838,6 @@ mod tests {
     // and whose host-side file I/O proves the shim link args do not leak onto build
     // scripts), a clean binary that audits and replays, and a second binary that
     // makes the binary selection ambiguous.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn create_package_fixture(root: &Path) {
         let greeter = root.join("greeter");
         fs::create_dir_all(greeter.join("src")).unwrap();

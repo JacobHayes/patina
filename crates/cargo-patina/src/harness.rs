@@ -983,7 +983,6 @@ mod tests {
     /// A seed whose child refuses because it is another supervisor build stops
     /// the test run, naming the supervisor, instead of being filed as that
     /// seed's failure.
-    #[cfg(unix)]
     #[test]
     fn a_seed_run_by_another_supervisor_build_stops_the_test_run() {
         let output = Command::new("/bin/sh")

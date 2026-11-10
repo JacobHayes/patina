@@ -11,7 +11,6 @@ use super::*;
 ///   has to carry into the envelope;
 /// * `parked`: fail the invariant while a parked worker holds std's stderr
 ///   lock, so finalization must not wait on a lock a guest thread can hold.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 const VERDICT_SDK_MAIN: &str = r#"
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -48,7 +47,6 @@ fn main() {
 "#;
 
 /// The [`VERDICT_SDK_MAIN`] guest.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn verdict_guest() -> PathBuf {
     super::run_facts::shared_sdk_guest("verdict-guest", VERDICT_SDK_MAIN)
 }
@@ -56,7 +54,6 @@ pub(super) fn verdict_guest() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     use super::verdict_guest;
 
     // ---------------------------------------------------------------------------
@@ -84,7 +81,6 @@ mod tests {
     // the shim's single `patina_verdict` verb, every call becomes a trace event, the
     // run's `patina.result/v1` envelope carries the structured `verdicts[]`, and a
     // replay reproduces the verdict stream byte-identically.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
         let directory = tempdir().unwrap();
@@ -171,7 +167,6 @@ mod tests {
     }
 
     /// A recorded run of the verdict guest that fails its `always!`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct AlwaysRecording {
         _directory: tempfile::TempDir,
         bin: PathBuf,
@@ -181,7 +176,6 @@ mod tests {
 
     /// Record one seeded run of the verdict guest in `mode`, which must fail
     /// and leave a trace holding exactly one violation verdict.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn record_always_violation(mode: &[&str]) -> AlwaysRecording {
         let directory = tempdir().unwrap();
         let bin = verdict_guest();
@@ -232,7 +226,6 @@ mod tests {
 
     /// A flag-free replay of `recording` ends the way the recording did and
     /// reproduces its output byte for byte.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn assert_replays_identically(recording: &AlwaysRecording) {
         let replayed = invoke_unchecked(
             env!("CARGO_BIN_EXE_patina"),
@@ -268,7 +261,6 @@ mod tests {
     // has diverged from the recording. That must surface as the shim fatal the
     // minimizer's divergence check reads, never as the finding alone, or a
     // reducer would accept a candidate that no longer reproduces the run.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn native_always_violation_is_one_verdict_whose_trace_replays_and_detects_divergence() {
         let recording = record_always_violation(&[]);
