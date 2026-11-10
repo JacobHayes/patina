@@ -4,6 +4,28 @@
 mod tests {
     use super::super::*;
 
+    // The package's second binary is the tool as a Cargo subcommand: Cargo
+    // passes the subcommand's own name first, and the rest is the tool's own
+    // command line. The tool itself has no verb of that name.
+    #[test]
+    fn the_cargo_subcommand_binary_is_the_same_tool() {
+        let workspace = native_workspace();
+        let tool = invoke(workspace, &["syscalls"]);
+        let subcommand = invoke_with(
+            env!("CARGO_BIN_EXE_cargo-patina"),
+            workspace,
+            &["patina", "syscalls"],
+        );
+        assert!(!tool.stdout.is_empty());
+        assert!(tool.stdout == subcommand.stdout);
+        let doubled = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            workspace,
+            &["patina", "syscalls"],
+        );
+        assert!(!doubled.status.success());
+    }
+
     // `run` and `audit` recognize a native binary by its leading magic bytes.
     // Options and the artifact may appear in any order (the `cargo run`
     // ergonomic): a registered flag before the binary runs identically to the

@@ -110,7 +110,7 @@ fn push_output_and_env_footer(out: &mut String) {
 /// Render the compact top-level overview.
 fn render_overview() -> String {
     let mut out = String::new();
-    out.push_str("Patina deterministic Cargo runner\n\n");
+    out.push_str("Patina: deterministic simulation testing for native programs\n\n");
     out.push_str("Usage: patina <VERB> [OPTIONS]\n\n");
     out.push_str("Verbs (run `patina <verb> --help` for details):\n");
     let width = VERBS.iter().map(|v| v.name.len()).max().unwrap_or(0);
