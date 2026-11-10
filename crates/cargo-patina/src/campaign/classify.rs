@@ -409,6 +409,12 @@ pub struct GenerationFacts {
     /// spec-declared pattern matcher and by the signature's fallback — never by
     /// [`built_in_class`], which cannot see it.
     pub output: String,
+    /// The GUEST's own captured stdout and stderr, joined, as the child's
+    /// envelope carried them; `None` without an envelope. What a signature's
+    /// fallback reads when there is one: the child supervisor's own stderr (a
+    /// build line, a pre-run advisory) names per-run paths and is never the
+    /// guest's finding, so it must not be able to become a failure's shape.
+    pub guest_output: Option<String>,
     /// The child envelope's `result_line`: the run verb's own single most
     /// representative line of the GUEST's streams (a violation marker, its
     /// `PATINA_RESULT`, else its last non-empty stderr line). Text, so it lives
@@ -427,6 +433,15 @@ pub struct GenerationFacts {
     /// decisions the exploration policy made in this schedule. A signature
     /// annotation, never a class input.
     pub bug_depth: Option<u64>,
+}
+
+impl GenerationFacts {
+    /// The text a finding's evidence is cut from when no structured fact names
+    /// it: the guest's own streams, or without an envelope everything the
+    /// child printed, which is all there is.
+    fn evidence(&self) -> &str {
+        self.guest_output.as_deref().unwrap_or(&self.output)
+    }
 }
 
 /// Per-guest classification rules a campaign spec declares (`classify` in the
@@ -760,7 +775,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
         return marker_evidence(line);
     }
     let mut lines = generation
-        .output
+        .evidence()
         .lines()
         .map(str::trim)
         .rev()
@@ -893,7 +908,7 @@ pub(super) fn is_runtime_diagnostic(line: &str) -> bool {
 /// deliberately NOT filtered as diagnostics, because for an abort they ARE the
 /// attribution.
 fn death_attribution(generation: &GenerationFacts) -> Option<String> {
-    let lines: Vec<&str> = generation.output.lines().map(str::trim).collect();
+    let lines: Vec<&str> = generation.evidence().lines().map(str::trim).collect();
     // The LAST panic wins: a double panic aborts on its second, and the abort is
     // what this shape explains.
     if let Some(at) = lines

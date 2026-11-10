@@ -267,7 +267,7 @@ pub(super) fn apply_release(artifact: &mut ArtifactRef, release: bool) -> Result
 /// build-on-the-fly exactly like a `.rs` source, so a positional naming an
 /// existing package is never reinterpreted as guest argv. Anything else is a
 /// usage error naming the offending path.
-pub(super) fn resolve_positional(verb: &str, raw: &OsStr) -> Result<ArtifactRef, CliError> {
+pub(crate) fn resolve_positional(verb: &str, raw: &OsStr) -> Result<ArtifactRef, CliError> {
     Ok(match classify_arg(raw)? {
         ArgKind::Artifact => ArtifactRef::Prebuilt(PathBuf::from(raw)),
         ArgKind::SourceFile(source) => ArtifactRef::Build(Box::new(native_source_spec(source))),

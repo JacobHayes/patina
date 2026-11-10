@@ -80,10 +80,16 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 )));
             }
             let artifact = artifact.expect("fresh campaign parser requires an artifact");
-            // Resolve the artifact once (build a source on the fly), then sweep the SAME
-            // built artifact across every generation — never rebuilt per generation.
-            let resolved = crate::resolve_artifact(crate::ArtifactRef::Prebuilt(artifact))?;
-            let identity = artifact_identity(&resolved.path)?;
+            // Resolve the artifact once, then sweep the SAME binary across every
+            // generation, its replays and any continuation: a source is built
+            // here, into the out-dir, never by a generation's own run.
+            let binary = match crate::parse::resolve_positional("campaign", artifact.as_os_str())? {
+                crate::ArtifactRef::Prebuilt(path) => path,
+                crate::ArtifactRef::Build(spec) => {
+                    crate::native_build::build_into(*spec, out_dir.join("guest"))?
+                }
+            };
+            let identity = artifact_identity(&binary)?;
             let mut spec = spec;
             // A campaign records its layout policy from the start, fixed unless
             // the operator asked otherwise, so a continuation can tell.

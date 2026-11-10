@@ -390,6 +390,7 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
         .and_then(serde_json::Value::as_u64);
     let stdout = envelope_stream("stdout").unwrap_or(child_stdout);
     let mut stderr = envelope_stream("stderr").unwrap_or(child_stderr.clone());
+    let mut guest_output = envelope.is_some().then(|| format!("{stdout}\n{stderr}"));
     if envelope.is_some() {
         // A supervisor diagnostic (a trace-finalization note, a build line) rides
         // the child's own stderr rather than the guest's; keep both, so nothing a
@@ -401,14 +402,18 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     }
     if timed_out {
         // Synthetic marker so the killed generation carries a stable signature.
-        stderr.push_str(&format!(
-            "\npatina: campaign generation exceeded timeout_secs={timeout_secs}\n"
-        ));
+        let marker =
+            format!("\npatina: campaign generation exceeded timeout_secs={timeout_secs}\n");
+        stderr.push_str(&marker);
+        if let Some(guest_output) = &mut guest_output {
+            guest_output.push_str(&marker);
+        }
     }
     Ok(GenerationRun {
         facts: GenerationFacts {
             facts,
             output: format!("{stdout}\n{stderr}"),
+            guest_output,
             result_line,
             exact_verdicts,
             bug_depth,

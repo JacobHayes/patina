@@ -26,6 +26,7 @@ pub(super) fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
     GenerationFacts {
         facts,
         output: output.to_string(),
+        guest_output: None,
         result_line: None,
         exact_verdicts: Vec::new(),
         bug_depth: None,
@@ -782,6 +783,7 @@ fn classifier_and_detector_checks() {
         &GenerationFacts {
             facts: RunFacts::ok().exit(1),
             output: format!("\nError: AlreadyInstalled\n{supervisor_note}\n"),
+            guest_output: None,
             result_line: Some("Error: AlreadyInstalled".to_string()),
             exact_verdicts: Vec::new(),
             bug_depth: None,
@@ -839,6 +841,7 @@ fork (process)\n";
                 ),
                 // What the run verb's last-stderr-line fallback actually returns
                 // for this guest: the runtime's report, not the guest's finding.
+                guest_output: None,
                 result_line: reports(activated, edges)
                     .lines()
                     .next_back()

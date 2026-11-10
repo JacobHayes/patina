@@ -65,8 +65,36 @@ pub(super) fn resolve_artifact(artifact: ArtifactRef) -> Result<ResolvedArtifact
 fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     let workspace = tempfile::tempdir()
         .map_err(|error| CliError(format!("failed to create build workspace: {error}")))?;
+    let origin = spec.origin.clone();
+    // Route this on-the-fly build note to stderr under `--output json` so stdout
+    // stays a single clean JSON envelope; human output keeps it on stdout.
+    let path = build_noted(
+        spec,
+        workspace.path().join("patina-run-artifact"),
+        output::options().is_json(),
+    )?;
+    Ok(ResolvedArtifact {
+        path,
+        display: origin,
+        _workspace: Some(workspace),
+    })
+}
+
+/// Build a source/package once into `output`, a path that outlives this
+/// process, for a caller that runs the one product many times (a campaign's
+/// generations, their replays, a later continuation). The identity note goes
+/// to stderr: nothing about a build belongs on a result stream.
+pub(super) fn build_into(spec: BuildSpec, output: PathBuf) -> Result<PathBuf, CliError> {
+    build_noted(spec, output, true)
+}
+
+fn build_noted(
+    spec: BuildSpec,
+    output: PathBuf,
+    note_on_stderr: bool,
+) -> Result<PathBuf, CliError> {
     let mut invocation = spec.build;
-    invocation.output = Some(workspace.path().join("patina-run-artifact"));
+    invocation.output = Some(output);
     let path = run_native_build(invocation)?;
     let bytes = fs::read(&path).map_err(|error| {
         CliError(format!(
@@ -76,24 +104,18 @@ fn build_on_the_fly(spec: BuildSpec) -> Result<ResolvedArtifact, CliError> {
     })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    // Route this on-the-fly build note to stderr under `--output json` so stdout
-    // stays a single clean JSON envelope; human output keeps it on stdout.
     let build_note = format!(
         "PATINA_BUILD_ON_RUN source={} artifact={} sha256={}",
         spec.origin.display(),
         path.display(),
         hex(&hasher.finalize())
     );
-    if output::options().is_json() {
+    if note_on_stderr {
         eprintln!("{build_note}");
     } else {
         println!("{build_note}");
     }
-    Ok(ResolvedArtifact {
-        path,
-        display: spec.origin,
-        _workspace: Some(workspace),
-    })
+    Ok(path)
 }
 
 /// The `build` (native) verb: build and report the artifact path.

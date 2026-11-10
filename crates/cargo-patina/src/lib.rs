@@ -65,7 +65,6 @@ use audit::execute_native_audit;
 use harness::execute_native_harness;
 use native_build::{
     Instrumentation, binary_instrumentation, execute_native_build, instrumentation_fingerprint,
-    resolve_artifact,
 };
 use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
 use parse::{ParseResult, current_verb, locate_positionals, parse};

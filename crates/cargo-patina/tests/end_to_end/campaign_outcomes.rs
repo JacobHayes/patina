@@ -24,6 +24,34 @@ mod tests {
         super::super::run_facts::shared_sdk_guest(&format!("sometimes-{label}"), &main)
     }
 
+    /// A campaign given a source builds it once, into the out-dir, and sweeps
+    /// that one binary: every generation of a guest that always fails the same
+    /// way shares one signature, and the finding reproduces under replay.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_source_first_campaign_builds_once_and_reproduces_its_finding() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("always_fails.rs");
+        fs::write(&source, "fn main() { panic!(\"always\"); }\n").unwrap();
+        let out = directory.path().join("campaign");
+        let run = campaign_run(&out, &source, &[]);
+        assert_eq!(run.status.code(), Some(1), "{run:?}");
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("campaign-state.json")).unwrap()).unwrap();
+        let artifact = PathBuf::from(state["artifact"]["path"].as_str().unwrap());
+        assert!(
+            artifact.starts_with(&out) && artifact.is_file(),
+            "the built guest must outlive the campaign at a stable path: {artifact:?}"
+        );
+        let signatures = state["signatures"].as_array().unwrap();
+        assert_eq!(signatures.len(), 1, "one failure, one signature: {state:#}");
+        assert_eq!(signatures[0]["count"], 2, "{state:#}");
+        assert_eq!(
+            signatures[0]["verification"]["status"], "reproduced",
+            "{state:#}"
+        );
+    }
+
     /// A declared `always!` no generation evaluates is reported, never gated: the
     /// campaign stays green and the store lists it as unregistered.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
