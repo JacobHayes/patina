@@ -524,8 +524,8 @@ a recorded result or a replay fetch",
     /// a runtime-initiated stop. At most one write per run
     /// ([`Context::recording_flushed`]): the native transport is append-only.
     ///
-    /// Scoped to stops the RUNTIME initiates (step-budget exhaustion,
-    /// poll churn, the crash that ends an incarnation), not arbitrary
+    /// Scoped to stops the RUNTIME initiates (step-budget exhaustion, a
+    /// liveness stop, poll churn, the crash that ends an incarnation), not arbitrary
     /// shim failures or panics. Explicit Linux guest `abort()` separately
     /// finalizes a healthy context; other internal fatalities leave the trace
     /// incomplete.

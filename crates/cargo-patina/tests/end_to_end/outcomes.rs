@@ -480,3 +480,62 @@ fn a_dropped_recording_leaves_the_runs_outcome_as_it_was() {
         assert!(!trace.exists(), "a dropped recording leaves no file");
     }
 }
+
+/// A worker that waits for good in a loop of timed sleeps, a hang the
+/// no-progress watchdog catches.
+const HALTED_WORKER_SOURCE: &str = r#"
+use std::time::Duration;
+
+fn main() {
+    let worker = std::thread::spawn(|| loop {
+        eprintln!("halting writes");
+        std::thread::sleep(Duration::from_millis(100));
+    });
+    worker.join().unwrap();
+}
+"#;
+
+/// A liveness stop keeps its recording, and the recording replays to the
+/// same stop. RED when the stop aborted without writing the trace (an empty
+/// file, `trace_incomplete`), and when a replay, without the watchdog, ran
+/// past the end of the trace.
+#[test]
+fn a_liveness_stop_is_recorded_and_replays_to_the_same_stop() {
+    let guest = native_build::source_guest("halted_worker", HALTED_WORKER_SOURCE);
+    let trace = guest.dir.path().join("halted.patina");
+    let trace = trace.to_str().unwrap();
+    let json = |output: &std::process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}\n{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let outcome = |result: &serde_json::Value| {
+        (
+            result["result"].clone(),
+            result["exit_code"].clone(),
+            result["runtime_findings"][0]["vtime_ns"].clone(),
+        )
+    };
+    // Under PCT too, whose decisions a replay consumes rather than makes.
+    for policy in [&[][..], &["--sched-pct=3"]] {
+        let _ = std::fs::remove_file(trace);
+        let mut arguments = vec![
+            "--seed",
+            "1",
+            "--liveness-watchdog",
+            "--record",
+            trace,
+            "--format",
+            "json",
+        ];
+        arguments.extend_from_slice(policy);
+        let recorded = json(&guest.command("run", &arguments));
+        assert_eq!(
+            (&recorded["result"], &recorded["exit_code"]),
+            (&"liveness".into(), &1.into()),
+            "{recorded:#}"
+        );
+        assert!(recorded.get("trace_incomplete").is_none(), "{recorded:#}");
+        let replayed = json(&guest.command("replay", &[trace, "--format", "json"]));
+        assert_eq!(outcome(&replayed), outcome(&recorded), "{replayed:#}");
+    }
+}

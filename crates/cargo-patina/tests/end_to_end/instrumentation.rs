@@ -482,6 +482,94 @@ fn main() {
         );
     }
 
+    // One thread spins without calls (re-sending to its own channel) until
+    // a peer, asleep for a millisecond, sets a flag.
+    const SPIN_BESIDE_SLEEPER_SOURCE: &str = r#"
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn main() {
+    let start = Instant::now();
+    let woke = Arc::new(AtomicBool::new(false));
+    let set = woke.clone();
+    let sleeper = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1));
+        set.store(true, Ordering::Release);
+    });
+    let spinner = thread::spawn(move || {
+        let (tx, rx) = mpsc::channel::<u64>();
+        let mut resent = 0u64;
+        while !woke.load(Ordering::Acquire) {
+            tx.send(resent).unwrap();
+            resent = rx.try_recv().unwrap() + 1;
+        }
+    });
+    sleeper.join().unwrap();
+    spinner.join().unwrap();
+    println!("SPIN_BESIDE_SLEEPER elapsed_ns={}", start.elapsed().as_nanos());
+}
+"#;
+
+    // Under --yield-stride the spinner's edge points charge nothing, so
+    // virtual time stands still and the sleeper's millisecond never passes
+    // (a known limit: on a real machine it would). The run still ends, as
+    // the host-time compute bound's `timeout`, on every seed. RED when edge
+    // points counted as the guest reaching the runtime: it ran for good.
+    #[test]
+    fn a_spinner_beside_a_sleeper_ends_under_a_yield_stride() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("spin_beside_sleeper.rs");
+        fs::write(&source, SPIN_BESIDE_SLEEPER_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let binary = dir.path().join("spin_beside_sleeper");
+        let bin = binary.to_str().unwrap();
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin,
+                "--instrument",
+            ],
+        );
+        for seed in ["1", "2", "3"] {
+            let output = invoke_with_deadline(
+                env!("CARGO_BIN_EXE_patina"),
+                workspace,
+                &[
+                    "run",
+                    bin,
+                    "--yield-stride",
+                    "300",
+                    "--seed",
+                    seed,
+                    "--compute-watchdog-ms",
+                    "200",
+                    "--format",
+                    "json",
+                ],
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|| panic!("the run never ended: seed {seed}"));
+            let result: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                    panic!(
+                        "seed {seed}: {error}\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )
+                });
+            assert_eq!(
+                (&result["result"], &result["exit_code"]),
+                (&"timeout".into(), &2.into()),
+                "seed {seed}: {result:#}"
+            );
+        }
+    }
+
     // A spin-wait on an atomic: the spinner makes no call until another
     // thread sets the flag (`set`), or for good (`never`); or it writes to a
     // file at every turn, a call that gets somewhere, until the flag is set

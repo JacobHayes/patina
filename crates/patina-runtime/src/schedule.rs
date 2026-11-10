@@ -657,7 +657,9 @@ impl Context {
         let operation = Operation::SchedulerNext;
         let expected = self.replay_expected(&operation)?;
         let result = match expected.as_ref().map(|(_, outcome)| outcome) {
-            Some(Outcome::OptionalTask(task)) => self.scheduler.select(*task).map(|()| *task),
+            Some(Outcome::OptionalTask(task)) => {
+                self.scheduler.select_recorded(*task).map(|()| *task)
+            }
             _ => self.scheduler.next(),
         };
         let actual = match result {

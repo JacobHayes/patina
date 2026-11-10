@@ -245,6 +245,7 @@ impl RuntimeBuilder {
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
         let mut replay_yield_stride: Option<u32> = None;
+        let mut replay_watchdog: Option<Option<patina_dst_trace::WatchdogConfigRecord>> = None;
         let (execution, root_seed) = match self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
             ExecutionMode::Record => (
@@ -330,6 +331,7 @@ impl RuntimeBuilder {
                     &self.config,
                     replayer.schedule_policy(),
                 )?);
+                replay_watchdog = Some(replayer.watchdog());
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
@@ -426,6 +428,18 @@ impl RuntimeBuilder {
         if let Some(stride) = replay_yield_stride {
             self.config.yield_stride = stride;
         }
+        // The recording's liveness watchdog is authoritative: a replay runs
+        // the same one, so a recorded liveness stop is reached again at the
+        // same operation, and a replay without one stops nowhere it did not.
+        if let Some(watchdog) = replay_watchdog {
+            self.config.liveness = watchdog
+                .map(|watchdog| crate::config::LivenessConfig {
+                    no_progress_budget_nanos: watchdog.no_progress_budget_nanos,
+                    converge_budget_nanos: watchdog.converge_budget_nanos,
+                    heal_after_nanos: watchdog.heal_after_nanos,
+                })
+                .unwrap_or_default();
+        }
 
         // The crash-consistency filesystem is built HERE, and only here, from
         // `config.faults` — the single choke point that always consumes the
@@ -519,16 +533,15 @@ impl RuntimeBuilder {
         // Build the liveness watchdog before the Context literal consumes
         // `self.config` fields. The heal-then-converge arm arms at the fault-window
         // end: an explicit override, else the buggify damage-control cutoff (when
-        // buggify is enabled), else run start. Detection is live only on a
-        // record/seeded run; a replay consumes the authoritative trace.
+        // buggify is enabled), else run start. Its inputs are recorded
+        // operations, virtual time and whether PCT deferred a task (which a
+        // replay keeps, `DetScheduler::select_recorded`), so a replay, which
+        // adopted the recording's watchdog above, stops where the recording
+        // did.
         let liveness = LivenessWatchdog::new(
             self.config.liveness,
             resolve_heal_after(&self.config),
             boot_origin_nanos,
-            matches!(
-                self.config.mode,
-                ExecutionMode::Seeded | ExecutionMode::Record
-            ),
         );
 
         let facts = self.facts_sink.take();

@@ -239,15 +239,21 @@ impl PctState {
     /// when it chose the previous task again over a runnable peer.
     /// `candidates` is non-empty.
     fn pick(&mut self, candidates: &[TaskId]) -> TaskId {
-        let previous = self.last_selected;
         let selected = self.highest(candidates);
+        self.note_selected(selected, candidates);
+        selected
+    }
+
+    /// Account a decision that chose `selected` among `candidates`: the
+    /// starvation count and the task a change point demotes.
+    fn note_selected(&mut self, selected: TaskId, candidates: &[TaskId]) {
+        let previous = self.last_selected;
         if previous == Some(selected) && candidates.len() > 1 {
             self.starving_decisions += 1;
         } else {
             self.starving_decisions = 0;
         }
         self.last_selected = Some(selected);
-        selected
     }
 
     fn highest(&self, candidates: &[TaskId]) -> TaskId {
@@ -444,6 +450,27 @@ impl DetScheduler {
         Ok(Some(selected))
     }
 
+    /// Replay a recorded decision: select `task` as [`DetScheduler::select`]
+    /// does, and keep the exploration policy's state as the recording's
+    /// [`DetScheduler::next`] left it (PCT's priorities, change points,
+    /// starvation count and whether the decision deferred a task), so what
+    /// reads that state on replay (the liveness watchdog) reads what the
+    /// recording read.
+    pub fn select_recorded(&mut self, task: Option<TaskId>) -> DriverResult<()> {
+        if let Some(selected) = task {
+            let runnable = self.runnable();
+            match self.pct.as_mut() {
+                Some(pct) if !runnable.is_empty() => {
+                    pct.advance();
+                    self.last_decision_deferred = pct.defers(&runnable);
+                    pct.note_selected(selected, &runnable);
+                }
+                _ => self.last_decision_deferred = false,
+            }
+        }
+        self.select(task)
+    }
+
     pub fn select(&mut self, task: Option<TaskId>) -> DriverResult<()> {
         let Some(task) = task else {
             if self.tasks.is_empty() {
@@ -614,6 +641,41 @@ mod tests {
             order.iter().any(|task| *task != order[0]),
             "a live change point must preempt: {order:?}"
         );
+    }
+
+    #[test]
+    fn a_replayed_decision_leaves_pct_as_the_recorded_one_did() {
+        // A replay selects the recorded task instead of choosing, and must
+        // still see what the recording's decisions saw: which ones deferred a
+        // task, the change points hit and the starvation moves.
+        let policy = SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 3,
+                steps: 64,
+            }),
+        };
+        let mut record = DetScheduler::with_policy(11, policy);
+        let mut replay = DetScheduler::with_policy(11, policy);
+        for scheduler in [&mut record, &mut replay] {
+            for label in ["a", "b", "c"] {
+                scheduler.spawn(label).unwrap();
+            }
+        }
+        let mut deferred = 0;
+        for _ in 0..3 * PCT_STARVATION_DECISIONS {
+            let task = record.next().unwrap().unwrap();
+            replay.select_recorded(Some(task)).unwrap();
+            assert_eq!(record.liveness_deferring(), replay.liveness_deferring());
+            deferred += usize::from(record.liveness_deferring());
+            let (left, right) = (record.pct.as_ref().unwrap(), replay.pct.as_ref().unwrap());
+            assert_eq!(left.priorities, right.priorities);
+            assert_eq!(left.change_points_hit, right.change_points_hit);
+            assert_eq!(left.starving_decisions, right.starving_decisions);
+            record.yield_task(task).unwrap();
+            replay.yield_task(task).unwrap();
+        }
+        assert!(deferred > 0);
+        assert!(record.pct.as_ref().unwrap().change_points_hit > 0);
     }
 
     #[test]

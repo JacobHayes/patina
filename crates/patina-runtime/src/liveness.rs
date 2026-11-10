@@ -192,13 +192,12 @@ impl WatchdogArm {
 /// enabling it is schedule-invariant (byte-identical trace when no violation
 /// fires) and needs no fingerprint component.
 ///
-/// Detection is live-selection only (record/seeded), like the exploration-policy
-/// report: on replay the recorded trace is authoritative and already reflects any
-/// abort, and the scheduler's live deferral state is not available, so the
-/// watchdog stays inert on replay.
+/// A replay runs the recording's watchdog (its metadata is authoritative),
+/// and its scheduler keeps PCT's state as the recording's decisions left it,
+/// so it reaches a recorded stop at the same operation.
 pub(super) struct LivenessWatchdog {
     pub(super) arms: Vec<WatchdogArm>,
-    /// Whether detection is live this run (record/seeded and at least one arm).
+    /// Whether detection is live this run (at least one arm).
     pub(super) active: bool,
     pub(super) fired: bool,
     /// The violation that fired, kept so the structured facts document can carry
@@ -209,13 +208,8 @@ pub(super) struct LivenessWatchdog {
 impl LivenessWatchdog {
     /// Build the watchdog from the resolved config. `heal_after_nanos` is the
     /// converge arm's arm-time already resolved by the caller (buggify cutoff or
-    /// override). `active` gates whether detection actually runs.
-    pub(super) fn new(
-        config: LivenessConfig,
-        heal_after_nanos: u64,
-        origin: u64,
-        active: bool,
-    ) -> Self {
+    /// override).
+    pub(super) fn new(config: LivenessConfig, heal_after_nanos: u64, origin: u64) -> Self {
         let heal_after_nanos = origin.saturating_add(heal_after_nanos);
         let mut arms = Vec::new();
         if let Some(budget) = config.no_progress_budget_nanos {
@@ -239,7 +233,7 @@ impl LivenessWatchdog {
             });
         }
         Self {
-            active: active && !arms.is_empty(),
+            active: !arms.is_empty(),
             arms,
             fired: false,
             violation: None,
@@ -665,8 +659,8 @@ impl Context {
     /// the scheduler's policy-deferral state WITHOUT recording anything or
     /// perturbing selection; returns a [`RuntimeError::Liveness`] (after emitting
     /// the loud, classifiable `PATINA_VIOLATION` line) when a no-progress budget is
-    /// exceeded. Inert unless the watchdog is active (record/seeded with a budget
-    /// configured), so a plain run and every replay are unaffected.
+    /// exceeded. Inert unless a budget is configured, so a plain run is
+    /// unaffected.
     fn liveness_track(&mut self, progress: bool) -> Result<(), RuntimeError> {
         if !self.liveness.active {
             return Ok(());
@@ -684,8 +678,10 @@ impl Context {
             // The interposed families abort the process on this error without
             // ever reaching `finish`, so the facts document — which carries this
             // very violation as a `runtime_findings` entry — has to be written
-            // here or it is never written at all.
+            // here or it is never written at all. So does the recording: the
+            // stop is the one finding that most needs its trace.
             self.emit_facts();
+            self.flush_recording();
             return Err(RuntimeError::Liveness {
                 kind: violation.kind,
                 detail: marker,

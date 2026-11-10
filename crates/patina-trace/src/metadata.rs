@@ -236,14 +236,13 @@ impl SwarmConfigRecord {
 /// virtual-time no-progress detector: it reports a structured `PATINA_LIVENESS`
 /// violation rather than letting a wedged run advance virtual time forever.
 ///
-/// This record is **purely informational**: unlike the fault, buggify, and
-/// schedule-policy records it is deliberately *not* folded into the compatibility
-/// fingerprint and is *not* reconciled fail-closed on replay. The watchdog only
-/// ever ADDS a violation report — it never records a boundary operation and never
-/// perturbs scheduler selection — so a trace recorded with the watchdog enabled is
-/// byte-for-byte identical to one recorded without it (when no violation fires),
-/// and either trace replays against a build with any watchdog configuration.
-/// Recording it keeps the trace self-describing (which budgets were armed).
+/// Unlike the fault, buggify, and schedule-policy records it is *not* folded
+/// into the compatibility fingerprint and *not* reconciled fail-closed: a
+/// replay adopts it, whatever watchdog the replay was asked for, so a recorded
+/// liveness stop is reached again at the same operation. The watchdog only
+/// ever ADDS a stop — it never records a boundary operation and never perturbs
+/// scheduler selection — so a trace recorded with the watchdog enabled is
+/// byte-for-byte identical to one recorded without it when no stop fires.
 /// The address layout a supervised native guest ran with
 /// ([`RunMetadata::address_layout`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -572,8 +572,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             command.env(name, value);
         }
         // Forward the liveness-watchdog knobs through the same control plane. The
-        // watchdog is schedule-invariant: recorded (informational) but not
-        // fingerprinted, so a watchdog trace replays against any build.
+        // watchdog is schedule-invariant: recorded but not fingerprinted, and a
+        // replay adopts the recorded one.
         for (name, value) in liveness_env_pairs(&invocation.liveness) {
             command.env(name, value);
         }

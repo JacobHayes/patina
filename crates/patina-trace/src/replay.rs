@@ -8,6 +8,7 @@ use patina_dst_abi::{Operation, Outcome, TaskId};
 use crate::{
     BuggifyConfigRecord, ComputeStop, DnsConfigRecord, FaultConfigRecord, MAIN_TIMELINE,
     RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, TraceBundle, TraceError, TraceEvent,
+    WatchdogConfigRecord,
 };
 
 pub struct Replayer {
@@ -122,6 +123,13 @@ impl Replayer {
     /// when it was; `None` otherwise (see [`RunMetadata::sud`]).
     pub const fn compute_stop(&self) -> Option<ComputeStop> {
         self.metadata.compute_stop
+    }
+
+    /// The liveness watchdog the recording ran under, authoritative on
+    /// replay: the replay derives the same stop at the same operation.
+    /// `None` for a recording without one.
+    pub const fn watchdog(&self) -> Option<WatchdogConfigRecord> {
+        self.metadata.watchdog
     }
 
     pub const fn sud(&self) -> Option<bool> {

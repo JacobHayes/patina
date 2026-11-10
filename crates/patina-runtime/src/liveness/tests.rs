@@ -936,7 +936,7 @@ fn liveness_watchdog_fires_on_virtual_time_no_progress_wedge() {
 }
 
 #[test]
-fn liveness_watchdog_is_schedule_invariant_and_replays_without_its_config() {
+fn liveness_watchdog_is_schedule_invariant_and_replays_from_its_record() {
     // The schedule-invariance proof: recording a healthy run with the watchdog
     // enabled produces a byte-identical recorded op stream to recording it
     // without. The watchdog only ADDS a possible report; it never records a
@@ -977,8 +977,8 @@ fn liveness_watchdog_is_schedule_invariant_and_replays_without_its_config() {
     // Fingerprint is unchanged by the watchdog (schedule-invariant).
     assert_eq!(a.metadata.fingerprint, b.metadata.fingerprint);
 
-    // The recorded watchdog is informational, not reconciled fail-closed: the
-    // watched trace replays with no watchdog configured.
+    // A replay adopts the recorded watchdog whatever it is configured with:
+    // the watched trace replays with none configured.
     let mut replay =
         Context::from_config(RuntimeConfig::replay(&watched, "wd-invariance-v1")).unwrap();
     replay.write_file("/f", b"hello").unwrap();

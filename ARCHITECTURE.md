@@ -459,6 +459,10 @@ lifecycle markers for crash restart).
   (`src/lifeline.rs`).
 - **One format version** (`TRACE_FORMAT_VERSION`); other versions are refused,
   never upgraded.
+- **A liveness stop is recorded.** The watchdog's stop flushes the recording
+  as it aborts, and a replay adopts the recorded watchdog (whatever
+  `--liveness-watchdog` it is given) and keeps PCT's state as the recorded
+  decisions left it, so it reaches the same stop at the same operation.
 - **Bounded:** a trace is held whole by the recorder, the supervisor that
   commits it and a replay, at about 256 bytes an event, so it is limited to
   `MAX_TIMELINE_EVENTS` (4,000,000) and `MAX_TRACE_BYTES` (256 MiB). Past

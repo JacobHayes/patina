@@ -13,8 +13,8 @@ use patina_dst_trace::AddressLayout;
 use std::collections::BTreeMap;
 
 /// Serialize the run's liveness-watchdog configuration into the trace metadata.
-/// Informational only — NOT a fingerprint input and NOT reconciled on replay,
-/// because the watchdog is schedule-invariant. `None` when the watchdog is off.
+/// Not a fingerprint input and not reconciled: a replay adopts it, so it
+/// reaches a recorded liveness stop again. `None` when the watchdog is off.
 pub(super) fn watchdog_record(
     config: &RuntimeConfig,
 ) -> Option<patina_dst_trace::WatchdogConfigRecord> {
