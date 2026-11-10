@@ -51,6 +51,7 @@ mod render;
 mod rollup;
 mod run_cache;
 mod sdk_report;
+mod sdk_version;
 mod seal;
 mod shim_build;
 mod shim_cache;

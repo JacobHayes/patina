@@ -466,6 +466,7 @@ fn build_native_package(
     let built = command
         .output()
         .map_err(|error| CliError(format!("failed to run cargo rustc: {error}")))?;
+    crate::sdk_version::check_guest_sdk(&built.stdout)?;
     if !built.status.success() {
         return Err(CliError(format!(
             "building the native Patina package {:?} failed",

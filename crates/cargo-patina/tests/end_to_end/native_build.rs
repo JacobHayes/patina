@@ -783,6 +783,59 @@ mod tests {
         );
     }
 
+    // A package pinned to another release line's SDK is refused by the build,
+    // where the same package on this line's SDK builds. The stand-in SDK is an
+    // empty library that links either way, so only the version check tells
+    // the two builds apart.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_package_on_another_release_lines_sdk_is_refused() {
+        let directory = tempdir().unwrap();
+        let build = |sdk_version: &str| {
+            let root = directory.path().join(sdk_version);
+            let sdk = root.join("patina-dst");
+            fs::create_dir_all(sdk.join("src")).unwrap();
+            fs::write(
+                sdk.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"patina-dst\"\nversion = \"{sdk_version}\"\nedition = \"2021\"\n"
+                ),
+            )
+            .unwrap();
+            fs::write(sdk.join("src/lib.rs"), "").unwrap();
+            let package = root.join("guest");
+            write_plain_package(&package, "patina-sdk-line-fixture", "fn main() {}\n");
+            let mut manifest = OpenOptions::new()
+                .append(true)
+                .open(package.join("Cargo.toml"))
+                .unwrap();
+            writeln!(
+                manifest,
+                "\n[dependencies]\npatina-dst = {{ path = \"../patina-dst\" }}"
+            )
+            .unwrap();
+            Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+                .current_dir(native_workspace())
+                .args(["build", package.to_str().unwrap(), "--output"])
+                .arg(root.join("built"))
+                .env("CARGO_TARGET_DIR", common::guest_target_dir("sdk-line"))
+                .output()
+                .unwrap()
+        };
+        let same_line = build(env!("CARGO_PKG_VERSION"));
+        assert!(
+            same_line.status.success(),
+            "a package on this release line's SDK did not build: {}",
+            String::from_utf8_lossy(&same_line.stderr)
+        );
+        let other_line = build("999.0.0");
+        assert!(
+            !other_line.status.success(),
+            "a package on another release line's SDK built"
+        );
+        assert!(!directory.path().join("999.0.0/built").exists());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn package_result(output: &Output) -> String {
         let stdout = String::from_utf8(output.stdout.clone()).unwrap();

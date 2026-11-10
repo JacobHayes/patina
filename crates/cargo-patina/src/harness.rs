@@ -186,6 +186,7 @@ fn build_native_harness(
             "failed to run cargo rustc for native harness: {error}"
         ))
     })?;
+    crate::sdk_version::check_guest_sdk(&built.stdout)?;
     if !built.status.success() {
         return Err(CliError(format!(
             "building the native libtest harness {:?} failed",
