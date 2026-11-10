@@ -12,7 +12,8 @@ build, test and land, and the invariants that hold everywhere.
 | [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first and the rules new surface must meet; cite it when proposing new surface |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim |
 | [VALIDATION.md](./VALIDATION.md) | what is validated, the guarantees and their oracles, known gaps |
-| [README.md](./README.md), [TUTORIAL.md](./TUTORIAL.md), [USAGE-MODES.md](./USAGE-MODES.md), `llms.txt` | the user-facing surface; must stay honest about status |
+| [README.md](./README.md), [TUTORIAL.md](./TUTORIAL.md), [docs/GUIDE.md](./docs/GUIDE.md), [USAGE-MODES.md](./USAGE-MODES.md), `llms.txt` | the user-facing surface; must stay honest about status. The README stays short, and every output it or the tutorial shows is the tool's own |
+| `examples/` | the README's and the tutorial's projects; `scripts/install-smoke.sh` runs them in CI as the documents say, so change a documented step and its example together |
 | [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) | the skill handed to agents *using* Patina; it teaches how to discover the surface, not a flag catalog |
 | [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
 | Nearest `AGENTS.md` | the native shim and the testbeds each have their own |

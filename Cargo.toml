@@ -17,6 +17,8 @@ members = [
     "crates/patina-trace",
     "crates/patina-wrapper-fault",
 ]
+# The documented examples are projects of their own, as an adopter's is.
+exclude = ["examples"]
 resolver = "2"
 
 # Line tables are all the debug info this workspace uses: panic backtraces

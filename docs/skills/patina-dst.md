@@ -34,10 +34,11 @@ shim was linked in when the guest was built. A process already running cannot
 retro-instrument itself, which is why the point-solution test path rebuilds the
 test binary rather than wrapping the current one.
 
-Two artifact families, inferred automatically from what you hand a verb: a
-**Cargo package/test** (directory or `Cargo.toml`, run in-process) and a
-**native binary** (Mach-O/ELF, linked against the shim). Some capabilities are family-specific — the registry tells you
-which, see "Families" below.
+One kind of artifact: a **native binary** (Mach-O/ELF) linked against the
+shim. Hand a verb a built binary, or a source file, package directory or
+`Cargo.toml`, which it builds first. A verb with several forms accepts some
+flags in only some of them — the registry tells you which, see "Families"
+below.
 
 ## What it can do — the capability map
 
@@ -50,7 +51,7 @@ trace, needing no flags because the trace is authoritative; `trace` inspects a
 recording offline — metadata, filtered events, aggregates, or a two-trace diff —
 without executing anything. `test` rebuilds one libtest target shim-linked to
 sweep a single exact test across seeds. `run --param K=V` hands the guest a named
-input it reads through `patina_dst::param`, recorded for flag-free replay. A run with a trace can be rendered to a self-contained HTML timeline.
+input it reads through `patina_dst::param`, recorded for flag-free replay. A run or a replay can be rendered to a self-contained HTML timeline.
 
 **Search.** `campaign` sweeps seeds over one artifact: a config-driven fault-and-schedule sweep where every generation's seed and knobs
 are a pure function of the generation number, with outcome classification,
@@ -241,9 +242,9 @@ learn the surface.
 - `llms.txt` — the compact machine-oriented map of the whole CLI and SDK: verbs,
   fault domains, output schemas, SDK macros, and the report markers, in one file.
   Read it once at the start of a session; use the registry for exact spellings.
-- `TUTORIAL.md` — the end-to-end walkthrough: instrument a program, sweep seeds,
-  catch a planted bug, replay it, render the timeline. Every command in it is
-  verified.
+- `README.md` and `TUTORIAL.md` — the first run and the end-to-end
+  walkthrough: instrument a program, sweep seeds, catch a planted bug, replay
+  it, render the timeline. Their projects are `examples/`, which CI runs.
 - `testbeds/` — real working guests, each with a runnable script. The closest
   thing to a worked example of your own situation.
 - `ARCHITECTURE.md`, `INTENTS.md`, `VALIDATION.md` — how it works, what it
@@ -264,7 +265,7 @@ status is reported in the envelope's `guest_exit`, never passed through.
 outcome class; `patina --help` lists them), `attribution` (`guest`,
 `patina_unsupported`, `patina_internal` or `request`: whose move it is) and
 `exit_code`, plus a `stop` naming what stopped a run that did not end clean, and whatever applies to
-the run: family, artifact, seed, fingerprint, captured guest output, verdicts,
+the run: artifact, seed, fingerprint, the command that repeats a failed run, captured guest output, verdicts,
 SDK site counters, per-plane fault facts, trace metadata, coverage or depth. A few report verbs emit their own
 schemas instead. Prefer JSON whenever you are parsing rather than reading — and
 discover an envelope's real fields by running the command once and inspecting the

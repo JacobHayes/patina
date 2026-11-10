@@ -1,0 +1,10 @@
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0" }
+
+[dev-dependencies]
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }

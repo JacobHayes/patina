@@ -219,6 +219,11 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   compares it with the default sweep, paired, over many seed bases: guidance
   finds a bug behind nested knob thresholds sooner, but not the workq bugs,
   so prefer the default sweep unless the target has that shape.
+  The same campaign command given again for its out-dir continues the recorded
+  campaign: it finishes an interrupted one, runs the missing generations when
+  `--gens` is larger, and otherwise runs nothing and reports the recorded
+  result with the same exit status. A command for another artifact or other
+  settings is refused, naming what differs.
 - `patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native edge coverage (`--instrument`, or a
   Go guest). Resolves covmap PCs from the `patina_yield_point` anchor, demangles
@@ -281,7 +286,8 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   `patina.trace.events/v1` JSON Lines. Human output is unchanged by default.
   NOTE: the selector is `--format`, not
   `--output`, because `--output PATH` is already the build/minimize artifact path.
-- `--render OUT.html` (run/replay with a trace): write a self-contained,
+- `--render OUT.html` (run or replay; a run without `--record` records to a
+  scratch trace for the page): write a self-contained,
   single-file HTML timeline — per-task lanes over trace sequence, colored by
   category (scheduling, sleep, network, filesystem, crash, entropy, clock), a
   metadata panel rendered generically from the trace JSON, per-task rollups, and
@@ -317,8 +323,9 @@ facts, the shim's stop record, the guest's wait status); printed failure text
 alone is a `failure`. `exit_code` is the tool's own exit status, never the
 guest's (`guest_exit`). A campaign's exit status is 1 when any generation is a
 finding in the guest or its coverage gate fails, else 2 when any generation is
-not clean. When applicable: `family`
-(`native|cargo`), `artifact`, `fingerprint`, `seed`, `render`, `findings`
+not clean. When applicable: `artifact`, `fingerprint`, `seed`, `render`,
+`reproduce` (the command that repeats a run that did not end clean: the replay
+of its recording, else the `run` with its seed spelled out), `findings`
 (audit import/finding strings), `finding_details` (structured audit symbol,
 category, provenance), `output_path` + `content_hash` (build), `verdicts` (every verdict the guest
 reported through the verdict ABI, in call order: `{seq, kind, label, detail}`;
@@ -411,7 +418,11 @@ dev-dependency use under plain `cargo test`.
   the same libtest target shim-linked, sweeps 20 seeds by default (or macro args
   such as `seed = 7`, `seeds = 200`, `buggify`, `net_drop_permille = 50`), and
   panics with the failing seed plus `patina test` / `patina replay`
-  repro commands. Missing CLI discovery is a failure, never a skip.
+  repro commands. Missing CLI discovery is a failure, never a skip. The
+  arguments are the flags of `patina test` with `_` for `-`, checked when the
+  test is compiled: an unknown name, a value on a switch or a missing value
+  does not compile. It works in `tests/*.rs` of a package whose own binary
+  calls the SDK.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,
   `patina_dst::buggify_knob!("label", default, lo, hi)` -> value.

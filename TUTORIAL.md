@@ -1,372 +1,294 @@
-# Patina tutorial: catch a planted bug with buggify, then replay and render it
+# Patina tutorial: a whole program
 
-This walkthrough takes a small `std` Rust program, instruments it with Patina's
-cooperative-SUT SDK (`buggify!`), sweeps seeds until a planted bug fires, then
-records that run, replays it byte-for-byte, and renders its timeline to a
-self-contained HTML page. Every command here is run against the current CLI.
+The [README](./README.md) found a bug in a library through one test. This
+tutorial takes a program with a `main`, marks a rare path in it, states an
+invariant, and then finds, replays and renders the failure. It takes about ten
+minutes.
 
-Prerequisites: `patina` on `PATH` ([install it](./README.md#install)), Rust and
-a C compiler.
+You need `patina` on `PATH` ([install it](./README.md#install)), Rust and a C
+compiler. The finished project is [examples/ledger](./examples/ledger), and
+the output shown here is what these commands print for it on Linux x86_64.
 
-## 1. A small program with a latent bug
+## 1. A program with a rare path
 
-Create a package `ledger/`:
+Make a package `ledger` with these four files.
 
-`ledger/Cargo.toml`
+`Cargo.toml`:
+
 ```toml
 [package]
 name = "ledger"
 version = "0.1.0"
 edition = "2021"
-publish = false
-[[bin]]
-name = "ledger"
-path = "src/main.rs"
+
 [dependencies]
-# The SDK from the release your `patina` is (`patina --version`); package
-# `patina-dst`, used as `patina_dst::` in code. Its default features are the
-# dependency-light macro set; a plain `cargo build` leaves every macro a no-op.
 patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0" }
+
+[dev-dependencies]
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }
 ```
 
-`ledger/src/main.rs`
+`src/lib.rs`:
+
 ```rust
-// A tiny append-only ledger with a LATENT bug: a rare "batch-commit" path
-// appends the next entry out of order, breaking the sorted-prefix invariant. The
-// bug only triggers when that rare path runs -- exactly the path buggify forces.
-// An end-of-run consistency check catches it and exits nonzero (a clean exit, so
-// the recorded trace finalizes and can be replayed and rendered).
-fn main() {
-    patina_dst::lifecycle::setup_complete();
-    let mut durable: Vec<u64> = Vec::new();
-    for i in 0..8u64 {
-        if patina_dst::buggify!("batch-commit") {
-            let last = durable.len();
-            durable.push(i);
-            if last >= 1 {
-                durable.swap(last, last - 1); // BUG: reorders two committed entries
-            }
-        } else {
-            durable.push(i);
-        }
-    }
-    let ok = durable.iter().enumerate().all(|(i, v)| *v as usize == i);
-    if ok {
-        println!("LEDGER_OK entries={}", durable.len());
+/// Append `entry` to the ledger. Entries arrive in increasing order, and the
+/// ledger must keep them that way.
+pub fn commit(ledger: &mut Vec<u64>, entry: u64) {
+    // A rare path: Patina takes it on seed-chosen runs. In an ordinary build
+    // `buggify!` is always false.
+    if patina_dst::buggify!("batch-commit") && !ledger.is_empty() {
+        let last = ledger.len() - 1;
+        ledger.push(entry);
+        ledger.swap(last, last + 1); // BUG: the batch path swaps two entries
     } else {
-        println!("BUG_CAUGHT reordered ledger={durable:?}");
-        std::process::exit(1);
+        ledger.push(entry);
     }
+    patina_dst::always!(ledger.is_sorted(), "ledger-sorted");
 }
 ```
 
-`buggify!("batch-commit")` returns `true` only on a rare, *seed-deterministic*
-path. Outside Patina (a plain `cargo build && ./ledger`) it is always `false`, so
-the program behaves normally and ships with the instrumentation inert.
+`src/main.rs`:
 
-## 2. Build it for the deterministic runtime
-
-```
-$ patina build ./ledger --output ./ledger/ledger
-PATINA_BUILD output=./ledger/ledger
-```
-
-`build` links the deterministic shim below your program and injects the cfgs that
-route the SDK macros to the runtime.
-
-## 3. Run it — a clean seed and a catching seed
-
-Most seeds do not activate the site or do not fire it, so the invariant holds:
-
-```
-$ patina run ./ledger/ledger --seed 0 --buggify
-LEDGER_OK entries=8
+```rust
+fn main() {
+    let mut ledger = Vec::new();
+    for entry in 0..8 {
+        ledger::commit(&mut ledger, entry);
+    }
+    println!("ledger: {ledger:?}");
+}
 ```
 
-Buggify is seeded by the run seed, so a different seed takes the rare path:
-
-```
-$ patina run ./ledger/ledger --seed 5 --buggify
-BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
-```
-
-On stderr you also get the SDK report — proof the site was actually exercised
-(not a vacuous "all clean"):
-
-```
-PATINA_SDK_REPORT enabled=1 swarm_deselected=0 fire_permille=250 activation_permille=250 ... \
-  sites_registered=1 sites_activated=1 total_firings=2 ... site=batch-commit|fault|...|@src/main.rs:9
-```
-
-For native edge coverage, build with `--instrument`, write a covmap, then use the
-read-only coverage report to symbolize and roll it up by crate/module/function:
-
-```
-$ patina build ./ledger --instrument --output ./ledger/ledger-inst
-$ patina run ./ledger/ledger-inst --seed 5 --buggify --coverage-out ./ledger/run.covmap
-$ patina coverage ./ledger/ledger-inst ./ledger/run.covmap --focus ledger --top 10
-```
-
-A longer `campaign` over an instrumented binary automatically accumulates the union
-under `<out-dir>/coverage/`; inspect it with
-`patina coverage ./ledger/ledger-inst <out-dir>`. The campaign report is tied
-to the recorded artifact hash, so passing a different binary fails closed instead
-of producing a mismatched symbol rollup.
-
-Catching seeds are build-specific (the instrumentation shapes the decision
-space), so sweep for one rather than hardcoding it.
-
-## 4. Sweep seeds automatically
-
-`campaign` runs the same artifact across generations, each on its own seed,
-deduplicates the failures it finds, and prints a reproduction command for each
-one (also kept in the campaign state under `--out-dir`):
-
-```
-$ patina campaign ./ledger/ledger --buggify --gens 50 --out-dir ./ledger-out
-```
-
-"Where to go next" shows how to reduce a campaign failure to its minimal fault knobs.
-
-## 5. Record the catching run
-
-Recording captures the seed, the buggify config, and the guest arguments into the
-trace, so the reproduction needs no flags later:
-
-```
-$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina
-BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
-```
-
-The trace is compact JSON — inspect it with `jq . bug.patina` if you like.
-
-## 6. Replay it — byte-for-byte, flag-free
-
-```
-$ patina replay ./ledger/ledger ./bug.patina
-BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1, identical
-```
-
-No `--seed` or `--buggify`: the trace is authoritative. The trace also records
-the digest of the binary it was recorded from: replay it against a binary that
-differs by even one byte and patina refuses before the guest starts, naming
-the executable as what differs, rather than lying.
-
-## 7. Render the timeline
-
-Add `--render` to write a self-contained HTML timeline (open it in any browser —
-no assets, no network):
-
-```
-$ patina replay ./ledger/ledger ./bug.patina --render ./bug.html
-```
-
-`bug.html` shows per-task lanes over the trace, a metadata panel (seed, buggify
-config, active sites), per-task rollups, and a notable-events list. Rendering
-only reads the trace, so the replay hash is unchanged whether or not you pass
-`--render`.
-
-For CLI-only inspection of an existing trace, use `trace info` and a filtered
-`trace events` dump:
-
-```
-$ patina trace info ./bug.patina
-$ patina trace events ./bug.patina --notable
-$ patina trace stats ./bug.patina
-$ patina trace diff ./bug.patina ./bug.patina
-$ patina trace events ./bug.patina --kind filesystem --first 20 --format json
-```
-
-`trace diff` exits 0 for identical traces and 1 when metadata or events diverge.
-The last command emits `patina.trace.events/v1` JSON Lines: a header, one object
-per emitted event (raw `operation`/`outcome` intact), and a matched/emitted
-summary.
-
-Prefer a one-shot failure report? `--report OUT.html` renders the timeline *only
-when the run fails*, leading with a failure summary:
-
-```
-$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --report ./report.html
-```
-
-## 8. Keep a point-solution guard under plain cargo test
-
-For a permanent per-PR guard, enable the `patina-dst` `macros` feature in
-`dev-dependencies` and annotate a zero-argument test:
+`tests/sorted.rs` (used in step 7):
 
 ```rust
 #[patina_dst::test(seeds = 20, buggify)]
-fn ledger_stays_sorted_under_faults() {
-    // ordinary test code using the crate's helpers and dev-dependencies
-}
-```
-
-Plain `cargo test` finds `patina` through `PATINA_CLI` or `PATH`, rebuilds
-the same libtest target shim-linked, and runs only that test with one libtest
-thread. A failing seed panics with both repro commands:
-
-```text
-reproduce:
-  patina test . --harness-target my_crate --exact ledger_stays_sorted_under_faults --seed 5
-  patina replay target/patina/dst/.../guest target/patina/dst/.../seed-5.patina
-```
-
-If `patina` is not discoverable, the test fails with the install line instead
-of skipping.
-
-## 9. Name resolution as a fault domain
-
-Buggify needs you to mark the site. Environment faults do not — they perturb the
-boundary your program already crosses. DNS is one, and it catches a bug class
-that never shows up in a unit test: a service that resolves its dependency once
-at startup and gives up if that lookup fails.
-
-`resolver.rs` (a standalone source; `build` takes a single `.rs` file directly):
-
-```rust
-// A service startup path that looks up its dependency exactly ONCE -- no retry.
-// Realistic, and exactly the shape a transient resolver failure breaks.
-use std::net::ToSocketAddrs;
-
-fn main() {
-    let resolved = ("db.internal", 9000)
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next());
-    match resolved {
-        Some(addr) => println!("PATINA_RESULT ok=1 db.internal={}", addr.ip()),
-        None => {
-            // The campaign's harness-agnostic violation contract.
-            println!("PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup");
-            std::process::exit(1);
-        }
+fn the_ledger_stays_sorted() {
+    let mut ledger = Vec::new();
+    for entry in 0..8 {
+        ledger::commit(&mut ledger, entry);
     }
 }
 ```
 
-There is no host resolver behind this. The run's host table is exactly what you
-declare with `--dns-entry NAME=ADDR` (repeatable); every other name is NXDOMAIN,
-deterministically:
+Two SDK macros carry the tutorial.
 
-```
-$ patina build ./resolver.rs --output ./resolver
-PATINA_BUILD output=./resolver
+`buggify!("batch-commit")` is a *fault site*: a place where something rare
+may happen. Under Patina it is true on some runs, chosen by the seed. It
+stands for the path your tests never take: the retry, the batch, the timeout.
 
-$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5
-PATINA_RESULT ok=1 db.internal=10.0.0.5
+`always!(condition, "ledger-sorted")` is an *invariant*. Under Patina a false
+condition ends the run as a `violation` that names the label.
 
-$ patina run ./resolver --seed 1
-PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
-```
+Outside Patina both are inert, so the program ships with them in place:
 
-That second failure is *semantics*, not a fault: an undefined name always fails.
-The two fault knobs act on names the table **does** define —
-`--dns-fail-permille` (a seeded split of NXDOMAIN and resolver timeout) and
-`--dns-latency-nanos MIN..MAX` (seeded resolution delay on the virtual clock).
-Both report on stderr whether they actually did anything, so a clean run cannot
-quietly mean "the knob never fired":
-
-```
-$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 --dns-fail-permille 1000
-PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
-PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 ... vacuous=0
-
-$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 \
-    --dns-latency-nanos 2000000..2000000
-PATINA_RESULT ok=1 db.internal=10.0.0.5
-PATINA_DNS_FAULT_REPORT resolutions=1 ... latency_applied=1 vacuous=0
+```text
+$ cargo run
+ledger: [0, 1, 2, 3, 4, 5, 6, 7]
 ```
 
-At rate 1000 the bug is trivially reproducible; the interesting question is
-whether a *realistic* failure rate finds it. Hand the table to a campaign and it
-draws the DNS knobs per generation alongside the fs and network ones:
+## 2. Build it for Patina
 
-```
-$ patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
-    --out-dir ./dns-out
-PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=violation NOVEL verify=replay:reproduced
-  class ok                 19
-  class violation          1
-      reproduce: patina replay ./resolver ./dns-out/failures/generation-7.patina
-PATINA_CAMPAIGN_COMPLETE generations=20 failures=1 novel=1
+```text
+$ patina build . --output ledger-guest
+PATINA_BUILD output=ledger-guest
 ```
 
-One generation in twenty caught it, and the reproducer needs no knob flags at
-all — the trace carries the host table and both knob settings:
+`build` compiles the package with Patina's runtime linked underneath it. The
+result is the *guest*: the program as Patina runs it. The first build also
+compiles the runtime itself, which takes a while and prints Cargo's progress.
 
-```
-$ patina replay ./resolver ./dns-out/failures/generation-7.patina
-PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
-PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 latency_applied=1 vacuous=0
-```
+## 3. Run seeds until one fails
 
-One thing worth knowing beyond this example. On the producer side, a server that
-binds `0.0.0.0:PORT` receives traffic addressed to any address on that port, so
-ordinary `INADDR_ANY` server code is reachable by a resolved name with no
-service-side registration.
+`run` takes a seed. `--buggify` arms the fault sites; without it they stay
+false.
 
-## 10. Machine-readable output for agents
-
-Any verb accepts `--format json`. Most emit one result envelope on stdout (schema
-`patina.result/v2`) with the guest output folded in; `coverage` emits
-`patina.coverage/v1`, and `trace events` uses streaming JSON Lines:
-
-```
-$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
-{"schema":"patina.result/v2","verb":"run","result":"violation",
- "attribution":"guest","exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":22,
- "event_count":...,"metadata":{...}},"verdicts":[...],
- "result_line":"BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]", ...}
+```text
+$ patina run ./ledger-guest --seed 0 --buggify
+ledger: [0, 1, 2, 3, 4, 5, 6, 7]
 ```
 
-`result` is the run's one outcome and `attribution` whose move it is; both, and
-the exit status that follows from them, are the table in the README's "Outcomes
-and exit codes". They are read from structured facts only: a guest that merely
-prints failure text and exits nonzero is a `failure`. The selector is `--format`
-(not `--output`, which is the build/minimize artifact path).
+Patina also writes to standard error. Every run prints a `note:` listing the
+calls it would refuse, and a run with `--buggify` prints a `PATINA_SDK_REPORT`
+line that counts how often each site was reached and fired. The output shown
+in this tutorial leaves those two lines out.
 
-A guest that reports outcomes through the verdict ABI
-(`patina_dst::verdict(kind, label, detail)`, and every `always!` violation) adds
-a `verdicts` array — `{"seq":0,"kind":"violation","label":"ledger-sorted",
-"detail":"{\"row\": 12}"}` — so tooling reads structured results instead of
-grepping `result_line` for strings. The field is omitted when the run
-reported none.
+On seed 0 the rare path was not taken. Try more seeds, and stop at the first
+that fails:
+
+```sh
+for seed in 0 1 2 3 4 5 6 7; do
+  patina run ./ledger-guest --seed $seed --buggify || break
+done
+```
+
+Seeds 0 to 4 print the sorted ledger. Seed 5 does not:
+
+```text
+PATINA_VERDICT seq=0 kind=violation label="ledger-sorted" detail="src/lib.rs:13"
+patina: FINDING in the guest [violation]: violation of "ledger-sorted" src/lib.rs:13 (guest killed by SIGABRT)
+patina: reproduce: patina run ./ledger-guest --seed 5 --buggify
+```
+
+The run ended as a `violation`, and `patina` exited with status 1. The last
+line is the command that gives this exact run again. Which seeds fail depends
+on the build, so yours may not be 5.
+
+## 4. Record it, and replay it
+
+`--record` writes the run's *trace*: every decision the simulated world made.
+
+```text
+$ patina run ./ledger-guest --seed 5 --buggify --record bug.patina
+PATINA_VERDICT seq=0 kind=violation label="ledger-sorted" detail="src/lib.rs:13"
+patina: FINDING in the guest [violation]: violation of "ledger-sorted" src/lib.rs:13 (guest killed by SIGABRT)
+patina: reproduce: patina replay ./ledger-guest bug.patina
+```
+
+`replay` needs no seed and no flags, because the trace holds them. It prints
+what the recording printed:
+
+```text
+$ patina replay ./ledger-guest bug.patina
+PATINA_VERDICT seq=0 kind=violation label="ledger-sorted" detail="src/lib.rs:13"
+patina: FINDING in the guest [violation]: violation of "ledger-sorted" src/lib.rs:13 (guest killed by SIGABRT)
+patina: reproduce: patina replay ./ledger-guest bug.patina
+```
+
+A trace belongs to the guest that recorded it. Replay it against a guest that
+differs by one byte, or with another build of `patina`, and the replay is
+refused before the program starts. To carry a failure to another machine,
+carry the `patina run ... --seed` command instead.
+
+## 5. Look at the trace
+
+`trace info` summarizes a trace. These are some of its lines:
+
+```text
+$ patina trace info bug.patina
+trace: bug.patina
+format_version: 28
+fingerprint: patina-native+buggify
+root_seed: 5
+guest_argv: []
+timelines: main (1 events)
+buggify: {"activation_permille":250,"active_sites":["batch-commit","ledger-sorted"],"cutoff_nanos":300000000000,"fire_permille":250} (per-evaluation firings are re-derived from the seed, not recorded)
+next: `patina trace events bug.patina` for the event stream
+```
+
+`--render` writes the trace as a page you can open in a browser. It works on
+a replay, and on a run with or without `--record`. The command prints what it
+printed before, and one more line:
+
+```text
+$ patina replay ./ledger-guest bug.patina --render bug.html
+PATINA_RENDER output=bug.html
+```
+
+This program does little the simulated world can see, so its page is short. A
+program with threads, files or sockets gets a lane for each thread, with its
+events.
+
+## 6. Let a campaign sweep for you
+
+A *campaign* runs many *generations*. Each generation is one run with its own
+seed, and with `--buggify` its own odds for the fault sites.
+
+```text
+$ patina campaign ./ledger-guest --buggify --gens 20 --out-dir ledger-out
+PATINA_CAMPAIGN_START artifact=./ledger-guest generations=20 seed_base=0 out=/home/you/ledger/ledger-out
+PATINA_CAMPAIGN_GEN generation=0 seed=5133223892554006150 class=violation NOVEL verify=replay:reproduced
+PATINA_CAMPAIGN_GEN generation=1 seed=9597900870906850753 class=violation
+[... one line for each failing generation ...]
+== campaign summary ==
+generations=20 failures=16 novel_signatures=1
+  class ok                 4
+  class violation          16
+-- failure signatures --
+  [violation] count=16 first_gen=0 seed=5133223892554006150
+      signature: violation|verdict kind=violation label=ledger-sorted|
+      reproduce: patina replay ./ledger-guest /home/you/ledger/ledger-out/failures/generation-0.patina --cpus 4
+      trace:     /home/you/ledger/ledger-out/failures/generation-0.patina
+      verify:    replay reproduced
+[... coverage reports ...]
+PATINA_CAMPAIGN_COMPLETE generations=20 failures=16 novel=1 result=violation attribution=guest
+patina: FINDING in the guest [violation]: 16 of 20 generation(s) did not end clean; the signatures above say how
+```
+
+Sixteen generations failed, and all sixteen are one bug: the campaign groups
+failures by *signature*, here the label of the violated invariant. It replayed
+the first one to check that it reproduces, and kept a trace for each under
+`ledger-out/failures/`. The `reproduce:` line replays it. The campaign exited
+with status 1.
+
+The out-dir holds the campaign's state. Give the same command again and
+nothing runs: it reports the same result. Ask for more generations and it
+runs only the missing ones:
+
+```text
+$ patina campaign ./ledger-guest --buggify --gens 40 --out-dir ledger-out
+PATINA_CAMPAIGN_RESUME out=/home/you/ledger/ledger-out done=20 target=40 artifact=./ledger-guest sha256=96ac69fce15c6f37b2df320a4abedb04e000842949482dae3f649e5bb2d5f8cc
+```
+
+A command for another guest or with other settings is refused: use a new
+`--out-dir` for a new campaign.
+
+## 7. Keep it as a test
+
+`tests/sorted.rs` from step 1 runs the same check from plain `cargo test`.
+The arguments of `#[patina_dst::test]` are the flags of `patina test`, with
+`_` for `-`; a misspelled one does not compile.
+
+`cargo test` fails on the same seed. Among its output:
+
+```text
+patina: FINDING in the guest [violation]: violation of "ledger-sorted" src/lib.rs:13
+patina dst test failed: sorted::the_ledger_stays_sorted
+  seed 5 of 0..20  class=violation  guest_exit={"code":134,"core":true,"signal":6,"signal_name":"SIGABRT"}
+  trace: /home/you/ledger/target/patina/dst/ledger/test/sorted/the_ledger_stays_sorted/seed-5.patina
+  reproduce:
+    patina test /home/you/ledger --harness-target sorted --exact the_ledger_stays_sorted --seed 5 --buggify
+    patina replay /home/you/ledger/target/.../guest /home/you/ledger/target/.../seed-5.patina
+```
+
+Now fix the bug: delete the two lines that take `last` and swap. `cargo test`
+passes, and the test stays as a guard: every `cargo test` runs it across 20
+seeds.
+
+## 8. Read results from a script
+
+Every command takes `--format json` and then prints one JSON object on one
+line. For the failing run, laid out here with most fields left out:
+
+```text
+$ patina run ./ledger-guest --seed 5 --buggify --format json
+{
+    "result": "violation",
+    "attribution": "guest",
+    "exit_code": 1,
+    "seed": 5,
+    "guest_exit": {"code": 134, "core": true, "signal": 6, "signal_name": "SIGABRT"},
+    "reproduce": "patina run ./ledger-guest --seed 5 --buggify --format json",
+    ...
+}
+```
+
+`result` is the outcome, `attribution` says whose move it is, and `exit_code`
+is the status `patina` exits with. The README's
+[outcome table](./README.md#outcomes-and-exit-codes) lists every value. A run
+that did not end clean also has a `stop` that says what stopped it.
 
 ## Where to go next
 
-- Add the other fault domains: `--machine-crash-permille`, `--fs-error-permille`,
-  `--fs-short-permille`, `--fs-latency-nanos`, `--net-drop-permille`,
-  `--net-jitter-nanos`, `--net-latency-nanos`, `--sleep-jitter-nanos` — the same
-  shape as the DNS knobs in section 9. They are seed-driven and default off. All
-  are recorded for flag-free replay. Crash restart (`--machine-crash-permille`
-  and `--process-crash-permille`) restarts the guest in a new incarnation, and
-  campaigns draw it from the `crash` fault plane.
-- Vary the *workload* across campaign generations from inside the guest: a
-  campaign varies patina-side seeds (scheduler, faults, buggify) per generation
-  but keeps guest argv fixed by design. A guest that wants a different logical
-  workload per generation should derive its workload parameters from the
-  deterministic entropy stream (seed an application RNG from bytes the runtime
-  provides, e.g. `rand`) instead of argv.
-  That way every generation is still reproducible from its patina seed alone,
-  and replay needs no extra flags.
-- Make atomics-only race windows schedulable: `patina build --instrument`,
-  then `patina run --yield-stride N` (a scheduling point every N edges a
-  thread executes; 1 is every edge, the densest and slowest). At the default
-  stride 0 the same binary only keeps edge counters, for
-  `--coverage-out`/`--guided`.
-- Reduce a campaign failure to a one-line reproduction: `patina minimize
-  --generation 14 --out-dir out/` delta-debugs that generation's fault knobs
-  first (usually 17-18 down to 1-2, in about twenty seeded re-runs), prints the
-  standalone command that still fails, and records the minimal-knob run as a
-  trace that replays without flags. There is no oracle to write:
-  the failure being preserved is the set of verdicts the campaign recorded for
-  that generation, and the completion line names it (`target=verdicts[…]`). A
-  guest that reports nothing through the verdict ABI is refused with a pointer
-  to `--marker 'wal corruption'`, which names the failure text instead.
-- Feed the guest named inputs with `patina run --param clients=40` (read
-  through `patina_dst::param("clients")`, recorded for flag-free replay), and
-  shrink the parameters a failure needs:
-  `patina minimize --params -- patina run ./ledger/ledger --seed 5 --param clients=40`.
-- See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work
-  queue: WAL crash-recovery, SimNet faults, buggify) for the flagship end-to-end
-  demonstration.
+- Inject faults the program did not mark. `--fs-error-permille 50` fails five
+  in a hundred filesystem calls; there are flags for short writes, crashes,
+  network drops and delays, and DNS. `patina run --help` lists them, and
+  [docs/GUIDE.md](./docs/GUIDE.md) explains them.
+- Reduce a campaign failure to the fewest faults that still cause it:
+  `patina minimize --generation 0 --out-dir ledger-out`.
+- Test a server: put the server and its clients in one test or one `main`. A
+  guest is one process in a closed world, and it has to finish. See
+  [What programs work](./README.md#what-programs-work).
+- Go and Python programs: [USAGE-MODES.md](./USAGE-MODES.md).
+- A larger example: `testbeds/workq`, a durable work queue tested through
+  crashes, network faults and fault sites.

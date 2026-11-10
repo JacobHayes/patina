@@ -28,9 +28,10 @@ document names directories and evidence shapes, not test functions.
 | `mise run conformance` | syscall conformance scenarios, natively and under Patina |
 | `mise run audit-corpus` | ecosystem symbol-audit corpus: every reproducer audits clean |
 | `mise run bench` | native-versus-Patina overhead measurement (not a gate) |
-| `scripts/install-smoke.sh REF` | the adopter path, with an installed `patina` and nothing of the checkout: a new package on the SDK from GitHub at REF passes a `#[patina_dst::test]` under plain `cargo test` and fails it once the tool is hidden, and its program builds, runs and replays (`--go`: a Go guest on the Go SDK too) |
+| `scripts/install-smoke.sh REF` | the adopter path and the documented first run, with an installed `patina`: the README's and the tutorial's projects (`examples/`), outside the checkout and on the SDK at REF (a tag, a commit, or a checkout's path), behave as the documents say (`cargo test` finds the failing seed, its trace replays, the fix passes, the test fails once the tool is hidden; the tutorial's program builds, fails on some seeds, replays, renders, and a campaign finds it and can be given again), and a new program builds, runs and replays (`--go`: a Go guest on the Go SDK too) |
 
-CI is the landing gate. Every push runs the workspace suite and the testbeds on
+CI is the landing gate. Every push runs the workspace suite, the testbeds and
+the install smoke (with the checkout's SDK) on
 Linux x86_64 and aarch64 and on macOS, plus the audit corpus; a nightly run adds
 the long workq and pubsub campaigns and the advisory audit of every lockfile.
 The release workflow builds each platform's archive, installs it with

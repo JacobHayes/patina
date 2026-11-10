@@ -1,79 +1,44 @@
 # Patina
 
-**Weather your Rust into a fine protective patina — before production does.**
+**Weather your code into a fine protective patina — before production does.**
 
-Patina is a deterministic simulation testing (DST) runtime for Rust. It runs
-*ordinary* `std` programs — no framework, no simulator-aware rewrite — under a
-deterministic OS personality: clocks, sleeps, entropy, the filesystem, the
-network, threads, and scheduling all route through a seeded virtual runtime
-instead of the host OS. Same seed, same run, byte for byte. Different seed,
-different schedule and different faults — a reproducible searchlight for the
-bugs that normally only show up in production.
+Patina runs an ordinary program in a simulated world where time, randomness,
+thread scheduling, the filesystem and the network are all decided by one
+number, the seed. The same seed always gives the same run, so a bug that shows
+up once in a thousand runs becomes a seed you can replay as often as you like.
+This is deterministic simulation testing (DST), known from FoundationDB and
+Antithesis, done by linking a deterministic layer under the standard library:
+your code needs no rewrite.
 
-```sh
-patina run ./my-server --seed 42                       # a deterministic run
-patina run ./my-server --seed 42 --record run.patina   # record it
-patina replay ./my-server run.patina                   # reproduce it exactly, flag-free
-patina campaign ./my-server --gens 1000                # hunt for failing seeds
-```
-
-Patina is **experimental**. It is developed in the open, validated hard (see
-[VALIDATION.md](./VALIDATION.md)), and released as a standalone tool (see
-[Install](#install)). APIs and the trace format will change.
-
-## Why
-
-Distributed systems, storage engines, and concurrent code fail under schedules
-and fault timings that ordinary tests almost never produce and never reproduce.
-The FoundationDB / Antithesis lineage showed the fix: make the whole world —
-time, randomness, I/O, scheduling — a pure function of a seed, then search seeds
-for disasters and replay the ones you find. No more flaky tests: a failure is a
-seed, and a seed is a repro.
-
-Existing Rust DST tools (MadSim, Turmoil) prove the value but ask your code and
-every dependency to use simulator-aware libraries. Deterministic hypervisors
-(Antithesis) attack it from the other side by controlling the entire machine.
-Patina sits between: it puts the deterministic boundary at the *Rust platform
-layer*, below your application and dependencies, using link-time interposition —
-so plain `std::fs`, `std::net`, `std::thread`, `SystemTime`, and seeded entropy
-just work deterministically, and stock async runtimes like tokio run unmodified
-over interposed kqueue/epoll reactors.
-
-```text
-your app and its dependencies      (unchanged)
-  -> std / libc-compatible shims
-  -> Patina deterministic ABI
-  -> virtual drivers + deterministic scheduler + trace
-```
-
-The boundary **fails closed**: an effect Patina does not model is a loud,
-pre-run refusal — never a silent escape to the host.
+Patina is experimental. Its commands, its SDK and its trace format will change.
 
 ## Install
-
-Patina is one binary, `patina`, released for Linux (x86_64 and arm64, built on
-Ubuntu 24.04) and macOS (Apple silicon):
 
 ```sh
 curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 ```
 
 That checks the download against the release's checksums and installs
-`~/.local/bin/patina`. Append `-s -- --version 0.1.0` to choose a release and
-`--prefix DIR` to install `DIR/bin/patina`. With [mise](https://mise.jdx.dev/):
+`~/.local/bin/patina`. With [mise](https://mise.jdx.dev/):
 `mise use -g github:JacobHayes/patina`.
 
-The binary carries everything it links into a guest, as source it compiles with
-your toolchain on first use (cached under `~/.cache/patina`, or
-`~/Library/Caches/patina` on macOS). From the machine it needs:
+Releases are built for Linux (x86_64 and arm64) and macOS (Apple silicon).
+Patina compiles its runtime with your toolchain the first time you use it, so
+the machine also needs Rust 1.99 or newer and a C compiler (`cc`). Inside
+Docker, run the container with `--security-opt seccomp=unconfined`: Patina
+turns off address-space randomization for the program it runs, which Docker's
+default profile forbids.
 
-| To build | The machine needs |
-|---|---|
-| Rust guests | Rust 1.99 or newer (`cargo`, `rustc`), a C compiler (`cc`), and crates.io for the runtime's dependencies on the first build |
-| Go guests (Linux x86_64) | the same, and Go |
-| Python guests (Linux) | the same, and `make`, `curl` and `tar`; the first build downloads the pinned CPython source unless `--python-source` names a copy |
+## First run
 
-A project takes the SDK from the same release as the tool:
+Five minutes: a small library with a bug that ordinary tests miss, found by
+Patina.
+
+**1. Make a library and add the Patina SDK to its tests.**
+
+```sh
+cargo new --lib jobs && cd jobs
+```
 
 ```toml
 # Cargo.toml
@@ -81,384 +46,163 @@ A project takes the SDK from the same release as the tool:
 patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }
 ```
 
-```sh
-go get github.com/JacobHayes/patina/go/patina@v0.1.0    # Go
-```
+Use the tag of the tool you installed (`patina --version`): the tool and the
+SDK must come from the same release line.
 
-The tool and the SDK must share a release line (`0.1.x` with `0.1.x`); a
-package build that finds another names both and how to match them. Python
-guests need no dependency: the tool carries the `patina` module.
-
-In CI, install the tool before the tests. For GitHub Actions:
-
-```yaml
-- run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.1.0
-- run: cargo test    # #[patina_dst::test] finds patina on PATH
-```
-
-Inside a container, a guest needs the `personality` system call, which
-Docker's default seccomp profile refuses: Patina turns address-space
-randomization off for every guest. Run the container with
-`--security-opt seccomp=unconfined` (or a profile that permits it), or pass
-`--allow-randomized-address-layout` for qualified determinism.
-
-On another platform, or to build it yourself:
-`cargo install --locked --git https://github.com/JacobHayes/patina --tag v0.1.0 cargo-patina`.
-
-## Quickstart
-
-Save this as `lottery.rs` — plain `std`, nothing Patina-specific:
+**2. Write the library.** It runs jobs on threads and promises their results
+in job order. Put this in `src/lib.rs`:
 
 ```rust
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::thread;
 
-fn main() {
-    let start = Instant::now();
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write(b"lottery");
-    let ticket = h.finish() % 1_000_000;
-    std::thread::sleep(std::time::Duration::from_secs(3600)); // costs no wall time
-    println!(
-        "ticket={ticket:06} epoch={}s elapsed={}s",
-        now.as_secs(),
-        start.elapsed().as_secs()
-    );
+/// Run every job on its own thread and return the results in job order.
+pub fn run_all(jobs: Vec<fn() -> u64>) -> Vec<u64> {
+    let (sender, receiver) = mpsc::channel();
+    for job in jobs {
+        let sender = sender.clone();
+        thread::spawn(move || sender.send(job()).unwrap());
+    }
+    drop(sender);
+    receiver.iter().collect() // BUG: this is the order the jobs finished in
 }
 ```
 
-Run it under the deterministic runtime (`run` builds sources on the fly):
+**3. Write a test.** Put this in `tests/order.rs`. With `#[test]` it passes
+nearly every time, because the first thread usually finishes first.
+`#[patina_dst::test]` runs it under Patina instead, once for each of 20
+*seeds*. Each seed decides, among other things, which thread runs when.
 
-```sh
-$ patina run lottery.rs --seed 1
-ticket=817442 epoch=0s elapsed=3600s
-$ patina run lottery.rs --seed 1
-ticket=817442 epoch=0s elapsed=3600s      # identical: entropy is seeded
-$ patina run lottery.rs --seed 2
-ticket=361331 epoch=0s elapsed=3600s      # a different world
+```rust
+#[patina_dst::test(seeds = 20)]
+fn results_come_back_in_job_order() {
+    let results = jobs::run_all(vec![|| 1, || 2, || 3]);
+    assert_eq!(results, [1, 2, 3]);
+}
 ```
 
-The hour-long sleep finished instantly — time is virtual — yet `elapsed` still
-reads 3600 seconds, and `RandomState` (normally fresh OS entropy per process)
-is a pure function of the seed.
-
-Now record a run, replay it byte-for-byte, and sweep seeds:
+**4. Run it.**
 
 ```sh
-patina build lottery.rs --output lottery       # build once for run-many stability
-patina run ./lottery --seed 1 --record run.patina
-patina replay ./lottery run.patina             # no flags: the trace is authoritative
-patina campaign ./lottery --gens 100          # sweep seeds, dedupe and reproduce failures
+cargo test
 ```
 
-From here, the [tutorial](./TUTORIAL.md) walks a small program from
-instrumentation to a caught, replayed, HTML-rendered bug in about ten minutes.
+The first build is slow: it compiles Patina's runtime. Then the test fails,
+and the output names the seed that failed. Among other lines it prints these
+(with your own paths, and perhaps another seed):
 
-## How to use it
+```text
+patina: FINDING in the guest [failure]: the guest panicked, or a test in it failed
+patina dst test failed: order::results_come_back_in_job_order
+  seed 0 of 0..20  class=failure  guest_exit={"code":101}
+  trace: /home/you/jobs/target/patina/dst/jobs/test/order/results_come_back_in_job_order/seed-0.patina
+  stderr tail:
+    thread 'results_come_back_in_job_order' (3) panicked at tests/order.rs:4:5:
+    assertion `left == right` failed
+      left: [1, 3, 2]
+     right: [1, 2, 3]
+  reproduce:
+    patina test /home/you/jobs --harness-target order --exact results_come_back_in_job_order --seed 0
+    patina replay /home/you/jobs/target/.../guest /home/you/jobs/target/.../seed-0.patina
+```
 
-One CLI over one kind of artifact: a **native binary** (Mach-O/ELF, linked
-against the deterministic shim), run interposed. `run`, `audit`, and `replay`
-are source-first: hand them a `.rs` file, a package directory, or a
-`Cargo.toml` and they build through the same pipeline as `build` first. `test` also has a
-source-first native libtest harness mode for one exact test target.
+## A failing seed, and how to replay it
 
-| Verb | What it does | Example |
+A failure under Patina is a *seed*, and the seed is the whole bug report.
+Patina ran the failing seed a second time and recorded it. The recording is
+the *trace*: a file that holds every decision the simulated world made.
+
+**5. Replay it.** Copy the `patina replay` line from your own output. It runs
+the same program against the trace and fails the same way every time:
+
+```text
+  left: [1, 3, 2]
+ right: [1, 2, 3]
+patina: FINDING in the guest [failure]: the guest panicked, or a test in it failed (guest exit 101)
+```
+
+The other line, `patina test ... --seed 0`, builds the test again and runs
+that one seed: use it after you change the code. Here the fix is to join the
+threads in job order. With it, `cargo test` passes all 20 seeds.
+
+```rust
+pub fn run_all(jobs: Vec<fn() -> u64>) -> Vec<u64> {
+    let workers: Vec<_> = jobs.into_iter().map(thread::spawn).collect();
+    workers.into_iter().map(|worker| worker.join().unwrap()).collect()
+}
+```
+
+## What programs work
+
+Patina runs one process in a closed world. Three rules follow from that.
+
+- **The program must be self-contained.** There is no real network, disk or
+  clock behind the simulated ones. A file the program reads must be written by
+  the program, or mounted read-only with `--mount`. A connection to a database
+  or another service outside the process finds nothing there.
+- **The program must finish.** A test body finishes; so does a `main` that
+  does its work and returns.
+- **A server needs its clients in the same process.** Start the server on one
+  thread and drive it from another, as a test does. A server that only waits
+  for connections ends as `liveness`: every thread is blocked, because nothing
+  in the simulated world will ever connect.
+
+Patina refuses what it does not model instead of letting it reach the real
+machine: the run ends as `unsupported` and names what it met. Not supported
+today are starting other processes (`fork`, `exec`, `std::process::Command`)
+and loading code at run time (`dlopen`).
+
+One limit is quiet: Patina switches threads only where a thread reaches the
+operating system (a lock it waits for, a sleep, a read, a write). A race
+between threads that only compute needs a build with `--instrument`; see the
+guide.
+
+What each platform runs today:
+
+| Platform | Runs | Does not run |
 |---|---|---|
-| `run` | Build (if needed) and run an artifact deterministically. | `patina run app.rs --seed 7` |
-| `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `patina test . --harness-target my_crate --exact tests::case --seeds 20` |
-| `build` | Build the shim-linked native binary, a Go main package (`--go`, Linux), or a Python application frozen into CPython (`--python`, Linux). | `patina build ./pkg --output app` |
-| `audit` | Report the true residual effect surface of a binary; default-deny. | `patina audit app.rs` |
-| `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `patina replay ./app run.patina` |
-| `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `patina trace info run.patina` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `nondeterministic`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `patina campaign ./app --gens 200 --buggify --out-dir out/` |
-| `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `patina coverage ./app out/` |
-| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `patina minimize --generation 14 --out-dir out/` |
-| `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `patina syscalls` |
+| Linux x86_64 | Rust, Go and Python programs, and the C code they link. | |
+| Linux arm64 | Rust and Python programs, and the C code they link. | Go programs. Code that makes system calls without going through the C library is refused. |
+| macOS (Apple silicon) | Rust programs, and the C code they link. | Go and Python programs. Refused: code that makes system calls without going through the C library, shared libraries that do I/O, and C++ on the system C++ library. A signal other than one the program raises on itself, and interval timers (`alarm`, `setitimer`), stop the run. |
 
-Native harness mode is the tight point-solution loop: `patina test
-<DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
-same Cargo libtest target under the native shim with a single libtest thread.
-Use `lib:NAME`, `bin:NAME` or `test:NAME` when target kinds share a name. A
-failing seed is re-run with `--record`, and the failure block carries the repro
-commands.
+On macOS heap addresses differ between runs of one seed, so a program that
+depends on pointer values can differ too. On Linux the program sees one fixed
+kernel, Ubuntu 24.04's 6.8, whatever the host runs.
 
-For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
-feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
-Rust test function. Plain `cargo test` then discovers `patina` through
-`PATINA_CLI` (absolute path) or `patina` on `PATH`, rebuilds the same
-libtest target shim-linked, and sweeps the test (20 seeds by default). A
-missing tool is a test failure that prints the install line, never a skip.
+## Outcomes and exit codes
 
-Any flag can be defaulted from the environment as `PATINA_<FLAG>` (`--seed` ->
-`PATINA_SEED`, `--format` -> `PATINA_FORMAT`); a typed flag still wins, and help
-shows each flag's variable. `PATINA_RT_*` is reserved for the runtime's internal
-control plane.
+Every `run`, `test`, `replay` and `campaign` ends in exactly one outcome, which
+decides the exit status of `patina`. Your program's own exit status is
+reported, never passed through.
 
-Every verb has `--help`, and `--help --format json` emits a machine-readable
-registry (schema `patina.help/v2`) with progressive disclosure: bare
-`patina --help --format json` is a compact index (every verb's summary and
-usage forms, the global flags, and the environment protocol), while
-`patina <verb> --help --format json` returns that one verb's full flag
-detail — handy for scripts and AI agents. Results are available as JSON via
-`--format json` (usually a single `patina.result/v2` envelope; `coverage` emits
-`patina.coverage/v1`; `syscalls` emits `patina.syscalls/v3`; `trace events`
-streams `patina.trace.events/v1` JSON Lines;
-`trace info|stats|diff` nest their trace payloads in the normal result envelope),
-and `--render out.html` writes a self-contained HTML timeline of any traced run.
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `ok` | 0 | The run finished and nothing was found. |
+| `violation` | 1 | An invariant your program declared did not hold (an `always!`, a `violation` verdict). |
+| `liveness` | 1 | The program stopped making progress: every thread is blocked, or a watchdog fired. |
+| `failure` | 1 | The program exited nonzero: a panic, a failed assertion, its own error status. |
+| `crash` | 1 | The program died on a signal: `abort()`, a segmentation fault. |
+| `unsupported` | 2 | The program did something Patina does not model. The message names it. |
+| `timeout` | 2 | The run did not finish within a bound. Inconclusive. |
+| `nondeterministic` | 2 | Two runs that should agree did not. A bug in Patina: please report it. |
+| `internal` | 2 | Patina itself failed, or the host killed the run. |
+| `vacuous` | 2 | A fault a campaign was asked to inject had nothing to act on. |
+| `error` | 2 | The command could not be carried out: a usage error, a failed build, a missing file. |
 
-### Outcomes and exit codes
+So the exit status is 0 for clean, 1 for a finding in your program, and 2 when
+Patina could not do what was asked, which alone is not evidence of a bug in
+your program. `--format json` reports the outcome as `result`, with what
+stopped the run as `stop`.
 
-Every `run`, `test`, `replay` and `campaign` ends in exactly one outcome. It has
-the same name on the line Patina prints last, in `--format json` (`result`, with
-`attribution`) and in a campaign's class counts, and it decides the exit status.
-The guest's own exit status is reported (`guest_exit`), never passed through.
+## Where to go next
 
-| Outcome | Attributed to | Exit | Meaning |
-|---|---|---|---|
-| `ok` | | 0 | The run finished and nothing was found. |
-| `violation` | `guest` | 1 | An invariant the guest declared was violated: an `always!`, a `violation` verdict, a class a campaign spec declared, an SDK contract. |
-| `liveness` | `guest` | 1 | The guest stopped making progress: the liveness or convergence watchdog fired, or every thread is blocked (a deadlock). |
-| `failure` | `guest` | 1 | The guest exited nonzero: a panic, a failed assertion, its own error status. |
-| `crash` | `guest` | 1 | The guest died on a signal: `abort()`, a segmentation fault. |
-| `unsupported` | `patina_unsupported` | 2 | The guest did something Patina does not model. `stop.detail` names the syscall, symbol or operation. |
-| `timeout` | `patina_unsupported` | 2 | The run did not finish within a bound: the host-time compute bound, `--budget`, a campaign's `--timeout-secs`. Inconclusive: a spinning guest or a bound set too low. |
-| `nondeterministic` | `patina_internal` | 2 | Two runs of one recording or generation disagreed: a replay left its trace, a campaign's reproduction did not reproduce. |
-| `internal` | `patina_internal` | 2 | Patina itself failed, or the host took the run away (an out-of-memory kill). |
-| `vacuous` | `request` | 2 | A fault or exploration plane a campaign configured had nothing to act on (campaign only). |
-| `error` | `request` | 2 | The request could not be carried out: a usage error, a failed build, a missing or mismatched input. |
-
-The attribution says whose move it is. `guest` is a finding to investigate in
-your program. `patina_unsupported` is a limit of Patina your program reached,
-and no evidence of a bug in it. `patina_internal` is a bug in Patina or a
-failure of the host: please report it. `request` is the command, its inputs or
-its configuration. A run that did not end clean carries a `stop` (`reason`,
-`detail`) saying what stopped it.
-
-So the exit status is 0 for clean, 1 for a finding in the guest, and 2 when
-Patina could not do what was asked. A campaign exits 1 when any generation is a
-finding in the guest or its coverage gate fails, otherwise 2 when any generation
-did not end clean. `patina --help` prints the same table.
-
-### Fault injection and schedule exploration
-
-Faults are seed-driven and default-off. Fault configurations are recorded
-into the trace so replay reproduces them flag-free.
-
-- **Crash restart**: at every successful operation a peer or the disk sees (a
-  filesystem change, a network send, a TCP connect, accept or close), native
-  `--machine-crash-permille N` takes the machine down with N per-mille odds,
-  else `--process-crash-permille M` kills the process with M per-mille odds;
-  the first hit terminates the incarnation and restarts it once. A process
-  crash keeps the page cache. A machine crash restarts from what the disk
-  holds, as ext4 leaves it: metadata rolls back to the last journal commit (an
-  `fsync` of a changed inode, `sync`/`syncfs`, or every 5 virtual seconds),
-  a file is the prefix that commit recorded, and each block overwritten in
-  place since keeps its old or new bytes.
-- **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR,
-  and on procfs, which has no storage, only ENOMEM),
-  `--fs-short-permille` (short reads/writes, procfs's reads too), and `--fs-latency-nanos MIN..MAX`
-  (seeded delay before every eligible fs op, so slow I/O reorders against timers
-  and peers). `--fs-error-at KIND:N[:ERRNO]` fails the Nth op of a kind (as the
-  fs fault report names it: `sync`, `sync_all`, `write`, ...) at any seed, so a
-  regression check needs no pinned seed; one that never landed makes the run's
-  fs fault report vacuous. An `fsync`, `sync` or `syncfs` failed with EIO or
-  ENOSPC is a failed writeback, as on Linux: the dirty pages stay readable but
-  are marked clean, so a retried `fsync` that succeeds makes none of them
-  durable, a machine crash loses them, and `posix_fadvise(DONTNEED)` drops them
-  so a re-read sees the disk. The error is reported once per open description
-  (`errseq`): by `fsync` (and a `WAIT`ing `sync_file_range`) for the file, by
-  `syncfs` for the volume; `sync(2)` reports nothing.
-- **Network faults**: `--net-drop-permille`, `--net-jitter-nanos MIN..MAX`,
-  `--net-latency-nanos` (base delivery latency, on datagrams and TCP alike).
-- **DNS**:
-  `--dns-entry NAME=ADDR` defines the host table a guest can resolve — every
-  other name is NXDOMAIN — and `--dns-fail-permille` / `--dns-latency-nanos`
-  inject seeded resolution failures and delays against the defined names. A
-  server that binds `0.0.0.0:PORT` is reachable at any address on that port, so
-  ordinary `INADDR_ANY` server code is reached by a resolved name with no
-  service-side registration.
-  `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
-  per generation and classifies an inert one as `vacuous` with the dns plane in its signature.
-- **Entropy**: `--entropy-fail-permille` models a guest that starts before the
-  kernel's random pool is initialized: a `GRND_NONBLOCK` `getrandom` answers
-  `EAGAIN` until a read shows the pool ready. No other entropy API can fail, so
-  a guest that makes no such read (any Darwin guest, and Rust's std)
-  gets no entropy report. The knob is undiagnosable there, not vacuous.
-- **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
-- **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling) and
-  `--swarm` (seed-derived fault-class subsets). `campaign --sched-pct` sweeps
-  PCT per generation. To make atomics-only race windows schedulable, build with
-  `patina build --instrument` and run with `--yield-stride N`: a
-  scheduling point every N edges a thread executes, 1 being every edge (densest,
-  and by far the most expensive). The stride is a run setting recorded in the
-  trace; at the default 0 the same binary keeps only its edge counters, so
-  `--coverage-out` and `campaign --guided` work without paying for preemption.
-  `campaign --yield-stride` sweeps strides from 1 to 1024 per generation.
-- **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
-  detector) and `--converge-within` (heal-then-converge budget).
-  Native call-free compute that starves another managed thread stops by name
-  after 10 host seconds (`--compute-watchdog-ms MS`): a known cooperative-runtime
-  limit, not a guest bug ([details](ARCHITECTURE.md#native-compute-only-starvation)).
-
-### The buggify SDK
-
-For faults the runtime cannot inject from outside — "what if this batch path
-ran?", "what if this retry fired?" — instrument your code with the
-cooperative-SUT SDK, in the style of FoundationDB's `BUGGIFY` and Antithesis
-assertions:
-
-```rust
-if patina_dst::buggify!("batch-commit") {
-    // rare path, taken only under Patina on seed-chosen runs
-}
-patina_dst::always!(invariant_holds(), "ledger-sorted");   // fatal if ever false
-patina_dst::sometimes!(cache_hit, "cache-hit-seen");       // coverage oracle
-patina_dst::verdict(patina_dst::VerdictKind::Violation,    // structured outcome
-    "ledger-sorted", "{\"row\": 12}");
-```
-
-The `patina-dst` crate is dependency-light and every macro is a no-op outside a
-Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
-code. `verdict()` is the machine-readable outcome channel: one ABI verb whose
-kind is data, recorded as a trace event (so replay reproduces the verdict stream
-and a divergent one fails closed) and surfaced in `--format json` as `verdicts[]`
-rather than as text to grep; an `always!` violation reports one automatically.
-Effects Patina does not model (RPC, S3, devices) go through
-`patina_dst::custom_op` / `custom_op_faultable`: recorded, replayed without
-re-running, and, for the faultable form, failed on demand with
-`--custom-op-fail-permille`.
-Enable at run time with `patina run --buggify`; decisions are pure
-functions of the seed, and the run's `sdk` facts (and its human
-`PATINA_SDK_REPORT` line) prove sites actually fired (no vacuous "all clean").
-Literal-label SDK macro calls also declare a link-time site table under
-Patina, so never-reached `sometimes!`/`reachable!` oracles appear in reports
-with `registered_gens=0`. Each row carries `@file:line`. `patina
-campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
-when a `sometimes!`/`reachable!` oracle is never satisfied; use
-`--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
-is the source of truth for which sites the build declares. A declared `always!` that no generation evaluates is listed as `UNEVALUATED` (and under `always_unevaluated` in the JSON); it is reported, not gated.
-
-### Record and replay
-
-`--record` captures every boundary decision into a compact JSON `.patina` trace
-(inspect with `jq` or `patina trace info|events`). Replay is strict: the
-trace carries the seed, fault knobs, buggify config, guest argv, and native
-`--env` and `--param` values, and any mismatch — changed binary, changed
-config, diverging operation — fails closed rather than lying. A native trace
-names its binary by digest, so replaying it against one that differs by a
-single byte is refused before the guest starts, naming what differs.
-
-### Debug vs release guest builds
-
-Guests build **debug by default**: `debug_assert!` and overflow checks in the
-guest and every dependency are extra oracles, frames stay exact for triage,
-and `--yield-stride` sees more edges to preempt.
-Use `--release` (on `run`, or `build --release` then `run`) for performance
-measurement, long campaigns once the hunt is over, and release-only codegen
-paths. `--instrument` binaries and Go guests emit edge coverage
-(`--coverage-out`, `patina coverage`), which campaigns accumulate and
-`campaign --guided` uses to bias generations toward new coverage.
-
-### proptest
-
-Stock `proptest` needs no adapter under the native shim (`run`, or `test`
-harness mode): its RNG seed comes from the run seed, so the cases a property
-draws, the failure it hits and what its shrinker reduces that failure to are
-all a function of the seed, and a recorded failure replays to the same minimal
-case. Two things differ from plain `cargo test`:
-
-- **Failure persistence does nothing.** The guest filesystem is in-memory and
-  fresh for every run, and no host directory is visible unless you pass
-  `--mount` (read-only), so `proptest-regressions/` files are neither read nor
-  written. The seed is the regression record: keep the failing seed (or its
-  trace) instead.
-- **Stateful tests:** use `proptest-state-machine` for model-based tests of a
-  stateful system; it runs on the same seeded runner.
-
-## Supported today
-
-- **Seeded determinism** for ordinary `std`: filesystem (including directories,
-  symlinks, permission bits, and named pipes), virtual clocks (`SystemTime`/`Instant`/sleeps), entropy,
-  UDP datagrams and TCP over a simulated network (both honor the configured
-  base link latency), threads with
-  mutex/condvar/parking gated one-at-a-time through a deterministic scheduler,
-  and deterministic process-state constants.
-- **Stock tokio** on macOS and Linux: kqueue/epoll readiness reactors are
-  interposed over virtual sockets, pipes, and the virtual clock.
-- **Record/replay** with byte-identical traces, and failure-preserving
-  **knob and parameter minimization**.
-- **Default-deny audit gate**: before a native guest runs, every externally
-  resolved symbol must be interposed or provably effect-free; unknown imports
-  and raw syscall/clock/entropy instructions are refusals
-  (`--allow-unsupported-symbols` is the loud, recorded escape hatch).
-- **Campaigns**: deterministic multi-generation sweeps with an outcome
-  classifier (finding, harness, vacuity and catch-all classes),
-  failure-signature dedup, and per-failure repro commands.
-- **The SDK** (see [USAGE-MODES.md](./USAGE-MODES.md)): `patina-dst`, with
-  run parameters through `patina_dst::param`.
-
-### Platforms
-
-| Platform | Status |
-|---|---|
-| macOS | Supported; static instruction scan + import audit for containment. |
-| Linux x86_64 | Supported; adds syscall-user-dispatch, which traps raw inline syscalls (e.g. rustix's default `linux_raw` backend) into the runtime, plus a whole-run `strace` containment gate in CI. |
-| Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
-
-On Linux the virtual kernel is pinned to Ubuntu 24.04's 6.8 kernel and glibc
-2.39 (`patina --version` names it): `uname` reports 6.8 and a syscall
-added later answers `ENOSYS`. The conformance scenarios are authoritative only
-on a host running that pin.
-
-If you use [mise](https://mise.jdx.dev/): `mise run check` formats, lints and
-runs the tests you name (`mise run check -p cargo-patina --test native_abi` for
-focused shim ABI feedback), and CI is the landing gate. The individually
-selectable native test targets and their platform coverage are listed in
-[testbeds/native-boundary](testbeds/native-boundary/README.md).
-
-## What Patina is not (yet)
-
-Honesty is a feature. Current limits, all of which fail loudly rather than
-silently:
-
-- **Experimental**: APIs, CLI, and the trace format are unstable; traces are
-  tied to the exact binary and config that produced them (by design), and a
-  trace from another format version is refused rather than upgraded.
-- **Not on crates.io**: the tool comes from GitHub releases and the SDK from
-  the release's git tag (see [Install](#install)). The SDK crate is
-  `patina-dst`, used as `patina_dst::` in code.
-- **No process spawning**: `fork`/`posix_spawn` and friends are denied
-  (a guest that reaches them aborts deterministically). One process per run.
-- **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see
-  one virtual host (`lo`, `eth0` at 10.0.0.1/24, no default route) and names
-  resolve only through the run's `--dns-entry` table. TCP and UDP over the
-  simulated network both honor `--net-latency-nanos` and the seeded
-  jitter/drop knobs.
-- **Not a hypervisor**: unsupported FFI, dynamic loading, inline assembly
-  reading clocks/entropy, and direct host APIs are refused, not virtualized.
-  Patina makes *mostly-Rust* programs deterministic; it does not promise to run
-  arbitrary native code.
-- Host-facing escape hatches (allowlisted host files via `--mount`) are
-  explicit, read-only, and fingerprinted — never ambient.
-
-## Going deeper
-
-- [TUTORIAL.md](./TUTORIAL.md) — hands-on: instrument, sweep, catch, replay,
-  and render a planted bug.
-- [USAGE-MODES.md](./USAGE-MODES.md) — the SDK, Go and Python guests, and the crate map.
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — system design: targets, drivers,
-  wrappers, traces, and the native shim.
-- [INTENTS.md](./INTENTS.md) — goals, non-goals, trade-offs, and the niche
-  Patina occupies.
-- [docs/SCOPE.md](./docs/SCOPE.md) — who Patina serves first and the rules new
-  surface must meet.
-- [VALIDATION.md](./VALIDATION.md) — what is validated, the guarantees and
-  their oracles, and known gaps.
-- [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) — a tool-agnostic
-  agent skill: what Patina is, what it can do, and how to discover the current
-  CLI and SDK surface from the generated registry instead of from memory.
-- [AGENTS.md](./AGENTS.md) — guidance for coding agents working in this repo.
-- `llms.txt` — a compact machine-oriented map of the CLI and SDK.
-- `testbeds/` — real dogfooding targets (`workq`, a durable work queue, is the
-  flagship end-to-end demonstration).
+- [TUTORIAL.md](./TUTORIAL.md): a whole program. Mark a rare path, state an
+  invariant, sweep seeds, replay and render the failure.
+- [docs/GUIDE.md](./docs/GUIDE.md): every command, fault injection, the SDK,
+  recording and replay, and current limits.
+- [USAGE-MODES.md](./USAGE-MODES.md): the SDK in Rust, Go and Python.
+- `patina --help` and `patina <command> --help`: the flags of your version.
+- [VALIDATION.md](./VALIDATION.md), [ARCHITECTURE.md](./ARCHITECTURE.md) and
+  [INTENTS.md](./INTENTS.md): what is tested, how Patina works, and why.
+- [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) and `llms.txt`: the
+  same ground for coding agents.
