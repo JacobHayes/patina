@@ -314,18 +314,15 @@ fn darwin_report() -> Value {
             let bindings: Vec<_> = symbols
                 .iter()
                 .filter(|s| match s.serves {
-                    Serves::Darwin(names) => row.variants.iter().any(|v| names.contains(&v.entry)),
+                    Serves::Darwin(names) => row.entries.iter().any(|entry| names.contains(entry)),
                     _ => false,
                 })
                 .map(|s| json!({"name": s.name, "status": s.status.render()}))
                 .collect();
             json!({
                 "namespace": row.namespace, "nr": row.nr, "subcode": row.subcode,
-                "name": row.variants[0].entry,
-                "variants": row.variants.iter().map(|v| json!({
-                    "entry": v.entry, "condition": v.condition,
-                    "table_status": v.table_status, "declaration": v.declaration,
-                })).collect::<Vec<_>>(),
+                "name": row.entries[0],
+                "variants": row.entries.iter().map(|entry| json!({"entry": entry})).collect::<Vec<_>>(),
                 "darwin": {"raw_entry": "not-interposed",
                     "applicability": if row.namespace == "mach" && matches!(row.nr, 0 | -3 | -4) {
                         "shadowed-by-arm64-dispatch"
@@ -341,7 +338,7 @@ fn darwin_report() -> Value {
         "metadata": {"darwin": {"reference_revision": source_revision("darwin")}},
         "scope": {"unit": "kernel-entry", "namespaces": ["bsd", "mach", "arm-special", "arm-platform"],
             "excludes": ["MIG message IDs", "commpage APIs", "unassigned selectors"],
-            "note": "Reference-source inventory, not a host configuration or a whole-kernel model. Guards and invalid slots are retained; status is not an observed errno. Raw entries are not interposed; symbol statuses describe only their C surface."},
+            "note": "Reference-source inventory, not a host configuration or a whole-kernel model. Each guarded alternative and invalid slot is retained by name. Raw entries are not interposed; symbol statuses describe only their C surface."},
         "sources": source_json("darwin"),
         "summary": {"rows": rows.len(), "symbols": symbol_status_counts(&symbols)},
         "rows": rows,
@@ -365,13 +362,11 @@ fn render_darwin(report: &Value) -> String {
     for row in report["rows"].as_array().unwrap() {
         for v in row["variants"].as_array().unwrap() {
             out.push_str(&format!(
-                "{} {} subcode={} {} [{}] guard={} raw=not-interposed symbols={}\n",
+                "{} {} subcode={} {} raw=not-interposed symbols={}\n",
                 row["namespace"].as_str().unwrap(),
                 row["nr"],
                 row["subcode"],
                 v["entry"].as_str().unwrap(),
-                v["table_status"].as_str().unwrap(),
-                v["condition"],
                 row["symbols"]
             ));
         }

@@ -124,15 +124,12 @@ class RefreshSyscallsTests(unittest.TestCase):
             output = refresh.generate(records, {})
         def verify(text):
             self.assertEqual(text.count('N_fixture = 37,'), 2)
-            self.assertIn('condition: Some("FEATURE")', text)
-            self.assertIn('condition: Some("!(FEATURE)")', text)
-            self.assertIn('table_status: "nosys"', text)
+            self.assertIn('nr: 0, subcode: None, entries: &["fixture", "nosys"]', text)
             self.assertIn('#[cfg(all(target_os = "linux", target_arch = "x86_64"))]', text)
             self.assertIn('#[cfg(all(target_os = "macos", target_arch = "aarch64"))]', text)
         verify(output)
         for mutation in [output.replace('N_fixture = 37,', 'N_fixture = 38,', 1),
-                         output.replace('condition: Some("FEATURE")', 'condition: None', 1),
-                         output.replace('table_status: "nosys"', 'table_status: "declared"')]:
+                         output.replace('"fixture", "nosys"', '"fixture"', 1)]:
             with self.assertRaises(AssertionError):
                 verify(mutation)
 

@@ -1,4 +1,4 @@
-//! Native Darwin symbol associations must resolve to generated entry variants.
+//! Native Darwin symbol associations must resolve to generated entry names.
 use crate::{DarwinEntry, Platform, Serves, SymbolRow};
 
 const fn same_name(left: &str, right: &str) -> bool {
@@ -20,10 +20,10 @@ const fn same_name(left: &str, right: &str) -> bool {
 const fn known_entry(name: &str, entries: &[DarwinEntry]) -> bool {
     let mut i = 0;
     while i < entries.len() {
-        let variants = entries[i].variants;
+        let names = entries[i].entries;
         let mut j = 0;
-        while j < variants.len() {
-            if same_name(name, variants[j].entry) {
+        while j < names.len() {
+            if same_name(name, names[j]) {
                 return true;
             }
             j += 1;

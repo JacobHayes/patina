@@ -251,25 +251,19 @@ def generate(records, sources):
                 'pub const fn is_implemented(self) -> bool { self.entry().entry.is_some() }\n',
                 'pub const fn from_nr(nr: u32) -> Option<Self> { match nr {',
                 *[f'{r["nr"]} => Some(Self::{ident(r["name"])}),' for r in rows], '_ => None,} }\n}\n',
-                'pub const ENTRIES: &[crate::LinuxEntry] = &[\n']
+                '#[rustfmt::skip]\npub const ENTRIES: &[crate::LinuxEntry] = &[\n']
         for r in rows:
-            out.append('crate::LinuxEntry {' +
-                       f'id: Syscall::{ident(r["name"])}, nr: {r["nr"]}, abi: {quote(r["abi"])}, name: {quote(r["name"])}, entry: {option(r["entry"]) }' + '},\n')
-        out += ['];\n}\n']
-    out += ['#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\npub mod darwin_aarch64 {\nuse crate::{DarwinEntry, Variant};\n',
-            '#[allow(non_camel_case_types)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum Syscall {\n']
-    def darwin_id(r):
-        return {'bsd': 'Bsd', 'mach': 'Mach', 'arm-special': 'ArmSpecial', 'arm-platform': 'ArmPlatform'}[r['namespace']] + str(abs(r['nr'])) + (f'Sub{r["subcode"]}' if r['subcode'] is not None else '') + '_' + r['variants'][0]['entry']
-    out += [f'{darwin_id(r)},\n' for r in darwin]
-    out += ['}\nimpl Syscall {\npub const fn number(self) -> i64 { self.entry().nr }\npub const fn entry(self) -> &\'static DarwinEntry { match self {',
-            *[f'Self::{darwin_id(r)} => &ENTRIES[{i}],' for i, r in enumerate(darwin)], '} }\n}\n',
-            'pub const ENTRIES: &[DarwinEntry] = &[\n']
+            out.append('        crate::LinuxEntry { ' +
+                       f'id: Syscall::{ident(r["name"])}, nr: {r["nr"]}, abi: {quote(r["abi"])}, name: {quote(r["name"])}, entry: {option(r["entry"]) }' + ' },\n')
+        out += ['    ];\n}\n']
+    # Darwin keeps each kernel entry's identity and the names its source
+    # alternatives declare: what the symbol associations are checked against.
+    out += ['#[cfg(all(target_os = "macos", target_arch = "aarch64"))]\npub mod darwin_aarch64 {\n',
+            '#[rustfmt::skip]\npub const ENTRIES: &[crate::DarwinEntry] = &[\n']
     for r in darwin:
-        out.append(f'DarwinEntry {{id: Syscall::{darwin_id(r)}, namespace: {quote(r["namespace"])}, nr: {r["nr"]}, subcode: {option(r["subcode"])}, variants: &[\n')
-        for v in r['variants']:
-            out.append(f'Variant {{entry: {quote(v["entry"])}, condition: {option(v["condition"])}, table_status: {quote(v["table_status"])}, declaration: {quote(v["declaration"])}}},\n')
-        out.append(']},\n')
-    out += ['];\n}\n']
+        names = ', '.join(quote(v['entry']) for v in r['variants'])
+        out.append(f'        crate::DarwinEntry {{ namespace: {quote(r["namespace"])}, nr: {r["nr"]}, subcode: {option(r["subcode"])}, entries: &[{names}] }},\n')
+    out += ['    ];\n}\n']
     # rustfmt is a maintainer tool only; normal builds consume the result directly.
     result = subprocess.run(['rustfmt', '--edition', '2024', '--emit', 'stdout'],
                             input=''.join(out), text=True, capture_output=True, check=True)

@@ -605,9 +605,10 @@ ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
   code.
 
 Darwin inventory is separate from Linux runtime rows. The generated native
-Darwin module preserves BSD/Mach/ARM namespace, subcodes, guarded alternatives
-and invalid slots. Never infer runtime support or observed errno from a source
-declaration. Raw-entry coverage and C symbol status remain distinct.
+Darwin module preserves each entry's BSD/Mach/ARM namespace, number and
+subcode, and the name of every guarded alternative and invalid slot. Never
+infer runtime support or observed errno from a source entry. Raw-entry coverage
+and C symbol status remain distinct.
 
 When moving Darwin libc adapters, inspect the header's symbol spelling with
 the packaged C feature macros. For example, `_DARWIN_C_SOURCE` makes allocating

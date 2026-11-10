@@ -9,14 +9,12 @@ fn metadata_is_the_compiled_targets_and_each_identity_has_its_own_number() {
     }
 
     assert!(!ENTRIES.is_empty());
-    for entry in ENTRIES {
-        assert_eq!(entry.id.number(), entry.nr);
-    }
     #[cfg(target_os = "linux")]
     {
         use patina_dst_syscalls::Syscall;
         assert_eq!(Syscall::ALL.len(), ENTRIES.len());
         for entry in ENTRIES {
+            assert_eq!(entry.id.number(), entry.nr);
             assert_eq!(entry.id.name(), entry.name);
             assert_eq!(Syscall::from_nr(entry.nr), Some(entry.id));
         }
@@ -26,13 +24,12 @@ fn metadata_is_the_compiled_targets_and_each_identity_has_its_own_number() {
         let mut identities = std::collections::BTreeSet::new();
         for entry in ENTRIES {
             assert!(identities.insert((entry.namespace, entry.nr, entry.subcode)));
-            assert!(!entry.variants.is_empty());
-            assert_eq!(entry.id.entry(), entry);
+            assert!(!entry.entries.is_empty());
         }
         for namespace in ["bsd", "mach", "arm-special", "arm-platform"] {
             assert!(ENTRIES.iter().any(|e| e.namespace == namespace));
         }
         assert!(ENTRIES.iter().any(|e| e.subcode.is_some()));
-        assert!(ENTRIES.iter().any(|e| e.variants.len() > 1));
+        assert!(ENTRIES.iter().any(|e| e.entries.len() > 1));
     }
 }

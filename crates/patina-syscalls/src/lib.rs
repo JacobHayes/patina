@@ -6,7 +6,7 @@
 //!
 //! ```compile_fail
 //! # #[cfg(target_os = "linux")]
-//! use patina_dst_syscalls::generated::darwin_aarch64::Syscall;
+//! use patina_dst_syscalls::generated::darwin_aarch64::ENTRIES;
 //! # #[cfg(target_os = "macos")]
 //! use patina_dst_syscalls::generated::linux_x86_64::Syscall;
 //! ```
@@ -23,7 +23,7 @@
 mod darwin;
 pub mod generated;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub use generated::darwin_aarch64::{ENTRIES, Syscall};
+pub use generated::darwin_aarch64::ENTRIES;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub use generated::linux_aarch64::{ENTRIES, Syscall};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -59,23 +59,15 @@ impl LinuxEntry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Variant {
-    pub entry: &'static str,
-    pub condition: Option<&'static str>,
-    /// A source declaration, never an observed errno or runtime disposition.
-    pub table_status: &'static str,
-    pub declaration: &'static str,
-}
-
+/// One xnu kernel entry: its identity, and the name each source alternative
+/// (a guarded slot has two) declares for it.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DarwinEntry {
-    pub id: Syscall,
     pub namespace: &'static str,
     pub nr: i64,
     pub subcode: Option<u32>,
-    pub variants: &'static [Variant],
+    pub entries: &'static [&'static str],
 }
 
 /// The Linux kernel release whose ABI the virtual kernel declares: the pinned
