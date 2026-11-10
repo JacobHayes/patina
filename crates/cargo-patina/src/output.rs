@@ -8,7 +8,7 @@
 //! `execute_*` signature. `entrypoint` strips the flags from the argument vector
 //! once and installs the options; the verbs read them here.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -97,6 +97,44 @@ impl OutputOptions {
 }
 
 static OPTIONS: OnceLock<OutputOptions> = OnceLock::new();
+static ARGUMENTS: OnceLock<Vec<OsString>> = OnceLock::new();
+
+/// Keep the words the tool was given (the verb first), for a run that has to
+/// say how to repeat itself.
+pub fn install_arguments(arguments: Vec<OsString>) {
+    let _ = ARGUMENTS.set(arguments);
+}
+
+/// The `patina run` command that repeats this process's run under `seed`:
+/// the words it was given, with the seed spelled out when they left it to the
+/// default, and the flag defaults it took from the environment carried along.
+/// `None` when the tool was not started as `run` (a unit test).
+pub fn run_again_command(seed: u64) -> Option<String> {
+    let arguments = ARGUMENTS.get()?;
+    if arguments.first().map(OsString::as_os_str) != Some(OsStr::new("run")) {
+        return None;
+    }
+    let guest_arguments = arguments
+        .iter()
+        .position(|word| word == "--")
+        .unwrap_or(arguments.len());
+    let (own, guest) = arguments.split_at(guest_arguments);
+    let mut words: Vec<OsString> = own.to_vec();
+    let seeded = own
+        .iter()
+        .any(|word| word == "--seed" || word.to_string_lossy().starts_with("--seed="));
+    if !seeded {
+        words.push("--seed".into());
+        words.push(seed.to_string().into());
+    }
+    words.extend_from_slice(guest);
+    let mut command = String::from("patina");
+    for word in &words {
+        command.push(' ');
+        command.push_str(&crate::cli::shell_quote(word));
+    }
+    Some(crate::cli::with_env_defaults(command))
+}
 
 /// Install the parsed options once, at the top of `entrypoint`. A second call is
 /// ignored (the first install wins); unit tests that never install get defaults.

@@ -279,6 +279,85 @@ fn campaign_files_each_ending_under_the_runs_own_class() {
     }
 }
 
+/// A run that did not end clean names the command that repeats it, and the
+/// command ends the same way: the replay of the recording it kept (which a
+/// failing replay names too, so the two say the same), else the `run` itself
+/// with its seed spelled out. A Rust guest's panic is told from a status the
+/// guest chose: its stop is `panic`, the other's `exit_status`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_failed_run_names_the_command_that_repeats_it() {
+    let guest = outcome_matrix_guest();
+    let guest = guest.to_str().unwrap();
+    let directory = tempdir().unwrap();
+    let patina = env!("CARGO_BIN_EXE_patina");
+    let ended = |output: Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("{error}: {output:?}"))
+    };
+    let run = |arguments: &[&str]| ended(invoke_unchecked(patina, directory.path(), arguments));
+    // The named command, run as a shell would run it, by the patina under
+    // test and with a flag default in the environment the command has to beat.
+    let repeat = |envelope: &serde_json::Value| {
+        let command = envelope["reproduce"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no command: {envelope:#}"))
+            .replacen("patina", patina, 1);
+        ended(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("{command} --format json"))
+                .env("PATINA_SEED", "9")
+                .current_dir(directory.path())
+                .output()
+                .unwrap(),
+        )
+    };
+    let ending = |envelope: &serde_json::Value| {
+        (
+            envelope["result"].clone(),
+            envelope["stop"]["reason"].clone(),
+            envelope["guest_exit"].clone(),
+            envelope["stdout"].clone(),
+        )
+    };
+
+    let recorded = run(&[
+        "run",
+        guest,
+        "--seed",
+        "4",
+        "--record",
+        "run.patina",
+        "--format",
+        "json",
+        "--",
+        "panic",
+    ]);
+    assert_eq!(
+        (&recorded["result"], &recorded["stop"]["reason"]),
+        (&"failure".into(), &"panic".into()),
+        "{recorded:#}"
+    );
+    let replayed = repeat(&recorded);
+    assert_eq!(ending(&replayed), ending(&recorded));
+    assert!(
+        replayed["seed"].is_null(),
+        "the command is the replay: {replayed:#}"
+    );
+    assert_eq!(replayed["reproduce"], recorded["reproduce"]);
+
+    // The seed left to its default is spelled out, so the command means the
+    // same run wherever it is pasted.
+    let exited = run(&["run", guest, "--format", "json", "--", "exit"]);
+    assert_eq!(exited["stop"]["reason"], "exit_status", "{exited:#}");
+    let repeated = repeat(&exited);
+    assert_eq!(ending(&repeated), ending(&exited));
+    assert_eq!(repeated["seed"], exited["seed"]);
+
+    let clean = run(&["run", guest, "--format", "json", "--", "ok"]);
+    assert!(clean["reproduce"].is_null(), "{clean:#}");
+}
+
 /// What patina could not do as asked, before any guest runs: a request error
 /// (exit 2), in the envelope and in the process status alike, for a target
 /// that does not exist and for a binary patina did not build.

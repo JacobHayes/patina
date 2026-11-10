@@ -232,6 +232,7 @@ fn every_way_a_run_ends_lands_in_one_class() {
             runtime_started: case.runtime_started,
             channel_defect: case.channel_defect,
             trace_lost: case.trace_lost,
+            rust_program: false,
         });
         assert_eq!(outcome.class, case.class, "{}", case.name);
         // A run that did not end clean always says what stopped it.
@@ -270,6 +271,7 @@ fn a_lost_recording_marks_the_guests_own_failure_unreplayable() {
             runtime_started: true,
             channel_defect: None,
             trace_lost,
+            rust_program: false,
         })
     };
     assert!(failed_guest(Some("gone")).trace_unusable);

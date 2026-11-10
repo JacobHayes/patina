@@ -383,7 +383,8 @@ fire", never zero.
   `crash_failed`, `shim_fatal`, `shim_panic`, ...); the supervisor builds the
   rest (`prerun_audit` and `trace_mismatch` before any guest launch, with no
   `guest_exit`; `violation_verdict`; `replay_divergence`; `trace_unavailable`;
-  `host_kill`; `no_runtime`; `signal`; `exit_status`). A death by signal that the
+  `host_kill`; `no_runtime`; `signal`; `panic`, a Rust guest that ended with
+  status 101; `exit_status`). A death by signal that the
   shim did not claim is the guest's own `crash`, since the shim cannot abort
   without saying so. The guest cannot write either channel.
 - `trace_unusable` — `true` when the class is the guest's own while the run's

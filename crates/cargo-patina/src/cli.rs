@@ -235,6 +235,21 @@ pub(crate) fn without_env_defaults(command: String) -> String {
     }
 }
 
+/// A printed command that repeats this process's own, made to carry the flag
+/// defaults this process took from its environment: `env NAME=VALUE` for each
+/// one set here. Unchanged in a clean environment.
+pub(crate) fn with_env_defaults(command: String) -> String {
+    let set: Vec<String> = set_env_defaults()
+        .into_iter()
+        .map(|(name, value)| format!("{name}={}", shell_quote(&value)))
+        .collect();
+    if set.is_empty() {
+        command
+    } else {
+        format!("env {} {command}", set.join(" "))
+    }
+}
+
 /// A reproduce command's words joined for a POSIX shell: the leading verb
 /// literal as is, every later word (a path, a flag value, a guest argument)
 /// quoted when it needs it, so a pasted command passes each word intact.

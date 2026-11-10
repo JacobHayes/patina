@@ -55,6 +55,12 @@ pub struct RunReport<'a> {
     /// What the operator relaxed for this run, each one a reason its
     /// determinism is not guaranteed. Empty for an unqualified run.
     pub qualifications: Vec<Qualification>,
+    /// Whether the guest is a program Rust's runtime starts, whose exit
+    /// status 101 is that runtime's for a panic.
+    pub rust_program: bool,
+    /// The command that repeats this run, for a run that does not end clean:
+    /// the replay of its recording when it kept one, else the `run` itself.
+    pub reproduce: Option<String>,
 }
 
 /// One operator-accepted relaxation that qualifies a run's determinism.
@@ -98,6 +104,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         runtime_started: report.runtime_started,
         channel_defect: report.channel_defect.as_deref(),
         trace_lost: report.trace_lost.as_deref(),
+        rust_program: report.rust_program,
     });
     let failed = outcome.class.is_failure();
     let guest_exit = GuestExit {
@@ -200,6 +207,9 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .map(str::to_string);
         }
         env.stop = outcome.stop.clone();
+        if failed {
+            env.reproduce = report.reproduce.clone();
+        }
         env.trace_unusable = outcome.trace_unusable;
         env.guest_exit = Some(guest_exit);
         env.result_line = result_line(&stdout_text, &stderr_text);
@@ -210,6 +220,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         // The one line that says whose move it is, after everything the guest
         // printed: the first thing a reader is told about how the run ended.
         eprintln!("{headline}");
+        // A failure is a seed, and a seed is a command: say it.
+        if let Some(command) = &report.reproduce {
+            eprintln!("patina: reproduce: {command}");
+        }
     }
 
     // The tool's own status follows the run's class: 0 clean, 1 a finding in

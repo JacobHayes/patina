@@ -28,6 +28,9 @@ pub struct Envelope {
     pub(crate) trace: Option<TraceFacts>,
     pub(super) coverage: Option<CoverageReport>,
     pub(super) render: Option<String>,
+    /// The command that repeats a run that did not end clean. Omitted for a
+    /// clean run.
+    pub(super) reproduce: Option<String>,
     /// audit findings / build outputs / mismatch detail — a list of strings.
     pub(crate) findings: Vec<String>,
     /// Structured audit finding details; additive companion to `findings`.
@@ -89,6 +92,7 @@ impl Envelope {
             trace: None,
             coverage: None,
             render: None,
+            reproduce: None,
             findings: Vec::new(),
             finding_details: Vec::new(),
             output_path: None,
@@ -159,6 +163,9 @@ impl Envelope {
         }
         if let Some(v) = &self.render {
             m.insert("render".into(), Value::from(v.clone()));
+        }
+        if let Some(v) = &self.reproduce {
+            m.insert("reproduce".into(), Value::from(v.clone()));
         }
         if !self.findings.is_empty() {
             m.insert("findings".into(), Value::from(self.findings.clone()));

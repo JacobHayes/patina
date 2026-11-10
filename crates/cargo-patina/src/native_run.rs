@@ -818,6 +818,18 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         }
     };
     let artifact = resolved.display.display().to_string();
+    // How to see this run again, should it not end clean: the replay of its
+    // recording when it has one to keep (a replay names itself, so a
+    // recording and its replay say the same), else the same `run`.
+    let reproduce = match (&trace_path, seed) {
+        (Some(trace), _) if scratch_trace.is_none() => Some(format!(
+            "patina replay {} {}",
+            crate::cli::shell_quote(resolved.display.as_os_str()),
+            crate::cli::shell_quote(trace.as_os_str()),
+        )),
+        (_, Some(seed)) => output::run_again_command(seed),
+        (_, None) => None,
+    };
     let mut qualifications = Vec::new();
     if invocation.allow_randomized_layout {
         qualifications.push(output::Qualification {
@@ -852,6 +864,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             channel_defect,
             trace_lost,
             qualifications,
+            rust_program: crate::native_build::started_by_rust_runtime(image.bytes()),
+            reproduce,
         },
         captured,
     )?;

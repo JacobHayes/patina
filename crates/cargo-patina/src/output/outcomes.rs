@@ -105,6 +105,10 @@ pub(crate) const SHUTDOWN_FAILURE_STOP: &str = "shutdown_failure";
 /// The reason of a process that ended badly before the shim reported the
 /// runtime installed.
 pub(crate) const NO_RUNTIME_STOP: &str = "no_runtime";
+/// The reason of a Rust guest that ended with its runtime's status for a
+/// panic.
+pub(crate) const PANIC_STOP: &str = "panic";
+const RUST_PANIC_STATUS: i32 = 101;
 /// The reason of a run the host killed (SIGKILL: the OOM killer, a cgroup
 /// limit, an operator), which no guest can do to itself.
 pub(crate) const HOST_KILL_STOP: &str = "host_kill";
@@ -201,12 +205,15 @@ pub(super) struct RunEvidence<'a> {
     /// The supervisor could not commit the run's recording, for a reason of
     /// patina's own rather than because the guest died mid-record.
     pub(super) trace_lost: Option<&'a str>,
+    /// Whether Rust's runtime starts the guest: a fact of the binary, read
+    /// from its symbols.
+    pub(super) rust_program: bool,
 }
 
 /// Classify a finished run. Total: every run lands in exactly one
 /// [`RunClass`], from structured evidence alone — the runtime's facts
 /// document, the shim's stop record, and what the supervisor observed of the
-/// process. Nothing here reads the run's text.
+/// process and its binary. Nothing here reads the run's text.
 ///
 /// The order is the precedence. A replay that left its trace is judged first,
 /// since nothing after the divergence describes the recorded run. Then the
@@ -398,6 +405,16 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
                     Some((_, name)) => format!("the guest died on {name}"),
                     None => format!("the guest died on signal {signal}"),
                 },
+            )),
+        ),
+        // Rust's runtime ends a program with this status when its main
+        // thread panics, and a test binary when a test fails. Known from the
+        // status and the binary, not from what the guest printed.
+        None if evidence.exit_code == RUST_PANIC_STATUS && evidence.rust_program => Outcome::of(
+            RunClass::Failure,
+            Some(Stop::new(
+                PANIC_STOP,
+                "the guest panicked, or a test in it failed",
             )),
         ),
         None if evidence.exit_code != 0 => Outcome::of(

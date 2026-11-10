@@ -896,6 +896,16 @@ pub(super) fn binary_instrumentation(image: &[u8]) -> Instrumentation {
     }
 }
 
+/// Whether the program whose bytes are `image` is started by Rust's runtime:
+/// its own crate instantiates `std::rt::lang_start`, whose mangled name (v0 or
+/// legacy) holds this path. Such a program ends with status 101 when its main
+/// thread panics, and a libtest harness when a test fails. The shim's own copy
+/// of `std` has no `main` and never instantiates it. A stripped program is not
+/// recognized, and its status is reported as any other.
+pub(super) fn started_by_rust_runtime(image: &[u8]) -> bool {
+    memchr::memmem::find(image, b"3std2rt10lang_start").is_some()
+}
+
 /// Append the instrumentation suffix to a base fingerprint when the binary
 /// carries the `--instrument` edge hook, leaving any other binary's fingerprint
 /// untouched, so an instrumented binary and a plain one never cross-replay. A Go
