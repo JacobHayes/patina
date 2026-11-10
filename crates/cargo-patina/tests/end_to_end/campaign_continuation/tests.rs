@@ -402,6 +402,64 @@ fn main() {
 /// artifact that changed or vanished. A continuation that is allowed reports
 /// cumulative progress, and a child launched by another build refuses before
 /// it runs anything.
+/// A campaign command given again for the out-dir it wrote continues that
+/// campaign. A finished one runs nothing and ends as it did; a larger `--gens`
+/// runs the generations that are missing; a command for another campaign
+/// (other settings, or a source that now builds another guest) is refused
+/// with the recorded campaign and its guest untouched.
+#[test]
+fn a_campaign_command_given_again_continues_its_out_dir() {
+    let directory = tempdir().unwrap();
+    let cwd = directory.path();
+    let source = cwd.join("fails.rs");
+    fs::write(&source, "fn main() {\n    std::process::exit(3);\n}\n").unwrap();
+    let out = cwd.join("camp");
+    let campaign = |extra: &[&str]| {
+        let mut args = vec!["campaign", "fails.rs", "--out-dir", "camp"];
+        args.extend_from_slice(extra);
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), cwd, &args)
+    };
+    let state = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap()).unwrap()
+    };
+    let done = || {
+        (
+            state()["generations_done"].clone(),
+            state()["classes"].clone(),
+        )
+    };
+
+    let first = campaign(&["--gens", "2"]);
+    assert_eq!(first.status.code(), Some(1), "{first:?}");
+    assert_eq!(done(), (2.into(), serde_json::json!({"failure": 2})));
+
+    let again = campaign(&["--gens", "2"]);
+    assert_eq!(again.status.code(), Some(1), "{again:?}");
+    assert_eq!(done(), (2.into(), serde_json::json!({"failure": 2})));
+    // The second build of the source left nothing behind.
+    let mut entries: Vec<String> = fs::read_dir(&out)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    entries.sort();
+    assert!(entries.is_empty(), "{entries:?}");
+
+    let more = campaign(&["--gens", "3"]);
+    assert_eq!(more.status.code(), Some(1), "{more:?}");
+    assert_eq!(done(), (3.into(), serde_json::json!({"failure": 3})));
+
+    let recorded = fs::read(out.join("campaign-state.json")).unwrap();
+    let guest = fs::read(out.join("guest")).unwrap();
+    let other_settings = campaign(&["--gens", "3", "--buggify"]);
+    assert_eq!(other_settings.status.code(), Some(2), "{other_settings:?}");
+    fs::write(&source, "fn main() {\n    std::process::exit(4);\n}\n").unwrap();
+    let other_guest = campaign(&["--gens", "3"]);
+    assert_eq!(other_guest.status.code(), Some(2), "{other_guest:?}");
+    assert_eq!(fs::read(out.join("campaign-state.json")).unwrap(), recorded);
+    assert_eq!(fs::read(out.join("guest")).unwrap(), guest);
+}
+
 #[test]
 fn campaign_continuation_refusals_are_loud() {
     let directory = tempdir().unwrap();
@@ -476,9 +534,18 @@ fn campaign_continuation_refusals_are_loud() {
         "a campaign records the digest of the patina that ran it"
     );
 
+    // The same out-dir with other settings would be another campaign.
     assert_refuses(
-        run(&["campaign", module_arg, "--gens", "1", "--out-dir", out_dir]),
-        "already contains campaign-state.json",
+        run(&[
+            "campaign",
+            module_arg,
+            "--gens",
+            "1",
+            "--buggify",
+            "--out-dir",
+            out_dir,
+        ]),
+        "buggify",
     );
     assert_refuses(
         run(&["campaign", "--resume", "--out-dir", out_dir]),

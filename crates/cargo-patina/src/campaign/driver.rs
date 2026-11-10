@@ -19,7 +19,7 @@ use super::repro::{
 use super::state::{
     CampaignLock, CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord,
     absolute_out_dir, artifact_identity, class_counts_failures, load_campaign_state,
-    load_coverage_tally, verify_campaign_build, write_campaign_checkpoint,
+    load_coverage_tally, spec_to_json, verify_campaign_build, write_campaign_checkpoint,
 };
 use super::verify::{
     Attempt, Observation, VerificationSummary, Verifier, VerifyStatus, nondeterminism_signature,
@@ -71,23 +71,36 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             .map_err(|e| CliError(format!("failed to create campaign output dir: {e}")))?;
     }
     let _lock = CampaignLock::acquire(&out_dir)?;
+    let mut scratch_guest = None;
 
-    let mut state = match mode {
-        CampaignMode::Fresh => {
-            if state_path.exists() {
-                return Err(CliError(format!(
-                    "campaign out-dir {} already contains campaign-state.json; use --extend N or --resume, pick a new --out-dir, or delete the old one",
-                    out_dir.display()
-                )));
-            }
+    // A campaign command given again for the out-dir it already wrote
+    // continues that campaign: see `continue_recorded`.
+    let recorded = if state_path.exists() {
+        Some(load_campaign_state(&state_path)?)
+    } else {
+        None
+    };
+    let continuing = recorded.is_some();
+    let mut state = match (mode, recorded) {
+        (CampaignMode::Fresh, recorded) => {
             let artifact = artifact.expect("fresh campaign parser requires an artifact");
             // Resolve the artifact once, then sweep the SAME binary across every
             // generation, its replays and any continuation: a source is built
             // here, into the out-dir, never by a generation's own run.
             let binary = match crate::parse::resolve_positional("campaign", artifact.as_os_str())? {
                 crate::ArtifactRef::Prebuilt(path) => path,
-                crate::ArtifactRef::Build(spec) => {
+                crate::ArtifactRef::Build(spec) if recorded.is_none() => {
                     crate::native_build::build_into(*spec, out_dir.join("guest"))?
+                }
+                // The recorded generations ran the guest the out-dir holds:
+                // the source is built again beside it, never over it.
+                crate::ArtifactRef::Build(spec) => {
+                    let scratch = tempfile::tempdir_in(&out_dir).map_err(|error| {
+                        CliError(format!("failed to create a build directory: {error}"))
+                    })?;
+                    scratch_guest = Some(scratch);
+                    let scratch = scratch_guest.as_ref().expect("just set").path();
+                    crate::native_build::build_into(*spec, scratch.join("guest"))?
                 }
             };
             let identity = artifact_identity(&binary)?;
@@ -101,20 +114,26 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             // And its corpus, absolute and hashed, so a continuation can tell
             // whether it changed.
             super::spec::resolve_mount(&mut spec)?;
-            CampaignState::fresh(
-                identity,
-                spec,
-                crate::supervisor_identity::supervisor_sha256()?.to_string(),
-            )
+            match recorded {
+                None => CampaignState::fresh(
+                    identity,
+                    spec,
+                    crate::supervisor_identity::supervisor_sha256()?.to_string(),
+                ),
+                Some(recorded) => continue_recorded(recorded, &identity, spec, &out_dir)?,
+            }
         }
-        CampaignMode::Resume | CampaignMode::Extend { .. } => load_campaign_state(&state_path)?,
+        (CampaignMode::Resume | CampaignMode::Extend { .. }, Some(recorded)) => recorded,
+        (CampaignMode::Resume | CampaignMode::Extend { .. }, None) => {
+            unreachable!("a continuation without a recorded campaign was refused above")
+        }
     };
+    drop(scratch_guest);
 
-    let mut coverage = match mode {
-        CampaignMode::Fresh => CoverageTally::default(),
-        CampaignMode::Resume | CampaignMode::Extend { .. } => {
-            load_coverage_tally(&sites_path, state.generations_done)?
-        }
+    let mut coverage = if continuing {
+        load_coverage_tally(&sites_path, state.generations_done)?
+    } else {
+        CoverageTally::default()
     };
 
     let artifact_path = PathBuf::from(&state.artifact.path);
@@ -182,22 +201,23 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     )?;
 
     if !json_output {
-        match mode {
-            CampaignMode::Fresh => println!(
-                "PATINA_CAMPAIGN_START artifact={} generations={} seed_base={} out={}",
-                artifact_path.display(),
-                state.spec.generations,
-                state.spec.seed_base,
-                out_dir.display(),
-            ),
-            CampaignMode::Extend { .. } | CampaignMode::Resume => println!(
+        if continuing {
+            println!(
                 "PATINA_CAMPAIGN_RESUME out={} done={} target={} artifact={} sha256={}",
                 out_dir.display(),
                 from_gen,
                 state.spec.generations,
                 artifact_path.display(),
                 state.artifact.sha256,
-            ),
+            );
+        } else {
+            println!(
+                "PATINA_CAMPAIGN_START artifact={} generations={} seed_base={} out={}",
+                artifact_path.display(),
+                state.spec.generations,
+                state.spec.seed_base,
+                out_dir.display(),
+            );
         }
         flush_stdout();
     }
@@ -544,6 +564,46 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         flush_stdout();
     }
     Ok(exit_code)
+}
+
+/// A campaign command given again for the out-dir it already wrote.
+///
+/// The same artifact and settings continue the recorded campaign toward the
+/// larger of the two generation counts: an interrupted campaign finishes, a
+/// larger `--gens` adds generations, and a finished one runs nothing and
+/// reports what the out-dir holds. Anything else would put two campaigns'
+/// outcomes in one directory, and is refused naming what differs.
+fn continue_recorded(
+    mut recorded: CampaignState,
+    artifact: &super::state::ArtifactIdentity,
+    spec: super::CampaignSpec,
+    out_dir: &Path,
+) -> Result<CampaignState, CliError> {
+    let mut differs = Vec::new();
+    if recorded.artifact.sha256 != artifact.sha256 {
+        differs.push("the artifact".to_string());
+    }
+    let (was, now) = (spec_to_json(&recorded.spec), spec_to_json(&spec));
+    if let (Some(was), Some(now)) = (was.as_object(), now.as_object()) {
+        let keys: std::collections::BTreeSet<&String> = was.keys().chain(now.keys()).collect();
+        differs.extend(
+            keys.into_iter()
+                .filter(|key| *key != "generations" && was.get(*key) != now.get(*key))
+                .cloned(),
+        );
+    }
+    if !differs.is_empty() {
+        return Err(CliError(format!(
+            "campaign out-dir {} holds a campaign this command does not continue: {} differ{}. \
+             Pick a new --out-dir or delete the old one (--extend N and --resume continue the \
+             recorded campaign as it is)",
+            out_dir.display(),
+            differs.join(", "),
+            if differs.len() == 1 { "s" } else { "" },
+        )));
+    }
+    recorded.spec.generations = recorded.spec.generations.max(spec.generations);
+    Ok(recorded)
 }
 
 /// Append one generation's record to `<out>/generations.jsonl` (`--generation-log`).

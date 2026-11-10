@@ -32,8 +32,11 @@ differing class, signature, verdict set or trace digest is `nondeterministic`, \
 reported with both outcomes. A second run patina could not finish (a timeout, a \
 host kill) is counted apart and leaves the class as observed. --no-verify skips these runs for cost. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
-checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
-target, and `--resume` finishes an interrupted campaign from the recorded out-dir \
+checkpoint their state in --out-dir. The same command given again continues the \
+campaign that out-dir holds: it finishes an interrupted one, runs the missing \
+generations when --gens is larger, and otherwise runs nothing and reports the recorded \
+result; a command for another artifact or other settings is refused. `--extend N` adds \
+N generations to the recorded target, and `--resume` finishes an interrupted campaign, \
 without re-supplying the artifact or spec flags. Output is summary-first: a human \
 report (novel/failing generations plus a periodic progress heartbeat, tuned by \
 --progress-every) or a patina.campaign/v3 JSON envelope (class counts, deduped \
