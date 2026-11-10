@@ -1,12 +1,11 @@
-# audit-corpus — the ecosystem symbol-audit corpus (strict-xfail)
+# audit-corpus — the ecosystem symbol-audit corpus
 
 Twenty minimal reproducers (MREs), one per widely-used crate, each built and
-audited through the packaged native path (`patina audit`). The corpus is a
-**strict-xfail gate**: the residual set of unsupported native imports for each
-crate is pinned in a committed, per-platform expectation file, and any deviation
-in **either** direction fails the gate. It is the standing punchlist for the
-symbol-classification / interposition work — every dirty entry is an item still
-to be covered, and every clean entry is a promise that must not regress.
+audited through the packaged native path (`patina audit`). Every one must audit
+clean: a reproducer whose audit reports an unsupported native import fails the
+gate. One more crate, `selftest-dynamic-loading`, imports a dynamic loader the
+shim never defines (`dlmopen` on Linux, `dlopen_preflight` on macOS) and must be
+refused: it is the leg that shows the audit can fail.
 
 ## Layout
 
@@ -17,13 +16,7 @@ audit-corpus/
                             of the root Patina workspace
     Cargo.lock              committed, version-pinned (see "Bumping" below)
     src/main.rs             the reproducer (exercises the crate's escaping path)
-  expected/
-    <name>.macos.txt        recorded macOS expectation (this file's contents are
-                            either the single word CLEAN, or sorted
-                            `symbol class` lines)
-    <name>.linux.txt        Linux expectation — ships as a PLACEHOLDER until the
-                            coordinator records it on real Linux
-  run.sh                    the gate (compare / --update / --selftest)
+  run.sh                    the gate
   README.md                 this file
 ```
 
@@ -39,98 +32,16 @@ committed `Cargo.lock`, so the audited surface is version-pinned. The root
 workspace uses an explicit `members` list and never picks these up (`cargo
 metadata` on the root shows no `mre_*` packages).
 
-## The expectation format
-
-An expectation file is one of:
-
-* the single word `CLEAN` — the shim covers everything; the audit reports no
-  unsupported imports; **or**
-* a sorted list of `symbol class` lines, one per residual unsupported import,
-  e.g.
-
-  ```
-  localtime_r time
-  ```
-
-Human audit refusals are grouped by `provenance=...` so operators can see the
-crate — and, where the binary format records it, the object/archive member —
-that introduced each symbol. The corpus normalizer intentionally strips those
-grouping headers and records only the stable residual `symbol class` set.
-`# comments` and blank lines are allowed and ignored on read. On macOS the
-recorded symbol is the real libc name — the audit's one leading-underscore
-mangling (`_localtime_r`) is stripped during normalization; Linux ELF names are
-recorded verbatim.
-
-## The contract (STRICT, both directions)
-
-For each crate, on the current platform:
-
-| committed expectation | actual audit | result |
-|---|---|---|
-| `CLEAN` | clean | PASS |
-| `CLEAN` | dirty | **FAIL** — regression (something the shim covered now escapes) |
-| dirty | byte-identical | PASS |
-| dirty | any difference (new symbol, dropped symbol, changed class, or now CLEAN) | **FAIL** — drift |
-| missing, on a *recorded* platform | — | **FAIL** loudly |
-| placeholder, on a *recorded* platform | — | **FAIL** loudly |
-
-Improvements never pass silently. A crate getting cleaner, or a symbol being
-reclassified into a sharper class, is real progress — but it must be **claimed**
-by re-recording the expectation (`--update`) and committing the diff. That is
-what makes this xfail-**strict**: the punchlist can only shrink deliberately.
-
-### Placeholder platforms (Linux until recorded)
-
-The audited symbol surface differs by platform (glibc / `linux_raw` names, no
-leading-underscore mangling on Linux), so Linux expectations must be recorded on
-real Linux hardware — never predicted from macOS. Until then every
-`expected/*.linux.txt` is a `PLACEHOLDER-NOT-YET-RECORDED` sentinel. While
-**every** file for a platform is a placeholder, `run.sh` treats that platform as
-"not yet recorded": it prints a loud SKIP notice and exits 0, so CI does not go
-red merely because Linux has not been recorded. The **first** real recording for
-a platform flips it to strict — from then on a missing or still-placeholder file
-for any crate is a loud FAIL.
-
 ## Usage
 
-Run from anywhere; paths are resolved from the script location.
-
 ```sh
-testbeds/audit-corpus/run.sh            # build + audit all, compare, PASS/FAIL table, nonzero on any fail
-testbeds/audit-corpus/run.sh --update   # re-record THIS platform's expectations (the claim mechanism)
-testbeds/audit-corpus/run.sh --selftest # prove both drift directions fire (tampered copies in $TMPDIR)
+testbeds/audit-corpus/run.sh
 ```
 
 `run.sh` builds the workspace `patina` (release) first, then audits each
-MRE by absolute directory path — the same invocation pattern the other testbeds
-use. Network access to crates.io may be needed the first time (CI runners have
-it); thereafter the pinned lockfiles + cargo cache make it offline.
-
-### Recording Linux expectations (coordinator, on real Linux x86_64)
-
-```sh
-testbeds/audit-corpus/run.sh --update   # regenerates expected/*.linux.txt
-git add testbeds/audit-corpus/expected/*.linux.txt
-# review the diff, then commit
-```
-
-## Self-test (detection-first)
-
-`run.sh --selftest` audits the dedicated probe crate (`selftest-dynamic-loading`,
-not in the corpus: it imports a dynamic loader the shim never defines, `dlmopen`
-on Linux and `dlopen_preflight` on macOS, refused by design forever, so it can
-never drift to CLEAN as real-crate support grows) once, then proves —
-on **copies** in `$TMPDIR`, never touching a committed file — that the strict
-comparison fails in every direction it must:
-
-* a positive control (identical expectation) PASSes;
-* an **injected** fake symbol FAILs (catches a shrinking punchlist claimed
-  without re-recording);
-* a **dropped** real symbol FAILs (catches a growing residual);
-* a `CLEAN` expectation over a dirty actual FAILs (catches a regression).
-
-If any direction fails to fire, the selftest itself fails — the gate cannot
-silently stop detecting drift.
+crate under `crates/` by absolute directory path. Network access to crates.io
+may be needed the first time; thereafter the pinned lockfiles and the cargo
+cache make it offline.
 
 ## Bumping crate versions
 
@@ -146,21 +57,13 @@ crate to a newer release (e.g. to re-audit after an upstream change):
    # or, to rebuild the lock from scratch:
    ( cd testbeds/audit-corpus/crates/<name> && cargo generate-lockfile )
    ```
-3. Re-record the affected expectations and review the diff:
-   ```sh
-   testbeds/audit-corpus/run.sh --update   # on each platform that is recorded
-   ```
-4. Commit the `Cargo.toml`, `Cargo.lock`, and `expected/*.txt` changes together
-   so the pinned surface and its recorded expectation stay in lockstep.
+3. Run `testbeds/audit-corpus/run.sh` and commit the `Cargo.toml` and
+   `Cargo.lock` changes together.
 
 To add a crate: create `crates/<name>/` (Cargo.toml with its own `[workspace]`
-table + `src/main.rs`), `cargo generate-lockfile` in it, add `<name>` to the
-`CORPUS` array in `run.sh`, then `--update` on each recorded platform.
+table + `src/main.rs`) and `cargo generate-lockfile` in it; `run.sh` audits
+every directory under `crates/`.
 
 ## CI
 
-`run.sh` runs on the routine **Linux x86_64** job and the
-daily/manual **macOS** job. Linux arm is skipped to bound cost
-(the audited symbol surface is toolchain-independent, and Linux arm shares the
-x86_64 expectation once recorded). On Linux the gate self-SKIPs (exit 0, loud
-notice) until the coordinator records `expected/*.linux.txt`.
+`run.sh` runs on the Linux x86_64 job and the macOS job.

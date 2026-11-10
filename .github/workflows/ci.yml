@@ -121,10 +121,9 @@ jobs:
       - run: testbeds/patina-macro-adopter/run.sh
         env:
           PATINA_CLI: ${{ github.workspace }}/target/release/patina
-      # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
-      # each compared strictly (both directions) to a committed platform
-      # expectation file. Linux x86_64 runs it here; the
-      # macOS job below checks the independently recorded macOS surface.
+      # The ecosystem symbol-audit corpus: 20 per-crate MREs built and audited,
+      # each of which must audit clean. Linux x86_64 runs it here; the macOS
+      # job below checks the macOS surface.
       - if: matrix.runner == 'ubuntu-latest'
         run: testbeds/audit-corpus/run.sh
 

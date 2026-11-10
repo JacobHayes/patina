@@ -39,7 +39,7 @@ description = "Paired guided-versus-uniform campaign benchmark: generations to a
 run = "python3 -B scripts/guided-bench.py"
 
 [tasks."audit-corpus"]
-description = "Ecosystem symbol-audit corpus: build+audit 20 MREs, strict-xfail vs committed per-platform expectations"
+description = "Ecosystem symbol-audit corpus: build and audit 20 MREs, each of which must audit clean"
 run = "testbeds/audit-corpus/run.sh"
 
 [tasks.conformance]
