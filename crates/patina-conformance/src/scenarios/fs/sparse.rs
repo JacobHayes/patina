@@ -226,19 +226,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mmap,
         Syscall::N_munmap,
     ],
-    symbols: &[
-        "openat",
-        "lseek",
-        "write",
-        "ftruncate",
-        "fallocate",
-        "fstat",
-        "close",
-        "fstatat",
-        "statx",
-        "mmap",
-        "munmap",
-    ],
     needs: &[Need::ExtentAllocation],
     ..DEFAULTS
 };

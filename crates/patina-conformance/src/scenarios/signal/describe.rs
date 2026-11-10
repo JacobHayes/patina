@@ -119,6 +119,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_write],
-    symbols: &["strsignal", "psignal"],
     ..DEFAULTS
 };

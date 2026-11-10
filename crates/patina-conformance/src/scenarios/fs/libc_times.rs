@@ -129,14 +129,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
         Syscall::N_nanosleep,
     ],
-    symbols: &[
-        "lutimes",
-        "futimes",
-        "openat",
-        "symlinkat",
-        "fstatat",
-        "close",
-        "nanosleep",
-    ],
     ..DEFAULTS
 };

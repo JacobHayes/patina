@@ -161,17 +161,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "fsync",
-        "fdatasync",
-        "sync",
-        "syncfs",
-        "sync_file_range",
-        "syscall",
-        "openat",
-        "write",
-        "pipe2",
-        "close",
-    ],
     ..DEFAULTS
 };

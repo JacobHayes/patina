@@ -240,8 +240,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
         Syscall::N_eventfd2,
     ],
-    symbols: &[
-        "ioctl", "fcntl", "openat", "read", "write", "lseek", "pipe2", "close", "eventfd",
-    ],
     ..DEFAULTS
 };

@@ -386,20 +386,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mknodat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "getcwd",
-        "chdir",
-        "fchdir",
-        "umask",
-        "openat",
-        "fstatat",
-        "fstat",
-        "mkdirat",
-        "symlinkat",
-        "unlinkat",
-        "mknodat",
-        "close",
-    ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

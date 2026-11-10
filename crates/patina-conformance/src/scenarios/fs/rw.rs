@@ -297,8 +297,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "openat", "read", "write", "lseek", "pread64", "pwrite64", "pipe2", "close",
-    ],
     ..DEFAULTS
 };

@@ -50,6 +50,5 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Syscall::N_readlink,
     ],
-    symbols: &["readlink", "readlinkat"],
     ..DEFAULTS
 };

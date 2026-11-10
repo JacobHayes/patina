@@ -77,7 +77,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_clone3, Syscall::N_execve, Syscall::N_wait4],
-    symbols: &["pidfd_spawnp", "pidfd_getpid", "waitpid", "setenv", "close"],
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],

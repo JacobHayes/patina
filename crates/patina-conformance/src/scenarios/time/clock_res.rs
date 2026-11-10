@@ -132,14 +132,6 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Syscall::N_time,
     ],
-    symbols: &[
-        "syscall",
-        "time",
-        "getpid",
-        "sleep",
-        "clock_gettime",
-        "clock_getres",
-    ],
     needs: &[Need::HighResTimers],
     ..DEFAULTS
 };

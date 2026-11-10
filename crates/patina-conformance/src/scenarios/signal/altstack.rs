@@ -156,7 +156,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::ALL,
     covers: &[Syscall::N_sigaltstack, Syscall::N_kill, Syscall::N_getpid],
-    symbols: &["sigaltstack", "kill", "getpid", "sigaction"],
     trace: Some(TraceFacts {
         generations: &[Generation::process(SIGUSR1)],
         max_wakes_per_generation: None,

@@ -90,15 +90,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_socket,
         Syscall::N_sendto,
     ],
-    symbols: &[
-        "pipe2",
-        "write",
-        "close",
-        "socketpair",
-        "socket",
-        "sendto",
-        "sigaction",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::thread(SIGPIPE),

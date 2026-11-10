@@ -45,6 +45,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "entropy/getrandom",
     run,
     covers: &[Syscall::N_getrandom],
-    symbols: &["getrandom"],
     ..DEFAULTS
 };

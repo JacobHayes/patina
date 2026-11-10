@@ -42,6 +42,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "sys/sysinfo",
     run,
     covers: &[Syscall::N_sysinfo],
-    symbols: &["sysinfo", "clock_gettime"],
     ..DEFAULTS
 };

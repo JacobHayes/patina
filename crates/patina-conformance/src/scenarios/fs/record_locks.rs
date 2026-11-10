@@ -70,6 +70,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getpid,
         Syscall::N_close,
     ],
-    symbols: &["openat", "fcntl", "getpid", "close"],
     ..DEFAULTS
 };

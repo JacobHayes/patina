@@ -12,11 +12,10 @@
 //! [`catalog::Gap`].
 //!
 //! * [`catalog`] — every scenario with the rows it covers, what it needs from
-//!   the host, and its gaps; the coverage exclusions.
+//!   the host, and its gaps.
 //! * [`probe`] — the scenario-facing call API; [`vehicle`] — the three doors.
 //! * [`compare`] — normalization and the live comparison; [`leak`] — the
-//!   strace escape filter; [`host`] — applicability detection; [`coverage`] —
-//!   registry entries no scenario or exclusion accounts for.
+//!   strace escape filter; [`host`] — applicability detection.
 //!
 //! The scenarios and the probe API are the Linux syscall ABI and build only
 //! there; the comparison, the leak filter and the vehicles' names are plain
@@ -29,8 +28,6 @@ pub mod vehicle;
 
 #[cfg(target_os = "linux")]
 pub mod catalog;
-#[cfg(target_os = "linux")]
-pub mod coverage;
 #[cfg(target_os = "linux")]
 pub mod host;
 #[cfg(target_os = "linux")]

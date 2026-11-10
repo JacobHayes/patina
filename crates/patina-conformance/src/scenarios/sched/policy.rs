@@ -204,7 +204,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sched_get_priority_min,
         Syscall::N_sched_rr_get_interval,
     ],
-    symbols: &["sched_yield", "syscall", "getpid", "setrlimit"],
     needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

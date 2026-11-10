@@ -192,7 +192,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/mmap",
     run,
     covers: &[Syscall::N_mmap, Syscall::N_munmap, Syscall::N_madvise],
-    symbols: &["mmap", "munmap"],
     kernel_floor: Some(KernelFloor {
         release: "5.4",
         why: "MAP_FIXED_NOREPLACE (4.17; older kernels ignore it and map over the page) and MADV_COLD (5.4)",

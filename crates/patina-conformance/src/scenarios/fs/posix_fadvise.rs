@@ -114,13 +114,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "posix_fadvise",
-        "posix_fadvise64",
-        "openat",
-        "write",
-        "pipe2",
-        "close",
-    ],
     ..DEFAULTS
 };

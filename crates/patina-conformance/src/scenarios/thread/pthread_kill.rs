@@ -84,7 +84,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getpid, Syscall::N_gettid, Syscall::N_tgkill],
-    symbols: &["getpid", "gettid", "syscall", "sigaction", "pthread_kill"],
     trace: Some(TraceFacts {
         generations: &[Generation::thread(SIGUSR1), Generation::thread(SIGUSR1)],
         max_wakes_per_generation: None,

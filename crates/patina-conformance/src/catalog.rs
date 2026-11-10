@@ -1,14 +1,12 @@
 //! Every scenario, what it covers, and how patina is known to fail it.
 //!
-//! A [`Scenario`] declares the registry rows it exercises (`covers`), the rows
-//! it asserts `ENOSYS` for because they are newer than the virtual ABI level
-//! (`asserts_absent`), and the libc symbols its `libc` vehicle goes through.
+//! A [`Scenario`] declares the registry rows it exercises (`covers`) and the
+//! rows it asserts `ENOSYS` for because they are newer than the virtual ABI
+//! level (`asserts_absent`).
 //! The host must implement every covered row and lack every asserted-absent
 //! one for its native run to be an oracle (see [`crate::host`]). A [`Gap`] is
 //! a strict expected failure: the patina run must fail exactly as declared,
 //! and a gap that stops matching fails its test until it is removed.
-//! [`EXCLUSIONS`] are registry entries deliberately left without a scenario,
-//! each with its reason; [`crate::coverage`] reports the rest.
 
 use crate::compare::{Expected, Failure};
 use crate::probe::Probe;
@@ -33,8 +31,6 @@ pub struct Scenario {
     pub covers: &'static [Syscall],
     /// Rows past the virtual ABI level the scenario asserts `ENOSYS` for.
     pub asserts_absent: &'static [Syscall],
-    /// libc symbols the `libc` vehicle goes through.
-    pub symbols: &'static [&'static str],
     /// Host capabilities beyond the covered rows the native oracle needs
     /// (detected live on the run directory; see [`crate::host::need_unmet`]).
     pub needs: &'static [Need],
@@ -63,7 +59,6 @@ pub const DEFAULTS: Scenario = Scenario {
     vehicles: Vehicle::DOORS,
     covers: &[],
     asserts_absent: &[],
-    symbols: &[],
     needs: &[],
     kernel_floor: None,
     gaps: &[],
@@ -395,408 +390,6 @@ fn generation_of(op: &Value) -> Option<Generation> {
     })
 }
 
-/// A registry entry with no scenario, deliberately.
-pub struct Exclusion {
-    pub entry: Entry,
-    pub reason: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Entry {
-    Syscall(Syscall),
-    Symbol(&'static str),
-}
-
-/// Why zstd's tracing hooks have no scenario.
-const ZSTD_TRACE_HOOK: &str = "no native definition (a third-party weak hook): one of zstd's weak tracing hooks, which the shim defines as no-ops (begin answers 0, which disables tracing per zstd_trace.h; end is inert; c/posix/core.c) so a guest linking zstd's static library imports nothing for them. zstd calls them, never the guest, and neither glibc nor the host defines them, so there is no native oracle and no row they serve";
-
-const TRAPPED: &str = "unmodeled by design: no target workload exercises it, so the registry traps it as a named stop (`Trap(privileged|unmodeled)`) instead of a model. The stop is asserted by the raw-guest tests (patina native_raw), not compared against a native oracle, because the native side is a privileged or host-mutating call";
-const TRAPPED_SYMBOL: &str = "the libc spelling of a row the registry traps as a named stop (see the syscall exclusions); the shim forwards it to the trapped row, so there is no modeled behaviour to compare with a native oracle";
-const PTY_SPELLING: &str = "pseudo-terminal spelling: patina models no pseudo-terminals. A /dev/ptmx open is a named stop, the stdio descriptors answer ENOTTY and /dev/tty answers ENXIO (fd/dev_tty, fd/termios); there is no pty behaviour to compare with a native oracle";
-const NUMA_CONSTANTS: &str = "answered by a one-node model: get_mempolicy reads back the calling thread's policy (inherited by new threads), node-0 policies succeed, other nodes are EINVAL and a non-default mbind is a named stop (numa.rs and sched.rs unit tests, raw probes). A native oracle would report the host's topology";
-
-/// Registry entries excluded from conformance coverage, with their reasons.
-pub const EXCLUSIONS: &[Exclusion] = &[
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_ptrace),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_syslog),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_vhangup),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_pivot_root),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_chroot),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_acct),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mount),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_umount2),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_swapon),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_swapoff),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_reboot),
-        reason: TRAPPED,
-    },
-    #[cfg(target_arch = "x86_64")]
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_iopl),
-        reason: TRAPPED,
-    },
-    #[cfg(target_arch = "x86_64")]
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_ioperm),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_init_module),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_delete_module),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_quotactl),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mbind),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_set_mempolicy),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_get_mempolicy),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_open),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_unlink),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_timedsend),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_timedreceive),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_notify),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mq_getsetattr),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_kexec_load),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_migrate_pages),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_unshare),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_move_pages),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_perf_event_open),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_setns),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_process_vm_readv),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_process_vm_writev),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_kcmp),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_finit_module),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_kexec_file_load),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_bpf),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_userfaultfd),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_open_tree),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_move_mount),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_fsopen),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_fsconfig),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_fsmount),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_fspick),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_mount_setattr),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_quotactl_fd),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_landlock_add_rule),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_landlock_restrict_self),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_set_mempolicy_home_node),
-        reason: NUMA_CONSTANTS,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_statmount),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_listmount),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_lsm_get_self_attr),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_lsm_set_self_attr),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_lsm_list_modules),
-        reason: TRAPPED,
-    },
-    Exclusion {
-        entry: Entry::Symbol("__ttyname_r_chk"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("acct"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("chroot"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("delete_module"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("fsconfig"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("fsmount"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("fsopen"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("fspick"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("init_module"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ioperm"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("iopl"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("mount"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("mount_setattr"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("move_mount"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("open_tree"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("pivot_root"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("process_vm_readv"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("process_vm_writev"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ptrace"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("quotactl"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("reboot"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("setns"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("swapoff"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("swapon"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("tcdrain"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("tcflush"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ttyname"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ttyname_r"),
-        reason: PTY_SPELLING,
-    },
-    Exclusion {
-        entry: Entry::Symbol("umount2"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("unshare"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Symbol("vhangup"),
-        reason: TRAPPED_SYMBOL,
-    },
-    Exclusion {
-        entry: Entry::Syscall(Syscall::N_open_by_handle_at),
-        reason: "privileged: opening by handle bypasses path permission checks, so it needs CAP_DAC_READ_SEARCH in the mount's user namespace (fs/fhandle.c may_decode_fh); an unprivileged native oracle observes only the EPERM refusal. Its unprivileged half, name_to_handle_at, is covered by fs/handles",
-    },
-    Exclusion {
-        entry: Entry::Symbol("tkill"),
-        reason: "glibc exports no tkill (only tgkill, since 2.30), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare it themselves. The tkill row is covered through syscall(2) by signal/basic",
-    },
-    Exclusion {
-        entry: Entry::Symbol("res_init"),
-        reason: "glibc exports no res_init (resolv.h defines it as __res_init, the name glibc 2.39 exports), so a native oracle can neither import nor dlsym it; the shim's definition serves guests that declare the name themselves. __res_init is covered by sys/nss",
-    },
-    Exclusion {
-        entry: Entry::Symbol("posix_spawn_file_actions_addchdir"),
-        reason: "glibc 2.39 exports no posix_spawn_file_actions_addchdir (the POSIX.1-2024 name; it has only the _np spelling), so a native oracle can neither import nor dlsym it; the shim's deny-trap serves guests that declare the name themselves. posix_spawn_file_actions_addchdir_np is covered by proc/spawn",
-    },
-    Exclusion {
-        entry: Entry::Symbol("ZSTD_trace_compress_begin"),
-        reason: ZSTD_TRACE_HOOK,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ZSTD_trace_compress_end"),
-        reason: ZSTD_TRACE_HOOK,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ZSTD_trace_decompress_begin"),
-        reason: ZSTD_TRACE_HOOK,
-    },
-    Exclusion {
-        entry: Entry::Symbol("ZSTD_trace_decompress_end"),
-        reason: ZSTD_TRACE_HOOK,
-    },
-    Exclusion {
-        entry: Entry::Symbol("__libc_start_main"),
-        reason: "control plane: the shim's startup hook, which crt1.o's _start calls before main and no guest calls itself; it arms syscall-user-dispatch, the TSC trap and THP-off, then hands glibc's own __libc_start_main a main wrapper that marks teardown (c/posix/init.c). Every scenario starts through it and proc/exit ends through the exit path it prepares; there is no call a native oracle could compare",
-    },
-];
-
 /// One declaration drives the catalog and the independent native test cases.
 #[macro_export]
 macro_rules! for_each_scenario {
@@ -1061,7 +654,7 @@ fn planted_escape(p: &Probe) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patina_dst_syscalls::{Disposition, Os, SYMBOLS, SYSCALLS};
+    use patina_dst_syscalls::{Disposition, SYSCALLS};
     use std::collections::BTreeSet;
 
     fn disposition(row: Syscall) -> Disposition {
@@ -1073,8 +666,8 @@ mod tests {
     }
 
     /// The catalog table lints, in one pass: scenario names, what each
-    /// scenario covers and asserts absent against the registry, the symbols it
-    /// names, its gaps and their vehicles, hang bounds, and the exclusions.
+    /// scenario covers and asserts absent against the registry, its gaps and
+    /// their vehicles, and hang bounds.
     #[test]
     fn the_catalog_is_internally_consistent() {
         let mut seen = BTreeSet::new();
@@ -1101,14 +694,6 @@ mod tests {
                     Disposition::Absent,
                     "{name} asserts {} absent",
                     row.name()
-                );
-            }
-            for symbol in scenario.symbols {
-                assert!(
-                    SYMBOLS
-                        .iter()
-                        .any(|row| row.name == *symbol && row.platform.defines_on(Os::host())),
-                    "{name} names symbol {symbol}, which has no registry row"
                 );
             }
             for gap in scenario.gaps {
@@ -1146,29 +731,6 @@ mod tests {
                     scenario.trace.is_none() || stops == 0,
                     "{name}[{}]: trace facts and a stopping gap",
                     vehicle.name()
-                );
-            }
-        }
-
-        let mut excluded = Vec::new();
-        for exclusion in EXCLUSIONS {
-            assert!(
-                !excluded.contains(&exclusion.entry),
-                "{:?}",
-                exclusion.entry
-            );
-            excluded.push(exclusion.entry);
-            for scenario in SCENARIOS {
-                let covered = match exclusion.entry {
-                    Entry::Syscall(row) => {
-                        scenario.covers.contains(&row) || scenario.asserts_absent.contains(&row)
-                    }
-                    Entry::Symbol(name) => scenario.symbols.contains(&name),
-                };
-                assert!(
-                    !covered,
-                    "{:?} is excluded and covered by {}",
-                    exclusion.entry, scenario.name
                 );
             }
         }

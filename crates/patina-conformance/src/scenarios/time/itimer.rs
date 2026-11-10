@@ -240,11 +240,5 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Syscall::N_alarm,
     ],
-    symbols: &[
-        "setitimer",
-        "getitimer",
-        #[cfg(target_arch = "x86_64")]
-        "alarm",
-    ],
     ..DEFAULTS
 };

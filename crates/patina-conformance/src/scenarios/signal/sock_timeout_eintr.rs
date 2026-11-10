@@ -163,22 +163,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
         Syscall::N_kill,
     ],
-    symbols: &[
-        "getpid",
-        "socketpair",
-        "socket",
-        "bind",
-        "listen",
-        "accept4",
-        "connect",
-        "getsockname",
-        "setsockopt",
-        "send",
-        "recv",
-        "close",
-        "kill",
-        "sigaction",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),

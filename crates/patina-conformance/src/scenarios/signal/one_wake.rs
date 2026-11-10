@@ -119,18 +119,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_rt_sigpending,
         Syscall::N_kill,
     ],
-    symbols: &[
-        "getpid",
-        "gettid",
-        "pipe2",
-        "read",
-        "write",
-        "close",
-        "kill",
-        "sigaction",
-        "pthread_sigmask",
-        "syscall",
-    ],
     trace: Some(TraceFacts {
         generations: &[Generation::process(SIGUSR1), Generation::process(SIGUSR1)],
         max_wakes_per_generation: Some(1),

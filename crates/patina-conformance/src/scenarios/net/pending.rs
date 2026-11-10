@@ -170,19 +170,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_ppoll,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socket",
-        "bind",
-        "listen",
-        "connect",
-        "accept4",
-        "getsockname",
-        "getpeername",
-        "getsockopt",
-        "sendto",
-        "recvfrom",
-        "poll",
-        "close",
-    ],
     ..DEFAULTS
 };

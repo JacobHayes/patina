@@ -262,20 +262,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_clock_gettime,
         Syscall::N_close,
     ],
-    symbols: &[
-        "select",
-        "pselect",
-        "socket",
-        "bind",
-        "listen",
-        "connect",
-        "accept4",
-        "getsockname",
-        "sendto",
-        "recvfrom",
-        "ioctl",
-        "clock_gettime",
-        "close",
-    ],
     ..DEFAULTS
 };

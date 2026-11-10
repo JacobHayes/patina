@@ -350,21 +350,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socket",
-        "bind",
-        "sendto",
-        "recvfrom",
-        "getsockname",
-        "getpeername",
-        "connect",
-        "shutdown",
-        "setsockopt",
-        "getsockopt",
-        "listen",
-        "accept4",
-        "openat",
-        "close",
-    ],
     ..DEFAULTS
 };

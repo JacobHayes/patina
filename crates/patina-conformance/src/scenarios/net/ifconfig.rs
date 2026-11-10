@@ -147,6 +147,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &["socket", "ioctl", "if_nametoindex", "openat", "close"],
     ..DEFAULTS
 };

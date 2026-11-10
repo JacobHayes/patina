@@ -593,17 +593,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_clone3, Syscall::N_futex],
-    symbols: &[
-        "pthread_create",
-        "pthread_join",
-        "pthread_detach",
-        "pthread_once",
-        "pthread_getname_np",
-        "pthread_setname_np",
-        "pthread_cancel",
-        "pthread_setcancelstate",
-        "pthread_setcanceltype",
-        "pthread_testcancel",
-    ],
     ..DEFAULTS
 };

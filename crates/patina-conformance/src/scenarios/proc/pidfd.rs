@@ -296,12 +296,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pidfd_send_signal,
         Syscall::N_process_mrelease,
     ],
-    symbols: &[
-        "pidfd_open",
-        "pidfd_getfd",
-        "pidfd_send_signal",
-        "process_mrelease",
-    ],
     needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

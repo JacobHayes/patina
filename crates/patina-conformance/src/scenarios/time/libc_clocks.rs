@@ -155,12 +155,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_clock_gettime,
         Syscall::N_gettimeofday,
     ],
-    symbols: &[
-        "clock_getres",
-        "__clock_gettime",
-        "__gettimeofday",
-        "clock_gettime",
-    ],
     needs: &[Need::HighResTimers],
     ..DEFAULTS
 };

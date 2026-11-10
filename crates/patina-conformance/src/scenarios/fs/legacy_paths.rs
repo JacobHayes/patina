@@ -440,10 +440,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fstat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "open", "creat", "stat", "lstat", "mkdir", "rmdir", "rename", "link", "unlink", "symlink",
-        "readlink", "chmod", "mknod", "chdir", "read", "write", "fstat", "close",
-    ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

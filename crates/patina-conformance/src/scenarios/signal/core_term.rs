@@ -32,7 +32,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "signal/core_term",
     run,
     covers: &[Syscall::N_getpid, Syscall::N_kill],
-    symbols: &["getpid", "kill", "sigaction"],
     trace: Some(TraceFacts {
         generations: &[Generation::process(SIGABRT)],
         max_wakes_per_generation: None,

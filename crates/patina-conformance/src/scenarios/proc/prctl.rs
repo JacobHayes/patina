@@ -149,6 +149,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "proc/prctl",
     run,
     covers: &[Syscall::N_prctl],
-    symbols: &["prctl"],
     ..DEFAULTS
 };

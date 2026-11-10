@@ -175,14 +175,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sched_setaffinity,
         Syscall::N_getcpu,
     ],
-    symbols: &[
-        "sched_getaffinity",
-        "sched_setaffinity",
-        "sched_getcpu",
-        "sysconf",
-        "getpid",
-        "syscall",
-    ],
     needs: &[Need::Unprivileged, Need::RootInit],
     ..DEFAULTS
 };

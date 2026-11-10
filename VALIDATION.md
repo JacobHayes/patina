@@ -26,7 +26,6 @@ document names directories and evidence shapes, not test functions.
 | `mise run check [nextest arguments]` | the inner loop: fmt, host clippy, then the tests named (`-p <package>`, `--test native_abi`, `-E <filter>`); with no arguments, the workspace suite, the native acceptance and conformance tests included |
 | `mise run check:full` | everything this host can check: the above plus clippy for the other platforms' cfgs, doctests, the macros feature, the native smoke and the testbeds |
 | `mise run conformance` | syscall conformance scenarios, natively and under Patina |
-| `mise run conformance:coverage` | registry entries no scenario covers or excludes (a report; exits 1 while any remain) |
 | `mise run audit-corpus` | ecosystem symbol-audit corpus against committed per-platform expectations |
 | `mise run bench` | native-versus-Patina overhead measurement (not a gate) |
 | `scripts/install-smoke.sh REF` | the adopter path, with an installed `patina` and nothing of the checkout: a new package on the SDK from GitHub at REF passes a `#[patina_dst::test]` under plain `cargo test` and fails it once the tool is hidden, and its program builds, runs and replays (`--go`: a Go guest on the Go SDK too) |
@@ -173,9 +172,7 @@ versions, target triple and fingerprint.
 - **Multi-process.** Process spawning is a non-goal: the spawn family deny-traps.
   `testbeds/multiproc` pins each workload's first refusal on x86_64 Linux; arm64
   and Darwin baselines are pending.
-- **Conformance coverage** is Linux only and not exhaustive:
-  `mise run conformance:coverage` lists the registry entries no scenario covers
-  and no exclusion accounts for.
+- **Conformance coverage** is Linux only and not exhaustive.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block
   accounting and page-cache residency are not modeled: `cachestat` counts every
   page of a file cached (a page `DONTNEED` dropped, or one over a hole never

@@ -82,7 +82,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/process_madvise",
     run,
     covers: &[Syscall::N_process_madvise],
-    symbols: &["process_madvise"],
     needs: &[Need::Unprivileged],
     kernel_floor: Some(KernelFloor {
         release: "5.10",

@@ -290,7 +290,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getsockopt,
         Syscall::N_close,
     ],
-    symbols: &["socket", "setsockopt", "getsockopt", "close"],
     needs: &[Need::Ipv6Loopback],
     ..DEFAULTS
 };

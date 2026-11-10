@@ -166,16 +166,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_sendto,
         Syscall::N_close,
     ],
-    symbols: &[
-        "__recv_chk",
-        "__recvfrom_chk",
-        "__poll_chk",
-        "__ppoll_chk",
-        "socket",
-        "bind",
-        "getsockname",
-        "sendto",
-        "close",
-    ],
     ..DEFAULTS
 };

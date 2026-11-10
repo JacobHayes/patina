@@ -244,14 +244,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "statvfs",
-        "fstatvfs",
-        "statvfs64",
-        "fstatvfs64",
-        "statfs",
-        "openat",
-        "close",
-    ],
     ..DEFAULTS
 };

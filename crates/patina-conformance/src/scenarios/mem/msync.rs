@@ -60,6 +60,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/msync",
     run,
     covers: &[Syscall::N_msync],
-    symbols: &["msync", "mmap", "munmap"],
     ..DEFAULTS
 };

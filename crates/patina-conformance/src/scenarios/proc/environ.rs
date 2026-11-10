@@ -306,17 +306,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getgid,
         Syscall::N_getegid,
     ],
-    symbols: &[
-        "getenv",
-        "secure_getenv",
-        "setenv",
-        "unsetenv",
-        "clearenv",
-        "putenv",
-        "getuid",
-        "geteuid",
-        "getgid",
-        "getegid",
-    ],
     ..DEFAULTS
 };

@@ -99,7 +99,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setrlimit,
         Syscall::N_prlimit64,
     ],
-    symbols: &["getrlimit64", "setrlimit64", "syscall"],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

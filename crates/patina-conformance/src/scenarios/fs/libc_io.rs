@@ -216,16 +216,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "pread",
-        "pwrite",
-        "posix_fallocate",
-        "isatty",
-        "openat",
-        "lseek",
-        "fstat",
-        "pipe2",
-        "close",
-    ],
     ..DEFAULTS
 };

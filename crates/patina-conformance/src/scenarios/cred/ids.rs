@@ -159,21 +159,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setfsuid,
         Syscall::N_setfsgid,
     ],
-    symbols: &[
-        "getuid",
-        "getgid",
-        "geteuid",
-        "getegid",
-        "setuid",
-        "setgid",
-        "setreuid",
-        "setregid",
-        "setresuid",
-        "setresgid",
-        "seteuid",
-        "setegid",
-        "syscall",
-    ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

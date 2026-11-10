@@ -49,6 +49,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_rt_sigprocmask,
         Syscall::N_tgkill,
     ],
-    symbols: &["sigaction", "sigprocmask", "abort"],
     ..DEFAULTS
 };

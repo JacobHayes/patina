@@ -64,7 +64,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "thread/tls_cpu",
     run,
     covers: &[Syscall::N_arch_prctl],
-    symbols: &["arch_prctl"],
     needs: &[Need::FourLevelPaging, Need::NoCpuidFaulting],
     ..DEFAULTS
 };

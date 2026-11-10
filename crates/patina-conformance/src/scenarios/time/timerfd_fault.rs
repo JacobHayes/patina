@@ -89,6 +89,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_timerfd_settime,
         Syscall::N_timerfd_gettime,
     ],
-    symbols: &["syscall", "read", "ppoll", "close"],
     ..DEFAULTS
 };

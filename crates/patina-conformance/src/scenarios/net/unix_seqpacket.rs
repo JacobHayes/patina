@@ -146,18 +146,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_recvmsg,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socketpair",
-        "socket",
-        "bind",
-        "listen",
-        "connect",
-        "accept4",
-        "sendto",
-        "recvfrom",
-        "sendmsg",
-        "recvmsg",
-        "close",
-    ],
     ..DEFAULTS
 };

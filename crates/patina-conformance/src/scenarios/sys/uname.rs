@@ -54,6 +54,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "sys/uname",
     run,
     covers: &[Syscall::N_uname],
-    symbols: &["uname", "gethostname"],
     ..DEFAULTS
 };

@@ -136,15 +136,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_recvfrom,
         Syscall::N_close,
     ],
-    symbols: &[
-        "getaddrinfo",
-        "freeaddrinfo",
-        "socket",
-        "bind",
-        "getsockname",
-        "sendto",
-        "recvfrom",
-        "close",
-    ],
     ..DEFAULTS
 };

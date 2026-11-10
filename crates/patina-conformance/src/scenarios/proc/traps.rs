@@ -78,7 +78,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_execve,
         Syscall::N_execveat,
     ],
-    symbols: &["fork", "syscall"],
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: Vehicle::DOORS,

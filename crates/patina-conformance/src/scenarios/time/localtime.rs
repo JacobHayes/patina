@@ -156,6 +156,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_clock_gettime],
-    symbols: &["localtime_r", "setenv", "clock_gettime"],
     ..DEFAULTS
 };

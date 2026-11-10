@@ -163,16 +163,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
         Syscall::N_kill,
     ],
-    symbols: &[
-        "getpid",
-        "signalfd",
-        "pause",
-        "read",
-        "close",
-        "kill",
-        "sigaction",
-        "syscall",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),

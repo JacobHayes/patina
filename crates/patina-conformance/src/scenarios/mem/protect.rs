@@ -100,6 +100,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/protect",
     run,
     covers: &[Syscall::N_mprotect, Syscall::N_mmap, Syscall::N_munmap],
-    symbols: &["mprotect", "mmap", "munmap"],
     ..DEFAULTS
 };

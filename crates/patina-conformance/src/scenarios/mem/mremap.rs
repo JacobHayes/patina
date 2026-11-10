@@ -235,7 +235,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "mem/mremap",
     run,
     covers: &[Syscall::N_mremap, Syscall::N_mmap, Syscall::N_munmap],
-    symbols: &["mremap", "mmap", "munmap"],
     kernel_floor: Some(KernelFloor {
         release: "5.7",
         why: "MREMAP_DONTUNMAP first appears in Linux 5.7 (and MAP_FIXED_NOREPLACE in 4.17)",

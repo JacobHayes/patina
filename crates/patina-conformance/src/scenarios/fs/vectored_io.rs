@@ -290,10 +290,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "readv", "writev", "preadv", "pwritev", "syscall", "openat", "write", "lseek", "pipe2",
-        "close",
-    ],
     kernel_floor: Some(KernelFloor {
         release: "6.4",
         why: "RWF_NOWAIT on a pipe (pipes gained FMODE_NOWAIT)",

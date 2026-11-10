@@ -231,6 +231,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_arch_prctl,
         Syscall::N_modify_ldt,
     ],
-    symbols: &["arch_prctl", "modify_ldt"],
     ..DEFAULTS
 };

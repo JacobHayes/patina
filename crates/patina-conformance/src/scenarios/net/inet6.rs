@@ -174,20 +174,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_recvfrom,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socket",
-        "bind",
-        "listen",
-        "connect",
-        "accept4",
-        "getsockname",
-        "getpeername",
-        "setsockopt",
-        "getsockopt",
-        "sendto",
-        "recvfrom",
-        "close",
-    ],
     needs: &[Need::Ipv6Loopback, Need::LocalBindOnly],
     ..DEFAULTS
 };

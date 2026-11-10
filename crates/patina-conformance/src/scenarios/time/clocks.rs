@@ -107,11 +107,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_nanosleep,
         Syscall::N_clock_nanosleep,
     ],
-    symbols: &[
-        "clock_gettime",
-        "gettimeofday",
-        "nanosleep",
-        "clock_nanosleep",
-    ],
     ..DEFAULTS
 };

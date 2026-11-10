@@ -188,16 +188,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_unlinkat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socketpair",
-        "socket",
-        "bind",
-        "connect",
-        "getpeername",
-        "sendto",
-        "recvfrom",
-        "unlinkat",
-        "close",
-    ],
     ..DEFAULTS
 };

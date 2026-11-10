@@ -164,22 +164,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_epoll_wait,
         Syscall::N_futex,
     ],
-    symbols: &[
-        "getpid",
-        "pipe2",
-        "read",
-        "write",
-        "close",
-        "kill",
-        "nanosleep",
-        "clock_nanosleep",
-        "clock_gettime",
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_wait",
-        "syscall",
-        "sigaction",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),

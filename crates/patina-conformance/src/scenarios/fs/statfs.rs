@@ -227,16 +227,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fstat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "statfs",
-        "fstatfs",
-        "syscall",
-        "openat",
-        "symlinkat",
-        "pipe2",
-        "eventfd",
-        "fstat",
-        "close",
-    ],
     ..DEFAULTS
 };

@@ -82,15 +82,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_munmap,
         Syscall::N_close,
     ],
-    symbols: &[
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_pwait",
-        "eventfd",
-        "mmap",
-        "mprotect",
-        "munmap",
-        "close",
-    ],
     ..DEFAULTS
 };

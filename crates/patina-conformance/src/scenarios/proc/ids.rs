@@ -105,9 +105,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setpgid,
         Syscall::N_setsid,
     ],
-    symbols: &[
-        "getpid", "syscall", "getppid", "gettid", "tgkill", "kill", "setpgid", "setsid",
-    ],
     needs: &[Need::Unprivileged, Need::RootInit],
     gaps: &[Gap {
         status: Status::ByDesign,

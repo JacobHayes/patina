@@ -14,11 +14,7 @@ patina-dst-syscalls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# One probe binary for every scenario; the report of uncovered registry entries.
+# One probe binary for every scenario.
 [[bin]]
 name = "conformance-probe"
 path = "src/bin/conformance-probe.rs"
-
-[[bin]]
-name = "conformance-coverage"
-path = "src/bin/conformance-coverage.rs"

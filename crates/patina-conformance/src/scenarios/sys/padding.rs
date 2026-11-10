@@ -145,7 +145,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
     ],
     vehicles: &[Vehicle::Syscall],
-    symbols: &["syscall"],
     needs: &[Need::SysvMsg, Need::SysvSem, Need::SysvShm],
     ..DEFAULTS
 };

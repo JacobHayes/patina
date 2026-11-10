@@ -103,16 +103,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fchmod,
         Syscall::N_close,
     ],
-    symbols: &[
-        "fstat",
-        "statx",
-        "fstatat",
-        "eventfd",
-        "signalfd",
-        "epoll_create1",
-        "pidfd_open",
-        "fchmod",
-        "close",
-    ],
     ..DEFAULTS
 };

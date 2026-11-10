@@ -237,17 +237,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_close,
     ],
-    symbols: &[
-        "copy_file_range",
-        "sendfile",
-        "sendfile64",
-        "openat",
-        "read",
-        "write",
-        "pread64",
-        "lseek",
-        "pipe2",
-        "close",
-    ],
     ..DEFAULTS
 };

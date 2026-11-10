@@ -384,19 +384,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_timerfd_create,
         Syscall::N_signalfd4,
     ],
-    symbols: &[
-        "dup",
-        "dup2",
-        "dup3",
-        "close_range",
-        "fcntl",
-        "openat",
-        "close",
-        "read",
-        "write",
-        "lseek",
-        "pipe2",
-        "eventfd",
-    ],
     ..DEFAULTS
 };

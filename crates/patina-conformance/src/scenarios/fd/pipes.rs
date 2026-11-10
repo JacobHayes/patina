@@ -336,18 +336,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_socketpair,
     ],
-    symbols: &[
-        "pipe2",
-        "pipe",
-        "dup",
-        "fcntl",
-        "flock",
-        "read",
-        "write",
-        "close",
-        "openat",
-        "socketpair",
-    ],
     kernel_floor: Some(KernelFloor {
         release: "5.19",
         why: "flock ignores LOCK_MAND before resolving the descriptor",

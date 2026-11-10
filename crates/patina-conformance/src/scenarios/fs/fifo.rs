@@ -113,8 +113,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_close,
         Syscall::N_umask,
     ],
-    symbols: &[
-        "mkfifo", "mkfifoat", "openat", "fstatat", "read", "close", "umask",
-    ],
     ..DEFAULTS
 };

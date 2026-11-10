@@ -258,9 +258,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   Darwin x86_64 is not inventoried. Shared JSON schema: `patina.syscalls/v3`.
   Row identity is `(namespace, nr, subcode)`; `variants` name each source alternative.
   Linux runtime fields are under each row's `linux` object (`disposition`,
-  `closes_in`, `since`, etc.); ABI is `metadata.linux.virtual_abi`. Which
-  conformance scenario covers a row is `mise run conformance:coverage`'s
-  business, not the report's. Darwin has no virtual ABI;
+  `closes_in`, `since`, etc.); ABI is `metadata.linux.virtual_abi`. Darwin has no virtual ABI;
   `darwin.raw_entry` is `not-interposed`, independent of C symbol status.
   MIG messages and commpage APIs are outside the kernel-entry scope.
 
@@ -482,8 +480,7 @@ dev-dependency use under plain `cargo test`.
   kernel as the oracle; `cargo test -p cargo-patina --test native_conformance`
   (`mise run conformance`) runs each natively and under patina (plus record/replay
   and strace), and each scenario's declared gaps are the exact current
-  host≠patina difference. `mise run conformance:coverage` lists registry entries
-  no scenario or exclusion accounts for.
+  host≠patina difference.
 - `testbeds/`: real end-to-end guests — `workq` (the flagship durable-work-queue
   demo), `pubsub` (a tokio broker on the interposed reactors), and more; see
   `testbeds/README.md` and each testbed's `run-patina.sh`.

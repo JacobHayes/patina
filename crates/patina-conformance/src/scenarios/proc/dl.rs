@@ -211,7 +211,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getrandom, Syscall::N_openat],
-    symbols: &["__wrap_dlsym", "dlerror", "dlopen", "dlclose"],
     gaps: &[
         Gap {
             status: Status::ByDesign,

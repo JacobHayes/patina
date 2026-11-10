@@ -209,13 +209,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_openat, Syscall::N_read, Syscall::N_close],
-    symbols: &[
-        "__res_init",
-        "getpwuid_r",
-        "getpwnam_r",
-        "setpwent",
-        "getpwent",
-        "endpwent",
-    ],
     ..DEFAULTS
 };

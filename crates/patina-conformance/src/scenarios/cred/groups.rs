@@ -81,7 +81,6 @@ pub const SCENARIO: Scenario = Scenario {
     name: "cred/groups",
     run,
     covers: &[Syscall::N_getgroups, Syscall::N_setgroups],
-    symbols: &["setgroups", "sysconf", "syscall"],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

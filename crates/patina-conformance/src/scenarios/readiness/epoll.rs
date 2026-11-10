@@ -297,17 +297,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_clock_gettime,
     ],
-    symbols: &[
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_wait",
-        "eventfd",
-        "pipe2",
-        "read",
-        "write",
-        "close",
-        "openat",
-        "clock_gettime",
-    ],
     ..DEFAULTS
 };

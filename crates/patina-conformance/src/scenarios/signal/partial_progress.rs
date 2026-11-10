@@ -156,20 +156,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_shutdown,
         Syscall::N_kill,
     ],
-    symbols: &[
-        "getpid",
-        "pipe2",
-        "write",
-        "close",
-        "fcntl",
-        "socketpair",
-        "send",
-        "recv",
-        "sendmmsg",
-        "shutdown",
-        "kill",
-        "sigaction",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),

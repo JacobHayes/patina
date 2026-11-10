@@ -295,23 +295,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_pipe2,
         Syscall::N_nanosleep,
     ],
-    symbols: &[
-        "truncate",
-        "ftruncate",
-        "fallocate",
-        "fstat",
-        "fstatat",
-        "openat",
-        "read",
-        "write",
-        "lseek",
-        "close",
-        "mkdirat",
-        "mknodat",
-        "symlinkat",
-        "pipe2",
-        "nanosleep",
-    ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

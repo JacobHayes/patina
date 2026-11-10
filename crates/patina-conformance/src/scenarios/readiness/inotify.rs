@@ -118,15 +118,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_pwait",
-        "ppoll",
-        "pselect",
-        "openat",
-        "close",
-    ],
     needs: &[Need::Inotify],
     ..DEFAULTS
 };

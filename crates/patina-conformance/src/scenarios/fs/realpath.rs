@@ -243,14 +243,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_symlinkat,
         Syscall::N_chdir,
     ],
-    symbols: &[
-        "realpath",
-        "openat",
-        "close",
-        "mkdirat",
-        "symlinkat",
-        "chdir",
-    ],
     needs: &[Need::Unprivileged],
     ..DEFAULTS
 };

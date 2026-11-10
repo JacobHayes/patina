@@ -90,6 +90,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_pipe2, Syscall::N_close],
-    symbols: &["tcgetattr", "tcsetattr", "pipe2", "close"],
     ..DEFAULTS
 };

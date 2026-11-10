@@ -291,23 +291,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_getgid,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socketpair",
-        "sendmsg",
-        "recvmsg",
-        "setsockopt",
-        "getsockopt",
-        "openat",
-        "write",
-        "read",
-        "lseek",
-        "fstat",
-        "fcntl",
-        "pipe2",
-        "getpid",
-        "getuid",
-        "getgid",
-        "close",
-    ],
     ..DEFAULTS
 };

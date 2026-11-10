@@ -433,9 +433,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_read,
         Syscall::N_close,
     ],
-    symbols: &[
-        "printf", "puts", "putchar", "fputc", "fputs", "fwrite", "fprintf", "vfprintf", "fflush",
-        "stdout", "stderr", "pipe2", "dup", "dup2", "fstat", "ioctl", "read", "close",
-    ],
     ..DEFAULTS
 };

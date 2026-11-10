@@ -371,18 +371,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_fstat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "mkdirat",
-        "renameat",
-        "unlinkat",
-        "symlinkat",
-        "readlinkat",
-        "linkat",
-        "fstatat",
-        "openat",
-        "write",
-        "fstat",
-        "close",
-    ],
     ..DEFAULTS
 };

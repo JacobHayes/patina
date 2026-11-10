@@ -145,7 +145,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getpid],
-    symbols: &["getpid", "signal", "pthread_atfork"],
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],

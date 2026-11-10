@@ -67,7 +67,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &["execvp", "setenv", "mkdirat", "openat", "close"],
     gaps: &[Gap {
         status: Status::ByDesign,
         vehicles: &[Vehicle::Libc],

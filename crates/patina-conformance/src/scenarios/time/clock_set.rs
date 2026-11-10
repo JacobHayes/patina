@@ -121,7 +121,6 @@ pub fn run(p: &Probe) {
 pub const SCENARIO: Scenario = Scenario {
     name: "time/clock_set",
     run,
-    symbols: &["clock_settime"],
     covers: &[
         Syscall::N_settimeofday,
         Syscall::N_clock_settime,

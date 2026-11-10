@@ -88,7 +88,6 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: Vehicle::ALL,
     covers: &[Syscall::N_getpid, Syscall::N_kill, Syscall::N_rt_sigaction],
-    symbols: &["getpid", "kill", "sigaction", "syscall"],
     trace: Some(TraceFacts {
         // Each deferral case's kill and its handler's raise, then the
         // SA_RESETHAND pair.

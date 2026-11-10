@@ -172,20 +172,6 @@ pub const SCENARIO: Scenario = Scenario {
         #[cfg(target_arch = "x86_64")]
         Syscall::N_epoll_wait,
     ],
-    symbols: &[
-        "getpid",
-        "signalfd",
-        "getuid",
-        "read",
-        "fcntl",
-        "close",
-        "kill",
-        "epoll_create1",
-        "epoll_ctl",
-        "epoll_wait",
-        "sigaction",
-        "syscall",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(support::FIRST_RT),

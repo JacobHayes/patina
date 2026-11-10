@@ -150,13 +150,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_clock_getres,
         Syscall::N_nanosleep,
     ],
-    symbols: &[
-        "clock_gettime",
-        "__clock_gettime",
-        "clock_getres",
-        "nanosleep",
-        "time",
-        "gettimeofday",
-    ],
     ..DEFAULTS
 };

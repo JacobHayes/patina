@@ -208,15 +208,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_tgkill,
         Syscall::N_rt_sigaction,
     ],
-    symbols: &[
-        "getpid",
-        "getuid",
-        "gettid",
-        "tgkill",
-        "kill",
-        "sigaction",
-        "syscall",
-    ],
     trace: Some(TraceFacts {
         generations: &[
             Generation::process(SIGUSR1),

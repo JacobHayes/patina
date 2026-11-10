@@ -66,6 +66,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_getrandom],
-    symbols: &["getentropy"],
     ..DEFAULTS
 };

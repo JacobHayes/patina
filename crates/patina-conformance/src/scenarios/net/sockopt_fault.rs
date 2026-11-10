@@ -44,6 +44,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_setsockopt,
         Syscall::N_close,
     ],
-    symbols: &["socket", "getsockopt", "setsockopt", "close"],
     ..DEFAULTS
 };

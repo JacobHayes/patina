@@ -123,6 +123,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_wait4, Syscall::N_exit_group],
-    symbols: &["waitpid", "exit", "fputs", "stdout"],
     ..DEFAULTS
 };

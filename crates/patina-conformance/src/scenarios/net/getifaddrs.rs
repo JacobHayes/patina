@@ -144,6 +144,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_socket, Syscall::N_ioctl, Syscall::N_close],
-    symbols: &["getifaddrs", "freeifaddrs", "socket", "ioctl", "close"],
     ..DEFAULTS
 };

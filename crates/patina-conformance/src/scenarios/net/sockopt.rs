@@ -277,15 +277,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "socket",
-        "setsockopt",
-        "getsockopt",
-        "bind",
-        "getsockname",
-        "openat",
-        "close",
-    ],
     kernel_floor: Some(KernelFloor {
         release: "5.7",
         why: "an unprivileged SO_BINDTODEVICE on an unbound socket (net/core/sock.c sock_bindtoindex_locked)",

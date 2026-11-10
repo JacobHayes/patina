@@ -215,17 +215,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mknodat,
         Syscall::N_unlinkat,
     ],
-    symbols: &[
-        "getdents64",
-        #[cfg(target_arch = "x86_64")]
-        "syscall",
-        "openat",
-        "close",
-        "lseek",
-        "mkdirat",
-        "symlinkat",
-        "mknodat",
-        "unlinkat",
-    ],
     ..DEFAULTS
 };

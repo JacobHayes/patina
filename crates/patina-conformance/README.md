@@ -61,14 +61,11 @@ the harness sweeps every name a run derives from its directory after each
 native run (`owned::sweep`). A host kernel that implements an
 asserted-absent row is still an oracle: the native run answers that row with
 the declared ENOSYS (the probe binary's declared-absent mode) and patina is
-judged against it. `EXCLUSIONS` lists registry
-entries deliberately left without a scenario. `mise run conformance` runs the tests;
-`mise run conformance:coverage` lists every registry entry of this target that
-neither a scenario nor an exclusion accounts for, and exits 1 while any remain.
+judged against it. `mise run conformance` runs the tests.
 
 Adding a scenario: write `src/scenarios/<family>/<name>.rs` with its `run`
-function and `SCENARIO` declaration, list it in `catalog::SCENARIOS`, add its
-`#[test]` to `crates/cargo-patina/tests/native_conformance/native_conformance.rs`, run the test, and declare what patina
+function and `SCENARIO` declaration, list it in `catalog::SCENARIOS` (which generates its test), run the test,
+and declare what patina
 does differently as gaps naming the responsible code.
 
 The network scenarios (`net/*`, `readiness/*`) use the host's loopback stack

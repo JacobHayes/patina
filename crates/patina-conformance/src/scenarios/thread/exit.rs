@@ -242,11 +242,5 @@ pub const SCENARIO: Scenario = Scenario {
     run,
     vehicles: &[Vehicle::Libc],
     covers: &[Syscall::N_clone3, Syscall::N_exit],
-    symbols: &[
-        "pthread_create",
-        "pthread_join",
-        "pthread_exit",
-        "pthread_once",
-    ],
     ..DEFAULTS
 };

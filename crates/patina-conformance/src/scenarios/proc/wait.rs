@@ -116,6 +116,5 @@ pub const SCENARIO: Scenario = Scenario {
     name: "proc/wait",
     run,
     covers: &[Syscall::N_wait4, Syscall::N_waitid, Syscall::N_getpid],
-    symbols: &["waitid", "getpid"],
     ..DEFAULTS
 };

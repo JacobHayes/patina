@@ -180,14 +180,5 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_openat,
         Syscall::N_close,
     ],
-    symbols: &[
-        "sendmmsg",
-        "recvmmsg",
-        "socket",
-        "bind",
-        "getsockname",
-        "openat",
-        "close",
-    ],
     ..DEFAULTS
 };

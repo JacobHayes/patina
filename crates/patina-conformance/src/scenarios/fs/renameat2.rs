@@ -186,15 +186,6 @@ pub const SCENARIO: Scenario = Scenario {
         Syscall::N_mkdirat,
         Syscall::N_newfstatat,
     ],
-    symbols: &[
-        "renameat2",
-        "openat",
-        "read",
-        "write",
-        "close",
-        "mkdirat",
-        "fstatat",
-    ],
     needs: &[Need::Whiteouts],
     kernel_floor: Some(KernelFloor {
         release: "5.8",

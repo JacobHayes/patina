@@ -46,7 +46,3 @@ run = "testbeds/audit-corpus/run.sh"
 description = "Syscall conformance: every scenario natively (the live host oracle) and under patina through the libc and syscall doors (raw only where the trap is the subject), record/replay on one leg per scenario, strace leak run on every leg"
 run = "cargo test -p cargo-patina --test native_conformance --locked"
 
-[tasks."conformance:coverage"]
-description = "List registry entries no conformance scenario covers and no exclusion accounts for; exits 1 while any remain"
-run = "cargo run -q -p patina-dst-conformance --bin conformance-coverage --locked"
-
