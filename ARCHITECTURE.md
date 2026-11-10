@@ -459,9 +459,14 @@ lifecycle markers for crash restart).
   (`src/lifeline.rs`).
 - **One format version** (`TRACE_FORMAT_VERSION`); other versions are refused,
   never upgraded.
-- **Bounded:** over `MAX_TRACE_BYTES` or `MAX_TIMELINE_EVENTS`, the recorder
-  writes an abandoned-trace marker and reports `PATINA_INFRA trace=incomplete`;
-  the guest's verdict stands. Every other finalization failure fails the run.
+- **Bounded:** a trace is held whole by the recorder, the supervisor that
+  commits it and a replay, at about 256 bytes an event, so it is limited to
+  `MAX_TIMELINE_EVENTS` (4,000,000) and `MAX_TRACE_BYTES` (256 MiB). Past
+  either, the recorder drops what it holds, writes an abandoned-trace marker
+  and reports `PATINA_INFRA trace=incomplete`. Recording is write-only, so the
+  run goes on to the outcome it would have had unrecorded, and its result
+  carries `trace_incomplete` beside that class. Every other finalization
+  failure fails the run.
 
 ## Host-alias doctrine
 

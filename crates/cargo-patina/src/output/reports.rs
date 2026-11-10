@@ -52,6 +52,9 @@ pub struct RunReport<'a> {
     /// that exited clean would not validate) rather than the guest dying
     /// mid-record.
     pub trace_lost: Option<String>,
+    /// The recording this run was asked for was not written, and why. A fact
+    /// beside the run's class, which it never changes by itself.
+    pub trace_incomplete: Option<TraceIncomplete>,
     /// What the operator relaxed for this run, each one a reason its
     /// determinism is not guaranteed. Empty for an unqualified run.
     pub qualifications: Vec<Qualification>,
@@ -61,6 +64,18 @@ pub struct RunReport<'a> {
     /// The command that repeats this run, for a run that does not end clean:
     /// the replay of its recording when it kept one, else the `run` itself.
     pub reproduce: Option<String>,
+}
+
+/// Why a run's recording is not at the path it was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceIncomplete {
+    /// Machine-readable name: `resource_limit` (the recording outgrew the
+    /// trace budget and was dropped), `channel_unavailable` (its scratch
+    /// file could not be read or moved), `incomplete` (the guest ended before
+    /// the recording was finalized, or left one that does not load).
+    pub reason: &'static str,
+    /// What happened, for a reader.
+    pub detail: String,
 }
 
 /// One operator-accepted relaxation that qualifies a run's determinism.
@@ -105,6 +120,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         channel_defect: report.channel_defect.as_deref(),
         trace_lost: report.trace_lost.as_deref(),
         rust_program: report.rust_program,
+        trace_abandoned: report
+            .trace_incomplete
+            .as_ref()
+            .is_some_and(|trace| trace.reason == "resource_limit"),
     });
     let failed = outcome.class.is_failure();
     let guest_exit = GuestExit {
@@ -188,6 +207,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.coverage = report.coverage.clone();
         env.crash_restart = report.crash_restart.clone();
         env.qualifications = report.qualifications.clone();
+        env.trace_incomplete = report.trace_incomplete.clone();
         // Runtime-owned structured facts, lifted verbatim out of the run's own
         // `patina.runfacts` document.
         if let Some(facts) = &report.facts {

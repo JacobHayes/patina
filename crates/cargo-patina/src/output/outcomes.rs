@@ -208,6 +208,10 @@ pub(super) struct RunEvidence<'a> {
     /// Whether Rust's runtime starts the guest: a fact of the binary, read
     /// from its symbols.
     pub(super) rust_program: bool,
+    /// The recorder dropped the run's recording for outgrowing the trace
+    /// budget. Never a reason for a class: recording is write-only, so the
+    /// run is what it would have been unrecorded.
+    pub(super) trace_abandoned: bool,
 }
 
 /// Classify a finished run. Total: every run lands in exactly one
@@ -426,7 +430,8 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
         ),
         None => Outcome::ok(),
     };
-    outcome.trace_unusable = evidence.trace_lost.is_some() && outcome.class.is_failure();
+    outcome.trace_unusable =
+        (evidence.trace_lost.is_some() || evidence.trace_abandoned) && outcome.class.is_failure();
     outcome
 }
 

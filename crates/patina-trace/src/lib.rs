@@ -133,8 +133,21 @@ pub use stream::TraceStream;
 /// - 29: `compute_stop.task` may be null: the stop found the main thread of
 ///   a run that had no task yet. A format 28 reader has no such stop.
 pub const TRACE_FORMAT_VERSION: u32 = 29;
+/// The most a recorded trace may hold: 256 MiB serialized, and 4,000,000
+/// events in a timeline. A recording past either is abandoned
+/// ([`ABANDONED_TRACE_KEY`]) and the run goes on to its own outcome.
+///
+/// The bounds are on memory. A trace is held whole wherever it is used: by
+/// the recorder inside the guest, by the supervisor that stamps and commits
+/// it, and by a replay. An event in memory is about 256 bytes whatever it
+/// records, so the event limit is about 1 GiB in each of them, and the byte
+/// limit bounds what payloads add; at the 70 to 90 bytes a typical event
+/// takes serialized, it binds first, near three million events. That is
+/// several minutes of virtual time of a busy multi-task guest (a tokio broker
+/// under load records about twelve thousand a second), and holds the 2.3
+/// million clock reads of a loop stopped as poll churn.
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
-pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
+pub const MAX_TIMELINE_EVENTS: usize = 4_000_000;
 
 /// The sole top-level key of an *abandoned-trace marker*: the one-line JSON
 /// document a recorder writes into a trace channel INSTEAD of a bundle when it
@@ -179,6 +192,12 @@ pub fn abandoned_trace_marker(reason: &str, detail: &str) -> Vec<u8> {
     bytes.push(b'\n');
     bytes
 }
+
+/// The abandoned-trace marker of a recorder that had already outgrown its
+/// budget when the run was stopped from where nothing may allocate (the
+/// native compute observer): the same statement [`abandoned_trace_marker`]
+/// makes, as a constant.
+pub const ABANDONED_AT_STOP_MARKER: &[u8] = b"{\"patina_trace_abandoned\":{\"reason\":\"resource-limit\",\"detail\":\"trace resource limit exceeded: the recorder had abandoned the trace before the run was stopped\"}}\n";
 
 /// The machine-greppable line a supervisor classifies an abandoned trace on,
 /// newline terminated, carrying the figures when the budget is a byte one.

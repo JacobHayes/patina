@@ -71,6 +71,8 @@ pub struct Envelope {
     pub(crate) stop: Option<Stop>,
     /// The run's recording is unusable although its class is the guest's own.
     pub(crate) trace_unusable: bool,
+    /// The recording the run was asked for was not written, and why.
+    pub(super) trace_incomplete: Option<TraceIncomplete>,
     /// How the guest process ended (exit code, terminating signal).
     pub(super) guest_exit: Option<GuestExit>,
     /// `guest_exit` as a child run's own envelope reported it, for a verb that
@@ -109,6 +111,7 @@ impl Envelope {
             qualifications: Vec::new(),
             stop: None,
             trace_unusable: false,
+            trace_incomplete: None,
             guest_exit: None,
             guest_exit_raw: None,
             stdout: None,
@@ -239,6 +242,12 @@ impl Envelope {
         }
         if self.trace_unusable {
             m.insert("trace_unusable".into(), Value::from(true));
+        }
+        if let Some(v) = &self.trace_incomplete {
+            let mut tm = Map::new();
+            tm.insert("reason".into(), Value::from(v.reason));
+            tm.insert("detail".into(), Value::from(v.detail.clone()));
+            m.insert("trace_incomplete".into(), Value::Object(tm));
         }
         if let Some(v) = &self.guest_exit {
             let mut gm = Map::new();

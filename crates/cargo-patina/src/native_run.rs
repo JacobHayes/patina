@@ -688,6 +688,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The recording is lost for a reason of patina's own, as opposed to a
     // truncated trace a guest that died mid-record leaves behind.
     let mut trace_lost: Option<String> = None;
+    // The recording the run was asked for is not at its path, whatever the
+    // reason: a fact of the run beside its class.
+    let mut trace_incomplete: Option<output::TraceIncomplete> = None;
     if let Some(sink) = trace_sink {
         // The supervisor stamps the build identity as it commits the trace, so
         // a recording replays against its own build whatever the recorder
@@ -726,6 +729,10 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 } else if matches!(failure, TraceCommitFailure::Broken(_)) && guest_clean {
                     trace_lost = Some(failure.reason().to_string());
                 }
+                trace_incomplete = Some(output::TraceIncomplete {
+                    reason: failure.kind(),
+                    detail: failure.reason().to_string(),
+                });
                 trace_finalization_error = Some((path, failure.reason().to_string()));
             }
         }
@@ -863,6 +870,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             runtime_started,
             channel_defect,
             trace_lost,
+            trace_incomplete,
             qualifications,
             rust_program: crate::native_build::started_by_rust_runtime(image.bytes()),
             reproduce,

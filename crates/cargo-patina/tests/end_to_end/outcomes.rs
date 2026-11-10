@@ -392,3 +392,91 @@ fn a_request_patina_cannot_carry_out_is_an_error_not_a_finding() {
         assert_eq!(ran.status.code(), Some(2), "{target:?}");
     }
 }
+
+/// A guest whose recording outgrows the trace budget (200 MiB of custom-op
+/// results, more than 256 MiB once encoded) before it ends as its argument
+/// says: cleanly, or with an exit status of its own.
+const OVER_BUDGET_SOURCE: &str = r#"
+unsafe extern "C" {
+    fn patina_custom_op_begin(
+        label: *const u8,
+        label_len: usize,
+        key: *const u8,
+        key_len: usize,
+        fault_eligible: i32,
+        out_len: *mut usize,
+    ) -> i32;
+    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
+}
+
+fn main() {
+    let chunk = vec![255u8; 8 << 20];
+    for _ in 0..25 {
+        let mut length = 0;
+        let label = b"blob";
+        // SAFETY: live buffers of the lengths given.
+        unsafe {
+            assert_eq!(
+                patina_custom_op_begin(label.as_ptr(), label.len(), std::ptr::null(), 0, 0, &mut length),
+                0
+            );
+            assert_eq!(patina_custom_op_record(chunk.as_ptr(), chunk.len()), 0);
+        }
+    }
+    println!("OVER_BUDGET_DONE");
+    if std::env::args().nth(1).as_deref() == Some("exit") {
+        std::process::exit(3);
+    }
+}
+"#;
+
+/// A recording that outgrows its budget is dropped, and that is all: the run
+/// ends in the class, with the stop and the guest status, of the same run
+/// unrecorded, and its result says the recording was not written. RED when a
+/// dropped recording was reported only as a line of text.
+#[test]
+fn a_dropped_recording_leaves_the_runs_outcome_as_it_was() {
+    let guest = native_build::source_guest("over_budget", OVER_BUDGET_SOURCE);
+    let trace = guest.dir.path().join("over-budget.patina");
+    let run = |mode: &str, record: bool| -> serde_json::Value {
+        let mut arguments = vec!["--seed", "1", "--format", "json"];
+        if record {
+            arguments.extend(["--record", trace.to_str().unwrap()]);
+        }
+        arguments.extend(["--", mode]);
+        let output = guest.command("run", &arguments);
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "no result for {mode}: {error}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    };
+    let outcome = |result: &serde_json::Value| {
+        (
+            result["result"].clone(),
+            result.get("attribution").cloned(),
+            result["exit_code"].clone(),
+            result["guest_exit"].clone(),
+            result.get("stop").cloned(),
+            result["stdout"].clone(),
+        )
+    };
+    for (mode, class, exit) in [("ok", "ok", 0), ("exit", "failure", 1)] {
+        let plain = run(mode, false);
+        assert_eq!(
+            (&plain["result"], &plain["exit_code"]),
+            (&class.into(), &exit.into()),
+            "{plain:#}"
+        );
+        assert!(plain.get("trace_incomplete").is_none(), "{plain:#}");
+        let recorded = run(mode, true);
+        assert_eq!(outcome(&recorded), outcome(&plain), "{recorded:#}");
+        assert_eq!(
+            recorded["trace_incomplete"]["reason"], "resource_limit",
+            "{recorded:#}"
+        );
+        assert!(recorded.get("trace").is_none(), "{recorded:#}");
+        assert!(!trace.exists(), "a dropped recording leaves no file");
+    }
+}

@@ -537,17 +537,18 @@ impl Context {
             return RuntimeError::ComputeStopState;
         }
         // steps counts an operation at begin, before custom perform has an
-        // outcome. Only recorder decisions form a replayable prefix. Refuse an
-        // overflowed recorder BEFORE any serializer or boxed I/O error path.
-        let steps = match &self.execution {
-            Execution::Record { recorder, .. } => match recorder.committed_prefix_len() {
-                Some(steps) => steps,
-                None => return RuntimeError::ComputeStopOverflow,
-            },
-            _ => self.compute_stop.map_or(self.steps, |stop| stop.steps),
+        // outcome. Only recorder decisions form a replayable prefix. A
+        // recorder that already abandoned its trace has none: the run stops
+        // the same way, under the same class, and its trace is reported lost.
+        let prefix = match &self.execution {
+            Execution::Record { recorder, .. } => recorder.committed_prefix_len(),
+            _ => Some(self.compute_stop.map_or(self.steps, |stop| stop.steps)),
         };
+        let steps = prefix.unwrap_or(self.steps);
         let stop = patina_dst_trace::ComputeStop { steps, task };
-        if let Execution::Record { recorder, .. } = &mut self.execution {
+        if prefix.is_some()
+            && let Execution::Record { recorder, .. } = &mut self.execution
+        {
             recorder.set_compute_stop(stop);
         }
         self.compute_stop = Some(stop);
@@ -578,7 +579,14 @@ impl Context {
             } = &mut self.execution
         {
             self.recording_flushed = true;
-            if transport.write_prefix(recorder).is_err() {
+            let exported = match prefix {
+                Some(_) => transport.write_prefix(recorder),
+                // The marker a reader takes for "abandoned", not for the
+                // empty file of a recorder that died: a constant, since
+                // nothing here may allocate.
+                None => transport.write_bundle(patina_dst_trace::ABANDONED_AT_STOP_MARKER),
+            };
+            if exported.is_err() {
                 return RuntimeError::ComputeStopExport;
             }
         }

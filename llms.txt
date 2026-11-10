@@ -396,6 +396,13 @@ fire", never zero.
   without saying so. The guest cannot write either channel.
 - `trace_unusable` — `true` when the class is the guest's own while the run's
   recording was lost.
+- `trace_incomplete` = `{reason, detail}` — the recording `--record` asked for
+  was not written. `reason` is `resource_limit` (the recording outgrew the
+  trace budget, 4,000,000 events or 256 MiB, and was dropped),
+  `channel_unavailable` (its scratch file could not be read or moved) or
+  `incomplete` (the guest ended before the recording was finalized). A fact
+  beside `result`, which a dropped recording never changes: the same run
+  without `--record` has the same class.
 - `qualifications[]` = `{kind, detail}` — what the operator relaxed for a
   native run, each a reason its determinism is not guaranteed:
   `randomized_address_layout` (`--allow-randomized-address-layout`) and

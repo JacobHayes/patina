@@ -82,7 +82,8 @@ spins that hold the guest allocator with scalar-only, byte-bearing,
 and overflowed recordings. They detect allocating or deallocating during stop
 export, including base64 helpers and overflow-error construction. `overflow-held`
 uses 25 eight-MiB results to exceed the real base64-encoded trace budget and must
-report a named infrastructure refusal without inventing a replayable prefix.
+stop under the class the unrecorded run stops under, its recording reported
+lost, without inventing a replayable prefix.
 `custom-spin` stops inside an open custom perform; replay must stop at the
 committed prefix before requesting its missing outcome. `handler-loop` and
 `handler-alloc` prove SIGABRT registration, then install hostile behavior which

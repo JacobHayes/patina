@@ -154,19 +154,25 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
             target.render()
         )));
     }
-    let recorded_bundle = TraceBundle::load(&recorded_trace).map_err(|error| {
-        CliError(format!(
-            "failed to load the trace recorded from the reduced knobs: {error}"
-        ))
-    })?;
-    recorded_bundle
-        .write_atomic(&output_path)
-        .map_err(|error| {
+    // A run that reproduced and left no trace had its recording dropped (it
+    // outgrew the trace budget) or lost: the reduction stands, and its
+    // command is the reproduction. Only the flag-free replay is missing.
+    let recorded = recorded_trace.exists();
+    if recorded {
+        let recorded_bundle = TraceBundle::load(&recorded_trace).map_err(|error| {
             CliError(format!(
-                "failed to write {}: {error}",
-                output_path.display()
+                "failed to load the trace recorded from the reduced knobs: {error}"
             ))
         })?;
+        recorded_bundle
+            .write_atomic(&output_path)
+            .map_err(|error| {
+                CliError(format!(
+                    "failed to write {}: {error}",
+                    output_path.display()
+                ))
+            })?;
+    }
 
     let detail = format!(
         "generation={} target={} knobs_before={} knobs_after={} knob_runs={knob_runs} \
@@ -176,8 +182,19 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
         knobs.len(),
         minimal.len(),
         repro_path.display(),
-        output_path.display(),
+        if recorded {
+            output_path.display().to_string()
+        } else {
+            "none".to_owned()
+        },
     );
+    if !recorded {
+        eprintln!(
+            "patina: the reduced run reproduced the failure but its recording was not kept, so \
+             no trace was written; `patina run --record` with the command below reports why \
+             (`trace_incomplete`)"
+        );
+    }
     if output::options().is_json() {
         output::emit_simple(
             "minimize",

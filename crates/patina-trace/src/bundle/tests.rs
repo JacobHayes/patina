@@ -64,11 +64,39 @@ fn save_paths_refuse_an_over_budget_trace_classifiably_and_write_nothing() {
         "a save-time refusal must leave neither a trace nor a temporary file"
     );
 
-    let mut oversized =
-        TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
-    oversized.timelines[0].decisions =
-        vec![TraceEvent::new(0, operation(), Outcome::U64(0)); MAX_TIMELINE_EVENTS + 1];
-    let error = oversized.validate().unwrap_err();
+    // A timeline one event over the limit, by its count alone: holding that
+    // many events is the cost the limit exists to bound.
+    struct Oversized<'a>(&'a Timeline);
+    impl TimelineShape for Oversized<'_> {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn parent(&self) -> Option<&str> {
+            self.0.parent()
+        }
+        fn branch_sequence(&self) -> Option<u64> {
+            self.0.branch_sequence()
+        }
+        fn branch_seed(&self) -> Option<u64> {
+            self.0.branch_seed()
+        }
+        fn lifecycle(&self) -> &[LifecycleEvent] {
+            self.0.lifecycle()
+        }
+        fn decision_count(&self) -> usize {
+            MAX_TIMELINE_EVENTS + 1
+        }
+        fn marks(&self) -> impl Iterator<Item = Mark> + '_ {
+            self.0.marks()
+        }
+    }
+    let bundle = TraceBundle::new(RunMetadata::new(7, "fingerprint", 0, "patina"), Vec::new());
+    let error = validate_shape(
+        bundle.format_version,
+        &bundle.metadata,
+        &[Oversized(&bundle.timelines[0])],
+    )
+    .unwrap_err();
     assert!(error.is_resource_limit(), "unexpected error: {error}");
     assert_eq!(
         error.resource_limit_bytes(),

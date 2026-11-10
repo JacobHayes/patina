@@ -286,9 +286,9 @@ pub(crate) unsafe fn sud_host_syscall(
 
 pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
     match error {
-        RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopOverflow
-        | RuntimeError::ComputeStopState => watchdog::report_and_abort(error, None, None),
+        RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => {
+            watchdog::report_and_abort(error, None, None)
+        }
         // The run's crash point was reached and the crash could not be
         // carried out. That is patina's failure: an errno would hand the
         // guest a fault it never had and let the run go on without its crash.
@@ -348,9 +348,7 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         // timeline. Name it and stop, as a refused custom operation does.
         RuntimeError::TimeModel { .. } => line(format!("patina: {error}\n")),
         RuntimeError::ComputeBound { .. } => watchdog::report_synchronous(error),
-        RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopOverflow
-        | RuntimeError::ComputeStopState => watchdog::report(error),
+        RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => watchdog::report(error),
         RuntimeError::InjectedCrash(_) => {}
         // Mid-run, [`runtime_errno`] refuses this before it gets here; at
         // shutdown it is only named, and the supervisor reads the crash
@@ -393,9 +391,9 @@ pub(crate) fn run_stop_class(error: &RuntimeError) -> Option<(RunClass, &'static
         RuntimeError::CustomOp { .. } => Some((RunClass::Violation, "custom_op")),
         RuntimeError::TimeModel { .. } => Some((RunClass::Nondeterministic, "replay_divergence")),
         RuntimeError::ComputeBound { .. } => Some((RunClass::Timeout, "compute_bound")),
-        RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopOverflow
-        | RuntimeError::ComputeStopState => Some((RunClass::Internal, "compute_stop")),
+        RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => {
+            Some((RunClass::Internal, "compute_stop"))
+        }
         RuntimeError::CrashFailed { .. } => Some((RunClass::Internal, "crash_failed")),
         RuntimeError::InjectedCrash(_)
         | RuntimeError::Effect(_)
@@ -812,9 +810,9 @@ pub(crate) fn with_context_msg<T>(
                 ],
             ))
         }
-        RuntimeError::ComputeStopExport
-        | RuntimeError::ComputeStopOverflow
-        | RuntimeError::ComputeStopState => watchdog::report_and_abort(&error, None, None),
+        RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => {
+            watchdog::report_and_abort(&error, None, None)
+        }
         // Any other error that ends the run (the step budget, a liveness
         // stop) ends it here under its own class, with the line the caller's
         // fatal would have printed: carried on as a string it could only be

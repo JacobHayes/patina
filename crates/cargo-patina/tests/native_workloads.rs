@@ -293,33 +293,50 @@ fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
     let g = Guest::assert_build("compute_watchdog.rs");
     g.assert_audit_clean();
     let trace = g.dir.path().join("overflow.patina");
-    let output = common::output_by_deadline(
-        Command::new(env!("CARGO_BIN_EXE_patina"))
+    let run = |record: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
+        command
             .arg("run")
             .arg(&g.binary)
-            .args(["--seed", "7", "--compute-watchdog-ms", "25", "--record"])
-            .arg(&trace)
-            .args(["--format", "json", "--", "overflow-held"]),
-        Duration::from_secs(60),
-    );
-    let common::Deadlined::Finished(output) = output else {
-        panic!("overflowed terminal export hung with the guest allocator held");
+            .args(["--seed", "7", "--compute-watchdog-ms", "25"]);
+        if record {
+            command.arg("--record").arg(&trace);
+        }
+        command.args(["--format", "json", "--", "overflow-held"]);
+        let common::Deadlined::Finished(output) =
+            common::output_by_deadline(&mut command, Duration::from_secs(60))
+        else {
+            panic!("overflowed terminal export hung with the guest allocator held");
+        };
+        assert!(!output.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            recorded_hazard(result["stderr"].as_str().unwrap(), "overflow-held"),
+            "{result:#}"
+        );
+        result
     };
-    assert!(!output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["result"], "internal", "{result:#}");
-    assert_eq!(result["guest_exit"]["signal_name"], "SIGABRT", "{result:#}");
-    assert!(
-        recorded_hazard(result["stderr"].as_str().unwrap(), "overflow-held"),
-        "{result:#}"
+    // The recorder had dropped its trace before the stop. The stop is the
+    // same stop, under the same class as the run that was never recorded:
+    // the recording is what is lost, and the result says so.
+    let outcome = |result: &serde_json::Value| {
+        (
+            result["result"].clone(),
+            result["exit_code"].clone(),
+            result["guest_exit"]["signal_name"].clone(),
+            result["stop"]["reason"].clone(),
+        )
+    };
+    let plain = run(false);
+    assert_eq!(plain["result"], "timeout", "{plain:#}");
+    assert!(plain.get("trace_incomplete").is_none(), "{plain:#}");
+    let recorded = run(true);
+    assert_eq!(outcome(&recorded), outcome(&plain), "{recorded:#}");
+    assert_eq!(
+        recorded["trace_incomplete"]["reason"], "resource_limit",
+        "{recorded:#}"
     );
-    assert!(
-        result["stderr"]
-            .as_str()
-            .unwrap()
-            .contains("reason=trace-overflow"),
-        "{result:#}"
-    );
+    assert!(recorded.get("trace").is_none(), "{recorded:#}");
     assert!(
         patina_dst_trace::TraceBundle::load(&trace).is_err(),
         "an abandoned recorder must not manufacture a replayable empty prefix"
@@ -404,14 +421,9 @@ fn specialized_hazard(mode: &str) -> bool {
     )
 }
 fn recorded_hazard(stderr: &str, mode: &str) -> bool {
-    let terminal = if mode == "overflow-held" {
-        "PATINA_INFRA compute_stop_export_failed reason=trace-overflow"
-    } else {
-        "PATINA_VIOLATION liveness "
-    };
     stderr
         .find(&format!("PATINA_LIFECYCLE_EVENT label=watchdog.{mode}\n"))
-        .zip(stderr.find(terminal))
+        .zip(stderr.find("PATINA_VIOLATION liveness "))
         .is_some_and(|(receipt, stop)| receipt < stop)
 }
 

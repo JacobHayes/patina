@@ -497,6 +497,8 @@ fn join_recorded_incarnations(
     let Ok(restarted_bundle) = TraceBundle::from_slice(&restarted) else {
         return Ok(restarted);
     };
+    // Each incarnation's trace fit the budget; the two together may not, in
+    // events or in bytes. That costs the run its trace, never its outcome.
     let joined = CrashRestartSegments {
         crashed: crashed_bundle,
         kind: handoff.kind,
@@ -504,15 +506,15 @@ fn join_recorded_incarnations(
         restarted: restarted_bundle,
     }
     .join()
-    .map_err(|error| CliError(format!("failed to join the crash-restart trace: {error}")))?;
-    match joined.to_bytes() {
+    .and_then(|joined| joined.to_bytes());
+    match joined {
         Ok(bytes) => Ok(bytes),
         Err(error) if error.is_resource_limit() => {
             append_supervisor_line(captured, resource_limit_infra_line(&error).trim_end());
             Ok(abandoned_trace_marker("resource-limit", &error.to_string()))
         }
         Err(error) => Err(CliError(format!(
-            "failed to encode the crash-restart trace: {error}"
+            "failed to join the crash-restart trace: {error}"
         ))),
     }
 }

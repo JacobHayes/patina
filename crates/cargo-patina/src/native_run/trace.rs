@@ -15,10 +15,10 @@ pub(crate) const TRACE_CHANNEL_UNAVAILABLE: &str = "patina: recorded trace chann
 pub(super) enum TraceCommitFailure {
     /// The recorder deliberately abandoned the trace and left an
     /// abandoned-trace marker naming why (today: the run outgrew
-    /// `MAX_TRACE_BYTES`). It writes that marker only from finalization, which
-    /// runs after the guest has already exited, so the run's verdict is final
-    /// and stands on its own — only the replay artifact is lost. The run is
-    /// reported, not failed.
+    /// `MAX_TRACE_BYTES` or `MAX_TIMELINE_EVENTS`). Recording is write-only,
+    /// so the run's outcome is what it would have been unrecorded and stands
+    /// on its own; only the replay artifact is lost. The run is reported,
+    /// not failed.
     Abandoned(String),
     /// The trace CHANNEL failed: the recorder's own scratch file could not be
     /// opened, read, or renamed — it vanished under the run, its directory did,
@@ -38,6 +38,15 @@ impl TraceCommitFailure {
     pub(crate) fn reason(&self) -> &str {
         match self {
             Self::Abandoned(reason) | Self::Broken(reason) | Self::Unavailable(reason) => reason,
+        }
+    }
+
+    /// The stable token a result names this failure by (`trace_incomplete`).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Abandoned(_) => "resource_limit",
+            Self::Unavailable(_) => "channel_unavailable",
+            Self::Broken(_) => "incomplete",
         }
     }
 }

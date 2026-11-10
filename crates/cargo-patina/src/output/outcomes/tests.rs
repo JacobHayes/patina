@@ -223,18 +223,31 @@ fn cases() -> Vec<Case> {
 #[test]
 fn every_way_a_run_ends_lands_in_one_class() {
     for case in cases() {
-        let outcome = classify(&RunEvidence {
-            exit_code: case.exit_code,
-            signal: case.signal,
-            facts: case.facts.as_ref(),
-            crash_replay_diverged: case.crash_replay_diverged,
-            crash_failed: case.crash_failed,
-            runtime_started: case.runtime_started,
-            channel_defect: case.channel_defect,
-            trace_lost: case.trace_lost,
-            rust_program: false,
-        });
+        let classified = |trace_abandoned| {
+            classify(&RunEvidence {
+                exit_code: case.exit_code,
+                signal: case.signal,
+                facts: case.facts.as_ref(),
+                crash_replay_diverged: case.crash_replay_diverged,
+                crash_failed: case.crash_failed,
+                runtime_started: case.runtime_started,
+                channel_defect: case.channel_defect,
+                trace_lost: case.trace_lost,
+                rust_program: false,
+                trace_abandoned,
+            })
+        };
+        let outcome = classified(false);
         assert_eq!(outcome.class, case.class, "{}", case.name);
+        // A recording dropped for outgrowing its budget changes nothing about
+        // how the run ended: the class and what stopped it are the same.
+        let dropped = classified(true);
+        assert_eq!(
+            (dropped.class, &dropped.stop),
+            (outcome.class, &outcome.stop),
+            "{}",
+            case.name
+        );
         // A run that did not end clean always says what stopped it.
         assert_eq!(
             outcome.stop.is_some(),
@@ -257,11 +270,11 @@ fn every_way_a_run_ends_lands_in_one_class() {
     }
 }
 
-/// A recording lost under a guest that failed on its own leaves the finding
-/// standing and says its trace is gone.
+/// A recording lost or dropped under a guest that failed on its own leaves
+/// the finding standing and says its trace is gone.
 #[test]
 fn a_lost_recording_marks_the_guests_own_failure_unreplayable() {
-    let failed_guest = |trace_lost| {
+    let failed_guest = |trace_lost, trace_abandoned| {
         classify(&RunEvidence {
             exit_code: 3,
             signal: None,
@@ -272,8 +285,10 @@ fn a_lost_recording_marks_the_guests_own_failure_unreplayable() {
             channel_defect: None,
             trace_lost,
             rust_program: false,
+            trace_abandoned,
         })
     };
-    assert!(failed_guest(Some("gone")).trace_unusable);
-    assert!(!failed_guest(None).trace_unusable);
+    assert!(failed_guest(Some("gone"), false).trace_unusable);
+    assert!(failed_guest(None, true).trace_unusable);
+    assert!(!failed_guest(None, false).trace_unusable);
 }

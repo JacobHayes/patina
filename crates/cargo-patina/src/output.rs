@@ -49,6 +49,7 @@ pub use reports::CoverageReport;
 pub use reports::Qualification;
 pub use reports::RunReport;
 pub(crate) use reports::TraceFacts;
+pub use reports::TraceIncomplete;
 pub use reports::finalize_run;
 
 /// The stable schema identifier stamped into every JSON envelope. Bump the

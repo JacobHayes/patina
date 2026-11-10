@@ -3,8 +3,8 @@
 use super::*;
 use crate::tests::operation;
 use crate::{
-    ComputeStop, LifecycleEventKind, MAX_TRACE_BYTES, RunMetadata, TraceBundle, TraceEvent,
-    abandoned_trace_marker, parse_abandoned_trace_marker, resource_limit_infra_line,
+    ComputeStop, LifecycleEventKind, MAX_TRACE_BYTES, RunMetadata, TraceBundle, TraceError,
+    TraceEvent, abandoned_trace_marker, parse_abandoned_trace_marker, resource_limit_infra_line,
 };
 use patina_dst_abi::{Outcome, TaskId};
 use std::fs;
@@ -187,6 +187,18 @@ fn an_over_budget_recording_stops_holding_events_and_still_refuses() {
     assert!(resource_limit_infra_line(&error).starts_with(&format!(
         "PATINA_INFRA trace=incomplete reason=resource-limit bytes={held} limit={limit}"
     )));
+    // The constant a stop writes where nothing may allocate is the same
+    // statement: a marker with the same reason, never a bundle.
+    assert_eq!(
+        parse_abandoned_trace_marker(crate::ABANDONED_AT_STOP_MARKER)
+            .unwrap()
+            .reason,
+        "resource-limit"
+    );
+    assert!(matches!(
+        TraceBundle::from_slice(crate::ABANDONED_AT_STOP_MARKER),
+        Err(TraceError::Incomplete { .. })
+    ));
 }
 
 /// The other half of the bargain: a recording that FITS its budget is

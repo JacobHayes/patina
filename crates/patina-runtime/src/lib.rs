@@ -790,8 +790,6 @@ pub enum RuntimeError {
     /// The asynchronous stop could not export its evidence. No heap-owned
     /// diagnostic: an interrupted allocator may be unavailable.
     ComputeStopExport,
-    /// Recording was already abandoned; no terminal prefix may be fabricated.
-    ComputeStopOverflow,
     /// Terminal metadata disagrees with the strictly replayed scheduler state.
     ComputeStopState,
 }
@@ -835,8 +833,7 @@ impl RuntimeError {
             | Self::InvalidOutcome { .. }
             | Self::PollChurn { .. }
             | Self::ComputeBound { .. }
-            | Self::ComputeStopExport
-            | Self::ComputeStopOverflow => None,
+            | Self::ComputeStopExport => None,
         }
     }
 }
@@ -879,9 +876,6 @@ impl fmt::Display for RuntimeError {
             }
             Self::TimeModel { detail } => write!(f, "Patina time-model divergence: {detail}"),
             Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),
-            Self::ComputeStopOverflow => {
-                f.write_str("PATINA_INFRA compute_stop_export_failed reason=trace-overflow")
-            }
             Self::ComputeStopState => {
                 f.write_str("PATINA_INFRA compute_stop_invalid_scheduler_state")
             }

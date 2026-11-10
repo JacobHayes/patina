@@ -44,7 +44,7 @@ Reproduce a recorded run with `patina replay`.",
                     "--record",
                     None,
                     Value::Required("PATH", Kind::Path),
-                    "Record boundary operations and outcomes to PATH.",
+                    "Record boundary operations and outcomes to PATH. A recording that outgrows the trace budget (4000000 events or 256 MiB) is dropped: the result says so (trace_incomplete) and the run's outcome is unchanged.",
                     false,
                 ),
                 f(
