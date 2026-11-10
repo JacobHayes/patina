@@ -7,11 +7,11 @@ Start with the [README](../README.md) and the [tutorial](../TUTORIAL.md);
 
 ## Installing
 
-`install.sh` takes `--version 0.1.0` to choose a release and `--prefix DIR` to
+`install.sh` takes `--version 0.2.0` to choose a release and `--prefix DIR` to
 install `DIR/bin/patina`:
 
 ```sh
-curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.1.0
+curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.2.0
 ```
 
 The binary carries everything it links into a guest, as source it compiles with
@@ -29,21 +29,21 @@ A project takes the SDK from the same release as the tool:
 ```toml
 # Cargo.toml
 [dev-dependencies]
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.2.0", features = ["macros"] }
 ```
 
 ```sh
-go get github.com/JacobHayes/patina/go/patina@v0.1.0    # Go
+go get github.com/JacobHayes/patina/go/patina@v0.2.0    # Go
 ```
 
-The tool and the SDK must share a release line (`0.1.x` with `0.1.x`); a
+The tool and the SDK must share a release line (`0.2.x` with `0.2.x`); a
 package build that finds another names both and how to match them. Python
 guests need no dependency: the tool carries the `patina` module.
 
 In CI, install the tool before the tests. For GitHub Actions:
 
 ```yaml
-- run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.1.0
+- run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.2.0
 - run: cargo test    # #[patina_dst::test] finds patina on PATH
 ```
 
@@ -54,7 +54,7 @@ randomization off for every guest. Run the container with
 `--allow-randomized-address-layout` for qualified determinism.
 
 On another platform, or to build it yourself:
-`cargo install --locked --git https://github.com/JacobHayes/patina --tag v0.1.0 cargo-patina`.
+`cargo install --locked --git https://github.com/JacobHayes/patina --tag v0.2.0 cargo-patina`.
 
 ## The commands
 

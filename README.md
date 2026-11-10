@@ -43,7 +43,7 @@ cargo new --lib jobs && cd jobs
 ```toml
 # Cargo.toml
 [dev-dependencies]
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.1.0", features = ["macros"] }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.2.0", features = ["macros"] }
 ```
 
 Use the tag of the tool you installed (`patina --version`): the tool and the
