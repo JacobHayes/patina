@@ -45,14 +45,19 @@ pub(crate) mod request {
 
 #[cfg(target_os = "macos")]
 pub(crate) mod request {
+    #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
     pub(crate) const FIONREAD: u64 = 0x4004_667F;
+    #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
     pub(crate) const FIONBIO: u64 = 0x8004_667E;
+    #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
     pub(crate) const FIONCLEX: u64 = 0x2000_6602;
+    #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
     pub(crate) const FIOCLEX: u64 = 0x2000_6601;
 }
 
 use request::{FIOCLEX, FIONBIO, FIONCLEX, FIONREAD};
 
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 const ENOTTY: c_int = 25;
 
 /// `SIOCATMARK` (`asm-generic/sockios.h`).
@@ -61,6 +66,7 @@ const SIOCATMARK: u64 = 0x8905;
 
 /// Write an `int` answer through the guest's argument (`EFAULT` for memory
 /// that cannot take it).
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn put_int(arg: *mut c_void, value: i32) -> c_int {
     match uaccess::write(arg as usize, &value) {
         Ok(()) => {
@@ -75,6 +81,7 @@ fn put_int(arg: *mut c_void, value: i32) -> c_int {
 /// truncated to an `int` exactly as `put_user` into an `int *` does. The
 /// kernel reads both from memory (`i_size`, `f_pos`), so the size is the
 /// never-faulted lookup: no filesystem fault can fail the request.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn file_fionread(handle: Fd, arg: *mut c_void) -> c_int {
     let queued = with_context(|context| {
         let size = context.fs_fd_metadata_unrecorded(handle)?.len;
@@ -87,13 +94,13 @@ fn file_fionread(handle: Fd, arg: *mut c_void) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `ioctl(fd, request, arg)`.
 ///
 /// # Safety
 /// `arg`, when the request reads or writes through it and it is non-null,
 /// must point to the guest's `int`.
-pub unsafe extern "C" fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_void) -> c_int {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // The kernel reads the request as an `unsigned int`: the C `ioctl`'s
     // `unsigned long` (a sign-extended `int` request among them) loses its
@@ -438,6 +445,7 @@ mod vfs {
 /// `ENOTTY` (`vfs_ioctl`). On Darwin `random_ioctl` is `ENOTTY`; what
 /// `mmioctl` answers for `/dev/null` and `/dev/zero` is not read live, so
 /// such a request stops by name.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn mem_device_ioctl(handle: u64, request: u64) -> c_int {
     let device = crate::memdev::MemDevice::of_handle(handle);
     if !device.draws_entropy() {

@@ -33,8 +33,8 @@ const FRAME_MASK: u8 = 1;
 
 static RESTORER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_signal_restorer(restorer: usize) {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub fn patina_signal_restorer(restorer: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     RESTORER.store(restorer, Ordering::Relaxed);
 }

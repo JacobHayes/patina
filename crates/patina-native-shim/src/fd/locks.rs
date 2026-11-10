@@ -195,7 +195,6 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
     Ok((start as u64, end as u64))
 }
 
-#[unsafe(no_mangle)]
 /// `fcntl(2)`'s record locks, both doors: `F_GETLK`/`F_SETLK`/`F_SETLKW`
 /// (POSIX locks, owned by the process) and `F_OFD_GETLK`/`F_OFD_SETLK`/
 /// `F_OFD_SETLKW` (owned by the open file description), in `fs/locks.c`'s
@@ -211,11 +210,7 @@ fn lock_range(resolved: &Resolved, lock: &PatinaFlock) -> Result<(u64, u64), c_i
 /// # Safety
 /// `lock` must be null or point to a writable `struct patina_flock`, at any
 /// alignment.
-pub unsafe extern "C" fn patina_record_lock(
-    raw_fd: c_int,
-    command: u32,
-    lock: *mut PatinaFlock,
-) -> c_int {
+pub unsafe fn patina_record_lock(raw_fd: c_int, command: u32, lock: *mut PatinaFlock) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     use thread::locks::{Lock, Owner, Type};
     if !matches!(

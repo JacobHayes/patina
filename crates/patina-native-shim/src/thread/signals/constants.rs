@@ -29,7 +29,9 @@ pub(in crate::thread) const SIG_SETMASK: i32 = 2;
 pub(in crate::thread) const SS_DISABLE: i32 = 2;
 pub(in crate::thread) const SA_RESTART: u64 = 0x1000_0000;
 pub(in crate::thread) const SA_RESETHAND: u64 = 0x8000_0000;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(in crate::thread) const GLIBC_SIGCANCEL: i32 = 32;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(in crate::thread) const GLIBC_SIGSETXID: i32 = 33;
 pub(in crate::thread) const EAGAIN: i32 = 11;
 pub(in crate::thread) const EFAULT: i32 = 14;

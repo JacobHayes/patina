@@ -15,10 +15,10 @@
 use super::*;
 use std::cell::RefCell;
 
-#[unsafe(no_mangle)]
 /// Called at the boundary return, not at generation. No lock survives a host
 /// unblock: handlers can re-enter either door and acquire the runtime normally.
-pub extern "C" fn patina_signal_deliver() {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub fn patina_signal_deliver() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     deliver();
 }

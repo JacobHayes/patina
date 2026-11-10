@@ -24,8 +24,8 @@
 //! it, plus an arrival count for edge-triggered interest. Nothing here reads
 //! host network state.
 
-// Darwin's bare prefixed-ABI archive reaches this model only through
-// `patina_sock_socketpair`/`patina_sock_sendto`; see the merge report.
+// Only the Darwin doors reach this model on macOS, and the library flavour
+// compiles none.
 #![cfg_attr(not(any(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -639,13 +639,8 @@ pub(crate) fn socketpair(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_socketpair(
-    family: c_int,
-    ty: c_int,
-    protocol: c_int,
-    sv: usize,
-) -> i64 {
+#[cfg(test)]
+pub fn patina_sock_socketpair(family: c_int, ty: c_int, protocol: c_int, sv: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abi::raw(socketpair(family, ty, protocol, sv))
 }
@@ -904,8 +899,8 @@ pub(crate) fn sendto(
     .map_err(crate::abi::Errno::new)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_sock_sendto(
+#[cfg(test)]
+pub fn patina_sock_sendto(
     fd: c_int,
     buf: usize,
     len: usize,

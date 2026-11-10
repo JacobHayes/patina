@@ -19,11 +19,10 @@ pub(crate) fn dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> crate::abi
     }
 }
 
-#[unsafe(no_mangle)]
 /// `fcntl(F_DUPFD)` / `F_DUPFD_CLOEXEC`: the lowest free number at or above
 /// `minimum`. `EINVAL` for a minimum outside the table, `EMFILE` when nothing
 /// at or above it is free.
-pub extern "C" fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
+pub fn patina_dupfd(raw_fd: c_int, minimum: c_int, cloexec: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     dupfd(raw_fd, minimum, cloexec).unwrap_or(-1)
 }

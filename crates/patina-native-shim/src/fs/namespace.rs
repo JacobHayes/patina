@@ -84,7 +84,6 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
     }
 }
 
-#[unsafe(no_mangle)]
 /// Create a named pipe (`mkfifo`/`mkfifoat`, and `mknod`/`mknodat` with
 /// `S_IFIFO`) at the caller's requested `mode` under the process umask. Only
 /// the NAME is filesystem state, so this is one recorded boundary operation
@@ -93,7 +92,7 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-pub unsafe extern "C" fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+pub unsafe fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
@@ -119,7 +118,6 @@ const S_IFBLK: u32 = 0o060000;
 const S_IFREG: u32 = 0o100000;
 const S_IFSOCK: u32 = 0o140000;
 
-#[unsafe(no_mangle)]
 /// `mknod(2)`/`mknodat(2)`, in the kernel's order of refusals (Linux
 /// `do_mknodat`): the type first (`may_mknod`: a directory is `EPERM`, an
 /// unknown type `EINVAL`), then the name (`ENOENT` for a missing parent,
@@ -134,12 +132,7 @@ const S_IFSOCK: u32 = 0o140000;
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-pub unsafe extern "C" fn patina_mknod(
-    dirfd: c_int,
-    path: *const c_char,
-    mode: u32,
-    dev: u32,
-) -> c_int {
+pub unsafe fn patina_mknod(dirfd: c_int, path: *const c_char, mode: u32, dev: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let kind = mode & S_IFMT;
     if cfg!(target_os = "macos") && kind != S_IFIFO {
@@ -410,14 +403,13 @@ pub unsafe extern "C" fn patina_renameat2(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Create a deterministic symbolic link (`symlink`/`symlinkat`). Only the LINK
 /// side resolves — `target` is the link's literal contents, stored verbatim —
 /// and an empty target is `ENOENT`, as `symlink(2)` answers.
 ///
 /// # Safety
 /// `target` and `link_path` must point to valid NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn patina_symlink(
+pub unsafe fn patina_symlink(
     target: *const c_char,
     dirfd: c_int,
     link_path: *const c_char,
@@ -444,7 +436,6 @@ pub unsafe extern "C" fn patina_symlink(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Create a deterministic hard link (`link`/`linkat`). The driver shares one
 /// inode between `from` and `to`, or duplicates the symlink entry when `from`
 /// is itself a symlink — the POSIX "hard link the symlink itself" behavior of
@@ -453,7 +444,7 @@ pub unsafe extern "C" fn patina_symlink(
 ///
 /// # Safety
 /// `from` and `to` must point to valid NUL-terminated UTF-8 strings.
-pub unsafe extern "C" fn patina_link(
+pub unsafe fn patina_link(
     fromfd: c_int,
     from: *const c_char,
     tofd: c_int,
@@ -815,10 +806,9 @@ pub extern "C" fn patina_fchdir(raw_fd: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `umask(2)`: install `mask` (its permission bits) as the process umask every
 /// creating entry applies, and return the previous one. Never fails.
-pub extern "C" fn patina_umask(mask: u32) -> u32 {
+pub fn patina_umask(mask: u32) -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     set_errno(0);
     paths::set_umask(mask)

@@ -95,13 +95,7 @@ mod ptrace;
 
 #[cfg(target_os = "linux")]
 fn deliver_signals() {
-    unsafe extern "C" {
-        fn patina_signal_deliver();
-    }
-    // SAFETY: the shared signal boundary requires no arguments.
-    unsafe {
-        patina_signal_deliver();
-    }
+    crate::thread::signals::patina_signal_deliver();
 }
 
 #[cfg(target_os = "linux")]

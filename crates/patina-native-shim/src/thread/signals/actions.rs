@@ -57,16 +57,11 @@ const _: () = {
     );
 };
 
-#[unsafe(no_mangle)]
 /// Libc-layout marshalling supplies glibc's init-time restorer; raw callers keep
 /// their exact flags/restorer. Both doors perform one install through the core.
 /// # Safety
 /// Non-null pointers name readable/writable kernel action records.
-pub unsafe extern "C" fn patina_signal_action_libc(
-    sig: i32,
-    action: *const Action,
-    old: *mut Action,
-) -> i64 {
+pub unsafe fn patina_signal_action_libc(sig: i32, action: *const Action, old: *mut Action) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let converted = if action.is_null() {
         None
@@ -156,15 +151,9 @@ pub unsafe extern "C" fn patina_signal_action(
     0
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// The optional mask pointers must be valid for eight bytes.
-pub unsafe extern "C" fn patina_signal_mask(
-    how: i32,
-    set: *const u64,
-    old: *mut u64,
-    size: usize,
-) -> i64 {
+pub unsafe fn patina_signal_mask(how: i32, set: *const u64, old: *mut u64, size: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `rt_sigprocmask`: the size, then the new set copied in, then `how`
     // judged; the old set is copied out once the new one took.
@@ -220,10 +209,9 @@ pub unsafe extern "C" fn patina_signal_mask(
     0
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `set` must be writable for `size` bytes.
-pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64 {
+pub unsafe fn patina_signal_pending(set: *mut u8, size: usize) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if size > SIGSET_BYTES {
         return -i64::from(EINVAL);
@@ -249,10 +237,9 @@ pub unsafe extern "C" fn patina_signal_pending(set: *mut u8, size: usize) -> i64
     0
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// Stack pointers must be valid Linux stack_t buffers when non-null.
-pub unsafe extern "C" fn patina_signal_altstack(stack: *const Stack, old: *mut Stack) -> i64 {
+pub unsafe fn patina_signal_altstack(stack: *const Stack, old: *mut Stack) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // One managed task per host thread. Where the thread's shim handlers
     // build their frames privately the registration is virtual

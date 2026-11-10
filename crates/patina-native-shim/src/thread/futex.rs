@@ -22,14 +22,15 @@ use super::*;
 ///
 /// # Safety
 /// `addr` must be the address of a live, aligned 4-byte futex word.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_futex_wait(addr: usize, expected: u32) -> c_int {
+#[cfg(test)]
+pub fn patina_futex_wait(addr: usize, expected: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     futex_wait(addr, expected, false, u32::MAX)
 }
 
 /// [`patina_futex_wait`], noting whether the wait is private
 /// (`FUTEX_PRIVATE_FLAG`) and its bitset: the dispatcher's `futex` row.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32) -> c_int {
     let mut restart = true;
     while restart {
@@ -67,7 +68,6 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
     0
 }
 
-#[unsafe(no_mangle)]
 /// Timed `FUTEX_WAIT`/`FUTEX_WAIT_BITSET`: like [`patina_futex_wait`] but
 /// with a deadline on the virtual-clock timer queue. `absolute` is 0 for a
 /// relative `FUTEX_WAIT` timeout (added to the current `clock` time) and
@@ -80,7 +80,8 @@ pub(crate) fn futex_wait(addr: usize, expected: u32, private: bool, bitset: u32)
 ///
 /// # Safety
 /// `addr` must be the address of a live, aligned 4-byte futex word.
-pub extern "C" fn patina_futex_wait_timed(
+#[cfg(test)]
+pub fn patina_futex_wait_timed(
     addr: usize,
     expected: u32,
     clock_id: u32,
@@ -101,6 +102,7 @@ pub extern "C" fn patina_futex_wait_timed(
 
 /// [`patina_futex_wait_timed`], noting whether the wait is private and
 /// its bitset.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn futex_wait_timed(
     addr: usize,
     expected: u32,
@@ -161,13 +163,12 @@ pub(crate) fn futex_wait_timed(
     if timed_out { super::fail(ETIMEDOUT) } else { 0 }
 }
 
-#[unsafe(no_mangle)]
 /// FUTEX_WAKE: wake up to `count` tasks (all if `count < 0`) parked on
 /// `addr`. Returns the number woken.
 ///
 /// # Safety
 /// C ABI entry point.
-pub extern "C" fn patina_futex_wake(addr: usize, count: c_int) -> c_int {
+pub fn patina_futex_wake(addr: usize, count: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     futex_wake(addr, count, true)
 }

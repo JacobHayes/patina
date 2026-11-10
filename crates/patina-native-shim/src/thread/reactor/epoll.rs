@@ -320,7 +320,6 @@ pub(crate) fn forget_description(desc: DescId) {
     }
 }
 
-#[unsafe(no_mangle)]
 /// Allocate a virtual epoll instance. Syscall-shaped
 /// (`epoll_create1(flags)`) so a future syscall-user-dispatch SIGSYS
 /// dispatcher can call it with raw register arguments; the C interposer
@@ -329,7 +328,8 @@ pub(crate) fn forget_description(desc: DescId) {
 ///
 /// # Safety
 /// C ABI entry point.
-pub extern "C" fn patina_epoll_create1(flags: c_int) -> c_int {
+#[cfg(test)]
+pub fn patina_epoll_create1(flags: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     create1(flags).unwrap_or(-1)
 }
@@ -368,7 +368,6 @@ pub(crate) fn create1(flags: c_int) -> SysResult<c_int> {
     Ok(fd)
 }
 
-#[unsafe(no_mangle)]
 /// Apply one `epoll_ctl` op. Syscall-shaped (`epoll_ctl(epfd, op, fd,
 /// event)`) for the SUD dispatcher. Registry mutation only — no
 /// scheduling point, no trace event. The kernel's `do_epoll_ctl`
@@ -391,7 +390,8 @@ pub(crate) fn create1(flags: c_int) -> SysResult<c_int> {
 /// # Safety
 /// `event` is the guest's `struct epoll_event` for every op but DEL;
 /// it is copied in through `uaccess`.
-pub unsafe extern "C" fn patina_epoll_ctl(
+#[cfg(test)]
+pub unsafe fn patina_epoll_ctl(
     epfd: c_int,
     op: c_int,
     fd: c_int,

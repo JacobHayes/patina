@@ -12,7 +12,6 @@ static STREAM_SALVAGE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 type StreamFlusher = unsafe extern "C" fn();
 type StreamSalvage = unsafe extern "C" fn(*mut *const c_void) -> usize;
 
-#[unsafe(no_mangle)]
 /// Register the POSIX layer's stdio flush, which [`patina_shutdown`] runs
 /// first, and the salvage of its stdout buffer, which every refusal runs
 /// ([`flush_before_refusal`]). Null pointers unregister.
@@ -20,7 +19,7 @@ type StreamSalvage = unsafe extern "C" fn(*mut *const c_void) -> usize;
 /// # Safety
 /// `flusher` must be a valid `void (*)(void)` and `salvage` a valid
 /// `size_t (*)(const void **)` for the life of the process.
-pub unsafe extern "C" fn patina_register_stream_flusher(
+pub unsafe fn patina_register_stream_flusher(
     flusher: Option<StreamFlusher>,
     salvage: Option<StreamSalvage>,
 ) {

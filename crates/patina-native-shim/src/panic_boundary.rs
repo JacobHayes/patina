@@ -475,9 +475,11 @@ pub(crate) fn take_back(held: Held) {
 
 // The library test harness owns its hook and deliberately catches test panics.
 #[cfg(test)]
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn install() {}
 
 #[cfg(not(test))]
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn install() {
     static INSTALLED: std::sync::Once = std::sync::Once::new();
     INSTALLED.call_once(|| {

@@ -146,6 +146,7 @@ mod arena;
 mod layout;
 #[cfg(target_os = "linux")]
 mod limits;
+#[cfg(any(test, patina_posix_exports))]
 mod localtime;
 // strftime's and wcsftime's formatter (C locale), over the zone model.
 #[cfg(any(test, patina_posix_exports))]
@@ -212,18 +213,19 @@ use patina_dst_trace::{
 };
 pub use thread::{
     patina_cond_broadcast, patina_cond_destroy, patina_cond_init, patina_cond_signal,
-    patina_cond_timedwait, patina_cond_wait, patina_futex_wait, patina_futex_wait_timed,
-    patina_futex_wake, patina_mutex_destroy, patina_mutex_init, patina_mutex_lock,
-    patina_mutex_trylock, patina_mutex_unlock, patina_rwlock_destroy, patina_rwlock_init,
-    patina_rwlock_rdlock, patina_rwlock_tryrdlock, patina_rwlock_trywrlock, patina_rwlock_unlock,
-    patina_rwlock_wrlock, patina_thread_create, patina_thread_detach, patina_thread_exit,
-    patina_thread_join,
+    patina_cond_timedwait, patina_cond_wait, patina_futex_wake, patina_mutex_destroy,
+    patina_mutex_init, patina_mutex_lock, patina_mutex_trylock, patina_mutex_unlock,
+    patina_rwlock_destroy, patina_rwlock_init, patina_rwlock_rdlock, patina_rwlock_tryrdlock,
+    patina_rwlock_trywrlock, patina_rwlock_unlock, patina_rwlock_wrlock, patina_thread_create,
+    patina_thread_detach, patina_thread_exit, patina_thread_join,
 };
 #[cfg(target_os = "macos")]
 pub use thread::{
     patina_dispatch_release, patina_dispatch_semaphore_create, patina_dispatch_semaphore_signal,
     patina_dispatch_semaphore_wait, patina_dispatch_time,
 };
+#[cfg(test)]
+pub use thread::{patina_futex_wait, patina_futex_wait_timed};
 
 /// Deterministic managed threads and pthread synchronization.
 ///

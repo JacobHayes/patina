@@ -620,11 +620,13 @@ fn offtime(t: i64, offset: i64) -> Result<PatinaTm, c_int> {
 
 /// The zone `tzset_internal` last read, and the `TZ` it read it from
 /// (`old_tz`, after glibc's `""` and `:` rewrites).
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 struct Current {
     zone: Zone,
     tz: Vec<u8>,
 }
 
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 static CURRENT: SpinMutex<Option<Current>> = SpinMutex::new(None);
 
 /// glibc's `tzset_internal`: the zone in effect. The first call reads `TZ`;
@@ -633,6 +635,7 @@ static CURRENT: SpinMutex<Option<Current>> = SpinMutex::new(None);
 /// keep it while `TZ` is the string it was read from, as glibc compares it.
 /// A zoneinfo file where glibc would read one is a named fatal naming `op`.
 /// `settings` reads `TZ` and `TZDIR`.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn current(op: &str, settings: &dyn Fn() -> Settings, reread: bool) -> Zone {
     loop {
         let (tz, tzdir) = settings();
@@ -658,9 +661,11 @@ pub(crate) fn current(op: &str, settings: &dyn Fn() -> Settings, reread: bool) -
 }
 
 /// `TZ` and `TZDIR`, each unset or its value.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) type Settings = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// `TZ` as glibc compares it with the zone in effect's.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn normalized(tz: Option<&[u8]>) -> Option<&[u8]> {
     tz.map(|tz| match tz {
         [] => &b"Universal"[..],
@@ -671,6 +676,7 @@ fn normalized(tz: Option<&[u8]>) -> Option<&[u8]> {
 
 /// The zone in effect, unless `reread` and `tz` is not the string it was
 /// read from.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn cached(tz: Option<&[u8]>, reread: bool) -> Option<Zone> {
     let current = CURRENT.lock();
     let current = current.as_ref()?;
@@ -678,6 +684,7 @@ fn cached(tz: Option<&[u8]>, reread: bool) -> Option<Zone> {
 }
 
 /// The zone `tz` and `tzdir` name, a zoneinfo file a named fatal.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn chosen(op: &str, tz: Option<&[u8]>, tzdir: Option<&[u8]>) -> Zone {
     let chosen = Zone::choose(tz, tzdir, |path| {
         // A zone file is a regular file on the volume; the entropy device and
@@ -694,41 +701,6 @@ fn chosen(op: &str, tz: Option<&[u8]>, tzdir: Option<&[u8]>) -> Zone {
         Err(ZoneFile(path)) => crate::trap_fatal(&format!(
             "{op}: TZ names the zoneinfo file {path}, which exists in the deterministic filesystem; zoneinfo (TZif) files are not modeled; failing closed"
         )),
-    }
-}
-
-#[unsafe(no_mangle)]
-/// Convert `t` to local time in the zone in effect (see the module doc and
-/// [`current`]). 0 with `out` filled, or -1 with patina_errno `EOVERFLOW`.
-/// A zoneinfo file where glibc would read one is a named fatal.
-///
-/// # Safety
-/// `tz` and `tzdir` must be NULL or NUL-terminated; `out` must be writable.
-pub unsafe extern "C" fn patina_localtime(
-    t: i64,
-    tz: *const c_char,
-    tzdir: *const c_char,
-    out: *mut PatinaTm,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let text = |value: *const c_char| {
-        if value.is_null() {
-            return None;
-        }
-        // SAFETY: nonnull, and NUL-terminated per the contract.
-        let value = unsafe { CStr::from_ptr(value) };
-        Some(value.to_bytes().to_vec())
-    };
-    let settings = (text(tz), text(tzdir));
-    let zone = current("localtime_r", &|| settings.clone(), false);
-    match zone.local(t) {
-        Ok(tm) => {
-            // SAFETY: writable, per the contract.
-            unsafe { out.write(tm) };
-            crate::set_errno(0);
-            0
-        }
-        Err(errno) => crate::fail(errno),
     }
 }
 

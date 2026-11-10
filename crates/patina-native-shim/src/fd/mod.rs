@@ -26,8 +26,7 @@ pub use value::{patina_close, patina_dupfd};
 
 /// The `PATINA_FD_*` kind of a guest descriptor, or -1 with `EBADF` for a
 /// number that names nothing.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
+pub fn patina_fd_kind(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().kind(raw_fd) {
         Some(kind) => {
@@ -38,10 +37,9 @@ pub extern "C" fn patina_fd_kind(raw_fd: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `RLIMIT_NOFILE` as the table enforces it — the one number `getrlimit`,
 /// `sysconf(_SC_OPEN_MAX)` and the `EMFILE` bound must agree on.
-pub extern "C" fn patina_fd_limit() -> c_int {
+pub fn patina_fd_limit() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::try_from(fd_limit()).expect("the descriptor limit fits an int")
 }
@@ -60,9 +58,8 @@ pub(crate) fn set_fd_limit(limit: u64) {
         .set_limit(usize::try_from(limit).unwrap_or(usize::MAX));
 }
 
-#[unsafe(no_mangle)]
 /// `F_GETFD`: 1 when the number carries `FD_CLOEXEC`, 0 when not, -1/`EBADF`.
-pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
+pub fn patina_fd_getfd(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().cloexec(raw_fd) {
         Ok(cloexec) => {
@@ -73,9 +70,8 @@ pub extern "C" fn patina_fd_getfd(raw_fd: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `F_SETFD`: set (nonzero) or clear the number's `FD_CLOEXEC` bit.
-pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
+pub fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match fd_table().lock().set_cloexec(raw_fd, cloexec != 0) {
         Ok(()) => {
@@ -86,10 +82,9 @@ pub extern "C" fn patina_fd_setfd(raw_fd: c_int, cloexec: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `F_GETFL`: the description's status flags in the `PATINA_O_*` vocabulary
 /// (access mode, `O_APPEND`, `O_NONBLOCK`, `O_PATH`), or -1/`EBADF`.
-pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
+pub fn patina_fd_getfl(raw_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     match resolve_fd(raw_fd) {
         Ok(resolved) => {
@@ -100,14 +95,13 @@ pub extern "C" fn patina_fd_getfl(raw_fd: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `F_SETFL`: replace the description's `O_APPEND`/`O_NONBLOCK` with the bits
 /// in `flags` (`PATINA_O_*`); every other bit is ignored, as the kernel ignores
 /// the access mode and creation flags in an `F_SETFL` argument. A file's
 /// `O_APPEND` places its cursor writes in the filesystem, so a change to it
 /// reaches the driver's description too ([`Context::fs_set_append_unrecorded`]),
 /// in the same step: no scheduling point, so no write runs between the two.
-pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
+pub fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = fd_table().lock().resolve(raw_fd);
     if let Some(resolved) = resolved
@@ -128,10 +122,9 @@ pub extern "C" fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `ioctl(FIONBIO)` / `SOCK_NONBLOCK` on accept: set or clear `O_NONBLOCK`
 /// alone, leaving the other status flags as they are.
-pub extern "C" fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
+pub fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let bits = if nonblocking != 0 { O_NONBLOCK } else { 0 };
     match fd_table().lock().set_status(raw_fd, O_NONBLOCK, bits) {
@@ -154,11 +147,10 @@ fn retire_number(raw_fd: c_int) {
     let _ = raw_fd;
 }
 
-#[unsafe(no_mangle)]
 /// `close_range(2)`: close every number in `[first, last]`, or with
 /// `CLOSE_RANGE_CLOEXEC` mark them close-on-exec instead. `first > last` or an
 /// unknown flag is `EINVAL`; the range is clamped to the table.
-pub extern "C" fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int {
+pub fn patina_close_range(first: u32, last: u32, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let closes = first <= last
         && flags & !(fdtable::CLOSE_RANGE_CLOEXEC | fdtable::CLOSE_RANGE_UNSHARE) == 0

@@ -87,14 +87,13 @@ fn has_mapping(resolved: &Resolved) -> bool {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `posix_fadvise(2)`: every `POSIX_FADV_*` advice is accepted, and
 /// `POSIX_FADV_DONTNEED` on a regular file no view maps drops its clean pages
 /// the range covers whole (a negative offset covers none). The refusals are
 /// `generic_fadvise`'s, in its order: an empty slot or an `O_PATH` descriptor
 /// `EBADF`, a FIFO `ESPIPE` (before the advice is looked at), a negative
 /// length or an unknown advice `EINVAL`.
-pub extern "C" fn patina_fadvise(raw_fd: c_int, offset: i64, length: i64, advice: c_int) -> c_int {
+pub fn patina_fadvise(raw_fd: c_int, offset: i64, length: i64, advice: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
         if is_fifo(&resolved) {
@@ -117,11 +116,10 @@ pub extern "C" fn patina_fadvise(raw_fd: c_int, offset: i64, length: i64, advice
     }))
 }
 
-#[unsafe(no_mangle)]
 /// `readahead(2)`: `fadvise(WILLNEED)` on a descriptor open for reading
 /// (`EBADF` otherwise, `O_PATH` included) whose node is a regular file
 /// (`EINVAL` otherwise). Past the end of the file it is the same no-op.
-pub extern "C" fn patina_readahead(raw_fd: c_int, _offset: i64, count: usize) -> c_int {
+pub fn patina_readahead(raw_fd: c_int, _offset: i64, count: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     answered(fdget(raw_fd).and_then(|resolved| {
         if resolved.status & O_READ == 0 {

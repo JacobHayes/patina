@@ -178,11 +178,10 @@ fn write_metadata(metadata: patina_dst_abi::FsMetadata, out: *mut PatinaMetadata
     0
 }
 
-#[unsafe(no_mangle)]
 /// The caller's pid, what `getpid` answers on both doors: its process's in
 /// the pid namespace's table on Linux (`identity::Process`); on macOS, the
 /// one process the run starts.
-pub extern "C" fn patina_pid() -> i32 {
+pub fn patina_pid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     return crate::identity::Process::current().pid();
@@ -190,10 +189,9 @@ pub extern "C" fn patina_pid() -> i32 {
     return registry::ROOT_PID as i32;
 }
 
-#[unsafe(no_mangle)]
 /// The caller's parent, what `getppid` answers: the root process's is the
 /// pid namespace's init (`registry::INIT_PID`).
-pub extern "C" fn patina_ppid() -> i32 {
+pub fn patina_ppid() -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     #[cfg(target_os = "linux")]
     return crate::identity::Process::current().parent();
@@ -242,21 +240,19 @@ pub(crate) fn caller() -> Caller {
     }
 }
 
-#[unsafe(no_mangle)]
 /// The caller's user id ([`caller`]) — what every `st_uid`, the C
 /// `getuid`/`geteuid`, and the ownership comparisons read. A guest reading
 /// an owner reads this, never a per-entry field: the deterministic
 /// filesystem stores no owner because every entry is the caller's.
-pub extern "C" fn patina_uid() -> u32 {
+pub fn patina_uid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     caller().uid
 }
 
-#[unsafe(no_mangle)]
 /// Entry `index` of the virtual machine's passwd database
 /// (`registry::PASSWD`, file order) as its `/etc/passwd` line, or NULL past
 /// the last: what the C passwd readers answer from.
-pub extern "C" fn patina_passwd_line(index: u32) -> *const c_char {
+pub fn patina_passwd_line(index: u32) -> *const c_char {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     usize::try_from(index)
         .ok()
@@ -264,9 +260,8 @@ pub extern "C" fn patina_passwd_line(index: u32) -> *const c_char {
         .map_or(std::ptr::null(), |line| line.as_ptr())
 }
 
-#[unsafe(no_mangle)]
 /// The caller's group id; see [`patina_uid`].
-pub extern "C" fn patina_gid() -> u32 {
+pub fn patina_gid() -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     caller().gid
 }
@@ -281,7 +276,6 @@ pub(crate) fn node_name() -> Result<String, c_int> {
     with_context_raw(|context| Ok(context.hostname().to_owned()))
 }
 
-#[unsafe(no_mangle)]
 /// `uname(3)` on Darwin: the virtual Darwin kernel's self-description
 /// (`darwin_identity`) into the caller's `struct utsname`. 0, or -1 with
 /// [`patina_errno`] (`EFAULT` for NULL).
@@ -289,7 +283,7 @@ pub(crate) fn node_name() -> Result<String, c_int> {
 /// # Safety
 /// `out` must be NULL or writable for a Darwin `struct utsname`.
 #[cfg(target_os = "macos")]
-pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
+pub unsafe fn patina_uname(out: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if out.is_null() {
         return fail(EFAULT);
@@ -305,7 +299,6 @@ pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
     0
 }
 
-#[unsafe(no_mangle)]
 /// Read the metadata of the entry `(dirfd, path)` resolves to: the guest's
 /// own `stat`, the one entry behind `stat`, `lstat`, `fstatat`, `statx`,
 /// `access` and every other by-path metadata read on both doors. `flags` are
@@ -317,7 +310,7 @@ pub unsafe extern "C" fn patina_uname(out: *mut c_void) -> c_int {
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string and `out` to a
 /// writable `struct patina_metadata`.
-pub unsafe extern "C" fn patina_metadata_at(
+pub unsafe fn patina_metadata_at(
     dirfd: c_int,
     path: *const c_char,
     flags: u32,
@@ -405,7 +398,6 @@ pub(crate) unsafe fn metadata_at(
     }
 }
 
-#[unsafe(no_mangle)]
 /// `access`/`faccessat`'s answer for the node a record describes, both
 /// doors: 0 or the errno. The caller is the one modeled identity: the owner
 /// of every volume entry (the owner triad answers), and not root, so a
@@ -415,7 +407,7 @@ pub(crate) unsafe fn metadata_at(
 ///
 /// # Safety
 /// `values` must point to a readable record.
-pub unsafe extern "C" fn patina_access_answer(values: *const PatinaMetadata, mode: c_int) -> c_int {
+pub unsafe fn patina_access_answer(values: *const PatinaMetadata, mode: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: readable per this function's contract.
     let values = unsafe { &*values };
@@ -457,21 +449,6 @@ pub(crate) fn node_owner(fs: u32) -> (u32, u32) {
         #[cfg(target_os = "linux")]
         PATINA_FS_NSFS | PATINA_FS_DEVTMPFS | PATINA_FS_ANON_INODE | PATINA_FS_PROC => (0, 0),
         _ => (caller.uid, caller.gid),
-    }
-}
-
-#[unsafe(no_mangle)]
-/// The C face of [`node_owner`].
-///
-/// # Safety
-/// `uid` and `gid` must be writable.
-pub unsafe extern "C" fn patina_node_owner(fs: u32, uid: *mut u32, gid: *mut u32) {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let (owner, group) = node_owner(fs);
-    // SAFETY: writable per this function's contract.
-    unsafe {
-        uid.write(owner);
-        gid.write(group);
     }
 }
 
@@ -631,12 +608,11 @@ impl MetadataLookup {
     }
 }
 
-#[unsafe(no_mangle)]
 /// Read full metadata for a deterministic descriptor: the guest's `fstat`.
 ///
 /// # Safety
 /// `out` must point to a writable `struct patina_metadata`.
-pub unsafe extern "C" fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
+pub unsafe fn patina_fd_metadata_full(raw_fd: c_int, out: *mut PatinaMetadata) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: per this function's contract.
     unsafe { fd_metadata_full(raw_fd, out, MetadataLookup::Fstat) }
@@ -736,7 +712,6 @@ unsafe fn fd_metadata_with(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Change the permission bits of the entry `(dirfd, path)` names (`chmod` /
 /// `fchmodat`). `flags` are `PATINA_RESOLVE_*`: without `NOFOLLOW` a trailing
 /// symlink resolves and its TARGET changes (the `chmod` and flagless `fchmodat`
@@ -745,12 +720,7 @@ unsafe fn fd_metadata_with(
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
-pub unsafe extern "C" fn patina_chmod(
-    dirfd: c_int,
-    path: *const c_char,
-    mode: u32,
-    flags: u32,
-) -> c_int {
+pub unsafe fn patina_chmod(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
@@ -787,10 +757,9 @@ pub unsafe extern "C" fn patina_chmod(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Change the permission bits of the entry an open descriptor names (`fchmod`).
 /// A descriptor already names the node, so there is no symlink to resolve.
-pub extern "C" fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
+pub fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A FIFO endpoint is a pipe, not a filesystem descriptor — so the bits it
     // changes are named by NODE, exactly as its `fstat` reads them by node. That

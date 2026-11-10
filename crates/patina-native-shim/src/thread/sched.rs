@@ -131,12 +131,12 @@ fn comm_of(bytes: &[u8]) -> [u8; COMM_LEN] {
     comm
 }
 
-#[unsafe(no_mangle)]
 /// Record `argv[0]` at startup.
 ///
 /// # Safety
 /// Non-null `argv0` must be a NUL-terminated string.
-pub unsafe extern "C" fn patina_note_program_name(argv0: *const c_char) {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_note_program_name(argv0: *const c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if argv0.is_null() {
         return;
@@ -319,6 +319,7 @@ pub(crate) fn set_current_name(name: &[u8]) {
 }
 
 /// The thread a `pthread_t` names: the caller's own, or a managed thread's.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn handle_tid(state: &ThreadRuntime, handle: usize) -> Option<i32> {
     // SAFETY: the real glibc `pthread_self`, resolved through the host-alias
     // table.
@@ -328,17 +329,13 @@ fn handle_tid(state: &ThreadRuntime, handle: usize) -> Option<i32> {
     state.handles.get(&handle).map(|task| tid_of(*task))
 }
 
-#[unsafe(no_mangle)]
 /// glibc's `pthread_getname_np`: the thread's name, into a buffer of at
 /// least `TASK_COMM_LEN` bytes (`ERANGE` otherwise).
 ///
 /// # Safety
 /// `name` must be writable for `len` bytes.
-pub unsafe extern "C" fn patina_thread_getname(
-    handle: usize,
-    name: *mut c_char,
-    len: usize,
-) -> c_int {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_thread_getname(handle: usize, name: *mut c_char, len: usize) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if len < COMM_LEN {
         return ERANGE;
@@ -353,13 +350,13 @@ pub unsafe extern "C" fn patina_thread_getname(
     0
 }
 
-#[unsafe(no_mangle)]
 /// glibc's `pthread_setname_np`: name the thread; a name longer than 15
 /// bytes is `ERANGE`.
 ///
 /// # Safety
 /// `name` must be a NUL-terminated string.
-pub unsafe extern "C" fn patina_thread_setname(handle: usize, name: *const c_char) -> c_int {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_thread_setname(handle: usize, name: *const c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a NUL-terminated string, per this function's contract.
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();

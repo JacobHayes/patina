@@ -686,7 +686,9 @@ impl Scheduler for RealScheduler {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlockClass {
     Io,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Futex,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     TimedFutex,
     Sleep,
     #[cfg(any(target_os = "linux", patina_posix_exports))]
@@ -1042,6 +1044,7 @@ struct FutexWaiter {
 impl FutexWaiter {
     /// A multiplexed `futex` row's waiter (`FUTEX_WAIT`,
     /// `FUTEX_WAIT_BITSET`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn multiplexed(task: TaskId, private: bool, bitset: u32) -> Self {
         FutexWaiter {
             task,
@@ -1055,6 +1058,7 @@ impl FutexWaiter {
 impl ThreadRuntime {
     /// Queue a waiter on the futex word at `addr` (`futex_queue`), as part
     /// of its task's `wait`.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn queue_futex_waiter(&mut self, addr: usize, waiter: FutexWaiter, wait: &mut Wait) {
         let queue = self.futexes.entry(addr).or_default();
         wait.enqueue(queue, waiter, WaiterLoc::Futex(addr));

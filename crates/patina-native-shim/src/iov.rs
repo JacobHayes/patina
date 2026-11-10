@@ -26,6 +26,7 @@ use crate::{
 };
 
 /// Linux and Darwin `UIO_MAXIOV`: the most segments one vector may carry.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const UIO_MAXIOV: usize = 1024;
 
 /// `struct iovec`, identical on every supported target.
@@ -38,17 +39,24 @@ pub struct GuestIovec {
 
 /// The `RWF_*` bits the virtual kernel (Linux 6.8) accepts per call
 /// (`RWF_SUPPORTED`); any other bit is `EOPNOTSUPP` (`kiocb_set_rw_flags`).
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const RWF_HIPRI: i32 = 0x01;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const RWF_DSYNC: i32 = 0x02;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const RWF_SYNC: i32 = 0x04;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const RWF_NOWAIT: i32 = 0x08;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) const RWF_APPEND: i32 = 0x10;
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 const RWF_SUPPORTED: i32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
 
 /// Import a guest vector: the segments, or the errno `lib/iov_iter.c` answers.
 ///
 /// # Safety
 /// A non-null `vector` must be readable for `count` segments.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) unsafe fn import(
     vector: *const GuestIovec,
     count: i64,
@@ -76,6 +84,7 @@ pub(crate) unsafe fn import(
 
 /// The segments that carry bytes: an empty one moves nothing and ends no
 /// transfer.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn nonempty(segments: &[GuestIovec]) -> Vec<GuestIovec> {
     segments
         .iter()
@@ -84,6 +93,7 @@ fn nonempty(segments: &[GuestIovec]) -> Vec<GuestIovec> {
         .collect()
 }
 
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn total(segments: &[GuestIovec]) -> usize {
     segments
         .iter()
@@ -93,6 +103,7 @@ fn total(segments: &[GuestIovec]) -> usize {
 /// The flag word's refusal, judged once the call has bytes to move. A
 /// directory has no `read_iter`, so the kernel's loop path refuses every flag
 /// but `RWF_HIPRI` there (`do_loop_readv_writev`).
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn rwf_refusal(resolved: &Resolved, flags: i32) -> Option<c_int> {
     if flags & !RWF_SUPPORTED != 0 {
         return Some(EOPNOTSUPP);
@@ -102,6 +113,7 @@ fn rwf_refusal(resolved: &Resolved, flags: i32) -> Option<c_int> {
 
 /// Fold a transfer that stopped early: the bytes already moved are the answer,
 /// the error is only when nothing moved.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn finish(total: usize, errno: Option<c_int>) -> isize {
     match errno {
         Some(errno) if total == 0 => fail(errno) as isize,
@@ -116,6 +128,7 @@ fn finish(total: usize, errno: Option<c_int>) -> isize {
 ///
 /// # Safety
 /// As [`import`].
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 unsafe fn open_vector(
     resolved: &Resolved,
     mode: u32,
@@ -140,6 +153,7 @@ unsafe fn open_vector(
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each
 /// writable for its length.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking: bool) -> isize {
     if matches!(resolved.kind, FdKind::File | FdKind::Dir) {
         let segments = nonempty(segments);
@@ -182,6 +196,7 @@ unsafe fn cursor_readv(resolved: Resolved, segments: &[GuestIovec], nonblocking:
 ///
 /// # Safety
 /// As [`cursor_readv`], each segment readable for its length.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 unsafe fn cursor_writev(
     resolved: Resolved,
     segments: &[GuestIovec],
@@ -220,17 +235,18 @@ unsafe fn cursor_writev(
 }
 
 /// Whether a write's `RWF_*` flags ask for its data to be durable on return.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn synced(flags: i32) -> bool {
     flags & (RWF_DSYNC | RWF_SYNC) != 0
 }
 
-#[unsafe(no_mangle)]
 /// `readv(2)`, and `preadv2` at position -1 with its `RWF_*` flags.
 ///
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each segment
 /// writable for its length.
-pub unsafe extern "C" fn patina_readv(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_readv(
     raw_fd: c_int,
     vector: *const GuestIovec,
     count: i64,
@@ -259,13 +275,13 @@ pub unsafe extern "C" fn patina_readv(
     transferred(&resolved, moved, false)
 }
 
-#[unsafe(no_mangle)]
 /// `writev(2)`, and `pwritev2` at position -1 with its `RWF_*` flags.
 ///
 /// # Safety
 /// `vector` must be a readable guest vector of `count` segments, each segment
 /// readable for its length.
-pub unsafe extern "C" fn patina_writev(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_writev(
     raw_fd: c_int,
     vector: *const GuestIovec,
     count: i64,
@@ -294,14 +310,14 @@ pub unsafe extern "C" fn patina_writev(
     transferred(&resolved, moved, true)
 }
 
-#[unsafe(no_mangle)]
 /// `preadv(2)`/`preadv2` at a position: scatter reads at `offset` that leave
 /// the cursor alone. A negative position is `EINVAL` before the descriptor, a
 /// description without offset addressing `ESPIPE` (`do_preadv`).
 ///
 /// # Safety
 /// As [`patina_readv`].
-pub unsafe extern "C" fn patina_preadv(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_preadv(
     raw_fd: c_int,
     vector: *const GuestIovec,
     count: i64,
@@ -350,14 +366,14 @@ pub unsafe extern "C" fn patina_preadv(
     transferred(&resolved, finish(moved, None), false)
 }
 
-#[unsafe(no_mangle)]
 /// `pwritev(2)`/`pwritev2` at a position: gather writes that leave the cursor
 /// alone, landing at the end of the file instead under `O_APPEND` (Linux) or
 /// `RWF_APPEND` — one end, taken once, so the segments stay contiguous.
 ///
 /// # Safety
 /// As [`patina_writev`].
-pub unsafe extern "C" fn patina_pwritev(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_pwritev(
     raw_fd: c_int,
     vector: *const GuestIovec,
     count: i64,

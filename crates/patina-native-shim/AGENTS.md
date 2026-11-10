@@ -572,10 +572,12 @@ ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
 
 - Keep C and Rust ABI signatures in lockstep. Variadic libc functions must be
   declared variadically on the host side; do not hand-declare a fixed argument
-  form for a variadic function. A `patina_*` entry point has THREE declarations
-  — the Rust definition, `include/patina_native.h`, and the SUD dispatcher's
-  `extern` block — and changing an argument list means changing all three; the
-  compiler catches two of them and the third is a link-time surprise.
+  form for a variadic function. A `patina_*` entry that C, assembly or an
+  SDK calls by symbol is `extern "C"` and exported, and one that C calls is
+  declared in `include/patina_native.h` (and in any Rust `extern` block naming
+  it); changing its argument list means changing each declaration, and the
+  compiler does not check them against each other. An entry only Rust calls
+  should be a plain function with no header line.
 - After editing `build_support.rs`, a slice under `c/posix/`, or related
   embedded C sources, rebuild `patina`; validating with a stale runner is
   an accidental false green.

@@ -337,9 +337,8 @@ pub extern "C" fn patina_mlockall(flags: c_int) -> i64 {
     0
 }
 
-#[unsafe(no_mangle)]
 /// `munlockall`: every lock and `MCL_FUTURE` end.
-pub extern "C" fn patina_munlockall() -> i64 {
+pub fn patina_munlockall() -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let mut mappings = MAPPINGS.lock();
     mappings.locks.clear();

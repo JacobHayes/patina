@@ -317,18 +317,13 @@ pub(crate) fn statx_extra(fs: u32, ino: u64, mask: u32) -> (u32, u64) {
     }
 }
 
-#[unsafe(no_mangle)]
 /// The C `statx`'s [`statx_extra`]: the mask bits to add; the mount id is
 /// written to `mount_id`.
 ///
 /// # Safety
 /// `mount_id` must be writable.
-pub unsafe extern "C" fn patina_statx_extra(
-    fs: u32,
-    ino: u64,
-    mask: u32,
-    mount_id: *mut u64,
-) -> u32 {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_statx_extra(fs: u32, ino: u64, mask: u32, mount_id: *mut u64) -> u32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let (bits, id) = statx_extra(fs, ino, mask);
     // SAFETY: writable per this function's contract.
@@ -381,13 +376,13 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> crate::abi::Sy
     Ok(())
 }
 
-#[unsafe(no_mangle)]
 /// `statfs(2)`: the filesystem `path` (a trailing symlink followed) is on.
 ///
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string; `out`, when
 /// non-null, to a writable `struct statfs`.
-pub unsafe extern "C" fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
+#[cfg(test)]
+pub unsafe fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: The prefixed C ABI contract guarantees a readable path string.
     unsafe { statfs(path, out) }.map_or(-1, |_| 0)

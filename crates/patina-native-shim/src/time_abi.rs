@@ -72,13 +72,12 @@ pub extern "C" fn patina_sleep_until(clock_id: u32, deadline_nanos: u64) -> c_in
     unsafe { patina_sleep_until_remaining(clock_id, deadline_nanos, std::ptr::null_mut()) }
 }
 
-#[unsafe(no_mangle)]
 /// Sleep with an optional two-i64 kernel timespec remaining-time output.
 /// Absolute sleeps pass null, so their caller's rem buffer is untouched.
 /// # Safety
 /// None beyond the ABI: a non-null `remaining` is copied to through
 /// `uaccess` (`EFAULT` where it cannot be).
-pub unsafe extern "C" fn patina_sleep_until_remaining(
+pub unsafe fn patina_sleep_until_remaining(
     clock_id: u32,
     deadline_nanos: u64,
     remaining: *mut i64,

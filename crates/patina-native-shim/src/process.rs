@@ -130,8 +130,7 @@ pub(crate) fn finalize_then_abort() -> ! {
     host_abort()
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_host_abort() -> ! {
+pub fn patina_host_abort() -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     host_abort()
 }
@@ -178,18 +177,16 @@ pub extern "C" fn patina_note_main_returned() {
     thread::note_main_returned();
 }
 
-#[unsafe(no_mangle)]
 /// Whether the process is in its post-`main` teardown (1) or not (0). After
 /// `main` returns only the root task runs, so the POSIX layer's internal locks
 /// (a stream's, the environment's) have nothing left to exclude, and waiting
 /// on one a parked task holds would be a scheduling operation past the end of
 /// the run — the refusal in `with_context_msg`. They are not taken then.
-pub extern "C" fn patina_in_teardown() -> c_int {
+pub fn patina_in_teardown() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     c_int::from(thread::main_returned())
 }
 
-#[unsafe(no_mangle)]
 /// Linux interposer-engagement canary. The atexit finalizer (`posix::lifecycle`)
 /// calls this from the `atexit` hook, which glibc runs AFTER the thread-local
 /// destructors on every exit-chain path that reaches it. On Linux the teardown
@@ -207,7 +204,7 @@ pub extern "C" fn patina_in_teardown() -> c_int {
 /// now that `patina_thread_join`'s host reap fixes the one known load-dependent
 /// branch (the joiner-vs-worker `Arc<thread::Inner>` teardown race).
 #[cfg(target_os = "linux")]
-pub extern "C" fn patina_assert_teardown_engaged() {
+pub fn patina_assert_teardown_engaged() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if !thread::main_returned() {
         let _ = host_write_all(

@@ -373,7 +373,6 @@ fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
         .unwrap_or_default()
 }
 
-#[unsafe(no_mangle)]
 /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
 /// write end, both non-blocking when `nonblocking != 0` and close-on-exec
 /// when `cloexec != 0`. The ends and the backing channel come from the class
@@ -383,7 +382,8 @@ fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<Ta
 ///
 /// # Safety
 /// `read_fd_out`/`write_fd_out` must be writable.
-pub unsafe extern "C" fn patina_pipe(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_pipe(
     read_fd_out: *mut c_int,
     write_fd_out: *mut c_int,
     nonblocking: c_int,
@@ -451,6 +451,7 @@ pub unsafe extern "C" fn patina_pipe(
 ///
 /// # Safety
 /// `first_out`/`second_out` must be writable.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 unsafe fn bind_pipe_pair(
     state: &mut ThreadRuntime,
     first: (c_int, u32),
@@ -740,6 +741,7 @@ pub(crate) fn fifo_open(
 
 /// The bytes a pipe end's `FIONREAD` reports: what is queued
 /// in the channel it reads (a pipe's write end, the pipe's one channel).
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn pipe_queued(handle: u64) -> Option<usize> {
     let state = lock_state();
     let end = state.net.pipe_ends.get(&(handle as c_int))?;
@@ -1277,20 +1279,23 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
 
 /// The largest pipe buffer an unprivileged `F_SETPIPE_SZ` may ask for
 /// (`fs.pipe-max-size`).
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 const PIPE_MAX_SIZE: usize = crate::registry::KERNEL_CONFIG.pipe_max_size as usize;
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 const PIPE_PAGE: usize = 4096;
 
 /// The channel a pipe endpoint's `F_GETPIPE_SZ`/`F_SETPIPE_SZ` act on: the
 /// pipe's one channel.
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 fn pipe_size_channel(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
     let end = state.net.pipe_ends.get(&fd)?;
     end.write_channel.or(end.read_channel)
 }
 
-#[unsafe(no_mangle)]
 /// `fcntl(F_GETPIPE_SZ)`: the endpoint's buffer capacity; `EINVAL` for a
 /// description that is not a pipe end.
-pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
+pub fn patina_pipe_size(guest_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
         Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
@@ -1318,7 +1323,6 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
     }
 }
 
-#[unsafe(no_mangle)]
 /// `fcntl(F_SETPIPE_SZ)`: resize the buffer the way `fs/pipe.c:round_pipe_size`
 /// does — the size an unsigned int (`EINVAL` past 2^31), at least one page
 /// (so 0 is one page), rounded up to a power of two, at most the unprivileged
@@ -1327,7 +1331,8 @@ pub extern "C" fn patina_pipe_size(guest_fd: c_int) -> c_int {
 /// stream's pipe resizes too: its capacity is all there is to change, since
 /// its input's writer is gone with nothing left in it and the supervisor
 /// drains its outputs as they are written, so none ever holds a byte.
-pub extern "C" fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
+pub fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = match class_entry(guest_fd) {
         Ok(resolved) => resolved,

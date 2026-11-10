@@ -113,7 +113,6 @@ pub unsafe extern "C" fn patina_openat(
     unsafe { open_at(dirfd, path, flags, mode, 0) }
 }
 
-#[unsafe(no_mangle)]
 /// `openat2(2)` past its `struct open_how` checks: [`patina_openat`] with the
 /// resolution confined by `resolve`, `PATINA_RESOLVE_*` restriction bits
 /// (`paths::RESOLVE_SCOPE_FLAGS`); any other bit is `EINVAL`.
@@ -121,7 +120,7 @@ pub unsafe extern "C" fn patina_openat(
 /// # Safety
 /// `path` must point to a valid NUL-terminated UTF-8 string.
 #[cfg(target_os = "linux")]
-pub unsafe extern "C" fn patina_openat2(
+pub unsafe fn patina_openat2(
     dirfd: c_int,
     path: *const c_char,
     flags: u32,

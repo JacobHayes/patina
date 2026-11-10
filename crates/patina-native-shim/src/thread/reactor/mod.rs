@@ -261,6 +261,7 @@ pub(super) enum ReadyDir {
 #[derive(Clone, Copy)]
 pub(super) enum WaiterLoc {
     PipeOpen(u64),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Futex(usize),
     Mutex(usize),
     RwRead(usize),

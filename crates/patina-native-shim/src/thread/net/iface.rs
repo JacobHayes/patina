@@ -205,13 +205,13 @@ mod plain_impls {
     });
 }
 
-#[unsafe(no_mangle)]
 /// The `position`th interface (index order), for `getifaddrs`: 0 with the
 /// record written, `-EINVAL` past the last.
 ///
 /// # Safety
 /// `out` must point to a writable `struct patina_interface`.
-pub unsafe extern "C" fn patina_net_interface(position: u32, out: *mut PatinaInterface) -> i64 {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_net_interface(position: u32, out: *mut PatinaInterface) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Some(interface) = VIRTUAL_INTERFACES.get(position as usize) else {
         return -i64::from(EINVAL);

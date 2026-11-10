@@ -268,6 +268,7 @@ pub(crate) fn read_len(len_ptr: usize) -> Result<i32, c_int> {
 /// `inet_pton`): IPv4 in one to four parts, each decimal, octal (leading `0`)
 /// or hexadecimal (`0x`), the last filling the remaining bytes; or IPv6, with
 /// an optional `%scope` naming an interface by number or by name.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 pub(crate) fn numeric_host(text: &str) -> Option<(std::net::IpAddr, u32)> {
     if let Some(ip) = inet_aton(text) {
         return Some((ip.into(), 0));
@@ -285,6 +286,7 @@ pub(crate) fn numeric_host(text: &str) -> Option<(std::net::IpAddr, u32)> {
     Some((address.parse::<Ipv6Addr>().ok()?.into(), scope))
 }
 
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn inet_aton(text: &str) -> Option<Ipv4Addr> {
     let mut parts = [0u32; 4];
     let mut count = 0;
@@ -321,7 +323,6 @@ fn inet_aton(text: &str) -> Option<Ipv4Addr> {
     Some(Ipv4Addr::from(value))
 }
 
-#[unsafe(no_mangle)]
 /// `getaddrinfo`'s numeric-host parse ([`numeric_host`]): the family with
 /// the address in `out` (4 or 16 bytes, network order) and the IPv6 scope in
 /// `scope`, or 0 when `node` is no numeric host.
@@ -329,7 +330,8 @@ fn inet_aton(text: &str) -> Option<Ipv4Addr> {
 /// # Safety
 /// `node` is a NUL-terminated string; `out` names 16 writable bytes and
 /// `scope` a writable `u32`.
-pub unsafe extern "C" fn patina_net_numeric_host(
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_net_numeric_host(
     node: *const std::ffi::c_char,
     out: *mut u8,
     scope: *mut u32,

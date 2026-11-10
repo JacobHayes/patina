@@ -131,12 +131,12 @@ fn poll_sources(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Raw-errno ABI shared by poll/ppoll on both doors. Negative timeout means
 /// indefinite; nonnegative timeout is relative nanoseconds.
 /// # Safety
 /// `fds` names `count` pollfd records; non-null mask names eight bytes.
-pub unsafe extern "C" fn patina_poll(
+#[cfg(test)]
+pub unsafe fn patina_poll(
     fds: *mut PollFd,
     count: usize,
     timeout: i64,
@@ -204,14 +204,14 @@ pub(crate) unsafe fn epoll_wait_masked_core(
     }
 }
 
-#[unsafe(no_mangle)]
 /// select/pselect use native-word fd sets. Timeout is relative nanoseconds;
 /// `remaining` lets each door write its timeval/timespec by its ABI rules.
 /// The sets are copied in and out whole (`EFAULT` for one that cannot be),
 /// as `core_sys_select` copies them.
 /// # Safety
 /// An optional mask names eight bytes; optional remaining names a u64.
-pub unsafe extern "C" fn patina_select(
+#[cfg(test)]
+pub unsafe fn patina_select(
     nfds: i32,
     read: *mut u64,
     write: *mut u64,

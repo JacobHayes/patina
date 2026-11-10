@@ -116,25 +116,6 @@ int32_t patina_init_crash(uint64_t seed);
  */
 int32_t patina_init_from_env(void);
 void patina_note_boundary_symbol(const char *symbol);
-/* POSIX-link startup only: installs panic containment, not a Context. */
-void patina_init_panic_policy(void);
-void patina_note_startup_constructor_finished(void);
-void patina_control_set_entry(const char *entry);
-/*
- * The guest environment is the process's `environ` array, which the POSIX
- * layer runs glibc's environment functions over. The runtime publishes the
- * array the run starts with (the startup `--env` map, the one piece the trace
- * records) through the registered installer; `patina_publish_environ` does so
- * for the startup path. The gates decide when the C functions may answer:
- * `patina_env_read_gate` 1 to read `environ`, 0 to answer NULL (before the
- * startup constructor finishes); `patina_env_write_gate` 0 to mutate it, -1
- * with patina_errno ENOSYS without an installed runtime. Both abort on a
- * stored init error.
- */
-int32_t patina_env_read_gate(void);
-int32_t patina_env_write_gate(void);
-void patina_register_environ_installer(void (*installer)(char **));
-void patina_publish_environ(void);
 /*
  * The POSIX layer's stdio flush and stdout salvage, registered at startup.
  * patina_shutdown calls the flush first, so the exit paths (the atexit
@@ -144,8 +125,6 @@ void patina_publish_environ(void);
  * without writing it: every path on which patina itself ends the run (a
  * refusal, a fatal, a verdict) writes those bytes after the captured ones.
  */
-void patina_register_stream_flusher(void (*flusher)(void),
-                                    size_t (*salvage)(const void **bytes));
 int32_t patina_shutdown(void);
 
 /*
@@ -155,19 +134,6 @@ int32_t patina_shutdown(void);
  * returns and from patina_exit for an explicit exit(3). First call wins.
  */
 void patina_note_guest_exit_status(int32_t status);
-/*
- * Record argv[0] at startup: its basename, truncated to 15 bytes, is every
- * thread's name until one is set. The supervisor fixes argv[0], so the name
- * never depends on the host binary's path. Linux.
- */
-void patina_note_program_name(const char *argv0);
-/*
- * glibc's pthread_getname_np/pthread_setname_np over the modeled per-thread
- * names: ERANGE for a buffer shorter than 16 bytes or a name longer than 15,
- * ESRCH for a handle naming no thread. Linux.
- */
-int patina_thread_getname(uintptr_t thread, char *name, size_t len);
-int patina_thread_setname(uintptr_t thread, const char *name);
 /*
  * The runtime side of the packaged `exit` interposer. Marks the process as
  * having entered post-`main` teardown (so the root task's --yield-stride hooks
@@ -189,7 +155,6 @@ void patina_note_main_returned(void);
  * 1 once the process is in post-`main` teardown (only the root task runs), 0
  * before: the POSIX layer's internal locks are not taken then.
  */
-int32_t patina_in_teardown(void);
 #ifdef __linux__
 /*
  * Syscall-user-dispatch (SUD) boundary (Linux only). `patina_sud_dispatch` is
@@ -211,7 +176,6 @@ void patina_sud_arm_thread(void);
  * (i.e. neither the __libc_start_main wrapper nor the `exit` interposer engaged),
  * so an interposition miss is a one-line fatal instead of a later op divergence.
  */
-void patina_assert_teardown_engaged(void);
 #endif
 /*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
@@ -223,25 +187,10 @@ void patina_assert_teardown_engaged(void);
 int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
 int32_t patina_entropy(void *destination, size_t length);
-/*
- * localtime_r's conversion (src/localtime.rs): `t` in the zone `tz` (TZ, or
- * NULL when unset) and `tzdir` (TZDIR) name at the FIRST call, as glibc reads
- * TZ once. 0 with `out` filled, or -1 with patina_errno EOVERFLOW. A zoneinfo
- * file where glibc would read one is a named fatal. `zone` lives for the
- * process.
- */
-struct patina_tm {
-    int32_t sec, min, hour, mday, mon, year, wday, yday, isdst;
-    int64_t gmtoff;
-    const char *zone;
-};
-int32_t patina_localtime(int64_t t, const char *tz, const char *tzdir, struct patina_tm *out);
 /* Entry `index` of the virtual machine's passwd database as its /etc/passwd
  * line (registry PASSWD, file order), or NULL past the last. */
-const char *patina_passwd_line(uint32_t index);
 int32_t patina_clock_now(uint32_t clock, uint64_t *nanos);
 int32_t patina_sleep_until(uint32_t clock, uint64_t deadline_nanos);
-int patina_sleep_until_remaining(uint32_t clock_id, uint64_t deadline_nanos, int64_t *remaining);
 /*
  * The process's virtual CPU time in nanoseconds, for the Darwin resource
  * accounting interposers (`getrusage`/`task_info`): the modeled startup cost
@@ -322,7 +271,6 @@ intptr_t patina_resolve_path(int32_t dirfd, const char *path, uint32_t flags, ch
 intptr_t patina_getcwd(char *buf, size_t len);
 int32_t patina_chdir(int32_t dirfd, const char *path);
 int32_t patina_fchdir(int32_t fd);
-uint32_t patina_umask(uint32_t mask);
 /*
  * openat(2): open what (dirfd, path) resolves to, returning a fresh guest
  * descriptor number. The entry's KIND decides the description: a regular file,
@@ -343,10 +291,6 @@ int32_t patina_openat(int32_t dirfd, const char *path, uint32_t flags, uint32_t 
  * resolution restricted by `resolve` (PATINA_RESOLVE_BENEATH, _IN_ROOT,
  * _NO_SYMLINKS, _NO_XDEV, _CACHED; any other bit is EINVAL).
  */
-#ifdef __linux__
-int32_t patina_openat2(int32_t dirfd, const char *path, uint32_t flags, uint32_t mode,
-                       uint32_t resolve);
-#endif
 /*
  * The universal descriptor operations: each resolves the guest number once and
  * dispatches on what it names, answering what the kernel answers for a kind
@@ -357,8 +301,6 @@ int32_t patina_openat2(int32_t dirfd, const char *path, uint32_t flags, uint32_t
  */
 intptr_t patina_read(int32_t fd, void *destination, size_t length);
 intptr_t patina_write(int32_t fd, const void *source, size_t length);
-intptr_t patina_pread(int32_t fd, void *destination, size_t length, int64_t offset);
-intptr_t patina_pwrite(int32_t fd, const void *source, size_t length, int64_t offset);
 /*
  * Vectored I/O over a `struct iovec` array of `count` segments: readv/writev at
  * the cursor, preadv/pwritev at `offset` (which never moves the cursor). The
@@ -369,95 +311,9 @@ intptr_t patina_pwrite(int32_t fd, const void *source, size_t length, int64_t of
  * plain rows): an unknown bit is EOPNOTSUPP, RWF_NOWAIT never waits,
  * RWF_APPEND writes at the end, RWF_DSYNC/RWF_SYNC make the bytes durable.
  */
-intptr_t patina_readv(int32_t fd, const void *vector, int64_t count, int32_t flags);
-intptr_t patina_writev(int32_t fd, const void *vector, int64_t count, int32_t flags);
-intptr_t patina_preadv(int32_t fd, const void *vector, int64_t count, int64_t offset,
-                       int32_t flags);
-intptr_t patina_pwritev(int32_t fd, const void *vector, int64_t count, int64_t offset,
-                        int32_t flags);
 int32_t patina_close(int32_t fd);
 int64_t patina_seek(int32_t fd, int64_t offset, uint32_t whence);
 int32_t patina_fsync(int32_t fd);
-/*
- * Advisory whole-file lock (flock(2)). `operation` is LOCK_SH/LOCK_EX/LOCK_UN
- * optionally OR'd with LOCK_NB. The lock belongs to the open file DESCRIPTION
- * (a dup of the holder shares and can release it) and is keyed on the
- * deterministic-fs inode: a lone opener always acquires, while an incompatible
- * lock held on a different description of the same file yields EWOULDBLOCK
- * (LOCK_NB) so a guest that opens the same file twice contends as it would on
- * a real kernel. The lock clears on LOCK_UN and with the description.
- */
-/*
- * fcntl(2)'s record locks, in Linux's numbering and the 64-bit kernel's
- * `struct flock` layout (the C fcntl translates its platform's): POSIX locks
- * (PATINA_F_GETLK/SETLK/SETLKW, owned by the process, released by any close of
- * the file) and OFD locks (PATINA_F_OFD_*, owned by the open file
- * description, released with it). A test writes the first conflicting lock
- * (l_pid its process, -1 for an OFD lock) or PATINA_F_UNLCK back; a set that
- * conflicts is EAGAIN, or with a SETLKW form waits (EDEADLK where a POSIX wait
- * would close a cycle). A NULL lock is EFAULT.
- */
-enum {
-    PATINA_F_GETLK = 5,
-    PATINA_F_SETLK = 6,
-    PATINA_F_SETLKW = 7,
-    PATINA_F_OFD_GETLK = 36,
-    PATINA_F_OFD_SETLK = 37,
-    PATINA_F_OFD_SETLKW = 38,
-};
-enum {
-    PATINA_F_RDLCK = 0,
-    PATINA_F_WRLCK = 1,
-    PATINA_F_UNLCK = 2,
-};
-struct patina_flock {
-    int16_t l_type;
-    int16_t l_whence;
-    int64_t l_start;
-    int64_t l_len;
-    int32_t l_pid;
-};
-int32_t patina_record_lock(int32_t fd, uint32_t command, struct patina_flock *lock);
-/*
- * ioctl(2)'s generic descriptor requests, `request` in the platform's own
- * numbering: FIOCLEX/FIONCLEX set/clear FD_CLOEXEC, FIONBIO reads an int
- * through `arg` (EFAULT for NULL) into the description's O_NONBLOCK, FIONREAD
- * writes an int (a regular file's size minus its position, a pipe's queued
- * bytes; EFAULT for NULL). An O_PATH descriptor is EBADF; any other request,
- * and FIONREAD on a descriptor with no such answer, is ENOTTY.
- */
-int32_t patina_ioctl(int32_t fd, uint64_t request, void *arg);
-/*
- * The descriptor table itself. patina_fd_kind answers PATINA_FD_* or -1/EBADF.
- * patina_fd_limit is RLIMIT_NOFILE as the table enforces it (EMFILE at and
- * above it), the number getrlimit and sysconf(_SC_OPEN_MAX) must report.
- * F_GETFD/F_SETFD read and write the number's FD_CLOEXEC bit; F_GETFL/F_SETFL
- * read and write the description's status flags in the PATINA_O_* vocabulary
- * (access mode, PATINA_O_APPEND, PATINA_O_NONBLOCK, PATINA_O_PATH,
- * PATINA_O_DIRECTORY when the open asked for it; only the
- * first two are settable, as the kernel ignores the rest of an F_SETFL
- * argument); patina_fd_set_nonblocking flips PATINA_O_NONBLOCK alone (FIONBIO,
- * SOCK_NONBLOCK on accept).
- */
-int32_t patina_fd_kind(int32_t fd);
-int32_t patina_fd_limit(void);
-int32_t patina_fd_getfd(int32_t fd);
-int32_t patina_fd_setfd(int32_t fd, int32_t cloexec);
-int32_t patina_fd_getfl(int32_t fd);
-int32_t patina_fd_setfl(int32_t fd, uint32_t flags);
-int32_t patina_fd_set_nonblocking(int32_t fd, int32_t nonblocking);
-/*
- * Duplication and closing, kernel semantics: dup binds the lowest free number;
- * F_DUPFD[_CLOEXEC] the lowest free at or above `minimum` (EINVAL outside the
- * table, EMFILE when none is free); dup2/dup3 bind a CHOSEN number, closing
- * what it named (dup2 of equal numbers validates and returns it, dup3 of equal
- * numbers is EINVAL; a target outside the table is EBADF). close frees the
- * number and, with its last number, the description; close_range covers
- * [first, last] (clamped to the table), or with CLOSE_RANGE_CLOEXEC marks the
- * range close-on-exec instead.
- */
-int32_t patina_dupfd(int32_t fd, int32_t minimum, int32_t cloexec);
-int32_t patina_close_range(uint32_t first, uint32_t last, uint32_t flags);
 /*
  * Memory mappings share one model across the libc and SUD doors. Each answer
  * follows the raw syscall ABI: the address (or 0) on success, -errno on
@@ -474,26 +330,6 @@ int64_t patina_mremap(uintptr_t old_addr, size_t old_length, size_t new_length, 
 int64_t patina_mlock(uintptr_t addr, size_t length, uint32_t flags);
 int64_t patina_munlock(uintptr_t addr, size_t length);
 int64_t patina_mlockall(int32_t flags);
-int64_t patina_munlockall(void);
-/*
- * prlimit64 of the virtual process (pid 0 or 1): the old limits into `old`
- * when non-NULL, then `new` when non-NULL. 0 or -errno.
- */
-struct patina_rlimit {
-    uint64_t cur;
-    uint64_t max;
-};
-int64_t patina_prlimit(int32_t pid, uint32_t resource, const struct patina_rlimit *new_limit,
-                       struct patina_rlimit *old_limit);
-/*
- * Anonymous files (src/mem.rs): memfd_create over the deterministic
- * filesystem, and the fcntl seal commands (F_GET_SEALS answers the seals,
- * F_ADD_SEALS adds them). Each returns -1 with patina_errno() on failure.
- */
-int32_t patina_memfd_create(const char *name, uint32_t flags);
-int32_t patina_memfd_secret(uint32_t flags);
-int32_t patina_get_seals(int32_t fd);
-int32_t patina_add_seals(int32_t fd, uint32_t seals);
 /* fcntl F_SETOWN/F_SETOWN_EX/F_SETSIG: EBADF for a closed or O_PATH
  * descriptor, otherwise a named fatal (SIGIO and SIGURG are not modeled). */
 int32_t patina_fcntl_owner(int32_t fd);
@@ -572,96 +408,30 @@ struct patina_timestamp {
     int64_t sec;
     int64_t nsec;
 };
-struct patina_metadata {
-    uint32_t kind;
-    uint32_t mode;
-    uint32_t nlink;
-    uint32_t fs; /* PATINA_FS_* */
-    uint32_t rdev_major; /* a device node's device (st_rdev); 0 for any other */
-    uint32_t rdev_minor;
-    uint64_t length;
-    uint64_t blocks; /* the 512-byte units the node has allocated (st_blocks) */
-    uint64_t ino;
-    struct patina_timestamp atime;
-    struct patina_timestamp mtime;
-    struct patina_timestamp ctime;
-    struct patina_timestamp btime;
-};
-/*
- * The metadata of what (dirfd, path) resolves to — the one entry behind the
- * stat family, access and statfs on both doors (`flags` are PATINA_RESOLVE_*;
- * a missing entry is ENOENT) — and of an open descriptor.
- */
-int32_t patina_metadata_at(int32_t dirfd, const char *path, uint32_t flags,
-                           struct patina_metadata *out);
-int32_t patina_fd_metadata_full(int32_t fd, struct patina_metadata *out);
 /*
  * access/faccessat's answer for the node `values` describes: 0 or the errno
  * (the owner triad of a volume entry, the other triad of a root-owned node,
  * EPERM for write access to an immutable one).
  */
-int32_t patina_access_answer(const struct patina_metadata *values, int32_t mode);
 #ifdef __linux__
-/*
- * Linux statfs(2)/fstatfs(2)/ustat(2): the filesystem a path (a trailing
- * symlink followed) or a descriptor (O_PATH included) is on, written into the
- * kernel's 64-bit `struct statfs` (glibc's layout too) or x86_64 `struct
- * ustat`. The deterministic volume is one constant ext4-like description;
- * a pipe, a socket, an eventfd/signalfd/epoll descriptor answer their
- * pseudo-filesystem's (PIPEFS_MAGIC, SOCKFS_MAGIC, ANON_INODE_FS_MAGIC).
- * f_flags carries ST_VALID. A NULL buffer is EFAULT once everything else was
- * judged; ustat of a device no filesystem is on is EINVAL before the buffer.
- */
-int32_t patina_statfs(const char *path, void *out);
-/*
- * What statx adds to the basic statistics of the node `ino` on the
- * PATINA_FS_* filesystem `fs`, asked for `mask`: the returned mask bits (the mount id's,
- * STATX_MNT_ID_UNIQUE when asked for, else STATX_MNT_ID; STATX_BTIME when
- * asked for and the filesystem records one), and the node's mount id,
- * written to `mount_id`.
- */
-uint32_t patina_statx_extra(uint32_t fs, uint64_t ino, uint32_t mask, uint64_t *mount_id);
-/*
- * Linux in-kernel copies, each with its syscall's contract and refusal order:
- * copy_file_range between two regular files (offsets read and advanced
- * through the pointers, or the cursors when NULL), sendfile from a regular
- * file into anything writable, splice/tee between pipes and files, and
- * vmsplice of a `struct iovec` vector into or out of a pipe.
- */
-intptr_t patina_copy_file_range(int32_t fd_in, int64_t *off_in, int32_t fd_out, int64_t *off_out,
-                                size_t len, uint32_t flags);
-intptr_t patina_sendfile(int32_t out_fd, int32_t in_fd, int64_t *offset, size_t count);
-intptr_t patina_splice(int32_t fd_in, int64_t *off_in, int32_t fd_out, int64_t *off_out,
-                       size_t len, uint32_t flags);
-intptr_t patina_tee(int32_t fd_in, int32_t fd_out, size_t len, uint32_t flags);
-intptr_t patina_vmsplice(int32_t fd, const void *vector, int64_t count, uint32_t flags);
 /*
  * Linux page-cache advice, validated as the kernel validates it over a
  * filesystem with no page cache: posix_fadvise/readahead are no-ops past
  * their refusals.
  */
-int32_t patina_fadvise(int32_t fd, int64_t offset, int64_t length, int32_t advice);
-int32_t patina_readahead(int32_t fd, int64_t offset, size_t count);
 #endif
 /*
  * The one modeled identity (uid/gid 1000): the ONE accessor getuid/geteuid,
  * getgid/getegid, every st_uid/st_gid, and the chown comparison read.
  */
-/* The guest's pid and its parent's (the pid namespace's init). */
-int32_t patina_pid(void);
-int32_t patina_ppid(void);
-uint32_t patina_uid(void);
-uint32_t patina_gid(void);
 /* The owner stat reports for a node on the PATINA_FS_* filesystem `fs`: the
  * caller's, but for the nodes the virtual kernel's boot or devpts makes
  * (namespace files, the entropy device, /dev/ptmx, a pseudoterminal's slave). */
-void patina_node_owner(uint32_t fs, uint32_t *uid, uint32_t *gid);
 #ifdef __linux__
 /* The name /proc/self/fd reads for a pseudoterminal descriptor (/dev/ptmx for
  * a master, /dev/pts/<index> for a slave): its length, written with its
  * terminator when `len` has room; -1 with patina_errno() (ENOTTY for any
  * other descriptor, EBADF for none). */
-intptr_t patina_pty_name(int32_t fd, char *buf, size_t len);
 #endif
 #ifdef __APPLE__
 /*
@@ -670,7 +440,6 @@ intptr_t patina_pty_name(int32_t fd, char *buf, size_t len);
  * struct utsname. 0, or -1 with patina_errno(); before the runtime is
  * installed it installs it or refuses by name, as every boundary does.
  */
-int32_t patina_uname(void *name);
 #endif
 /*
  * utimensat(2) on a (dirfd, path) (`flags` are PATINA_RESOLVE_*; NOFOLLOW
@@ -715,15 +484,6 @@ int32_t patina_fchown(int32_t fd, uint32_t uid, uint32_t gid);
 int32_t patina_truncate(int32_t dirfd, const char *path, int64_t length);
 int32_t patina_fallocate(int32_t fd, uint32_t mode, int64_t offset, int64_t length);
 /*
- * Change an entry's permission bits (chmod/fchmod/fchmodat). Without
- * PATINA_RESOLVE_NOFOLLOW a trailing symlink resolves and its TARGET changes
- * (chmod, fchmodat with no flags); with it the link itself is named, which is
- * EOPNOTSUPP because Linux has no way to change a symlink's mode. Only the
- * permission bits of `mode` are stored.
- */
-int32_t patina_chmod(int32_t dirfd, const char *path, uint32_t mode, uint32_t flags);
-int32_t patina_fchmod(int32_t fd, uint32_t mode);
-/*
  * The namespace operations, each on a resolved (dirfd, path). A trailing
  * symlink is never followed by these: the kernel creates, removes and renames
  * link ENTRIES as entries. Creating calls take the caller's mode and apply the
@@ -739,7 +499,6 @@ int32_t patina_fchmod(int32_t fd, uint32_t mode);
  * EINVAL, a zero-length buffer is EINVAL.
  */
 int32_t patina_mkdir(int32_t dirfd, const char *path, uint32_t mode);
-int32_t patina_mkfifo(int32_t dirfd, const char *path, uint32_t mode);
 /*
  * mknod(2)/mknodat(2) in the kernel's order: the type (S_IFDIR EPERM, an
  * unknown type EINVAL) before the path, then the name (ENOENT, EEXIST), the
@@ -749,7 +508,6 @@ int32_t patina_mkfifo(int32_t dirfd, const char *path, uint32_t mode);
  * is the kernel's 32-bit device word; the mode is applied under the umask.
  * Darwin: a FIFO is mkfifo, every other type EPERM.
  */
-int32_t patina_mknod(int32_t dirfd, const char *path, uint32_t mode, uint32_t dev);
 int32_t patina_unlink(int32_t dirfd, const char *path);
 int32_t patina_rmdir(int32_t dirfd, const char *path);
 /*
@@ -760,14 +518,10 @@ int32_t patina_rmdir(int32_t dirfd, const char *path);
  */
 int32_t patina_renameat2(int32_t fromfd, const char *from, int32_t tofd, const char *to,
                          uint32_t flags);
-int32_t patina_symlink(const char *target, int32_t dirfd, const char *link_path);
-int32_t patina_link(int32_t fromfd, const char *from, int32_t tofd, const char *to,
-                    int32_t follow);
 intptr_t patina_read_link(int32_t dirfd, const char *path, char *buf, size_t len);
 int32_t patina_thread_id(void);
 #ifdef __APPLE__
 /* Synchronous self-signal generation through the Darwin signal model. */
-int patina_raise(int sig);
 #endif
 
 #ifdef __linux__
@@ -779,27 +533,9 @@ struct patina_signal_action {
 };
 int64_t patina_signal_action(int32_t sig, const struct patina_signal_action *act,
                             struct patina_signal_action *old, size_t size);
-int64_t patina_signal_mask(int32_t how, const uint64_t *set, uint64_t *old, size_t size);
-int64_t patina_signal_pending(uint8_t *set, size_t size);
-int64_t patina_signal_altstack(const void *stack, void *old);
-enum patina_signal_wait_mode {
-    PATINA_SIGNAL_DEQUEUE = 0,
-    PATINA_SIGNAL_SUSPEND = 1,
-    PATINA_SIGNAL_PAUSE = 2,
-};
-int64_t patina_signal_wait(const uint64_t *set, void *info, const void *timeout,
-                          size_t size, enum patina_signal_wait_mode mode);
-int patina_pthread_kill(uintptr_t thread, int sig);
 /* Nonzero for glibc's reserved signals, SIGCANCEL (32) and SIGSETXID (33),
  * which its libc face refuses (EINVAL) to act on. */
-int patina_signal_reserved(int sig);
-int64_t patina_set_tid_address(int32_t *address);
-_Noreturn void patina_raw_exit(int status);
 _Noreturn void patina_raw_exit_group(int status);
-void patina_signal_deliver(void);
-void patina_signal_restorer(uintptr_t restorer);
-int64_t patina_signal_action_libc(int sig, const struct patina_signal_action *action,
-                                struct patina_signal_action *old);
 void patina_signal_frame(uint64_t *mask, void *stack);
 /* A guest restorer's rt_sigreturn: keep the containment signals out of the
  * frame's saved mask at `mask`, and name the host vehicle (glibc's real
@@ -810,7 +546,6 @@ uintptr_t patina_signal_return(uintptr_t mask);
 void patina_thread_registrations_adopt_main(void);
 #endif
 /* Private internal-fatal vehicle: never finalize the guest trace. */
-_Noreturn void patina_host_abort(void);
 #ifdef __linux__
 _Noreturn void patina_abort(void);
 #endif
@@ -961,17 +696,11 @@ int32_t patina_cancel_leave(int32_t outer);
  * thread with a cancel to act on stops the run by name. */
 void patina_cancel_point(const char *name);
 #endif
-int32_t patina_mutex_init(void *mutex, const void *attr);
-int32_t patina_mutex_lock(void *mutex);
-int32_t patina_mutex_trylock(void *mutex);
-int32_t patina_mutex_unlock(void *mutex);
-int32_t patina_mutex_destroy(void *mutex);
 int32_t patina_cond_init(void *cond, const void *attr);
 int32_t patina_cond_wait(void *cond, void *mutex);
 int32_t patina_cond_timedwait(void *cond, void *mutex, const void *abstime);
 int32_t patina_cond_signal(void *cond);
 int32_t patina_cond_broadcast(void *cond);
-int32_t patina_cond_destroy(void *cond);
 
 /*
  * Deterministic pthread_rwlock_* under the scheduler: writer-preferring, FIFO
@@ -988,87 +717,6 @@ int32_t patina_rwlock_unlock(void *lock);
 int32_t patina_rwlock_destroy(void *lock);
 
 /*
- * Sockets (AF_INET, AF_INET6, AF_UNIX, AF_NETLINK) use the runtime's SimNet
- * and the shim's shared socket model. The libc and SUD doors preserve their
- * kernel argument widths and copy guest memory through the same model.
- * Blocking calls park the calling managed task through the scheduler baton.
- */
-int64_t patina_sock_socketpair(int family, int type, int protocol, uintptr_t sv);
-int64_t patina_sock_sendto(int fd, uintptr_t buf, size_t len, int flags, uintptr_t addr,
-                           int64_t alen);
-
-/*
- * The virtual interface table (`lo`, `eth0`) one record at a time, in index
- * order: 0 with `*out` written, -EINVAL past the last. Addresses are in
- * network order; `ipv4_broadcast` is zero for a link without broadcast.
- */
-struct patina_interface {
-    uint32_t index;
-    uint32_t flags;
-    uint32_t mtu;
-    uint16_t hardware_type;
-    char name[16];
-    uint8_t hardware_address[6];
-    uint8_t broadcast_hardware_address[6];
-    uint8_t ipv4[4];
-    uint8_t ipv4_netmask[4];
-    uint8_t ipv4_broadcast[4];
-    uint8_t has_ipv6;
-    uint8_t ipv6_prefix;
-    uint8_t ipv6[16];
-};
-int64_t patina_net_interface(uint32_t position, struct patina_interface *out);
-/*
- * getaddrinfo's numeric-host parse (inet_aton, or inet_pton with an optional
- * `%scope`): AF_INET/AF_INET6 with the address in `out` (4 or 16 bytes,
- * network order) and the scope in `*scope`, or 0 for no numeric host.
- */
-int patina_net_numeric_host(const char *node, uint8_t out[16], uint32_t *scope);
-/*
- * Resolve a host name to a virtual IPv4 address (host byte order) through the
- * run's deterministic DNS host table. Returns 0 and writes *ip on success; on
- * failure returns -1 and sets errno (ENOENT for a name that does not resolve,
- * EINTR for an injected resolver timeout). Backs getaddrinfo; gethostbyname and
- * getnameinfo stay refused.
- */
-int32_t patina_dns_resolve(const char *name, uint32_t *ip);
-
-/*
- * In-process pipe. Both endpoints live inside this one guest process (an async
- * runtime's IO-driver / signal self-pipe), so they are modeled as deterministic
- * in-memory byte channels, PATINA_FD_PIPE descriptions on the same
- * baton/waiter machinery the sockets use. The two numbers are allocated
- * atomically (one free slot is EMFILE and creates nothing). A dup of an
- * endpoint shares its description: a channel side reports EOF/EPIPE only once
- * its LAST number has closed. patina_pipe_size / patina_pipe_set_size are
- * F_GETPIPE_SZ / F_SETPIPE_SZ (page-rounded to a power of two, 64 KiB by
- * default, EBUSY below the bytes buffered, EPERM above the unprivileged
- * maximum).
- */
-int32_t patina_pipe(int32_t *read_fd_out, int32_t *write_fd_out, int32_t nonblocking,
-                    int32_t cloexec);
-int32_t patina_pipe_size(int32_t fd);
-int32_t patina_pipe_set_size(int32_t fd, int32_t size);
-
-/*
- * Linux SYS_futex routing. Rust std on Linux implements Mutex/Condvar/thread
- * parking with raw futexes reached through libc's syscall() wrapper; the
- * interposed syscall() delegates FUTEX_WAIT/WAKE here so they run under the
- * deterministic scheduler keyed on the futex word's address.
- */
-int32_t patina_futex_wait(uintptr_t addr, uint32_t expected);
-/*
- * Timed FUTEX_WAIT/FUTEX_WAIT_BITSET. `clock` is PATINA_CLOCK_MONOTONIC unless
- * FUTEX_CLOCK_REALTIME was set; `absolute` is 0 for a relative FUTEX_WAIT
- * timeout and nonzero for an absolute FUTEX_WAIT_BITSET deadline. Returns 0 when
- * woken by FUTEX_WAKE, or -1 with patina_errno ETIMEDOUT at the deadline or
- * EWOULDBLOCK if the word no longer holds `expected`.
- */
-int32_t patina_futex_wait_timed(uintptr_t addr, uint32_t expected, uint32_t clock,
-                                int32_t absolute, uint64_t timeout_nanos);
-int32_t patina_futex_wake(uintptr_t addr, int32_t count);
-
-/*
  * epoll / eventfd readiness reactor (Linux). The Linux mirror of the macOS
  * kqueue reactor below, over the same shared readiness core. An epoll instance
  * is a PATINA_FD_EPOLL description, an eventfd a PATINA_FD_EVENTFD one; read/
@@ -1082,8 +730,6 @@ int32_t patina_futex_wake(uintptr_t addr, int32_t count);
  * in the C layer.
  */
 #ifdef __linux__
-int32_t patina_epoll_create1(int32_t flags);
-int32_t patina_epoll_ctl(int32_t epfd, int32_t op, int32_t fd, const void *event);
 /* timeout_ms: -1 blocks until ready, 0 polls, > 0 is a relative virtual-clock
  * deadline in milliseconds. */
 int32_t patina_epoll_wait(int32_t epfd, void *events, int32_t maxevents, int32_t timeout_ms);
@@ -1098,11 +744,6 @@ int32_t patina_epoll_wait(int32_t epfd, void *events, int32_t maxevents, int32_t
  * monotonic token consumed by patina_dispatch_semaphore_wait.
  */
 #ifdef __APPLE__
-uint64_t patina_dispatch_time(uint64_t when, int64_t delta);
-void *patina_dispatch_semaphore_create(intptr_t value);
-intptr_t patina_dispatch_semaphore_wait(void *sem, uint64_t timeout);
-intptr_t patina_dispatch_semaphore_signal(void *sem);
-void patina_dispatch_release(void *object);
 
 /*
  * os_unfair_lock routing (macOS). parking_lot_core's Darwin word lock is a bare
@@ -1114,25 +755,6 @@ void patina_dispatch_release(void *object);
 void patina_os_unfair_lock_lock(void *lock);
 int32_t patina_os_unfair_lock_trylock(void *lock);
 void patina_os_unfair_lock_unlock(void *lock);
-
-/*
- * kqueue / kevent readiness reactor (macOS). A kqueue is a PATINA_FD_KQUEUE
- * description (close-on-exec from birth, as xnu makes it); close/dup/fcntl
- * reach it through the universal entries. The C kevent interposers marshal the platform struct kevent/kevent64_s changelists and
- * eventlists to and from this platform-neutral projection; the Rust reactor owns
- * the knote registry, readiness, deterministic event ordering, and the multi-fd
- * fan-in park. `struct patina_kevent` is laid out to match the macOS `struct
- * kevent` field for field (asserted in the C layer), so a kevent eventlist is
- * marshalled by a direct reinterpret and a kevent64_s eventlist field by field.
- */
-struct patina_kevent {
-    uint64_t ident;
-    int16_t filter;
-    uint16_t flags;
-    uint32_t fflags;
-    int64_t data;
-    void *udata;
-};
 
 /*
  * Apply one changelist entry. Returns 0 on success or a POSIX errno the caller
@@ -1154,15 +776,6 @@ int32_t patina_kqueue_apply(int32_t kq, uint64_t ident, int16_t filter, uint16_t
 #define PATINA_TSC_NONE 0
 #define PATINA_TSC_RDTSC 1
 #define PATINA_TSC_RDTSCP 2
-
-#ifdef __linux__
-int64_t patina_signalfd(int fd, const uint64_t *mask, size_t size, int flags);
-#endif
-
-#ifdef __linux__
-int64_t patina_poll(void *fds, size_t count, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
-int64_t patina_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, int64_t timeout, const uint64_t *mask, uint64_t *remaining);
-#endif
 
 #ifdef __cplusplus
 }

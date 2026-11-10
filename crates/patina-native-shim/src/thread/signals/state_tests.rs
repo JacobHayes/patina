@@ -202,7 +202,7 @@ fn stacked_delivery_releases_frames_with_one_host_unblock() {
         generate(SIGUSR2);
         generate(SIGUSR1);
         set_mask(SIG_UNBLOCK, bit(SIGUSR1) | bit(SIGUSR2));
-        let calls = capture_transport(|| patina_signal_deliver());
+        let calls = capture_transport(patina_signal_deliver);
         assert_eq!(
             calls,
             vec![
@@ -231,7 +231,7 @@ fn stacked_delivery_out_of_host_order_releases_each_frame_last_first() {
         generate(SIGUSR1);
         directed(current_task(), SIGUSR2);
         set_mask(SIG_UNBLOCK, bit(SIGUSR1) | bit(SIGUSR2));
-        let calls = capture_transport(|| patina_signal_deliver());
+        let calls = capture_transport(patina_signal_deliver);
         assert_eq!(
             calls,
             vec![
@@ -268,7 +268,7 @@ fn shim_scopes_close_where_they_opened() {
         set_mask(SIG_BLOCK, bit(SIGUSR1));
         generate(SIGUSR1);
         set_mask(SIG_UNBLOCK, bit(SIGUSR1));
-        deeper(|| patina_signal_deliver());
+        deeper(patina_signal_deliver);
         assert_eq!(HANDLERS.load(Ordering::SeqCst), 1);
         let after_delivery = fault::open_scopes();
         let blocked = bit(SIGSEGV);

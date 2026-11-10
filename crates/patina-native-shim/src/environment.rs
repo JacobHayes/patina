@@ -77,8 +77,7 @@ pub extern "C" fn patina_errno() -> c_int {
 /// constructor runs, so those probes see the historical empty environment
 /// rather than the host's. A stored init error aborts, as every entry that
 /// answers without reaching `ensure_runtime` must.
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_env_read_gate() -> c_int {
+pub fn patina_env_read_gate() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
@@ -89,13 +88,12 @@ pub extern "C" fn patina_env_read_gate() -> c_int {
     1
 }
 
-#[unsafe(no_mangle)]
 /// May the POSIX layer mutate `environ`? 0 to go ahead, -1 (`ENOSYS`, with a
 /// diagnostic) when no runtime is installed. Unlike a lookup, a pre-startup
 /// WRITE would change the ambient host array the constructor is about to
 /// scrub, and the guest and the run would then disagree about the
 /// environment: a constructor beat Patina's, so name it and fail closed.
-pub extern "C" fn patina_env_write_gate() -> c_int {
+pub fn patina_env_write_gate() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Some(message) = init_error().lock().clone() {
         abort_with_init_error(&message);
@@ -126,13 +124,12 @@ static ENVIRON_INSTALLER: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut(
 
 type EnvironInstaller = unsafe extern "C" fn(*mut *mut c_char);
 
-#[unsafe(no_mangle)]
 /// Register the callback that publishes the startup `environ` array. Called
 /// once from the POSIX constructor before the runtime is installed.
 ///
 /// # Safety
 /// `installer` must be a valid `void (*)(char **)` for the life of the process.
-pub unsafe extern "C" fn patina_register_environ_installer(installer: Option<EnvironInstaller>) {
+pub unsafe fn patina_register_environ_installer(installer: Option<EnvironInstaller>) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // A function pointer and a data pointer are the same width on every platform
     // Patina targets; the value is only ever transmuted back to the same type.
@@ -181,12 +178,11 @@ pub(crate) fn publish_environ(env: &BTreeMap<String, String>) {
     unsafe { installer(array) };
 }
 
-#[unsafe(no_mangle)]
 /// Publish `environ` from the installed context's startup map, or an empty
 /// array when no runtime is installed. The POSIX constructor then commits
 /// this map to the launcher's reserved initial-stack environment and scrubs
 /// the old entries before admitting guest environment reads.
-pub extern "C" fn patina_publish_environ() {
+pub fn patina_publish_environ() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let guard = slot().lock();
     match guard.as_ref() {

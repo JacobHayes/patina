@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 // XNU bsd/sys/signalvar.h, sigprop: these defaults ignore the signal. A managed
 // process is never stopped, so SIGCONT's continue side effect is inert.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn ignored_by_default(sig: i32) -> bool {
     matches!(
         sig,
@@ -17,8 +18,8 @@ fn ignored_by_default(sig: i32) -> bool {
     )
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn patina_raise(sig: i32) -> i32 {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub fn patina_raise(sig: i32) -> i32 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::abort_if_init_failed();
     // Darwin has signals 1..31, unlike Linux's 1..64. Zero only probes self.

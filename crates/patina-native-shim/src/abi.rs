@@ -98,6 +98,7 @@ pub(crate) fn pthread_result(result: SysResult<()>) -> c_int {
 }
 
 /// Project a result to the raw-syscall convention (`-errno` on failure).
+#[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
 pub(crate) fn raw(result: SysResult<i64>) -> i64 {
     match result {
         Ok(value) => value,

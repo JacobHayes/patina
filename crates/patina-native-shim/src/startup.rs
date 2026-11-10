@@ -8,25 +8,14 @@ pub extern "C" fn patina_note_boundary_symbol(symbol: *const c_char) {
     LAST_BOUNDARY_SYMBOL.store(symbol.cast_mut(), Ordering::Relaxed);
 }
 
-#[unsafe(no_mangle)]
-/// Install the POSIX interposer's internal-panic policy without installing a
-/// runtime. Bare prefixed-C embedders have no guest abort interposer or required
-/// host aliases and deliberately do not call this startup control-plane entry.
-pub extern "C" fn patina_init_panic_policy() {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
-    crate::panic_boundary::install();
-}
-
-#[unsafe(no_mangle)]
 /// Mark that the packaged C startup constructor finished capture/init/scrub.
-pub extern "C" fn patina_note_startup_constructor_finished() {
+pub fn patina_note_startup_constructor_finished() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // The loader runs the constructor on the main thread.
     thread::claim_main_thread();
     STARTUP_CONSTRUCTOR_FINISHED.store(true, Ordering::Release);
 }
 
-#[unsafe(no_mangle)]
 /// Capture one `PATINA_NAME=value` constructor-time control-plane entry for
 /// later shim-internal configuration reads. Guest-visible getenv never serves
 /// this map.
@@ -34,7 +23,7 @@ pub extern "C" fn patina_note_startup_constructor_finished() {
 /// # Safety
 /// `entry` must point to a valid NUL-terminated string for the duration of the
 /// call.
-pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
+pub unsafe fn patina_control_set_entry(entry: *const c_char) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if entry.is_null() {
         return;

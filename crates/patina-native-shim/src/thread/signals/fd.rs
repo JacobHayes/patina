@@ -7,15 +7,9 @@ pub(in crate::thread) struct SignalFd {
     pub arrivals: u64,
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mask` names an eight-byte Linux signal set.
-pub unsafe extern "C" fn patina_signalfd(
-    fd: i32,
-    mask: *const u64,
-    size: usize,
-    flags: i32,
-) -> i64 {
+pub unsafe fn patina_signalfd(fd: i32, mask: *const u64, size: usize, flags: i32) -> i64 {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // `signalfd4`: the size, then the mask copied in, then the flags.
     if size != SIGSET_BYTES {

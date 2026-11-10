@@ -14,10 +14,9 @@ macro_rules! managed_op {
     }};
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_void) -> c_int {
+pub unsafe fn patina_mutex_init(mutex: *mut c_void, attr: *const c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     // SAFETY: a null or initialized attribute, per the pthread contract.
     let kind = unsafe { MutexKind::of_attr(attr) };
@@ -28,10 +27,9 @@ pub unsafe extern "C" fn patina_mutex_init(mutex: *mut c_void, attr: *const c_vo
     })
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
+pub unsafe fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let key = mutex as usize;
@@ -50,10 +48,9 @@ pub unsafe extern "C" fn patina_mutex_lock(mutex: *mut c_void) -> c_int {
     })
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
+pub unsafe fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         // SAFETY: a valid `pthread_mutex_t`, per this function's contract.
@@ -64,10 +61,9 @@ pub unsafe extern "C" fn patina_mutex_trylock(mutex: *mut c_void) -> c_int {
     })
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
+pub unsafe fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_op(crate::charge::Op::PthreadSync);
     managed_op!({
         let me = current_task();
@@ -80,10 +76,9 @@ pub unsafe extern "C" fn patina_mutex_unlock(mutex: *mut c_void) -> c_int {
     })
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `mutex` must reference a valid `pthread_mutex_t`.
-pub unsafe extern "C" fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
+pub unsafe fn patina_mutex_destroy(mutex: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
         let mut state = lock_state();
@@ -535,10 +530,9 @@ pub unsafe extern "C" fn patina_cond_broadcast(cond: *mut c_void) -> c_int {
     })
 }
 
-#[unsafe(no_mangle)]
 /// # Safety
 /// `cond` must reference a valid `pthread_cond_t`.
-pub unsafe extern "C" fn patina_cond_destroy(cond: *mut c_void) -> c_int {
+pub unsafe fn patina_cond_destroy(cond: *mut c_void) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     managed_op!({
         let mut state = lock_state();

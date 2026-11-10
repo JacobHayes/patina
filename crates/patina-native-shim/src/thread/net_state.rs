@@ -31,6 +31,7 @@ pub(crate) struct NetState {
     pub(crate) next_pipe_ino: u64,
     /// The capacity of each standard stream's pipe (`handle` 0, 1, 2), which
     /// `F_SETPIPE_SZ` changes and `F_GETPIPE_SZ` answers.
+    #[cfg_attr(not(all(target_os = "linux", patina_posix_exports)), allow(dead_code))]
     pub(crate) stdio_pipe_sizes: [usize; 3],
     // Virtual kqueue readiness reactors, keyed by registry id. The
     // descriptor table holds the description (a `dup`/`F_DUPFD` of a kqueue
@@ -88,6 +89,7 @@ impl NetState {
 }
 
 /// A dotted-quad `IP:PORT` as a host-order address and port.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
 fn parse_addr(addr: &str) -> Option<(u32, u16)> {
     let (host, port) = addr.rsplit_once(':')?;
     let port: u16 = port.parse().ok()?;
@@ -115,7 +117,6 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
     }
 }
 
-#[unsafe(no_mangle)]
 /// Resolve a host name through the run's deterministic DNS host table.
 ///
 /// Writes the resolved address as a host-byte-order `u32` and returns 0; on
@@ -125,7 +126,8 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
 /// # Safety
 /// C ABI entry point: `name` must be a NUL-terminated string and `ip` must
 /// point at a writable `uint32_t`.
-pub unsafe extern "C" fn patina_dns_resolve(name: *const c_char, ip: *mut u32) -> c_int {
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub unsafe fn patina_dns_resolve(name: *const c_char, ip: *mut u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if let Err(errno) = sched_point() {
         return super::fail(errno);

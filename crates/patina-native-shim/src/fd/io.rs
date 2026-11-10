@@ -397,13 +397,12 @@ pub(crate) unsafe fn fs_pread(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Positional read (`pread`): read at `offset` without moving the file cursor;
 /// see [`positional_target`] for the refusals.
 ///
 /// # Safety
 /// `destination` must be writable for `length` bytes when nonzero.
-pub unsafe extern "C" fn patina_pread(
+pub unsafe fn patina_pread(
     raw_fd: c_int,
     destination: *mut c_void,
     length: usize,
@@ -436,6 +435,7 @@ pub(crate) enum Placement {
     End,
     /// At the end of the file, the cursor moving past the bytes: `RWF_APPEND`
     /// at position -1 (`pwritev2`).
+    #[cfg_attr(not(patina_posix_exports), allow(dead_code))]
     EndAtCursor,
 }
 
@@ -561,14 +561,13 @@ unsafe fn fs_pwrite_resolved(
     }
 }
 
-#[unsafe(no_mangle)]
 /// Positional write (`pwrite`): write at `offset` without moving the file
 /// cursor; see [`positional_target`] for the refusals and
 /// [`positional_placement`] for `O_APPEND`.
 ///
 /// # Safety
 /// `source` must be readable for `length` bytes when nonzero.
-pub unsafe extern "C" fn patina_pwrite(
+pub unsafe fn patina_pwrite(
     raw_fd: c_int,
     source: *const c_void,
     length: usize,
