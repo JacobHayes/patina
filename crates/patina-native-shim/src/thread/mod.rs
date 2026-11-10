@@ -589,7 +589,32 @@ pub(crate) fn fatal(message: &str) -> ! {
     let _ = super::flush_before_refusal();
     let text = format!("patina native shim fatal: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
-    crate::host_abort();
+    crate::host_abort(crate::RunStop::internal(&[message.as_bytes()]));
+}
+
+/// [`fatal`] for a stop that is the guest reaching something Patina does not
+/// model, which `message` names: the same line and the same abort,
+/// attributed to the missing model rather than to a failure of Patina's own.
+pub(crate) fn fatal_unmodeled(message: &str) -> ! {
+    let _ = super::flush_before_refusal();
+    let text = format!("patina native shim fatal: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort(crate::RunStop::unmodeled(&[message.as_bytes()]));
+}
+
+/// [`fatal`] for a stop the guest's own misuse of an interface earned (a lock
+/// it does not hold, a stream it closed), where the host's libc would crash
+/// or corrupt: the same line and the same abort, attributed to the guest.
+#[cfg(target_os = "macos")]
+pub(crate) fn fatal_guest_misuse(message: &str) -> ! {
+    let _ = super::flush_before_refusal();
+    let text = format!("patina native shim fatal: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort(crate::RunStop::new(
+        patina_dst_abi::RunClass::Crash,
+        "guest_misuse",
+        &[message.as_bytes()],
+    ));
 }
 
 /// A recoverable POSIX error code or a fatal determinism violation.

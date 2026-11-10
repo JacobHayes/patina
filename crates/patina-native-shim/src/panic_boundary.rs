@@ -176,7 +176,9 @@ impl PanicScope {
                     b"patina: guest code entered the shim while this thread holds a shim lock: \
                       not modeled\n",
                 );
-                crate::host_abort();
+                crate::host_abort(crate::RunStop::unmodeled(&[
+                    b"guest code entered the shim while this thread holds a shim lock",
+                ]));
             }
             let here = 0u8;
             took(std::hint::black_box(&here) as *const u8 as usize);
@@ -227,7 +229,11 @@ impl Drop for PanicScope {
                 2,
                 b"patina native shim panic: unwinding an owned boundary\n",
             );
-            crate::host_abort();
+            crate::host_abort(crate::RunStop::new(
+                patina_dst_abi::RunClass::Internal,
+                "shim_panic",
+                &[b"a panic inside the shim unwound an owned boundary"],
+            ));
         }
         // The guest call ends here: an escalation its polls earned is
         // applied first, while it is still the running call.
@@ -438,7 +444,7 @@ pub(crate) fn release(claim: Claim) {
         );
     }
     if !claim.took && claim.previous != Owner::Shim {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "guest code called under a trap handler's hold made a held call: not modeled",
         );
     }
@@ -502,7 +508,14 @@ pub(crate) fn install() {
             // Formatting writes directly to the host, without captured stdio,
             // allocation, runtime locks, or the public guest abort interposer.
             let _ = writeln!(HostDiagnostic, "patina native shim panic: {info}");
-            crate::host_abort();
+            // The panic's own text went to stderr above without allocating;
+            // the record names only its place, which formatting cannot fail.
+            let location = info.location().map_or("", |location| location.file());
+            crate::host_abort(crate::RunStop::new(
+                patina_dst_abi::RunClass::Internal,
+                "shim_panic",
+                &[b"a panic inside the shim, at ", location.as_bytes()],
+            ));
         }));
         POLICY_INSTALLED.store(true, std::sync::atomic::Ordering::Release);
     });

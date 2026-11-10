@@ -126,7 +126,9 @@ pub unsafe extern "C" fn patina_start_prepare(
         // this layer is only linked with -Wl,--wrap=dlsym. Fail closed loudly
         // rather than run the guest unwrapped, which would silently
         // reintroduce the nondeterministic teardown yields the door removes.
-        crate::patina_host_abort();
+        crate::host_abort(crate::RunStop::internal(&[
+            b"could not resolve glibc's __libc_start_main",
+        ]));
     }
     // SAFETY: glibc's __libc_start_main.
     unsafe { core::mem::transmute::<*mut c_void, LibcStartMain>(real) }
@@ -140,7 +142,7 @@ pub unsafe extern "C" fn patina_start_prepare(
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_startup_refusal(reason: c_int) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    crate::trap_fatal(match reason {
+    crate::trap_unmodeled(match reason {
         1 => {
             "early-init: the loader ran the executable's preinit array without the shim's entry, \
              so shared-library constructors ran before containment was armed"

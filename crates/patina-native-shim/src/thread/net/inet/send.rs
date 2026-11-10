@@ -117,7 +117,7 @@ fn send_datagram(handle: c_int, message: Outgoing) -> Result<usize, c_int> {
     };
     #[cfg(target_os = "macos")]
     if let Some((level, kind, _)) = message.protocol.first() {
-        crate::trap_fatal(&format!(
+        crate::trap_unmodeled(&format!(
             "ancillary data at level {level}, type {kind} on a Darwin datagram socket is not \
              modeled; failing closed"
         ));
@@ -172,7 +172,7 @@ pub(super) fn send_stream(handle: c_int, message: Outgoing) -> Result<usize, c_i
     };
     let direction = pair.sending(handle);
     if direction.urgent.is_some() {
-        fatal(
+        fatal_unmodeled(
             "a second urgent byte (MSG_OOB) before the receiver passed the first is not \
              modeled; failing closed",
         );
@@ -249,7 +249,7 @@ fn send_stream_bytes(handle: c_int, message: &Outgoing) -> Result<usize, c_int> 
                 if message.flags & MSG_OOB != 0 && sent > 0 {
                     // `tcp_sendmsg_locked` pushes with `MSG_OOB` before it
                     // waits, marking the last byte sent so far urgent too.
-                    fatal(
+                    fatal_unmodeled(
                         "a MSG_OOB send that waits for room after sending part of its bytes \
                          (an urgent mark at each wait) is not modeled; failing closed",
                     );

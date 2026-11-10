@@ -168,7 +168,7 @@ pub unsafe extern "C" fn patina_fault_route(
         None => (None, None),
     };
     if sent.is_none() && SYNCHRONOUS & bit(sig) == 0 {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a signal sent from outside the run (another process's kill) reached a guest \
              handler: not modeled",
         );
@@ -178,7 +178,7 @@ pub unsafe extern "C" fn patina_fault_route(
         Some(action) => action,
         None => {
             if info.code() <= 0 {
-                crate::trap_fatal(
+                crate::trap_unmodeled(
                     "a SIGBUS, SIGFPE, SIGILL, SIGTRAP or SIGSEGV sent from outside the run \
                      (another process's kill) reached the fault handler: not modeled",
                 );
@@ -381,7 +381,7 @@ pub unsafe extern "C" fn patina_trap_enter(
     // SAFETY: the C handler's own record, per this function's contract.
     unsafe { claim.write(held) };
     if !owned && plan_pending() {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a call left its trap's exit a delivery plan that no exit carried out: not modeled",
         );
     }
@@ -440,6 +440,8 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
               signal ",
         );
     } else {
+        // Patina's own code faulting, or a libc call following a bad pointer
+        // the guest handed it: the two cannot be told apart here.
         line.text(b"patina: fault inside the shim's own code: signal ");
     }
     line.number(info.signo().into(), 10);
@@ -451,6 +453,14 @@ pub unsafe extern "C" fn patina_trap_shim_fault(info: *const Info, pc: usize) ->
     line.number(info.words[2], 16);
     line.text(b"\n");
     let _ = crate::host_write_all(2, line.bytes());
+    // The default action ends the run on the fault's own signal, which
+    // without this record would read as the guest's crash.
+    let detail = [line.bytes()];
+    crate::process::record_stop(if counter || traced {
+        crate::RunStop::unmodeled(&detail)
+    } else {
+        crate::RunStop::new(patina_dst_abi::RunClass::Internal, "shim_fault", &detail)
+    });
     take_default(info.signo())
 }
 
@@ -487,7 +497,7 @@ pub unsafe extern "C" fn patina_trap_nested_syscall(
     line.number(pc as u64, 16);
     line.text(b"\n");
     let _ = crate::host_write_all(2, line.bytes());
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::unmodeled(&[line.bytes()]))
 }
 
 #[unsafe(no_mangle)]
@@ -525,7 +535,7 @@ pub unsafe extern "C" fn patina_door_nested_call(
     }
     line.text(b"\n");
     let _ = crate::host_write_all(2, line.bytes());
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::unmodeled(&[line.bytes()]))
 }
 
 #[unsafe(no_mangle)]
@@ -573,7 +583,9 @@ pub(super) fn take_default(sig: u8) -> ! {
         SYS_TGKILL,
         [pid as u64, tid as u64, u64::from(sig), 0, 0, 0],
     );
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::internal(&[
+        b"a fatal signal's default action did not end the run",
+    ]))
 }
 
 /// One diagnostic line built without allocating.
@@ -844,7 +856,7 @@ impl SegvMask {
             return;
         }
         if self.known == STACKS {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "more alternate stacks registered inside signal handlers under the counter \
                  trap than the shim tells apart for SIGSEGV's block: not modeled",
             );
@@ -856,7 +868,7 @@ impl SegvMask {
     /// below `sp`, with `stack` the guest's alternate stack, if any.
     fn open(&mut self, canary: *mut u64, sp: usize, stack: Option<(usize, usize)>, shim: bool) {
         if self.depth == SCOPES {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "signal handlers under the counter trap nest deeper than the shim tracks \
                  SIGSEGV's block for: not modeled",
             );
@@ -1133,7 +1145,7 @@ pub unsafe extern "C" fn patina_signal_fault(
         None => {
             // No kernel fault path uses such a code, and patina queued none.
             if info.code() <= 0 {
-                crate::trap_fatal(
+                crate::trap_unmodeled(
                     "a SIGSEGV sent from outside the run (another process's kill) reached \
                      the counter trap: not modeled",
                 );
@@ -1143,7 +1155,7 @@ pub unsafe extern "C" fn patina_signal_fault(
             match SEGV.with_borrow_mut(|segv| segv.at(&at)) {
                 SegvBlock::No => {}
                 SegvBlock::Yes => return FAULT_DEFAULT,
-                SegvBlock::Unknown => crate::trap_fatal(
+                SegvBlock::Unknown => crate::trap_unmodeled(
                     "a SIGSEGV fault below a SIGSEGV handler that blocks it: a fault inside the \
                      handler (which the kernel takes as the default action) and one after a \
                      siglongjmp out of it cannot be told apart",

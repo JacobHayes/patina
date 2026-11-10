@@ -196,7 +196,7 @@ pub unsafe fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_void) -> c_i
         // it answers any other `ENOTTY`.
         #[cfg(target_os = "linux")]
         _ if resolved.kind == FdKind::Namespace && crate::nsfs::is_ns_ioctl(request) => {
-            crate::trap_fatal(&format!(
+            crate::trap_unmodeled(&format!(
                 "ioctl: namespace request {request:#x} on a namespace file is not modeled; \
                  failing closed"
             ))
@@ -308,7 +308,7 @@ mod vfs {
     }
 
     fn stop(what: &str, request: u64) -> ! {
-        crate::trap_fatal(&format!(
+        crate::trap_unmodeled(&format!(
             "ioctl: {what} (request {request:#x}) is not modeled; failing closed"
         ))
     }

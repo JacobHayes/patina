@@ -179,7 +179,7 @@ impl ThreadRuntime {
         wait: &Wait,
     ) {
         if self.cancels.get(me).acts() && cancellation_point(wait.class, &wait.locs) {
-            fatal(&format!(
+            fatal_unmodeled(&format!(
                 "a thread with a pending cancellation blocks in {reason}: acting on a \
                  cancellation there is not modeled (only the sleeps and pthread_testcancel act)"
             ));
@@ -191,7 +191,7 @@ impl ThreadRuntime {
     /// the model does not follow.
     pub(in crate::thread) fn refuse_deadlocked_join(&self, me: TaskId) {
         if self.cancels.get(me).acts() {
-            fatal(
+            fatal_unmodeled(
                 "a pending cancellation reaches pthread_join where glibc waits and so acts \
                  (a join that would otherwise be EDEADLK): not modeled",
             );
@@ -273,8 +273,10 @@ pub extern "C" fn patina_thread_cancel(handle: usize) -> c_int {
             0
         }
         Reach::Refuse(why) => match blocked {
-            Some((_, _, reason)) => fatal(&format!("{why} (the thread waits in {reason})")),
-            None => fatal(why),
+            Some((_, _, reason)) => {
+                fatal_unmodeled(&format!("{why} (the thread waits in {reason})"))
+            }
+            None => fatal_unmodeled(why),
         },
     }
 }
@@ -384,7 +386,7 @@ pub unsafe extern "C" fn patina_cancel_point(name: *const std::ffi::c_char) {
     if lock_state().cancels.get(current_task()).acts() {
         // SAFETY: NUL-terminated, per this function's contract.
         let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
-        fatal(&format!(
+        fatal_unmodeled(&format!(
             "a pending cancellation reaches {name}, a cancellation point the model does not act \
              at (only the sleeps and pthread_testcancel act): glibc would end the thread there"
         ));

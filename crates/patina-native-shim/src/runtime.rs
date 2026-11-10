@@ -42,6 +42,22 @@ pub(crate) fn record_init_error(message: String) {
     INIT_FAILED.store(true, Ordering::Release);
 }
 
+/// Whether the recorded init failure is the run's own request refusing (its
+/// configuration, or a trace that does not fit this run) rather than a
+/// failure of Patina's or the host's.
+static INIT_REFUSED_REQUEST: AtomicBool = AtomicBool::new(false);
+
+/// [`record_init_error`] for a runtime error, which says which of the two an
+/// init failure is: a configuration or trace the runtime refused is the
+/// request's, anything else Patina's own.
+pub(crate) fn record_init_failure(error: &RuntimeError) {
+    INIT_REFUSED_REQUEST.store(
+        matches!(error, RuntimeError::Config(_) | RuntimeError::Trace(_)),
+        Ordering::Release,
+    );
+    record_init_error(error.to_string());
+}
+
 /// Abort with the stored init diagnostic if initialization has already failed
 /// closed, else return and let the caller proceed.
 ///
@@ -164,7 +180,32 @@ pub(crate) fn trap_fatal(message: &str) -> ! {
     let _ = flush_before_refusal();
     let text = format!("patina: {message}\n");
     let _ = host_write_all(2, text.as_bytes());
-    crate::host_abort();
+    crate::host_abort(RunStop::internal(&[message.as_bytes()]));
+}
+
+/// [`trap_fatal`] for a stop that is the guest reaching something Patina does
+/// not model, which `message` names: the same line and the same abort,
+/// attributed to the missing model rather than to a failure of Patina's own.
+pub(crate) fn trap_unmodeled(message: &str) -> ! {
+    let _ = flush_before_refusal();
+    let text = format!("patina: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort(RunStop::unmodeled(&[message.as_bytes()]));
+}
+
+/// [`trap_fatal`] for a stop the guest's own misuse of an interface earned (a
+/// stream it already closed), where the host's libc would crash or corrupt:
+/// the same line and the same abort, attributed to the guest.
+#[cfg(patina_posix_exports)]
+pub(crate) fn trap_guest_misuse(message: &str) -> ! {
+    let _ = flush_before_refusal();
+    let text = format!("patina: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort(RunStop::new(
+        RunClass::Crash,
+        "guest_misuse",
+        &[message.as_bytes()],
+    ));
 }
 
 /// Fail closed on something the HOST cannot provide, as [`trap_fatal`] does,
@@ -176,7 +217,11 @@ pub(crate) fn infra_fatal(kind: &str, reason: &str) -> ! {
     let _ = flush_before_refusal();
     let text = format!("PATINA_INFRA {kind} reason=\"{reason}\"\n");
     let _ = host_write_all(2, text.as_bytes());
-    crate::host_abort();
+    crate::host_abort(RunStop::new(
+        RunClass::Internal,
+        "host_limit",
+        &[kind.as_bytes(), b": ", reason.as_bytes()],
+    ));
 }
 
 #[unsafe(no_mangle)]
@@ -189,7 +234,7 @@ pub extern "C" fn patina_fcntl_owner(raw_fd: c_int) -> c_int {
     if let Err(errno) = fdget(raw_fd) {
         return fail(errno);
     }
-    trap_fatal(
+    trap_unmodeled(
         "fcntl setting a descriptor's owner or signal (F_SETOWN, F_SETOWN_EX, F_SETSIG) is not \
          modeled: SIGIO and SIGURG are never delivered; failing closed",
     );
@@ -248,7 +293,7 @@ pub(crate) fn runtime_errno(error: &RuntimeError) -> c_int {
         // carried out. That is patina's failure: an errno would hand the
         // guest a fault it never had and let the run go on without its crash.
         RuntimeError::CrashFailed { reason } => refuse_failed_crash(reason),
-        _ if report_run_stop(error) => abort_after_flushing_output(),
+        _ if report_run_stop(error) => abort_on_run_stop(error),
         _ => error_errno(error),
     }
 }
@@ -327,9 +372,48 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
 /// run. `host_abort()` skips the atexit-driven shutdown flush, so the explicit flush
 /// here is what preserves that marker; mirrors [`abort_with_init_error`] /
 /// [`abort_with_buggify_marker`].
-fn abort_after_flushing_output() -> ! {
+fn abort_after_flushing_output(stop: RunStop<'_>) -> ! {
     let _ = flush_before_refusal();
-    crate::host_abort();
+    crate::host_abort(stop);
+}
+
+/// The stop a run-ending runtime error is: the class the run is filed under
+/// and the reason's token. `None` for an error that answers the guest an
+/// errno instead ([`report_run_stop`] decides the same way). The match has no
+/// wildcard, so a new runtime error is given its class here or does not
+/// compile.
+pub(crate) fn run_stop_class(error: &RuntimeError) -> Option<(RunClass, &'static str)> {
+    match error {
+        RuntimeError::StepBudgetExceeded { .. } => Some((RunClass::Timeout, "step_budget")),
+        RuntimeError::Liveness { .. } | RuntimeError::FrozenClockChurn { .. } => {
+            Some((RunClass::Liveness, "liveness"))
+        }
+        // A custom operation the guest's own `perform` or protocol broke on a
+        // new run; on a replay the runtime has noted the divergence, which
+        // the supervisor reads first.
+        RuntimeError::CustomOp { .. } => Some((RunClass::Violation, "custom_op")),
+        RuntimeError::TimeModel { .. } => Some((RunClass::Nondeterministic, "replay_divergence")),
+        RuntimeError::ComputeBound { .. } => Some((RunClass::Timeout, "compute_bound")),
+        RuntimeError::ComputeStopExport
+        | RuntimeError::ComputeStopOverflow
+        | RuntimeError::ComputeStopState => Some((RunClass::Internal, "compute_stop")),
+        RuntimeError::CrashFailed { .. } => Some((RunClass::Internal, "crash_failed")),
+        RuntimeError::InjectedCrash(_)
+        | RuntimeError::Effect(_)
+        | RuntimeError::Config(_)
+        | RuntimeError::Io { .. }
+        | RuntimeError::Trace(_)
+        | RuntimeError::InvalidOutcome { .. }
+        | RuntimeError::ScheduleDivergence { .. } => None,
+    }
+}
+
+/// End the run on `error`, a run-ending runtime error whose line is already
+/// written: flush, then stop under the class [`run_stop_class`] gives it.
+fn abort_on_run_stop(error: &RuntimeError) -> ! {
+    let detail = error.to_string();
+    let (class, reason) = run_stop_class(error).unwrap_or((RunClass::Internal, "runtime_error"));
+    abort_after_flushing_output(RunStop::new(class, reason, &[detail.as_bytes()]))
 }
 
 pub(crate) fn effect_errno(error: &EffectError) -> c_int {
@@ -426,7 +510,11 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     let message: &[u8] = b"patina: this binary was built with `patina build` and must \
 run under `patina run` (or with the PATINA_RT_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
-    crate::host_abort();
+    crate::host_abort(RunStop::new(
+        RunClass::Error,
+        "no_runtime_installed",
+        &[b"the binary ran without `patina run`: no deterministic runtime is installed"],
+    ));
 }
 
 /// Emit the runtime's own init-failure diagnostic and abort the process. The
@@ -447,7 +535,22 @@ pub(crate) fn abort_with_init_error(message: &str) -> ! {
     );
     let _ = host_write_all(2, message.as_bytes());
     let _ = host_write_all(2, b"\n");
-    crate::host_abort();
+    // A configuration or trace the runtime refused (a replay against another
+    // build or corpus, a conflicting fault setting) is the request's; any
+    // other init failure is Patina's own or the host's.
+    let class = if INIT_REFUSED_REQUEST.load(Ordering::Acquire) {
+        RunClass::Error
+    } else {
+        RunClass::Internal
+    };
+    crate::host_abort(RunStop::new(
+        class,
+        "runtime_init",
+        &[
+            b"the deterministic runtime failed to initialize: ",
+            message.as_bytes(),
+        ],
+    ));
 }
 
 fn last_boundary_symbol_bytes() -> Option<&'static [u8]> {
@@ -474,7 +577,15 @@ pub(crate) fn abort_preinit_interposed_call() -> ! {
         2,
         b". This most likely came from a static constructor/ctor that ran before Patina's startup constructor. Patina fails closed here because the control plane is not installed yet; cfg-gate that constructor out of DST builds (for example with `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move any setup that reads environment, files, clocks, threads, or other interposed APIs into `main`.\n",
     );
-    crate::host_abort();
+    crate::host_abort(RunStop::new(
+        RunClass::Unsupported,
+        "preinit_call",
+        &[
+            b"an interposed call before the deterministic runtime was initialized (a static \
+              constructor that ran before Patina's startup); calling symbol: ",
+            last_boundary_symbol_bytes().unwrap_or(b"unknown"),
+        ],
+    ));
 }
 
 /// Run a closure against the installed [`Context`] without first taking a
@@ -570,7 +681,14 @@ fn refuse_failed_crash(reason: &str) -> ! {
         };
         let _ = host_write_all(2, format!("{error}\n").as_bytes());
     }
-    crate::host_abort();
+    crate::host_abort(RunStop::new(
+        RunClass::Internal,
+        "crash_failed",
+        &[
+            b"the run's crash point was reached and the crash could not be carried out: ",
+            reason.as_bytes(),
+        ],
+    ));
 }
 
 fn terminate_for_injected_crash(crash: patina_dst_runtime::InjectedCrash) -> ! {
@@ -644,7 +762,9 @@ pub(crate) fn with_context_msg<T>(
             b"patina native shim fatal: a managed scheduling operation reached the trace after \
 `main` returned; the post-main teardown window must take no recorded scheduling points\n",
         );
-        crate::host_abort();
+        crate::host_abort(RunStop::internal(&[
+            b"a managed scheduling operation reached the trace after `main` returned",
+        ]));
     }
     ensure_runtime().map_err(|_| "Patina context is not installed".to_string())?;
     let mut guard = slot().lock();
@@ -674,12 +794,42 @@ pub(crate) fn with_context_msg<T>(
             // only lends C stdout bytes; it takes no scheduling point/Context
             // lock (see salvage_buffered_stdout). Keep stop ownership here.
             watchdog::report_synchronous(&error);
-            abort_after_flushing_output()
+            abort_on_run_stop(&error)
+        }
+        // No task can run and none will be woken: every guest thread is
+        // blocked for good. The guest's own hang, stopped here by name under
+        // the class a hang has, where the scheduler found it; every caller
+        // would only carry the message on to a fatal of its own.
+        RuntimeError::Effect(effect) if effect.code == ErrorCode::Deadlock => {
+            let _ = flush_before_refusal();
+            let text = format!("patina native shim fatal: {error}\n");
+            let _ = host_write_all(2, text.as_bytes());
+            crate::host_abort(RunStop::new(
+                RunClass::Liveness,
+                "deadlock",
+                &[
+                    b"every guest thread is blocked and none can run: ",
+                    effect.message.as_bytes(),
+                ],
+            ))
         }
         RuntimeError::ComputeStopExport
         | RuntimeError::ComputeStopOverflow
         | RuntimeError::ComputeStopState => watchdog::report_and_abort(&error, None, None),
-        _ => error.to_string(),
+        // Any other error that ends the run (the step budget, a liveness
+        // stop) ends it here under its own class, with the line the caller's
+        // fatal would have printed: carried on as a string it could only be
+        // filed as a failure of the shim's own.
+        _ => match run_stop_class(&error) {
+            Some((class, reason)) => {
+                let _ = flush_before_refusal();
+                let detail = error.to_string();
+                let text = format!("patina native shim fatal: {detail}\n");
+                let _ = host_write_all(2, text.as_bytes());
+                crate::host_abort(RunStop::new(class, reason, &[detail.as_bytes()]))
+            }
+            None => error.to_string(),
+        },
     })
 }
 
@@ -1183,14 +1333,14 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     // capture, never through std's stderr lock, which the guest shares.
     let _ = patina_dst_runtime::set_diagnostic_writer(write_runtime_diagnostic);
     if let Err(error) = declare_link_time_sites(&mut context) {
-        record_init_error(error.to_string());
+        record_init_failure(&error);
         return fail(runtime_errno(&error));
     }
     // A configured `--cwd` is opened now, on the context directly: a path that
     // is not a directory refuses the run by name here rather than answering
     // ENOENT to every relative path later.
     if let Err(error) = paths::install_cwd(&mut context.bookkeeping()) {
-        record_init_error(error.to_string());
+        record_init_failure(&error);
         return fail(runtime_errno(&error));
     }
     // A supplied standard input (`--stdin FILE`) is the file `< FILE` opens:
@@ -1201,7 +1351,7 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
         Ok(Some(fd)) => fd_table().lock().make_stdin_file(fd.0),
         Ok(None) => {}
         Err(error) => {
-            record_init_error(error.to_string());
+            record_init_failure(&error);
             return fail(runtime_errno(&error));
         }
     }
@@ -1247,6 +1397,9 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     finish_shim_bootstrap();
     // What this thread counted until now ran before the modeled run began.
     crate::charge::discard();
+    // From here the guest runs under the runtime, and a death the shim does
+    // not claim with a stop record is the guest's own.
+    crate::process::record_runtime_started();
 
     0
 }

@@ -132,6 +132,8 @@ extern int patina_fault_route(int sig, siginfo_t *info, const ucontext_t *uc,
  * return path: its level of the private stack must hold them (frames.rs). */
 #define PATINA_FRAME_MARGIN 4096
 static _Noreturn void patina_fault_stop(const char *message, size_t length);
+/* The supervisor's stop pipe once the runtime is installed, else -1. */
+extern int32_t PATINA_STOP_FD;
 
 /* Call `handler(sig, info, uc)` with the stack pointer at `target`, and return
  * on the caller's stack (assembly in src/posix/lifecycle/traps.rs). */
@@ -360,8 +362,17 @@ void patina_tsc_sigsegv(int sig, siginfo_t *info, void *ucontext) {
 static _Noreturn void patina_fault_stop(const char *message, size_t length) {
     static const unsigned long default_action[4] = {0, 0, 0, 0};
     static const uint64_t unblock = UINT64_C(1) << (SIGABRT - 1);
+    /* Why the run stops, for the supervisor (src/process.rs, `RunStop`): a
+     * failure of the shim's own, never the guest's crash. The pipe is the
+     * one Rust published; a record of another schema is refused, not misread. */
+    static const char record[] =
+        "{\"schema\":\"patina.runstop/v1\",\"stop\":{\"class\":\"internal\","
+        "\"reason\":\"fault_stop\",\"detail\":\"the shim's signal front could not go on\"}}\n";
     (void)patina_sud_host_open();
     (void)patina_fault_host_syscall(SYS_write, 2, message, length);
+    int32_t stop_fd = __atomic_load_n(&PATINA_STOP_FD, __ATOMIC_RELAXED);
+    if (stop_fd >= 0)
+        (void)patina_fault_host_syscall(SYS_write, stop_fd, record, sizeof record - 1);
     /* Private abort, not guest abort: reset/unblock SIGABRT and send it to
      * this thread. No Rust scope, trace finalization or guest handler. */
     (void)patina_fault_host_syscall(SYS_rt_sigaction, SIGABRT, default_action, NULL, 8);

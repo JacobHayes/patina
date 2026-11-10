@@ -91,7 +91,7 @@ fn fatal(message: &'static [u8]) -> ! {
     unsafe {
         crate::patina_stdio_write(2, message.as_ptr().cast(), message.len());
     }
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::internal(&[message]))
 }
 
 /// The host's original environment array, the one the control plane is

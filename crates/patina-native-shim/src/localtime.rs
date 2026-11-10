@@ -698,7 +698,7 @@ fn chosen(op: &str, tz: Option<&[u8]>, tzdir: Option<&[u8]>) -> Zone {
     });
     match chosen {
         Ok(zone) => zone,
-        Err(ZoneFile(path)) => crate::trap_fatal(&format!(
+        Err(ZoneFile(path)) => crate::trap_unmodeled(&format!(
             "{op}: TZ names the zoneinfo file {path}, which exists in the deterministic filesystem; zoneinfo (TZif) files are not modeled; failing closed"
         )),
     }

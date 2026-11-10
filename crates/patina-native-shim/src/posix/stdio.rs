@@ -371,7 +371,10 @@ pub(crate) fn trap(symbol: &CStr) -> ! {
         }
     }
     crate::patina_flush_captured_stdio();
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::unmodeled(&[
+        b"stdio call on a FILE* that is not a stream the shim opened: ",
+        symbol.to_bytes(),
+    ]))
 }
 /// The shim's stream a call names: every stdio door's one way to its stream.
 /// Any other `FILE*` stops the run by name, as does a stream `fclose`
@@ -382,7 +385,7 @@ fn stream_of(stream: *mut libc::FILE, symbol: &CStr) -> StreamId {
     };
     // SAFETY: the entry lives for the process.
     if unsafe { (*id.0).life.load(Ordering::Acquire) } != OPEN {
-        crate::trap_fatal(&format!(
+        crate::trap_guest_misuse(&format!(
             "{} on a stream after fclose closed it",
             symbol.to_string_lossy()
         ));

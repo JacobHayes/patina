@@ -302,7 +302,7 @@ fn next(exit: &mut Exit) -> bool {
                 != 0
         {
             drop(state);
-            crate::trap_fatal(SEGV_UNKNOWN);
+            crate::trap_unmodeled(SEGV_UNKNOWN);
         }
         state.signals.tasks.get_mut(&me).unwrap().mask = mask;
         let mut batch = Vec::new();
@@ -334,7 +334,7 @@ fn next(exit: &mut Exit) -> bool {
             // A cancel that reached this thread inside a sleep, before
             // the sleep waits, has ended glibc's thread: no handler runs.
             if state.cancels.acts_in_point(me, state.signals.depth(me)) {
-                fatal(
+                fatal_unmodeled(
                     "a signal handler would run inside a sleep whose thread a pending \
                      cancellation has ended under glibc: not modeled",
                 );
@@ -386,10 +386,13 @@ fn next(exit: &mut Exit) -> bool {
     for (instance, action, seen) in &batch {
         if action.handler == SIG_DFL {
             if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
-                fatal("default Stop-class signal would stop the only virtual process");
+                fatal_unmodeled("default Stop-class signal would stop the only virtual process");
             }
             if crate::shutdown_run() != 0 {
-                fatal("signal termination finalization failed");
+                crate::finalization_failed(
+                    "signal termination finalization failed",
+                    128 + i32::from(instance.sig),
+                );
             }
             let default = Action::default();
             if instance.sig != SIGKILL
@@ -407,6 +410,14 @@ fn next(exit: &mut Exit) -> bool {
             {
                 fatal("host default signal action install failed (rt_sigaction)");
             }
+            // The signal is the guest's own (it was generated inside the
+            // run), and its default action is what ends the run: say so, so
+            // the death is not read as a kill from outside.
+            crate::process::record_stop(crate::RunStop::new(
+                patina_dst_abi::RunClass::Crash,
+                "signal",
+                &[b"a signal the guest itself raised took its default action"],
+            ));
             // Release only the dying signal; queued handler frames stay
             // blocked. No handler runs: the default action ends the run.
             install_mask(!bit(instance.sig));
@@ -439,7 +450,7 @@ fn next(exit: &mut Exit) -> bool {
     }
     let ticket = REMAINDER.with_borrow_mut(|remainders| {
         if remainders.live.len() == REMAINDERS {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "more signal batches released a member at a time were left by siglongjmp \
                  than the shim tracks: not modeled",
             );
@@ -572,7 +583,7 @@ fn released(exit: &mut Exit) -> bool {
                 .is_some_and(|remainder| remainder.at > 0)
         });
         if more && read_mask() != host_mask(exit.mask) {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "a signal handler edited its frame's saved mask (uc_sigmask) while more \
                  frames of its delivery batch were still to run: not modeled",
             );
@@ -759,7 +770,7 @@ fn end(exit: &mut Exit, ret: i64) -> bool {
 /// thread, or a named stop.
 fn from_trap_exit() {
     if !crate::panic_boundary::entered_by_trap_exit() {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a signal delivery's step was called with a shim Rust frame beneath it, where a \
              handler that leaves by siglongjmp would discard it: not modeled",
         );
@@ -771,7 +782,7 @@ fn from_trap_exit() {
 fn releasing_from_trap_exit() {
     from_trap_exit();
     if crate::panic_boundary::frames_suspended() {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a release from C was prepared with shim Rust frames suspended beneath the trap: \
              not modeled",
         );
@@ -1022,7 +1033,7 @@ pub(super) fn fault_entered(sig: u8, sent: bool) {
                 )
         };
         if differs {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "a fault met the action a delivery batch put on the host for a frame of the \
                  same signal still to run, which differs from the current one: not modeled",
             );

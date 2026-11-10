@@ -47,7 +47,12 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_RT_FACTS_FD",
         scope: "protocol",
-        doc: "Inherited descriptor carrying the run's patina.runfacts/v1 document, so a fully interposed guest never writes it through the deterministic FS. Set by --format json; the CLI folds the document into the envelope's fault_reports/runtime_findings.",
+        doc: "Inherited descriptor carrying the run's patina.runfacts/v1 document, so a fully interposed guest never writes it through the deterministic FS. Set on every run; the CLI judges the run from it and folds the document into the envelope's fault_reports/runtime_findings.",
+    },
+    EnvVar {
+        name: "PATINA_RT_STOP_FD",
+        scope: "protocol",
+        doc: "Inherited pipe the native shim writes its stop record to (patina.runstop/v1) just before it ends a run: the class the run is filed under, a reason token and the detail naming what was reached. The CLI reports it as the envelope's result and stop.",
     },
     EnvVar {
         name: "PATINA_RT_FS_IMAGE_FD",

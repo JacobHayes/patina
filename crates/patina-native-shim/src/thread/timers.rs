@@ -762,7 +762,7 @@ pub(crate) fn libc_timer_create(clock: i32, event: *const Sigevent, out: usize) 
         }
     };
     if event.notify == SIGEV_THREAD {
-        crate::trap_fatal("libc timer_create SIGEV_THREAD callbacks are not modeled");
+        crate::trap_unmodeled("libc timer_create SIGEV_THREAD callbacks are not modeled");
     }
     let mut id = 0;
     let result = timer_create(clock, &event, &mut id);

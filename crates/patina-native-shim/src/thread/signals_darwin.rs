@@ -36,7 +36,7 @@ pub fn patina_raise(sig: i32) -> i32 {
         return 0;
     }
     if sig == libc::SIGSYS {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "guest SIGSYS generation is not modeled; SIGSYS is reserved for containment",
         );
     }
@@ -52,11 +52,11 @@ pub fn patina_raise(sig: i32) -> i32 {
     let ignored = action.sa_sigaction == libc::SIG_IGN
         || (action.sa_sigaction == libc::SIG_DFL && ignored_by_default(sig));
     if mask & (1u32 << (sig - 1)) != 0 {
-        crate::trap_fatal("Darwin deferred self-signal delivery is not modeled");
+        crate::trap_unmodeled("Darwin deferred self-signal delivery is not modeled");
     }
     if !ignored {
         if action.sa_flags & libc::SA_SIGINFO != 0 {
-            crate::trap_fatal("Darwin self-signal SA_SIGINFO delivery is not modeled");
+            crate::trap_unmodeled("Darwin self-signal SA_SIGINFO delivery is not modeled");
         }
         if action.sa_sigaction == libc::SIG_DFL
             && matches!(
@@ -64,7 +64,7 @@ pub fn patina_raise(sig: i32) -> i32 {
                 libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
             )
         {
-            crate::trap_fatal("Darwin default signal stop is not modeled");
+            crate::trap_unmodeled("Darwin default signal stop is not modeled");
         }
     }
     // No scheduling handoff between validating the disposition and delivering.
@@ -88,7 +88,16 @@ pub fn patina_raise(sig: i32) -> i32 {
         return 0;
     }
     if action.sa_sigaction == libc::SIG_DFL && crate::shutdown_run() != 0 {
-        crate::trap_fatal("Darwin default signal finalization failed");
+        crate::finalization_failed("Darwin default signal finalization failed", 128 + sig);
+    }
+    if action.sa_sigaction == libc::SIG_DFL {
+        // The guest's own signal, whose default action ends the run: say so,
+        // so the death is not read as a kill from outside.
+        crate::process::record_stop(crate::RunStop::new(
+            patina_dst_abi::RunClass::Crash,
+            "signal",
+            &[b"a signal the guest itself raised took its default action"],
+        ));
     }
     let _guest = crate::panic_boundary::PanicScope::suspend();
     // Never libc raise (which can fall back to process-directed kill). The

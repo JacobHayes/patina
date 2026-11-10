@@ -167,7 +167,9 @@ pub(crate) fn publish_environ(env: &BTreeMap<String, String>) {
                 2,
                 b"patina: deterministic guest environment contained a NUL byte; failing closed\n",
             );
-            crate::host_abort();
+            crate::host_abort(RunStop::internal(&[
+                b"the deterministic guest environment contained a NUL byte",
+            ]));
         };
         entries.push(entry.into_raw());
     }

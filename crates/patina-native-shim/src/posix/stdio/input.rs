@@ -512,7 +512,7 @@ pub(super) fn ungetc_impl(character: c_int, stream: *mut libc::FILE, symbol: &CS
     unsafe {
         if !(*state).access.read {
             #[cfg(target_os = "linux")]
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "ungetc onto a stream opened for writing only: its pushback area is not modeled",
             );
             #[cfg(target_os = "macos")]
@@ -522,7 +522,7 @@ pub(super) fn ungetc_impl(character: c_int, stream: *mut libc::FILE, symbol: &CS
         #[cfg(target_os = "linux")]
         if (*state).putting && (*state).used > 0 {
             unlock(s, held);
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "ungetc onto a stream holding unwritten output: glibc's backup area over a \
                  put area is not modeled",
             );

@@ -70,9 +70,9 @@ pub use fd::*;
 pub use fs::*;
 pub(crate) use host::*;
 pub(crate) use host::{hostapi, hostcoll};
-#[cfg(test)]
-pub(crate) use process::host_abort;
 pub use process::*;
+#[cfg(test)]
+pub(crate) use process::{RunStop, host_abort};
 pub use runtime::*;
 pub use sdk::*;
 pub use shutdown::*;
@@ -198,7 +198,7 @@ use fdtable::{DescId, FdKind, GuestFdTable, Release, Resolved};
 
 use patina_dst_abi::{
     ClockKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsEntryKind, FsNode, OpenFlags,
-    SeekWhence, TaskId,
+    RunClass, SeekWhence, TaskId,
 };
 
 use patina_dst_fs_crash::CrashFs;

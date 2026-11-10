@@ -249,7 +249,7 @@ fn dentry_of(holder: Holder) -> Option<Dentry> {
     let dentries = DENTRIES.lock();
     if dentries.stale.contains(&holder) {
         drop(dentries);
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "inotify: an event through a descriptor whose name an in-process crash \
              (patina_crash) left unknown is not modeled; failing closed",
         );

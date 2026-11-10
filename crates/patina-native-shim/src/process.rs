@@ -92,11 +92,198 @@ pub extern "C" fn patina_exit(status: c_int) -> ! {
     unsafe { (hostapi::get().host_exit)(status) }
 }
 
+/// Why the shim is ending the run: the class the supervisor files the run
+/// under, a stable token for the reason, and the line that names what was
+/// reached. [`host_abort`] takes one, so the shim has no way to end a run
+/// without a class, and the class carries the attribution
+/// ([`RunClass::attribution`]): a finding in the guest, something Patina does
+/// not model, or a failure of Patina's own.
+#[derive(Clone, Copy)]
+pub(crate) struct RunStop<'a> {
+    class: RunClass,
+    reason: &'static str,
+    detail: &'a [&'a [u8]],
+    /// The status the guest itself reached, when the stop replaces it.
+    guest_exit: Option<i32>,
+}
+
+impl<'a> RunStop<'a> {
+    /// A stop of `class` for `reason`, its detail the concatenation of
+    /// `detail`'s parts.
+    pub(crate) const fn new(class: RunClass, reason: &'static str, detail: &'a [&'a [u8]]) -> Self {
+        Self {
+            class,
+            reason,
+            detail,
+            guest_exit: None,
+        }
+    }
+
+    /// A failure of Patina's own, or of the host under it: a broken shim
+    /// invariant, a host call that failed. Never the guest's doing.
+    pub(crate) const fn internal(detail: &'a [&'a [u8]]) -> Self {
+        Self::new(RunClass::Internal, "shim_fatal", detail)
+    }
+
+    /// The guest reached something Patina does not model; `detail` names it.
+    pub(crate) const fn unmodeled(detail: &'a [&'a [u8]]) -> Self {
+        Self::new(RunClass::Unsupported, "not_modeled", detail)
+    }
+
+    /// This stop, carrying the exit status the guest had already reached.
+    pub(crate) const fn with_guest_exit(mut self, status: Option<i32>) -> Self {
+        self.guest_exit = status;
+        self
+    }
+}
+
+/// The supervisor's stop pipe, read without allocating or taking a lock, so a
+/// stop reached before the runtime is installed, inside the allocator or
+/// under a shim lock can still say why.
+fn stop_record_fd() -> Option<c_int> {
+    #[cfg(patina_posix_exports)]
+    {
+        crate::posix_env::control_value(patina_dst_runtime::ENV_STOP_FD)
+            .and_then(|value| value.parse().ok())
+    }
+    #[cfg(not(patina_posix_exports))]
+    {
+        None
+    }
+}
+
+/// Tell the supervisor the runtime is installed and the guest is about to run
+/// under it: one line on the stop pipe. Without it the supervisor cannot tell
+/// a guest that died on its own from a process that never got as far as
+/// patina's runtime (a loader failure, a shim of another patina that writes no
+/// stop records), and files neither as the guest's finding.
+pub(crate) fn record_runtime_started() {
+    let Some(fd) = stop_record_fd() else {
+        return;
+    };
+    // The C signal front ends a run without entering Rust; it finds the pipe
+    // here ([`PATINA_STOP_FD`]).
+    PATINA_STOP_FD.store(fd, core::sync::atomic::Ordering::Relaxed);
+    // One write, so the line is whole or absent.
+    let mut line = [0u8; 96];
+    let mut len = 0;
+    for part in [
+        b"{\"schema\":\"".as_slice(),
+        patina_dst_runtime::STOP_SCHEMA.as_bytes(),
+        b"\",\"started\":true}\n",
+    ] {
+        line[len..len + part.len()].copy_from_slice(part);
+        len += part.len();
+    }
+    let _ = host_write_all(fd, &line[..len]);
+}
+
+/// The supervisor's stop pipe once the runtime is installed, else -1: where
+/// the C signal front (`c/posix/init.c`, `patina_fault_stop`), which may not
+/// enter Rust, writes its own stop record. Before the runtime is installed a
+/// death is not read as the guest's whatever is written.
+#[unsafe(no_mangle)]
+pub static PATINA_STOP_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// Tell the supervisor why the run is stopping: one stop record on its stop
+/// pipe ([`patina_dst_runtime::ENV_STOP_FD`]), which the guest cannot write.
+/// Built in fixed storage and sent with one host write, well under a pipe's
+/// atomic size, so it is safe wherever a stop is: no allocation, no lock, no
+/// guest-visible effect, and no file size limit to refuse it. The detail is
+/// cut to fit; the stderr line each stop already prints carries it whole.
+pub(crate) fn record_stop(stop: RunStop<'_>) {
+    record_stop_through(stop, &mut |fd, bytes| {
+        let _ = host_write_all(fd, bytes);
+    });
+}
+
+/// [`record_stop`] through `send`, for the one stop that precedes the host
+/// alias table: a host symbol that would not resolve.
+pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int, &[u8])) {
+    let Some(fd) = stop_record_fd() else {
+        return;
+    };
+    // No longer than the smallest atomic pipe write (512 bytes on macOS), so
+    // two threads stopping at once cannot interleave their records.
+    struct Record {
+        bytes: [u8; 512],
+        len: usize,
+    }
+    impl Record {
+        fn raw(&mut self, text: &[u8]) {
+            let end = (self.len + text.len()).min(self.bytes.len());
+            self.bytes[self.len..end].copy_from_slice(&text[..end - self.len]);
+            self.len = end;
+        }
+        /// `text` as the inside of a JSON string, while `reserve` bytes stay
+        /// free for what must follow it.
+        fn escaped(&mut self, text: &[u8], reserve: usize) {
+            for &byte in text {
+                let escape: &[u8] = match byte {
+                    b'"' => b"\\\"",
+                    b'\\' => b"\\\\",
+                    b'\n' => b"\\n",
+                    // Other control bytes, and bytes outside ASCII (a detail
+                    // is cut by bytes, so never mid-character), read as '?'.
+                    0x00..=0x1f | 0x7f..=0xff => b"?",
+                    _ => std::slice::from_ref(&byte),
+                };
+                if self.len + escape.len() + reserve > self.bytes.len() {
+                    return;
+                }
+                self.raw(escape);
+            }
+        }
+        fn number(&mut self, value: i32) {
+            if value < 0 {
+                self.raw(b"-");
+            }
+            let mut digits = [0u8; 10];
+            let mut start = digits.len();
+            let mut rest = value.unsigned_abs();
+            loop {
+                start -= 1;
+                digits[start] = b'0' + (rest % 10) as u8;
+                rest /= 10;
+                if rest == 0 {
+                    break;
+                }
+            }
+            self.raw(&digits[start..]);
+        }
+    }
+    let mut record = Record {
+        bytes: [0; 512],
+        len: 0,
+    };
+    record.raw(b"{\"schema\":\"");
+    record.raw(patina_dst_runtime::STOP_SCHEMA.as_bytes());
+    record.raw(b"\",\"stop\":{\"class\":\"");
+    record.raw(stop.class.as_str().as_bytes());
+    record.raw(b"\",\"reason\":\"");
+    record.raw(stop.reason.as_bytes());
+    record.raw(b"\",\"detail\":\"");
+    // Room for the closing quote, the guest status and the document's end.
+    const TAIL: usize = 48;
+    for part in stop.detail {
+        record.escaped(part, TAIL);
+    }
+    record.raw(b"\"");
+    if let Some(status) = stop.guest_exit {
+        record.raw(b",\"guest_exit_code\":");
+        record.number(status);
+    }
+    record.raw(b"}}\n");
+    send(fd, &record.bytes[..record.len]);
+}
+
 /// Private fatal vehicle: never finalize an invalid run through the guest abort interposer.
 /// The stop is the host's default SIGABRT, never a delivery: a guest's
 /// SIGABRT handler (including Linux's modeled front) does not run inside the
-/// stopping shim.
-pub(crate) fn host_abort() -> ! {
+/// stopping shim. `stop` says why, to the supervisor ([`record_stop`]); the
+/// caller has already said it to a reader on stderr.
+pub(crate) fn host_abort(stop: RunStop<'_>) -> ! {
+    record_stop(stop);
     let host = hostapi::get();
     let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
     default.sa_sigaction = libc::SIG_DFL;
@@ -127,12 +314,11 @@ pub(crate) fn finalize_then_abort() -> ! {
     if shutdown_run() != 0 {
         thread::fatal("always! violation finalization failed");
     }
-    host_abort()
-}
-
-pub fn patina_host_abort() -> ! {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    host_abort()
+    host_abort(RunStop::new(
+        RunClass::Violation,
+        "always",
+        &[b"an always! invariant the guest declared was violated"],
+    ))
 }
 
 /// A guest's `abort` is glibc's: SIGABRT through the virtual kernel, so an
@@ -150,7 +336,11 @@ pub extern "C" fn patina_abort() -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if internal_panic {
         let _ = host_write_all(2, b"patina native shim panic: aborting an owned boundary\n");
-        host_abort();
+        host_abort(RunStop::new(
+            RunClass::Internal,
+            "shim_panic",
+            &[b"a panic inside the shim aborted an owned boundary"],
+        ));
     }
     if !in_shim_critical() {
         if slot().lock().is_some() {
@@ -214,7 +404,10 @@ silencing is not active on this platform/toolchain (neither the __libc_start_mai
 exit interposer set the teardown flag before atexit); --yield-stride teardown determinism is not \
 guaranteed\n",
         );
-        crate::host_abort();
+        crate::host_abort(RunStop::internal(&[
+            b"teardown interposer did not engage: main-return silencing is not active on this \
+              platform/toolchain",
+        ]));
     }
 }
 
@@ -226,7 +419,7 @@ pub extern "C" fn patina_crash() -> c_int {
     // none.
     #[cfg(target_os = "linux")]
     if fsnotify::watching() {
-        trap_fatal(
+        trap_unmodeled(
             "patina_crash: an in-process crash while an inotify watch exists is not modeled; \
              failing closed",
         );

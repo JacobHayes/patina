@@ -164,6 +164,18 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 /// as the trace travels ([`ENV_TRACE_FD`]).
 pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
 
+/// Inherited host descriptor the native shim writes its stop record to: one
+/// [`STOP_SCHEMA`] line saying why it is ending the run, written just before
+/// it aborts. The write end of a pipe, not a file: a pipe write is subject to
+/// neither a file size limit nor `SIGXFSZ`, and a record is far smaller than a
+/// pipe's buffer, so the stop is told wherever and however the run dies.
+pub const ENV_STOP_FD: &str = "PATINA_RT_STOP_FD";
+
+/// The schema of the shim's stop record ([`ENV_STOP_FD`]): `stop.class` is the
+/// run's outcome class, `stop.reason` a stable token, `stop.detail` the line
+/// naming what was reached.
+pub const STOP_SCHEMA: &str = "patina.runstop/v1";
+
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
 /// set, `run` streams a read-only host directory tree into the guest and
 /// the shim rebuilds it as the deterministic filesystem instead of an empty one,

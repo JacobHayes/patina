@@ -801,7 +801,7 @@ pub fn patina_fchmod(raw_fd: c_int, mode: u32) -> c_int {
         // The one anonymous inode is root's too.
         if volume::on_anon_inode(resolved.kind) {
             if caller_capable(registry::Capability::Fowner) {
-                trap_fatal(
+                trap_unmodeled(
                     "fchmod: changing the mode of the anonymous inode every eventfd, timerfd, \
                      signalfd, epoll, inotify and pidfd shares is not modeled",
                 );

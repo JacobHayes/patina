@@ -95,7 +95,9 @@ pub(crate) unsafe fn generate_signal(
                 // Init has no handlers, and the kernel drops what a member
                 // of its namespace sends it by default.
                 Some(process) if process == crate::identity::Process::INIT => return 0,
-                Some(_) => crate::trap_fatal("a signal to another guest process is not modeled"),
+                Some(_) => {
+                    crate::trap_unmodeled("a signal to another guest process is not modeled")
+                }
                 None => return -i64::from(ESRCH),
             }
         }
@@ -201,7 +203,9 @@ impl ThreadRuntime {
         // host containment handler or silently disappear, regardless of the
         // guest disposition. Keep this check at the shared generation funnel.
         if info.signo() == SIGSYS {
-            fatal("guest SIGSYS generation is not modeled; SIGSYS is reserved for containment");
+            fatal_unmodeled(
+                "guest SIGSYS generation is not modeled; SIGSYS is reserved for containment",
+            );
         }
         let (instance, wake) = self.signals.enqueue(info.signo(), target, info);
         let generated = Generated {
@@ -277,7 +281,7 @@ pub extern "C" fn patina_raw_exit_group(status: i32) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     crate::patina_note_guest_exit_status(status & 255);
     if crate::shutdown_run() != 0 {
-        fatal("exit_group finalization failed");
+        crate::finalization_failed("exit_group finalization failed", status & 255);
     }
     note_main_returned();
     host(SYS_EXIT_GROUP, [(status & 255) as u64, 0, 0, 0, 0, 0]);

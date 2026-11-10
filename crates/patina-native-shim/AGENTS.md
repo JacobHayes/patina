@@ -337,8 +337,15 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   admit host siginfo fields. Pair changes with `native_signals::self_raise_*`
   and the audited compute-watchdog guest, retaining the actual raise probe.
 
-- `host_abort` / `patina_host_abort` are private internal-fatal vehicles. They
-  never finalize a trace. Guest `abort` raises SIGABRT through the virtual
+- `host_abort` is the private stop vehicle, and the only way the shim ends a
+  run by aborting. It takes a `RunStop`: the run's class (so its attribution:
+  the guest's finding, something Patina does not model, or Patina's own
+  failure), a reason token and the detail that names what was reached, which
+  it writes to the supervisor's stop pipe before the abort. A new stop picks its class
+  at the call site: `trap_unmodeled`/`fatal_unmodeled` for a guest call the
+  model lacks, `trap_fatal`/`fatal` for a broken shim invariant or a host
+  failure, never the second for the first. It
+  never finalizes a trace. Guest `abort` raises SIGABRT through the virtual
   kernel (the handler runs, then the default disposition); fatal default
   dispositions finalize exactly once, then use the private host vehicle; never call public `abort`
   while holding shim locks. Rust ABI entries claim a thread-local panic scope;

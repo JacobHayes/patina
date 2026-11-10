@@ -37,6 +37,15 @@ unsafe fn unresolved_symbol_diagnostic(write: *mut c_void, name: &std::ffi::CStr
         // the process aborts next.
         unsafe { write(2, part.as_ptr().cast(), part.len()) };
     }
+    // The abort that follows is the resolver's own, not `host_abort`: say
+    // why on the supervisor's stop pipe here, through the same host `write`.
+    crate::process::record_stop_through(
+        crate::RunStop::internal(&[b"could not resolve host symbol ", name.to_bytes()]),
+        &mut |fd, bytes| {
+            // SAFETY: `bytes` is readable for its length.
+            unsafe { write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        },
+    );
 }
 
 /// The host's definition of the door `name`, or null where the host has
@@ -78,7 +87,11 @@ pub unsafe extern "C" fn patina_host_unbound(name: *const c_char) -> ! {
     for part in parts {
         let _ = host_write_all(2, part);
     }
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::internal(&[
+        b"engine code called the host's ",
+        name.to_bytes(),
+        b", which the host does not define or startup had not bound",
+    ]))
 }
 
 #[cfg(target_os = "macos")]

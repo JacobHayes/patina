@@ -60,7 +60,7 @@ fn notified(input: c_int, output: c_int, moved: isize, output_first: bool) -> is
 /// role the model gives it no transfer for: the streams are pipes, but only a
 /// splice from another pipe into standard output or error moves bytes.
 fn stream_unmodeled(call: &str) -> ! {
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "{call} with a standard stream on this side is not modeled; failing closed"
     ))
 }

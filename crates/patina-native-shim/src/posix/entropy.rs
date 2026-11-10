@@ -87,6 +87,9 @@ unsafe extern "C" fn CCRandomGenerateBytes(destination: *mut c_void, length: usi
     let filled = unsafe { crate::entropy::fill(destination, length, EntropyWait::UntilReady) };
     if filled != Ok(length) {
         // Preserve __builtin_trap's instruction fault, rather than guest abort.
+        crate::process::record_stop(crate::RunStop::internal(&[
+            b"the entropy pool could not fill a local buffer",
+        ]));
         // SAFETY: this noreturn instruction intentionally raises the established trap.
         unsafe { core::arch::asm!("brk #1", options(noreturn)) }
     }
@@ -115,6 +118,9 @@ extern "C" fn srandomdev() {
         // A pool that is ready before the guest runs cannot fail a local
         // buffer; fault as `CCRandomGenerateBytes` does rather than seed
         // from anything else.
+        crate::process::record_stop(crate::RunStop::internal(&[
+            b"the entropy pool could not fill a local buffer",
+        ]));
         // SAFETY: this noreturn instruction intentionally raises the established trap.
         unsafe { core::arch::asm!("brk #1", options(noreturn)) }
     }

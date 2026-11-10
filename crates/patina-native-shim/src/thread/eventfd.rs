@@ -168,7 +168,7 @@ pub(crate) unsafe fn eventfd_write(handle: u64, buf: *const c_void, len: usize) 
         return super::fail(super::EBADF) as isize;
     };
     let Some(sum) = efd.value.checked_add(add).filter(|sum| *sum < u64::MAX) else {
-        fatal(&format!(
+        fatal_unmodeled(&format!(
             "eventfd write overflows the counter ({} + {add}): blocking eventfd \
              writers are not modeled; failing closed",
             efd.value

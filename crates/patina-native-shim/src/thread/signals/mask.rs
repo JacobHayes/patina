@@ -150,7 +150,7 @@ pub extern "C" fn patina_signal_return(mask: usize) -> usize {
             if crate::uaccess::write(mask, &kept).is_err() {
                 // Natively the kernel would install this mask: a read-only
                 // frame that blocks a containment signal cannot be honoured.
-                crate::trap_fatal(
+                crate::trap_unmodeled(
                     "a guest rt_sigreturn frame blocks a containment signal (SIGSYS, or \
                      SIGSEGV under the timestamp-counter trap) and cannot be written to keep \
                      it unblocked",
@@ -199,7 +199,9 @@ pub(crate) fn write_through(fd: c_int, bytes: &[u8]) -> bool {
             b"patina native shim fatal: host signal mask change around a captured write \
               failed (rt_sigprocmask)\n",
         );
-        crate::host_abort()
+        crate::host_abort(crate::RunStop::internal(&[
+            b"host signal mask change around a captured write failed (rt_sigprocmask)",
+        ]))
     };
     let pipe = bit(SIGPIPE);
     let mut held = 0u64;

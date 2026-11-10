@@ -53,7 +53,15 @@ fn process_trap(symbol: &CStr) -> ! {
         crate::patina_stdio_write(2, suffix.as_ptr().cast(), suffix.len());
     }
     crate::patina_flush_captured_stdio();
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::new(
+        patina_dst_abi::RunClass::Unsupported,
+        "deny_trap",
+        &[
+            b"the guest called ",
+            symbol.to_bytes(),
+            b" (process spawn), which Patina does not model",
+        ],
+    ))
 }
 
 #[unsafe(no_mangle)]

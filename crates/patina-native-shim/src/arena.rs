@@ -185,7 +185,7 @@ fn fatal(reason: &[u8]) -> ! {
     let _ = crate::host_write_all(2, b"patina native shim fatal: ");
     let _ = crate::host_write_all(2, reason);
     let _ = crate::host_write_all(2, b"\n");
-    crate::host_abort();
+    crate::host_abort(crate::RunStop::internal(&[reason]));
 }
 
 /// [`fatal`] for a host call that failed, naming its errno.
@@ -207,7 +207,12 @@ fn host_fatal(reason: &[u8]) -> ! {
     let _ = crate::host_write_all(2, b" (errno ");
     let _ = crate::host_write_all(2, &digits[start..]);
     let _ = crate::host_write_all(2, b")\n");
-    crate::host_abort();
+    crate::host_abort(crate::RunStop::internal(&[
+        reason,
+        b" (errno ",
+        &digits[start..],
+        b")",
+    ]));
 }
 
 /// Where the region goes in an address space whose top is `top`, and how

@@ -69,14 +69,14 @@ pub(super) fn answer(nr: i64, check: Check, args: [u64; 6]) -> i64 {
     let row = || super::row_for(nr).map_or("a privileged row", |(_, row)| row.name);
     match check(credential(), &args) {
         Ok(value) => value,
-        Err(Unmodeled::Granted(capability)) => crate::trap_fatal(&format!(
+        Err(Unmodeled::Granted(capability)) => crate::trap_unmodeled(&format!(
             "capability {} granted but {} is not modeled: the virtual credential holds it, and \
              what the kernel does for such a caller is outside the model; failing closed",
             capability.name(),
             row()
         )),
         Err(Unmodeled::Path(what)) => {
-            crate::trap_fatal(&format!("{}: {what} is not modeled; failing closed", row()))
+            crate::trap_unmodeled(&format!("{}: {what} is not modeled; failing closed", row()))
         }
     }
 }

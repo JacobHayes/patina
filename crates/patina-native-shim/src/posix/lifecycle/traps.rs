@@ -509,10 +509,13 @@ pub unsafe extern "C" fn patina_sud_decode(
     }
     let loader = LOADER_TEXT[0].load(Ordering::Relaxed)..LOADER_TEXT[1].load(Ordering::Relaxed);
     if loader.contains(&call_addr) {
-        fatal(
+        // Something the guest did made glibc load a library by itself: a
+        // gap in the model, not a broken shim invariant.
+        crate::trap_unmodeled(&format!(
             "SUD: the dynamic loader made a system call after startup (glibc loading a library \
-             itself: an NSS or iconv module, libgcc_s for unwinding); not modeled",
-        );
+             itself: an NSS or iconv module, libgcc_s for unwinding); not modeled \
+             (syscall {nr} at {call_addr:#x})"
+        ));
     }
     let context = unsafe { &raw mut (*uc).uc_mcontext };
     #[cfg(target_arch = "x86_64")]

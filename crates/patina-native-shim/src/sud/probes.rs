@@ -17,7 +17,7 @@ pub(super) fn landlock_create_ruleset(args: [u64; 6]) -> i64 {
     if attr == 0 && size == 0 && flags == LANDLOCK_CREATE_RULESET_VERSION {
         return KERNEL_CONFIG.landlock_abi;
     }
-    crate::trap_fatal(
+    crate::trap_unmodeled(
         "landlock_create_ruleset: only the version query is modeled (patina does not enforce \
          Landlock); failing closed",
     )
@@ -63,7 +63,7 @@ pub(super) fn seccomp(args: [u64; 6]) -> i64 {
         SECCOMP_SET_MODE_STRICT
         | SECCOMP_SET_MODE_FILTER
         | SECCOMP_GET_NOTIF_SIZES
-        | SECCOMP_SET_MODE_FILTER_LISTENER => crate::trap_fatal(
+        | SECCOMP_SET_MODE_FILTER_LISTENER => crate::trap_unmodeled(
             "seccomp: only SECCOMP_GET_ACTION_AVAIL is modeled (patina does not enforce a \
              guest's seccomp mode); failing closed",
         ),

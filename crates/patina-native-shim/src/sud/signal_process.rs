@@ -248,7 +248,7 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
         PR_GET_NAME => return prctl_get_name(arg2),
         // No seccomp mode is ever entered: setting one stops by name.
         PR_GET_SECCOMP => return 0,
-        PR_SET_SECCOMP => crate::trap_fatal(
+        PR_SET_SECCOMP => crate::trap_unmodeled(
             "prctl: PR_SET_SECCOMP is not modeled (patina does not enforce a guest's seccomp \
              mode); failing closed",
         ),

@@ -85,7 +85,7 @@ pub(crate) fn init_from_env() -> c_int {
     if let Err(error) = &context {
         // Preserve the runtime's diagnostic before `install` collapses it to a
         // bare errno, so the fail-closed abort path can report *why*.
-        record_init_error(error.to_string());
+        record_init_failure(error);
     }
     install(context)
 }

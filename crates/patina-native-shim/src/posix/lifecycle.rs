@@ -121,6 +121,13 @@ extern "C" fn finalize_atexit() {
     // patina_shutdown already emitted the runtime error; atexit ignores
     // return values, so abort to make finalization failures loud.
     if crate::patina_shutdown() != 0 {
-        crate::patina_host_abort();
+        crate::host_abort(
+            crate::RunStop::new(
+                patina_dst_abi::RunClass::Internal,
+                "shutdown_failure",
+                &[b"finalizing the run failed after the guest finished"],
+            )
+            .with_guest_exit(crate::guest_exit_status()),
+        );
     }
 }

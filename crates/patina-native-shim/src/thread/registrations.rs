@@ -409,7 +409,7 @@ pub(crate) fn rseq(area: usize, len: u32, flags: i32, sig: u32) -> i64 {
     }
     if write_cpu(area, super::sched::current_cpu()).is_err() {
         // The kernel's notify-resume would force SIGSEGV on this thread.
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "rseq registered an area the CPU fields cannot be written to: the kernel's \
              forced SIGSEGV is not modeled",
         );
@@ -432,7 +432,7 @@ pub(super) fn migrated(task: TaskId, cpu: u32) {
         && write_cpu(area, cpu).is_err()
     {
         // The kernel's notify-resume would force SIGSEGV on the task.
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a migrated task's rseq area cannot be written: the kernel's forced SIGSEGV is not \
              modeled",
         );

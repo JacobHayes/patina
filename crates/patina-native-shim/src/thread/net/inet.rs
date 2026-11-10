@@ -233,7 +233,7 @@ pub(super) fn create(v6: bool, ty: i32, protocol: i32) -> Result<(i32, i32, Prot
         // UDP-Lite is a protocol of its own (its own ports, partial
         // checksums) the virtual network does not carry.
         #[cfg(target_os = "linux")]
-        SOCK_DGRAM if protocol == IPPROTO_UDPLITE => crate::trap_fatal(
+        SOCK_DGRAM if protocol == IPPROTO_UDPLITE => crate::trap_unmodeled(
             "socket(SOCK_DGRAM, IPPROTO_UDPLITE): UDP-Lite is not modeled; failing closed",
         ),
         // A ping socket needs a group in `ping_group_range`, empty by default.

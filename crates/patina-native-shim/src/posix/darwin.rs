@@ -8,6 +8,11 @@ const MONOTONIC: u32 = 1;
 const REALTIME: u32 = 0;
 const PHYSICAL_MEMORY_BYTES: i64 = 8 * 1024 * 1024 * 1024;
 fn trap() -> ! {
+    // The virtual clock refused a read or a sleep: patina's failure, said
+    // before the trap instruction ends the run on its own signal.
+    crate::process::record_stop(crate::RunStop::internal(&[
+        b"the virtual clock refused a Mach time call",
+    ]));
     // SAFETY: this deliberately executes an architecture trap and never returns.
     unsafe {
         #[cfg(target_arch = "aarch64")]
@@ -195,7 +200,13 @@ unsafe extern "C" fn __assert_rtn(
         }
     }
     crate::patina_flush_captured_stdio();
-    crate::host_abort()
+    // The guest's own failed C `assert`: on Linux it ends in the guest's
+    // `abort`, here in this stop, and either way it is the guest's.
+    crate::host_abort(crate::RunStop::new(
+        patina_dst_abi::RunClass::Crash,
+        "assert",
+        &[b"a C assert in the guest failed"],
+    ))
 }
 /// The virtual machine's CPU count, as the `hw.*cpu` integers carry it:
 /// every CPU is a logical, physical, available and active one.

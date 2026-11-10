@@ -532,7 +532,7 @@ fn route_message(
             Ok(vec![datagram])
         }
         RTM_GETADDR => Err(LINUX_EOPNOTSUPP),
-        _ => crate::trap_fatal(&format!(
+        _ => crate::trap_unmodeled(&format!(
             "rtnetlink request type {kind} is not modeled (the virtual kernel answers links \
              and addresses from its interface table; routes, neighbours and the other \
              routing objects are not modeled); failing closed"

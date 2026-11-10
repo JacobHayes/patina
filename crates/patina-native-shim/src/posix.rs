@@ -43,7 +43,17 @@ fn native_trap(class: &CStr, symbol: &CStr) -> ! {
         }
     }
     crate::patina_flush_captured_stdio();
-    crate::host_abort()
+    crate::host_abort(crate::RunStop::new(
+        patina_dst_abi::RunClass::Unsupported,
+        "deny_trap",
+        &[
+            b"the guest called ",
+            symbol.to_bytes(),
+            b" (",
+            class.to_bytes(),
+            b"), which Patina does not interpose",
+        ],
+    ))
 }
 // The registry's deny rows outside the process family (dynamic loading, the
 // macOS framework and host-introspection helpers, Darwin's `fsctl`), generated with the

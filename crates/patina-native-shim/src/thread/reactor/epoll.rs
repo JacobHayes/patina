@@ -9,8 +9,8 @@ use patina_dst_abi::ClockKind;
 
 use super::{
     DescId, EPERM, FdKind, O_READ, O_WRITE, ReadyDir, Step, TaskId, ThreadRuntime, WaitQueue,
-    WaiterLoc, Watched, current_task, fatal, lock_state, register_readiness_waiters, sched_point,
-    switch_and_park, unregister_waiters, wake_all,
+    WaiterLoc, Watched, current_task, fatal_unmodeled, lock_state, register_readiness_waiters,
+    sched_point, switch_and_park, unregister_waiters, wake_all,
 };
 
 // <sys/epoll.h> control ops and event bits (the reactor is Linux-only).
@@ -464,7 +464,7 @@ pub(crate) unsafe fn ctl_core(
     // Readiness is defined over every pollable kind but another epoll
     // instance: nested epoll is not modeled and fails closed loudly.
     if target.kind == FdKind::Epoll {
-        fatal(&format!(
+        fatal_unmodeled(&format!(
             "epoll_ctl registered epoll descriptor {fd} on another epoll instance: \
              nested epoll is not modeled; failing closed"
         ));

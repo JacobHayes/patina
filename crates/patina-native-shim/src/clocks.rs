@@ -434,7 +434,7 @@ fn sleep_on(clock: Clock, flags: c_int) -> Sleep {
             Ok((CpuOf::Thread(task), _)) if thread::tid_of(task) == thread::current_tid() => {
                 Sleep::Refused(EINVAL)
             }
-            Ok(_) => crate::trap_fatal(
+            Ok(_) => crate::trap_unmodeled(
                 "clock_nanosleep on a CPU clock is not modeled (the sleeper spends no CPU time, so                  only another task's clock reads could end the sleep, or nothing, for init's);                  failing closed",
             ),
         },

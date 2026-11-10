@@ -11,7 +11,7 @@ use crate::abi::{SysResult, failed};
 #[cfg(patina_posix_exports)]
 use patina_dst_abi::ClockKind;
 
-use super::{FdKind, TaskId, ThreadRuntime, WaitQueue, fatal, lock_state, wake_all};
+use super::{FdKind, TaskId, ThreadRuntime, WaitQueue, fatal_unmodeled, lock_state, wake_all};
 // The gather path: only the guest archive's `kqueue`/`kevent` doors reach it.
 #[cfg(patina_posix_exports)]
 use super::{
@@ -112,7 +112,7 @@ fn kq_id(_state: &ThreadRuntime, fd: c_int) -> Option<u64> {
 }
 
 fn fatal_filter(filter: i16, fd: c_int, direction: &str) -> ! {
-    fatal(&format!(
+    fatal_unmodeled(&format!(
         "kevent EVFILT_{direction} registered on non-virtual descriptor {fd} \
          (filter {filter}): readiness for real host descriptors is not modeled; \
          failing closed"
@@ -205,7 +205,7 @@ pub extern "C" fn patina_kqueue_apply(
             filter,
             EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_TIMER
         ) {
-            fatal(&format!(
+            fatal_unmodeled(&format!(
                 "kevent filter {filter} is not modeled (only EVFILT_READ/WRITE/USER/TIMER \
                  are supported); failing closed"
             ));

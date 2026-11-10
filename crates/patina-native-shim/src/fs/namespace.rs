@@ -610,7 +610,7 @@ pub(crate) unsafe fn read_link(
                         && paths::node_path(Fd(resolved.handle)) == Err(ENOENT)
                 }) =>
         {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "readlinkat(fd, \"\") on an O_PATH descriptor whose node was unlinked is not \
                  modeled; failing closed",
             )

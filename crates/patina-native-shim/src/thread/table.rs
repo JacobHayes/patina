@@ -308,7 +308,9 @@ pub(super) struct ThreadTable {
 
 pub(super) fn refuse_nested_sync_wait(interrupted: bool) {
     if interrupted {
-        fatal("signal handler blocked on a pthread wait while interrupting one: not modeled");
+        fatal_unmodeled(
+            "signal handler blocked on a pthread wait while interrupting one: not modeled",
+        );
     }
 }
 

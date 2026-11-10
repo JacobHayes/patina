@@ -61,7 +61,7 @@ pub(crate) const DENY_O_PATH_NAMESPACE_LINK: &str =
 #[cfg(any(target_os = "linux", patina_posix_exports))]
 pub(crate) fn unmodeled_open_flags<'a>(flags: impl Iterator<Item = &'a str>) -> ! {
     let flags = flags.collect::<Vec<_>>().join("|");
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "open with {flags} is not modeled by the deterministic filesystem; failing closed"
     ))
 }

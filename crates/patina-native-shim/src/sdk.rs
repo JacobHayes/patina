@@ -31,15 +31,21 @@ unsafe fn buggify_label<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 /// stderr through the non-interposed host alias, and abort. Mirrors
 /// [`abort_with_init_error`] so the marker lands after buffered guest output.
 ///
-/// Reserved for patina's own *refusals* — a duplicate buggify label and its
-/// peers, whose marker is what `patina`'s envelope attributes the refusal
-/// from. A system-under-test finding does NOT come through here: it is reported
-/// as a verdict ([`abort_after_verdict`]).
+/// Reserved for the SDK contracts a guest broke — a duplicate buggify label and
+/// its peers — which stop the run as the guest's `violation` under the
+/// `sdk_misuse` reason. An invariant the guest declared does NOT come through
+/// here: it is reported as a verdict ([`abort_after_verdict`]).
 pub(crate) fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {
     let _ = flush_before_refusal();
     let line = format!("{marker} label={label}\n");
     let _ = host_write_all(2, line.as_bytes());
-    crate::host_abort();
+    // The guest broke the SDK's own contract (one label, one site): a
+    // finding in the program under test, like the invariants the SDK checks.
+    crate::host_abort(RunStop::new(
+        RunClass::Violation,
+        "sdk_misuse",
+        &[marker.as_bytes(), b" label=", label.as_bytes()],
+    ));
 }
 
 /// Finalize the run and abort, printing nothing of the shim's own.

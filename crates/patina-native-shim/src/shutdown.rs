@@ -88,12 +88,29 @@ pub(crate) fn shutdown_run() -> c_int {
             b"PATINA_BUGGIFY_SETUP_NEVER_CALLED --buggify-after-setup was declared but the guest \
 never called patina_dst::lifecycle::setup_complete()\n",
         );
-        crate::host_abort();
+        crate::host_abort(RunStop::new(
+            RunClass::Violation,
+            "buggify_setup_never_called",
+            &[
+                b"--buggify-after-setup was declared but the guest never called \
+                patina_dst::lifecycle::setup_complete()",
+            ],
+        ));
     }
     if let Err(error) = coverage {
         let line = format!("patina: coverage finalization refused: {error}\n");
         let _ = host_write_all(2, line.as_bytes());
-        crate::host_abort();
+        crate::host_abort(
+            RunStop::new(
+                RunClass::Internal,
+                "shutdown_failure",
+                &[
+                    b"coverage finalization refused: ",
+                    error.to_string().as_bytes(),
+                ],
+            )
+            .with_guest_exit(guest_exit_status()),
+        );
     }
     // Patina fails closed by default: a shutdown failure is reported and the
     // atexit hook aborts on it, so a recorder that misbehaved can never be
@@ -210,7 +227,7 @@ pub extern "C" fn patina_note_guest_exit_status(status: c_int) {
     );
 }
 
-fn guest_exit_status() -> Option<i32> {
+pub(crate) fn guest_exit_status() -> Option<i32> {
     match GUEST_EXIT_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
         GUEST_EXIT_UNKNOWN => None,
         status => Some(status),
@@ -233,6 +250,24 @@ fn report_shutdown_error(message: &str) {
     }
     line.push('\n');
     let _ = host_write_all(2, line.as_bytes());
+}
+
+/// Stop a run whose finalization failed as the guest was already ending on
+/// its own, with `guest_status` (an exit status, or `128 + signal`): the
+/// same named stop a shim fatal is, carrying the status the guest reached, so
+/// a guest that had already failed is not filed as patina failing.
+pub(crate) fn finalization_failed(message: &str, guest_status: i32) -> ! {
+    let _ = flush_before_refusal();
+    let text = format!("patina native shim fatal: {message}\n");
+    let _ = host_write_all(2, text.as_bytes());
+    crate::host_abort(
+        RunStop::new(
+            RunClass::Internal,
+            "shutdown_failure",
+            &[message.as_bytes()],
+        )
+        .with_guest_exit(Some(guest_status)),
+    )
 }
 
 #[unsafe(no_mangle)]

@@ -144,7 +144,7 @@ pub unsafe extern "C" fn patina_os_unfair_lock_lock(lock: *mut c_void) {
         }
         Err(ThreadError::Posix(_)) => {
             drop(state);
-            fatal(
+            fatal_guest_misuse(
                 "os_unfair_lock_lock: recursive lock of an os_unfair_lock already held by the \
                  current task",
             );
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn patina_os_unfair_lock_unlock(lock: *mut c_void) {
         }
         Err(ThreadError::Posix(_)) => {
             drop(state);
-            fatal(
+            fatal_guest_misuse(
                 "os_unfair_lock_unlock: unlock of an os_unfair_lock not owned by the current \
                  task",
             );

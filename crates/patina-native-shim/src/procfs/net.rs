@@ -102,7 +102,7 @@ fn lists(file: NetFile) -> (i32, Option<i32>) {
 pub(super) fn text(pid: i32, file: NetFile) -> Vec<u8> {
     let (family, ty) = lists(file);
     if crate::thread::net::holds_socket(family, ty) {
-        crate::trap_fatal(&format!(
+        crate::trap_unmodeled(&format!(
             "{} is read while the guest holds a socket it lists; a table's socket rows are not \
              modeled; failing closed",
             Node::NetFile(pid, file).path()

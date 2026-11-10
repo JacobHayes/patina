@@ -249,7 +249,18 @@ pub(crate) fn report_and_abort(
         );
     }
     let _ = super::host_write_all(2, &text.bytes[..text.len]);
-    super::host_abort()
+    let mut detail = Text {
+        bytes: [0; 1024],
+        len: 0,
+    };
+    let _ = write!(detail, "{error}");
+    let (class, reason) = crate::runtime::run_stop_class(error)
+        .unwrap_or((patina_dst_abi::RunClass::Internal, "compute_stop"));
+    super::host_abort(crate::RunStop::new(
+        class,
+        reason,
+        &[&detail.bytes[..detail.len]],
+    ))
 }
 
 #[derive(Clone, Copy)]

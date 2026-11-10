@@ -147,7 +147,7 @@ const CONTENTS_CODE: u32 = 3;
 
 /// Stop the run: `what` would move the thread pointer.
 fn refuse(what: &str) -> ! {
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "thread-pointer: {what} refused: the shim finds its own per-thread state through the \
          thread pointer, so no guest may move it (the pre-run audit refuses wrfsbase and FS \
          selector loads for the same reason); keep the thread pointer glibc installs"
@@ -197,7 +197,7 @@ pub(super) fn sys_arch_prctl(nr: i64, a: [u64; 6]) -> i64 {
             .iter()
             .find(|(codes, _)| codes.contains(&code))
         {
-            Some((_, what)) => crate::trap_fatal(&format!(
+            Some((_, what)) => crate::trap_unmodeled(&format!(
                 "arch_prctl({code:#x}): {what} are not modeled; failing closed"
             )),
             None => -i64::from(errno::EINVAL),

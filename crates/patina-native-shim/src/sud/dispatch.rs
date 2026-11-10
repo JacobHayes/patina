@@ -119,7 +119,7 @@ fn trap_row(row: &SyscallRow, class: &str, nr: i64, args: [u64; 6]) -> i64 {
         Some(arc) => format!(" Closes in the {arc} arc."),
         None => String::new(),
     };
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "SUD trapped unsupported syscall {} (nr {nr}, class {class}; args {:#x} {:#x} {:#x} {:#x} \
          {:#x} {:#x}): {}{closes} Guest raw syscalls must map to a deterministic route; `cargo \
          patina syscalls` lists every row",
@@ -132,7 +132,7 @@ fn trap_row(row: &SyscallRow, class: &str, nr: i64, args: [u64; 6]) -> i64 {
 /// garbage in the syscall register. Distinct from a trapped row, which is a
 /// deliberate disposition.
 fn not_in_table(nr: i64, args: [u64; 6]) -> i64 {
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "SUD trapped syscall number {nr}, which is not in the vendored Linux {} syscall table \
          (args {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}); run scripts/refresh-syscalls.py and \
          add a registry row if the kernel has grown a number, or treat this as a corrupt raw \

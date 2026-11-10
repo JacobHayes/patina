@@ -490,7 +490,7 @@ pub(crate) unsafe fn add_watch(fd: c_int, path: *const c_char, mask: u32) -> i64
     if crate::memdev::MemDevice::ALL.into_iter().any(|device| {
         device.path().rsplit_once('/').map(|(dir, _)| dir) == Some(found.path.as_str())
     }) {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "inotify_add_watch: a watch on /dev, where the memory devices live, is not \
              modeled; failing closed",
         );

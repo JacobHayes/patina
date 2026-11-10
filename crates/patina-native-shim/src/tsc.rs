@@ -118,7 +118,7 @@ pub(crate) fn counter_read_at(pc: usize) -> bool {
 pub extern "C" fn patina_tsc_declined(rip: usize) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if counter_read_at(rip) {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a timestamp-counter read the trap does not answer (outside the main executable's \
              text, or in a prefixed encoding): not modeled",
         );

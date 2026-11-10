@@ -58,7 +58,7 @@ fn int(data: &[u8]) -> i32 {
 }
 
 fn unmodeled(level: i32, kind: i32) -> ! {
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "ancillary data at level {level}, type {kind} (IP options, protocol, flow label or \
          an IPv6 extension header) on a datagram socket is not modeled; failing closed"
     ))

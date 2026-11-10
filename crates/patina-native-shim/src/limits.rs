@@ -155,7 +155,7 @@ pub unsafe fn patina_prlimit(
         if !caller.same_ids(process.credential()) && !caller.capable(Capability::SysResource) {
             return -i64::from(crate::EPERM);
         }
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "prlimit64 of another process: its limits are not modeled; failing closed",
         );
     }

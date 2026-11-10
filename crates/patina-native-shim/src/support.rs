@@ -242,7 +242,10 @@ impl<T> SpinMutex<T> {
                   holds it (a signal handler, or guest code the shim called, ran over shim \
                   code holding it); failing closed\n",
             );
-            host_abort()
+            host_abort(crate::RunStop::internal(&[
+                b"a shim lock was re-entered by the thread that holds it (a signal handler, or \
+                  guest code the shim called, ran over shim code holding it)",
+            ]))
         })
     }
 

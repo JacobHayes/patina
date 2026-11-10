@@ -364,7 +364,7 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
                 Some((process, true)) => Ok(Node::Process(process.pid())),
                 // `find_task_by_pid_ns` finds a thread too: its directory is
                 // hidden from the listing but there.
-                Some((_, false)) => crate::trap_fatal(&format!(
+                Some((_, false)) => crate::trap_unmodeled(&format!(
                     "{ROOT}/{pid} names a thread of the guest, whose procfs directory is not \
                      modeled; failing closed"
                 )),
@@ -389,7 +389,7 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
                 Err(ENOENT)
             }
         }
-        Node::Thread(pid, tid) if name == "ns" => crate::trap_fatal(&format!(
+        Node::Thread(pid, tid) if name == "ns" => crate::trap_unmodeled(&format!(
             "{ROOT}/{pid}/task/{tid}/ns, a thread's namespace files, is not modeled; failing \
              closed"
         )),
@@ -550,7 +550,7 @@ fn namespaces(pid: i32, remaining: &VecDeque<String>) -> Result<Walked, c_int> {
     {
         return Err(ENOENT);
     }
-    crate::trap_fatal(&format!(
+    crate::trap_unmodeled(&format!(
         "{ROOT}/{pid}/ns reached other than as /proc/self/ns/<entry> is not modeled; failing \
          closed"
     ))
@@ -603,7 +603,7 @@ pub(crate) fn metadata(node: Node) -> PatinaMetadata {
         Node::Fds(pid) if pid == Process::current().pid() => fd::numbers().len() as u64,
         // Init's descriptors are another process's, whose table the model
         // does not keep.
-        Node::Fds(pid) => crate::trap_fatal(&format!(
+        Node::Fds(pid) => crate::trap_unmodeled(&format!(
             "the size of {ROOT}/{pid}/fd, another process's descriptor count, is not modeled; \
              failing closed"
         )),

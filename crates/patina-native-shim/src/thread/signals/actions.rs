@@ -175,7 +175,7 @@ pub unsafe fn patina_signal_mask(how: i32, set: *const u64, old: *mut u64, size:
     let previous = read_mask();
     let segv = segv_blocked();
     if !old.is_null() && segv == SegvBlock::Unknown {
-        crate::trap_fatal(SEGV_UNKNOWN);
+        crate::trap_unmodeled(SEGV_UNKNOWN);
     }
     let old_value = previous | segv_bit(segv);
     let (mask, segv) = match set {
@@ -227,7 +227,7 @@ pub unsafe fn patina_signal_pending(set: *mut u8, size: usize) -> i64 {
             != 0
     {
         drop(state);
-        crate::trap_fatal(SEGV_UNKNOWN);
+        crate::trap_unmodeled(SEGV_UNKNOWN);
     }
     let pending = state.signals.pending(me).to_ne_bytes();
     drop(state);

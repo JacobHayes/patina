@@ -83,7 +83,7 @@ pub(in crate::sud) fn sys_name_to_handle_at(
     // which the model does not; a filesystem with no export operations
     // refuses before the handle is read (`exportfs_can_encode_fh`).
     if values.fs == crate::PATINA_FS_DEVTMPFS {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "name_to_handle_at of the entropy device (a devtmpfs file handle) is not modeled; \
              failing closed",
         );

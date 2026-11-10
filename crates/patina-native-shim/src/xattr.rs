@@ -161,7 +161,7 @@ fn descriptor_node(raw_fd: c_int) -> Result<Node, c_int> {
         },
         FdKind::Namespace => NSFS_NODE,
         // As by path ([`paths::Virtual::unmodeled`]).
-        FdKind::Proc | FdKind::ProcDir => crate::trap_fatal(
+        FdKind::Proc | FdKind::ProcDir => crate::trap_unmodeled(
             "an extended attribute access of a procfs node is not modeled; failing closed",
         ),
     })

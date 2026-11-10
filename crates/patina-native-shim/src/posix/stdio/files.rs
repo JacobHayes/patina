@@ -50,7 +50,9 @@ unsafe fn parse_mode(mode: *const c_char) -> Option<Mode> {
             }
         }
         if bytes.windows(5).any(|window| window == b",ccs=") {
-            crate::trap_fatal("a stdio mode with ,ccs=: wide-character streams are not modeled");
+            crate::trap_unmodeled(
+                "a stdio mode with ,ccs=: wide-character streams are not modeled",
+            );
         }
         Some(Mode { flags, access })
     }
@@ -249,7 +251,9 @@ pub(super) unsafe fn freopen_impl(
 ) -> *mut libc::FILE {
     let s = stream_of(stream, symbol);
     if path.is_null() {
-        crate::trap_fatal("freopen with a null path: reopening a stream's own file is not modeled");
+        crate::trap_unmodeled(
+            "freopen with a null path: reopening a stream's own file is not modeled",
+        );
     }
     let state = stream_ptr(s);
     // SAFETY: the stream is a table entry; its lock serializes it; path and

@@ -38,6 +38,7 @@ mod network;
 /// `Some(bytes)` as the base64 payload. Public for the trace metadata's own
 /// optional byte fields (`#[serde(with = "patina_dst_abi::option_bytes_base64")]`).
 pub mod option_bytes_base64;
+mod run_class;
 mod verdict;
 
 pub use charge::{COMPUTE_UNIT_NS, ChargeClass, ChargeCounts, CpuCharge, STARTUP_CPU_CHARGE};
@@ -50,6 +51,7 @@ pub use filesystem::{
     OpenFlags, SeekWhence, XattrTarget, seals,
 };
 pub use network::{Datagram, SendDisposition, SendReport, ShutdownHow, TcpAccepted};
+pub use run_class::{Attribution, RunClass};
 pub use verdict::VerdictKind;
 
 /// A virtual filesystem handle. Handles are scoped to one runtime.

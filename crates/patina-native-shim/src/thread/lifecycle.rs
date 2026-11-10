@@ -190,7 +190,7 @@ pub extern "C" fn patina_thread_exiting(
 ) -> unsafe extern "C" fn(*mut c_void) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     if lock_state().signals.in_handler(current_task()) {
-        fatal(
+        fatal_unmodeled(
             "pthread_exit, or a cancellation acting, inside a signal handler is not \
              modeled: glibc's unwind would cross the shim's signal-delivery frames beneath \
              the handler",
@@ -202,7 +202,7 @@ pub extern "C" fn patina_thread_exiting(
     } else if me == MAIN_TASK {
         MAIN_EXIT_VALUE.store(value as usize, std::sync::atomic::Ordering::SeqCst);
     } else {
-        fatal("pthread_exit on a thread the runtime does not run is not modeled");
+        fatal_unmodeled("pthread_exit on a thread the runtime does not run is not modeled");
     }
     lock_state().cancels.exiting(me);
     crate::hostapi::get().host_pthread_exit
@@ -337,7 +337,7 @@ fn last_thread_exits() {
         .cast::<std::sync::atomic::AtomicU32>()
         .cast_const();
     if count.is_null() {
-        fatal(
+        fatal_unmodeled(
             "glibc's thread count (__nptl_nthreads) is not visible, so the thread that \
              calls exit(0) after the main thread's pthread_exit cannot be chosen",
         );
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn patina_thread_detach(handle: *mut c_void) -> c_int {
 /// C ABI entry point; the argument is an opaque pointer.
 pub unsafe extern "C" fn patina_thread_exit(_retval: *mut c_void) -> ! {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    fatal(
+    fatal_unmodeled(
         "pthread_exit is not supported by Patina's deterministic thread runtime; \
          return from the thread body instead",
     )

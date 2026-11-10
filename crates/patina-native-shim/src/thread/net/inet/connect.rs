@@ -240,7 +240,7 @@ fn connect_stream(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<(), 
     // an address an earlier connection still holds (open, or waiting in a
     // backlog) cannot be.
     if state.net.sockets.inet.streams.contains_key(&key) {
-        fatal(
+        fatal_unmodeled(
             "a TCP connection from an address an earlier connection still holds (open, or \
              waiting in a listener's backlog) is not modeled; failing closed",
         );

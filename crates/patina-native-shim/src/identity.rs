@@ -625,7 +625,7 @@ pub(crate) unsafe fn capset(
         inheritable: credential.inheritable,
     };
     if new != old {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "capset: changing the capability sets is not modeled (the virtual credential is \
              fixed); failing closed",
         );

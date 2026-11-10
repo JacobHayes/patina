@@ -167,7 +167,7 @@ pub(crate) unsafe fn set_mempolicy(mode: i32, mask: *const u64, maxnode: u64) ->
     match policy_for(mode, nodes) {
         // The mask a relative policy was given reads back as given, and only
         // node 0's survives here: not modeled.
-        Ok(Policy { flags, .. }) if flags & MPOL_F_RELATIVE_NODES != 0 => crate::trap_fatal(
+        Ok(Policy { flags, .. }) if flags & MPOL_F_RELATIVE_NODES != 0 => crate::trap_unmodeled(
             "set_mempolicy with MPOL_F_RELATIVE_NODES is not modeled; failing closed",
         ),
         Ok(policy) => {
@@ -203,7 +203,7 @@ pub(crate) unsafe fn mbind(
         // An empty range is left alone, whatever policy it was given.
         Ok(_) if len == 0 => 0,
         Ok(Policy::DEFAULT) => 0,
-        Ok(_) => crate::trap_fatal(
+        Ok(_) => crate::trap_unmodeled(
             "mbind with a policy other than MPOL_DEFAULT is not modeled (per-range memory \
              policy is not kept); failing closed",
         ),

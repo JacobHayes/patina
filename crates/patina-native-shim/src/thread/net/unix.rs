@@ -705,7 +705,7 @@ fn send_stream(handle: c_int, mut message: Outgoing, urgent: bool) -> Result<usi
         };
         if urgent {
             drop(state);
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "MSG_OOB on an AF_UNIX stream socket (CONFIG_AF_UNIX_OOB) is not modeled; \
                  failing closed",
             );

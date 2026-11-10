@@ -180,9 +180,9 @@ void patina_sud_arm_thread(void);
 /*
  * Flush captured stdout/stderr to the real host descriptors WITHOUT finalizing
  * the run (unlike patina_shutdown), with what stdout's buffer holds after the
- * captured stdout. The process-class deny-traps call this before
- * patina_host_abort() so the guest's output and the deny diagnostic reach the
- * operator even though the private fatal vehicle skips the atexit-driven shutdown flush.
+ * captured stdout. The process-class deny-traps call this before the
+ * private fatal vehicle so the guest's output and the deny diagnostic reach the
+ * operator even though that vehicle skips the atexit-driven shutdown flush.
  */
 int32_t patina_flush_captured_stdio(void);
 int32_t patina_errno(void);
@@ -545,7 +545,6 @@ uintptr_t patina_signal_return(uintptr_t mask);
  * list head) as the main task's; a managed run's startup calls it once. */
 void patina_thread_registrations_adopt_main(void);
 #endif
-/* Private internal-fatal vehicle: never finalize the guest trace. */
 #ifdef __linux__
 _Noreturn void patina_abort(void);
 #endif

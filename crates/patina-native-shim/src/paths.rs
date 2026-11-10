@@ -165,7 +165,7 @@ impl Virtual {
 
     /// Stop the run: `operation` on this entry is not modeled.
     pub(crate) fn unmodeled(self, operation: &str) -> ! {
-        crate::trap_fatal(&format!(
+        crate::trap_unmodeled(&format!(
             "{operation} of {} is not modeled; failing closed",
             self.path()
         ))
@@ -424,7 +424,7 @@ fn fd_path(guest_fd: c_int, empty_path: bool) -> Result<String, c_int> {
         // A namespace file's nsfs inode is a regular file, but no path
         // names it: an empty-path operation on it is not modeled.
         #[cfg(target_os = "linux")]
-        FdKind::Namespace | FdKind::NamespacePath if empty_path => crate::trap_fatal(
+        FdKind::Namespace | FdKind::NamespacePath if empty_path => crate::trap_unmodeled(
             "an empty-path operation on a namespace file (its nsfs inode has no path in the \
              model) is not modeled; failing closed",
         ),
@@ -619,7 +619,7 @@ pub(crate) fn resolve_more(dirfd: c_int, path: &str, flags: u32) -> Result<Resol
         // process's or thread's view of them) is not modeled.
         #[cfg(target_os = "linux")]
         if crate::nsfs::names_procfs(&join(&lexical)) {
-            crate::trap_fatal(&format!(
+            crate::trap_unmodeled(&format!(
                 "{} names procfs's namespace files other than as /proc/self/ns/<entry>, which \
                  is not modeled; failing closed",
                 join(&lexical)
@@ -736,7 +736,7 @@ fn in_procfs(
             // The jump lands on the node, past its ancestors' search
             // permission, which the model's lookups by name would charge.
             let metadata = match metadata(&path) {
-                Err(errno) if errno == EACCES => crate::trap_fatal(&format!(
+                Err(errno) if errno == EACCES => crate::trap_unmodeled(&format!(
                     "a jump through a descriptor's link in {} to {path}, under a directory the \
                      caller may not search, is not modeled; failing closed",
                     Virtual::Proc(start).path()

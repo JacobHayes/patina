@@ -20,7 +20,7 @@ extern "C" fn setitimer(
     #[cfg(target_os = "macos")]
     {
         let _ = (which, new, old);
-        crate::trap_fatal("Darwin setitimer is not modeled")
+        crate::trap_unmodeled("Darwin setitimer is not modeled")
     }
 }
 
@@ -34,7 +34,7 @@ extern "C" fn getitimer(which: c_int, out: *mut libc::itimerval) -> c_int {
     #[cfg(target_os = "macos")]
     {
         let _ = (which, out);
-        crate::trap_fatal("Darwin getitimer is not modeled")
+        crate::trap_unmodeled("Darwin getitimer is not modeled")
     }
 }
 
@@ -48,7 +48,7 @@ extern "C" fn alarm(seconds: c_uint) -> c_uint {
     #[cfg(target_os = "macos")]
     {
         let _ = seconds;
-        crate::trap_fatal("Darwin alarm is not modeled")
+        crate::trap_unmodeled("Darwin alarm is not modeled")
     }
 }
 
@@ -62,7 +62,7 @@ extern "C" fn ualarm(micros: c_uint, interval: c_uint) -> c_uint {
     #[cfg(target_os = "macos")]
     {
         let _ = (micros, interval);
-        crate::trap_fatal("Darwin ualarm is not modeled")
+        crate::trap_unmodeled("Darwin ualarm is not modeled")
     }
 }
 

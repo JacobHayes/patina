@@ -511,7 +511,7 @@ pub(super) fn enter(flags: u64, sp: usize, floor: usize) -> Option<Entered> {
     let frame = floor + FRAME_MARGIN;
     let level = end.saturating_sub(frame) / private.level;
     if frame > end || level > RECORDS || floor <= end - (level + 1) * private.level {
-        crate::trap_fatal(
+        crate::trap_unmodeled(
             "a signal's shim frames outgrew their level of the private signal stack: not \
              modeled",
         );
@@ -543,7 +543,7 @@ pub(super) fn enter(flags: u64, sp: usize, floor: usize) -> Option<Entered> {
             );
         }
         if kept == RECORDS {
-            crate::trap_fatal(
+            crate::trap_unmodeled(
                 "more signal handlers running at once on one thread than the shim tracks: not \
                  modeled",
             );

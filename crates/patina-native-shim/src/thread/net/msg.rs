@@ -290,7 +290,7 @@ fn inet_socket_control(datagram: bool, kind: i32) -> Result<(), c_int> {
         use inet_cmsg::*;
         match kind {
             SO_MARK if datagram => Err(crate::EPERM),
-            SO_TIMESTAMPING_OLD | SCM_TXTIME | SCM_TS_OPT_ID => fatal(&format!(
+            SO_TIMESTAMPING_OLD | SCM_TXTIME | SCM_TS_OPT_ID => fatal_unmodeled(&format!(
                 "socket-level ancillary data type {kind} (timestamping, transmit time) on an \
                  inet socket is not modeled; failing closed"
             )),

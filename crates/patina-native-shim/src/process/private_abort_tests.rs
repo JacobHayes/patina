@@ -42,7 +42,7 @@ fn check(name: &str, handler: extern "C" fn(c_int)) {
                 0
             );
         }
-        host_abort();
+        host_abort(crate::RunStop::internal(&[b"a test stop"]));
     }
     use std::os::unix::process::ExitStatusExt;
     use std::process::{Command, Stdio};
