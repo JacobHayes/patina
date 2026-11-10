@@ -305,7 +305,6 @@ fn the_initial_stack_environment_is_whole_or_refused() {
                 }
                 command.arg("--record").arg(&trace);
             }
-            command.args(["--fingerprint", "initial-stack-env"]);
             if !replay {
                 command.arg("--").args(&expected);
             }
@@ -395,25 +394,13 @@ fn host_environment_canaries_never_enter_guest_or_replay() {
         common::invoke_in_with_env(common::native_workspace(), args, envs).stdout
     };
     let recorded = run(
-        &[
-            "run",
-            bin,
-            "--seed",
-            "3",
-            "--record",
-            trace,
-            "--fingerprint",
-            "env-v1",
-        ],
+        &["run", bin, "--seed", "3", "--record", trace],
         &[("PATINA_ENV_CANARY_HOST", "one"), ("CANARY_HOST", "one")],
     );
     assert_eq!(text(&recorded), "NATIVE_ENV_RESULT vars=0\n");
     assert_eq!(
         recorded,
-        run(
-            &["replay", bin, trace, "--fingerprint", "env-v1"],
-            &[("CANARY_HOST", "two")]
-        )
+        run(&["replay", bin, trace], &[("CANARY_HOST", "two")])
     );
 }
 

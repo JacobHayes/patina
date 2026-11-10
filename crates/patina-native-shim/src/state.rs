@@ -389,7 +389,7 @@ fn descriptor_text(
 ///
 /// This is the ONE door into the window, and it fails closed on a failed init:
 /// `bootstrap::ACTIVE` is cleared only by a SUCCESSFUL [`install`], so an
-/// initialization that failed closed (a `--fingerprint` mismatch, a bad
+/// initialization that failed closed (a fingerprint mismatch, a bad
 /// `--mount` corpus, ...) leaves the window open for the rest of the process.
 /// Every answer behind it — a zero clock, a zero CPU time, `ENOENT` for a
 /// `read_link`, a natively-run lock — is produced WITHOUT reaching

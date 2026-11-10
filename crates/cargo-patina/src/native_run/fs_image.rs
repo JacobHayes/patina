@@ -77,8 +77,7 @@ impl MountMismatch {
 
 /// The image hash a recorded fingerprint carries where this run's puts one:
 /// right after `head` (the base and instrumentation parts), before the policy
-/// suffix the runtime appends. A `+fsimg:` in the user's own label is never taken
-/// for it. `None` when the recorded fingerprint is not this run's head followed
+/// suffix the runtime appends. `None` when the recorded fingerprint is not this run's head followed
 /// by some image hash (it differs elsewhere too, or recorded no corpus).
 pub(crate) fn recorded_image_hash<'a>(recorded: &'a str, head: &str) -> Option<&'a str> {
     let rest = recorded

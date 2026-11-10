@@ -349,9 +349,6 @@ fn main() {
     /// inherited descriptors at once, and a replay against a corpus that moved is
     /// refused before the guest runs, naming what moved.
     fn mount_composes_with_record_and_replay(guest: &common::native::Guest) {
-        // A label holding what the corpus component looks like: the hash is
-        // read where patina put it, not out of the label.
-        const LABEL: &str = "read-mount+fsimg:label";
         let directory = guest.dir.path();
         let bin = guest.binary.to_str().unwrap();
         let workspace = native_workspace();
@@ -384,8 +381,6 @@ fn main() {
                 mount_arg,
                 "--record",
                 trace.to_str().unwrap(),
-                "--fingerprint",
-                LABEL,
                 "--",
                 "mount",
             ],
@@ -395,15 +390,7 @@ fn main() {
         // `replay` re-supplies the host corpus with --mount (a host input the trace
         // cannot carry; only its hash is in the fingerprint).
         let replay = |mount: &str, extra: &[&str]| {
-            let mut args = vec![
-                "replay",
-                bin,
-                trace.to_str().unwrap(),
-                "--mount",
-                mount,
-                "--fingerprint",
-                LABEL,
-            ];
+            let mut args = vec!["replay", bin, trace.to_str().unwrap(), "--mount", mount];
             args.extend_from_slice(extra);
             invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &args)
         };

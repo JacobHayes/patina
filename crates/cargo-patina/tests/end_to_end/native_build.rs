@@ -87,19 +87,11 @@ mod tests {
                 "5",
                 "--record",
                 trace.to_str().unwrap(),
-                "--fingerprint",
-                "native-pkg-v1",
             ],
         ));
         let replayed = package_result(&invoke(
             workspace,
-            &[
-                "replay",
-                clean.to_str().unwrap(),
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "native-pkg-v1",
-            ],
+            &["replay", clean.to_str().unwrap(), trace.to_str().unwrap()],
         ));
         assert_eq!(recorded, seeded);
         assert_eq!(replayed, seeded);

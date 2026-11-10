@@ -18,7 +18,6 @@ pub(super) const RUN_DEADLINE: Duration = Duration::from_secs(60);
 pub(super) const PATINA_RT_SEED: &str = "1";
 /// The seed of the shim-linked binary run directly (no `patina`).
 pub(super) const DIRECT_SEED: &str = "9";
-pub(super) const FINGERPRINT: &str = "patina-conformance";
 /// The virtual kernel's descriptor limit and initial umask: the native run
 /// starts from the same process state (and with only the three standard
 /// descriptors), so allocation order, `EMFILE`, the `F_DUPFD`/`dup2` bounds and

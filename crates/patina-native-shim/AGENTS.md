@@ -254,8 +254,8 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   accepts bytes with no context installed, and shutdown then drops them. When
   adding an entry point, ask what it answers with no runtime installed; if it
   answers at all, call `abort_if_init_failed` and give it a leg in the
-  cargo-patina e2e that drives each such path through a mismatched
-  `--fingerprint` replay.
+  cargo-patina e2e that drives each such path through a replay of a trace
+  naming another fingerprint.
 - Test the reentrancy, not just the answer. Aborting is not free on these paths:
   the diagnostic write flushes captured stdio, which deallocates through the
   guest's global allocator, which can come straight back through an interposed

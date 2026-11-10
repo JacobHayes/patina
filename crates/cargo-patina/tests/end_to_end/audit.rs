@@ -303,8 +303,6 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
                 "1",
                 "--record",
                 trace.to_str().unwrap(),
-                "--fingerprint",
-                "sf-v1",
                 "--",
                 "hi",
                 "there",
@@ -340,13 +338,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
             invoke_unchecked(
                 env!("CARGO_BIN_EXE_patina"),
                 workspace,
-                &[
-                    "replay",
-                    source.to_str().unwrap(),
-                    trace.to_str().unwrap(),
-                    "--fingerprint",
-                    "sf-v1",
-                ],
+                &["replay", source.to_str().unwrap(), trace.to_str().unwrap()],
             )
         };
         let replayed = common::assert_success(replay_source());

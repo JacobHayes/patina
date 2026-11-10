@@ -12,7 +12,8 @@ use crate::output;
 use crate::parse::{buggify_env_pairs, knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
 use crate::run_cache::Image;
 use crate::{
-    CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
+    CliError, DEFAULT_NATIVE_FINGERPRINT, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode,
+    UnsupportedPolicy, coverage,
 };
 use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_abi::RunClass;
@@ -306,18 +307,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The recorded hash is read where this replay's fingerprint puts its
     // own, so it is compared only when the fingerprints differ in nothing
     // else.
-    if let (
-        NativeRunMode::Replay { fingerprint, .. },
-        Some(bundle),
-        Some(current),
-        Some(host_dir),
-    ) = (
+    if let (NativeRunMode::Replay { .. }, Some(bundle), Some(current), Some(host_dir)) = (
         &invocation.mode,
         &replay_trace,
         &image_hash,
         &invocation.mount,
     ) {
-        let head = instrumentation_fingerprint(fingerprint, instrumented);
+        let head = instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, instrumented);
         if let Some(recorded) = recorded_image_hash(&bundle.metadata.fingerprint, &head)
             && let Some(mismatch) = FsImageHash::mismatch(recorded, current)
         {
@@ -377,14 +373,16 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         NativeRunMode::Seeded { seed } => {
             vec![(ENV_MODE, "seeded".into()), (ENV_SEED, seed.to_string())]
         }
-        NativeRunMode::Record {
-            seed, fingerprint, ..
-        } => vec![
+        NativeRunMode::Record { seed, .. } => vec![
             (ENV_MODE, "record".into()),
             (ENV_SEED, seed.to_string()),
             (
                 ENV_FINGERPRINT,
-                native_run_fingerprint(fingerprint, instrumented, image_hash.as_deref()),
+                native_run_fingerprint(
+                    DEFAULT_NATIVE_FINGERPRINT,
+                    instrumented,
+                    image_hash.as_deref(),
+                ),
             ),
             // Record the guest arguments into the trace metadata so a later
             // `replay` restores them without the `--` section being re-passed.
@@ -392,7 +390,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             // `[]`, and replaying it reproduces zero arguments.
             (ENV_GUEST_ARGV, encode_guest_argv(&program_args)?),
         ],
-        NativeRunMode::Replay { fingerprint, .. } => {
+        NativeRunMode::Replay { .. } => {
             let bundle = replay_trace
                 .as_ref()
                 .expect("a native replay loads its trace first");
@@ -403,7 +401,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 (ENV_SEED, bundle.metadata.root_seed.to_string()),
                 (
                     ENV_FINGERPRINT,
-                    native_run_fingerprint(fingerprint, instrumented, image_hash.as_deref()),
+                    native_run_fingerprint(
+                        DEFAULT_NATIVE_FINGERPRINT,
+                        instrumented,
+                        image_hash.as_deref(),
+                    ),
                 ),
             ]
         }
@@ -791,8 +793,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     };
     let fingerprint = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
-        NativeRunMode::Record { fingerprint, .. } | NativeRunMode::Replay { fingerprint, .. } => {
-            Some(fingerprint.clone())
+        NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
+            Some(DEFAULT_NATIVE_FINGERPRINT.to_string())
         }
     };
     let artifact = resolved.display.display().to_string();

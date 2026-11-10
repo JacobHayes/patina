@@ -63,6 +63,27 @@ fn native_seed(mode: &NativeRunMode) -> Option<u64> {
     }
 }
 
+/// A recording carries no operator label, so nothing a `run` is given can
+/// make its trace need a flag to replay.
+#[test]
+fn a_recording_takes_no_fingerprint_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = native_fixture(&dir, "app");
+    let b = binary.to_str().unwrap();
+    assert!(
+        parse(strings(&[
+            "run",
+            b,
+            "--record",
+            "t.patina",
+            "--fingerprint",
+            "fp"
+        ]))
+        .is_err()
+    );
+    assert!(parse(strings(&["replay", b, "t.patina", "--fingerprint", "fp"])).is_err());
+}
+
 #[test]
 fn run_and_replay_locate_native_positionals_around_options() {
     let dir = tempfile::tempdir().unwrap();
@@ -72,40 +93,10 @@ fn run_and_replay_locate_native_positionals_around_options() {
         ParseResult::NativeRun(inv) => inv,
         _ => panic!("expected a native run"),
     };
-    // `--fingerprint` labels a recording, so it rides with `--record` (a seeded
-    // run refuses it; see
-    // `fingerprint_on_a_seeded_native_run_is_refused_not_ignored`).
-    let base = native(&[
-        "run",
-        b,
-        "--seed",
-        "5",
-        "--record",
-        "t.patina",
-        "--fingerprint",
-        "fp",
-    ]);
+    let base = native(&["run", b, "--seed", "5", "--record", "t.patina"]);
     for spelling in [
-        &[
-            "run",
-            "--seed",
-            "5",
-            "--record",
-            "t.patina",
-            "--fingerprint",
-            "fp",
-            b,
-        ][..],
-        &[
-            "run",
-            "--fingerprint",
-            "fp",
-            b,
-            "--seed",
-            "5",
-            "--record",
-            "t.patina",
-        ][..],
+        &["run", "--seed", "5", "--record", "t.patina", b][..],
+        &["run", "--record", "t.patina", b, "--seed", "5"][..],
     ] {
         let got = native(spelling);
         assert_eq!(got.binary, base.binary);
@@ -117,55 +108,19 @@ fn run_and_replay_locate_native_positionals_around_options() {
         let binary = native_fixture(&dir, "app");
         let b = binary.to_str().unwrap();
         // A flag leads the two positionals; their order (binary then trace) holds.
-        match parse(strings(&["replay", "--fingerprint", "f", b, "run.patina"])).unwrap() {
+        match parse(strings(&["replay", "--mount", "corpus", b, "run.patina"])).unwrap() {
             ParseResult::NativeRun(inv) => {
                 assert_eq!(inv.binary, ArtifactRef::Prebuilt(PathBuf::from(b)));
+                assert_eq!(inv.mount, Some(PathBuf::from("corpus")));
                 match inv.mode {
-                    NativeRunMode::Replay { path, fingerprint } => {
+                    NativeRunMode::Replay { path } => {
                         assert_eq!(path, PathBuf::from("run.patina"));
-                        assert_eq!(fingerprint, "f");
                     }
                     _ => panic!("expected replay mode"),
                 }
             }
             _ => panic!("expected a native run from replay"),
         }
-    }
-}
-
-/// `--fingerprint` is only ever read back off a recorded trace: the seeded
-/// native path sets no `PATINA_RT_FINGERPRINT` at all, so a label supplied there
-/// could never be compared against anything. It is refused instead of quietly
-/// discarded, so "I pinned this run to a build" cannot be believed of a run
-/// that pinned nothing.
-#[test]
-fn fingerprint_on_a_seeded_native_run_is_refused_not_ignored() {
-    let dir = tempfile::tempdir().unwrap();
-    let binary = native_fixture(&dir, "app");
-    let b = binary.to_str().unwrap();
-    let Err(error) = parse(strings(&["run", b, "--seed", "5", "--fingerprint", "fp"])) else {
-        panic!("a seeded run must refuse a fingerprint it cannot record");
-    };
-    assert!(format!("{error}").contains("--record"));
-
-    // With a recording the same label is accepted and carried into the trace.
-    match parse(strings(&[
-        "run",
-        b,
-        "--seed",
-        "5",
-        "--record",
-        "t.patina",
-        "--fingerprint",
-        "fp",
-    ]))
-    .unwrap()
-    {
-        ParseResult::NativeRun(inv) => match inv.mode {
-            NativeRunMode::Record { fingerprint, .. } => assert_eq!(fingerprint, "fp"),
-            _ => panic!("expected record mode"),
-        },
-        _ => panic!("expected a native run"),
     }
 }
 

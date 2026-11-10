@@ -3,7 +3,7 @@
 use super::*;
 use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::tests::{native_build_invocation, native_run, strings};
-use crate::{ArtifactRef, DEFAULT_NATIVE_FINGERPRINT, NativeBuildTarget, NativeRunMode};
+use crate::{ArtifactRef, NativeBuildTarget, NativeRunMode};
 use patina_dst_runtime::{ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -221,18 +221,11 @@ fn parses_native_run_modes_and_rejects_conflicts() {
         "run.patina",
         "--seed",
         "5",
-        "--fingerprint",
-        "native-v1",
     ]);
     match recorded.mode {
-        NativeRunMode::Record {
-            seed,
-            path,
-            fingerprint,
-        } => {
+        NativeRunMode::Record { seed, path } => {
             assert_eq!(seed, 5);
             assert_eq!(path, PathBuf::from("run.patina"));
-            assert_eq!(fingerprint, "native-v1");
         }
         _ => panic!("expected record mode"),
     }
@@ -241,7 +234,7 @@ fn parses_native_run_modes_and_rejects_conflicts() {
     assert!(parse_native_run(Vec::new()).is_err());
 
     // `replay <bin> <trace>` parses into replay mode, restoring seed/faults/
-    // buggify/argv from the trace and defaulting the fingerprint. `replay` is
+    // buggify/argv from the trace. `replay` is
     // source-first, so the binary is classified by magic: use a real file
     // carrying native (ELF) magic as the prebuilt artifact.
     let directory = tempfile::tempdir().unwrap();
@@ -255,9 +248,8 @@ fn parses_native_run_modes_and_rejects_conflicts() {
                 ArtifactRef::Prebuilt(PathBuf::from(probe))
             );
             match invocation.mode {
-                NativeRunMode::Replay { path, fingerprint } => {
+                NativeRunMode::Replay { path } => {
                     assert_eq!(path, PathBuf::from("run.patina"));
-                    assert_eq!(fingerprint, DEFAULT_NATIVE_FINGERPRINT);
                 }
                 _ => panic!("expected replay mode"),
             }

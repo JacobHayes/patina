@@ -101,10 +101,10 @@ fi
 
 echo "==> [4] record → replay byte-identical"
 "$PATINA" run "$built" --seed 1 --record "$out/mre.patina" \
-  --fingerprint fifo-ipc-v1 >"$out/record.out" 2>/dev/null || {
+  >"$out/record.out" 2>/dev/null || {
   echo "fifo-ipc: FAIL [4] record run failed" >&2; exit 1; }
 "$PATINA" replay "$built" "$out/mre.patina" \
-  --fingerprint fifo-ipc-v1 >"$out/replay.out" 2>/dev/null || {
+  >"$out/replay.out" 2>/dev/null || {
   echo "fifo-ipc: FAIL [4] replay failed" >&2; exit 1; }
 if ! cmp -s "$out/record.out" "$out/replay.out"; then
   echo "fifo-ipc: FAIL [4] record/replay diverged" >&2; exit 1; fi

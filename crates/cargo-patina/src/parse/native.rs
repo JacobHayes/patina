@@ -305,22 +305,10 @@ pub(crate) fn parse_native_run_from(
     let args = cli::parse("run", help::Family::Sole, arguments)?;
     let seed = args.u64("--seed").unwrap_or(0);
     let record = args.path("--record");
-    // The label is only ever read back off a recorded trace, and the seeded
-    // control plane sets no `PATINA_RT_FINGERPRINT` at all, so `--fingerprint` is
-    // registered as dependent on `--record` (see the native run group in
-    // `help.rs`): a seeded run carrying one is refused by the generic registry
-    // check rather than silently discarding it.
-    let fingerprint = args
-        .string("--fingerprint")
-        .unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string());
     Ok(NativeRunInvocation {
         binary,
         mode: match record {
-            Some(path) => NativeRunMode::Record {
-                seed,
-                path,
-                fingerprint,
-            },
+            Some(path) => NativeRunMode::Record { seed, path },
             None => NativeRunMode::Seeded { seed },
         },
         program_args,
@@ -347,7 +335,7 @@ pub(crate) fn parse_native_run_from(
     })
 }
 
-/// Parse the native `replay <BINARY> <TRACE> [--fingerprint STR] [--mount
+/// Parse the native `replay <BINARY> <TRACE> [--mount
 /// HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
 /// [-- GUEST ARGS]` given an already-resolved binary reference and trace path.
 ///
@@ -356,7 +344,7 @@ pub(crate) fn parse_native_run_from(
 /// exposes NO semantic flags. The registry declares those refusals (see
 /// `REPLAY`'s `refusals`), so each is answered by name rather than as an unknown
 /// option, and a knob added to a shared slice is refused the day it is added.
-/// The only flags are host/build facts the trace cannot carry: `--fingerprint`,
+/// The only flags are host/build facts the trace cannot carry:
 /// `--mount` (re-supply the host corpus whose hash the fingerprint verifies),
 /// and the machine-local pre-run audit surface. An optional trailing
 /// `--` section is accepted only for script compatibility and must match the
@@ -371,12 +359,7 @@ pub(crate) fn parse_native_replay(
     let args = cli::parse("replay", help::Family::Sole, arguments)?;
     Ok(NativeRunInvocation {
         binary,
-        mode: NativeRunMode::Replay {
-            path: trace,
-            fingerprint: args
-                .string("--fingerprint")
-                .unwrap_or_else(|| DEFAULT_NATIVE_FINGERPRINT.to_string()),
-        },
+        mode: NativeRunMode::Replay { path: trace },
         program_args,
         environment: BTreeMap::new(),
         // Nor --param: the trace restores the run parameters.

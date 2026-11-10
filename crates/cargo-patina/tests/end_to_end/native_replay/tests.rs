@@ -26,6 +26,20 @@ fn native_replay_ties_the_trace_to_its_build_and_argv() {
     replay_init_error_reaches_every_bootstrap_window_entry_point(&guest);
 }
 
+/// Rewrite a recorded trace to name a compatibility fingerprint no runtime
+/// computes. The supervisor's own checks (the build, the libraries) still
+/// pass, so the replay fails closed where the guest's runtime initializes.
+fn name_another_fingerprint(trace: &Path) {
+    let recorded = fs::read_to_string(trace).unwrap();
+    let field = "\"fingerprint\":\"";
+    assert_eq!(recorded.matches(field).count(), 1, "{recorded}");
+    fs::write(
+        trace,
+        recorded.replacen(field, "\"fingerprint\":\"another-", 1),
+    )
+    .unwrap();
+}
+
 /// A replay whose runtime initialization fails closed must reach the guest as a
 /// named abort through EVERY interposed entry point, including the ones that
 /// answer without calling `ensure_runtime`: the bootstrap-window arms take an
@@ -54,8 +68,6 @@ fn replay_init_error_reaches_every_bootstrap_window_entry_point(guest: &common::
                 "3",
                 "--record",
                 trace.to_str().unwrap(),
-                "--fingerprint",
-                "bootstrap-window-v1",
                 "--",
                 entry,
             ],
@@ -67,20 +79,15 @@ fn replay_init_error_reaches_every_bootstrap_window_entry_point(guest: &common::
             String::from_utf8_lossy(&recorded.stderr)
         );
 
-        // The same trace replayed under a different fingerprint: initialization
-        // fails closed, and the guest must learn about it through this entry
-        // point. The deadline turns the field symptom (an endless spin) into a
+        // The same trace naming another fingerprint: initialization fails
+        // closed, and the guest must learn about it through this entry point.
+        // The deadline turns the field symptom (an endless spin) into a
         // failure instead of a hung test.
+        name_another_fingerprint(&trace);
         let replayed = invoke_with_deadline(
             patina,
             workspace,
-            &[
-                "replay",
-                bin,
-                trace.to_str().unwrap(),
-                "--fingerprint",
-                "bootstrap-window-other",
-            ],
+            &["replay", bin, trace.to_str().unwrap()],
             Duration::from_secs(60),
         );
         let Some(replayed) = replayed else {
@@ -149,8 +156,6 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
             "1",
             "--record",
             trace.to_str().unwrap(),
-            "--fingerprint",
-            "custom-alloc-v1",
         ],
     );
     assert!(
@@ -159,16 +164,11 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
         String::from_utf8_lossy(&recorded.stderr)
     );
 
+    name_another_fingerprint(&trace);
     let replayed = invoke_with_deadline(
         patina,
         workspace,
-        &[
-            "replay",
-            bin.to_str().unwrap(),
-            trace.to_str().unwrap(),
-            "--fingerprint",
-            "custom-alloc-other",
-        ],
+        &["replay", bin.to_str().unwrap(), trace.to_str().unwrap()],
         Duration::from_secs(60),
     )
     .expect("the custom-allocator guest wedged under a fail-closed init error instead of aborting");
@@ -197,8 +197,6 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
             "1",
             "--record",
             trace.to_str().unwrap(),
-            "--fingerprint",
-            "abort-record",
             "--format",
             "json",
             "--",

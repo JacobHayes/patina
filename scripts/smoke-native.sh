@@ -141,9 +141,9 @@ if cmp -s "$tmp/native-seed-1" "$tmp/native-seed-other"; then
   exit 1
 fi
 "$runner" run "$tmp/smoke-native" --seed 123 --record "$tmp/native.patina" \
-  --fingerprint smoke-native-v1 >"$tmp/native-record"
+  >"$tmp/native-record"
 "$runner" replay "$tmp/smoke-native" "$tmp/native.patina" \
-  --fingerprint smoke-native-v1 >"$tmp/native-replay"
+  >"$tmp/native-replay"
 cmp "$tmp/native-record" "$tmp/native-replay"
 cmp "$tmp/native-seed-1" "$tmp/native-replay"
 
@@ -158,7 +158,7 @@ cmp "$tmp/native-seed-1" "$tmp/native-replay"
 # behavior and the trace must not).
 "$runner" build "$tmp/smoke.rs" --output "$tmp/smoke-native-warm" >/dev/null
 "$runner" run "$tmp/smoke-native-warm" --seed 123 --record "$tmp/native-warm.patina" \
-  --fingerprint smoke-native-v1 >"$tmp/native-warm-record"
+  >"$tmp/native-warm-record"
 cmp "$tmp/native.patina" "$tmp/native-warm.patina"
 grep '^SMOKE_RESULT ' "$tmp/native-record" >"$tmp/native-cold-line"
 grep '^SMOKE_RESULT ' "$tmp/native-warm-record" >"$tmp/native-warm-line"

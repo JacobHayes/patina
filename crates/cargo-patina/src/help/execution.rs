@@ -10,7 +10,7 @@ pub(super) const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -136,24 +136,6 @@ Reproduce a recorded run with `patina replay`.",
                     Value::Required("HOST_FILE", Kind::Path),
                     "The guest's standard input, as `< HOST_FILE`: descriptor 0 is an unlinked read-only regular file holding its bytes (at most 4 MiB), whose reads fault as any file's do (recorded and restored on replay; default an empty pipe).",
                     false,
-                ),
-                // The label a RECORDING carries: the supervisor composes it (base
-                // label plus the `+buggify`/`+pct`/`+swarm` components the run
-                // really armed), the runtime writes it into the trace, and replay
-                // recomputes and compares it. A seeded run writes no trace and the
-                // runtime never even reads `PATINA_RT_FINGERPRINT` in seeded mode, so
-                // a label supplied there could not be checked by anything —
-                // declared dependent on `--record` so it is refused rather than
-                // silently discarded.
-                needs(
-                    f(
-                        "--fingerprint",
-                        None,
-                        Value::Required("STR", Kind::Str),
-                        "Compatibility label written into the recorded trace; requires --record (default patina-native).",
-                        false,
-                    ),
-                    "--record",
                 ),
                 ALLOW_FLAG,
                 ALLOW_UNSUPPORTED_FLAG,
@@ -538,7 +520,7 @@ realtime epoch, boot origin, hostname, native CPU count, guest argv, and native 
 recording or the replay is refused.\n\
 \n\
 Only host/build inputs the trace cannot carry stay as flags: replay accepts \
-only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
+only --mount, --coverage-out, --compute-watchdog-ms, the \
 --allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
     families: &[fam(Family::Sole, "`replay`", None)],
     groups: &[Group {
@@ -546,13 +528,6 @@ only --fingerprint, --mount, --coverage-out, --compute-watchdog-ms, the \
         families: SOLE,
         flags: &[
             COMPUTE_WATCHDOG_FLAG,
-            f(
-                "--fingerprint",
-                None,
-                Value::Required("STR", Kind::Str),
-                "Compatibility fingerprint label (default patina-native).",
-                false,
-            ),
             f(
                 "--mount",
                 None,

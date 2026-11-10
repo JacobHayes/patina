@@ -267,18 +267,9 @@ enum ArtifactRef {
 
 #[derive(Clone)]
 enum NativeRunMode {
-    Seeded {
-        seed: u64,
-    },
-    Record {
-        seed: u64,
-        path: PathBuf,
-        fingerprint: String,
-    },
-    Replay {
-        path: PathBuf,
-        fingerprint: String,
-    },
+    Seeded { seed: u64 },
+    Record { seed: u64, path: PathBuf },
+    Replay { path: PathBuf },
 }
 
 #[derive(Clone)]

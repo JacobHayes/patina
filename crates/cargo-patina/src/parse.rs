@@ -2,8 +2,8 @@
 
 use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::{
-    ArtifactRef, BuildSpec, CliError, DEFAULT_NATIVE_FINGERPRINT, HarnessFeatures, HarnessSeeds,
-    KnobValues, NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
+    ArtifactRef, BuildSpec, CliError, HarnessFeatures, HarnessSeeds, KnobValues,
+    NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
     NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
     UnsupportedPolicy, campaign, cli, coverage, help, minimize, syscalls, trace_cmd, trace_view,
     values,
@@ -244,7 +244,7 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
 /// the trace and loads it fail-closed BEFORE any guest execution.
 fn parse_replay(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // The two positionals (artifact/source/package, then trace) may be
-    // interleaved with options in any order, e.g. `replay --fingerprint f app
+    // interleaved with options in any order, e.g. `replay --mount corpus app
     // trace`; their relative order is preserved: the first is the origin, the
     // second the trace. A rebuilt binary is judged against the trace by the
     // fail-closed machinery (fingerprint + operation-mismatch).

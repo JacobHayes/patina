@@ -536,7 +536,7 @@ mod registry {
         };
         // A dependent knob is refused without its parent, so supply the parent in
         // whichever form it takes: an optional-value switch is armed bare, while a
-        // required-value parent (`--fingerprint` needs `--record PATH`) needs a
+        // required-value parent needs a
         // sample of its own kind, taken from the registry rather than hardcoded.
         let parent = flag.requires.map(|name| {
             let parent = help::verb(verb)

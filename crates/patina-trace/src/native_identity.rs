@@ -12,7 +12,7 @@ use crate::Sha256Digest;
 /// recorder linked into the guest knows. `patina replay` recomputes it for
 /// the binary it is about to run and refuses, before the guest starts, a trace
 /// whose identity differs, naming every component that does. The compatibility fingerprint string stays
-/// what it was: the operator's `--fingerprint` label and the policy suffixes.
+/// what it was: the base label and the policy suffixes.
 ///
 /// Some fields are identity, compared on replay; the rest are context, recorded
 /// so a refusal and `trace info` can say what the recording was made with, and
