@@ -151,4 +151,10 @@ pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 /// - 4: metered computation costs time ([`ChargeClass::Compute`]): a guest
 ///   built with a compute meter (every Go guest) charges each batch of
 ///   counted comparisons as user time and takes a scheduling point.
-pub const TIME_MODEL: u32 = 4;
+/// - 5: a poll escalation charges its token and nothing more: it no longer
+///   reaches for the earliest pending deadline, so work that reads the clock
+///   as it goes cannot make a peer's timeout pass. The token is 1/256 of
+///   what the streak has charged once that exceeds 1 ms, a `sched_yield`
+///   while no other task is runnable is a poll, and a streak is stopped as churn once it has charged the
+///   default no-progress budget rather than after a count of escalations.
+pub const TIME_MODEL: u32 = 5;

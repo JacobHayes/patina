@@ -3,7 +3,7 @@
 
 use crate::config::{LivenessConfig, RuntimeConfig};
 use crate::custom_op::CustomOpMode;
-use crate::liveness::{CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, LivenessKind, WatchdogArm};
+use crate::liveness::{CHURN_HORIZON_NANOS, ESCALATION_POLLS, LivenessKind, WatchdogArm};
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, CpuCharge, STARTUP_CPU_CHARGE, TaskId};
 
@@ -316,15 +316,16 @@ fn poll_until_the_sleeper_expires(context: &mut Context, read_clock: bool) -> u6
 }
 
 #[test]
-fn an_empty_poll_loop_is_escalated_to_its_peers_deadline_and_replays() {
+fn an_empty_poll_loop_reaches_its_peers_deadline_and_replays() {
     for read_clock in [true, false] {
         let directory = tempdir().unwrap();
         let path = directory.path().join("poll.patina");
         let mut record = Context::from_config(RuntimeConfig::record(3, &path, "poll-v1")).unwrap();
+        // The tokens walk virtual time to the sleeper's deadline, where the
+        // clock stops (`poll_until_the_sleeper_expires` checks it): several
+        // streaks of polls, not one that jumps there.
         let polls = poll_until_the_sleeper_expires(&mut record, read_clock);
-        // One streak: the first escalation reaches the sleeper's deadline.
-        assert!(polls <= ESCALATION_POLLS / 2, "{polls}");
-        assert_eq!(record.spin.escalations, 1);
+        assert!(record.spin.escalations > 1);
         record.finish().unwrap();
         let mut replay = Context::from_config(RuntimeConfig::replay(&path, "poll-v1")).unwrap();
         assert_eq!(
@@ -332,6 +333,58 @@ fn an_empty_poll_loop_is_escalated_to_its_peers_deadline_and_replays() {
             polls
         );
         replay.finish().unwrap();
+    }
+}
+
+#[test]
+fn work_that_reads_the_clock_does_not_reach_a_peers_deadline() {
+    // A task parked for a minute, and another doing work that reads the
+    // clock now and then with no other effect: the reads cost about a
+    // microsecond each, and the minute does not pass because of them.
+    const MINUTE: u64 = 60_000_000_000;
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let waiter = context.task_spawn("waiter").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(waiter));
+    context
+        .task_park_timed(
+            waiter,
+            "timeout",
+            ClockKind::Monotonic,
+            DEFAULT_BOOT_ORIGIN_NANOS + MINUTE,
+        )
+        .unwrap();
+    let worker = context.task_spawn("worker").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(worker));
+    let reads = 5_000;
+    let mut last = 0;
+    for _ in 0..reads {
+        last = context.now(ClockKind::Monotonic).unwrap();
+    }
+    let elapsed = last - DEFAULT_BOOT_ORIGIN_NANOS;
+    assert!(context.spin.escalations > 0, "the reads were a poll streak");
+    assert!(elapsed < reads * 10_000, "{elapsed} ns for {reads} reads");
+    assert!(context.take_expired_timeouts().is_empty());
+    context.finish().unwrap();
+}
+
+#[test]
+fn a_busy_wait_reaches_a_far_deadline_of_its_own_close_to_it() {
+    // A loop whose only exit is the clock passing a time of its own, beyond
+    // what the old fixed count of 1 ms tokens covered and minutes beyond it:
+    // it ends, late by no more than half a percent of the wait, in a few
+    // million reads, not the hundreds of millions a fixed token would take.
+    // Nothing tells the runtime where the deadline is.
+    for window in [300_000_000u64, 300_000_000_000] {
+        let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+        let (reads, elapsed) = calibration_spin(&mut context, window).unwrap();
+        assert!(elapsed > window);
+        assert!(
+            elapsed - window <= (window / 200).max(1_000_000),
+            "a {window} ns wait ended {} ns late",
+            elapsed - window
+        );
+        assert!(reads < 4_000_000, "{reads} reads for a {window} ns wait");
+        context.finish().unwrap();
     }
 }
 
@@ -358,25 +411,27 @@ fn spin_for_cpu(context: &mut Context, cpu: u64, which: fn(CpuCharge) -> u64) ->
 }
 
 #[test]
-fn escalation_reaches_an_alarm_in_one_step_without_the_ramp() {
-    // Toward a published wall alarm, the first escalation charges the reads up
-    // to it.
+fn escalation_stops_the_clock_at_an_alarm_and_charges_no_further_than_a_cpu_timer() {
+    // A wall alarm is a barrier like any pending deadline: the tokens walk
+    // the clock up to it, and there it stops until its owner settles it.
+    let alarm = DEFAULT_BOOT_ORIGIN_NANOS + 1_500_000;
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    context.set_alarm(Some(DEFAULT_BOOT_ORIGIN_NANOS + 1_500_000));
-    let (reads, elapsed) = calibration_spin(&mut context, 1_000).unwrap();
-    assert_eq!(elapsed, 1_500_000);
-    assert_eq!(reads, ESCALATION_POLLS + 1);
-    assert_eq!(context.spin.escalations, 1);
+    context.set_alarm(Some(alarm));
+    while context.now(ClockKind::Monotonic).unwrap() < alarm {}
+    assert_eq!(context.current_monotonic().unwrap(), alarm);
+    assert!(context.spin.escalations > 1);
     context.finish().unwrap();
 
-    // An 11 ms CPU-time timer. Without an alarm the ramp takes ten
-    // escalating tokens (1.023 ms) and ten more at the ceiling; toward a
-    // published CPU deadline, on either line, one escalation lands on it.
+    // CPU time is the charges themselves, with nothing to carry: without a
+    // timer the token that passes 11 ms of it overshoots; toward a published
+    // CPU-time deadline, on either line, the escalation that would pass it
+    // charges exactly up to it.
     const DEADLINE: u64 = 11_000_000;
     let total: fn(CpuCharge) -> u64 = |time| time.total_ns();
     let user: fn(CpuCharge) -> u64 = |time| time.user_ns;
     let mut ramp = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    assert_eq!(spin_for_cpu(&mut ramp, DEADLINE, total), 20);
+    spin_for_cpu(&mut ramp, DEADLINE, total);
+    assert!(total(ramp.cpu_time()) - total(STARTUP_CPU_CHARGE) > DEADLINE);
     ramp.finish().unwrap();
     for (line, alarms) in [
         (
@@ -396,7 +451,7 @@ fn escalation_reaches_an_alarm_in_one_step_without_the_ramp() {
     ] {
         let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
         context.set_cpu_alarms(alarms);
-        assert_eq!(spin_for_cpu(&mut context, DEADLINE, line), 1);
+        spin_for_cpu(&mut context, DEADLINE, line);
         assert_eq!(
             line(context.cpu_time()) - line(STARTUP_CPU_CHARGE),
             DEADLINE
@@ -699,11 +754,13 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
 }
 
 #[test]
-fn frozen_clock_churn_aborts_a_loop_that_ignores_the_clock() {
-    // A loop whose exit condition never depends on the clock value it reads:
-    // no amount of charging frees it, so the backstop must name it rather
-    // than escalate it forever.
+fn poll_churn_stops_a_loop_that_no_time_ends() {
+    // A loop that reads the clock and goes round whatever it says: time
+    // moves for it like for any poller, and no time ends it. It must become
+    // a named stop, in a bounded number of reads, once it has polled away
+    // the whole horizon.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let start = context.current_monotonic().unwrap();
     let mut reads = 0u64;
     let error = loop {
         match context.now(ClockKind::Monotonic) {
@@ -711,31 +768,95 @@ fn frozen_clock_churn_aborts_a_loop_that_ignores_the_clock() {
             Err(error) => break error,
         }
     };
-    let RuntimeError::FrozenClockChurn { detail } = error else {
-        panic!("expected a frozen-clock-churn abort, got {error:?}");
+    let RuntimeError::PollChurn { detail } = error else {
+        panic!("expected a poll-churn stop, got {error:?}");
     };
     // The marker rides the established liveness interface contract, so a
     // campaign consumer classifies it without a new rule.
-    assert!(detail.starts_with("PATINA_VIOLATION liveness detail=frozen-clock-churn "));
-    assert_eq!(context.spin.escalations, CHURN_ABORT_ESCALATIONS);
-    // Ten escalating tokens (1_023_000 ns) plus 246 at the 1 ms ceiling.
-    assert_eq!(context.spin.charged_nanos, 247_023_000);
-    // The abort fires only once the poll PERSISTS past the last escalation:
-    // a full further streak of reads bought nothing. The read that completes
-    // it is the one refused.
-    assert_eq!(reads, (CHURN_ABORT_ESCALATIONS + 1) * ESCALATION_POLLS - 1);
+    assert!(detail.starts_with("PATINA_VIOLATION liveness detail=poll-churn "));
+    assert!(reads < 4_000_000, "{reads} reads to the stop");
+    // The whole horizon went by, and the guest saw it go by.
+    let charged = context.spin.charged_nanos;
+    assert!(charged >= CHURN_HORIZON_NANOS);
+    assert_eq!(context.current_monotonic().unwrap() - start, charged);
     // The facts document carries the same finding as the line.
     let finding = &context.run_facts()["runtime_findings"][0];
-    assert_eq!(finding["detail"], "frozen-clock-churn");
-    assert_eq!(finding["rescues"], CHURN_ABORT_ESCALATIONS);
-    assert_eq!(finding["advanced_ns"], 247_023_000);
+    assert_eq!(finding["detail"], "poll-churn");
+    assert_eq!(finding["rescues"], context.spin.escalations);
+    assert_eq!(finding["advanced_ns"], charged);
+}
+
+#[test]
+fn a_loop_of_yields_is_a_poll_streak_too() {
+    // A guest that only asks to yield is charged its calls and escalated
+    // like one that only reads the clock: time passes for it, a sleeping
+    // peer's deadline arrives, and with nothing to wait for it reaches the
+    // same stop. The yields count while no other task is runnable. The embedder charges each call and applies the escalation
+    // a call's poll earned as the call ends.
+    let yield_once = |context: &mut Context, task| {
+        context.accrue_calls(Some(task), calls(ChargeClass::Syscall, 1));
+        context.yield_poll();
+        let earned = context.take_poll_streak();
+        context.show_carry()?;
+        if earned {
+            context.escalate_call(Some(task), ChargeClass::Syscall)?;
+        }
+        Ok::<_, RuntimeError>(())
+    };
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let origin = DEFAULT_BOOT_ORIGIN_NANOS;
+    let sleeper = context.task_spawn("sleeper").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(sleeper));
+    context
+        .task_park_timed(sleeper, "sleep", ClockKind::Monotonic, origin + 50_000_000)
+        .unwrap();
+    let spinner = context.task_spawn("spinner").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(spinner));
+    let mut yields = 0u64;
+    while context.take_expired_timeouts().is_empty() {
+        yield_once(&mut context, spinner).unwrap();
+        yields += 1;
+    }
+    // Reached by the tokens, well before the calls' own 250 ns each would
+    // have got there.
+    assert_eq!(context.current_monotonic().unwrap(), origin + 50_000_000);
+    assert!(yields < 50_000_000 / 250 / 2, "{yields} yields");
+    // A task alone that yields for good.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let spinner = context.task_spawn("spinner").unwrap();
+    assert_eq!(context.scheduler_next().unwrap(), Some(spinner));
+    let error = loop {
+        if let Err(error) = yield_once(&mut context, spinner) {
+            break error;
+        }
+    };
+    assert!(matches!(error, RuntimeError::PollChurn { .. }), "{error:?}");
+}
+
+#[test]
+fn a_yield_beside_a_runnable_peer_is_no_poll() {
+    // A work-stealing pool's idle workers yield while a peer works: those
+    // yields cost their calls and nothing more, however many there are.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let worker = context.task_spawn("worker").unwrap();
+    let idle = context.task_spawn("idle").unwrap();
+    assert!(
+        matches!(context.scheduler_next().unwrap(), Some(task) if task == worker || task == idle)
+    );
+    let running = context.charges.running.unwrap();
+    for _ in 0..4 * ESCALATION_POLLS {
+        context.accrue_calls(Some(running), calls(ChargeClass::Syscall, 1));
+        context.yield_poll();
+        assert!(!context.take_poll_streak());
+    }
+    assert_eq!(context.spin.polls, 0);
 }
 
 #[test]
 fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
     // The watchdog's no-progress window is measured in virtual nanoseconds,
     // which escalation moves, so a budget the escalations walk past trips it,
-    // and it trips FIRST, long before the frozen-clock backstop's 256.
+    // and it trips FIRST, long before the churn stop's horizon.
     let mut context =
         Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
             no_progress_budget_nanos: Some(5_000),
@@ -755,7 +876,7 @@ fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
     assert!(detail.starts_with("PATINA_VIOLATION liveness detail=no-progress "));
     // Fired after the third escalation (1+2+4 = 7 µs past a 5 µs budget).
     assert_eq!(context.spin.escalations, 3);
-    assert!(context.spin.escalations < CHURN_ABORT_ESCALATIONS);
+    assert!(context.spin.charged_nanos < CHURN_HORIZON_NANOS);
 }
 
 // -- Liveness watchdog --------------------------------------------------

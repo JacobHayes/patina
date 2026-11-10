@@ -262,47 +262,54 @@ impl LivenessWatchdog {
 /// Consecutive polls without progress after which a poll is escalated:
 /// 1024.
 ///
-/// A poll is a clock observation or an operation whose outcome found nothing
-/// to take (see [`outcome_is_progress`]); a progress operation ends the
-/// count, and the scheduling and wait operations between polls neither count
-/// nor end it, so a polling thread in a multi-task run still accumulates.
-/// Real code cannot accumulate it by accident: any effect, entropy draw,
-/// spawn or idle wait ends it, and a poll is nearly always followed by one of
-/// those. 1024 is an order of magnitude beyond even a pathological loop that
-/// re-reads the clock a few dozen times per decision, and still cheap for a
-/// genuine spin: the canonical calibration loop issues two clock reads per
-/// iteration, so 1024 is 512 iterations, microseconds of host time.
+/// A poll is a clock observation, an operation whose outcome found nothing
+/// to take (see [`outcome_is_progress`]), or the guest's own request to yield
+/// ([`Context::yield_poll`]); a progress operation ends the count, and the
+/// scheduling and wait operations between polls neither count nor end it, so
+/// a polling thread in a multi-task run still accumulates. 1024 is an order
+/// of magnitude beyond a loop that re-reads the clock a few dozen times per
+/// decision, and still cheap for a genuine spin: the canonical calibration
+/// loop issues two clock reads per iteration, so 1024 is 512 iterations,
+/// microseconds of host time.
 pub const ESCALATION_POLLS: u64 = 1_024;
 
-/// The first escalation's CPU time within an episode with no deadline
-/// pending: 1 µs, deliberately tiny. A guest merely polling hard (a 100 µs
-/// busy-wait) sees a nudge rather than a jump, so the elapsed time it derives
-/// stays close to what it asked for.
+/// The first escalation's CPU time within an episode: 1 µs, deliberately
+/// tiny. A guest merely polling hard (a 100 µs busy-wait) sees a nudge rather
+/// than a jump, so the elapsed time it derives stays close to what it asked
+/// for.
 const ESCALATION_TOKEN_MIN_NANOS: u64 = 1_000;
 
-/// The ceiling the token doubles to: 1 ms. The doubling is what makes a
-/// calibration loop with no deadline converge in tens of escalations instead
-/// of millions of iterations; the ceiling bounds the overshoot (10% of the
-/// 10 ms window the calibration pattern measures).
+/// What the token doubles to: 1 ms. The doubling is what makes a short
+/// calibration loop converge in tens of escalations instead of millions of
+/// iterations; 1 ms bounds the overshoot of any wait under a second (10% of
+/// the 10 ms window the calibration pattern measures).
 ///
 /// Worked example (the fastant calibration loop, 10 ms window): tokens
-/// 1, 2, 4, … 512 µs sum to ~1.02 ms over ten escalations, then the ceiling
-/// carries the remaining ~9 ms in nine more: ~19 escalations, ~19 × 1024 ≈
-/// 20k recorded clock reads per window, well under
-/// [`patina_dst_trace::MAX_TIMELINE_EVENTS`].
-const ESCALATION_TOKEN_MAX_NANOS: u64 = 1_000_000;
+/// 1, 2, 4, … 512 µs sum to ~1.02 ms over ten escalations, then 1 ms tokens
+/// carry the remaining ~9 ms in nine more: ~19 escalations, ~19 × 1024 ≈
+/// 20k recorded clock reads per window.
+const ESCALATION_TOKEN_STEP_NANOS: u64 = 1_000_000;
 
-/// Escalations within one episode after which the run is aborted as
-/// frozen-clock churn: 256.
+/// The share of what an episode has charged that its next token is, once
+/// that is more than [`ESCALATION_TOKEN_STEP_NANOS`]: 1/256.
 ///
-/// At the token ceiling this is >250 ms of CPU time charged with zero genuine
-/// progress, 25× the 10 ms window the calibration pattern uses and ~5× the
-/// longest (50 ms) seen in the crates that use it, and with a deadline pending
-/// it is 256 deadlines passed. A loop still polling after that is not waiting
-/// for time, it ignores it, and no further charging will free it. Bounded
-/// trace cost: at most 256 × 1024 ≈ 262k recorded polls before the named
-/// abort, so the trace that explains the wedge is still writable and loadable.
-const CHURN_ABORT_ESCALATIONS: u64 = 256;
+/// It bounds how late a long busy-wait ends, as a fraction of the wait
+/// (0.4%), and sets how fast a streak that never ends reaches
+/// [`CHURN_HORIZON_NANOS`]: about two million polls, few enough that the
+/// stop comes in seconds and its trace can still be written. A smaller share
+/// is more exact and slower on both counts. The 1 ms step is 1/256 of 256 ms,
+/// so the two parts of the token meet a quarter of a second into a streak.
+const ESCALATION_TOKEN_SHARE: u64 = 256;
+
+/// The CPU time an episode's escalations may charge before the run is stopped
+/// as churn: the default no-progress budget, 10 virtual minutes.
+///
+/// A poll loop is a wait the runtime cannot see the end of: the guest may be
+/// polling toward a time of its own, which no observation can tell from a
+/// loop that ignores what it reads. So it is bounded like any other stall,
+/// by how much virtual time it has spent with nothing else happening. Ten
+/// minutes of polling with no other effect is not a wait a test means.
+const CHURN_HORIZON_NANOS: u64 = crate::DEFAULT_LIVENESS_BUDGET_NANOS;
 
 /// Whether an operation that made no progress is a poll: a clock observation,
 /// or an operation whose outcome found nothing to take.
@@ -327,17 +334,22 @@ fn poll_class(operation: &Operation) -> ChargeClass {
 /// [`ESCALATION_POLLS`] polls without progress, one poll is escalated: it is
 /// charged as `k` more calls of its class, standing for the iterations the
 /// simulation did not run, so the user/system split stays the poller's own.
-/// With a deadline pending (a timed park's, the embedder's alarm, or a
-/// published CPU-time timer's), `k` reaches the earliest exactly; otherwise
-/// it is the escalating token's worth.
+/// `k` is the episode's token's worth ([`Escalation::token_nanos`]), and
+/// that is all: an escalation never reaches for a deadline some other task
+/// is waiting on, because a streak of polls may just as well be work that
+/// reads the clock as it goes, and that work must not make a peer's timeout
+/// pass. The clock follows the charge like any other, stopping at each
+/// pending deadline on the way. Only a CPU-time timer bounds `k`: CPU time
+/// is the charges themselves, with nothing to carry, so the escalation
+/// charges no more than reaches the earliest one.
 ///
 /// Two levels of state, deliberately distinct:
 ///
 /// - The **streak** (`polls`) is the trigger. It counts polls since the
 ///   episode began or the last escalation.
 /// - The **episode** (`escalations`, `charged_nanos`) survives escalations
-///   and drives the token and the frozen-clock-churn backstop. A progress
-///   operation or an idle advance (the guest waited) ends it.
+///   and drives the token and the churn stop. A progress operation or an
+///   idle advance (the guest waited) ends it.
 ///
 /// Escalation is charged after the escalated poll's outcome, so the poll
 /// itself observes the time before it. Every input is a recorded operation,
@@ -348,10 +360,10 @@ fn poll_class(operation: &Operation) -> ChargeClass {
 pub(super) struct Escalation {
     /// Polls since the episode began or the last escalation.
     pub(super) polls: u64,
-    /// Escalations in the current episode; drives the token and is what
-    /// [`CHURN_ABORT_ESCALATIONS`] bounds.
+    /// Escalations in the current episode, for the churn diagnostic.
     pub(super) escalations: u64,
-    /// CPU time the episode's escalations charged, for the churn diagnostic.
+    /// CPU time the episode's escalations charged: what the token follows
+    /// and [`CHURN_HORIZON_NANOS`] bounds.
     pub(super) charged_nanos: u64,
     /// An escalation a completed streak earned, with the class of the poll
     /// that completed it. Taken at once: by the operation's own outcome, or
@@ -363,24 +375,48 @@ pub(super) struct Escalation {
     /// [`Context::escalate_call`]), once all its reads are done. Without one,
     /// each operation is a call and is escalated at its outcome.
     pub(super) paced: bool,
-    /// The virtual time the frozen-clock-churn backstop fired at, so the facts
-    /// document can carry the same finding the marker line carries.
+    /// The virtual time the churn stop fired at, so the facts document can
+    /// carry the same finding the marker line carries.
     pub(super) churn_vtime_nanos: Option<u64>,
 }
 
 impl Escalation {
     /// The next token: [`ESCALATION_TOKEN_MIN_NANOS`] doubled once per
-    /// escalation already taken in this episode, saturating at
-    /// [`ESCALATION_TOKEN_MAX_NANOS`].
+    /// escalation already taken in this episode up to
+    /// [`ESCALATION_TOKEN_STEP_NANOS`], and from then on
+    /// 1/[`ESCALATION_TOKEN_SHARE`] of what the episode has charged, once
+    /// that is more.
+    ///
+    /// So a poll costs about 1 µs for the first quarter second of a streak
+    /// (1 ms per 1024 polls), and after that about four millionths of the
+    /// time the streak has spent. The first part keeps work that polls as it
+    /// goes cheap and a short wait exact to the millisecond. The second is
+    /// what lets a busy-wait reach a deadline seconds or minutes away in a
+    /// million polls or two rather than a million a second, late by at most
+    /// 0.4% of the wait, and what brings a loop that will never end to
+    /// [`CHURN_HORIZON_NANOS`].
     fn token_nanos(&self) -> u64 {
         // The shift is clamped to the last doubling that can matter (ten of
-        // them take the token past the ceiling): `1_000 << escalations`
-        // would overflow u64 around escalation 55 and WRAP to a smaller token.
-        const MAX_SHIFT: u32 = ESCALATION_TOKEN_MAX_NANOS.ilog2() + 1;
+        // them take the token past the step): `1_000 << escalations` would
+        // overflow u64 around escalation 55 and WRAP to a smaller token.
+        const MAX_SHIFT: u32 = ESCALATION_TOKEN_STEP_NANOS.ilog2() + 1;
         let shift = u32::try_from(self.escalations)
             .unwrap_or(MAX_SHIFT)
             .min(MAX_SHIFT);
-        (ESCALATION_TOKEN_MIN_NANOS << shift).min(ESCALATION_TOKEN_MAX_NANOS)
+        (ESCALATION_TOKEN_MIN_NANOS << shift)
+            .min(ESCALATION_TOKEN_STEP_NANOS)
+            .max(self.charged_nanos / ESCALATION_TOKEN_SHARE)
+    }
+
+    /// Count one poll; the one that completes a streak makes an escalation
+    /// of `class` due. The streak is spent as it completes, whenever its
+    /// escalation is applied: the polls after it start the next one.
+    fn poll(&mut self, class: ChargeClass) {
+        self.polls += 1;
+        if self.polls >= ESCALATION_POLLS {
+            self.polls = 0;
+            self.due = Some(class);
+        }
     }
 
     /// End the episode: the guest made progress or waited.
@@ -399,14 +435,14 @@ impl Escalation {
         self.charged_nanos = self.charged_nanos.saturating_add(nanos);
     }
 
-    /// The loud line the frozen-clock-churn abort emits. It
-    /// reuses the established `PATINA_VIOLATION liveness …` interface contract
-    /// (this IS a liveness failure, and a downstream campaign consumer already
-    /// classifies that prefix) with its own `detail=` reason; `rescues` counts
-    /// escalations and `advanced_ns` the CPU time they charged.
+    /// The loud line the churn stop emits. It reuses the established
+    /// `PATINA_VIOLATION liveness …` interface contract (this IS a liveness
+    /// failure, and a downstream campaign consumer already classifies that
+    /// prefix) with its own `detail=` reason; `rescues` counts escalations
+    /// and `advanced_ns` the CPU time they charged.
     fn churn_marker_line(&self, vtime_nanos: u64) -> String {
         format!(
-            "PATINA_VIOLATION liveness detail=frozen-clock-churn vtime_ns={} rescues={} \
+            "PATINA_VIOLATION liveness detail=poll-churn vtime_ns={} rescues={} \
 advanced_ns={} clock_ops_per_rescue={}",
             vtime_nanos, self.escalations, self.charged_nanos, ESCALATION_POLLS,
         )
@@ -664,14 +700,33 @@ impl Context {
         if !is_poll(operation) {
             return Ok(());
         }
-        self.spin.polls += 1;
-        if self.spin.polls >= ESCALATION_POLLS {
-            // The streak is spent as it completes, whenever its escalation
-            // is applied: the polls after it start the next one.
-            self.spin.polls = 0;
-            self.spin.due = Some(poll_class(operation));
-        }
+        self.spin.poll(poll_class(operation));
         Ok(())
+    }
+
+    /// The guest asked to yield (`sched_yield`): when no other task is
+    /// runnable, a poll, of a system call's class. The yield found nothing to
+    /// take, as an empty receive does, so a loop of them is escalated like a
+    /// loop of clock reads: time passes for it, a sleeping peer's deadline
+    /// arrives, and one that nothing will ever free reaches the churn stop
+    /// instead of yielding for good. A yield beside a runnable peer is no
+    /// poll, whichever task the scheduler then picks: the peer may be doing
+    /// work, and a yield-heavy library backoff (a work-stealing pool's idle
+    /// workers) must not make time run away from it.
+    /// Unrecorded bookkeeping the embedder derives from the guest's own
+    /// calls, identical on record and replay. The scheduling points an
+    /// embedder takes for its own reasons (at a call's entry, at an
+    /// instrumented edge) are not the guest's request and are not polls.
+    pub fn yield_poll(&mut self) {
+        let running = self.charges.running;
+        let peer_runnable = self
+            .scheduler_tasks
+            .iter()
+            .any(|task| Some(*task) != running && !self.parked_tasks.contains(task));
+        if peer_runnable {
+            return;
+        }
+        self.spin.poll(ChargeClass::Syscall);
     }
 
     /// For an embedder that does not charge its calls, where each operation
@@ -714,32 +769,27 @@ impl Context {
     /// Charge one escalation of `class` to `task`. Its time is carried like
     /// any charge.
     fn escalate(&mut self, task: Option<TaskId>, class: ChargeClass) -> Result<(), RuntimeError> {
-        let now = self.current_monotonic()?;
-        // Backstop first: a loop that ignores time rather than waiting for it
-        // must become a named abort, not an unbounded stream of escalations.
-        if self.spin.escalations >= CHURN_ABORT_ESCALATIONS {
-            return Err(self.frozen_clock_churn(now));
+        // The stop first: an episode that has polled away the whole horizon
+        // must become a named stop, not an unbounded stream of escalations.
+        if self.spin.charged_nanos >= CHURN_HORIZON_NANOS {
+            let now = self.current_monotonic()?;
+            return Err(self.poll_churn(now));
         }
         let mut calls = ChargeCounts::new();
-        calls.add(class, self.escalation_calls(class, now));
+        calls.add(class, self.escalation_calls(class));
         self.spin.on_escalated(calls.charge().total_ns());
         self.charges.charge(task, calls);
         Ok(())
     }
 
-    /// How many more calls of `class` an escalation at monotonic `now`
-    /// charges: enough to reach the earliest pending deadline (a monotonic
-    /// one, past the time charges have yet to show, or a published CPU-time
-    /// timer's), or else the episode's token.
-    fn escalation_calls(&self, class: ChargeClass, now: u64) -> u64 {
+    /// How many more calls of `class` an escalation charges: the episode's
+    /// token's worth, and no more than reaches the earliest published
+    /// CPU-time timer.
+    fn escalation_calls(&self, class: ChargeClass) -> u64 {
         let cost = class.cost();
         let per_call = cost.total_ns().max(1);
-        let shown = now.saturating_add(self.charges.carry());
         let cpu = self.charges.total();
         let alarms = self.charges.alarms;
-        let monotonic = self
-            .earliest_deadline_after(shown)
-            .map(|deadline| (deadline - shown).div_ceil(per_call));
         let user = alarms
             .user_ns
             .filter(|deadline| *deadline > cpu.user_ns && cost.user_ns > 0)
@@ -748,37 +798,39 @@ impl Context {
             .total_ns
             .filter(|deadline| *deadline > cpu.total_ns())
             .map(|deadline| (deadline - cpu.total_ns()).div_ceil(per_call));
-        [monotonic, user, total]
+        [user, total]
             .into_iter()
             .flatten()
-            .min()
-            .unwrap_or_else(|| self.spin.token_nanos().div_ceil(per_call))
+            .fold(self.spin.token_nanos().div_ceil(per_call), u64::min)
     }
 
-    /// The frozen-clock churn abort: [`CHURN_ABORT_ESCALATIONS`] escalations
-    /// bought no genuine progress, so the guest is in a loop that time cannot
-    /// free. Loud (a `PATINA_VIOLATION liveness` line naming the
-    /// pattern and what the guest was doing) and fail-closed, in the shape the
-    /// liveness watchdog established.
-    fn frozen_clock_churn(&mut self, now: u64) -> RuntimeError {
+    /// The churn stop: the episode's escalations have charged
+    /// [`CHURN_HORIZON_NANOS`] and the guest is still polling. Loud (a
+    /// `PATINA_VIOLATION liveness` line naming the pattern and what the guest
+    /// was doing) and fail-closed, in the shape the liveness watchdog
+    /// established. The line says what was observed and no more: whether the
+    /// loop would have ended at some later time is not something a run can
+    /// show.
+    fn poll_churn(&mut self, now: u64) -> RuntimeError {
         self.spin.churn_vtime_nanos = Some(now);
         let marker = self.spin.churn_marker_line(now);
         crate::reports::diagnostic!("{marker}");
         crate::reports::diagnostic!(
-            "patina: frozen-clock churn — the guest has polled {} times per escalation across {} \
-escalations ({} ns of CPU time charged) without one genuine boundary effect in between. It is not \
-waiting for time, it is ignoring it: a busy-wait whose exit condition never depends on the clock \
-or the poll, or one waiting on state only another task can publish. Give the loop a wait the \
-runtime can see (sleep/yield/park), or bound the run with --budget.",
-            ESCALATION_POLLS,
-            self.spin.escalations,
+            "patina: poll churn — for {} ns of virtual time ({} escalations of {} polls each) the \
+guest did nothing but poll: read the clock, find nothing to take, or yield, with no other effect \
+in between. Time moved the whole while, and no deadline of the guest's own or of a peer's ended \
+the loop. If the loop waits for state another thread publishes, nothing ran that publishes it; if \
+it waits for a time further off than this, give it a wait the runtime can see (a sleep or a timed \
+wait) instead of a busy-wait.",
             self.spin.charged_nanos,
+            self.spin.escalations,
+            ESCALATION_POLLS,
         );
         // The interposed families abort on this without reaching `finish`, so
         // the artifacts that explain the wedge have to be written here.
         self.emit_facts();
         self.flush_recording();
-        RuntimeError::FrozenClockChurn { detail: marker }
+        RuntimeError::PollChurn { detail: marker }
     }
 }
 

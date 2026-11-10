@@ -12,11 +12,14 @@ pub extern "C" fn patina_thread_id() -> c_int {
 /// `sched_yield`/`thread::yield_now`: take a deterministic scheduling point
 /// instead of yielding the host scheduler. std's `mpsc`/`mpmc` backoff spins
 /// through `thread::yield_now` before parking, so an uninterposed `sched_yield`
-/// would be a host scheduling call outside the runtime. A no-op until the
-/// thread subsystem activates, so single-threaded programs are unaffected.
+/// would be a host scheduling call outside the runtime. The scheduling point
+/// is a no-op until the thread subsystem activates. A yield while no other
+/// task is runnable is a poll (`Context::yield_poll`), so a loop of them is
+/// escalated like a loop of clock reads: time passes for it, and one that
+/// nothing ends stops by name.
 pub extern "C" fn patina_sched_yield() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    let _ = thread::sched_point();
+    let _ = thread::yield_poll();
     0
 }
 

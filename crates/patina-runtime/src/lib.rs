@@ -764,12 +764,11 @@ pub enum RuntimeError {
         label: String,
         detail: String,
     },
-    /// The frozen-clock churn backstop fired: advance-on-spin fed the guest
-    /// [`SPIN_CHURN_ABORT_RESCUES`] token advances and it still made no genuine
-    /// progress, so the loop ignores the clock it reads rather than waiting for
-    /// it. Loud (the `PATINA_VIOLATION liveness detail=frozen-clock-churn` line
-    /// was emitted, and the partial trace flushed); `detail` holds that marker.
-    FrozenClockChurn {
+    /// The poll churn stop fired: the guest polled away the whole churn
+    /// horizon of virtual time with no other effect. Loud (the
+    /// `PATINA_VIOLATION liveness detail=poll-churn` line was emitted, and
+    /// the partial trace flushed); `detail` holds that marker.
+    PollChurn {
         detail: String,
     },
     /// Replay derived a different monotonic time than the recording read:
@@ -834,7 +833,7 @@ impl RuntimeError {
             | Self::StepBudgetExceeded { .. }
             | Self::Liveness { .. }
             | Self::InvalidOutcome { .. }
-            | Self::FrozenClockChurn { .. }
+            | Self::PollChurn { .. }
             | Self::ComputeBound { .. }
             | Self::ComputeStopExport
             | Self::ComputeStopOverflow => None,
@@ -875,8 +874,8 @@ impl fmt::Display for RuntimeError {
             ),
             Self::ScheduleDivergence { detail } => f.write_str(detail),
             Self::CustomOp { detail, .. } => f.write_str(detail),
-            Self::FrozenClockChurn { detail } => {
-                write!(f, "Patina frozen-clock churn: {detail}")
+            Self::PollChurn { detail } => {
+                write!(f, "Patina poll churn: {detail}")
             }
             Self::TimeModel { detail } => write!(f, "Patina time-model divergence: {detail}"),
             Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),

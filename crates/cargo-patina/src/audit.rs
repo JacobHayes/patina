@@ -163,8 +163,8 @@ answered deterministically from the run's virtual clock via prctl(PR_SET_TSC) on
 refused everywhere else (macOS, arm64) — rebuild the guest without the inline counter read for \
 those. Manageable is not runnable: this says the counter reads are answered, not that the guest \
 progresses. A guest that calibrates the counter by busy-waiting on clock deltas is carried by the \
-runtime's advance-on-spin rescue; one that spins without ever consulting the value stops with a \
-named frozen-clock-churn abort.",
+runtime's poll escalation; one that keeps spinning whatever it reads stops with a named \
+poll-churn stop.",
                         if tsc_sites == 1 { "" } else { "s" }
                     );
                 }

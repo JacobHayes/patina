@@ -338,12 +338,11 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         RuntimeError::CustomOp { label, detail } => line(format!(
             "PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}\n"
         )),
-        // Frozen-clock churn is the same fail-closed shape: the guest is in a
-        // loop that ignores the clock it reads, so escalation cannot free
-        // it and an errno it could swallow would just resume the spin. The
-        // runtime has already emitted the classifiable marker and flushed the
-        // truncated trace.
-        RuntimeError::FrozenClockChurn { .. } => {}
+        // Poll churn is the same fail-closed shape: the guest polled away
+        // the whole horizon, and an errno it could swallow would just resume
+        // the spin. The runtime has already emitted the classifiable marker
+        // and flushed the truncated trace.
+        RuntimeError::PollChurn { .. } => {}
         // A time-model divergence means the replay no longer describes the
         // run: every later clock read and expiry would answer from a different
         // timeline. Name it and stop, as a refused custom operation does.
@@ -385,7 +384,7 @@ fn abort_after_flushing_output(stop: RunStop<'_>) -> ! {
 pub(crate) fn run_stop_class(error: &RuntimeError) -> Option<(RunClass, &'static str)> {
     match error {
         RuntimeError::StepBudgetExceeded { .. } => Some((RunClass::Timeout, "step_budget")),
-        RuntimeError::Liveness { .. } | RuntimeError::FrozenClockChurn { .. } => {
+        RuntimeError::Liveness { .. } | RuntimeError::PollChurn { .. } => {
             Some((RunClass::Liveness, "liveness"))
         }
         // A custom operation the guest's own `perform` or protocol broke on a

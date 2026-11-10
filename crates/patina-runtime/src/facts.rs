@@ -403,11 +403,11 @@ pub(crate) fn write_compute_bound_facts(
     )
 }
 
-/// The frozen-clock-churn finding: poll escalation charged a polling guest
+/// The poll-churn finding: poll escalation charged a polling guest
 /// `rescues` escalations totalling `advanced_ns` of CPU time and it still made
 /// no genuine progress. Carries the same fields as the
-/// `PATINA_VIOLATION liveness detail=frozen-clock-churn` line.
-pub(crate) fn frozen_clock_churn_finding(
+/// `PATINA_VIOLATION liveness detail=poll-churn` line.
+pub(crate) fn poll_churn_finding(
     vtime_ns: u64,
     rescues: u64,
     advanced_ns: u64,
@@ -416,7 +416,7 @@ pub(crate) fn frozen_clock_churn_finding(
     object(vec![
         ("source", Value::from("liveness")),
         ("kind", Value::from("liveness")),
-        ("detail", Value::from("frozen-clock-churn")),
+        ("detail", Value::from("poll-churn")),
         ("vtime_ns", Value::from(vtime_ns)),
         ("rescues", Value::from(rescues)),
         ("advanced_ns", Value::from(advanced_ns)),

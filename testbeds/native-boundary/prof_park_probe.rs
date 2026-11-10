@@ -1,10 +1,14 @@
-// A process whose only timer is an ITIMER_PROF one second of CPU time away
-// (Linux, Patina only): it polls a UDP socket that never receives, `polls`
-// times without blocking, then blocks on it. Under Patina the receive that
-// completes a poll streak earns an escalation, charged as that call ends,
-// before it parks: the CPU time it stands for reaches the timer, whose
-// signal interrupts the receive. (Natively a blocked process spends no CPU
-// time, so the receive waits forever: there is no native oracle.)
+// A process whose only timer is an ITIMER_PROF 3 ms of CPU time away (2 ms
+// and the tick a timer is armed past; Linux, Patina only): it polls a UDP
+// socket that never receives, `polls` times without blocking, then blocks on
+// it. Under Patina the receive that completes a poll streak earns an
+// escalation, charged as that call ends, before it parks. The calls' own
+// charges and the earlier streaks' tokens leave the timer out of reach until
+// the eleventh streak, whose millisecond token passes it: the escalation
+// charges exactly up to the timer, whose signal interrupts the receive that
+// earned it. A receive that completes no streak parks with the timer out of
+// reach. (Natively a blocked process spends no CPU time, so the receive
+// waits forever: there is no native oracle.)
 use std::ffi::c_int;
 use std::net::UdpSocket;
 use std::os::fd::AsRawFd;
@@ -49,8 +53,8 @@ fn main() {
     assert_eq!(unsafe { sigaction(SIGPROF, &action, std::ptr::null_mut()) }, 0);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
     socket.set_nonblocking(true).unwrap();
-    // One-shot, one second of CPU time away.
-    let timer = [0i64, 0, 1, 0];
+    // One-shot, 2 ms of CPU time (and a tick) away.
+    let timer = [0i64, 0, 0, 2_000];
     // SAFETY: a local value; no old value.
     assert_eq!(unsafe { setitimer(ITIMER_PROF, &timer, std::ptr::null_mut()) }, 0);
     let mut buf = [0u8; 16];

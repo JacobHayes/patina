@@ -338,7 +338,7 @@ pub(crate) fn finish_call(class: ChargeClass) {
     if !ESCALATION.with(|owed| owed.replace(false)) || silenced() {
         return;
     }
-    // A refusal (frozen-clock churn) is fatal in the gateway itself.
+    // A refusal (poll churn) is fatal in the gateway itself.
     let _ = crate::with_context_raw(|context| {
         context.escalate_call(crate::thread::charge_task(), class)
     });

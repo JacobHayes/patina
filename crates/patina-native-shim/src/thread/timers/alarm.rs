@@ -65,10 +65,11 @@ mod tests {
 
     #[test]
     fn a_context_call_in_the_section_that_freed_a_timer_finds_the_alarm_it_left() {
-        // Freeing a closed timer descriptor parks the alarm change. An
-        // escalation later in the same section charges up to the earliest
-        // deadline the context knows, so with the freed timer's deadline still
-        // published it would carry the clock all the way there.
+        // Freeing a closed timer descriptor parks the alarm change. A charge
+        // later in the same section is shown against the alarm the context
+        // knows, and an alarm is a barrier until its owner settles it: with
+        // the freed timer's deadline still published, the clock would stop
+        // there for good, nobody being left to settle it.
         super::super::super::signals::tests::isolated(|| {
             let deadline = now_on(Line::Monotonic).unwrap() + 10 * NANOS;
             let mut state = lock_state();
@@ -91,8 +92,13 @@ mod tests {
             state.publish_alarm();
             // Its last reader left: nothing names it, and it goes.
             state.release_closed_timerfd(handle);
+            // Calls costing more than the time to the freed deadline.
+            let mut calls = patina_dst_abi::ChargeCounts::new();
+            let cost = ChargeClass::Syscall.cost().total_ns();
+            calls.add(ChargeClass::Syscall, 11 * NANOS / cost);
             with_context_raw(|context| {
-                context.escalate_call(crate::thread::charge_task(), ChargeClass::Clock)
+                context.accrue_calls(crate::thread::charge_task(), calls);
+                Ok(())
             })
             .unwrap();
             drop(state);
@@ -102,8 +108,8 @@ mod tests {
             })
             .unwrap();
             assert!(
-                now < deadline,
-                "the clock reached the freed deadline {deadline}: {now}"
+                now > deadline,
+                "the clock stopped at the freed deadline {deadline}: {now}"
             );
         });
     }

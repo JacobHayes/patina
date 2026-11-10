@@ -1431,10 +1431,21 @@ pub(crate) fn wait_deadline(
     context.monotonic_deadline(clock, deadline)
 }
 
+/// The guest's own request to yield: a scheduling point that, when no other
+/// task is runnable, is also a poll the runtime counts (`Context::yield_poll`). Teardown code, which takes no scheduling point, polls nothing
+/// either.
+pub(crate) fn yield_poll() -> Result<(), c_int> {
+    scheduling_point(true)
+}
+
 /// Take a deterministic scheduling point at a boundary call. A no-op until
 /// the thread subsystem activates, so single-threaded programs are
 /// unaffected.
 pub(crate) fn sched_point() -> Result<(), c_int> {
+    scheduling_point(false)
+}
+
+fn scheduling_point(guest_yield: bool) -> Result<(), c_int> {
     // A thread whose task already completed is running teardown code only; it
     // must not take a scheduling point. Checked before locking and keyed on
     // the completed sentinel alone, so a never-registered thread falls through
@@ -1461,7 +1472,12 @@ pub(crate) fn sched_point() -> Result<(), c_int> {
     // mutex through the mutex door), and the lock it holds may be the
     // Context's.
     if !crate::in_shim_critical() {
-        match crate::with_context_raw(|context| context.show_carry()) {
+        match crate::with_context_raw(|context| {
+            if guest_yield {
+                context.yield_poll();
+            }
+            context.show_carry()
+        }) {
             // No runtime installed yet: nothing was charged.
             Ok(()) | Err(crate::ENOSYS) => {}
             Err(errno) => return Err(errno),

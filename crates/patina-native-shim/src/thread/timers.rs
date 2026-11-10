@@ -493,7 +493,7 @@ impl ThreadRuntime {
 
     /// Publish the earliest monotonic deadline, which a charge never moves
     /// the clock past (`Context::set_alarm`), and the earliest CPU-time
-    /// deadlines, which an escalated poll charges up to
+    /// deadlines, which an escalated poll charges no further than
     /// (`Context::set_cpu_alarms`), and with them the thread-clock ones, which
     /// a door's return checks its thread's charge against
     /// (`crate::charge::timers_due`).

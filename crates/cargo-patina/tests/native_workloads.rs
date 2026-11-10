@@ -1035,13 +1035,15 @@ fn syscall_is_charged_as_the_call_it_makes() {
 fn a_blocking_receive_that_earns_an_escalation_reaches_its_cpu_timer() {
     let g = Guest::assert_build("prof_park_probe.rs");
     // Some count of nonblocking receives (each makes two polls, near 512 of
-    // them to a streak) makes the blocking receive's poll the streak's last:
-    // a smaller one leaves it short of the streak, a larger one fires the
-    // one-shot timer during the polls. At seed 5 the hits sit near 510; the
-    // search spirals out from there over a range wide enough that small drift
-    // in the per-poll charge still lands inside it, and stops at the first hit.
-    let mut counts: Vec<u32> = (496..560).collect();
-    counts.sort_by_key(|polls| polls.abs_diff(510));
+    // them to a streak) makes the blocking receive's poll the last of the
+    // eleventh streak, the one whose token passes the timer: a smaller count
+    // leaves the receive short of a streak, parked for good, and a larger
+    // one fires the one-shot timer during the polls. At seed 5 the hit sits
+    // near 5630; the search spirals out from there over a range wide enough
+    // that small drift in the polls the guest's startup makes still lands
+    // inside it, and stops at the first hit.
+    let mut counts: Vec<u32> = (5598..5662).collect();
+    counts.sort_by_key(|polls| polls.abs_diff(5630));
     let polls = counts
         .into_iter()
         .find(|polls| {

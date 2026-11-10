@@ -27,7 +27,7 @@ use crate::{Context, RuntimeError};
 /// CPU-time timer on user time (`ITIMER_VIRTUAL`, a `CPUCLOCK_VIRT` timer)
 /// and on user plus system time (`ITIMER_PROF`, the other CPU clocks). An
 /// embedder publishes them ([`Context::set_cpu_alarms`]) so an escalated
-/// poll charges up to the earliest instead of ramping toward it.
+/// poll charges no further than the earliest.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CpuAlarms {
     pub user_ns: Option<u64>,
@@ -120,10 +120,6 @@ impl Charges {
 
     pub(crate) fn total(&self) -> CpuCharge {
         self.total
-    }
-
-    pub(crate) fn carry(&self) -> u64 {
-        self.carry
     }
 
     /// An idle advance of `nanos`: the charged work still to show ran before
@@ -225,21 +221,6 @@ impl Context {
             .find(|deadline| *deadline > now);
         let alarm = self.alarm.filter(|deadline| *deadline >= now);
         [park, alarm].into_iter().flatten().min()
-    }
-
-    /// The earliest monotonic deadline after `now`: a timed park's or the
-    /// embedder's alarm.
-    pub(crate) fn earliest_deadline_after(&self, now: u64) -> Option<u64> {
-        let park = self
-            .timers
-            .keys()
-            .map(|(deadline, _)| *deadline)
-            .find(|deadline| *deadline > now);
-        [park, self.alarm]
-            .into_iter()
-            .flatten()
-            .filter(|deadline| *deadline > now)
-            .min()
     }
 
     /// Reserve `task`'s charge entry ahead of its first charge: an embedder

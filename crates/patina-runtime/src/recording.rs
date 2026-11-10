@@ -294,7 +294,7 @@ impl Context {
             findings.push(facts::liveness_finding(violation));
         }
         if let Some(vtime) = self.spin.churn_vtime_nanos {
-            findings.push(facts::frozen_clock_churn_finding(
+            findings.push(facts::poll_churn_finding(
                 vtime,
                 self.spin.escalations,
                 self.spin.charged_nanos,
@@ -525,7 +525,7 @@ a recorded result or a replay fetch",
     /// ([`Context::recording_flushed`]): the native transport is append-only.
     ///
     /// Scoped to stops the RUNTIME initiates (step-budget exhaustion,
-    /// frozen-clock churn, the crash that ends an incarnation), not arbitrary
+    /// poll churn, the crash that ends an incarnation), not arbitrary
     /// shim failures or panics. Explicit Linux guest `abort()` separately
     /// finalizes a healthy context; other internal fatalities leave the trace
     /// incomplete.

@@ -372,10 +372,31 @@ model does not answer is a named stop, never a host passthrough.
   them.
 - One authority expires timed parks, after every advance and at every
   timed-park registration, in `(deadline, registration)` order.
-- **Poll escalation:** after 1024 polls without progress, the completing call
-  is charged as more calls of its class (to the next deadline, else a token
-  that doubles to 1 ms). After 256 escalations without progress, the run stops
-  with `liveness detail=frozen-clock-churn`.
+- **Polling costs time.** A poll is a clock read, an operation that found
+  nothing to take, or a `sched_yield` while no other task is runnable. The
+  runtime cannot tell a guest that polls toward a time of its own from one
+  that works and reads the clock as it goes, so the cost of a poll depends
+  only on how long the guest has done nothing but poll, never on what
+  deadlines are pending. After 1024 polls with no progress and no idle wait
+  in between (a streak), the call that completes the count is also charged a
+  token: 1 µs, doubling to 1 ms, and once the streak has charged a quarter
+  second, 1/256 of what it has charged. The clock follows that charge like
+  any other, stopping at each pending deadline on the way; only a CPU-time
+  timer caps it.
+- What that means for a guest: a burst of up to about ten thousand polls
+  costs little more than the calls themselves; a busy-wait on the clock
+  reaches its own deadline late by at most 1 ms or 0.4% of the wait (a minute
+  away in 1.7 million polls); and a long streak grows virtual time
+  geometrically, so a million clock reads with no other effect cost about
+  4 s. A peer's timeout passes during a streak only once the streak has
+  itself charged that long.
+- **Poll churn.** A streak that has charged 10 virtual minutes (the default
+  no-progress budget, fixed whatever `--liveness-watchdog` says, so a replay
+  derives the same stop) stops the run with `liveness detail=poll-churn`: for
+  that long the guest did nothing but poll. A loop that no time ends gets
+  there in about 2.3 million polls. The stop says what was seen, not that the
+  loop could never end: a busy-wait toward a time further off than that is
+  stopped the same way.
 - CPU time is the sum of charges (`cpu_charges` in the facts). A call-free
   loop is charged nothing unless the guest carries a compute meter.
 - Every trace records `time_model` (`TIME_MODEL`); a trace from another model
