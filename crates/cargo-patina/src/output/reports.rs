@@ -22,6 +22,10 @@ pub struct RunReport<'a> {
     /// The on-disk trace path for a record/replay run, or `None` for a plain
     /// seeded run (no trace was written).
     pub trace_path: Option<PathBuf>,
+    /// The trace is scratch, recorded only to draw a page from (`--render` or
+    /// `--report` without `--record`) and removed with the run: the result
+    /// names no trace.
+    pub trace_scratch: bool,
     /// The facts of the trace at `trace_path`, when the caller already loaded
     /// it; `None` reads them from `trace_path`.
     pub trace_facts: Option<TraceFacts>,
@@ -102,49 +106,55 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         core: captured.core,
     };
 
-    // Render the timeline when `--render` is set (always) or `--report` is set and
-    // the run failed. Both need a trace on disk.
+    // The timeline page: `--render` always writes it, `--report` only when the
+    // run failed, and a run given both writes both. The page is drawn from the
+    // run's trace.
     let mut render_path: Option<String> = None;
-    let want_render = opts.render.is_some() || (opts.report.is_some() && failed);
+    let pages: Vec<&PathBuf> = opts
+        .render
+        .iter()
+        .chain(opts.report.iter().filter(|_| failed))
+        .collect();
     let mut render = || -> Result<(), CliError> {
-        let out = opts.render.as_ref().or(opts.report.as_ref());
-        if let Some(out) = out {
-            let trace = report.trace_path.as_ref().ok_or_else(|| {
-                CliError(
-                    "--render/--report needs a recorded or replayed trace; a plain seeded run writes none (use --record PATH or replay a trace)"
-                        .into(),
-                )
-            })?;
-            let failure = failed.then(|| {
-                failure_summary(
-                    captured.exit_code,
-                    &outcome,
-                    report.facts.as_ref(),
-                    &stdout_text,
-                    &stderr_text,
-                )
-            });
-            let html = render::render_trace_file(
-                &trace.to_string_lossy(),
-                report.artifact,
-                report.timeline,
-                failure,
+        let trace = report.trace_path.as_ref().ok_or_else(|| {
+            CliError(
+                "--render/--report found no trace to draw: the run left no complete recording"
+                    .into(),
             )
-            .map_err(|error| CliError(format!("failed to render trace timeline: {error}")))?;
-            std::fs::write(out, html).map_err(|error| {
+        })?;
+        let failure = failed.then(|| {
+            failure_summary(
+                captured.exit_code,
+                &outcome,
+                report.facts.as_ref(),
+                &stdout_text,
+                &stderr_text,
+            )
+        });
+        let html = render::render_trace_file(
+            &trace.to_string_lossy(),
+            report.artifact,
+            report.timeline,
+            failure,
+        )
+        .map_err(|error| CliError(format!("failed to render trace timeline: {error}")))?;
+        for out in &pages {
+            std::fs::write(out, &html).map_err(|error| {
                 CliError(format!(
                     "failed to write render output {}: {error}",
                     out.display()
                 ))
             })?;
-            render_path = Some(out.to_string_lossy().into_owned());
+            render_path.get_or_insert_with(|| out.to_string_lossy().into_owned());
             if !opts.is_json() {
                 eprintln!("PATINA_RENDER output={}", out.display());
             }
         }
         Ok(())
     };
-    if want_render && let Err(error) = render() {
+    if !pages.is_empty()
+        && let Err(error) = render()
+    {
         // A page that could not be rendered must not take a failed run's
         // class with it: the run is still reported, the page's error beside
         // it. A clean run has nothing to lose, and fails on the error.
@@ -160,12 +170,14 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.fingerprint = report.fingerprint.clone();
         env.seed = report.seed;
         env.render = render_path.clone();
-        env.trace = report.trace_facts.clone().or_else(|| {
-            report
-                .trace_path
-                .as_ref()
-                .and_then(|trace| trace_facts(trace, report.timeline))
-        });
+        if !report.trace_scratch {
+            env.trace = report.trace_facts.clone().or_else(|| {
+                report
+                    .trace_path
+                    .as_ref()
+                    .and_then(|trace| trace_facts(trace, report.timeline))
+            });
+        }
         env.coverage = report.coverage.clone();
         env.crash_restart = report.crash_restart.clone();
         env.qualifications = report.qualifications.clone();

@@ -46,8 +46,9 @@ fn main() {
 
     // Observability: the machine-readable `--format json` envelope of each verb has
     // a stable, parseable shape, and the HTML timeline (`--render`/`--report`) is a
-    // pure read-only consumer: rendering a trace does not change its bytes, and
-    // rendering with no trace on disk is a clear error, not a silent no-op.
+    // pure read-only consumer: rendering a trace does not change its bytes. A
+    // run asked for a page without `--record` still writes it, and a failing
+    // run given both flags writes both pages.
     #[test]
     fn native_json_envelopes_and_html_timelines() {
         let directory = tempdir().unwrap();
@@ -130,22 +131,42 @@ fn main() {
             "event count not shown ({events})"
         );
 
-        let untraced = invoke_unchecked(
-            patina,
+        // A run that asks for a page without `--record` writes the page all
+        // the same, and names no trace: the one it drew from was scratch.
+        let unrecorded_page = directory.path().join("out.html");
+        let unrecorded = envelope(&invoke(
             workspace,
             &[
                 "run",
                 bin.to_str().unwrap(),
                 "--seed",
-                "1",
+                "7",
                 "--render",
-                directory.path().join("out.html").to_str().unwrap(),
+                unrecorded_page.to_str().unwrap(),
+                "--format",
+                "json",
             ],
+        ));
+        assert_eq!(unrecorded["result"], "ok", "{unrecorded:#}");
+        assert_eq!(unrecorded["stdout"], value["stdout"], "{unrecorded:#}");
+        assert!(unrecorded["trace"].is_null(), "{unrecorded:#}");
+        assert_eq!(
+            unrecorded["render"],
+            unrecorded_page.to_str().unwrap(),
+            "{unrecorded:#}"
         );
-        assert!(!untraced.status.success());
+        let unrecorded_html = fs::read_to_string(&unrecorded_page).unwrap();
+        assert!(
+            unrecorded_html.starts_with("<!doctype html>")
+                && unrecorded_html.contains(&format!("{events} events")),
+            "the same seed draws the same timeline, recorded by request or not"
+        );
 
-        // A failing run's report carries the failure summary and its violation line.
+        // A failing run given both flags writes both pages, each carrying the
+        // failure summary and its violation line. `--report` alone needs no
+        // `--record` either.
         let report = directory.path().join("report.html");
+        let rendered = directory.path().join("failed-timeline.html");
         let failed = invoke_unchecked(
             patina,
             workspace,
@@ -156,6 +177,8 @@ fn main() {
                 "1",
                 "--record",
                 directory.path().join("fail.patina").to_str().unwrap(),
+                "--render",
+                rendered.to_str().unwrap(),
                 "--report",
                 report.to_str().unwrap(),
                 "--",
@@ -167,6 +190,31 @@ fn main() {
             Some(1),
             "a planted failure is a finding in the guest, whatever status the guest chose"
         );
+        assert_eq!(
+            fs::read_to_string(&rendered).unwrap(),
+            fs::read_to_string(&report).unwrap(),
+            "a failing run's --render and --report pages are the same page"
+        );
+        let unrecorded_report = directory.path().join("unrecorded-report.html");
+        for (arguments, written) in [(&["fail"][..], true), (&[][..], false)] {
+            let _ = fs::remove_file(&unrecorded_report);
+            let mut command = vec![
+                "run",
+                bin.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--report",
+                unrecorded_report.to_str().unwrap(),
+                "--",
+            ];
+            command.extend_from_slice(arguments);
+            invoke_unchecked(patina, workspace, &command);
+            assert_eq!(
+                unrecorded_report.exists(),
+                written,
+                "--report writes its page exactly when the run fails"
+            );
+        }
         let page = fs::read_to_string(&report).unwrap();
         assert!(page.starts_with("<!doctype html>"));
         assert!(

@@ -20,7 +20,7 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--render",
         None,
         Value::Required("OUT.html", Kind::Path),
-        "For a run/replay with a trace, write a self-contained HTML timeline to OUT.html.",
+        "Write a self-contained HTML timeline of a run or replay to OUT.html.",
         false,
     ),
     f(

@@ -70,8 +70,7 @@ pub enum OutputFormat {
 #[derive(Clone, Debug, Default)]
 pub struct OutputOptions {
     pub format: OutputFormat,
-    /// `--render PATH`: always write the timeline HTML for a run/replay that has
-    /// a trace (record or replay mode).
+    /// `--render PATH`: always write the timeline HTML of a run or replay.
     pub render: Option<PathBuf>,
     /// `--report PATH`: write the timeline HTML *only when the run failed*, with a
     /// prominent failure-summary section.
@@ -88,6 +87,12 @@ impl OutputOptions {
 
     pub fn is_json(&self) -> bool {
         self.format == OutputFormat::Json
+    }
+
+    /// Whether a timeline page was asked for (`--render`, `--report`). A page
+    /// is drawn from a trace, so a run that wants one records.
+    pub fn wants_page(&self) -> bool {
+        self.render.is_some() || self.report.is_some()
     }
 }
 

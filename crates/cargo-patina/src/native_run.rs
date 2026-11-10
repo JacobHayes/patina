@@ -118,6 +118,25 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
 
+    // A page (`--render`, `--report`) is drawn from a trace. A run asked for
+    // one without `--record` records into a scratch directory that goes away
+    // with the run.
+    let scratch_trace = match &invocation.mode {
+        NativeRunMode::Seeded { seed } if output::options().wants_page() => {
+            let directory = tempfile::tempdir().map_err(|error| {
+                CliError(format!(
+                    "failed to create a scratch directory for the page's trace: {error}"
+                ))
+            })?;
+            invocation.mode = NativeRunMode::Record {
+                seed: *seed,
+                path: directory.path().join("run.patina"),
+            };
+            Some(directory)
+        }
+        _ => None,
+    };
+
     // Source-first: an artifact runs as-is; a source/package is built on the fly
     // first (`resolved` holds the build workspace alive for the whole run). For
     // replay, the rebuilt binary is judged against the trace's build identity
@@ -793,6 +812,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     };
     let fingerprint = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
+        NativeRunMode::Record { .. } if scratch_trace.is_some() => None,
         NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
             Some(DEFAULT_NATIVE_FINGERPRINT.to_string())
         }
@@ -820,6 +840,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             verb: "run",
             artifact: &artifact,
             trace_path,
+            trace_scratch: scratch_trace.is_some(),
             trace_facts,
             timeline: "main",
             fingerprint,
