@@ -305,6 +305,11 @@ These concerns are kept out of the interposed data plane:
   runtime; the wake funnel refuses a wake that meets unsettled expiries.
 - While the thread runtime is held, Context calls run as an embedder section
   in which virtual time stands still.
+- The scheduler picks uniformly among the runnable tasks; under PCT
+  (`--sched-pct`) it picks the one of highest priority. A task PCT has
+  picked at 1024 decisions in a row over a runnable peer is moved below every
+  other task, whatever it did between them, so a task spinning until a peer
+  acts lets that peer run under every schedule.
 - Signal dispositions and shared pending signals are per process; masks and
   private pending signals per task. Generation records `SignalGenerated`;
   delivery runs on the recipient task under the baton.
@@ -378,15 +383,24 @@ model does not answer is a named stop, never a host passthrough.
 
 ### Native compute-only starvation
 
-A call-free loop cannot hand over the baton. When another task is runnable or
-in a timed park, a host observer stops the run after `--compute-watchdog-ms`
-(default 10 s of wall time without a scheduling point) with
-`PATINA_VIOLATION liveness detail=compute-bound known_limit=true`. It never
-preempts, wakes, advances time or feeds a host answer to the guest. The trace
-records `compute_stop`; replay consumes the prefix and stops at the same
-point. The observer then samples the interrupted PC best-effort. Its helpers
-use only the `HostApi` table, block all signals, allocate nothing and only
-try-lock runtime locks.
+Code that makes no call cannot hand over the baton, and nothing it does moves
+virtual time. A host observer, started with the runtime, stops the run after
+`--compute-watchdog-ms` (default 10 s of wall time) in which the guest was
+charged no virtual time and began no boundary operation, with
+`PATINA_VIOLATION liveness detail=compute-bound known_limit=true` (the
+`timeout` outcome). It watches whichever thread runs guest code: a task with
+runnable or parked peers, and the main thread of a guest that never starts
+another (in a `patina build` guest; another embedding starts the observer
+with its first thread). So finite compute that makes no call for longer than
+the bound ends the same way, and a run that needs it raises the bound. An instrumented build's edge yields (`--yield-stride`) are
+scheduling points that charge nothing: tasks that only pass the baton
+between them are stopped like the same loop without the hook, and so is a
+loop of calls answered without the runtime (`getpid`), whose charge waits
+for a call that reaches it. The observer never preempts, wakes, advances
+time or feeds a host answer to the guest. The trace records `compute_stop`;
+replay consumes the prefix and stops at the same point. The observer then
+samples the interrupted PC best-effort. Its helpers use only the `HostApi`
+table, block all signals, allocate nothing and only try-lock runtime locks.
 
 ## Drivers and wrappers
 

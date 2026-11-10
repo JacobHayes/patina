@@ -102,7 +102,7 @@ pub use filesystem::FsTime;
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
-pub use liveness::{ESCALATION_POLLS, LivenessKind};
+pub use liveness::{ComputeStamp, ESCALATION_POLLS, LivenessKind};
 
 pub use buggify::{
     BuggifyDeclaredSiteReport, BuggifyDiagnostics, BuggifyKind, BuggifySiteReport, SiteOutcome,
@@ -512,6 +512,10 @@ pub struct Context {
     compatibility_fingerprint: String,
     step_budget: Option<u64>,
     steps: u64,
+    /// How many of `steps` were a task's yield or the scheduler's decision:
+    /// the steps a scheduling point takes by itself
+    /// ([`Context::compute_watchdog_candidate`]).
+    yield_steps: u64,
     params: BTreeMap<String, String>,
     guest_env: BTreeMap<String, String>,
     guest_cwd: Option<String>,
@@ -775,9 +779,13 @@ pub enum RuntimeError {
     TimeModel {
         detail: String,
     },
-    /// Native compute-only starvation: a runtime limit, never a guest verdict.
+    /// The native compute bound: a guest that was charged no virtual time
+    /// and began no boundary operation for the host-time bound. A runtime
+    /// limit, never a guest verdict.
+    /// `task` is the thread that held the run: `None` for the main thread of
+    /// a run with no task yet.
     ComputeBound {
-        task: TaskId,
+        task: Option<TaskId>,
         steps: u64,
     },
     /// The asynchronous stop could not export its evidence. No heap-owned
@@ -878,11 +886,20 @@ impl fmt::Display for RuntimeError {
             Self::ComputeStopState => {
                 f.write_str("PATINA_INFRA compute_stop_invalid_scheduler_state")
             }
-            Self::ComputeBound { task, steps } => write!(
-                f,
-                "PATINA_VIOLATION liveness detail=compute-bound task={} steps={} known_limit=true: no scheduling point within the host-time bound while another managed thread is runnable or in a timed park; host blocking and descheduling are not distinguished from computation; this is a known Patina limit, not a guest bug",
-                task.0, steps
-            ),
+            Self::ComputeBound { task, steps } => {
+                f.write_str("PATINA_VIOLATION liveness detail=compute-bound task=")?;
+                match task {
+                    Some(task) => write!(f, "{}", task.0)?,
+                    None => f.write_str("main")?,
+                }
+                write!(
+                    f,
+                    " steps={steps} known_limit=true: the guest was charged no virtual time and \
+began no boundary operation within the host-time bound; computing, spinning, descheduling and \
+blocking on the host look the same from here, so this is a known Patina limit and inconclusive, \
+not a finding in the guest"
+                )
+            }
         }
     }
 }

@@ -7,6 +7,9 @@
       if (pid == "") { pid = $1 }
       sub(/^[0-9]+ +/, "", line)
       if (line ~ /^--- / || line ~ /^\+\+\+ /) next
+      # The second half of a call another thread's call interrupted: its name
+      # and arguments were judged on the first half (`<unfinished ...>`).
+      if (line ~ /^<\.\.\. [a-z0-9_]+ resumed>/) next
       syscall = line
       sub(/\(.*/, "", syscall)
       args = line
@@ -20,8 +23,9 @@
       if (syscall ~ /^(execve|brk|arch_prctl|mmap|mmap2|munmap|mprotect|madvise|futex|sched_yield|sigaltstack|rt_sigaction|rt_sigprocmask|rt_sigreturn|exit|exit_group|close)$/) next
       if (syscall == "getrandom" && args ~ /GRND_NONBLOCK/) next
       # The shim's guest-memory copies name the traced process itself; a copy
-      # aimed at another process escapes.
-      if (syscall ~ /^process_vm_(readv|writev)$/) { target = args; sub(/,.*/, "", target); if (target == pid) next }
+      # aimed at another process escapes. The pid is the first argument, also
+      # of a first half another thread's call split (`<unfinished ...>`).
+      if (syscall ~ /^process_vm_(readv|writev)$/) { target = args; sub(/[^0-9].*/, "", target); if (target == pid) next }
       if (syscall ~ /^(openat|openat2|open|newfstatat|readlink|readlinkat)$/ && trusted_path(args)) next
       if (syscall ~ /^(faccessat|faccessat2|access)$/ && args ~ /"\/etc\/ld\.so\.preload"/) next
       if (syscall ~ /^(read|pread64|fstat|fcntl|lseek)$/) {

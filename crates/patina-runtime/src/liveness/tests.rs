@@ -472,28 +472,57 @@ fn escalation_records_only_the_reads_and_replays() {
 }
 
 #[test]
-fn compute_watchdog_uses_runnable_peers_not_live_tasks() {
+fn compute_watchdog_watches_whichever_thread_runs_guest_code() {
+    // A thread running guest code is a candidate with or without a peer:
+    // the main thread before any task exists, a lone task, and a task beside
+    // runnable or parked peers. Nothing runs guest code while the selected
+    // task is parked.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    assert_eq!(context.compute_watchdog_candidate(), None);
+    let task_of = |context: &Context| context.compute_watchdog_candidate().map(|(_, task)| task);
+    assert_eq!(task_of(&context), Some(None));
     let main = context.task_spawn("main").unwrap();
     assert_eq!(context.scheduler_next().unwrap(), Some(main));
-    assert_eq!(context.compute_watchdog_candidate(), None);
+    assert_eq!(task_of(&context), Some(Some(main)));
     let peer = context.task_spawn("peer").unwrap();
-    assert_eq!(
-        context.compute_watchdog_candidate(),
-        Some((context.steps(), main))
-    );
+    assert_eq!(task_of(&context), Some(Some(main)));
     context.task_park(main, "condition").unwrap();
+    assert_eq!(task_of(&context), None);
     assert_eq!(context.scheduler_next().unwrap(), Some(peer));
-    assert_eq!(context.compute_watchdog_candidate(), None);
+    assert_eq!(task_of(&context), Some(Some(peer)));
     context.task_wake(main).unwrap();
-    assert_eq!(
-        context.compute_watchdog_candidate(),
-        Some((context.steps(), peer))
-    );
     context.task_complete(peer).unwrap();
     assert_eq!(context.scheduler_next().unwrap(), Some(main));
-    assert_eq!(context.compute_watchdog_candidate(), None);
+    assert_eq!(task_of(&context), Some(Some(main)));
+}
+
+#[test]
+fn compute_watchdog_stamp_ignores_yields_that_charge_nothing() {
+    // What the observer compares between two looks. A yield and the decision
+    // after it are what an instrumented build's edge hook takes: a guest
+    // doing nothing else has made no call and moved no time, whichever task
+    // the scheduler hands the baton to. A charged call or any other
+    // operation is the guest reaching the runtime.
+    let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
+    let stamp = |context: &Context| context.compute_watchdog_candidate().unwrap().0;
+    let first = context.task_spawn("first").unwrap();
+    context.task_spawn("second").unwrap();
+    let mut running = context.scheduler_next().unwrap().unwrap();
+    let idle = stamp(&context);
+    let mut ran = std::collections::BTreeSet::new();
+    for _ in 0..64 {
+        ran.insert(running);
+        context.task_yield(running).unwrap();
+        running = context.scheduler_next().unwrap().unwrap();
+        assert_eq!(stamp(&context), idle);
+    }
+    assert_eq!(ran.len(), 2, "both tasks took turns");
+    context
+        .charge_calls(Some(first), calls(ChargeClass::Sync, 1))
+        .unwrap();
+    let charged = stamp(&context);
+    assert_ne!(charged, idle);
+    context.now(ClockKind::Monotonic).unwrap();
+    assert_ne!(stamp(&context), charged);
 }
 
 #[test]
@@ -526,10 +555,13 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
     );
     let task = setup(&mut record);
     let steps = record.steps();
-    assert_eq!(record.compute_watchdog_candidate(), Some((steps, task)));
+    assert_eq!(
+        record.compute_watchdog_candidate().map(|(_, task)| task),
+        Some(Some(task))
+    );
     assert!(matches!(
-        record.stop_compute_bound(task),
-        RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps
+        record.stop_compute_bound(Some(task)),
+        RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == Some(task) && at == steps
     ));
     assert_eq!(
         record.current_monotonic().unwrap(),
@@ -557,7 +589,7 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
     assert_eq!(replay.compute_watchdog_candidate(), None);
     assert!(matches!(
         replay.finish(),
-        Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == task && at == steps
+        Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == Some(task) && at == steps
     ));
 }
 
@@ -580,7 +612,7 @@ fn compute_stop_inside_an_open_custom_op_replays_only_the_committed_prefix() {
         CustomOpMode::Record
     );
     assert_eq!(record.steps(), committed + 1);
-    let stop = record.stop_compute_bound(main);
+    let stop = record.stop_compute_bound(Some(main));
     let bundle = TraceBundle::load(&path).unwrap();
     assert_eq!(bundle.metadata.compute_stop.unwrap().steps, committed);
     assert_eq!(
@@ -605,7 +637,7 @@ fn compute_stop_inside_an_open_custom_op_replays_only_the_committed_prefix() {
                 .unwrap_err()
         };
         assert!(
-            matches!(error, RuntimeError::ComputeBound { task, steps } if task == main && steps == committed)
+            matches!(error, RuntimeError::ComputeBound { task, steps } if task == Some(main) && steps == committed)
         );
     }
 }
@@ -624,11 +656,11 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
     let task = setup(&mut record);
     let steps = record.steps();
     assert!(
-        matches!(record.stop_compute_bound(task), RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps)
+        matches!(record.stop_compute_bound(Some(task)), RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == Some(task) && at == steps)
     );
     let original = fs::read(&path).unwrap();
     // The append-only native sink relies on exactly one flush.
-    record.stop_compute_bound(task);
+    record.stop_compute_bound(Some(task));
     assert_eq!(original, fs::read(&path).unwrap());
     for finish in [false, true] {
         let mut replay = Context::from_config(RuntimeConfig::replay(&path, "compute-v1")).unwrap();
@@ -636,7 +668,10 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
         assert_eq!(setup(&mut replay), task);
         assert_eq!(
             replay.replay_compute_stop_due(),
-            Some(patina_dst_trace::ComputeStop { task, steps })
+            Some(patina_dst_trace::ComputeStop {
+                task: Some(task),
+                steps
+            })
         );
         let error = if finish {
             replay.finish().unwrap_err()
@@ -644,11 +679,11 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
             replay.task_yield(task).unwrap_err()
         };
         assert!(
-            matches!(error, RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == task && at == steps)
+            matches!(error, RuntimeError::ComputeBound { task: stopped, steps: at } if stopped == Some(task) && at == steps)
         );
     }
     let mut wrong_task = TraceBundle::load(&path).unwrap();
-    wrong_task.metadata.compute_stop.as_mut().unwrap().task = TaskId(99);
+    wrong_task.metadata.compute_stop.as_mut().unwrap().task = Some(TaskId(99));
     let wrong_path = directory.path().join("wrong-task.patina");
     wrong_task.write_atomic(&wrong_path).unwrap();
     let mut replay =

@@ -365,7 +365,10 @@ class Leg:
         binary = str(self.binary(workload.testbed))
         if self.cargo_patina is None:
             return [binary] + expand(workload.args, n, directory)
-        return ([str(self.cargo_patina), 'run', binary, '--seed', str(self.seed), '--']
+        # A workload is sized to run for seconds, the compute one without a
+        # call: the host-time compute bound is not what is being measured.
+        return ([str(self.cargo_patina), 'run', binary, '--seed', str(self.seed),
+                 '--compute-watchdog-ms', '86400000', '--']
                 + expand(workload.args, n, VIRTUAL_DIR))
 
 

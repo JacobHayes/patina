@@ -130,7 +130,9 @@ pub use stream::TraceStream;
 /// - 28: a procfs open and read are decisions (`fs_synthetic_open`,
 ///   `fs_synthetic_read`), so a filesystem fault reaches them. A format 27
 ///   trace of a guest that read procfs has none, so it is refused.
-pub const TRACE_FORMAT_VERSION: u32 = 28;
+/// - 29: `compute_stop.task` may be null: the stop found the main thread of
+///   a run that had no task yet. A format 28 reader has no such stop.
+pub const TRACE_FORMAT_VERSION: u32 = 29;
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 

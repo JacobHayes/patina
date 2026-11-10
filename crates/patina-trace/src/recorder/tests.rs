@@ -21,7 +21,7 @@ fn borrowed_prefix_matches_the_ordinary_bundle_of_its_incarnation() {
             }
             recorder.set_compute_stop(ComputeStop {
                 steps: count,
-                task: TaskId(1),
+                task: Some(TaskId(1)),
             });
             let mut bytes = Vec::new();
             recorder.write_prefix(&mut bytes).unwrap();

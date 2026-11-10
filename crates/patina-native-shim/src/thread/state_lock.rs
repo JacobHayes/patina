@@ -241,7 +241,7 @@ pub(super) fn unsettled_state() -> SpinGuard<'static, ThreadRuntime> {
 }
 
 /// Observer lock order is the ordinary ThreadRuntime -> Context order.
-/// Never wait for the guest: a busy shim is not compute-only starvation.
+/// Never wait for the guest: a busy shim is not a guest computing.
 /// `observe` also learns whether the baton holder is creating a thread or
 /// taking the baton after a completion: it then waits, off the guest, for
 /// the new host thread's start-up or the finished one's exit, which a
@@ -252,7 +252,7 @@ pub(crate) fn watchdog_observe(
     let Some(state) = thread_runtime().try_lock() else {
         return;
     };
-    if !state.active || main_returned() {
+    if main_returned() {
         return;
     }
     let Some(mut slot) = crate::slot().try_lock() else {

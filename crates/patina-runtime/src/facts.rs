@@ -368,7 +368,8 @@ struct ComputeBoundFinding {
     kind: &'static str,
     detail: &'static str,
     known_limit: bool,
-    task: u64,
+    /// `null` for the main thread of a run that had no task yet.
+    task: Option<u64>,
     steps: u64,
 }
 
@@ -395,7 +396,7 @@ pub(crate) fn write_compute_bound_facts(
                 kind: "liveness",
                 detail: "compute-bound",
                 known_limit: true,
-                task: stop.task.0,
+                task: stop.task.map(|task| task.0),
                 steps: stop.steps,
             }],
         },
@@ -450,7 +451,7 @@ mod tests {
         write_compute_bound_facts(
             u64::MAX,
             patina_dst_trace::ComputeStop {
-                task: patina_dst_abi::TaskId(u64::MAX),
+                task: Some(patina_dst_abi::TaskId(u64::MAX)),
                 steps: u64::MAX,
             },
             &mut cursor,

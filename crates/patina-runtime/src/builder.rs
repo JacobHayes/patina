@@ -588,6 +588,7 @@ impl RuntimeBuilder {
             compatibility_fingerprint: effective_fingerprint,
             step_budget: self.config.step_budget,
             steps: 0,
+            yield_steps: 0,
             params: self.config.params,
             guest_env: self.config.guest_env,
             guest_cwd: self.config.guest_cwd,

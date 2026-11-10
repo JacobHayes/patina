@@ -448,7 +448,9 @@ pub struct RunMetadata {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputeStop {
     pub steps: u64,
-    pub task: TaskId,
+    /// The task that held the run, or `None` for the main thread of a run
+    /// that had no task yet (the guest never started a second thread).
+    pub task: Option<TaskId>,
 }
 
 /// The policy suffix of a run's compatibility fingerprint: `+buggify`, `+pct`,

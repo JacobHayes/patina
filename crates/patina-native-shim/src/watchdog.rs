@@ -1,14 +1,17 @@
 //! Native no-boundary-progress is a terminal refusal, never a preemption.
 //! Wall time cannot distinguish computation from untracked host blocking.
-//! The observer reads existing state under the normal lock order. No host clock,
-//! atomic publication, or new counter is added to a scheduling point.
+//! The observer reads existing state under the normal lock order. No host
+//! clock or atomic publication is added to a scheduling point.
+//!
+//! It runs from the moment the runtime is installed, so a guest that never
+//! starts a second thread is watched like any other: a run always ends.
 
 use std::ffi::{CStr, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Once, OnceLock};
 
 use super::TaskId;
-use patina_dst_runtime::RuntimeError;
+use patina_dst_runtime::{ComputeStamp, RuntimeError};
 
 pub(crate) const ENV: &str = "PATINA_RT_COMPUTE_WATCHDOG_MS";
 const DEFAULT_MS: u64 = 10_000;
@@ -29,9 +32,17 @@ pub(crate) fn host_thread_self() -> usize {
     unsafe { (super::hostapi::get().host_pthread_self)() }
 }
 
+/// The main thread's host handle, for the terminal PC sample of a run whose
+/// main thread is no task yet.
+static MAIN_THREAD: AtomicUsize = AtomicUsize::new(0);
+
+/// Start the observer. A `patina build` guest calls it on the main thread as
+/// the runtime is installed, before any guest thread exists, so the helpers
+/// map their stacks first, in one order on every run.
 pub(crate) fn start() {
     static START: Once = Once::new();
     START.call_once(|| {
+        MAIN_THREAD.store(host_thread_self(), Ordering::Release);
         let _ = super::hostapi::get();
         // Prepare before either unmanaged helper can contend on Rust's Once.
         // Darwin's contended Once parks through public dispatch semaphores,
@@ -65,29 +76,50 @@ pub(crate) fn start() {
     });
 }
 
+/// What the observer saw last and since when: the runtime's stamp
+/// (`Context::compute_watchdog_candidate`), which stands still while the
+/// guest is charged no virtual time and begins no boundary operation,
+/// whichever task holds the baton.
 #[derive(Default)]
 struct Window {
-    last: Option<((u64, TaskId), u64)>,
+    last: Option<(ComputeStamp, u64)>,
 }
+/// The stamp and the thread running guest code: a task, or the main thread
+/// of a run with no task yet.
+type Candidate = (ComputeStamp, Option<TaskId>);
 impl Window {
     // None is a missed lock; Some(None) is a confirmed ineligible state.
+    // Answers the task to stop once the stamp has stood still for the bound.
     fn observe(
         &mut self,
-        observation: Option<Option<(u64, TaskId)>>,
+        observation: Option<Option<Candidate>>,
         now: u64,
         bound: u64,
-    ) -> Option<TaskId> {
+    ) -> Option<Option<TaskId>> {
         let candidate = observation?;
-        let Some(candidate) = candidate else {
+        let Some((stamp, task)) = candidate else {
             self.last = None;
             return None;
         };
         let since = match self.last {
-            Some((previous, since)) if previous == candidate => since,
+            Some((previous, since)) if previous == stamp => since,
             _ => now,
         };
-        self.last = Some((candidate, since));
-        (now.saturating_sub(since) >= bound).then_some(candidate.1)
+        self.last = Some((stamp, since));
+        (now.saturating_sub(since) >= bound).then_some(task)
+    }
+}
+
+/// The host thread running `task`: the main thread when it is no task yet.
+fn handle_of(
+    handles: &std::collections::BTreeMap<usize, TaskId>,
+    task: Option<TaskId>,
+) -> Option<usize> {
+    match task {
+        Some(task) => handles
+            .iter()
+            .find_map(|(handle, owner)| (*owner == task).then_some(*handle)),
+        None => Some(MAIN_THREAD.load(Ordering::Acquire)).filter(|handle| *handle != 0),
     }
 }
 
@@ -104,9 +136,7 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
         super::thread::watchdog_observe(|context, handles, off_guest| {
             observed = true;
             if let Some(stop) = context.replay_compute_stop_due() {
-                let handle = handles
-                    .iter()
-                    .find_map(|(handle, owner)| (*owner == stop.task).then_some(*handle));
+                let handle = handle_of(handles, stop.task);
                 let error = context.stop_compute_bound(stop.task);
                 report_and_abort(&error, handle, None);
             }
@@ -123,9 +153,7 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
             };
             // Both locks stay held: the guest cannot add a modeled effect or
             // change eligibility between commitment, export and termination.
-            let handle = handles
-                .iter()
-                .find_map(|(handle, owner)| (*owner == task).then_some(*handle));
+            let handle = handle_of(handles, task);
             let error = context.stop_compute_bound(task);
             report_and_abort(&error, handle, Some(bound));
         });
@@ -197,7 +225,7 @@ pub(crate) fn report_and_abort(
     if let Some(bound) = observed_bound_ms {
         let _ = writeln!(
             text,
-            "patina: no scheduling point for at least {bound} ms of host wall time (includes descheduling and untracked host blocking)"
+            "patina: no virtual time charged and no boundary operation begun for at least {bound} ms of host wall time (includes descheduling and untracked host blocking)"
         );
         let _ = super::host_write_all(2, &text.bytes[..text.len]);
         text.len = 0;
@@ -637,15 +665,46 @@ mod tests {
     #[test]
     fn missed_locks_preserve_the_bound_but_progress_and_ineligibility_reset_it() {
         let mut window = Window::default();
-        let task = TaskId(1);
-        assert_eq!(window.observe(Some(Some((3, task))), 0, 100), None);
-        assert_eq!(window.observe(Some(Some((3, task))), 25, 100), None);
+        let task = Some(TaskId(1));
+        let at = |operations| {
+            Some(Some((
+                ComputeStamp {
+                    operations,
+                    charged_nanos: 0,
+                },
+                task,
+            )))
+        };
+        assert_eq!(window.observe(at(3), 0, 100), None);
+        assert_eq!(window.observe(at(3), 25, 100), None);
         for now in [40, 60, 80, 110] {
             assert_eq!(window.observe(None, now, 100), None);
         }
-        assert_eq!(window.observe(Some(Some((3, task))), 111, 100), Some(task));
-        assert_eq!(window.observe(Some(Some((4, task))), 112, 100), None);
+        assert_eq!(window.observe(at(3), 111, 100), Some(task));
+        assert_eq!(window.observe(at(4), 112, 100), None);
         assert_eq!(window.observe(Some(None), 180, 100), None);
-        assert_eq!(window.observe(Some(Some((4, task))), 300, 100), None);
+        assert_eq!(window.observe(at(4), 300, 100), None);
+    }
+
+    #[test]
+    fn the_bound_follows_the_stamp_whichever_task_holds_the_baton() {
+        // Tasks that only hand the baton round (an instrumented build's edge
+        // yields) leave the stamp alone: the bound is not theirs one by one.
+        // The main thread before any task is watched the same way.
+        let mut window = Window::default();
+        let stamp = |charged_nanos| ComputeStamp {
+            operations: 7,
+            charged_nanos,
+        };
+        let seen = |charged_nanos, task| Some(Some((stamp(charged_nanos), Some(TaskId(task)))));
+        assert_eq!(window.observe(seen(9, 1), 0, 100), None);
+        assert_eq!(window.observe(seen(9, 2), 60, 100), None);
+        assert_eq!(window.observe(seen(9, 1), 100, 100), Some(Some(TaskId(1))));
+        // A charged call moves the stamp without an operation.
+        assert_eq!(window.observe(seen(10, 1), 150, 100), None);
+        assert_eq!(
+            window.observe(Some(Some((stamp(10), None))), 250, 100),
+            Some(None)
+        );
     }
 }

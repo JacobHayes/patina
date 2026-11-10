@@ -23,18 +23,21 @@ mod proc_fd;
 #[path = "native_workloads/two_copy.rs"]
 mod two_copy;
 
-/// One build of the watchdog guest covers the class: call-free code with a
-/// runnable peer is a named terminal limit, recorded with an eligible prefix
-/// that a replay reaches from the trace alone, while identical compute with no
-/// runnable peer completes, and the configured bound moves the stop. The
-/// stopped modes cover each place a starved guest can be caught: the main task
-/// (`starved`) or a worker (`worker-starved`) spinning; compute that a replay
-/// would finish if it forgot the stop (`finite`); a held allocator under a
-/// byte-payload export (`payload-held`); an allocating abort handler that is
-/// never called (`handler-alloc`); a custom perform replaying its committed
-/// prefix (`custom-spin`, or on Linux `sync-buffer`, whose replay also
-/// salvages buffered C stdout); and on Linux x86_64 a 2 KiB stack
-/// (`small-stack`). A failure names its mode.
+/// One build of the watchdog guest covers the class: a thread that runs
+/// without a call or a boundary operation for the bound is a named terminal
+/// limit, recorded with an eligible prefix that a replay reaches from the
+/// trace alone, while finite compute completes inside its bound, and the
+/// configured bound moves the stop. The stopped modes cover each place such a
+/// guest can be caught: the main task (`starved`) or a worker
+/// (`worker-starved`) spinning beside a runnable peer; the main thread of a
+/// guest that never starts another (`alone`); a worker spinning while the
+/// only other thread waits for it with no deadline (`parked-spin`); compute
+/// that a replay would finish if it forgot the stop (`finite`); a held
+/// allocator under a byte-payload export (`payload-held`); an allocating
+/// abort handler that is never called (`handler-alloc`); a custom perform
+/// replaying its committed prefix (`custom-spin`, or on Linux `sync-buffer`,
+/// whose replay also salvages buffered C stdout); and on Linux x86_64 a 2 KiB
+/// stack (`small-stack`). A failure names its mode.
 #[test]
 fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     use std::os::unix::process::ExitStatusExt;
@@ -75,6 +78,8 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     let mut modes = vec![
         "starved",
         "worker-starved",
+        "alone",
+        "parked-spin",
         "finite",
         "payload-held",
         "handler-alloc",
@@ -139,7 +144,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
                     .any(|line| line.starts_with("PATINA_VIOLATION liveness ")),
                 "marker must start at column zero: {stderr}"
             );
-            if mode == "starved" {
+            if mode == "starved" || mode == "alone" {
                 assert!(
                     stderr.contains("COMPUTE_PARTIAL_STDERR\nPATINA_VIOLATION "),
                     "{stderr}"
@@ -155,7 +160,9 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
                 .metadata
                 .compute_stop
                 .expect("recorded terminal fact");
-            assert_eq!(terminal.task.0, finding["task"].as_u64().unwrap());
+            assert_eq!(terminal.task.map(|task| task.0), finding["task"].as_u64());
+            // Only the main thread of a guest with no other thread is no task.
+            assert_eq!(terminal.task.is_none(), mode == "alone", "mode={mode}");
             assert_eq!(terminal.steps, finding["steps"].as_u64().unwrap());
             let events = bundle.resolved_timeline("main").unwrap();
             assert_compute_stop_eligible(&events, terminal);
@@ -207,15 +214,12 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         );
     }
     for mode in ["single", "parked", "finite"] {
-        // single and parked leave no runnable peer, so even the tight bound
-        // must not stop them. finite's peer stays runnable, so its bound is
-        // the deadline: every compute the harness waits for ends inside it,
-        // however loaded the host, so any stop fired before its bound.
-        let bound = if mode == "finite" {
-            deadline.as_millis().to_string()
-        } else {
-            "25".to_owned()
-        };
+        // Finite compute, alone (single), beside a parked peer (parked) or
+        // beside a runnable one (finite), ends inside a bound it fits. The
+        // bound is the deadline: every compute the harness waits for ends
+        // inside it, however loaded the host, so any stop fired before its
+        // bound.
+        let bound = deadline.as_millis().to_string();
         if mode == "finite" {
             // Timed without the supervisor's startup: the observer saw the
             // same runnable-peer candidate across at least two maximum-length
@@ -241,28 +245,10 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             &bound,
         );
         let output = assert_success(output);
-        if mode == "single" {
-            let bundle = patina_dst_trace::TraceBundle::load(&negative_trace).unwrap();
-            let events = bundle.resolved_timeline("main").unwrap();
-            assert!(
-                events
-                    .iter()
-                    .filter(|e| matches!(e.operation, patina_dst_abi::Operation::TaskSpawn { .. }))
-                    .count()
-                    >= 2,
-                "single must arm the observer by creating a peer first"
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|e| matches!(e.operation, patina_dst_abi::Operation::TaskComplete { .. })),
-                "single must join its peer before computing"
-            );
-        }
         assert_exact_line(&output.stdout, "COMPUTE_RESULT completed=true");
         assert!(
             elapsed > Duration::from_millis(100),
-            "negative control did not exceed bound: {elapsed:?}"
+            "the compute was too short for the observer to have seen it: {elapsed:?}"
         );
     }
     // The bound is load-bearing, not a fixed timeout: a long bound moves the
@@ -369,8 +355,10 @@ fn assert_terminal_sample(stderr: &str, context: &str, synchronous: bool) {
 }
 
 // Class pairing: validate host-time terminal stops from the recorded scheduler
-// state, alongside the runtime's runnable-versus-parked watchdog unit detector.
-// This accepts any eligible prefix, without pinning platform-specific counts.
+// state, alongside the runtime's watchdog unit detector: the stop names the
+// thread that held the run, which is the selected, unparked task, or no task
+// in a run that never had one. This accepts any eligible prefix, without
+// pinning platform-specific counts.
 fn assert_compute_stop_eligible(
     events: &[patina_dst_trace::TraceEvent],
     stop: patina_dst_trace::ComputeStop,
@@ -378,9 +366,11 @@ fn assert_compute_stop_eligible(
     use patina_dst_abi::{Operation, Outcome};
     let mut runnable = std::collections::BTreeSet::new();
     let mut running = None;
+    let mut spawned = 0;
     for event in events {
         match (&event.operation, &event.outcome) {
             (Operation::TaskSpawn { .. }, Outcome::Task(task)) => {
+                spawned += 1;
                 runnable.insert(*task);
             }
             (Operation::TaskYield { task } | Operation::TaskWake { task }, Outcome::Unit) => {
@@ -399,15 +389,11 @@ fn assert_compute_stop_eligible(
         }
     }
     assert_eq!(stop.steps as usize, events.len());
-    assert_eq!(running, Some(stop.task), "stop must name the baton holder");
-    assert!(
-        runnable.contains(&stop.task),
-        "stopped task must be runnable"
-    );
-    assert!(
-        runnable.iter().any(|task| *task != stop.task),
-        "stop must have a runnable peer"
-    );
+    assert_eq!(running, stop.task, "stop must name the baton holder");
+    match stop.task {
+        Some(task) => assert!(runnable.contains(&task), "stopped task must be runnable"),
+        None => assert_eq!(spawned, 0, "a stop with no task is a run with no task"),
+    }
 }
 
 /// The modes whose recording must reach the guest's own hazard marker.

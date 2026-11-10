@@ -424,32 +424,68 @@ pub(super) fn resolve_heal_after(config: &RuntimeConfig) -> u64 {
     }
 }
 
+/// How far the guest has come, as the native compute observer sees it
+/// ([`Context::compute_watchdog_candidate`]): two equal stamps a bound apart
+/// are a guest that was charged no virtual time and began no boundary
+/// operation in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ComputeStamp {
+    /// Boundary operations begun, not counting a task's yield and the
+    /// scheduler's decision.
+    pub operations: u64,
+    /// The CPU time charged to the guest's calls.
+    pub charged_nanos: u64,
+}
+
 impl Context {
-    /// Read-only native watchdog observation. The embedder must hold its
-    /// context AND thread-transition locks. Existing scheduler bookkeeping is
-    /// the authority; untimed parked peers and a lone running task never qualify.
-    /// A peer parked until a future deadline qualifies: call-free code keeps
-    /// that deadline from arriving, since only a boundary operation advances
-    /// virtual time. The expiry authority answers which deadlines are future;
-    /// a reached one has already expired and left its task runnable.
+    /// Read-only native watchdog observation: what the host-time observer
+    /// compares between two looks, and the task it would stop. The embedder
+    /// must hold its context AND thread-transition locks.
+    ///
+    /// The stamp changes whenever the guest reaches the runtime in a way
+    /// that can lead somewhere: its calls are charged (a call's charge, or a
+    /// compute meter's batch, handed over at a gateway, which moves virtual
+    /// time), or an operation other than a yield and the decision that
+    /// follows it begins. A yield that charges nothing is an instrumented
+    /// build's edge hook (`--yield-stride`): it lets the scheduler choose,
+    /// but a guest that does nothing else between two of them has moved no
+    /// time, exactly like the same loop without the hook, so it must not
+    /// look like progress here. A call answered without a gateway (a cached
+    /// identity query) moves nothing either until the next gateway hands
+    /// its charge over, so a loop of only those is one more loop that
+    /// reaches nothing.
+    ///
+    /// A candidate exists while a thread runs guest code: the task the
+    /// scheduler selected, unparked, or the main thread before the embedder
+    /// manages any task (`None`). Nothing else can end such a run: only a
+    /// boundary operation advances virtual time, so a peer's deadline never
+    /// arrives, and with no peer at all there is nothing left to wait for.
     /// Host-time detection is disabled on replay: its recorded stop is final.
-    pub fn compute_watchdog_candidate(&self) -> Option<(u64, TaskId)> {
+    pub fn compute_watchdog_candidate(&self) -> Option<(ComputeStamp, Option<TaskId>)> {
         if !matches!(self.execution, Execution::Seeded | Execution::Record { .. }) {
             return None;
         }
-        let running = self.charges.running?;
-        self.compute_starves_peer(running)
-            .then_some((self.steps, running))
+        let running = self.charges.running;
+        self.computing(running).then_some((
+            ComputeStamp {
+                operations: self.steps - self.yield_steps,
+                charged_nanos: self.charges.total().total_ns(),
+            },
+            running,
+        ))
     }
 
-    fn compute_starves_peer(&self, running: TaskId) -> bool {
-        self.charges.running == Some(running)
-            && self.scheduler_tasks.contains(&running)
-            && !self.parked_tasks.contains(&running)
-            && self.scheduler_tasks.iter().any(|task| {
-                *task != running
-                    && (!self.parked_tasks.contains(task) || self.has_future_deadline(*task))
-            })
+    /// Whether `running` is the thread that runs guest code now: the selected,
+    /// unparked task, or (`None`) the main thread of a run with no task yet.
+    fn computing(&self, running: Option<TaskId>) -> bool {
+        match running {
+            Some(task) => {
+                self.charges.running == Some(task)
+                    && self.scheduler_tasks.contains(&task)
+                    && !self.parked_tasks.contains(&task)
+            }
+            None => self.charges.running.is_none() && self.scheduler_tasks.is_empty(),
+        }
     }
 
     /// A replay terminal boundary already reached, without asking the guest for
@@ -460,8 +496,8 @@ impl Context {
 
     /// Commit a native host-time stop. This changes no driver or scheduler
     /// answer. The valid recorded prefix and its terminal fact are flushed once.
-    pub fn stop_compute_bound(&mut self, task: TaskId) -> RuntimeError {
-        if !self.compute_starves_peer(task) {
+    pub fn stop_compute_bound(&mut self, task: Option<TaskId>) -> RuntimeError {
+        if !self.computing(task) {
             return RuntimeError::ComputeStopState;
         }
         // steps counts an operation at begin, before custom perform has an
@@ -547,11 +583,22 @@ impl Context {
     /// Feed one beginning boundary operation to the progress trackers, unless
     /// its progress waits on its outcome ([`Context::track_outcome`]).
     pub(super) fn track_begin(&mut self, operation: &Operation) -> Result<(), RuntimeError> {
+        if matches!(
+            operation,
+            Operation::TaskYield { .. } | Operation::SchedulerNext
+        ) {
+            self.yield_steps += 1;
+        }
         let progress = match progress_of(operation) {
             Progress::Always => true,
             Progress::Never => false,
             Progress::ByOutcome => return Ok(()),
         };
+        self.track(operation, progress)
+    }
+
+    /// Feed one operation, progress or not, to every progress tracker.
+    fn track(&mut self, operation: &Operation, progress: bool) -> Result<(), RuntimeError> {
         self.liveness_track(progress)?;
         self.spin_track(operation, progress)
     }
@@ -567,9 +614,7 @@ impl Context {
         if progress_of(operation) != Progress::ByOutcome {
             return Ok(());
         }
-        let progress = outcome_is_progress(operation, outcome);
-        self.liveness_track(progress)?;
-        self.spin_track(operation, progress)
+        self.track(operation, outcome_is_progress(operation, outcome))
     }
 
     /// Advance the liveness watchdog for one boundary op. Reads virtual time and

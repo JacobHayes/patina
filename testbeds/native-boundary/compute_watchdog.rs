@@ -299,9 +299,29 @@ fn main() {
             worker.join().unwrap();
         }
         "single" => {
-            // Arm the real observer before testing its lone-task exemption.
+            // A finite computation with every other thread gone.
             std::thread::spawn(|| {}).join().unwrap();
             compute();
+        }
+        "alone" => {
+            // The main thread of a guest that never starts another: no call,
+            // no peer, no end.
+            eprint!("COMPUTE_PARTIAL_STDERR");
+            loop {
+                std::hint::spin_loop();
+            }
+        }
+        "parked-spin" => {
+            // A worker that spins for good while the only other thread waits
+            // for it without a deadline: nobody is starved, and nothing ends
+            // the run.
+            std::thread::spawn(|| {
+                loop {
+                    std::hint::spin_loop();
+                }
+            })
+            .join()
+            .unwrap();
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         "small-stack" => {
@@ -341,7 +361,7 @@ fn main() {
             worker.join().unwrap();
         }
         _ => panic!(
-            "expected starved, worker-starved, allocator-held, custom-spin, handler-loop, handler-alloc, overflow-held, payload-held, sync-buffer, finite, single, or parked"
+            "expected starved, worker-starved, allocator-held, custom-spin, handler-loop, handler-alloc, overflow-held, payload-held, sync-buffer, finite, single, alone, parked-spin, or parked"
         ),
     }
     println!("COMPUTE_RESULT completed=true");

@@ -1397,6 +1397,12 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     finish_shim_bootstrap();
     // What this thread counted until now ran before the modeled run began.
     crate::charge::discard();
+    // A guest is watched from here on, whether or not it ever starts a
+    // thread. The observer's host threads are created through the host-alias
+    // table, which only a `patina build` link resolves; any other embedding
+    // starts them with its first thread (`thread::lifecycle`).
+    #[cfg(patina_posix_exports)]
+    crate::watchdog::start();
     // From here the guest runs under the runtime, and a death the shim does
     // not claim with a stop record is the guest's own.
     crate::process::record_runtime_started();

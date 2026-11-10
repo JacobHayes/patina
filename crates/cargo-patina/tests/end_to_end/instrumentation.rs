@@ -481,4 +481,128 @@ fn main() {
             String::from_utf8_lossy(&replayed.stderr)
         );
     }
+
+    // A spin-wait on an atomic: the spinner makes no call until another
+    // thread sets the flag (`set`), or for good (`never`); or it writes to a
+    // file at every turn, a call that gets somewhere, until the flag is set
+    // (`log`).
+    const ATOMIC_SPIN_SOURCE: &str = r#"
+use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+
+fn main() {
+    let mode = std::env::args().nth(1).unwrap();
+    let set = mode != "never";
+    let log = mode == "log";
+    let flag = Arc::new(AtomicBool::new(false));
+    let f = flag.clone();
+    let spinner = thread::spawn(move || {
+        let mut file = log.then(|| std::fs::File::create("/tmp/spin.log").unwrap());
+        while !f.load(Ordering::Acquire) {
+            match &mut file {
+                Some(file) => file.write_all(b".").unwrap(),
+                None => std::hint::spin_loop(),
+            }
+        }
+    });
+    let setter = thread::spawn(move || {
+        if set {
+            flag.store(true, Ordering::Release)
+        }
+    });
+    setter.join().unwrap();
+    spinner.join().unwrap();
+    println!("SPIN_DONE");
+}
+"#;
+
+    // Every combination of the scheduling options ends the spin-wait in one
+    // outcome. Where the edge hook hands the scheduler the spinner again and
+    // again, the setter still gets its turn (under PCT the spinner would
+    // otherwise keep its priority for good) and the run is clean; where
+    // nothing can set the flag, or nothing lets the scheduler choose, the
+    // host-time bound ends it as a timeout, never a hang.
+    #[test]
+    fn a_spin_wait_ends_under_every_combination_of_scheduling_options() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("spin.rs");
+        fs::write(&source, ATOMIC_SPIN_SOURCE).unwrap();
+        let workspace = native_workspace();
+        let binary = dir.path().join("spin");
+        let bin = binary.to_str().unwrap();
+        invoke(
+            workspace,
+            &[
+                "build",
+                source.to_str().unwrap(),
+                "--output",
+                bin,
+                "--instrument",
+            ],
+        );
+        let run = |options: &[&str], mode: &str| -> serde_json::Value {
+            let mut arguments = vec!["run", bin, "--format", "json"];
+            arguments.extend_from_slice(options);
+            arguments.extend_from_slice(&["--", mode]);
+            let output = invoke_with_deadline(
+                env!("CARGO_BIN_EXE_patina"),
+                workspace,
+                &arguments,
+                Duration::from_secs(60),
+            )
+            .unwrap_or_else(|| panic!("the run never ended: {options:?} {mode}"));
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "no result for {options:?} {mode}: {error}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+        };
+        let outcome = |result: &serde_json::Value| {
+            (
+                result["result"].as_str().unwrap().to_owned(),
+                result["exit_code"].as_i64().unwrap(),
+            )
+        };
+        let clean = ("ok".to_owned(), 0);
+        let timeout = ("timeout".to_owned(), 2);
+        for options in [
+            &["--yield-stride", "64", "--seed", "1"][..],
+            &["--sched-pct=1", "--yield-stride", "64", "--seed", "1"],
+            &["--sched-pct=1", "--yield-stride", "64", "--seed", "2"],
+            &["--sched-pct=3", "--yield-stride", "64", "--seed", "1"],
+            &["--sched-pct=1", "--yield-stride", "1", "--seed", "1"],
+        ] {
+            let result = run(options, "set");
+            assert_eq!(outcome(&result), clean, "{options:?}: {result:#}");
+            assert_eq!(result["stdout"], "SPIN_DONE\n", "{options:?}");
+        }
+        // A spinner whose every turn is a call that gets somewhere, under
+        // PCT, on seeds where it outranks the setter: the setter still runs.
+        for seed in ["1", "2", "4"] {
+            let options = ["--sched-pct=1", "--seed", seed];
+            let result = run(&options, "log");
+            assert_eq!(outcome(&result), clean, "{options:?}: {result:#}");
+        }
+        // No edge yields: the spinner never lets the scheduler choose, and
+        // under depth-1 PCT it is the first to run. With them and no setter:
+        // the scheduler is asked for good and the guest still does nothing.
+        // Both end at the bound, with or without a recording.
+        let bound = ["--compute-watchdog-ms", "200", "--seed", "1"];
+        let trace = dir.path().join("spin.patina");
+        let record = ["--record", trace.to_str().unwrap()];
+        for (options, mode) in [
+            (&["--sched-pct=1"][..], "set"),
+            (&["--yield-stride", "64"], "never"),
+            (&["--sched-pct=1", "--yield-stride", "64"], "never"),
+            (&["--yield-stride", "64", "--record", record[1]], "never"),
+        ] {
+            let mut options = options.to_vec();
+            options.extend_from_slice(&bound);
+            let result = run(&options, mode);
+            assert_eq!(outcome(&result), timeout, "{options:?} {mode}: {result:#}");
+        }
+    }
 }

@@ -180,9 +180,10 @@ into the trace so replay reproduces them flag-free.
   `campaign --yield-stride` sweeps strides from 1 to 1024 per generation.
 - **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
   detector) and `--converge-within` (heal-then-converge budget).
-  Native call-free compute that starves another managed thread stops by name
-  after 10 host seconds (`--compute-watchdog-ms MS`): a known cooperative-runtime
-  limit, not a guest bug ([details](../ARCHITECTURE.md#native-compute-only-starvation)).
+  A native guest that goes 10 host seconds without a call that reaches the
+  runtime stops by name (`--compute-watchdog-ms MS`), as a `timeout`: a known
+  cooperative-runtime limit, not a finding
+  ([details](../ARCHITECTURE.md#native-compute-only-starvation)).
 
 ## The SDK
 

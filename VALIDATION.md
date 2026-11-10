@@ -131,10 +131,12 @@ Oracle: the fs-crash unit suite, native crash-restart record/replay, and a
 native store that fails closed after a targeted (`--fs-error-at`) writeback
 failure and re-reads the disk.
 
-**Liveness.** A wedged run, frozen-clock churn or call-free compute starving a
-timed peer stops with a `PATINA_VIOLATION liveness` finding and a replayable
-terminal prefix. Oracle: planted spins (main thread, worker, allocator-held,
-small stack) and parked/single-task controls that must not fire.
+**Liveness.** A wedged run, frozen-clock churn or a guest that makes no call
+for the host-time bound stops with a `PATINA_VIOLATION liveness` line and a
+replayable terminal prefix, under every scheduling option. Oracle: planted
+spins (main thread, worker, a guest with no other thread, a worker beside a
+parked thread, allocator-held, small stack, an instrumented spin-wait under
+PCT and a yield stride) and finite-compute controls that must complete.
 
 **One outcome model.** Every run ends in one class (`patina_dst_abi::RunClass`),
 whose attribution and exit status are functions of it. The native shim cannot

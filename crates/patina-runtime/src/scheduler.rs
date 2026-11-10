@@ -9,7 +9,11 @@
 //!   each task is assigned a random priority; `d-1` seed-placed priority-change
 //!   points demote the running task as the schedule advances; the highest-priority
 //!   runnable task always runs. This gives a probabilistic guarantee of finding
-//!   bugs of ordering-depth `d`.
+//!   bugs of ordering-depth `d`. A task chosen at
+//!   [`PCT_STARVATION_DECISIONS`] decisions in a row over a runnable peer is
+//!   moved below every other task, so no peer waits on it for good. Those
+//!   moves are preemptions beyond the `d-1` change points, so the depth
+//!   guarantee holds for bugs within a slice of that many decisions.
 //!
 //! The policy draws exclusively from its own domain-separated `SplitMix64`
 //! stream, never the default selection generator, so enabling it leaves the
@@ -111,6 +115,12 @@ struct PctState {
     /// demotes).
     last_selected: Option<TaskId>,
     change_points_hit: u32,
+    /// Consecutive decisions that chose `last_selected` again over a runnable
+    /// peer ([`PCT_STARVATION_DECISIONS`]).
+    starving_decisions: u64,
+    /// The priority the next starving task is moved to: below every spawn
+    /// and change-point priority, and below every task moved before it.
+    floor: i64,
 }
 
 /// The high band a freshly spawned task draws its priority from: `depth +
@@ -118,6 +128,22 @@ struct PctState {
 /// (`1..=depth-1`). Ties are broken by lowest task id, so exact collisions are
 /// harmless.
 const PCT_PRIORITY_BAND: u64 = 1 << 20;
+
+/// Consecutive decisions that may choose the same task over a runnable peer:
+/// 1024.
+///
+/// PCT runs the highest-priority runnable task until a change point, which
+/// assumes that task gets somewhere without its peers. One that spins until
+/// a peer acts (on a flag, yielding, polling the clock, or logging as it
+/// waits) gets nowhere until that peer runs, and at depth 1, or once the
+/// change points are spent, no peer ever would: the run would spin for good
+/// with nothing wrong in the guest. A real scheduler preempts the spinner;
+/// here the decision after the run moves it below every other task. The
+/// count is of decisions alone, whatever the task did between them: the
+/// runtime cannot tell a spin that logs from work, and a bounded slice is
+/// what guarantees every peer runs. So under PCT a task holds the baton for
+/// at most this many decisions in a row while a peer is runnable.
+const PCT_STARVATION_DECISIONS: u64 = 1_024;
 
 impl PctState {
     fn new(config: PctConfig, seed: u64) -> Self {
@@ -147,6 +173,8 @@ impl PctState {
             step: 0,
             last_selected: None,
             change_points_hit: 0,
+            starving_decisions: 0,
+            floor: 0,
         }
     }
 
@@ -163,15 +191,27 @@ impl PctState {
     }
 
     /// Advance the decision counter and, if this step is a change point, demote
-    /// the currently-running task so a higher-priority task preempts it.
+    /// the currently-running task so a higher-priority task preempts it. A
+    /// task chosen [`PCT_STARVATION_DECISIONS`] times running over a runnable
+    /// peer is moved below every other task.
     fn advance(&mut self) {
         self.step += 1;
         if let Some(&new_priority) = self.change_points.get(&self.step)
             && let Some(task) = self.last_selected
             && let Some(slot) = self.priorities.get_mut(&task)
         {
-            *slot = new_priority;
+            // A task starvation already moved below every other keeps that
+            // place: a change point only ever lowers a priority.
+            *slot = (*slot).min(new_priority);
             self.change_points_hit += 1;
+        }
+        if self.starving_decisions >= PCT_STARVATION_DECISIONS
+            && let Some(task) = self.last_selected
+            && let Some(slot) = self.priorities.get_mut(&task)
+        {
+            self.floor -= 1;
+            *slot = self.floor;
+            self.starving_decisions = 0;
         }
     }
 
@@ -195,9 +235,23 @@ impl PctState {
     }
 
     /// Pick the highest-priority task among `candidates`, ties broken by lowest
-    /// task id. `candidates` is non-empty.
+    /// task id, and count the decision toward [`PCT_STARVATION_DECISIONS`]
+    /// when it chose the previous task again over a runnable peer.
+    /// `candidates` is non-empty.
     fn pick(&mut self, candidates: &[TaskId]) -> TaskId {
-        let selected = *candidates
+        let previous = self.last_selected;
+        let selected = self.highest(candidates);
+        if previous == Some(selected) && candidates.len() > 1 {
+            self.starving_decisions += 1;
+        } else {
+            self.starving_decisions = 0;
+        }
+        self.last_selected = Some(selected);
+        selected
+    }
+
+    fn highest(&self, candidates: &[TaskId]) -> TaskId {
+        *candidates
             .iter()
             .max_by(|a, b| {
                 let pa = self
@@ -214,9 +268,7 @@ impl PctState {
                 // the id comparison relative to the priority comparison.
                 pa.cmp(&pb).then_with(|| b.0.cmp(&a.0))
             })
-            .expect("candidate set is non-empty");
-        self.last_selected = Some(selected);
-        selected
+            .expect("candidate set is non-empty")
     }
 }
 
@@ -562,6 +614,46 @@ mod tests {
             order.iter().any(|task| *task != order[0]),
             "a live change point must preempt: {order:?}"
         );
+    }
+
+    #[test]
+    fn pct_lets_a_peer_run_once_the_chosen_task_only_spins() {
+        // Depth 1 has no change points: the highest-priority task is chosen at
+        // every decision. After a bounded run of decisions each peer gets its
+        // turn, in priority order, and the first runs again only once they
+        // have all run as long.
+        let policy = SchedulePolicy {
+            pct: Some(PctConfig {
+                depth: 1,
+                steps: 100,
+            }),
+        };
+        let spin = |scheduler: &mut DetScheduler| {
+            let mut order = Vec::new();
+            for _ in 0..4 * PCT_STARVATION_DECISIONS + 8 {
+                let task = scheduler.next().unwrap().unwrap();
+                if order.last() != Some(&task) {
+                    order.push(task);
+                }
+                scheduler.yield_task(task).unwrap();
+            }
+            order
+        };
+        let mut scheduler = DetScheduler::with_policy(5, policy);
+        for label in ["a", "b", "c"] {
+            scheduler.spawn(label).unwrap();
+        }
+        let order = spin(&mut scheduler);
+        assert_eq!(order.len(), 5, "{order:?}");
+        let mut turns = order[..3].to_vec();
+        turns.sort();
+        assert_eq!(turns, [TaskId(1), TaskId(2), TaskId(3)]);
+        assert_eq!(order[3..], order[..2]);
+
+        // A task with no runnable peer to starve keeps its priority.
+        let mut alone = DetScheduler::with_policy(5, policy);
+        alone.spawn("a").unwrap();
+        assert_eq!(spin(&mut alone), [TaskId(1)]);
     }
 
     #[test]

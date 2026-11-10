@@ -76,7 +76,9 @@ reaches the timer before it parks, and the signal interrupts it.
 ### Call-free compute
 
 `compute_watchdog.rs` plants main- and worker-thread atomic spins with a runnable
-peer, plus spins that hold the guest allocator with scalar-only, byte-bearing,
+peer, the main thread of a guest with no other thread spinning (`alone`), a
+worker spinning while the only other thread waits for it (`parked-spin`), plus
+spins that hold the guest allocator with scalar-only, byte-bearing,
 and overflowed recordings. They detect allocating or deallocating during stop
 export, including base64 helpers and overflow-error construction. `overflow-held`
 uses 25 eight-MiB results to exceed the real base64-encoded trace budget and must
@@ -87,12 +89,12 @@ committed prefix before requesting its missing outcome. `handler-loop` and
 private termination must never call. `sync-buffer` leaves C stdout buffered
 before the custom begin that stops synchronously on replay; the refusal must
 salvage it without enabling callback salvage on the asynchronous path. `single`
-first spawns and joins a trivial peer to arm the observer. It and `parked` run
-long compute with no runnable peer (the latter uses a mutex/condvar handshake,
-never a synchronization sleep). `finite` keeps a peer runnable while doing
-finite call-free work: it must complete below a bound as long as the test's
-deadline, however loaded the host, but recording with a short bound and
-replaying with a long bound must both stop. A partial stderr line before peer
+and `parked` run finite compute with no runnable peer (the first after joining
+a trivial peer, the second beside one parked through a mutex/condvar handshake,
+never a synchronization sleep), and `finite` keeps a peer runnable while doing
+finite call-free work: each must complete below a bound as long as the test's
+deadline, however loaded the host, but `finite` recorded with a short bound and
+replayed with a long one must stop both times. A partial stderr line before peer
 creation pins fresh-line diagnostic framing even if the run stops as soon as
 the peer exists. `native_workloads` requires named known-limit findings, a nonzero
 interrupted PC or explicit sampling deadline, and valid eligible terminal traces.

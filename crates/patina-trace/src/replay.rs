@@ -39,10 +39,10 @@ impl Replayer {
         }
         let decisions = bundle.resolved_timeline(MAIN_TIMELINE)?;
         if let Some(stop) = bundle.metadata.compute_stop
-            && (stop.steps != decisions.len() as u64 || stop.task.0 == 0)
+            && (stop.steps != decisions.len() as u64 || stop.task.is_some_and(|task| task.0 == 0))
         {
             return Err(TraceError::Invalid(
-                "compute stop must name a task at the end of its exact prefix".into(),
+                "compute stop must name a task, or none, at the end of its exact prefix".into(),
             ));
         }
         Ok(Self {

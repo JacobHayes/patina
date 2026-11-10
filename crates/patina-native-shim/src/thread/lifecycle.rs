@@ -520,7 +520,7 @@ pub unsafe extern "C" fn patina_thread_create(
     // The watchdog's host threads map their stacks before the new thread
     // exists: a thread maps its private signal stack as it starts, and two
     // host threads mapping at once would leave the address space in an order
-    // no seed decides.
+    // no seed decides. A `patina build` guest started them with its runtime.
     crate::watchdog::start();
     let mut handle: *mut c_void = core::ptr::null_mut();
     // SAFETY: `spawn_host_thread` creates a real, non-interposed host OS

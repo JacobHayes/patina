@@ -261,7 +261,7 @@ pub(super) const COMPUTE_WATCHDOG_FLAG: Flag = f(
     "--compute-watchdog-ms",
     None,
     Value::Required("MS", Kind::WatchdogMillis),
-    "Native call-free starvation bound in host milliseconds (1..=86400000; default 10000); replay follows the recorded stop, not host time.",
+    "Host milliseconds a native guest may run without a call that reaches the runtime before the run stops as a timeout (1..=86400000; default 10000); replay follows the recorded stop, not host time.",
     false,
 );
 
