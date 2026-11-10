@@ -131,7 +131,6 @@ pub unsafe extern "C" fn patina_signal_action(
     {
         return -i64::from(EINVAL);
     }
-    // Rust std performs registration before a deferred harness installs Context.
     // Dispositions are unrecorded process state; do not activate the scheduler.
     let mut state = lock_state();
     let previous = state.signals.actions[sig as usize];

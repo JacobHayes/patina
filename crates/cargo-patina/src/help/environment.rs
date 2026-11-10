@@ -60,11 +60,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Inherited descriptor streaming the --mount host-directory image to the guest.",
     },
     EnvVar {
-        name: "PATINA_RT_DEFER_INIT",
-        scope: "protocol",
-        doc: "Set for a patina-dst-harness binary (recognised by its embedded marker): defer runtime installation so the harness owns configure-then-run.",
-    },
-    EnvVar {
         name: "PATINA_RT_STEP_BUDGET",
         scope: "protocol",
         doc: "Maximum boundary operations (mirrors --budget).",

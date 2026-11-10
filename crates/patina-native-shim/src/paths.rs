@@ -36,8 +36,8 @@ use patina_dst_runtime::{Bookkeeping, RuntimeError};
 use crate::fdtable::FdKind;
 use crate::memdev::MemDevice;
 use crate::{
-    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, mark_boundary,
-    resolve_fd, with_bookkeeping, with_context, with_context_raw,
+    EACCES, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR, EXDEV, SpinMutex, ensure_runtime, resolve_fd,
+    with_bookkeeping, with_context, with_context_raw,
 };
 
 /// Linux `PATH_MAX`: a path (with its terminator) at or past this length is
@@ -248,7 +248,6 @@ pub(crate) fn cwd_path() -> Result<String, c_int> {
 fn namei<T>(
     lookup: impl FnOnce(&mut Bookkeeping<'_>) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
-    mark_boundary();
     ensure_runtime()?;
     with_bookkeeping(lookup)
 }

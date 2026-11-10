@@ -244,8 +244,7 @@ into the trace so replay reproduces them flag-free.
   inject seeded resolution failures and delays against the defined names. A
   server that binds `0.0.0.0:PORT` is reachable at any address on that port, so
   ordinary `INADDR_ANY` server code is reached by a resolved name with no
-  service-side registration — and a harness can name its own services with
-  `HarnessBuilder::dns_service`, which allocates the virtual address for you.
+  service-side registration.
   `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
   per generation and classifies an inert one as `VACUOUS` with the dns plane in its signature.
 - **Entropy**: `--entropy-fail-permille` models a guest that starts before the
@@ -363,9 +362,8 @@ case. Two things differ from plain `cargo test`:
 - **Campaigns**: deterministic multi-generation sweeps with an outcome
   classifier (finding, harness, vacuity and catch-all classes),
   failure-signature dedup, and per-failure repro commands.
-- **Two adoption modes** (see [USAGE-MODES.md](./USAGE-MODES.md)): SDK-only
-  (`patina-dst`, with run parameters through `patina_dst::param`) and a
-  configure-then-run harness (`patina-dst-harness`).
+- **The SDK** (see [USAGE-MODES.md](./USAGE-MODES.md)): `patina-dst`, with
+  run parameters through `patina_dst::param`.
 
 ### Platforms
 
@@ -415,7 +413,7 @@ silently:
 
 - [TUTORIAL.md](./TUTORIAL.md) — hands-on: instrument, sweep, catch, replay,
   and render a planted bug.
-- [USAGE-MODES.md](./USAGE-MODES.md) — the three adoption levels and crate map.
+- [USAGE-MODES.md](./USAGE-MODES.md) — the SDK, Go and Python guests, and the crate map.
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — system design: targets, drivers,
   wrappers, traces, and the native shim.
 - [INTENTS.md](./INTENTS.md) — goals, non-goals, trade-offs, and the niche

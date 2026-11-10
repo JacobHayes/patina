@@ -144,7 +144,7 @@ impl ReportConfig {
         self.enabled[report as usize]
     }
 
-    /// Turn one report on or off explicitly (the harness overlay path).
+    /// Turn one report on or off explicitly.
     pub const fn set(&mut self, report: Report, enabled: bool) {
         self.enabled[report as usize] = enabled;
     }

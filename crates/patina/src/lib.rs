@@ -54,9 +54,8 @@
 //!   the operation, which is what `--custom-op-fail-permille` acts on.
 //!   [`custom_op`] and [`custom_op_faultable`] are the same two with
 //!   serde-typed keys and results.
-//! - [`param`] — a named run parameter (`patina run --param K=V`, or a
-//!   harness's `.param()` default), recorded and restored on replay; `None`
-//!   outside Patina.
+//! - [`param`] — a named run parameter (`patina run --param K=V`), recorded
+//!   and restored on replay; `None` outside Patina.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
 //! - With the default-off `macros` feature, `#[patina_dst::test]` rebuilds the
 //!   same libtest harness shim-linked and sweeps the annotated test under plain
@@ -161,13 +160,9 @@
 //! shim path. Under `patina build`/`run` the native shim
 //! supplies the deterministic runtime below ordinary
 //! `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented production code
-//! needs no explicit runtime dependency (usage mode 1 of [USAGE-MODES.md]).
+//! needs no explicit runtime dependency (see [USAGE-MODES.md]).
 //! The `cfg(patina)`/`cfg(patina_shim)` markers this crate compiles against are
 //! injected by `patina build` — an adopter never sets them.
-//!
-//! To configure Patina in code and then drive normal application code through
-//! the same shims, use the shim-backed harness crate `patina-dst-harness`
-//! (mode 2).
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
 //! [README]: https://github.com/JacobHayes/patina/blob/main/README.md

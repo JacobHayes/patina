@@ -54,10 +54,6 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
     ),
     ("must run under `patina run`", "no_runtime_installed"),
     (
-        "harness has not installed the runtime yet",
-        "harness_before_install",
-    ),
-    (
         "interposed call before deterministic runtime initialization",
         "preinit_interposed_call",
     ),

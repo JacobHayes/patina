@@ -291,8 +291,8 @@ fn allow_vehicle(vehicle: usize) -> Result<(), ()> {
 
 /// Main-thread SUD setup, before guest constructors. Arms only a managed run
 /// on a SUD-capable kernel. The libc frame restorer is captured even for a
-/// standalone run: Rust std registers handlers before reporting
-/// NotUnderPatina. A standalone run (no PATINA_RT_MODE) stays unarmed: its first
+/// standalone run: Rust std registers handlers before its first boundary
+/// effect. A standalone run (no PATINA_RT_MODE) stays unarmed: its first
 /// interposed boundary already fails closed.
 pub(super) unsafe fn sud_init(envp: *const *const c_char, probe: bool) {
     let managed = unsafe { env_has(envp, b"PATINA_RT_MODE") };

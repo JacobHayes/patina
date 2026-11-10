@@ -26,10 +26,7 @@ known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matchin
 denials to a loud warning (an instruction-class finding matches by its own \
 `instruction@.text+OFF` name or by the containing symbol its provenance names).\n\
 \n\
-A `patina-dst-harness` (configure-then-run) binary is recognised by the marker it \
-embeds and defers runtime installation on its own; no flag is needed on `run` or \
-`replay`. Reproduce a recorded run with \
-`patina replay`.",
+Reproduce a recorded run with `patina replay`.",
     families: &[fam(Family::Sole, "`run`", None)],
     groups: &[
         Group {

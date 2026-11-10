@@ -88,7 +88,6 @@ pub(crate) unsafe fn fs_read_segments(
 /// (a scheduling point), as a captured-stdio write is. A `--stdin` knob feeding
 /// bytes here is a later slice; the registry row's reasoning names it.
 fn stdin_read() -> isize {
-    crate::mark_boundary();
     if let Err(errno) = thread::sched_point() {
         return fail(errno) as isize;
     }

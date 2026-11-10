@@ -760,13 +760,12 @@ fn action_mask_deferred_pending_remains_visible_and_consumable() {
 
 /// Before the runtime is installed, signal and poll queries answer without
 /// installing the scheduler, and a scheduling point (a lock or a write the
-/// host's or the harness's own startup makes before `patina_harness_install`)
-/// has no charged time to show and marks no boundary, so the harness can still
-/// install. Shim code holding the Context lock that reaches a door taking a
-/// scheduling point (a diagnostic under the lock initialising std's stderr
-/// mutex, on macOS) takes no second Context lock.
+/// host's startup makes) has no charged time to show. Shim code holding the
+/// Context lock that reaches a door taking a scheduling point (a diagnostic
+/// under the lock initialising std's stderr mutex, on macOS) takes no second
+/// Context lock.
 #[test]
-fn startup_work_before_install_installs_nothing_and_marks_no_boundary() {
+fn startup_work_before_install_installs_nothing() {
     let name = test_name();
     if std::env::var("PATINA_SIGNAL_UNIT_CHILD").as_deref() != Ok(&name) {
         let output = reexec(&name, &[]);
@@ -778,7 +777,6 @@ fn startup_work_before_install_installs_nothing_and_marks_no_boundary() {
         return;
     }
     assert!(crate::slot().lock().is_none());
-    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
     install_handler(SIGUSR1, handler, 0, 0);
     let mut previous = Action::default();
     assert_eq!(
@@ -813,23 +811,7 @@ fn startup_work_before_install_installs_nothing_and_marks_no_boundary() {
     crate::charge::flush_now();
     assert!(crate::slot().lock().is_none());
     assert!(!lock_state().active);
-    assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
     let held = crate::slot().lock();
     assert_eq!(crate::thread::sched_point(), Ok(()));
     drop(held);
-}
-
-/// With the runtime installed, a scheduling point's charge bookkeeping
-/// (handing calls over, showing their time) is no boundary effect: a
-/// harness guest the supervisor already installed a runtime for still
-/// learns, at its own install, that one is installed.
-#[test]
-fn charge_bookkeeping_marks_no_boundary() {
-    isolated(|| {
-        crate::BOUNDARY_SEEN.store(false, Ordering::Relaxed);
-        crate::charge::count(patina_dst_abi::ChargeClass::Syscall);
-        assert_eq!(crate::thread::sched_point(), Ok(()));
-        crate::charge::flush_now();
-        assert!(!crate::BOUNDARY_SEEN.load(Ordering::Relaxed));
-    });
 }

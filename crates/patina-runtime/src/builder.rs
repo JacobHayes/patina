@@ -223,8 +223,7 @@ impl RuntimeBuilder {
         // Same contract for the guest's standard input.
         let mut replay_guest_stdin_override: Option<Option<Vec<u8>>> = None;
         // The recorded run parameters replace whatever the replaying process
-        // supplied: a harness re-installs its `.param()` defaults on replay, and
-        // the recording already holds those merged with the run's overrides.
+        // supplied.
         let mut replay_params_override: Option<BTreeMap<String, String>> = None;
         // Same contract for clock origins and the node name.
         let mut replay_realtime_epoch_override: Option<u64> = None;

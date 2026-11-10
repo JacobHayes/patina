@@ -163,8 +163,7 @@ the system-under-test with the SDK. Sweep seeds first; move to a campaign when
 you want fault shapes varied for you, failures deduplicated, and coverage
 accumulated. Wire two CI tiers: point-solution tests per PR, a campaign nightly.
 
-`USAGE-MODES.md` describes the three adoption levels (transparent SDK-only,
-shim-backed harness, explicit-context simulator) and which crate each needs.
+`USAGE-MODES.md` describes the SDK and the Go and Python guest paths.
 
 ## How to learn the current surface
 

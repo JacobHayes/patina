@@ -31,14 +31,12 @@ pub unsafe extern "C" fn patina_stdio_write(
     abort_if_init_failed();
     // Runtime diagnostics can print with Context/ThreadRuntime locked. They use
     // the same captured sink, but must not schedule or re-enter either lock.
-    // A guest write is a boundary effect, captured even before a harness
-    // installs the runtime (which then refuses), and takes its ordinary
-    // scheduling point.
-    if !in_shim_critical() {
-        mark_boundary();
-        if let Err(errno) = thread::sched_point() {
-            return fail(errno) as isize;
-        }
+    // A guest write is a boundary effect and takes its ordinary scheduling
+    // point.
+    if !in_shim_critical()
+        && let Err(errno) = thread::sched_point()
+    {
+        return fail(errno) as isize;
     }
     let bytes = if length == 0 {
         &[]
@@ -68,8 +66,7 @@ pub extern "C" fn patina_errno() -> c_int {
 // assigns is honoured and a `putenv` string stays aliased. The runtime's part
 // is the array the run STARTS with — the startup `--env` map, the one piece
 // the trace records, published once the ambient host environment is scrubbed
-// (and again when a deferred harness installs the runtime) — and the gates
-// below, which decide when the POSIX layer may answer at all.
+// — and the gates below, which decide when the POSIX layer may answer at all.
 //
 // Mutations are guest-driven and therefore deterministic: nothing is recorded
 // per mutation, and replay reproduces them by re-executing the guest.
@@ -79,8 +76,7 @@ pub extern "C" fn patina_errno() -> c_int {
 /// environment, and Rust/libc startup code can probe it before Patina's
 /// constructor runs, so those probes see the historical empty environment
 /// rather than the host's. A stored init error aborts, as every entry that
-/// answers without reaching `ensure_runtime` must; so does a lookup that beat
-/// a deferred harness install.
+/// answers without reaching `ensure_runtime` must.
 #[unsafe(no_mangle)]
 pub extern "C" fn patina_env_read_gate() -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
@@ -89,10 +85,6 @@ pub extern "C" fn patina_env_read_gate() -> c_int {
     }
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
         return 0;
-    }
-    let missing_context = slot().lock().is_none();
-    if missing_context && missing_context_is_pre_harness_install() {
-        abort_harness_before_install();
     }
     1
 }
@@ -113,9 +105,6 @@ pub extern "C" fn patina_env_write_gate() -> c_int {
     }
     let missing_context = slot().lock().is_none();
     if missing_context {
-        if missing_context_is_pre_harness_install() {
-            abort_harness_before_install();
-        }
         // A standalone run (or one past `patina_shutdown`) has no deterministic
         // environment to mutate; refuse rather than pretend the write took.
         let _ = host_write_all(
@@ -196,8 +185,7 @@ pub(crate) fn publish_environ(env: &BTreeMap<String, String>) {
 /// Publish `environ` from the installed context's startup map, or an empty
 /// array when no runtime is installed. The POSIX constructor then commits
 /// this map to the launcher's reserved initial-stack environment and scrubs
-/// the old entries before admitting guest environment reads. A deferred
-/// harness installation later replaces `environ` without rebaking the stack.
+/// the old entries before admitting guest environment reads.
 pub extern "C" fn patina_publish_environ() {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let guard = slot().lock();

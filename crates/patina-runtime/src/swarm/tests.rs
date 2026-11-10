@@ -161,7 +161,7 @@ fn seed_where_buggify_is(selected: bool) -> u64 {
         .expect("some seed in 0..1024 draws each way")
 }
 
-/// A harness keeps asking for buggify in code on replay. When the recording's
+/// A replay may keep asking for buggify. When the recording's
 /// swarm draw deselected it, the replay must accept the request and run with
 /// buggify disarmed, exactly as recorded, rather than refuse the configuration.
 #[test]

@@ -350,8 +350,8 @@ pub struct RunMetadata {
         with = "patina_dst_abi::option_bytes_base64"
     )]
     pub guest_stdin: Option<Vec<u8>>,
-    /// The run parameters (`run --param KEY=VALUE`, or a harness's
-    /// `.param()` defaults) the guest reads through `patina_dst::param`,
+    /// The run parameters (`run --param KEY=VALUE`) the guest reads through
+    /// `patina_dst::param`,
     /// authoritative on replay so a flag-free replay reproduces
     /// parameter-dependent guest behavior. Empty when the run had none. Not a
     /// fingerprint input: the recorded op-stream already reflects them.

@@ -70,7 +70,7 @@ pub unsafe extern "C" fn patina_start_prepare(
     let envp = unsafe { argv.add(argc as usize + 1) };
     unsafe { crate::posix_env::save_host(envp) };
     // The POSIX link supplies host aliases; install panic containment before
-    // any guest constructors, independently of whether Context is deferred.
+    // any guest constructors.
     crate::panic_boundary::install();
     let program = if argc > 0 {
         unsafe { *argv }

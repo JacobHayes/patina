@@ -194,7 +194,7 @@ fn buggify_config_from_record(record: &patina_dst_trace::BuggifyConfigRecord) ->
 /// (`None`) refuses an operator who enables it: the replay would claim coverage
 /// the recording never had. The exception is a trace whose swarm draw
 /// deselected buggify: the recording asked for it and had it masked, so a
-/// harness that still asks for it replays with buggify disarmed, as recorded.
+/// run that still asks for it replays with buggify disarmed, as recorded.
 pub(super) fn reconcile_replay_buggify(
     config: &RuntimeConfig,
     recorded: Option<&patina_dst_trace::BuggifyConfigRecord>,

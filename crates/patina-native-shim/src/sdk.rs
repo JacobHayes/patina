@@ -273,9 +273,9 @@ pub unsafe extern "C" fn patina_declare_site(
     if label.is_empty() || site.is_empty() {
         return fail(EINVAL);
     }
-    // A declaration is no effect of the guest's: it records nothing and marks
-    // no boundary, as the link-time table's declarations at install do not.
-    match with_context_bookkeeping(|context| context.declare_static_site(label, site, kind)) {
+    // A declaration is no effect of the guest's: it records nothing, as the
+    // link-time table's declarations at install do not.
+    match with_context_raw(|context| context.declare_static_site(label, site, kind)) {
         Ok(SiteOutcome::DuplicateLabel) => {
             abort_with_buggify_marker("PATINA_BUGGIFY_DUPLICATE_LABEL", label)
         }

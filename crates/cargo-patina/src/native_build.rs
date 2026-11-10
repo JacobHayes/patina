@@ -883,14 +883,6 @@ pub(super) fn instrumentation_fingerprint(base: &str, instrumentation: Instrumen
     }
 }
 
-/// Whether the program whose bytes are `image` is a `patina-dst-harness` binary,
-/// recovered from the marker that crate embeds. A harness owns runtime
-/// installation, so the supervisor defers it for such a program on every run,
-/// replay and campaign generation alike, with no flag to repeat.
-pub(super) fn binary_is_harness(image: &[u8]) -> bool {
-    memchr::memmem::find(image, patina_dst_runtime::HARNESS_MARKER).is_some()
-}
-
 /// The fingerprint a native run hands the runtime: the base fingerprint, the
 /// instrumentation suffix and the mounted-corpus suffix. Folding the filesystem
 /// image hash in means a trace recorded against one corpus fails closed on
@@ -1049,15 +1041,5 @@ mod tests {
             instrumentation_fingerprint(DEFAULT_NATIVE_FINGERPRINT, instrumented),
             DEFAULT_NATIVE_FINGERPRINT
         );
-    }
-
-    #[test]
-    fn a_harness_binary_is_recognised_by_its_embedded_marker() {
-        let mut image = vec![0u8; 200_000];
-        assert!(!binary_is_harness(&image));
-        let marker = patina_dst_runtime::HARNESS_MARKER;
-        let at = 64 * 1024 - (marker.len() / 2);
-        image[at..at + marker.len()].copy_from_slice(marker);
-        assert!(binary_is_harness(&image));
     }
 }

@@ -5,45 +5,6 @@ mod tests {
     use super::super::run_facts::{outcome_guest, shared_sdk_guest};
     use super::super::*;
 
-    // Gate: a `patina-dst-harness` binary is sweepable with no flag. The binary
-    // carries its own marker, so every generation's child `run` defers runtime
-    // installation and the guest's install succeeds.
-    #[test]
-    fn campaign_sweeps_a_harness_binary_without_a_flag() {
-        let directory = tempdir().unwrap();
-        let guest = super::super::sdk_harness::harness_guest();
-
-        let swept = campaign_run(&directory.path().join("green"), &guest, &[]);
-        assert!(
-            swept.status.success(),
-            "a harness binary must be sweepable:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&swept.stdout),
-            String::from_utf8_lossy(&swept.stderr)
-        );
-        assert_eq!(campaign_json_stdout(&swept)["classes"]["OK"], 2);
-
-        // A continuation needs nothing re-supplied either.
-        let extended = invoke_unchecked(
-            env!("CARGO_BIN_EXE_patina"),
-            native_workspace(),
-            &[
-                "campaign",
-                "--extend",
-                "1",
-                "--out-dir",
-                directory.path().join("green").to_str().unwrap(),
-                "--format",
-                "json",
-            ],
-        );
-        assert!(
-            extended.status.success(),
-            "a resumed harness campaign must run unchanged:\nstderr:\n{}",
-            String::from_utf8_lossy(&extended.stderr)
-        );
-        assert_eq!(campaign_json_stdout(&extended)["classes"]["OK"], 3);
-    }
-
     // One native guest, several outcomes, each landing in the class its attribution
     // earns:
     //

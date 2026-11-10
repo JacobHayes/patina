@@ -129,7 +129,7 @@ void patina_control_set_entry(const char *entry);
  * `patina_env_read_gate` 1 to read `environ`, 0 to answer NULL (before the
  * startup constructor finishes); `patina_env_write_gate` 0 to mutate it, -1
  * with patina_errno ENOSYS without an installed runtime. Both abort on a
- * stored init error or an access that beat a deferred harness install.
+ * stored init error.
  */
 int32_t patina_env_read_gate(void);
 int32_t patina_env_write_gate(void);
@@ -138,7 +138,7 @@ void patina_publish_environ(void);
 /*
  * The POSIX layer's stdio flush and stdout salvage, registered at startup.
  * patina_shutdown calls the flush first, so the exit paths (the atexit
- * finalizer, a harness's finalize) write what the streams buffered, as glibc's
+ * finalizer) write what the streams buffered, as glibc's
  * exit does; the runtime's abort, fatal-signal and raw exit_group paths
  * finalize without it. The salvage hands over (and empties) stdout's buffer
  * without writing it: every path on which patina itself ends the run (a

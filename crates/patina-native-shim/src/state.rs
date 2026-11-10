@@ -105,7 +105,6 @@ pub(crate) fn at_free_numbers<T>(mut call: impl FnMut() -> Result<T, c_int>) -> 
         Err(EMFILE) => {}
         answer => return answer,
     }
-    mark_boundary();
     ensure_runtime()?;
     thread::sched_point()?;
     call()

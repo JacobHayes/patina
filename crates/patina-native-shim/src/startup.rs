@@ -1,4 +1,4 @@
-//! Native constructor and deferred-harness runtime installation.
+//! Native constructor and runtime installation.
 
 use super::*;
 
@@ -47,31 +47,9 @@ pub unsafe extern "C" fn patina_control_set_entry(entry: *const c_char) {
     if !name.starts_with("PATINA_") {
         return;
     }
-    let mut plane = control_plane().lock();
-    let value = match plane.get(name) {
-        // A later entry for the run parameters (a harness's `.param()`
-        // defaults) merges under the captured one (`run --param`): the operator's
-        // value wins per key.
-        Some(existing) if name == patina_dst_runtime::ENV_PARAMS_JSON => {
-            merge_params_json(value, existing)
-        }
-        _ => value.to_owned(),
-    };
-    plane.insert(name.to_owned(), value);
-}
-
-/// Merge two `PATINA_RT_PARAMS_JSON` objects, `winning` taking precedence per
-/// key. A malformed side is kept verbatim so the runtime's parser reports it.
-fn merge_params_json(defaults: &str, winning: &str) -> String {
-    let parse = |json: &str| serde_json::from_str::<BTreeMap<String, String>>(json);
-    match (parse(defaults), parse(winning)) {
-        (Ok(mut merged), Ok(winning)) => {
-            merged.extend(winning);
-            serde_json::to_string(&merged).unwrap_or_else(|_| defaults.to_owned())
-        }
-        (Err(_), _) => defaults.to_owned(),
-        (_, Err(_)) => winning.to_owned(),
-    }
+    control_plane()
+        .lock()
+        .insert(name.to_owned(), value.to_owned());
 }
 
 #[unsafe(no_mangle)]
@@ -135,79 +113,4 @@ pub extern "C" fn patina_init_from_env() -> c_int {
         return 0;
     }
     init_from_env()
-}
-
-#[unsafe(no_mangle)]
-/// Install the deterministic runtime for a shim-backed harness (see
-/// `patina-dst-harness`, USAGE-MODES.md startup Option B). Called by
-/// `patina_dst_harness::run`/`run_with` under `patina run`
-/// (`PATINA_RT_DEFER_INIT=1`, set because the binary carries the harness marker), after the harness has injected its configuration
-/// overlay onto the captured control plane via [`patina_control_set_entry`]. The
-/// runtime is then built from the (overlaid) control plane through the SAME
-/// parsers the constructor path uses ([`init_from_env`]), so every fault/buggify/
-/// schedule/liveness knob folds into the identical `RuntimeConfig` fields — the
-/// `reconcile_replay_*` conflict checks apply and the runtime computes the
-/// fingerprint's policy suffix from the installed configuration.
-///
-/// Fails closed, returning a distinct [`patina_dst_runtime`] `HARNESS_ERR_*`
-/// sentinel and printing a loud diagnostic, when: a boundary effect already ran
-/// (`HARNESS_ERR_BOUNDARY_BEFORE_INSTALL`); the runtime is already installed
-/// (`HARNESS_ERR_ALREADY_INSTALLED`); there is no `PATINA_RT_MODE` in the control
-/// plane, i.e. not under `patina run` (`HARNESS_ERR_NOT_UNDER_PATINA`); or
-/// the configuration failed to build/validate (`HARNESS_ERR_CONFIG`).
-pub extern "C" fn patina_harness_install() -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // Ordering matters: report the most specific fail-closed reason first. A
-    // boundary already seen is the sharpest diagnostic (the run produced events
-    // before configuration), so it precedes the generic already-installed check.
-    if BOUNDARY_SEEN.load(std::sync::atomic::Ordering::Relaxed) {
-        let _ = flush_captured_stdio();
-        let _ = host_write_all(
-            2,
-            b"patina: patina_dst_harness cannot install the runtime: a deterministic boundary \
-effect already ran before the harness configured the context; do all configuration and application \
-effects inside the harness closure so replay stays unambiguous\n",
-        );
-        return patina_dst_runtime::HARNESS_ERR_BOUNDARY_BEFORE_INSTALL;
-    }
-    if slot().lock().is_some() {
-        let _ = flush_captured_stdio();
-        let _ = host_write_all(
-            2,
-            b"patina: patina_dst_harness cannot install the runtime: a deterministic runtime is \
-already installed. Run the harness binary with `patina run` so startup defers \
-initialization to the harness (PATINA_RT_DEFER_INIT), and call run/run_with exactly once\n",
-        );
-        return patina_dst_runtime::HARNESS_ERR_ALREADY_INSTALLED;
-    }
-    if control_env(patina_dst_runtime::ENV_MODE).is_none() {
-        let _ = flush_captured_stdio();
-        let _ = host_write_all(
-            2,
-            b"patina: patina_dst_harness cannot install the runtime: this binary is not running \
-under `patina run` (no PATINA_RT_MODE control plane). A shim-backed harness must be built and \
-run through Patina, e.g. `patina run <manifest>`\n",
-        );
-        return patina_dst_runtime::HARNESS_ERR_NOT_UNDER_PATINA;
-    }
-    let _ = init_from_env();
-    if slot().lock().is_some() {
-        // Ordered against the interposers' `missing_context_is_pre_harness_install`
-        // load: once this is visible, an absent context is teardown, not a
-        // pre-install boundary.
-        HARNESS_INSTALLED.store(true, Ordering::Release);
-        set_errno(0);
-        return patina_dst_runtime::HARNESS_OK;
-    }
-    // Configuration failed to build: surface the runtime's own diagnostic (bad
-    // knob value, replay fingerprint/reconciliation conflict, bad `--mount`
-    // corpus, ...) rather than a bare code.
-    if let Some(message) = init_error().lock().clone() {
-        let _ = flush_captured_stdio();
-        let line = format!(
-            "patina: patina_dst_harness could not build the runtime configuration: {message}\n"
-        );
-        let _ = host_write_all(2, line.as_bytes());
-    }
-    patina_dst_runtime::HARNESS_ERR_CONFIG
 }

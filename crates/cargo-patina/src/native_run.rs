@@ -5,8 +5,8 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    IMAGE_FINGERPRINT_COMPONENT, binary_instrumentation, binary_is_harness,
-    instrumentation_fingerprint, native_run_fingerprint, resolve_artifact,
+    IMAGE_FINGERPRINT_COMPONENT, binary_instrumentation, instrumentation_fingerprint,
+    native_run_fingerprint, resolve_artifact,
 };
 use crate::output;
 use crate::parse::{buggify_env_pairs, knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
@@ -17,10 +17,10 @@ use crate::{
 use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
-    ENV_COVERAGE_FD, ENV_DEFER_INIT, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV,
-    ENV_GUEST_CPUS, ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_GUEST_STDIN_FD,
-    ENV_INITIAL_STACK, ENV_MODE, ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED,
-    ENV_STEP_BUDGET, ENV_TRACE_FD, GUEST_STDIN_MAX_BYTES, NATIVE_INITIAL_STACK_TRAILER_SLOTS,
+    ENV_COVERAGE_FD, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CPUS,
+    ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_GUEST_STDIN_FD, ENV_INITIAL_STACK,
+    ENV_MODE, ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
+    GUEST_STDIN_MAX_BYTES, NATIVE_INITIAL_STACK_TRAILER_SLOTS,
 };
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, native_binary_has_sud_marker,
@@ -300,11 +300,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         }
         None => None,
     };
-    // A harness binary installs the runtime itself, after applying its own
-    // configuration; the image says so, on every run and replay.
-    let harness = image.remember("harness", || {
-        Ok::<_, CliError>(binary_is_harness(image.bytes()))
-    })?;
     // A replay against another corpus would only fail as a fingerprint
     // mismatch inside the guest; refuse it here and say which half differs.
     // The recorded hash is read where this replay's fingerprint puts its
@@ -418,10 +413,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // Reserve room for its entries plus a disjoint copy of the platform trailer
     // (ELF auxv / Darwin apple vector); libc/dyld keep the original trailer.
     // Replay restores its map from metadata, not the normally empty CLI map.
-    // A deferred harness starts empty and later replaces environ at installation.
-    let startup_env_entries = if harness {
-        0
-    } else if let Some(bundle) = &replay_trace {
+    let startup_env_entries = if let Some(bundle) = &replay_trace {
         bundle.metadata.guest_env.as_ref().map_or(0, BTreeMap::len)
     } else {
         invocation.environment.len()
@@ -429,9 +421,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // The run's own inputs as the control plane carries them: its environment
     // map and its arguments, the same size in every mode, so the fixed address
     // layout can reserve room for them beside the rest of the control plane.
-    // Run parameters are not among them: a recording carries only the CLI's
-    // while its trace holds those merged with a harness's defaults, so they
-    // ride the control plane's own reservation, which the padding evens out.
+    // Run parameters are not among them: they ride the control plane's own
+    // reservation, which the padding evens out.
     let guest_payload = {
         let environment = replay_trace
             .as_ref()
@@ -476,15 +467,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         command.env(ENV_INITIAL_STACK, "1");
         for slot in 0..startup_env_entries + NATIVE_INITIAL_STACK_TRAILER_SLOTS {
             command.env(format!("{ENVP_SLOT_PREFIX}{slot}"), "");
-        }
-        // A `patina-dst-harness` binary (usage mode 2, recognised by its image
-        // marker) defers runtime installation to its `run`/`run_with` call:
-        // tell the packaged constructor to capture/scrub the control plane and
-        // register finalization but NOT install the runtime. Applies uniformly
-        // to seeded/record and replay so the harness owns installation on every
-        // path. An interposed effect before the harness installs fails closed.
-        if harness {
-            command.env(ENV_DEFER_INIT, "1");
         }
         if let Some(file) = &coverage_file {
             command.env(ENV_COVERAGE_FD, file.as_raw_fd().to_string());

@@ -37,8 +37,7 @@ fn poll_sources(
     timeout: Option<u64>,
     mut remaining: Option<&mut u64>,
 ) -> SysResult<i64> {
-    // Rust std checks the standard descriptors before a deferred harness has
-    // installed Context. An immediately resolved query needs neither clock nor
+    // An immediately resolved query needs neither clock nor
     // scheduler; activate only when this call genuinely needs to park.
     let mut deadline = None;
     if let (Some(timeout), Some(out)) = (timeout, remaining.as_deref_mut()) {

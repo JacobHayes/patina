@@ -371,36 +371,6 @@ pub(crate) fn effect_errno(error: &EffectError) -> c_int {
 pub(crate) static SHUTDOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Set once any deterministic boundary effect has run against the installed
-/// context (in [`with_context`]/[`with_context_raw`]). The shim-backed harness
-/// (`patina-dst-harness`, USAGE-MODES.md Option B) consults this in
-/// [`patina_harness_install`]: a boundary observed BEFORE the harness installs
-/// means the run already produced events, so reconfiguring the context would
-/// make replay semantics ambiguous — the install fails closed. The harness's own
-/// `install` does not route through those functions, so it never self-trips this.
-pub(crate) static BOUNDARY_SEEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-/// A guest boundary effect that answers with no context installed (a captured
-/// stdout or stderr write, a read of stdin's EOF), marked at its own entry
-/// ([`BOUNDARY_SEEN`]): a harness that installs after it refuses.
-pub(crate) fn mark_boundary() {
-    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Set once [`patina_harness_install`] has installed the runtime. Monotonic: it
-/// stays set for the rest of the process, including the teardown window after
-/// `patina_shutdown` has taken the context back out of the slot.
-///
-/// Under deferred init the shim answers an absent context by aborting with the
-/// "harness has not installed the runtime yet" diagnostic. That is only the right
-/// answer *before* the install — after it, an absent context means the run was
-/// already finalized, which is an ordinary teardown state the non-deferred path
-/// handles by returning nothing. Keying the diagnostic on the install itself
-/// rather than on the context's presence keeps the two apart with no window
-/// between `patina_shutdown` taking the context and marking the run shut down.
-pub(crate) static HARNESS_INSTALLED: AtomicBool = AtomicBool::new(false);
-
 /// Set by the packaged C startup constructor after it has captured the control
 /// plane, optionally installed the runtime, and scrubbed the live environment.
 /// If an interposed boundary arrives before this flag, a guest/static constructor
@@ -438,15 +408,6 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     }
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
         abort_preinit_interposed_call();
-    }
-    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `patina run` on a harness binary):
-    // the harness owns installation, so an effect that arrives with no context
-    // installed and no install yet performed ran BEFORE `patina_harness_install`.
-    // Do NOT auto-init from the env — that would race the harness's overlay and
-    // silently run against a config the harness never got to apply. Fail closed,
-    // loudly and named, so the boundary is attributed to the missing install.
-    if missing_context_is_pre_harness_install() {
-        abort_harness_before_install();
     }
     if control_env(patina_dst_runtime::ENV_MODE).is_some() {
         let _ = init_from_env();
@@ -500,36 +461,6 @@ fn last_boundary_symbol_bytes() -> Option<&'static [u8]> {
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-/// Whether an absent deterministic context means the harness has not installed
-/// the runtime *yet* — the fail-closed pre-install case — as opposed to the run
-/// having already been installed and finalized.
-///
-/// `patina_shutdown` takes the context out of the slot before `Context::finish`
-/// emits the end-of-run diagnostics, and the multithreaded schedule report reads
-/// its own suppression knob through `std::env`, which links to the interposed
-/// `getenv` inside a shim-linked guest. So every harness run whose guest spawned
-/// a thread reached the interposers with no context installed, during teardown of
-/// a runtime the harness had plainly installed. Without this discriminator that
-/// landed on the pre-install abort and killed the process before the trace was
-/// written.
-pub(crate) fn missing_context_is_pre_harness_install() -> bool {
-    if HARNESS_INSTALLED.load(Ordering::Acquire) {
-        return false;
-    }
-    control_plane()
-        .lock()
-        .contains_key(patina_dst_runtime::ENV_DEFER_INIT)
-}
-
-pub(crate) fn abort_harness_before_install() -> ! {
-    let _ = flush_before_refusal();
-    let message: &[u8] = b"patina: harness has not installed the runtime yet; an interposed \
-effect reached the deterministic boundary before patina_dst_harness::run/run_with installed the \
-runtime. Do all configuration and application effects inside the harness closure.\n";
-    let _ = host_write_all(2, message);
-    crate::host_abort();
-}
-
 pub(crate) fn abort_preinit_interposed_call() -> ! {
     let _ = host_write_all(
         2,
@@ -541,7 +472,7 @@ pub(crate) fn abort_preinit_interposed_call() -> ! {
     }
     let _ = host_write_all(
         2,
-        b". This most likely came from a static constructor/ctor that ran before Patina's startup constructor. Patina fails closed here because the control plane is not installed yet; cfg-gate that constructor out of DST builds (for example with `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move any setup that reads environment, files, clocks, threads, or other interposed APIs into `main` or the Patina harness closure.\n",
+        b". This most likely came from a static constructor/ctor that ran before Patina's startup constructor. Patina fails closed here because the control plane is not installed yet; cfg-gate that constructor out of DST builds (for example with `#[cfg(not(patina))]` / `#[cfg(not(dst))]`) and move any setup that reads environment, files, clocks, threads, or other interposed APIs into `main`.\n",
     );
     crate::host_abort();
 }
@@ -553,25 +484,12 @@ pub(crate) fn abort_preinit_interposed_call() -> ! {
 pub(crate) fn with_context_raw<T>(
     invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
 ) -> Result<T, c_int> {
-    mark_boundary();
-    gateway(invoke)
-}
-
-/// [`with_context_raw`] for the shim's own bookkeeping, which is no boundary
-/// effect and marks none ([`BOUNDARY_SEEN`]): handing counted calls over and
-/// a scheduling point showing the time they carried. A step that only reads
-/// takes [`with_bookkeeping`] instead.
-/// A harness's startup takes scheduling points (its locks and writes) before
-/// it installs the runtime.
-pub(crate) fn with_context_bookkeeping<T>(
-    invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>,
-) -> Result<T, c_int> {
     gateway(invoke)
 }
 
 /// The shim's own internal step: a page cache filling, a reactor reading
 /// the clock, a name table following a crash, the working directory's
-/// root. It takes no scheduling point and marks no boundary, and its
+/// root. It takes no scheduling point, and its
 /// closure sees only [`Bookkeeping`], so it cannot name a method that
 /// records, faults, delays, counts toward a crash or draws a seeded stream.
 pub(crate) fn with_bookkeeping<T>(
@@ -785,7 +703,6 @@ pub(crate) fn with_context<T>(
 /// descriptor's resolution and its read), which then go through
 /// [`with_context_raw`].
 pub(crate) fn boundary_point() -> Result<(), c_int> {
-    BOUNDARY_SEEN.store(true, std::sync::atomic::Ordering::Relaxed);
     ensure_runtime()?;
     thread::sched_point()
 }
@@ -805,8 +722,7 @@ pub(crate) fn boot_instant() -> u64 {
 
 /// The instant the deterministic filesystem would stamp an entry with now, for
 /// a node the shim keeps itself (a pipe's pipefs inode); 0 with no runtime
-/// installed. A clock read, not a boundary effect: it neither marks a boundary
-/// nor records anything.
+/// installed. A clock read, not a boundary effect: it records nothing.
 pub(crate) fn fs_time_unrecorded() -> u64 {
     slot()
         .lock()
@@ -1364,9 +1280,7 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     crate::PATINA_YIELD_STRIDE.store(context.yield_stride(), Ordering::Relaxed);
     *guard = Some(context);
     // Publish `environ` from the freshly installed startup env map. The startup
-    // constructor also publishes, but a deferred harness install (or a direct
-    // C-ABI embedder) lands here first — and its `--env`/overlay values are the
-    // environment the guest starts from.
+    // constructor also publishes, but a direct C-ABI embedder lands here first.
     publish_environ(guard.as_ref().expect("just installed").guest_env());
     set_errno(0);
     // The deterministic runtime is now installed, so the bootstrap window is over.

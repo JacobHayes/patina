@@ -85,8 +85,7 @@ extern "C" fn native_start() {
     // SAFETY: single-threaded CRT startup.
     unsafe { crate::posix_env::capture_control_plane() };
     // Register before init: installing the runtime publishes environ from the
-    // guest env map, and a deferred harness install happens after this
-    // constructor returns.
+    // guest env map.
     unsafe {
         crate::patina_register_environ_installer(Some(crate::posix_env::patina_environ_install))
     };
@@ -98,17 +97,8 @@ extern "C" fn native_start() {
             Some(super::stdio::take_pending),
         )
     };
-    // Deferred harness init (PATINA_RT_DEFER_INIT=1, set by `patina run`
-    // for a harness binary): still capture the control plane, register finalization and
-    // scrub the environment, but leave the runtime uninstalled so
-    // patina-dst-harness can apply its configuration overlay and install
-    // explicitly. An interposed effect before that install fails closed in
-    // `ensure_runtime` (never auto-inits under defer).
-    let control =
-        |name: &core::ffi::CStr| unsafe { crate::posix_env::control_getenv(name.as_ptr()) };
-    let defer = control(c"PATINA_RT_DEFER_INIT");
-    let deferred = !defer.is_null() && unsafe { core::ffi::CStr::from_ptr(defer) } == c"1";
-    if !control(c"PATINA_RT_MODE").is_null() && !deferred {
+    // SAFETY: the control plane was captured above.
+    if !unsafe { crate::posix_env::control_getenv(c"PATINA_RT_MODE".as_ptr()) }.is_null() {
         crate::patina_init_from_env();
     }
     crate::patina_publish_environ();

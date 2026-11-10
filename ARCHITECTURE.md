@@ -82,18 +82,6 @@ trace format.
   frozen with each application over `_patina` (`python/sdk_module.c`), a
   builtin module the launcher registers, which lowers sites, verdicts and
   custom ops to the shim's `patina_*` entries as the Go SDK does.
-- **Harness** (`patina-dst-harness`, usage mode 2). A harness binary
-  configures the run in code, then runs ordinary `std` code under the shim's
-  global runtime. a harness binary's `PATINA_HARNESS_V1` marker makes the supervisor set
-  `PATINA_RT_DEFER_INIT=1`, so the constructor
-  scrubs the control plane but leaves installation to
-  `patina_harness_install`. Its overlay flows through the same `PATINA_RT_*`
-  values and `RuntimeConfig` fields as the CLI, so replay reconciliation
-  covers it. Run without Patina, it returns `NotUnderPatina`.
-  Its `.param()` values are run-parameter defaults a CLI `--param` overrides
-  per key (the shim merges the two control-plane values); the guest reads the
-  merged set through `patina_dst::param`, a pure configuration read, and the
-  trace records it for replay.
 
 ## Crate layout
 
@@ -104,7 +92,6 @@ Package names are `patina-dst-*`; directories under `crates/` drop the
 cargo-patina                # the CLI: the `patina` binary (and the same tool as `cargo patina`)
 patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-light)
 patina-dst-macros           # the SDK's proc macros
-patina-dst-harness          # configure-then-run harness under the shim
 patina-dst-abi              # boundary operations/outcomes, time-model constants
 patina-dst-runtime          # Context, drivers, scheduler policies, record/replay, params
 patina-dst-trace            # trace bundle, branch metadata, strict replay
@@ -126,8 +113,7 @@ abi -> trace
 concrete drivers + trace -> runtime -> native-shim -> cargo-patina
 ```
 
-Native shims and the harness depend on the runtime boundary; they never
-redefine it.
+The native shim depends on the runtime boundary; it never redefines it.
 
 ## Native build and link
 

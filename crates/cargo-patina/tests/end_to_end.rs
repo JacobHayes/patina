@@ -77,8 +77,6 @@ mod prerun_and_watchdog;
 mod proptest;
 #[path = "end_to_end/run_facts.rs"]
 mod run_facts;
-#[path = "end_to_end/sdk_harness.rs"]
-mod sdk_harness;
 #[path = "end_to_end/toolchains.rs"]
 mod toolchains;
 #[path = "end_to_end/verdict.rs"]

@@ -85,8 +85,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   `--record PATH` writes a trace. `--env K=V` sets the guest's starting
   environment, `--cwd PATH` its starting working directory (an absolute path
   that must exist in the deterministic image; default `/`), and `--param K=V` a
-  run parameter it reads through `patina_dst::param` (overriding a harness's
-  `.param()` default); all are recorded into the trace and restored flag-free
+  run parameter it reads through `patina_dst::param`; all are recorded into the trace and restored flag-free
   on replay.
   `--realtime-epoch 2001-09-09T01:46:40Z` sets realtime at
   monotonic zero (default 2026-07-22T23:00:09Z, Patina's first commit), not
@@ -357,7 +356,7 @@ fire", never zero.
 - `refusal` = `{class, message}` — present only when PATINA failed closed
   (`host_limit`, `fingerprint_mismatch`, `trace_operation_mismatch`, `runtime_init_failure`,
   `no_runtime_installed`, `buggify_duplicate_label`,
-  `buggify_setup_never_called`, `harness_before_install`,
+  `buggify_setup_never_called`,
   `preinit_interposed_call`, `shim_fatal`, `unsupported_import`,
   `unknown_import`, `incomplete_trace`, `native_prerun_audit`).
   `native_prerun_audit` is emitted directly by the native audit gate before any
@@ -413,7 +412,7 @@ dev-dependency use under plain `cargo test`.
 - `patina_dst::lifecycle::setup_complete()`, `patina_dst::lifecycle::event!("name")`.
 - `patina_dst::rng()`: seed-bridged deterministic entropy. `patina_dst::is_simulated()`.
 - `patina_dst::param("key") -> Option<String>`: a run parameter
-  (`run --param key=value`, or a harness `.param()` default), recorded and
+  (`run --param key=value`), recorded and
   restored on replay; `None` outside Patina.
 
 ## proptest

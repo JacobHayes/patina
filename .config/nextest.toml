@@ -32,7 +32,7 @@ priority = 20
 
 [[profile.default.overrides]]
 filter = '''
-  (binary(end_to_end) & test(/^(campaign_continuation|minimize|custom_ops|native_harness|sdk_harness)::/))
+  (binary(end_to_end) & test(/^(campaign_continuation|minimize|custom_ops|native_harness)::/))
   | (binary(native_abi) & test(/^variadic::matrix::/))
   | (binary(native_workloads) & test(/^(compute_watchdog|fs_faults::)/))
   | (binary(native_containment) & test(/^layout::/))

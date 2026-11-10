@@ -11,8 +11,7 @@
 //! Application code does not depend on this crate. Programs run under
 //! `patina run`, where the native shim installs one [`Context`] for the
 //! process and routes interposed `std` calls into it; the crate an application
-//! ships is the dependency-light SDK, `patina-dst`, and `patina-dst-harness`
-//! configures a run in code. See [USAGE-MODES.md] for the map and
+//! ships is the dependency-light SDK, `patina-dst`. See [USAGE-MODES.md] for the map and
 //! [ARCHITECTURE.md] for the design.
 //!
 //! The [`Context`] methods are the boundary operations the shim performs on
@@ -203,24 +202,6 @@ pub const ENV_INCARNATION: &str = "PATINA_RT_INCARNATION";
 pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RT_RESTART_REALTIME_NANOS";
 
 pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";
-
-/// Deferred-initialization flag for the shim-backed harness (see
-/// `patina-dst-harness`, USAGE-MODES.md startup Option B). When present (`=1`)
-/// alongside `PATINA_RT_MODE`, the packaged native constructor captures and scrubs
-/// the control plane and registers finalization but does NOT install the runtime;
-/// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
-/// the harness's configuration overlay. An interposed effect that reaches the
-/// boundary before the harness installs fails closed loudly (never auto-inits).
-/// Set by `patina run` (and `replay`) for a program carrying
-/// [`HARNESS_MARKER`]. Off when
-/// unset (the ordinary constructor-installs-at-startup path).
-pub const ENV_DEFER_INIT: &str = "PATINA_RT_DEFER_INIT";
-
-/// The bytes a harness binary embeds in its image (`patina-dst-harness` places
-/// them, `patina` scans for them, the same way it does for
-/// `PATINA_INSTRUMENTED_V1`): the program owns runtime installation, so the
-/// supervisor sets [`ENV_DEFER_INIT`] without being told.
-pub const HARNESS_MARKER: &[u8] = b"PATINA_HARNESS_V1";
 
 /// Native supervisor reservation marker (`=1`): the initial environment has
 /// room for the deterministic map and a disjoint copy of the platform trailer.
@@ -481,30 +462,6 @@ pub const ENV_CONVERGE_WITHIN: &str = "PATINA_RT_CONVERGE_WITHIN_NANOS";
 /// When unset and converge is enabled, the runtime derives it from the buggify
 /// damage-control cutoff (if buggify is enabled) else 0.
 pub const ENV_HEAL_AFTER: &str = "PATINA_RT_HEAL_AFTER_NANOS";
-
-// Return codes for the shim's `patina_harness_install` C ABI, shared by the
-// native shim (which returns them) and `patina-dst-harness` (which maps them to
-// its `HarnessError` variants). Distinct, stable sentinels so the harness can
-// discriminate the fail-closed reasons without parsing stderr; the shim also
-// prints a loud diagnostic for each nonzero case.
-/// Harness install succeeded: the runtime is installed with the overlay applied.
-pub const HARNESS_OK: i32 = 0;
-
-/// No `PATINA_RT_MODE` in the control plane: the harness binary was not run under
-/// `patina run` (plain execution or missing supervisor protocol).
-pub const HARNESS_ERR_NOT_UNDER_PATINA: i32 = -1;
-
-/// The runtime is already installed (a non-deferred startup, or a second
-/// `run`/`run_with`): the harness cannot install a second context.
-pub const HARNESS_ERR_ALREADY_INSTALLED: i32 = -2;
-
-/// A deterministic boundary effect was already observed before the harness
-/// installed: reconfiguring after events would make replay semantics ambiguous.
-pub const HARNESS_ERR_BOUNDARY_BEFORE_INSTALL: i32 = -3;
-
-/// The runtime configuration built from the (overlaid) control plane failed to
-/// validate/build (bad knob value, fingerprint/replay reconciliation conflict).
-pub const HARNESS_ERR_CONFIG: i32 = -4;
 
 /// Default generic no-progress budget: 600 virtual seconds. Generous by design —
 /// the budget must exceed the longest legitimate quiescent (single-sleep) period,
@@ -973,8 +930,8 @@ impl Context {
         self.steps
     }
 
-    /// The run parameter `key` (`run --param KEY=VALUE` or a harness's
-    /// `.param()`), restored from the trace on replay.
+    /// The run parameter `key` (`run --param KEY=VALUE`), restored from the
+    /// trace on replay.
     pub fn param(&self, key: &str) -> Option<&str> {
         self.params.get(key).map(String::as_str)
     }

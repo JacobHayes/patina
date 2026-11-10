@@ -577,45 +577,6 @@ pub(super) fn assert_native_harness_prerun_refusal(
     );
 }
 
-// ---- patina-dst-harness (shim-backed configure-then-run harness) --------------
-//
-// Validation gates for USAGE-MODES.md usage mode 2 (startup Option B, deferred
-// init). A harness binary depends on `patina-dst-harness` and is built and run
-// through `patina run`; ordinary `std` effects in the application
-// closure are interposed by the native shim, and the harness's `HarnessBuilder`
-// overlay flows through the same `RuntimeConfig` fields the CLI env path sets.
-
-/// Write a harness fixture crate at `dir` whose `main.rs` is `main_rs`, with a
-/// path dependency on the workspace `patina-dst-harness`.
-pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
-    fs::create_dir_all(dir.join("src")).unwrap();
-    let harness_path = native_workspace().join("crates/patina-harness");
-    let harness_path = harness_path.to_string_lossy().replace('\\', "\\\\");
-    let sdk_path = native_workspace().join("crates/patina");
-    let sdk_path = sdk_path.to_string_lossy().replace('\\', "\\\\");
-    fs::write(
-        dir.join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\npatina-dst-harness = {{ path = \"{harness_path}\" }}\npatina-dst = {{ path = \"{sdk_path}\" }}\n"
-        ),
-    )
-    .unwrap();
-    fs::write(dir.join("src/main.rs"), main_rs).unwrap();
-}
-
-/// Build a harness fixture into `out` through `patina build`.
-pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
-    invoke(
-        native_workspace(),
-        &[
-            "build",
-            dir.join("Cargo.toml").to_str().unwrap(),
-            "--output",
-            out.to_str().unwrap(),
-        ],
-    );
-}
-
 // ---- campaign forwards the native `run` invocation shape ---------------------
 //
 // A campaign spawns child `patina run` processes. The

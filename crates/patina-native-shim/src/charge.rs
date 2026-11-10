@@ -494,7 +494,7 @@ pub(crate) fn service_timers() {
 /// the run's last calls are in the totals; a call counted after that is
 /// teardown, like one after `main` returned, and is not charged.
 pub(crate) fn flush_now() {
-    let _ = crate::with_context_bookkeeping(|_| Ok(()));
+    let _ = crate::with_context_raw(|_| Ok(()));
 }
 
 /// Drop what this thread counted before the runtime was installed (the

@@ -1432,7 +1432,7 @@ pub(crate) fn sched_point() -> Result<(), c_int> {
     // mutex through the mutex door), and the lock it holds may be the
     // Context's.
     if !crate::in_shim_critical() {
-        match crate::with_context_bookkeeping(|context| context.show_carry()) {
+        match crate::with_context_raw(|context| context.show_carry()) {
             // No runtime installed yet: nothing was charged.
             Ok(()) | Err(crate::ENOSYS) => {}
             Err(errno) => return Err(errno),

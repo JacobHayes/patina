@@ -359,14 +359,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "patina-dst-harness"
-version = "0.1.0"
-dependencies = [
- "patina-dst-runtime",
- "serde_json",
-]
-
-[[package]]
 name = "patina-dst-macros"
 version = "0.1.0"
 

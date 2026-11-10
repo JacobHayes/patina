@@ -303,8 +303,7 @@ PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 latency_applied=1 
 One thing worth knowing beyond this example. On the producer side, a server that
 binds `0.0.0.0:PORT` receives traffic addressed to any address on that port, so
 ordinary `INADDR_ANY` server code is reachable by a resolved name with no
-service-side registration — and a harness can name its own services with
-`HarnessBuilder::dns_service`, which allocates the virtual address for you.
+service-side registration.
 
 ## 10. Machine-readable output for agents
 
