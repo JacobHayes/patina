@@ -2,23 +2,14 @@
 
 use super::*;
 
-pub(crate) fn parse_native_harness_from(
+pub(crate) fn parse_test_from(
     origin: PathBuf,
     manifest: PathBuf,
+    filter: Option<String>,
     arguments: Vec<OsString>,
-) -> Result<NativeHarnessInvocation, CliError> {
-    if arguments.iter().any(|argument| argument == "--") {
-        return Err(CliError::usage(
-            "test native harness mode does not accept a `--` tail; it supplies the libtest --exact filter itself",
-        ));
-    }
-    let selection = take_package_bin(arguments)?;
-    if selection.bin.is_some() {
-        return Err(CliError::usage(
-            "--bin does not select a libtest harness; use --harness-target with the Cargo test target name",
-        ));
-    }
-    let args = cli::parse("test", help::Family::Sole, selection.rest)?;
+) -> Result<TestInvocation, CliError> {
+    use crate::harness::{CargoFeatures, RunFlags, Seeds, Selection};
+    let args = cli::parse("test", help::Family::Sole, arguments)?;
     let (seed, seeds) = args.exclusive(
         "--seed",
         "--seeds",
@@ -27,44 +18,83 @@ pub(crate) fn parse_native_harness_from(
     let seed = args.u64("--seed").filter(|_| seed);
     let seeds = args.u64("--seeds").filter(|_| seeds);
     if let Some(count) = seeds
-        && (count == 0 || count > 1_000_000)
+        && count > 1_000_000
     {
         return Err(CliError::usage("--seeds must be between 1 and 1000000"));
     }
-    Ok(NativeHarnessInvocation {
+    if args.flag("--exact") && filter.is_none() {
+        return Err(CliError::usage(
+            "--exact matches TESTNAME exactly; give a TESTNAME",
+        ));
+    }
+    if args.flag("--workspace") && args.supplied("--package") {
+        return Err(CliError::usage(
+            "--workspace tests every member; --package selects some of them: give one or the other",
+        ));
+    }
+    let jobs = match args.u64("--jobs") {
+        Some(jobs) => usize::try_from(jobs).map_err(|_| CliError::usage("--jobs is too large"))?,
+        None => std::thread::available_parallelism().map_or(1, usize::from),
+    };
+    Ok(TestInvocation {
         origin,
         manifest,
-        package: match selection.package {
-            Some(package) => Some(package),
-            None => env_text(cli::flag("test", "--package"))?,
+        selection: Selection {
+            packages: args
+                .texts("--package")
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            workspace: args.flag("--workspace"),
+            lib: args.flag("--lib"),
+            bins: args.texts("--bin").into_iter().map(str::to_owned).collect(),
+            all_bins: args.flag("--bins"),
+            tests: args
+                .texts("--test")
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            all_tests: args.flag("--tests"),
         },
-        harness_target: args.string("--harness-target").ok_or_else(|| {
-            CliError::usage("test native harness mode requires --harness-target <NAME>")
-        })?,
-        exact: args
-            .string("--exact")
-            .ok_or_else(|| CliError::usage("test native harness mode requires --exact <PATH>"))?,
-        seeds: seed
-            .map(HarnessSeeds::One)
-            .unwrap_or_else(|| HarnessSeeds::Range(seeds.unwrap_or(20))),
-        release: args.flag("--release"),
-        features: HarnessFeatures {
+        filter,
+        exact: args.flag("--exact"),
+        include_ignored: args.flag("--include-ignored"),
+        features: CargoFeatures {
             features: args.string("--features"),
+            all_features: args.flag("--all-features"),
+            no_default_features: args.flag("--no-default-features"),
         },
+        release: args.flag("--release"),
         instrument: args.flag("--instrument"),
-        step_budget: args.u64("--budget"),
-        realtime_epoch: args.string("--realtime-epoch"),
-        hostname: args.string("--hostname"),
-        cpus: args.u32("--cpus"),
-        params: key_values(&args, "--param")?,
-        knobs: knobs_of(&args)?,
-        buggify: buggify_of(&args),
-        schedule: schedule_of(&args),
-        liveness: NativeLiveness {
-            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
-            ..liveness_of(&args)
+        no_run: args.flag("--no-run"),
+        seeds: match (seed, seeds) {
+            (_, Some(count)) => Seeds::Range(count),
+            (seed, None) => Seeds::One(seed.unwrap_or(0)),
         },
-        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
+        jobs,
+        timeout_secs: args.u64("--timeout-secs").unwrap_or(300),
+        accept_unsupported: args
+            .texts("--accept-unsupported")
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        run: RunFlags {
+            step_budget: args.u64("--budget"),
+            realtime_epoch: args.string("--realtime-epoch"),
+            hostname: args.string("--hostname"),
+            cpus: args.u32("--cpus"),
+            params: key_values(&args, "--param")?,
+            env: key_values(&args, "--env")?,
+            mount: args.path("--mount"),
+            knobs: knobs_of(&args)?,
+            buggify: buggify_of(&args),
+            schedule: schedule_of(&args),
+            liveness: NativeLiveness {
+                compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+                ..liveness_of(&args)
+            },
+            allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
+        },
     })
 }
 

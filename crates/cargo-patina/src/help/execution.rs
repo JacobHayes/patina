@@ -168,38 +168,184 @@ Reproduce a recorded run with `patina replay`.",
 
 pub(super) const TEST: Verb = Verb {
     name: "test",
-    summary: "Run one libtest test of a source package shim-linked, across seeds.",
+    summary: "Run a Cargo project's own test suite under the deterministic runtime, one run per test.",
     synopsis: &[
-        "patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
+        "patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--seed N | --seeds N] [--jobs N] [RUN OPTIONS]",
+        "patina test [DIR|Cargo.toml] --no-run [SELECTION]   (build and stage the test targets; print each guest's path)",
     ],
     prose: "\
-Patina rebuilds the requested Cargo libtest target shim-linked with `cargo rustc`, stages \
-the harness under target/patina/dst, and runs only the `--exact` test with \
-`--test-threads=1`. `--seeds N` sweeps 0..N (default 20); `--seed N` runs one \
-seed. Qualify a shared target name as lib:NAME, bin:NAME, or test:NAME; \
---package selects a workspace member. Staging is keyed on the resolved kind/name. \
-On the first failure Patina re-runs that seed with --record, except pre-run \
-audit/import refusals (nothing executed). A `test` repro is always printed; \
-the JSON `trace` field and a `replay` command come only from the recorded \
-child's readable-trace receipt.",
+`test` builds each selected Cargo test target once, linked with the runtime, \
+asks the built harness for its tests (`--list`), and runs every test in a \
+simulated world of its own: one `patina run` per test and seed, `--jobs` at a \
+time. Selection follows `cargo test`: the package in or above the current \
+directory (or the one DIR names), `-p`/`--workspace` for workspace members, \
+`--lib`/`--bin`/`--bins`/`--test`/`--tests` for targets (default: the library, \
+binaries and integration tests), and a trailing TESTNAME that filters by \
+substring, or matches exactly with `--exact`; a filter that matches nothing is \
+an error. Doc tests are not run. `#[ignore]`d tests are skipped unless \
+`--include-ignored`; `#[should_panic]` is libtest's own.\n\
+\n\
+Each test ends in one outcome; the run exits 1 if any test is a finding, \
+else 2 if any test could not be run (unsupported, timeout, internal, error), \
+else 0. `--accept-unsupported TEXT` keeps an `unsupported` test whose stop \
+names TEXT from raising the exit status; it is still reported as unsupported, \
+never as passed. Every test that did not pass is listed with the command that \
+reruns it alone on its seed; a finding is run again recorded, and a replay \
+command printed. `--format json` prints one patina.test/v1 document.\n\
+\n\
+The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/guest; \
+`--no-run` builds and prints those paths without running anything.",
     families: &[fam(Family::Sole, "`test`", None)],
     groups: &[
         Group {
-            title: "Patina options",
+            title: "Test selection (as `cargo test`)",
+            families: SOLE,
+            flags: &[
+                f(
+                    "--package",
+                    Some("-p"),
+                    Value::Required("NAME", Kind::Str),
+                    "Test this workspace member (repeatable; default: the package of DIR, or the workspace's default members).",
+                    true,
+                ),
+                f(
+                    "--workspace",
+                    None,
+                    Value::None,
+                    "Test every workspace member.",
+                    false,
+                ),
+                f(
+                    "--lib",
+                    None,
+                    Value::None,
+                    "Test the package's library.",
+                    false,
+                ),
+                f(
+                    "--bin",
+                    None,
+                    Value::Required("NAME", Kind::Str),
+                    "Test the named binary (repeatable).",
+                    true,
+                ),
+                f("--bins", None, Value::None, "Test every binary.", false),
+                f(
+                    "--test",
+                    None,
+                    Value::Required("NAME", Kind::Str),
+                    "Test the named integration test target (repeatable).",
+                    true,
+                ),
+                f(
+                    "--tests",
+                    None,
+                    Value::None,
+                    "Test every integration test target.",
+                    false,
+                ),
+                f(
+                    "--exact",
+                    None,
+                    Value::None,
+                    "Match TESTNAME exactly against the test's path within its target, not as a substring.",
+                    false,
+                ),
+                f(
+                    "--include-ignored",
+                    None,
+                    Value::None,
+                    "Run `#[ignore]`d tests too.",
+                    false,
+                ),
+                f(
+                    "--features",
+                    None,
+                    Value::Required("FEATURES", Kind::Str),
+                    "Space- or comma-separated Cargo features to enable (forwarded to Cargo).",
+                    false,
+                ),
+                f(
+                    "--all-features",
+                    None,
+                    Value::None,
+                    "Enable every feature of the selected packages.",
+                    false,
+                ),
+                f(
+                    "--no-default-features",
+                    None,
+                    Value::None,
+                    "Do not enable the default feature.",
+                    false,
+                ),
+                f(
+                    "--release",
+                    None,
+                    Value::None,
+                    "Build the test targets with the `bench` profile, which inherits `release` (default: the `test` profile).",
+                    false,
+                ),
+                f(
+                    "--instrument",
+                    None,
+                    Value::None,
+                    "Build the test targets with edge hooks: edge counters, and the scheduling points --yield-stride asks for.",
+                    false,
+                ),
+                f(
+                    "--no-run",
+                    None,
+                    Value::None,
+                    "Build and stage the selected test targets, print each staged guest's path, and run nothing.",
+                    false,
+                ),
+            ],
+        },
+        Group {
+            title: "Seeds and running",
             families: SOLE,
             flags: &[
                 f(
                     "--seed",
                     None,
                     Value::Required("U64", Kind::U64),
-                    "Run exactly this seed instead of a sweep.",
+                    "Run every test on this seed (default 0).",
                     false,
+                ),
+                f(
+                    "--seeds",
+                    None,
+                    Value::Required("N", Kind::PositiveU64),
+                    "Run every test on seeds 0..N, stopping a test at its first seed that does not pass (mutually exclusive with --seed).",
+                    false,
+                ),
+                f(
+                    "--jobs",
+                    Some("-j"),
+                    Value::Required("N", Kind::PositiveU64),
+                    "Run at most N tests at a time, each in its own process (default: the number of CPUs).",
+                    false,
+                ),
+                f(
+                    "--timeout-secs",
+                    None,
+                    Value::Required("N", Kind::U64),
+                    "Stop a test's run after N seconds of host time and report it as `timeout` (default 300; 0 waits forever).",
+                    false,
+                ),
+                f(
+                    "--accept-unsupported",
+                    None,
+                    Value::Required("TEXT", Kind::Symbol),
+                    "Do not let an `unsupported` test whose stop names TEXT (as the summary prints it, e.g. `process spawn`) raise the exit status; it is still reported as unsupported (repeatable).",
+                    true,
                 ),
                 f(
                     "--budget",
                     None,
                     Value::Required("STEPS", Kind::U64),
-                    "Maximum boundary operations before explicit failure.",
+                    "Maximum boundary operations of each test's run before explicit failure.",
                     false,
                 ),
                 f(
@@ -217,65 +363,32 @@ child's readable-trace receipt.",
                     false,
                 ),
                 PARAM_FLAG,
+                f(
+                    "--env",
+                    None,
+                    Value::Required("K=V", Kind::KeyValue),
+                    "Set a deterministic guest environment variable in every test's run (recorded and restored on replay).",
+                    true,
+                ),
+                f(
+                    "--mount",
+                    None,
+                    Value::Required("HOST_DIR", Kind::Path),
+                    "Capture a host directory read-only into every test's filesystem at `/`, where a test's relative paths resolve (its working directory is `/`).",
+                    false,
+                ),
+                Flag {
+                    doc: "The number of CPUs every test's guest sees (default 4, at most 1024).",
+                    ..CPUS_FLAG
+                },
+                Flag {
+                    doc: "Run every test, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each run's determinism is qualified and the replay command carries the flag.",
+                    ..ALLOW_RANDOMIZED_LAYOUT_FLAG
+                },
             ],
         },
         Group {
-            title: "Libtest harness selection",
-            families: SOLE,
-            flags: &[
-                f(
-                    "--harness-target",
-                    None,
-                    Value::Required("NAME", Kind::Symbol),
-                    "Cargo libtest target to rebuild shim-linked. Use NAME when unique, or lib:NAME, bin:NAME, test:NAME to disambiguate target kinds; --package selects the workspace member. Required.",
-                    false,
-                ),
-                f(
-                    "--exact",
-                    None,
-                    Value::Required("MOD::test", Kind::Symbol),
-                    "Exact libtest filter to run inside the shim-linked harness. Required.",
-                    false,
-                ),
-                f(
-                    "--seeds",
-                    None,
-                    Value::Required("N", Kind::PositiveU64),
-                    "Run seeds 0..N (default 20; mutually exclusive with --seed).",
-                    false,
-                ),
-                f(
-                    "--package",
-                    Some("-p"),
-                    Value::Required("NAME", Kind::Str),
-                    "Select a workspace member before building the native libtest harness.",
-                    false,
-                ),
-                f(
-                    "--features",
-                    None,
-                    Value::Required("FEATURES", Kind::Str),
-                    "Space- or comma-separated Cargo features to enable when building the native libtest harness (forwarded to `cargo rustc --features`).",
-                    false,
-                ),
-                f(
-                    "--release",
-                    None,
-                    Value::None,
-                    "Build the native libtest harness in release mode (default debug).",
-                    false,
-                ),
-                f(
-                    "--instrument",
-                    None,
-                    Value::None,
-                    "Build the native libtest harness with edge hooks: edge counters, and the scheduling points --yield-stride asks for.",
-                    false,
-                ),
-            ],
-        },
-        Group {
-            title: "Fault options (seed-driven, default off)",
+            title: "Fault options (seed-driven, default off; applied to every test)",
             families: SOLE,
             flags: FAULT_FLAGS,
         },
@@ -298,22 +411,6 @@ child's readable-trace receipt.",
             title: "Native compute liveness (host-time terminal bound)",
             families: SOLE,
             flags: &[COMPUTE_WATCHDOG_FLAG],
-        },
-        Group {
-            title: "Virtual machine",
-            families: SOLE,
-            flags: &[Flag {
-                doc: "The number of CPUs every seed's guest sees (default 4, at most 1024), re-emitted onto each seed's child run.",
-                ..CPUS_FLAG
-            }],
-        },
-        Group {
-            title: "Native address layout",
-            families: SOLE,
-            flags: &[Flag {
-                doc: "Run every seed, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each seed's determinism is qualified and the replay repro carries the flag.",
-                ..ALLOW_RANDOMIZED_LAYOUT_FLAG
-            }],
         },
         Group {
             title: "Liveness options",

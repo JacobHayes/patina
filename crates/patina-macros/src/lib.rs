@@ -30,7 +30,7 @@ fn expand_test(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Stri
     let attrs = prefix_line(&parsed.attrs);
     let vis = prefix_inline(&parsed.vis);
     let wrapper = format!(
-        "{attrs}#[test]\n{vis}fn {name}() {{\n    if ::patina_dst::is_simulated() {{\n        ::patina_dst::__rt::assert_test_return({helper}());\n    }} else {{\n        ::patina_dst::__rt::orchestrate(&::patina_dst::__rt::DstTest {{\n            manifest_dir: env!(\"CARGO_MANIFEST_DIR\"),\n            harness_target: env!(\"CARGO_CRATE_NAME\"),\n            test_path: concat!(module_path!(), \"::\", stringify!({name})),\n            cli_args: &[{cli_args}],\n        }});\n    }}\n}}\nfn {helper}",
+        "{attrs}#[test]\n{vis}fn {name}() {{\n    if ::patina_dst::is_simulated() {{\n        ::patina_dst::__rt::assert_test_return({helper}());\n    }} else {{\n        ::patina_dst::__rt::orchestrate(&::patina_dst::__rt::DstTest {{\n            manifest_dir: env!(\"CARGO_MANIFEST_DIR\"),\n            package: env!(\"CARGO_PKG_NAME\"),\n            crate_name: env!(\"CARGO_CRATE_NAME\"),\n            bin_name: option_env!(\"CARGO_BIN_NAME\"),\n            integration_test: option_env!(\"CARGO_TARGET_TMPDIR\").is_some(),\n            test_path: concat!(module_path!(), \"::\", stringify!({name})),\n            cli_args: &[{cli_args}],\n        }});\n    }}\n}}\nfn {helper}",
         name = parsed.name,
         helper = parsed.helper,
     );
@@ -435,7 +435,7 @@ mod tests {
             ("release", Some("1")),
             ("seeds", None),
             ("exact", Some("a::b")),
-            ("harness_target", Some("lib:a")),
+            ("package", Some("a")),
         ] {
             assert!(words(&[refused]).is_err(), "{refused:?} was accepted");
         }

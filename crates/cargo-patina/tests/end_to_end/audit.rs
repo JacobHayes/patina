@@ -234,16 +234,16 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
             &[
                 "test",
                 ".",
-                "--harness-target",
+                "--bin",
                 "audit_boundaries",
-                "--exact",
                 "boundaries",
+                "--exact",
                 "--seed",
                 "1",
             ],
         );
         let guest = fixture_target_directory(root)
-            .join("patina/dst/audit_boundaries/bin/audit_boundaries/boundaries/guest");
+            .join("patina/dst/audit_boundaries/bin/audit_boundaries/guest");
         assert_boundaries(&guest);
         invoke(root, &["audit", guest.to_str().unwrap()]);
     }

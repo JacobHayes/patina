@@ -462,7 +462,7 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     })
 }
 
-fn kill_generation_process_tree(child: &mut std::process::Child) {
+pub(crate) fn kill_generation_process_tree(child: &mut std::process::Child) {
     {
         let pgid = -(child.id() as i32);
         // SAFETY: `kill` is called with a process-group id created for this
@@ -480,7 +480,7 @@ fn kill_generation_process_tree(child: &mut std::process::Child) {
 /// the campaign stops waiting for it. A killed process normally exits within
 /// milliseconds even on a loaded host; one that outlasts this is stuck in the
 /// kernel (uninterruptible I/O) or is an orphaned zombie nobody reaps.
-const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Wait until no process of the SIGKILLed generation process group `pgid`
 /// remains, and return whether it vanished within `bound`. The caller has
@@ -495,7 +495,7 @@ const KILLED_GROUP_EXIT_BOUND: std::time::Duration = std::time::Duration::from_s
 /// that outlasts `bound` is reported and left: the campaign cannot do more than
 /// SIGKILL, and a scratch file that then survives the sweep is the loud trace
 /// of it.
-fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
+pub(crate) fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
     use std::time::{Duration, Instant};
 
     const ESRCH: i32 = 3;
@@ -521,9 +521,8 @@ fn await_process_group_exit(pgid: u32, bound: std::time::Duration) -> bool {
         }
         if Instant::now() >= deadline {
             eprintln!(
-                "patina: warning: process group {pgid} of a timed-out campaign generation \
-                 still has members {}s after SIGKILL; its trace scratch file may be left \
-                 in the out-dir",
+                "patina: warning: process group {pgid} of a timed-out child run still has \
+                 members {}s after SIGKILL; its trace scratch file may be left behind",
                 bound.as_secs()
             );
             return false;

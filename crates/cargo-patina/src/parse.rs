@@ -2,11 +2,10 @@
 
 use crate::native_build::DEFAULT_NATIVE_EDITION;
 use crate::{
-    ArtifactRef, BuildSpec, CliError, HarnessFeatures, HarnessSeeds, KnobValues,
-    NativeAuditInvocation, NativeBuggify, NativeBuildInvocation, NativeBuildTarget,
-    NativeHarnessInvocation, NativeLiveness, NativeRunInvocation, NativeRunMode, NativeSchedule,
-    UnsupportedPolicy, campaign, cli, coverage, help, minimize, syscalls, trace_cmd, trace_view,
-    values,
+    ArtifactRef, BuildSpec, CliError, KnobValues, NativeAuditInvocation, NativeBuggify,
+    NativeBuildInvocation, NativeBuildTarget, NativeLiveness, NativeRunInvocation, NativeRunMode,
+    NativeSchedule, TestInvocation, UnsupportedPolicy, campaign, cli, coverage, help, minimize,
+    syscalls, trace_cmd, trace_view, values,
 };
 use patina_dst_runtime::{
     ENV_BUGGIFY, ENV_BUGGIFY_ACTIVATION, ENV_BUGGIFY_AFTER_SETUP, ENV_BUGGIFY_CUTOFF,
@@ -31,11 +30,11 @@ pub(super) use minimization::parse_minimize;
 use native::native_manifest_path;
 pub(super) use native::parse_native_audit_from;
 pub(super) use native::parse_native_build;
-pub(super) use native::parse_native_harness_from;
 pub(super) use native::parse_native_replay;
 #[cfg(test)]
 pub(super) use native::parse_native_run;
 pub(super) use native::parse_native_run_from;
+pub(super) use native::parse_test_from;
 
 pub(super) enum ParseResult {
     Help(help::Topic),
@@ -46,7 +45,7 @@ pub(super) enum ParseResult {
     NativeAudit(NativeAuditInvocation),
     NativeBuild(NativeBuildInvocation),
     NativeRun(NativeRunInvocation),
-    NativeHarness(NativeHarnessInvocation),
+    Test(Box<TestInvocation>),
     Minimize(minimize::MinimizeInvocation),
     Trace(trace_cmd::TraceInvocation),
 }
@@ -195,23 +194,90 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
 }
 
-/// Route `test <DIR|Cargo.toml>`: the native libtest harness mode used by
-/// point-solution DST tests.
+/// Route `test [DIR|Cargo.toml] [TESTNAME]`. Two positionals at most: the
+/// first is the package when it names a `Cargo.toml` or a directory holding
+/// one, and otherwise the test-name filter; with two, the first must be the
+/// package. No package means the one `cargo test` would use: the nearest
+/// `Cargo.toml` at or above the working directory.
 fn parse_test(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    const WHAT: &str = "a Cargo package (directory or Cargo.toml)";
-    let scan = locate_positionals("test", &arguments, 1);
-    let Some(first) = scan.positionals.first().cloned() else {
-        return Err(missing_artifact("test", &arguments, scan.stop, WHAT));
-    };
-    match classify_arg(&first)? {
-        ArgKind::SourcePackage(manifest) => {
-            parse_native_harness_from(PathBuf::from(&first), manifest, scan.rest)
-                .map(ParseResult::NativeHarness)
+    if arguments.iter().any(|argument| argument == "--") {
+        return Err(CliError::usage(
+            "test takes no `--` tail: it runs each test with libtest's own arguments; select \
+             tests with TESTNAME, --exact and --include-ignored",
+        ));
+    }
+    let scan = locate_positionals("test", &arguments, 2);
+    if let Some(stop) = scan.stop {
+        return Err(CliError::usage(format!(
+            "unsupported option {:?} for `test`",
+            arguments[stop].to_string_lossy()
+        )));
+    }
+    let package_of = |raw: &OsString| -> Option<PathBuf> {
+        let path = Path::new(raw);
+        if path.file_name() == Some(OsStr::new("Cargo.toml")) && path.is_file() {
+            Some(path.to_path_buf())
+        } else if path.is_dir() && path.join("Cargo.toml").is_file() {
+            Some(path.join("Cargo.toml"))
+        } else {
+            None
         }
-        _ => Err(CliError::usage(format!(
-            "test requires {WHAT}, not {}",
-            Path::new(&first).display()
-        ))),
+    };
+    let mut positionals = scan.positionals.into_iter();
+    let (origin, manifest, filter) = match (positionals.next(), positionals.next()) {
+        (None, _) => {
+            let (origin, manifest) = nearest_manifest()?;
+            (origin, manifest, None)
+        }
+        (Some(first), second) => match package_of(&first) {
+            Some(manifest) => (PathBuf::from(&first), manifest, second),
+            None if second.is_some() => {
+                return Err(CliError::usage(format!(
+                    "test takes [DIR|Cargo.toml] [TESTNAME]: {} is not a Cargo package",
+                    Path::new(&first).display()
+                )));
+            }
+            None => {
+                let (origin, manifest) = nearest_manifest()?;
+                (origin, manifest, Some(first))
+            }
+        },
+    };
+    let filter = filter
+        .map(|filter| {
+            filter.into_string().map_err(|filter| {
+                CliError::usage(format!("TESTNAME {filter:?} is not valid UTF-8"))
+            })
+        })
+        .transpose()?;
+    parse_test_from(origin, manifest, filter, scan.rest)
+        .map(|invocation| ParseResult::Test(Box::new(invocation)))
+}
+
+/// The `Cargo.toml` `cargo test` would use from the working directory: the
+/// nearest one at or above it. The origin a rerun command names is `.` when
+/// it is the working directory's own.
+fn nearest_manifest() -> Result<(PathBuf, PathBuf), CliError> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| CliError(format!("failed to read the working directory: {error}")))?;
+    let mut directory = cwd.as_path();
+    loop {
+        let manifest = directory.join("Cargo.toml");
+        if manifest.is_file() {
+            let origin = if directory == cwd {
+                PathBuf::from(".")
+            } else {
+                directory.to_path_buf()
+            };
+            return Ok((origin, manifest));
+        }
+        directory = directory.parent().ok_or_else(|| {
+            CliError::usage(format!(
+                "test found no Cargo.toml in {} or any directory above it; name a package \
+                 (DIR or Cargo.toml)",
+                cwd.display()
+            ))
+        })?;
     }
 }
 

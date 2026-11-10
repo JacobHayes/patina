@@ -1,86 +1,110 @@
-//! Cargo libtest harness selection, seed runs, and refusal provenance.
+//! `patina test`: a package's own test suite, one simulated run per test.
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
 
+    fn json_of(output: &std::process::Output) -> serde_json::Value {
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    /// Each test's result by name.
+    fn results(document: &serde_json::Value) -> BTreeMap<String, String> {
+        document["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|test| test["skipped"].is_null())
+            .map(|test| {
+                (
+                    test["name"].as_str().unwrap().to_string(),
+                    test["result"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The whole suite runs, one verdict per test: each in the class its own
+    /// run ends in, `#[should_panic]` honoured, `#[ignore]` skipped unless
+    /// asked, and the exit status the most severe test's. Every test the
+    /// fixture declares is listed; none is lost or invented.
     #[test]
-    fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
+    fn the_whole_suite_runs_with_one_verdict_per_test() {
+        let directory = tempdir().unwrap();
+        let source = create_native_harness_fixture(directory.path());
+        let declared = source.matches("#[test]").count();
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let ran = invoke_unchecked(patina, directory.path(), &["test", "--format", "json"]);
+        let document = json_of(&ran);
+        assert_eq!(document["schema"], "patina.test/v1");
+        assert_eq!(document["listed"], declared, "{document:#}");
+        let expected: BTreeMap<String, String> = [
+            ("tests::epoch_is_seeded", "ok"),
+            ("tests::should_panic_panics", "ok"),
+            ("tests::always_is_violated", "violation"),
+            ("tests::aborts", "crash"),
+            ("tests::panics", "failure"),
+            ("tests::should_panic_does_not", "failure"),
+            ("tests::spawns_a_process", "unsupported"),
+            ("tests::buggify_failure_records", "ok"),
+        ]
+        .into_iter()
+        .map(|(name, class)| (name.to_string(), class.to_string()))
+        .collect();
+        assert_eq!(results(&document), expected, "{document:#}");
+        assert_eq!(document["skipped"], 1, "{document:#}");
+        assert_eq!(
+            (document["result"].as_str(), ran.status.code()),
+            (Some("violation"), Some(1))
+        );
+        let counted: u64 = document["counts"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|count| count.as_u64().unwrap())
+            .sum();
+        assert_eq!(counted as usize, declared - 1);
+
+        // The staged guest is where the document says, and passes the audit.
+        let guest = document["targets"][0]["guest"].as_str().unwrap();
+        assert!(
+            invoke_unchecked(patina, directory.path(), &["audit", guest])
+                .status
+                .success()
+        );
+
+        // `--include-ignored` runs the ignored test too.
+        let all = invoke_unchecked(
+            patina,
+            directory.path(),
+            &["test", "ignored", "--include-ignored", "--format", "json"],
+        );
+        let all = json_of(&all);
+        assert_eq!(all["skipped"], 0);
+        assert_eq!(results(&all)["tests::ignored_panics"], "failure", "{all:#}");
+    }
+
+    /// A finding is recorded on its seed: the trace it names replays the
+    /// failure, and the rerun command it prints runs that one test on that
+    /// seed to the same end.
+    #[test]
+    fn a_finding_replays_and_its_rerun_reproduces_it() {
         let directory = tempdir().unwrap();
         create_native_harness_fixture(directory.path());
         let patina = env!("CARGO_BIN_EXE_patina");
-        let harness = "dst_harness_fixture";
-        let passing_args = [
-            "test",
-            ".",
-            "--harness-target",
-            harness,
-            "--exact",
-            "tests::epoch_is_seeded",
-            "--seed",
-            "1",
-            "--format",
-            "json",
-        ];
-        let passed = invoke_unchecked(patina, directory.path(), &passing_args);
-        assert!(
-            passed.status.success(),
-            "filtered harness run failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&passed.stdout),
-            String::from_utf8_lossy(&passed.stderr)
-        );
-
-        let pass_guest = fixture_target_directory(directory.path()).join(
-            "patina/dst/dst_harness_fixture/lib/dst_harness_fixture/tests__epoch_is_seeded/guest",
-        );
-        assert!(
-            pass_guest.exists(),
-            "staged pass harness missing: {pass_guest:?}"
-        );
-        let audit = invoke_unchecked(
-            patina,
-            directory.path(),
-            &["audit", pass_guest.to_str().unwrap()],
-        );
-        assert!(
-            audit.status.success(),
-            "libtest harness audit surface should pass:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&audit.stdout),
-            String::from_utf8_lossy(&audit.stderr)
-        );
-
-        // A path the target has no test for runs nothing, so it is refused
-        // rather than passed: libtest itself exits 0 for it.
-        let unmatched = invoke_unchecked(
+        let ran = invoke_unchecked(
             patina,
             directory.path(),
             &[
                 "test",
-                ".",
-                "--harness-target",
-                harness,
-                "--exact",
-                "tests::no_such_test",
-                "--seeds",
-                "2",
-                "--format",
-                "json",
-            ],
-        );
-        assert_eq!(unmatched.status.code(), Some(2), "{unmatched:?}");
-        let refused: serde_json::Value = serde_json::from_slice(&unmatched.stdout).unwrap();
-        assert_ne!(refused["result"], "ok", "{refused}");
-
-        let failing = invoke_unchecked(
-            patina,
-            directory.path(),
-            &[
-                "test",
-                ".",
-                "--harness-target",
-                harness,
-                "--exact",
                 "tests::buggify_failure_records",
+                "--exact",
                 "--seeds",
                 "3",
                 "--buggify=1000",
@@ -90,67 +114,92 @@ mod tests {
                 "json",
             ],
         );
-        // A failing test body is a finding in the guest: exit 1, with the
-        // libtest harness's own status reported beside it.
-        assert_eq!(failing.status.code(), Some(1));
-        let result: serde_json::Value = serde_json::from_slice(&failing.stdout).unwrap();
+        assert_eq!(ran.status.code(), Some(1));
+        let document = json_of(&ran);
+        let test = &document["tests"][0];
         assert_eq!(
             (
-                &result["result"],
-                &result["attribution"],
-                &result["guest_exit"]["code"]
+                &test["result"],
+                &test["attribution"],
+                &test["guest_exit"]["code"],
+                &test["seed"]
             ),
-            (&"failure".into(), &"guest".into(), &101.into()),
-            "{result}"
+            (&"failure".into(), &"guest".into(), &101.into(), &0.into()),
+            "{document:#}"
         );
-        // Positive control for the refusal detector: the receipt must contain real
-        // trace facts, and the path it advertises must actually replay the failure.
-        assert!(result["trace"].is_object(), "{result}");
-        assert!(result["trace"]["event_count"].as_u64().unwrap() > 0);
-        let trace = PathBuf::from(result["trace"]["path"].as_str().unwrap());
-        let failure_dir = fixture_target_directory(directory.path()).join(
-            "patina/dst/dst_harness_fixture/lib/dst_harness_fixture/tests__buggify_failure_records",
-        );
-        let fail_guest = failure_dir.join("guest");
-        assert_eq!(trace, failure_dir.join("seed-0.patina"));
-        assert!(trace.is_file());
-        let replay = invoke_unchecked(
-            patina,
-            directory.path(),
-            &[
-                "replay",
-                fail_guest.to_str().unwrap(),
-                trace.to_str().unwrap(),
-            ],
-        );
+        assert!(test["trace"]["event_count"].as_u64().unwrap() > 0);
+        let trace = test["trace"]["path"].as_str().unwrap();
+        let guest = document["targets"][0]["guest"].as_str().unwrap();
+        let replay = invoke_unchecked(patina, directory.path(), &["replay", guest, trace]);
         assert_eq!(replay.status.code(), Some(1));
         assert!(
             String::from_utf8_lossy(&replay.stderr).contains("HARNESS_BUG"),
-            "replay should reproduce the recorded failing libtest body:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&replay.stdout),
-            String::from_utf8_lossy(&replay.stderr)
+            "{replay:?}"
         );
+        let rerun = test["rerun"].as_str().unwrap();
+        let rerun = rerun.strip_prefix("patina ").expect("a patina command");
+        let again = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("exec \"$0\" {rerun} --format json"))
+            .arg(patina)
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let again = json_of(&again);
+        assert_eq!(results(&again), results(&document));
+        assert_eq!(again["tests"][0]["seed"], 0);
+    }
 
-        let missing = invoke_unchecked(
+    /// The exit status: an unsupported test raises it to 2 unless an
+    /// `--accept-unsupported` text names its stop, and even then it is
+    /// reported unsupported, never ok. A filter that matches nothing is an
+    /// error, not a pass of nothing.
+    #[test]
+    fn unsupported_tests_are_never_passes() {
+        let directory = tempdir().unwrap();
+        create_native_harness_fixture(directory.path());
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let spawn = [
+            "test",
+            "tests::spawns_a_process",
+            "--exact",
+            "--format",
+            "json",
+        ];
+        let refused = invoke_unchecked(patina, directory.path(), &spawn);
+        assert_eq!(refused.status.code(), Some(2));
+        let refused = json_of(&refused);
+        assert_eq!(refused["tests"][0]["result"], "unsupported", "{refused:#}");
+        let detail = refused["tests"][0]["stop"]["detail"].as_str().unwrap();
+        let accepted = invoke_unchecked(
             patina,
             directory.path(),
-            &[
-                "test",
-                ".",
-                "--harness-target",
-                "missing_harness",
-                "--exact",
-                "tests::epoch_is_seeded",
-                "--seed",
-                "0",
-            ],
+            &[&spawn[..], &["--accept-unsupported", detail]].concat(),
         );
-        assert_eq!(missing.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&missing.stderr).contains("no libtest harness target named"),
-            "missing harness target should refuse loudly:\n{}",
-            String::from_utf8_lossy(&missing.stderr)
+        assert_eq!(accepted.status.code(), Some(0));
+        let accepted = json_of(&accepted);
+        assert_eq!(
+            (
+                &accepted["tests"][0]["result"],
+                &accepted["tests"][0]["accepted"]
+            ),
+            (&"unsupported".into(), &true.into()),
+            "{accepted:#}"
         );
+        let other = invoke_unchecked(
+            patina,
+            directory.path(),
+            &[&spawn[..], &["--accept-unsupported", "dlopen"]].concat(),
+        );
+        assert_eq!(other.status.code(), Some(2));
+
+        let unmatched = invoke_unchecked(
+            patina,
+            directory.path(),
+            &["test", "tests::no_such_test", "--exact", "--format", "json"],
+        );
+        assert_eq!(unmatched.status.code(), Some(2), "{unmatched:?}");
+        assert_eq!(json_of(&unmatched)["result"], "error");
     }
 
     /// Portable class pairing for the executable-metadata pin. An import refusal
@@ -172,13 +221,12 @@ fn import_is_linked() {
         );
     }
 
-    /// Same-name targets are Cargo's default for a package with lib.rs + main.rs.
-    /// A bare name is ambiguous, and each `kind:name` selector runs its own
-    /// target: every target carries a canary that fails only under Patina, so a
-    /// wrong target or an empty filter cannot look like success. Class pairing:
-    /// the target-kind/package selection matrix in lib.rs.
+    /// Same-named targets are Cargo's default for a package with lib.rs and
+    /// main.rs. Each selection flag runs its own target and no other: every
+    /// target carries a canary that fails only under Patina, so a wrong
+    /// target or an empty run cannot look like success.
     #[test]
-    fn native_harness_selects_same_named_library_binary_and_integration_test() {
+    fn selection_flags_run_their_own_targets() {
         let directory = tempdir().unwrap();
         let root = directory.path();
         fs::create_dir_all(root.join("src")).unwrap();
@@ -202,39 +250,35 @@ fn import_is_linked() {
             .unwrap();
         }
         let patina = env!("CARGO_BIN_EXE_patina");
-        let ambiguous = invoke_unchecked(
+        let everything = json_of(&invoke_unchecked(
             patina,
             root,
-            &[
-                "test",
-                ".",
-                "--harness-target",
-                "same_name",
-                "--exact",
-                "selected_lib",
-                "--seed",
-                "0",
-            ],
+            &["test", "--format", "json"],
+        ));
+        assert_eq!(
+            results(&everything).into_keys().collect::<Vec<_>>(),
+            ["selected_bin", "selected_lib", "selected_test"]
         );
-        assert_eq!(ambiguous.status.code(), Some(2));
-        for kind in ["lib", "bin", "test"] {
-            let selector = format!("{kind}:same_name");
-            let canary = invoke_unchecked(
+        for (selection, kind) in [
+            (&["--lib"][..], "lib"),
+            (&["--bin", "same_name"][..], "bin"),
+            (&["--test", "same_name"][..], "test"),
+        ] {
+            let ran = invoke_unchecked(
                 patina,
                 root,
-                &[
-                    "test",
-                    ".",
-                    "--harness-target",
-                    &selector,
-                    "--exact",
-                    &format!("selected_{kind}"),
-                    "--seed",
-                    "0",
-                ],
+                &[&["test", "--format", "json"][..], selection].concat(),
             );
-            assert_eq!(canary.status.code(), Some(1), "{selector}: {canary:?}");
+            assert_eq!(ran.status.code(), Some(1), "{selection:?}: {ran:?}");
+            let document = json_of(&ran);
+            assert_eq!(
+                results(&document),
+                BTreeMap::from([(format!("selected_{kind}"), "failure".to_string())]),
+                "{selection:?}"
+            );
         }
+        let missing = invoke_unchecked(patina, root, &["test", "--test", "missing"]);
+        assert_eq!(missing.status.code(), Some(2));
     }
 
     /// A package whose own binary calls the SDK, with an integration test:
@@ -281,11 +325,8 @@ fn the_sdk_reaches_the_runtime() {
             root,
             &[
                 "test",
-                ".",
-                "--harness-target",
+                "--test",
                 "dst",
-                "--exact",
-                "the_sdk_reaches_the_runtime",
                 "--seed",
                 "1",
                 "--buggify",
@@ -295,62 +336,20 @@ fn the_sdk_reaches_the_runtime() {
                 "json",
             ],
         );
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&ran.stdout).unwrap_or_else(|error| panic!("{error}: {ran:?}"));
+        let document = json_of(&ran);
         assert_eq!(
-            (envelope["result"].as_str(), ran.status.code()),
-            (Some("ok"), Some(0)),
-            "{envelope:#}\n{}",
+            (results(&document), ran.status.code()),
+            (
+                BTreeMap::from([("the_sdk_reaches_the_runtime".to_string(), "ok".to_string())]),
+                Some(0)
+            ),
+            "{document:#}\n{}",
             String::from_utf8_lossy(&ran.stderr)
         );
     }
 
-    /// `test` ends in the class of the seed's own run, with the attribution
-    /// and exit status that follow from it: the vocabulary and the table are
-    /// `run`'s.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn test_reports_the_class_of_the_run_that_decided_it() {
-        let directory = tempdir().unwrap();
-        create_native_harness_fixture(directory.path());
-        for (exact, result, attribution, exit) in [
-            ("tests::epoch_is_seeded", "ok", None, 0),
-            ("tests::always_is_violated", "violation", Some("guest"), 1),
-            ("tests::aborts", "crash", Some("guest"), 1),
-            ("tests::no_such_test", "error", Some("request"), 2),
-        ] {
-            let ran = invoke_unchecked(
-                env!("CARGO_BIN_EXE_patina"),
-                directory.path(),
-                &[
-                    "test",
-                    ".",
-                    "--harness-target",
-                    "dst_harness_fixture",
-                    "--exact",
-                    exact,
-                    "--seed",
-                    "1",
-                    "--format",
-                    "json",
-                ],
-            );
-            let envelope: serde_json::Value = serde_json::from_slice(&ran.stdout)
-                .unwrap_or_else(|error| panic!("{exact}: {error}: {ran:?}"));
-            assert_eq!(
-                (
-                    envelope["result"].as_str(),
-                    envelope["attribution"].as_str(),
-                    envelope["exit_code"].as_i64(),
-                    ran.status.code(),
-                ),
-                (Some(result), attribution, Some(i64::from(exit)), Some(exit)),
-                "{exact}: {envelope:#}"
-            );
-        }
-    }
-
-    fn create_native_harness_fixture(root: &Path) {
+    /// Writes the fixture and returns its test source.
+    fn create_native_harness_fixture(root: &Path) -> String {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
         root.join("Cargo.toml"),
@@ -360,9 +359,7 @@ fn the_sdk_reaches_the_runtime() {
         ),
     )
     .unwrap();
-        fs::write(
-            root.join("src/lib.rs"),
-            r#"
+        let source = r#"
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -378,7 +375,6 @@ mod tests {
         assert_eq!(epoch, DEFAULT_START_SECONDS);
     }
 
-
     #[test]
     fn always_is_violated() {
         patina_dst::always!(std::env::args().count() > 64, "harness-always");
@@ -390,6 +386,32 @@ mod tests {
     }
 
     #[test]
+    fn panics() {
+        panic!("HARNESS_PANIC");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected")]
+    fn should_panic_panics() {
+        panic!("expected");
+    }
+
+    #[test]
+    #[should_panic]
+    fn should_panic_does_not() {}
+
+    #[test]
+    #[ignore]
+    fn ignored_panics() {
+        panic!("HARNESS_IGNORED");
+    }
+
+    #[test]
+    fn spawns_a_process() {
+        let _ = std::process::Command::new("true").status();
+    }
+
+    #[test]
     fn buggify_failure_records() {
         if patina_dst::buggify_with_prob!("native-harness-record", 1.0) {
             eprintln!("HARNESS_BUG record-on-failure");
@@ -398,14 +420,14 @@ mod tests {
     }
 }
 "#
-            .replace(
-                "DEFAULT_START_SECONDS",
-                &((patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
-                    + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
-                    / 1_000_000_000)
-                    .to_string(),
-            ),
-        )
-        .unwrap();
+        .replace(
+            "DEFAULT_START_SECONDS",
+            &((patina_dst_runtime::DEFAULT_REALTIME_EPOCH_NANOS
+                + patina_dst_runtime::DEFAULT_BOOT_ORIGIN_NANOS)
+                / 1_000_000_000)
+                .to_string(),
+        );
+        fs::write(root.join("src/lib.rs"), &source).unwrap();
+        source
     }
 }

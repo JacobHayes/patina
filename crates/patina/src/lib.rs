@@ -57,9 +57,8 @@
 //! - [`param`] — a named run parameter (`patina run --param K=V`), recorded
 //!   and restored on replay; `None` outside Patina.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
-//! - With the default-off `macros` feature, `#[patina_dst::test]` rebuilds the
-//!   same libtest harness shim-linked and sweeps the annotated test under plain
-//!   `cargo test`.
+//! - With the default-off `macros` feature, `#[patina_dst::test]` runs the
+//!   annotated test through `patina test` from plain `cargo test`.
 //!
 //! # Labels, helpers and families
 //!

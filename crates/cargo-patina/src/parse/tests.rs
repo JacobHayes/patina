@@ -125,18 +125,25 @@ fn run_and_replay_locate_native_positionals_around_options() {
 }
 
 #[test]
-fn run_and_test_without_an_artifact_are_usage_errors() {
-    // There is no implicit current package: every form names its artifact or
-    // package, so a missing one (or one hidden behind an unknown flag) is
-    // refused rather than run as something else.
+fn run_without_an_artifact_and_test_without_a_package_are_usage_errors() {
+    // `run` has no implicit artifact, so a missing one (or one hidden behind
+    // an unknown flag) is refused rather than run as something else. `test`
+    // takes the working directory's package by default, but two positionals
+    // must be a package and a filter, and a `--` tail is libtest's own.
     let dir = tempfile::tempdir().unwrap();
     let module = native_fixture(&dir, "app");
     let m = module.to_str().unwrap();
+    let d = dir.path().to_str().unwrap();
     for argv in [
         &["run"][..],
         &["run", "--frob", m],
-        &["test", "--seed", "1"],
-        &["test", m],
+        &["test", m, "name"],
+        &["test", d, "name"],
+        &["test", "--frob"],
+        &["test", ".", "a", "b"],
+        &["test", ".", "--", "--exact"],
+        &["test", "--exact"],
+        &["test", "--workspace", "-p", "a"],
     ] {
         crate::tests::parse_error(argv);
     }

@@ -511,34 +511,28 @@ pub(super) fn assert_native_harness_prerun_refusal(
         .unwrap();
     assert!(native.status.success(), "{native:?}");
     let patina = env!("CARGO_BIN_EXE_patina");
-    let staged =
-        fixture_target_directory(root).join(format!("patina/dst/{name}/lib/{name}/{exact}"));
-    fs::create_dir_all(&staged).unwrap();
-    let trace = staged.join("seed-0.patina");
+    let staged = fixture_target_directory(root).join(format!("patina/dst/{name}/lib/{name}"));
+    fs::create_dir_all(staged.join("traces")).unwrap();
+    let trace = staged.join(format!("traces/{exact}.seed-0.patina"));
     // File existence is not evidence that THIS run produced a trace.
     fs::write(&trace, b"stale trace canary").unwrap();
     let run = invoke_unchecked(
         patina,
         root,
-        &[
-            "test",
-            ".",
-            "--harness-target",
-            name,
-            "--exact",
-            exact,
-            "--seed",
-            "0",
-            "--format",
-            "json",
-        ],
+        &["test", exact, "--exact", "--format", "json"],
     );
     assert_eq!(run.status.code(), Some(2), "{run:?}");
     let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(result["verb"], "test");
-    assert!(result["trace"].is_null(), "{result}");
-    // Skipping the recording attempt must not touch a previous attempt's file;
-    // and that file must not masquerade as facts in this attempt's receipt.
+    // The pre-run gate refuses the whole target before any test runs: its
+    // listing is the unsupported outcome, and no test ran or was recorded.
+    assert_eq!(result["result"], "unsupported", "{result}");
+    assert_eq!(
+        result["targets"][0]["listing"]["stop"]["reason"], "prerun_audit",
+        "{result}"
+    );
+    assert_eq!(result["tests"], serde_json::json!([]), "{result}");
+    // Nothing touched a previous attempt's file.
     assert_eq!(fs::read(&trace).unwrap(), b"stale trace canary");
     let refused = invoke_unchecked(
         patina,

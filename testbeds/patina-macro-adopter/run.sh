@@ -91,7 +91,7 @@ import sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
 start = None
 for i, line in enumerate(lines):
-    if "patina dst test failed:" in line:
+    if "seeded_failure_reports_repro (seed" in line:
         start = i
         break
 if start is None:
@@ -129,10 +129,10 @@ run_seeded_failure "$FAIL2"
 extract_failure_block "$FAIL1" >"$BLOCK1"
 extract_failure_block "$FAIL2" >"$BLOCK2"
 diff -u "$BLOCK1" "$BLOCK2" >/dev/null
-assert_contains "$BLOCK1" "seed 7"
+assert_contains "$BLOCK1" "(seed 7)"
 assert_contains "$BLOCK1" "patina test"
-assert_contains "$BLOCK1" "--harness-target dst_macro"
-assert_contains "$BLOCK1" "--exact seeded_failure_reports_repro"
+assert_contains "$BLOCK1" "--test dst_macro seeded_failure_reports_repro --exact"
+assert_contains "$BLOCK1" "--seed 7"
 assert_contains "$BLOCK1" "patina replay"
 assert_contains "$FAIL1" "DST_MACRO_PLANTED_FAILURE"
 

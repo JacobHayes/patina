@@ -267,27 +267,5 @@ pub(crate) fn report_prerun_stop(artifact: &Path, class: RunClass, stop: Stop) -
     class.exit_code()
 }
 
-/// The `test` verb's envelope: the class of the seed that decided it, what
-/// stopped that seed's run, and how its guest ended.
-pub(crate) struct HarnessResult {
-    pub(crate) result: RunClass,
-    pub(crate) message: String,
-    pub(crate) trace: Option<TraceFacts>,
-    pub(crate) stop: Option<Stop>,
-    pub(crate) guest_exit: Option<serde_json::Value>,
-}
-
-pub(crate) fn emit_harness_result(harness: HarnessResult) {
-    if !options().is_json() {
-        return;
-    }
-    let mut env = Envelope::new("test", harness.result);
-    env.message = Some(harness.message);
-    env.trace = harness.trace;
-    env.stop = harness.stop;
-    env.guest_exit_raw = harness.guest_exit;
-    env.emit();
-}
-
 #[cfg(test)]
 mod tests;

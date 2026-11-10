@@ -9,7 +9,13 @@ mod orchestration {
     #[doc(hidden)]
     pub struct DstTest {
         pub manifest_dir: &'static str,
-        pub harness_target: &'static str,
+        pub package: &'static str,
+        /// The test's crate: the library's, or the target's own.
+        pub crate_name: &'static str,
+        /// Set when the test is in a binary target.
+        pub bin_name: Option<&'static str>,
+        /// Whether the test is in an integration test target.
+        pub integration_test: bool,
         pub test_path: &'static str,
         pub cli_args: &'static [&'static str],
     }
@@ -46,8 +52,9 @@ mod orchestration {
     ///
     /// The shim-linked guest calls the same wrapper, but `is_simulated()` is true
     /// there, so only the body executes. This function is therefore host-side
-    /// only: discover the `patina` tool, ask it to rebuild the same libtest
-    /// target under the native shim, and panic loudly on any failure.
+    /// only: discover the `patina` tool, ask it to run this one test of this
+    /// one target (`patina test DIR -p PACKAGE --lib|--bin|--test NAME --exact`),
+    /// and panic loudly on any failure.
     #[cfg(feature = "macros")]
     #[doc(hidden)]
     #[track_caller]
@@ -65,10 +72,13 @@ mod orchestration {
         command
             .arg("test")
             .arg(test.manifest_dir)
-            .arg("--harness-target")
-            .arg(test.harness_target)
-            .arg("--exact")
+            .arg("--package")
+            .arg(test.package)
+            .args(target_selection(test))
             .arg(&exact)
+            .arg("--exact")
+            // The test is asked for by name, `#[ignore]` or not.
+            .arg("--include-ignored")
             .args(test.cli_args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -82,19 +92,28 @@ mod orchestration {
         if output.status.success() {
             return Ok(());
         }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Exit 1 is a finding: the summary on stdout names the seed, why,
+        // and the rerun and replay commands, and is the whole report.
+        if output.status.code() == Some(1) {
+            return Err(format!(
+                "patina dst test failed: {}\n{}",
+                test.test_path,
+                stdout.trim_matches('\n')
+            ));
+        }
         let exit = match output.status.code() {
             Some(code) => code.to_string(),
             None => "terminated by signal".to_string(),
         };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
         let mut message = format!(
-            "patina dst test orchestration failed: {}\n  command: {rendered}\n  exit: {exit}",
+            "patina dst test could not run: {}\n  command: {rendered}\n  exit: {exit}",
             test.test_path
         );
         if !stdout.trim().is_empty() {
             message.push_str("\n  stdout:\n");
-            message.push_str(&indent_block(&stdout));
+            message.push_str(&indent_block(stdout.trim_matches('\n')));
         }
         if !stderr.trim().is_empty() {
             message.push_str("\n  stderr:\n");
@@ -103,9 +122,21 @@ mod orchestration {
         Err(message)
     }
 
+    /// The `patina test` flags that select the test's own target. A compiled
+    /// test knows its target's crate name (`-` read as `_`), which `patina
+    /// test` matches against the target's name.
+    #[cfg(feature = "macros")]
+    fn target_selection(test: &DstTest) -> Vec<&'static str> {
+        match test.bin_name {
+            Some(bin) => vec!["--bin", bin],
+            None if test.integration_test => vec!["--test", test.crate_name],
+            None => vec!["--lib"],
+        }
+    }
+
     #[cfg(feature = "macros")]
     fn libtest_exact_name(test: &DstTest) -> String {
-        if let Some(rest) = test.test_path.strip_prefix(test.harness_target)
+        if let Some(rest) = test.test_path.strip_prefix(test.crate_name)
             && let Some(rest) = rest.strip_prefix("::")
             && !rest.is_empty()
         {
@@ -247,7 +278,10 @@ mod orchestration {
 
         const TEST: DstTest = DstTest {
             manifest_dir: "/repo/crate",
-            harness_target: "macro_adopter",
+            package: "macro-adopter",
+            crate_name: "macro_adopter",
+            bin_name: None,
+            integration_test: true,
             test_path: "macro_adopter::nested::case",
             cli_args: &[],
         };
@@ -255,6 +289,7 @@ mod orchestration {
         #[test]
         fn rerun_commands_name_the_libtest_case_and_quote_for_the_shell() {
             assert_eq!(libtest_exact_name(&TEST), "nested::case");
+            assert_eq!(target_selection(&TEST), ["--test", "macro_adopter"]);
             assert_eq!(
                 shell_quote(std::ffi::OsStr::new("simple/path")),
                 "simple/path"

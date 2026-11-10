@@ -19,12 +19,10 @@ macro is a no-op or plain fallback
 outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
 in their code. The default-off `macros` feature re-exports
 `#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
-`patina` through `PATINA_CLI` or `PATH`, then rebuilds the same libtest
-target shim-linked and runs the annotated body under the native harness. The
-runtime otherwise enters through `patina build`/`run` (the shim),
-`patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
-(the source-first native libtest harness for one point-solution test), or not
-at all.
+`patina` through `PATINA_CLI` or `PATH`, then runs `patina test` for that
+one test. The runtime otherwise enters through `patina build`/`run` (the
+shim), `patina test [DIR|Cargo.toml] [cargo test selection] [TESTNAME]`
+(a package's own libtest suite, one simulated run per test), or not at all.
 
 Native startup has one important adopter rule: static constructors (`#[ctor]`,
 link-section constructors, C++ global constructors) must not perform interposed

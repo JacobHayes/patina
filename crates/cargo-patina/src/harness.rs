@@ -1,1213 +1,182 @@
-//! Native libtest harnesses (`test <DIR|Cargo.toml>`).
+//! `patina test`: a Cargo project's own test suite under the deterministic
+//! runtime, one simulated run per test.
+//!
+//! Three phases, each once per invocation: build every selected libtest
+//! target shim-linked and stage it ([`build`]); ask each staged harness for
+//! its tests (`--list`, under the runtime) and pick the ones the filter
+//! selects ([`run`]); then run every selected test, on every seed, as its own
+//! child `patina run` in a world of its own, `--jobs` at a time. A test that
+//! does not pass on a seed stops there; a finding is run again recorded, so
+//! it can be replayed. [`report`] prints the outcome per test.
+//!
+//! `#[patina_dst::test]` is this same command for one test: the attribute's
+//! host side runs `patina test` with the test's own target and exact name.
 
-use crate::native_build::{
-    NATIVE_AUDIT_METADATA_ARGS, host_target_triple, native_package_link_args,
-    native_package_rustflags, stage_sancov_stub, stage_sdk_stub,
-};
-use crate::parse::knob_flag_pairs;
-use crate::shim_build::{
-    RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
-    lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
-};
-use crate::{CliError, NativeHarnessInvocation, cli, output};
-use patina_dst_abi::RunClass;
-use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::{env, fs};
-
-/// A child's exit code, or an error for one a signal ended.
-fn exit_code(status: std::process::ExitStatus) -> Result<i32, CliError> {
-    status
-        .code()
-        .ok_or_else(|| CliError("a child patina run was terminated by a signal".into()))
-}
-
-fn command_line(prefix: &str, args: &[OsString]) -> String {
-    let mut parts = vec![prefix.to_string()];
-    parts.extend(args.iter().map(|arg| cli::shell_quote(arg)));
-    parts.join(" ")
-}
-
-struct BuiltNativeHarness {
-    guest: PathBuf,
-    directory: PathBuf,
-    package_name: String,
-}
-
-struct NativeHarnessArtifact {
-    executable: PathBuf,
-    package_id: String,
-}
-
-struct HarnessSeedRun {
-    /// The class the seed's own `patina run` reported.
-    result: RunClass,
-    /// What stopped the seed's run, and how its guest ended, as that run's
-    /// envelope reported them.
-    stop: Option<output::Stop>,
-    guest_exit: Option<serde_json::Value>,
-    stdout: String,
-    stderr: String,
-    message: Option<String>,
-    // Choke point: HarnessSeedRun::trace is taken only from the child's receipt,
-    // never inferred from a requested path or a file left by an earlier run.
-    trace: Option<output::TraceFacts>,
-    pre_run_refusal: bool,
-}
-
-fn record_harness_failure(
-    first: &HarnessSeedRun,
-    trace: &Path,
-    record: impl FnOnce() -> Result<HarnessSeedRun, CliError>,
-) -> Result<Option<HarnessSeedRun>, CliError> {
-    if first.pre_run_refusal {
-        // Nothing executed, so a recorded retry would only repeat the audit.
-        return Ok(None);
-    }
-    match fs::remove_file(trace) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(CliError(format!(
-                "failed to remove previous harness trace {}: {error}",
-                trace.display()
-            )));
-        }
-    }
-    record().map(Some)
-}
-
-pub(super) fn execute_native_harness(invocation: NativeHarnessInvocation) -> Result<i32, CliError> {
-    let built = build_native_harness(&invocation)?;
-    let test_name = format!("{}::{}", invocation.harness_target, invocation.exact);
-    let first_seed = invocation.seeds.iter().next().unwrap_or(0);
-    require_listed_test(&invocation, &built.guest, first_seed)?;
-    for seed in invocation.seeds.iter() {
-        let run = run_native_harness_seed(&invocation, &built.guest, seed, None)?;
-        if run.result.is_failure() {
-            let trace = built.directory.join(format!("seed-{seed}.patina"));
-            let recorded = record_harness_failure(&run, &trace, || {
-                run_native_harness_seed(&invocation, &built.guest, seed, Some(&trace))
-            })?;
-            // The recorded retry is the same seed: it must end the same way,
-            // class and guest status both. A retry patina could not finish (a
-            // timeout, a host kill, an error of its own) says nothing either
-            // way: the first run's finding stands, without a recording.
-            let recorded = recorded.filter(|recorded| {
-                !matches!(
-                    recorded.result,
-                    RunClass::Timeout | RunClass::Internal | RunClass::Error
-                ) || recorded.result == run.result
-            });
-            let reproduced = recorded.as_ref().map(|recorded| {
-                recorded.result == run.result && recorded.guest_exit == run.guest_exit
-            });
-            let latest = recorded.as_ref().unwrap_or(&run);
-            // A seed that does not end the same way twice is not this test's
-            // finding: it is the run failing to be deterministic.
-            let result = if reproduced == Some(false) {
-                RunClass::Nondeterministic
-            } else {
-                run.result
-            };
-            let block = native_harness_failure_block(NativeHarnessFailure {
-                invocation: &invocation,
-                built: &built,
-                test_name: &test_name,
-                seed,
-                result,
-                first: &run,
-                latest,
-                reproduced,
-            });
-            if !output::options().is_json() {
-                eprintln!("{block}");
-            }
-            output::emit_harness_result(output::HarnessResult {
-                result,
-                message: block,
-                trace: latest.trace.clone(),
-                stop: latest.stop.clone(),
-                guest_exit: latest.guest_exit.clone(),
-            });
-            return Ok(result.exit_code());
-        }
-    }
-    let message = format!(
-        "patina dst test passed: {test_name} {} package={} guest={}",
-        invocation.seeds.label(),
-        built.package_name,
-        built.guest.display()
-    );
-    if output::options().is_json() {
-        output::emit_simple("test", RunClass::Ok, Some(message));
-    } else {
-        println!("PATINA_DST_TEST_PASS {message}");
-    }
-    Ok(0)
-}
-
-fn build_native_harness(
-    invocation: &NativeHarnessInvocation,
-) -> Result<BuiltNativeHarness, CliError> {
-    if !invocation.manifest.is_file() {
-        return Err(CliError(format!(
-            "no Cargo manifest at {}",
-            invocation.manifest.display()
-        )));
-    }
-    let shim = prepare_shim_sources()?;
-    let rustc = check_native_toolchain_agreement(&shim.dir)?;
-    let built_shim = build_native_shim(invocation.release, &rustc, &shim)?;
-    let host_target = host_target_triple(&rustc)?;
-    let yield_object =
-        stage_instrumentation_object(&built_shim, invocation.instrument, &host_target)?;
-    let sancov_stub = stage_sancov_stub(&built_shim, yield_object.is_some(), &host_target)?;
-    let metadata = cargo_metadata(&invocation.manifest, Some(&rustc))?;
-    let target_dir = metadata_target_dir(&metadata)?;
-    let selected = select_native_harness_target(
-        &metadata,
-        &invocation.harness_target,
-        invocation.package.as_deref(),
-    )?;
-    // Cargo builds a package's binaries beside its integration tests, and the
-    // shim's link arguments reach the test alone. A binary that calls the SDK
-    // links against the stand-ins instead.
-    let sdk_stub = match selected.kind {
-        HarnessTargetKind::Test => Some(stage_sdk_stub(&built_shim, &host_target)?),
-        HarnessTargetKind::Lib | HarnessTargetKind::Bin => None,
-    };
-    let rustflags =
-        native_package_rustflags(sancov_stub.as_deref(), sdk_stub.as_deref(), &host_target);
-
-    let mut command = Command::new(&rustc.cargo_command);
-    command
-        .arg("rustc")
-        .arg("--manifest-path")
-        .arg(&invocation.manifest)
-        .arg("--package")
-        .arg(&selected.package)
-        .arg("--target")
-        .arg(&host_target)
-        .arg("--message-format=json-render-diagnostics")
-        .env_remove("RUSTFLAGS")
-        .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    apply_rustc_env(&mut command, &rustc);
-    command.args(selected.kind.select_args(&selected.name));
-    command.args(invocation.features.cargo_args());
-    // `cargo rustc` builds a lib/bin target in test mode only under the `test` or
-    // `bench` profile, and `--release` is rejected alongside `--profile`. `bench`
-    // inherits `release`, so `--release` here means the same codegen settings a
-    // `cargo test --release` harness would get, including any `[profile.release]`
-    // overrides the package declares.
-    command
-        .arg("--profile")
-        .arg(if invocation.release { "bench" } else { "test" });
-    command
-        .arg("--")
-        .args(native_package_link_args(
-            &built_shim.facade,
-            &built_shim.engine,
-            &built_shim.allocator_link_args(&host_target)?,
-            yield_object.as_deref(),
-        ))
-        .args(NATIVE_AUDIT_METADATA_ARGS);
-    let _lock = lock_target_dir(&target_dir)?;
-    let built = command.output().map_err(|error| {
-        CliError(format!(
-            "failed to run cargo rustc for native harness: {error}"
-        ))
-    })?;
-    crate::sdk_version::check_guest_sdk(&built.stdout)?;
-    if !built.status.success() {
-        return Err(CliError(format!(
-            "building the native libtest harness {:?} failed",
-            invocation.harness_target
-        )));
-    }
-    let artifact = native_harness_executable(&built.stdout, &selected.name)?;
-    let package_name = metadata_package_name(&metadata, &artifact.package_id)
-        .unwrap_or_else(|| artifact.package_id.clone());
-    let directory = selected.staging_directory(&target_dir, &package_name, &invocation.exact);
-    fs::create_dir_all(&directory).map_err(|error| {
-        CliError(format!(
-            "failed to create native harness staging dir {}: {error}",
-            directory.display()
-        ))
-    })?;
-    let guest = directory.join("guest");
-    fs::copy(&artifact.executable, &guest).map_err(|error| {
-        CliError(format!(
-            "failed to stage native harness {} at {}: {error}",
-            artifact.executable.display(),
-            guest.display()
-        ))
-    })?;
-    let permissions = fs::metadata(&artifact.executable)
-        .map_err(|error| {
-            CliError(format!(
-                "failed to read permissions for {}: {error}",
-                artifact.executable.display()
-            ))
-        })?
-        .permissions();
-    fs::set_permissions(&guest, permissions).map_err(|error| {
-        CliError(format!(
-            "failed to copy permissions to staged native harness {}: {error}",
-            guest.display()
-        ))
-    })?;
-    Ok(BuiltNativeHarness {
-        guest,
-        directory,
-        package_name,
-    })
-}
-
-pub(super) fn cargo_metadata(
-    manifest: &Path,
-    rustc: Option<&RustcInvocation>,
-) -> Result<serde_json::Value, CliError> {
-    let cargo = rustc
-        .map(|r| r.cargo_command.clone())
-        .unwrap_or_else(|| env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
-    let mut command = Command::new(&cargo);
-    if let Some(rustc) = rustc {
-        apply_rustc_env(&mut command, rustc);
-    }
-    let output = command
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .arg("--manifest-path")
-        .arg(manifest)
-        .output()
-        .map_err(|error| CliError(format!("failed to run cargo metadata: {error}")))?;
-    if !output.status.success() {
-        return Err(CliError(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| CliError(format!("failed to parse cargo metadata: {error}")))
-}
-
-pub(super) fn metadata_target_dir(metadata: &serde_json::Value) -> Result<PathBuf, CliError> {
-    metadata
-        .get("target_directory")
-        .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError("cargo metadata did not report target_directory".into()))
-}
-
-fn metadata_package_name(metadata: &serde_json::Value, package_id: &str) -> Option<String> {
-    metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)?
-        .iter()
-        .find(|package| package.get("id").and_then(serde_json::Value::as_str) == Some(package_id))?
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-}
-
-/// Which `cargo rustc` target-selection flag reaches a libtest harness target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HarnessTargetKind {
-    /// The package's own library, built in test mode (`--harness-target <crate>`
-    /// naming the crate itself — the common shape).
-    Lib,
-    /// An integration test under `tests/`.
-    Test,
-    /// A binary target's inline `#[test]`s.
-    Bin,
-}
-
-impl HarnessTargetKind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Lib => "lib",
-            Self::Bin => "bin",
-            Self::Test => "test",
-        }
-    }
-
-    fn select_args(self, name: &str) -> Vec<String> {
-        match self {
-            HarnessTargetKind::Lib => vec!["--lib".to_string()],
-            HarnessTargetKind::Test => vec!["--test".to_string(), name.to_string()],
-            HarnessTargetKind::Bin => vec!["--bin".to_string(), name.to_string()],
-        }
-    }
-}
-
-/// The package and target kind a `--harness-target` name resolves to.
-struct SelectedNativeHarness {
-    package: String,
-    name: String,
-    kind: HarnessTargetKind,
-}
-
-impl SelectedNativeHarness {
-    fn staging_directory(&self, target_dir: &Path, package_name: &str, exact: &str) -> PathBuf {
-        target_dir
-            .join("patina/dst")
-            .join(safe_path_segment(package_name))
-            .join(self.kind.name())
-            .join(safe_path_segment(&self.name))
-            .join(safe_path_segment(exact))
-    }
-}
-
-/// Resolve `--harness-target` to exactly one package and target *before*
-/// building, so the shim link arguments can be scoped to that one unit with
-/// `cargo rustc` (see [`native_package_link_args`]). Fails closed on an unknown
-/// or ambiguous name, listing what the workspace does offer.
-fn select_native_harness_target(
-    metadata: &serde_json::Value,
-    harness_target: &str,
-    package: Option<&str>,
-) -> Result<SelectedNativeHarness, CliError> {
-    let packages = metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| CliError("cargo metadata reported no packages".into()))?;
-    let (kind_filter, target_name) = match harness_target.split_once(':') {
-        Some(("lib", name)) => (Some(HarnessTargetKind::Lib), name),
-        Some(("bin", name)) => (Some(HarnessTargetKind::Bin), name),
-        Some(("test", name)) => (Some(HarnessTargetKind::Test), name),
-        Some(_) => {
-            return Err(CliError(format!(
-                "invalid harness target {harness_target:?}; use NAME, lib:NAME, bin:NAME, or test:NAME"
-            )));
-        }
-        None => (None, harness_target),
-    };
-    let mut matches: Vec<SelectedNativeHarness> = Vec::new();
-    let mut available = BTreeSet::new();
-    for entry in packages {
-        let Some(package_name) = entry.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if package.is_some_and(|wanted| wanted != package_name) {
-            continue;
-        }
-        let targets = entry
-            .get("targets")
-            .and_then(serde_json::Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        for target in targets {
-            let Some(name) = target.get("name").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let kinds: Vec<&str> = target
-                .get("kind")
-                .and_then(serde_json::Value::as_array)
-                .map(|kinds| kinds.iter().filter_map(serde_json::Value::as_str).collect())
-                .unwrap_or_default();
-            // A `[lib]` reports its declared crate types as its kinds, so a
-            // dependency-style `crate-type = ["rlib", "cdylib"]` library is still
-            // selected by `--lib`. Build scripts (`custom-build`) and examples
-            // carry no libtest harness.
-            let kind = if kinds
-                .iter()
-                .all(|kind| matches!(*kind, "lib" | "rlib" | "dylib" | "cdylib" | "proc-macro"))
-                && !kinds.is_empty()
-            {
-                HarnessTargetKind::Lib
-            } else if kinds == ["test"] {
-                HarnessTargetKind::Test
-            } else if kinds == ["bin"] {
-                HarnessTargetKind::Bin
-            } else {
-                continue;
-            };
-            let prefix = kind.name();
-            available.insert(format!("{prefix}:{name} (package {package_name})"));
-            if name == target_name && kind_filter.is_none_or(|wanted| wanted == kind) {
-                matches.push(SelectedNativeHarness {
-                    package: package_name.to_string(),
-                    name: name.to_string(),
-                    kind,
-                });
-            }
-        }
-    }
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(CliError(format!(
-            "no libtest harness target named {harness_target:?} in the workspace; available harness targets: {}",
-            if available.is_empty() {
-                "<none>".to_string()
-            } else {
-                available.into_iter().collect::<Vec<_>>().join(", ")
-            }
-        ))),
-        _ => Err(CliError(format!(
-            "multiple targets named {harness_target:?} were found; qualify the name with lib:, bin:, or test: and select a workspace member with --package if needed; available harness targets: {}",
-            available.into_iter().collect::<Vec<_>>().join(", ")
-        ))),
-    }
-}
-
-fn native_harness_executable(
-    stdout: &[u8],
-    harness_target: &str,
-) -> Result<NativeHarnessArtifact, CliError> {
-    let mut matches = Vec::new();
-    let mut available = BTreeSet::new();
-    for line in stdout.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
-            continue;
-        };
-        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
-            continue;
-        }
-        let Some(executable) = message
-            .get("executable")
-            .and_then(serde_json::Value::as_str)
-        else {
-            continue;
-        };
-        let is_test_profile = message
-            .get("profile")
-            .and_then(|profile| profile.get("test"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
-        if !is_test_profile {
-            continue;
-        }
-        let target_name = message
-            .get("target")
-            .and_then(|target| target.get("name"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("<unknown>");
-        available.insert(target_name.to_string());
-        if target_name == harness_target {
-            let package_id = message
-                .get("package_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("<unknown-package>")
-                .to_string();
-            matches.push(NativeHarnessArtifact {
-                executable: PathBuf::from(executable),
-                package_id,
-            });
-        }
-    }
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(CliError(format!(
-            "no libtest harness target named {harness_target:?} was reported by cargo rustc; available harness targets: {}",
-            if available.is_empty() {
-                "<none>".to_string()
-            } else {
-                available.into_iter().collect::<Vec<_>>().join(", ")
-            }
-        ))),
-        _ => Err(CliError(format!(
-            "internal error: cargo rustc reported multiple libtest executables for the single selected target {harness_target:?}"
-        ))),
-    }
-}
-
-fn safe_path_segment(value: &str) -> String {
-    let mut segment = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-            segment.push(ch);
-        } else {
-            segment.push('_');
-        }
-    }
-    if segment.is_empty() {
-        "_".to_string()
-    } else {
-        segment
-    }
-}
-
-/// Refuse a `--exact` path the harness has no test for. libtest runs zero
-/// tests for a filter that matches nothing and exits 0, which every seed
-/// would then report as a pass of a test that never ran. The harness lists
-/// its own tests (`--list`), one `NAME: test` line each; a listing that
-/// itself fails is left for the first seed to report.
-fn require_listed_test(
-    invocation: &NativeHarnessInvocation,
-    guest: &Path,
-    seed: u64,
-) -> Result<(), CliError> {
-    let listing = run_native_harness_child(invocation, guest, seed, None, &["--list"])?;
-    if listing.result.is_failure() {
-        return Ok(());
-    }
-    let tests: Vec<&str> = listing
-        .stdout
-        .lines()
-        .filter_map(|line| line.strip_suffix(": test"))
-        .collect();
-    if tests.contains(&invocation.exact.as_str()) {
-        return Ok(());
-    }
-    let mut message = format!(
-        "no test named {:?} in harness target {:?}: nothing would run. --exact takes the \
-         test's full path within the target",
-        invocation.exact, invocation.harness_target
-    );
-    if tests.is_empty() {
-        message.push_str("; the target lists no tests");
-    } else {
-        message.push_str("; it lists:");
-        for name in &tests {
-            message.push_str("\n  ");
-            message.push_str(name);
-        }
-    }
-    Err(CliError(message))
-}
-
-fn run_native_harness_seed(
-    invocation: &NativeHarnessInvocation,
-    guest: &Path,
-    seed: u64,
-    record: Option<&Path>,
-) -> Result<HarnessSeedRun, CliError> {
-    run_native_harness_child(
-        invocation,
-        guest,
-        seed,
-        record,
-        &["--exact", &invocation.exact, "--nocapture"],
-    )
-}
-
-/// One child `patina run` of the harness under `seed`, with `libtest_args`
-/// after the single-thread setting every harness run takes.
-fn run_native_harness_child(
-    invocation: &NativeHarnessInvocation,
-    guest: &Path,
-    seed: u64,
-    record: Option<&Path>,
-    libtest_args: &[&str],
-) -> Result<HarnessSeedRun, CliError> {
-    let executable = env::current_exe().map_err(|error| {
-        CliError(format!(
-            "failed to locate current patina executable: {error}"
-        ))
-    })?;
-    let mut args = vec![
-        OsString::from("run"),
-        OsString::from("--format"),
-        OsString::from("json"),
-    ];
-    args.push(guest.as_os_str().to_owned());
-    args.push(OsString::from("--seed"));
-    args.push(OsString::from(seed.to_string()));
-    if let Some(path) = record {
-        args.push(OsString::from("--record"));
-        args.push(path.as_os_str().to_owned());
-    }
-    append_native_harness_run_flags(&mut args, invocation);
-    args.push(OsString::from("--"));
-    args.push(OsString::from("--test-threads=1"));
-    args.extend(libtest_args.iter().map(OsString::from));
-    let mut command = Command::new(&executable);
-    command.args(&args);
-    // Every seed, and the recorded retry, is this same supervisor build.
-    crate::supervisor_identity::expect_this_supervisor(&mut command)?;
-    let output = command
-        .output()
-        .map_err(|error| CliError(format!("failed to run native harness seed {seed}: {error}")))?;
-    harness_seed_outcome(seed, &output)
-}
-
-/// What one harness seed's child `patina run` reported.
-fn harness_seed_outcome(
-    seed: u64,
-    output: &std::process::Output,
-) -> Result<HarnessSeedRun, CliError> {
-    let exit_code = exit_code(output.status)?;
-    let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    // A child that is another patina build (the executable was replaced
-    // under the run) stops the test run rather than being filed as a seed
-    // failure: it is not the supervisor this run started with.
-    if let Some(refusal) =
-        crate::supervisor_identity::supervisor_mismatch(&stdout_text, &child_stderr)
-    {
-        return Err(CliError(format!(
-            "stopping: native harness seed {seed} ran another supervisor build than this test \
-             run, so its result is not comparable. {refusal}"
-        )));
-    }
-    let json_line = stdout_text
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| {
-            CliError(format!(
-                "native harness seed {seed} produced no JSON envelope\nstderr:\n{child_stderr}"
-            ))
-        })?;
-    let envelope: serde_json::Value = serde_json::from_str(json_line).map_err(|error| {
-        CliError(format!(
-            "native harness seed {seed} did not produce a valid JSON envelope: {error}\nstdout:\n{stdout_text}\nstderr:\n{child_stderr}"
-        ))
-    })?;
-    // The seed's class is the one its own run named. A child that names none
-    // this patina knows has not reported a result this test can stand on.
-    let result = envelope
-        .get("result")
-        .and_then(serde_json::Value::as_str)
-        .and_then(RunClass::from_name)
-        .ok_or_else(|| {
-            CliError(format!(
-                "native harness seed {seed} reported no result class\nstdout:\n{stdout_text}\nstderr:\n{child_stderr}"
-            ))
-        })?;
-    let guest_stdout = envelope
-        .get("stdout")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let guest_stderr = envelope
-        .get("stderr")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let mut stderr = String::new();
-    if !child_stderr.is_empty() {
-        stderr.push_str(&child_stderr);
-        if !child_stderr.ends_with('\n') && !guest_stderr.is_empty() {
-            stderr.push('\n');
-        }
-    }
-    stderr.push_str(guest_stderr);
-    let message = envelope
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    if stderr.trim().is_empty()
-        && let Some(message) = &message
-    {
-        stderr.push_str(message);
-    }
-    // The child's exit status is a function of the class it reported. One
-    // that reported an outcome and exited another way did not finish the run
-    // it described, and its word is not taken over the process's.
-    if exit_code != result.exit_code() {
-        return Err(CliError(format!(
-            "native harness seed {seed} reported {result} and exited {exit_code}; its result \
-             cannot be trusted\nstderr:\n{child_stderr}"
-        )));
-    }
-    Ok(HarnessSeedRun {
-        result,
-        stop: output::Stop::from_envelope(&envelope),
-        // No guest ran when the run's envelope reports no guest status: a
-        // pre-run refusal, or an error before the launch.
-        pre_run_refusal: envelope.get("guest_exit").is_none(),
-        guest_exit: envelope.get("guest_exit").cloned(),
-        stdout: guest_stdout,
-        stderr,
-        message,
-        trace: envelope
-            .get("trace")
-            .filter(|trace| !trace.is_null())
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|error| CliError(format!("invalid harness trace receipt: {error}")))?,
-    })
-}
-
-fn append_native_harness_run_flags(args: &mut Vec<OsString>, invocation: &NativeHarnessInvocation) {
-    if let Some(budget) = invocation.step_budget {
-        args.push(OsString::from("--budget"));
-        args.push(OsString::from(budget.to_string()));
-    }
-    if let Some(epoch) = &invocation.realtime_epoch {
-        args.push(OsString::from("--realtime-epoch"));
-        args.push(OsString::from(epoch));
-    }
-    if let Some(hostname) = &invocation.hostname {
-        args.push(OsString::from("--hostname"));
-        args.push(OsString::from(hostname));
-    }
-    if let Some(cpus) = invocation.cpus {
-        args.push(OsString::from("--cpus"));
-        args.push(OsString::from(cpus.to_string()));
-    }
-    for (key, value) in &invocation.params {
-        args.push(OsString::from("--param"));
-        args.push(OsString::from(format!("{key}={value}")));
-    }
-    // Every knob the registry defines, from the shared table: a flag the harness
-    // parsed but did not re-emit would be silently inert here. That includes the
-    // repeatable ones (`--dns-entry`, `--net-partition`), which the harness
-    // family registers and which the historical `--dns-entry` bug parsed and
-    // then dropped, so every lookup in a harness run went NXDOMAIN as if no
-    // table had been supplied.
-    for (flag, value) in knob_flag_pairs(&invocation.knobs) {
-        args.push(OsString::from(flag));
-        args.push(OsString::from(value));
-    }
-    if let Some(buggify) = &invocation.buggify {
-        match &buggify.fire_permille {
-            Some(value) => args.push(OsString::from(format!("--buggify={value}"))),
-            None => args.push(OsString::from("--buggify")),
-        }
-        push_optional_arg(
-            args,
-            "--buggify-activation-permille",
-            buggify.activation_permille.as_deref(),
-        );
-        push_optional_arg(
-            args,
-            "--buggify-cutoff-nanos",
-            buggify.cutoff_nanos.as_deref(),
-        );
-        if buggify.after_setup {
-            args.push(OsString::from("--buggify-after-setup"));
-        }
-    }
-    push_optional_value_flag(args, "--sched-pct", invocation.schedule.pct.as_deref());
-    push_optional_arg(
-        args,
-        "--sched-pct-steps",
-        invocation.schedule.pct_steps.as_deref(),
-    );
-    if invocation.schedule.swarm {
-        args.push(OsString::from("--swarm"));
-    }
-    if invocation.schedule.yield_stride != 0 {
-        args.push(OsString::from("--yield-stride"));
-        args.push(OsString::from(invocation.schedule.yield_stride.to_string()));
-    }
-    push_optional_arg(
-        args,
-        "--compute-watchdog-ms",
-        invocation.liveness.compute_watchdog_ms.as_deref(),
-    );
-    push_optional_value_flag(
-        args,
-        "--liveness-watchdog",
-        invocation.liveness.watchdog.as_deref(),
-    );
-    push_optional_value_flag(
-        args,
-        "--converge-within",
-        invocation.liveness.converge.as_deref(),
-    );
-    push_optional_arg(
-        args,
-        "--heal-after",
-        invocation.liveness.heal_after.as_deref(),
-    );
-    if invocation.allow_randomized_layout {
-        args.push(OsString::from("--allow-randomized-address-layout"));
-    }
-}
-
-fn push_optional_arg(args: &mut Vec<OsString>, flag: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        args.push(OsString::from(flag));
-        args.push(OsString::from(value));
-    }
-}
-
-fn push_optional_value_flag(args: &mut Vec<OsString>, flag: &str, value: Option<&str>) {
-    if let Some(value) = value {
-        if value.is_empty() {
-            args.push(OsString::from(flag));
-        } else {
-            args.push(OsString::from(format!("{flag}={value}")));
-        }
-    }
-}
-
-struct NativeHarnessFailure<'a> {
-    invocation: &'a NativeHarnessInvocation,
-    built: &'a BuiltNativeHarness,
-    test_name: &'a str,
-    seed: u64,
-    /// The class the test run ends in.
-    result: RunClass,
-    first: &'a HarnessSeedRun,
-    latest: &'a HarnessSeedRun,
-    // None means the pre-run gate refused: no recorded retry was attempted.
-    reproduced: Option<bool>,
-}
-
-fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
-    let repro = native_harness_repro(failure.invocation, failure.seed);
-    let (trace_note, replay) = match &failure.latest.trace {
-        Some(trace) => (
-            trace.path.clone(),
-            format!(
-                "\n    {}",
-                cli::without_env_defaults(format!(
-                    "patina replay {} {}{}",
-                    cli::shell_quote(failure.built.guest.as_os_str()),
-                    cli::shell_quote(OsStr::new(&trace.path)),
-                    if failure.invocation.allow_randomized_layout {
-                        " --allow-randomized-address-layout"
-                    } else {
-                        ""
-                    }
-                ))
-            ),
-        ),
-        None => ("not produced".to_string(), String::new()),
-    };
-    // The block leads with whose move it is: the same line `run` leads with.
-    let outcome = output::Outcome::of(failure.result, failure.latest.stop.clone());
-    let mut block = format!(
-        "{}\npatina dst test failed: {}\n  {}  class={}  guest_exit={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}{replay}",
-        outcome.headline(None).unwrap_or_default(),
-        failure.test_name,
-        failure.invocation.seeds.contains(failure.seed),
-        failure.result,
-        guest_exit_text(failure.first),
-        trace_note,
-        indent_tail(&failure.latest.stderr, 20),
-    );
-    if failure.reproduced == Some(false) {
-        block.push_str(&format!(
-            "\n  record-on-failure mismatch: first class={} guest_exit={}, recorded class={} guest_exit={}; refusing to call this deterministic",
-            failure.first.result,
-            guest_exit_text(failure.first),
-            failure.latest.result,
-            guest_exit_text(failure.latest),
-        ));
-    }
-    if failure.reproduced == Some(false) && failure.first.stderr != failure.latest.stderr {
-        block.push_str("\n  first-run stderr tail:\n");
-        block.push_str(&indent_tail(&failure.first.stderr, 20));
-    }
-    if !failure.first.stdout.trim().is_empty() {
-        block.push_str("\n  stdout tail:\n");
-        block.push_str(&indent_tail(&failure.first.stdout, 10));
-    }
-    if let Some(message) = &failure.latest.message
-        && !message.trim().is_empty()
-        && !failure.latest.stderr.contains(message)
-    {
-        block.push_str(&format!("\n  message: {message}"));
-    }
-    block
-}
-
-/// How a seed's guest ended, for a reader: its envelope's `guest_exit`, or
-/// that no guest ran.
-fn guest_exit_text(run: &HarnessSeedRun) -> String {
-    run.guest_exit
-        .as_ref()
-        .map_or_else(|| "none (no guest ran)".to_string(), ToString::to_string)
-}
-
-fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> String {
-    let mut args = vec![
-        OsString::from("test"),
-        invocation.origin.as_os_str().to_owned(),
-    ];
-    if let Some(package) = &invocation.package {
-        args.push(OsString::from("--package"));
-        args.push(OsString::from(package));
-    }
-    args.push(OsString::from("--harness-target"));
-    args.push(OsString::from(&invocation.harness_target));
-    args.push(OsString::from("--exact"));
-    args.push(OsString::from(&invocation.exact));
-    args.push(OsString::from("--seed"));
-    args.push(OsString::from(seed.to_string()));
-    if invocation.release {
-        args.push(OsString::from("--release"));
-    }
-    args.extend(invocation.features.cargo_args());
-    if invocation.instrument {
-        args.push(OsString::from("--instrument"));
-    }
-    append_native_harness_run_flags(&mut args, invocation);
-    // Each seed ran as an isolated child from these resolved flags alone.
-    cli::without_env_defaults(command_line("patina", &args))
-}
-
-fn indent_tail(text: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.is_empty() {
-        return "    (empty)".to_string();
-    }
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..]
-        .iter()
-        .map(|line| format!("    {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
+mod build;
+mod report;
+pub(crate) use select::{cargo_metadata, metadata_target_dir};
+mod run;
+mod select;
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        HarnessFeatures, HarnessSeeds, NativeHarnessInvocation, NativeLiveness, NativeSchedule, cli,
+mod tests;
+
+use crate::{CliError, KnobValues, NativeBuggify, NativeLiveness, NativeSchedule};
+use patina_dst_abi::RunClass;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+/// One `patina test` invocation, as parsed.
+pub(crate) struct TestInvocation {
+    /// The package path as given (or `.` for the working directory's own),
+    /// for the rerun commands to name.
+    pub(crate) origin: PathBuf,
+    pub(crate) manifest: PathBuf,
+    pub(crate) selection: Selection,
+    /// The trailing TESTNAME: a substring of a test's path within its target,
+    /// or with `exact` the whole path.
+    pub(crate) filter: Option<String>,
+    pub(crate) exact: bool,
+    pub(crate) include_ignored: bool,
+    pub(crate) features: CargoFeatures,
+    pub(crate) release: bool,
+    pub(crate) instrument: bool,
+    pub(crate) no_run: bool,
+    pub(crate) seeds: Seeds,
+    pub(crate) jobs: usize,
+    /// Host-time backstop per test run, in seconds; 0 waits forever.
+    pub(crate) timeout_secs: u64,
+    /// Texts whose presence in an `unsupported` test's stop keeps it from
+    /// raising the exit status.
+    pub(crate) accept_unsupported: Vec<String>,
+    pub(crate) run: RunFlags,
+}
+
+/// Which packages and targets to test, in `cargo test`'s own terms.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Selection {
+    pub(crate) packages: Vec<String>,
+    pub(crate) workspace: bool,
+    pub(crate) lib: bool,
+    pub(crate) bins: Vec<String>,
+    pub(crate) all_bins: bool,
+    pub(crate) tests: Vec<String>,
+    pub(crate) all_tests: bool,
+}
+
+impl Selection {
+    /// Whether any target flag was given; without one, the default set.
+    fn names_targets(&self) -> bool {
+        self.lib
+            || self.all_bins
+            || self.all_tests
+            || !self.bins.is_empty()
+            || !self.tests.is_empty()
+    }
+}
+
+/// Cargo feature selection, forwarded to every build.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CargoFeatures {
+    pub(crate) features: Option<String>,
+    pub(crate) all_features: bool,
+    pub(crate) no_default_features: bool,
+}
+
+impl CargoFeatures {
+    /// The Cargo arguments that reproduce this selection.
+    fn cargo_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(features) = &self.features {
+            args.push("--features".to_string());
+            args.push(features.clone());
+        }
+        if self.all_features {
+            args.push("--all-features".to_string());
+        }
+        if self.no_default_features {
+            args.push("--no-default-features".to_string());
+        }
+        args
+    }
+}
+
+/// The seeds every test runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Seeds {
+    One(u64),
+    /// Seeds `0..N`.
+    Range(u64),
+}
+
+impl Seeds {
+    fn list(self) -> Vec<u64> {
+        match self {
+            Seeds::One(seed) => vec![seed],
+            Seeds::Range(count) => (0..count).collect(),
+        }
+    }
+}
+
+/// The run configuration every test's child `patina run` is given, flag for
+/// flag ([`run::push_run_flags`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RunFlags {
+    pub(crate) step_budget: Option<u64>,
+    pub(crate) realtime_epoch: Option<String>,
+    pub(crate) hostname: Option<String>,
+    pub(crate) cpus: Option<u32>,
+    pub(crate) params: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) mount: Option<PathBuf>,
+    pub(crate) knobs: KnobValues,
+    pub(crate) buggify: Option<NativeBuggify>,
+    pub(crate) schedule: NativeSchedule,
+    pub(crate) liveness: NativeLiveness,
+    pub(crate) allow_randomized_layout: bool,
+}
+
+pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> {
+    let started = Instant::now();
+    let toolchain = build::toolchain()?;
+    let metadata = select::cargo_metadata(&invocation.manifest, Some(&toolchain.rustc))?;
+    let selected = select::select(&invocation, &metadata)?;
+    let built = build::build_all(
+        &invocation,
+        &toolchain,
+        &selected.targets,
+        &selected.target_dir,
+    )?;
+    let build_seconds = started.elapsed().as_secs_f64();
+    if invocation.no_run {
+        return Ok(report::no_run(&built, &selected.skipped, build_seconds));
+    }
+    let running = Instant::now();
+    let suite = run::run_suite(&invocation, &built)?;
+    let outcome = report::Outcome {
+        invocation: &invocation,
+        built: &built,
+        skipped_targets: &selected.skipped,
+        suite: &suite,
+        build_seconds,
+        run_seconds: running.elapsed().as_secs_f64(),
     };
-    use patina_dst_runtime::FaultKnob;
-    use std::collections::BTreeMap;
-    use std::ffi::{OsStr, OsString};
-    use std::path::{Path, PathBuf};
+    Ok(outcome.report())
+}
 
-    use crate::help;
-    use std::fs;
-
-    use crate::parse::knobs_of;
-    use crate::tests::knob_sample;
-
-    #[test]
-    fn native_harness_selection_disambiguates_target_kinds_and_packages() {
-        let targets = serde_json::json!([
-            {"name": "app", "kind": ["lib"]},
-            {"name": "app", "kind": ["bin"]},
-            {"name": "app", "kind": ["test"]}
-        ]);
-        let metadata = serde_json::json!({"packages": [
-            {"name": "first", "targets": targets},
-            {"name": "second", "targets": targets}
-        ]});
-        assert!(select_native_harness_target(&metadata, "app", Some("first")).is_err());
-        for (prefix, kind) in [
-            ("lib", HarnessTargetKind::Lib),
-            ("bin", HarnessTargetKind::Bin),
-            ("test", HarnessTargetKind::Test),
-        ] {
-            let selector = format!("{prefix}:app");
-            assert!(select_native_harness_target(&metadata, &selector, None).is_err());
-            let selected = select_native_harness_target(&metadata, &selector, Some("first"))
-                .unwrap_or_else(|error| panic!("{selector}: {error}"));
-            assert_eq!(selected.kind, kind);
-            assert_eq!(selected.name, "app");
-            assert_eq!(selected.package, "first");
-        }
-        for selector in ["example:app", "lib:missing"] {
-            assert!(select_native_harness_target(&metadata, selector, Some("first")).is_err());
-        }
-
-        // Staging is keyed by the resolved kind and name, so a bare name and
-        // its explicit kind stage together and distinct targets apart.
-        let metadata = serde_json::json!({"packages": [{"name": "pkg", "targets": [
-            {"name": "app", "kind": ["lib"]},
-            {"name": "lib_app", "kind": ["test"]}
-        ]}]});
-        let directory = |selector| {
-            select_native_harness_target(&metadata, selector, None)
-                .unwrap()
-                .staging_directory(Path::new("target"), "pkg", "tests::case")
-        };
-        assert_eq!(directory("app"), directory("lib:app"));
-        assert_eq!(directory("lib_app"), directory("test:lib_app"));
-        assert_ne!(directory("lib:app"), directory("lib_app"));
-    }
-
-    /// `#[patina_dst::test(...)]` refuses, when the test is compiled, an
-    /// argument that is not a flag of this verb. Its table of them is this
-    /// registry's, flag for flag and arity for arity.
-    #[test]
-    fn the_test_attribute_takes_exactly_this_verbs_flags() {
-        mod attribute {
-            include!("../../patina-macros/src/test_flags.rs");
-        }
-        use attribute::Arity;
-        let registered: BTreeMap<String, Arity> = help::verb("test")
-            .expect("the test verb")
-            .family_flags(help::Family::Sole)
-            // The attribute supplies these two itself.
-            .filter(|flag| !matches!(flag.name, "--harness-target" | "--exact"))
-            .map(|flag| {
-                let arity = match flag.value {
-                    help::Value::None => Arity::Switch,
-                    help::Value::Required(..) => Arity::Value,
-                    help::Value::Optional(..) => Arity::OptionalValue,
-                };
-                (flag.name.trim_start_matches("--").replace('-', "_"), arity)
-            })
-            .collect();
-        let table: BTreeMap<String, Arity> = attribute::TEST_FLAGS
-            .iter()
-            .map(|(name, arity)| (name.to_string(), *arity))
-            .collect();
-        assert_eq!(table, registered);
-        assert_eq!(table.len(), attribute::TEST_FLAGS.len(), "a flag twice");
-    }
-
-    #[test]
-    fn native_harness_records_failures_but_never_retries_a_prerun_refusal() {
-        fn outcome(result: RunClass, pre_run_refusal: bool) -> HarnessSeedRun {
-            HarnessSeedRun {
-                result,
-                stop: None,
-                guest_exit: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                message: None,
-                trace: None,
-                pre_run_refusal,
-            }
-        }
-        // A class that exits 2 is not by itself a pre-run refusal: other stops
-        // still get their recording attempt, as do failures and crashes.
-        for (code, pre_run) in [
-            (RunClass::Unsupported, true),
-            (RunClass::Unsupported, false),
-            (RunClass::Failure, false),
-            (RunClass::Crash, false),
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let trace = directory.path().join("seed-0.patina");
-            fs::write(&trace, b"previous recording").unwrap();
-            let mut calls = 0;
-            let recorded = record_harness_failure(&outcome(code, pre_run), &trace, || {
-                calls += 1;
-                assert!(!trace.exists());
-                Ok(outcome(code, false))
-            })
-            .unwrap();
-            assert_eq!(calls, usize::from(!pre_run));
-            assert_eq!(recorded.is_some(), !pre_run);
-            if pre_run {
-                assert_eq!(fs::read(trace).unwrap(), b"previous recording");
-            }
-        }
-    }
-
-    /// A seed whose child refuses because it is another supervisor build stops
-    /// the test run, naming the supervisor, instead of being filed as that
-    /// seed's failure.
-    #[test]
-    fn a_seed_run_by_another_supervisor_build_stops_the_test_run() {
-        let output = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!(
-                "echo '{{\"result\":\"failure\"}}'; \
-                 echo 'patina: {} this patina is another build' >&2; exit 2",
-                crate::supervisor_identity::SUPERVISOR_MISMATCH
-            ))
-            .output()
-            .unwrap();
-        let stopped = harness_seed_outcome(3, &output)
-            .err()
-            .map(|error| error.to_string());
-        assert!(
-            stopped
-                .as_deref()
-                .is_some_and(|error| error.contains("supervisor")),
-            "the test run must stop, naming the supervisor; got {stopped:?}"
-        );
-    }
-
-    #[test]
-    fn the_native_harness_re_emits_every_fault_knob_it_parsed() {
-        // Native harness mode runs each seed as a child `run`, so a knob it
-        // parsed but did not re-emit is silently inert — the shape the
-        // hand-maintained forwarding list had for the Wave B fs knobs, and the
-        // shape the historical `--dns-entry` bug had (advertised by the harness
-        // family, never forwarded to its child `run`). Every registered knob,
-        // repeatable ones included, must survive the round trip.
-        let mut tokens: Vec<OsString> = Vec::new();
-        for knob in FaultKnob::ALL {
-            tokens.push(OsString::from(knob.meta().flag));
-            tokens.push(OsString::from(knob_sample(*knob)));
-        }
-        // The realtime epoch is run configuration, not a fault knob, but the
-        // child `run` drops it just as silently if it is not re-emitted.
-        tokens.push(OsString::from("--realtime-epoch"));
-        tokens.push(OsString::from("2001-09-09T01:46:40Z"));
-        tokens.push(OsString::from("--hostname"));
-        tokens.push(OsString::from("db-1"));
-        tokens.push(OsString::from("--cpus"));
-        tokens.push(OsString::from("3"));
-        tokens.extend([
-            OsString::from("--compute-watchdog-ms"),
-            OsString::from("5000"),
-        ]);
-        tokens.push(OsString::from("--allow-randomized-address-layout"));
-
-        let args = cli::parse("test", help::Family::Sole, tokens).expect("harness parse");
-        let invocation = NativeHarnessInvocation {
-            origin: PathBuf::new(),
-            manifest: PathBuf::new(),
-            package: None,
-            harness_target: "t".into(),
-            exact: "m::t".into(),
-            seeds: HarnessSeeds::One(0),
-            release: false,
-            features: HarnessFeatures::default(),
-            instrument: false,
-            step_budget: Some(9),
-            realtime_epoch: args.string("--realtime-epoch"),
-            hostname: args.string("--hostname"),
-            cpus: args.u32("--cpus"),
-            params: BTreeMap::from([("k".to_owned(), "v=w".to_owned())]),
-            knobs: knobs_of(&args).expect("harness knob parse"),
-            buggify: None,
-            schedule: NativeSchedule::default(),
-            liveness: NativeLiveness {
-                compute_watchdog_ms: args.string("--compute-watchdog-ms"),
-                ..NativeLiveness::default()
-            },
-            allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
-        };
-        let mut emitted: Vec<OsString> = Vec::new();
-        append_native_harness_run_flags(&mut emitted, &invocation);
-        for knob in FaultKnob::ALL {
-            let flag = knob.meta().flag;
-            let value = knob_sample(*knob);
-            let at = emitted
-                .iter()
-                .position(|token| token == flag)
-                .unwrap_or_else(|| {
-                    panic!("native harness dropped {flag} on the way to its child run")
-                });
-            assert_eq!(
-                emitted.get(at + 1).map(OsString::as_os_str),
-                Some(OsStr::new(value)),
-                "native harness re-emitted {flag} without its value"
-            );
-        }
-        assert!(emitted.iter().any(|token| token == "--budget"));
-        assert!(
-            emitted
-                .windows(2)
-                .any(|pair| pair[0] == "--param" && pair[1] == "k=v=w"),
-            "native harness dropped --param: {emitted:?}"
-        );
-        assert!(
-            emitted
-                .iter()
-                .any(|token| token == "--allow-randomized-address-layout"),
-            "native harness dropped --allow-randomized-address-layout: {emitted:?}"
-        );
-        for (flag, value) in [
-            ("--realtime-epoch", "2001-09-09T01:46:40Z"),
-            ("--hostname", "db-1"),
-            ("--cpus", "3"),
-            ("--compute-watchdog-ms", "5000"),
-        ] {
-            let at = emitted
-                .iter()
-                .position(|token| token == flag)
-                .unwrap_or_else(|| {
-                    panic!("native harness dropped {flag} on the way to its child run")
-                });
-            assert_eq!(
-                emitted.get(at + 1).map(OsString::as_os_str),
-                Some(OsStr::new(value))
-            );
-        }
-    }
+/// What one test, or one target that could not be listed, came to.
+#[derive(Clone)]
+pub(crate) struct Verdict {
+    /// The class of the deciding run: the lowest seed that did not pass, or
+    /// `Ok` when every seed passed.
+    pub(crate) class: RunClass,
+    /// The deciding run's seed.
+    pub(crate) seed: u64,
+    /// How many seeds ran clean (all of them, for a test that passed).
+    pub(crate) seeds_passed: u64,
+    pub(crate) run: Option<run::SeedRun>,
+    /// For a finding: the recorded rerun of its seed, when one was made.
+    pub(crate) recorded: Option<run::SeedRun>,
+    /// Host time spent running this test, every seed and the recording.
+    pub(crate) seconds: f64,
 }

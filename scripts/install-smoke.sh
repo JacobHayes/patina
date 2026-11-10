@@ -15,14 +15,15 @@ usage: scripts/install-smoke.sh [--go] REF
 Uses the `patina` on PATH. Of this checkout it uses only examples/, the
 projects the README and the tutorial walk through, copied to a new directory
 with their SDK dependency set to REF:
-  * the README's first run (examples/quickstart): plain `cargo test` fails on
-    a seed and leaves a trace, the trace replays to the same failure, the
-    fixed library passes, and the test fails once the tool cannot be found
-    (so the pass went through the tool);
+  * the README's first run (examples/quickstart): `patina test --seeds 20`
+    fails the package's plain test on a seed and leaves a trace, the trace
+    replays to the same failure, and the fixed library passes;
   * the tutorial (examples/ledger): the program builds, some seeds end clean
     and some in a violation, a recorded violation replays and renders, a
     campaign finds it, reproduces it and can be given again, and `cargo test`
-    finds it too;
+    finds it too through `#[patina_dst::test]`; with the bug's two lines
+    removed `cargo test` passes, and fails once the tool cannot be found (so
+    the pass went through the tool);
   * a new program builds, runs the same for one seed and differently for
     another, and a recorded run replays;
   * with --go, a Go program using the Go SDK at REF builds, runs simulated,
@@ -90,10 +91,12 @@ round_trip() {
   ! cmp -s "$work/$name.seed7" "$work/$name.seed8" || fail "$name: two seeds ran the same"
 }
 
-# One documented project, copied out of the checkout with its SDK set to REF.
+# One documented project, copied out of the checkout with its SDK, if it
+# uses one, set to REF.
 example() {
   local name=$1
   cp -R "$examples/$name" "$work/$name"
+  grep -q "$repository" "$work/$name/Cargo.toml" || return 0
   grep -q "$repository, tag = \"" "$work/$name/Cargo.toml" \
     || fail "$name: its manifest names no SDK release to set to $ref"
   sed -i.orig -E "s|$repository, tag = \"[^\"]*\"|$pin|" "$work/$name/Cargo.toml"
@@ -107,26 +110,27 @@ finds() {
   ((status == 1)) || { cat "$work/$log" >&2; fail "$log: status $status, not a finding: $*"; }
 }
 
-echo "==> [1] README first run: cargo test finds a failing seed, and it replays"
+# A finding's trace, as `patina test` records it beside its target's guest:
+# target/patina/dst/PACKAGE/KIND/TARGET/{guest,traces/NAME.seed-N.patina}.
+recorded_trace() {
+  find "$1/target/patina/dst" -path '*/traces/*.patina' | head -n 1
+}
+
+echo "==> [1] README first run: patina test finds a failing seed, and it replays"
 example quickstart
 quickstart=$work/quickstart
-if cargo test --manifest-path "$quickstart/Cargo.toml" >"$work/quickstart-test.log" 2>&1; then
-  cat "$work/quickstart-test.log" >&2
-  fail "quickstart: cargo test passed over the planted bug"
-fi
-trace=$(find "$quickstart/target/patina/dst" -name 'seed-*.patina' | head -n 1)
-[[ -n $trace ]] || { cat "$work/quickstart-test.log" >&2; fail "quickstart: the failing seed left no trace"; }
-finds quickstart-replay.log "$patina" replay "$(dirname "$trace")/guest" "$trace"
-cp "$quickstart/lib.fixed.rs" "$quickstart/src/lib.rs"
-step quickstart-fixed.log cargo test --manifest-path "$quickstart/Cargo.toml"
+(
+  cd "$quickstart"
+  finds quickstart-test.log "$patina" test --seeds 20
+  trace=$(recorded_trace .)
+  [[ -n $trace ]] || { cat "$work/quickstart-test.log" >&2; fail "quickstart: the failing seed left no trace"; }
+  finds quickstart-replay.log "$patina" replay "$(dirname "$(dirname "$trace")")/guest" "$trace"
+  cp lib.fixed.rs src/lib.rs
+  step quickstart-fixed.log "$patina" test --seeds 20
+)
 
-echo "==> [2] the same test fails when the tool is missing"
-if PATINA_CLI="$work/no-such-patina" cargo test --manifest-path "$quickstart/Cargo.toml" >"$work/cargo-test-no-tool.log" 2>&1; then
-  cat "$work/cargo-test-no-tool.log" >&2
-  fail "cargo test passed without the tool"
-fi
+echo "==> [2] tutorial: build, sweep seeds, record, replay, render, campaign, cargo test"
 
-echo "==> [3] tutorial: build, sweep seeds, record, replay, render, campaign, cargo test"
 example ledger
 (
   cd "$work/ledger"
@@ -159,8 +163,18 @@ example ledger
     cat "$work/ledger-test.log" >&2
     fail "ledger: cargo test passed over the planted bug"
   fi
-  [[ -n $(find target/patina/dst -name 'seed-*.patina') ]] \
+  [[ -n $(recorded_trace .) ]] \
     || { cat "$work/ledger-test.log" >&2; fail "ledger: cargo test failed without finding a seed"; }
+  # The tutorial's fix: delete the two lines that take `last` and swap.
+  sed -i.orig -e '/let last = /d' -e '/ledger.swap(/d' src/lib.rs
+  rm src/lib.rs.orig
+  step ledger-fixed.log cargo test
+
+  echo "==> [3] the same test fails when the tool is missing"
+  if PATINA_CLI="$work/no-such-patina" cargo test >"$work/cargo-test-no-tool.log" 2>&1; then
+    cat "$work/cargo-test-no-tool.log" >&2
+    fail "cargo test passed without the tool"
+  fi
 )
 
 rust=$work/rust

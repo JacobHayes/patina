@@ -61,13 +61,13 @@ On another platform, or to build it yourself:
 One CLI over one kind of artifact: a **native binary** (Mach-O/ELF, linked
 against the deterministic shim), run interposed. `run`, `audit`, and `replay`
 are source-first: hand them a `.rs` file, a package directory, or a
-`Cargo.toml` and they build through the same pipeline as `build` first. `test` also has a
-source-first native libtest harness mode for one exact test target.
+`Cargo.toml` and they build through the same pipeline as `build` first. `test` runs a
+package's own libtest suite, one simulated run per test.
 
 | Verb | What it does | Example |
 |---|---|---|
 | `run` | Build (if needed) and run an artifact deterministically. | `patina run app.rs --seed 7` |
-| `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `patina test . --harness-target my_crate --exact tests::case --seeds 20` |
+| `test` | Run a package's own test suite, each test in a simulated world of its own. | `patina test . --seeds 20` |
 | `build` | Build the shim-linked native binary, a Go main package (`--go`, Linux), or a Python application frozen into CPython (`--python`, Linux). | `patina build ./pkg --output app` |
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `patina replay ./app run.patina` |
@@ -77,18 +77,23 @@ source-first native libtest harness mode for one exact test target.
 | `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `patina syscalls` |
 
-Native harness mode is the tight point-solution loop: `patina test
-<DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
-same Cargo libtest target under the native shim with a single libtest thread.
-Use `lib:NAME`, `bin:NAME` or `test:NAME` when target kinds share a name. A
-failing seed is re-run with `--record`, and the failure block carries the repro
-commands.
+`patina test [DIR|Cargo.toml]` runs an existing test suite unmodified, with
+`cargo test`'s selection (`-p`, `--workspace`, `--lib`, `--bin NAME`,
+`--test NAME`, a trailing filter and `--exact`). Each target is built
+shim-linked once; each test then runs on each seed (`--seed N`, `--seeds N`)
+as its own run, `--jobs` at a time, and ends in one outcome. A finding is
+re-run recorded, and its block carries the `rerun:` and `replay:` commands.
+`--no-run` builds and prints where each target's guest is staged
+(`target/patina/dst/PACKAGE/KIND/TARGET/guest`). A test that reaches
+something Patina does not model is `unsupported` (exit 2), never a pass;
+`--accept-unsupported TEXT` lets such a test, when its stop names TEXT, not
+fail CI while it still reports as `unsupported`.
 
 For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
 Rust test function. Plain `cargo test` then discovers `patina` through
-`PATINA_CLI` (absolute path) or `patina` on `PATH`, rebuilds the same
-libtest target shim-linked, and sweeps the test (20 seeds by default). A
+`PATINA_CLI` (absolute path) or `patina` on `PATH` and runs `patina test`
+for that one test (20 seeds by default). A
 missing tool is a test failure that prints the install line, never a skip.
 
 Any flag can be defaulted from the environment as `PATINA_<FLAG>` (`--seed` ->

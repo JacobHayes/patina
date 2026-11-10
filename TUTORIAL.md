@@ -242,14 +242,21 @@ The arguments of `#[patina_dst::test]` are the flags of `patina test`, with
 `cargo test` fails on the same seed. Among its output:
 
 ```text
-patina: FINDING in the guest [violation]: violation of "ledger-sorted" src/lib.rs:13
 patina dst test failed: sorted::the_ledger_stays_sorted
-  seed 5 of 0..20  class=violation  guest_exit={"code":134,"core":true,"signal":6,"signal_name":"SIGABRT"}
-  trace: /home/you/ledger/target/patina/dst/ledger/test/sorted/the_ledger_stays_sorted/seed-5.patina
-  reproduce:
-    patina test /home/you/ledger --harness-target sorted --exact the_ledger_stays_sorted --seed 5 --buggify
-    patina replay /home/you/ledger/target/.../guest /home/you/ledger/target/.../seed-5.patina
+patina test: 1 test(s) in 1 target(s); built in 0.5s, ran in 0.6s (24 job(s), seeds 0..20)
+  violation             1
+
+violation        ledger --test sorted the_ledger_stays_sorted (seed 5)
+    violation of "ledger-sorted" src/lib.rs:13
+    rerun:  patina test /home/you/ledger -p ledger --test sorted the_ledger_stays_sorted --exact --seed 5 --buggify
+    replay: patina replay /home/you/ledger/target/patina/dst/ledger/test/sorted/guest /home/you/ledger/target/patina/dst/ledger/test/sorted/traces/the_ledger_stays_sorted.seed-5.patina
+
+patina: FINDING in the guest [violation]: 1 of 1 did not pass
 ```
+
+The attribute runs `patina test` for its own test. `patina test --seeds 20
+--buggify` in the package runs the same check, and every other test beside
+it, without the attribute.
 
 Now fix the bug: delete the two lines that take `last` and swap. `cargo test`
 passes, and the test stays as a guard: every `cargo test` runs it across 20

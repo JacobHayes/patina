@@ -140,13 +140,7 @@ impl Envelope {
             m.insert("seed".into(), Value::from(v));
         }
         if let Some(t) = &self.trace {
-            let mut tm = Map::new();
-            tm.insert("path".into(), Value::from(t.path.clone()));
-            tm.insert("format_version".into(), Value::from(t.format_version));
-            tm.insert("timelines".into(), Value::from(t.timelines.clone()));
-            tm.insert("event_count".into(), Value::from(t.event_count));
-            tm.insert("metadata".into(), t.metadata.clone());
-            m.insert("trace".into(), Value::Object(tm));
+            m.insert("trace".into(), t.to_json());
         }
         if let Some(c) = &self.coverage {
             let mut cm = Map::new();

@@ -327,11 +327,22 @@ pub(crate) struct TraceFacts {
     pub(crate) path: String,
     pub(super) format_version: u32,
     pub(super) timelines: Vec<String>,
-    pub(super) event_count: usize,
+    pub(crate) event_count: usize,
     pub(super) metadata: serde_json::Value,
 }
 
 impl TraceFacts {
+    /// The facts as an envelope's `trace` object.
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "path": self.path,
+            "format_version": self.format_version,
+            "timelines": self.timelines,
+            "event_count": self.event_count,
+            "metadata": self.metadata,
+        })
+    }
+
     /// The facts of `bundle`, already loaded from `path`, so a caller holding
     /// the bundle does not read the trace again.
     pub(crate) fn of(path: &Path, bundle: &patina_dst_trace::TraceBundle, timeline: &str) -> Self {

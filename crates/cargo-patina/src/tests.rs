@@ -3,8 +3,8 @@
 use super::*;
 use crate::parse::{
     knob_env_pairs, knobs_of, parse, parse_minimize, parse_native_audit_from, parse_native_build,
-    parse_native_harness_from, parse_native_replay, parse_native_run, parse_native_run_from,
-    parse_trace, repeatable_payload,
+    parse_native_replay, parse_native_run, parse_native_run_from, parse_test_from, parse_trace,
+    repeatable_payload,
 };
 use crate::{campaign, cli, coverage, help, output, syscalls, values};
 use patina_dst_runtime::{FaultKnob, Plumbing};
@@ -168,10 +168,10 @@ mod registry {
                 );
                 // The verb's own flags are present; a DIFFERENT verb's unique flag is
                 // not. `run`'s `--mount` (a host corpus) is unique to run/replay
-                // and the campaign that forwards it, so it never appears in, say,
-                // `build`'s payload.
+                // and the verbs that forward it to their runs, so it never
+                // appears in, say, `build`'s payload.
                 let names = flag_names(&json["verb"]["flag_groups"]);
-                if !matches!(verb.name, "run" | "replay" | "campaign") {
+                if !matches!(verb.name, "run" | "replay" | "campaign" | "test") {
                     assert!(
                         !names.contains("--mount"),
                         "{}'s payload leaked run's unique --mount flag",
@@ -373,7 +373,7 @@ mod registry {
     /// Drive `args` through the real parser of `verb`'s `family`, supplying the
     /// context that family's routing would already have consumed: the
     /// positionals it takes, and the companion flags a successful parse needs
-    /// (a native harness needs a target and a test filter; a branch replay needs
+    /// (a test run is given its package and filter; a branch replay needs
     /// its whole quorum).
     ///
     /// This is the ONLY hand-written table left in the walk, and it is keyed by
@@ -411,16 +411,13 @@ mod registry {
             ("run", help::Family::Sole) => {
                 parse_native_run_from(prebuilt("bin"), with(none, &[])).map(|_| ())
             }
-            ("test", help::Family::Sole) => {
-                let mut prefix = unless("--harness-target", &["--harness-target=harness"]);
-                prefix.extend(unless("--exact", &["--exact=module::test"]));
-                parse_native_harness_from(
-                    PathBuf::from("."),
-                    PathBuf::from("Cargo.toml"),
-                    with(prefix, &[]),
-                )
-                .map(|_| ())
-            }
+            ("test", help::Family::Sole) => parse_test_from(
+                PathBuf::from("."),
+                PathBuf::from("Cargo.toml"),
+                Some("module::test".to_string()),
+                with(none, &[]),
+            )
+            .map(|_| ()),
             ("build", help::Family::Sole) => {
                 // A single-source build needs an output; a package build is what
                 // `--package`/`--bin` select.

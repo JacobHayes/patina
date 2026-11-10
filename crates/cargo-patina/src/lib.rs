@@ -62,7 +62,7 @@ mod trace_view;
 mod values;
 
 use audit::execute_native_audit;
-use harness::execute_native_harness;
+use harness::{TestInvocation, execute_test};
 use native_build::{
     Instrumentation, binary_instrumentation, execute_native_build, instrumentation_fingerprint,
 };
@@ -115,88 +115,6 @@ struct NativeAuditInvocation {
     /// residual). With it, the full audit runs anyway under a loud banner
     /// marking the import findings as pre-interposition.
     raw: bool,
-}
-
-struct NativeHarnessInvocation {
-    origin: PathBuf,
-    manifest: PathBuf,
-    package: Option<String>,
-    harness_target: String,
-    exact: String,
-    seeds: HarnessSeeds,
-    release: bool,
-    /// Cargo features (`--features`) forwarded verbatim to the harness build.
-    features: HarnessFeatures,
-    /// `--instrument`: build the native libtest harness with edge hooks (edge
-    /// counters, and the scheduling points `--yield-stride` asks for).
-    instrument: bool,
-    /// Boundary-operation budget forwarded to each seed's child `run`.
-    step_budget: Option<u64>,
-    /// The `--realtime-epoch` timestamp, re-emitted verbatim onto each seed's
-    /// child `run`.
-    realtime_epoch: Option<String>,
-    /// The `--hostname` name, re-emitted verbatim onto each seed's child `run`.
-    hostname: Option<String>,
-    /// The `--cpus` count, re-emitted onto each seed's child `run`.
-    cpus: Option<u32>,
-    /// The `--param` run parameters, re-emitted onto each seed's child `run`.
-    params: BTreeMap<String, String>,
-    /// Every fault knob this invocation set, re-emitted onto each seed's child
-    /// `run` command line by [`knob_flag_pairs`].
-    knobs: KnobValues,
-    buggify: Option<NativeBuggify>,
-    schedule: NativeSchedule,
-    liveness: NativeLiveness,
-    /// `--allow-randomized-address-layout`, re-emitted onto each seed's child
-    /// `run` and onto the replay repro.
-    allow_randomized_layout: bool,
-}
-
-/// Cargo feature selection for a native libtest harness build.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct HarnessFeatures {
-    features: Option<String>,
-}
-
-impl HarnessFeatures {
-    /// The `cargo rustc` arguments that reproduce this selection.
-    fn cargo_args(&self) -> Vec<OsString> {
-        let mut args = Vec::new();
-        if let Some(features) = &self.features {
-            args.push(OsString::from("--features"));
-            args.push(OsString::from(features));
-        }
-        args
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HarnessSeeds {
-    One(u64),
-    Range(u64),
-}
-
-impl HarnessSeeds {
-    fn iter(self) -> Box<dyn Iterator<Item = u64>> {
-        match self {
-            HarnessSeeds::One(seed) => Box::new(std::iter::once(seed)),
-            HarnessSeeds::Range(count) => Box::new(0..count),
-        }
-    }
-
-    fn label(self) -> String {
-        match self {
-            HarnessSeeds::One(seed) => format!("seed {seed}"),
-            HarnessSeeds::Range(count) => format!("seeds 0..{count}"),
-        }
-    }
-
-    fn contains(self, seed: u64) -> String {
-        match self {
-            HarnessSeeds::One(_) => format!("seed {seed}"),
-            HarnessSeeds::Range(count) => format!("seed {seed} of 0..{count}"),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,7 +279,7 @@ struct NativeRunInvocation {
 /// One store for both plumbing shapes: a [`Plumbing::Scalar`] knob holds at most
 /// one value, a [`Plumbing::Repeatable`] one holds the whole set in CLI order.
 /// Every family's plumbing — the native subprocess environment, the cargo
-/// subprocess environment and its scrub list, and the native harness's
+/// subprocess environment and its scrub list, and the `test` verb's
 /// re-emitted `run` command line — iterates
 /// [`FaultKnob::ALL`], so a knob added to the registry cannot be forwarded by one
 /// family and silently dropped by another. There is no per-knob field, accessor
@@ -585,7 +503,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
         ParseResult::NativeAudit(invocation) => execute_native_audit(invocation),
         ParseResult::NativeBuild(invocation) => execute_native_build(invocation),
         ParseResult::NativeRun(invocation) => execute_native_run(invocation),
-        ParseResult::NativeHarness(invocation) => execute_native_harness(invocation),
+        ParseResult::Test(invocation) => execute_test(*invocation),
         ParseResult::Minimize(invocation) => minimize::execute(invocation),
         ParseResult::Trace(invocation) => trace_cmd::execute(invocation),
     }

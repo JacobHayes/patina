@@ -50,7 +50,10 @@ pub use classify::{
     ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,
     recognize_verdicts, signature,
 };
-pub(crate) use generation::{GenerationRun, run_envelope};
+pub(crate) use generation::{
+    GenerationRun, KILLED_GROUP_EXIT_BOUND, await_process_group_exit, kill_generation_process_tree,
+    run_envelope,
+};
 pub use parse::{CampaignInvocation, parse};
 pub use patina_dst_abi::RunClass;
 pub(crate) use planes::FAULT_PLANE_NAMES;

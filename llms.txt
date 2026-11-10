@@ -114,15 +114,30 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run as `internal`, `stop.reason` `host_limit`.
-- `patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
-  Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
-  stages it under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, runs the exact libtest
-  filter with one libtest thread, and records the first failing seed unless it is
-  a pre-run audit/import refusal (nothing ran, so no recorded retry is attempted).
-  NAME can be qualified as lib:NAME, bin:NAME, or test:NAME; --package selects the
-  workspace member. Staging uses the resolved kind/name, not selector spelling.
-  A test repro is always printed on failure; `trace` facts in the JSON envelope
-  and a replay repro come only from that recorded child's receipt, never old files.
+- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+  A package's own libtest suite, unmodified: selection is `cargo test`'s
+  (default: the package in DIR, else the workspace's default members; lib,
+  bins and integration tests). Each selected target is built shim-linked once
+  and staged at `target/patina/dst/PACKAGE/KIND/TARGET/guest` (`--no-run`
+  builds and prints the staged paths); its tests are listed under the
+  runtime, and each test runs on each seed as its own `patina run` child in a
+  world of its own, `--jobs` at a time (default: CPUs), the trailing filter a
+  substring or with `--exact` the whole name. `#[ignore]` tests are skipped
+  unless `--include-ignored`; `#[should_panic]` is libtest's. One verdict per
+  test: the class of its lowest failing seed (seeds above it are not run), or
+  `ok`. A finding is rerun recorded to `<stage>/traces/NAME.seed-N.patina`; a
+  rerun that ends otherwise makes the test `nondeterministic`. A test still
+  running after `--timeout-secs` (default 300) is `timeout`. Exit: 0 when all
+  pass or are skipped, 1 on any finding, 2 when a test or target could not run
+  (`unsupported`, `timeout`, a build failure) or the filter matched nothing.
+  `--accept-unsupported TEXT` keeps an `unsupported` test whose stop names TEXT
+  from raising the exit status; it still reports as `unsupported`, never `ok`.
+  Human output: progress per test on stderr, then counts per class and, per
+  non-ok test, its class, one line of why, `rerun:` and `replay:` commands.
+  `--format json` prints `schema: "patina.test/v1"` with `counts`, `targets`
+  and per-test `result`, `attribution`, `seed`, `seeds_passed`, `duration_ms`,
+  `why`, `stop`, `guest_exit`, `rerun`, `replay`, `trace`, plus
+  `build_seconds` and `run_seconds`.
 - `patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
@@ -421,8 +436,8 @@ Patina. The default-off `macros` feature re-exports `#[patina_dst::test]` for
 dev-dependency use under plain `cargo test`.
 
 - `#[patina_dst::test]`: point-solution DST test. The plain test process finds
-  `patina` via absolute `PATINA_CLI` or `patina` on `PATH`, rebuilds
-  the same libtest target shim-linked, sweeps 20 seeds by default (or macro args
+  `patina` via absolute `PATINA_CLI` or `patina` on `PATH`, runs
+  `patina test` for that one test, sweeps 20 seeds by default (or macro args
   such as `seed = 7`, `seeds = 200`, `buggify`, `net_drop_permille = 50`), and
   panics with the failing seed plus `patina test` / `patina replay`
   repro commands. Missing CLI discovery is a failure, never a skip. The

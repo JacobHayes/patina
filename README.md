@@ -32,22 +32,13 @@ default profile forbids.
 ## First run
 
 Five minutes: a small library with a bug that ordinary tests miss, found by
-Patina.
+Patina running the tests the library already has.
 
-**1. Make a library and add the Patina SDK to its tests.**
+**1. Make a library.**
 
 ```sh
 cargo new --lib jobs && cd jobs
 ```
-
-```toml
-# Cargo.toml
-[dev-dependencies]
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.2.0", features = ["macros"] }
-```
-
-Use the tag of the tool you installed (`patina --version`): the tool and the
-SDK must come from the same release line.
 
 **2. Write the library.** It runs jobs on threads and promises their results
 in job order. Put this in `src/lib.rs`:
@@ -68,43 +59,45 @@ pub fn run_all(jobs: Vec<fn() -> u64>) -> Vec<u64> {
 }
 ```
 
-**3. Write a test.** Put this in `tests/order.rs`. With `#[test]` it passes
-nearly every time, because the first thread usually finishes first.
-`#[patina_dst::test]` runs it under Patina instead, once for each of 20
-*seeds*. Each seed decides, among other things, which thread runs when.
+**3. Write an ordinary test.** Put this in `tests/order.rs`. `cargo test`
+passes it nearly every time, because the first thread usually finishes first.
 
 ```rust
-#[patina_dst::test(seeds = 20)]
+#[test]
 fn results_come_back_in_job_order() {
     let results = jobs::run_all(vec![|| 1, || 2, || 3]);
     assert_eq!(results, [1, 2, 3]);
 }
 ```
 
-**4. Run it.**
+**4. Run the suite under Patina.**
 
 ```sh
-cargo test
+patina test --seeds 20
 ```
 
-The first build is slow: it compiles Patina's runtime. Then the test fails,
-and the output names the seed that failed. Among other lines it prints these
-(with your own paths, and perhaps another seed):
+`patina test` builds each test target once, then runs every test in a
+simulated world of its own, once for each of 20 *seeds*. Each seed decides,
+among other things, which thread runs when. The first build is slow: it
+compiles Patina's runtime. Then the summary names each test that did not
+pass, why, and the seed it failed on (with your own paths, and perhaps
+another seed):
 
 ```text
-patina: FINDING in the guest [failure]: the guest panicked, or a test in it failed
-patina dst test failed: order::results_come_back_in_job_order
-  seed 0 of 0..20  class=failure  guest_exit={"code":101}
-  trace: /home/you/jobs/target/patina/dst/jobs/test/order/results_come_back_in_job_order/seed-0.patina
-  stderr tail:
-    thread 'results_come_back_in_job_order' (3) panicked at tests/order.rs:4:5:
-    assertion `left == right` failed
-      left: [1, 3, 2]
-     right: [1, 2, 3]
-  reproduce:
-    patina test /home/you/jobs --harness-target order --exact results_come_back_in_job_order --seed 0
-    patina replay /home/you/jobs/target/.../guest /home/you/jobs/target/.../seed-0.patina
+patina test: 1 test(s) in 2 target(s); built in 10.3s, ran in 0.4s (24 job(s), seeds 0..20)
+  failure               1
+
+failure          jobs --test order results_come_back_in_job_order (seed 0)
+    panicked at tests/order.rs:4:5: assertion `left == right` failed
+    rerun:  patina test . -p jobs --test order results_come_back_in_job_order --exact --seed 0
+    replay: patina replay /home/you/jobs/target/patina/dst/jobs/test/order/guest /home/you/jobs/target/patina/dst/jobs/test/order/traces/results_come_back_in_job_order.seed-0.patina
+
+patina: FINDING in the guest [failure]: 1 of 1 did not pass
 ```
+
+It takes the selection `cargo test` takes (`-p`, `--workspace`, `--lib`,
+`--test NAME`, a name filter, `--exact`), and exits 0 when every test passed,
+1 on a finding and 2 when a test could not run under Patina.
 
 ## A failing seed, and how to replay it
 
@@ -121,9 +114,9 @@ the same program against the trace and fails the same way every time:
 patina: FINDING in the guest [failure]: the guest panicked, or a test in it failed (guest exit 101)
 ```
 
-The other line, `patina test ... --seed 0`, builds the test again and runs
-that one seed: use it after you change the code. Here the fix is to join the
-threads in job order. With it, `cargo test` passes all 20 seeds.
+The `rerun:` line builds the test again and runs that one seed: use it after
+you change the code. Here the fix is to join the threads in job order. With
+it, `patina test --seeds 20` passes all 20 seeds.
 
 ```rust
 pub fn run_all(jobs: Vec<fn() -> u64>) -> Vec<u64> {
