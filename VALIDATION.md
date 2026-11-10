@@ -23,16 +23,17 @@ document names directories and evidence shapes, not test functions.
 
 | Command | What it runs |
 |---|---|
-| `mise run check` | the local landing gate: fmt, clippy (host and the other OS family's cfgs), docs, packaging, `cargo nextest run --workspace` (including the native acceptance and conformance tests), doctests, the native smoke, and the testbeds |
-| `mise run check:native-abi` | just the native ABI integration tests |
-| `mise run smoke` | native smoke checks |
+| `mise run check [nextest arguments]` | the inner loop: fmt, host clippy, then the tests named (`-p <package>`, `--test native_abi`, `-E <filter>`); with no arguments, the workspace suite, the native acceptance and conformance tests included |
+| `mise run check:full` | everything this host can check: the above plus clippy for the other platforms' cfgs, doctests, the macros feature, the native smoke and the testbeds |
 | `mise run conformance` | syscall conformance scenarios, natively and under Patina |
 | `mise run conformance:coverage` | registry entries no scenario covers or excludes (a report; exits 1 while any remain) |
 | `mise run audit-corpus` | ecosystem symbol-audit corpus against committed per-platform expectations |
 | `mise run bench` | native-versus-Patina overhead measurement (not a gate) |
 
-CI runs the workspace suite and testbeds on Linux x86_64 and aarch64 and on
-macOS, plus the audit corpus. Evidence is platform-local: a Linux run does not
+CI is the landing gate. Every push runs the workspace suite and the testbeds on
+Linux x86_64 and aarch64 and on macOS, plus the audit corpus; a nightly run adds
+the long workq and pubsub campaigns and the advisory audit of every lockfile.
+Evidence is platform-local: a Linux run does not
 verify the Darwin legs, and trace hashes are not compared across operating
 systems.
 
@@ -64,7 +65,7 @@ systems.
 
 | Level | Scope | Status |
 |---|---|---|
-| V0 | workspace quality: the `mise run check` gate | standing |
+| V0 | workspace quality: fmt, clippy and the suite in CI | standing |
 | V1 | deterministic vertical slice at the explicit `Context` boundary | complete |
 | V2 | cooperative scheduling, SimNet, wrappers, branching, async executor | complete |
 | V3 | native linked-shim target: interposition, audit gate, threads, reactors, SUD | partial |
