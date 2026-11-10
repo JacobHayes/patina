@@ -1002,7 +1002,11 @@ fn main() {
                     .unwrap()
                     .contains("before-default-termination")
             );
-            assert!(envelope.get("refusal").is_none(), "{envelope:#}");
+            assert_eq!(
+                (&envelope["result"], &envelope["attribution"]),
+                (&"crash".into(), &"guest".into()),
+                "{envelope:#}"
+            );
             let bundle =
                 TraceBundle::load(&trace).expect("signal death leaves a complete finalized bundle");
             assert_eq!(bundle.timelines.len(), 1);

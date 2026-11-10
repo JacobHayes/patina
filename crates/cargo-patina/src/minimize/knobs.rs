@@ -85,7 +85,8 @@ pub(super) struct KnobOracle {
 /// How a knob candidate's run ended.
 #[derive(Clone, Debug)]
 pub(super) struct RunEnd {
-    /// Patina's refusal class from the result envelope, when it refused.
+    /// The reason patina stopped the run, from the result envelope, when the
+    /// stop is patina's and not the guest's own finding.
     pub(super) refusal: Option<String>,
 }
 
@@ -169,7 +170,7 @@ impl KnobOracle {
         )?;
         let (stdout, stderr) = run.streams();
         let end = RunEnd {
-            refusal: run.refusal().map(str::to_string),
+            refusal: run.patina_stop().map(str::to_string),
         };
         let shows_target = self.target.preserved(&CandidateOutcome {
             stdout,

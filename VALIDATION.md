@@ -115,7 +115,7 @@ elsewhere.
 buggify knob is recorded in the trace, authoritative on replay, folded into the
 fingerprint where it changes behavior, and accepted by every family or refused by
 name. Each knob emits a report, and a knob that never fired is a warning or a
-`VACUOUS` campaign class naming its plane. Oracle: table-driven per-knob tests from the one
+`vacuous` campaign class naming its plane. Oracle: table-driven per-knob tests from the one
 knob declaration, and vacuity tests per class.
 
 **Crash consistency.** `CrashFs` rolls metadata back to the last ext4-style
@@ -135,10 +135,15 @@ timed peer stops with a `PATINA_VIOLATION liveness` finding and a replayable
 terminal prefix. Oracle: planted spins (main thread, worker, allocator-held,
 small stack) and parked/single-task controls that must not fire.
 
-**Campaign classification.** The campaign classifier reads only the structured
-`patina.result/v1` envelope, never guest text, and a reproduction it prints must
-reproduce (`NONDETERMINISM` otherwise). Oracle: the campaign classifier unit tests,
-which fire every class from planted envelopes.
+**One outcome model.** Every run ends in one class (`patina_dst_abi::RunClass`),
+whose attribution and exit status are functions of it. The native shim cannot
+abort without naming a class (its one abort vehicle takes a `RunStop`), the
+supervisor's classification is total and reads structured evidence only, never
+guest text, and a campaign files each generation under the class its run
+reported; a reproduction it prints must reproduce (`nondeterministic`
+otherwise). Oracle: the run classification table (every way a run ends, from
+planted evidence), the end-to-end outcome matrix over `run`, `test` and
+`campaign`, and the campaign rule tests.
 
 **SDK inertness.** Outside a Patina build every SDK macro is a no-op, and with
 buggify off a rebuilt guest reproduces its canonical result. Oracle: the

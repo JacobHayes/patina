@@ -106,7 +106,7 @@ mod tests {
     use super::outcome_guest;
 
     // ---------------------------------------------------------------------------
-    // Outcome channel: the `patina.result/v1`
+    // Outcome channel: the `patina.result/v2`
     // envelope's runtime-owned facts. `fault_reports`/`runtime_findings` come from
     // the runtime's own `patina.runfacts/v1` document — the same report structs the
     // `PATINA_*_REPORT` lines are formatted from — while `refusal`/`guest_exit` are
@@ -237,8 +237,13 @@ mod tests {
             liveness["vtime_ns"].as_u64().unwrap().to_string(),
             printed["vtime_ns"]
         );
-        assert!(
-            wedged.get("refusal").is_none(),
+        assert_eq!(
+            (
+                &wedged["result"],
+                &wedged["attribution"],
+                &wedged["exit_code"]
+            ),
+            (&"liveness".into(), &"guest".into(), &1.into()),
             "a liveness wedge is a finding about the guest, not patina refusing:\n{wedged:#}"
         );
 
@@ -249,9 +254,14 @@ mod tests {
         ]);
         assert_eq!(aborted["guest_exit"]["signal"], 6);
         assert_eq!(aborted["guest_exit"]["signal_name"], "SIGABRT");
-        assert!(
-            aborted.get("refusal").is_none(),
-            "a guest's own abort must carry no patina refusal:\n{aborted:#}"
+        assert_eq!(
+            (
+                &aborted["result"],
+                &aborted["attribution"],
+                &aborted["exit_code"]
+            ),
+            (&"crash".into(), &"guest".into(), &1.into()),
+            "a guest's own abort is the guest's, never patina's:\n{aborted:#}"
         );
 
         // Patina refusing is attributed by class. A trace whose recorded
@@ -277,16 +287,21 @@ mod tests {
         );
         fs::write(&trace, tampered).unwrap();
         let refused = envelope(&["replay", guest, trace.to_str().unwrap(), "--format", "json"]);
+        // The trace does not fit this run: the request's, named by the stop
+        // the runtime's own refusal left, and never the guest's abort.
         assert_eq!(
-            refused["refusal"]["class"], "fingerprint_mismatch",
-            "patina's own refusal must be attributed:\n{refused:#}"
+            (
+                &refused["result"],
+                &refused["attribution"],
+                &refused["exit_code"]
+            ),
+            (&"error".into(), &"request".into(), &2.into()),
+            "a refused trace must be attributed to the request:\n{refused:#}"
         );
+        assert_eq!(refused["stop"]["reason"], "runtime_init", "{refused:#}");
         assert!(
-            refused["refusal"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("fingerprint mismatch"),
-            "the refusal must carry the line that announced it:\n{refused:#}"
+            !refused["stop"]["detail"].as_str().unwrap().is_empty(),
+            "the stop must carry the line that announced it:\n{refused:#}"
         );
         assert_eq!(refused["guest_exit"]["signal_name"], "SIGABRT");
     }

@@ -40,7 +40,7 @@ impl VerdictKind {
 ///
 /// Under Patina the call is recorded as a trace event — replay reproduces the
 /// verdict stream byte-identically, and a divergent one fails closed like any
-/// other operation mismatch — and surfaces in the run's `patina.result/v1`
+/// other operation mismatch — and surfaces in the run's `patina.result/v2`
 /// envelope as a `verdicts[]` entry. Outside Patina it is a no-op, so it is safe
 /// to leave in production code.
 ///

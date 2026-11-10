@@ -149,7 +149,7 @@ pub(super) fn native_prerun_gate(
     load_set: &LoadSet<'_>,
     allow: &BTreeSet<String>,
     policy: &UnsupportedPolicy,
-) -> Result<Vec<NativeEscape>, CliError> {
+) -> Result<Vec<NativeEscape>, GateRefusal> {
     // The operator's `--allow`, and nothing else: the shim's own `dlsym`
     // vehicle is admitted by its binding (`NativeAudit::audit`), the same in
     // `audit` and here.
@@ -170,6 +170,21 @@ pub(super) fn native_prerun_gate(
         image.store_unchanged(&entry, &notes);
     }
     outcome
+}
+
+/// Why the pre-run gate did not let a binary run.
+pub(super) enum GateRefusal {
+    /// The binary reaches something patina does not model: the rendered
+    /// refusal names each symbol, its class and where it is reached from.
+    Unsupported(String),
+    /// The binary could not be judged at all.
+    Error(CliError),
+}
+
+impl From<CliError> for GateRefusal {
+    fn from(error: CliError) -> Self {
+        Self::Error(error)
+    }
 }
 
 /// What this host can trap: syscall-user-dispatch and the timestamp counter.
@@ -213,7 +228,7 @@ fn judge(
     policy: &UnsupportedPolicy,
     host: HostTraps,
     notes: &mut String,
-) -> Result<Vec<NativeEscape>, CliError> {
+) -> Result<Vec<NativeEscape>, GateRefusal> {
     let mut note = |text: &str| {
         notes.push_str(text);
         notes.push('\n');
@@ -231,10 +246,10 @@ fn judge(
         Err(TargetError::UnsupportedImports(denied)) => denied,
         // A binary we cannot even parse/format-check must never run.
         Err(other) => {
-            return Err(CliError(format!(
+            return Err(GateRefusal::Error(CliError(format!(
                 "refusing to run {}: {other}",
                 binary.display()
-            )));
+            ))));
         }
     };
 
@@ -393,7 +408,19 @@ run that reaches one is not reproducible, so it is refused; pass --allow-unsuppo
 <all|name,name,...> to run anyway with a warning, but determinism is then only qualified.",
             );
         }
-        return Err(CliError(message));
+        if !shim_linked {
+            // A binary no `patina build` produced is not something patina
+            // fails to model: every libc call it makes is an unsatisfied
+            // import, so the list below says nothing about the program. The
+            // request's to fix, and said first.
+            return Err(GateRefusal::Error(CliError(format!(
+                "{} was not built by patina, so it is not linked with the deterministic \
+                 runtime: build it with `patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the \
+                 source or package to `patina run`. What it imports unlinked:\n{message}",
+                binary.display()
+            ))));
+        }
+        return Err(GateRefusal::Unsupported(message));
     }
 
     if !downgraded.is_empty() {

@@ -2,15 +2,13 @@
 
 mod scaling;
 
-use super::classify::{
-    HOST_KILL_SHAPE, SIGABRT, SIGABRT_EXIT, TRACE_UNAVAILABLE_CLASS, is_runtime_diagnostic,
-};
-use super::generation::{SIGKILL, facts_from_envelope};
+use super::classify::{HOST_KILL_SHAPE, is_runtime_diagnostic};
+use super::generation::SIGKILL;
 use super::report::{CoverageGate, coverage_verdict};
 use super::spec::json_classify_rules;
 use super::verify::{selftest_class_checks, selftest_sampling};
 use super::{
-    AllowUnmetSometimes, CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts,
+    AllowUnmetSometimes, ClassifyRules, FindingFacts, GenerationFacts, RunClass, RunFacts,
     VerdictFacts, classify, signature,
 };
 use crate::sdk_report::CoverageTally;
@@ -27,6 +25,7 @@ pub(super) fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
         facts,
         output: output.to_string(),
         guest_output: None,
+        stop_detail: None,
         result_line: None,
         exact_verdicts: Vec::new(),
         bug_depth: None,
@@ -35,21 +34,46 @@ pub(super) fn planted(facts: RunFacts, output: &str) -> GenerationFacts {
 
 impl RunFacts {
     /// A clean, envelope-carrying generation — the base every selftest fixture
-    /// mutates by exactly the one fact it is proving.
+    /// mutates by exactly the one fact it is proving. The builders below keep
+    /// `class` what the generation's own run would have reported for the
+    /// facts planted, since the campaign reads that class rather than
+    /// re-deriving it.
     pub(super) fn ok() -> Self {
         RunFacts {
             envelope: true,
+            class: Some(RunClass::Ok),
+            guest_exit_code: Some(0),
             ..RunFacts::default()
         }
     }
 
+    /// The guest's own exit status: a nonzero one is a `failure`, and the
+    /// child's own status follows the class.
     pub(super) fn exit(mut self, code: i32) -> Self {
-        self.exit_code = code;
+        self.guest_exit_code = Some(code);
+        if code != 0 && self.class == Some(RunClass::Ok) {
+            self.class = Some(RunClass::Failure);
+        }
+        self.exit_code = self.class.map_or(2, RunClass::exit_code);
         self
     }
 
+    /// The guest died on `signal`: a `crash`, unless a finding or a stop
+    /// already says why.
     pub(super) fn signal(mut self, signal: i32) -> Self {
         self.signal = Some(signal);
+        if matches!(self.class, Some(RunClass::Ok | RunClass::Failure)) {
+            self.class = Some(RunClass::Crash);
+        }
+        self.exit_code = self.class.map_or(2, RunClass::exit_code);
+        self
+    }
+
+    /// The child `patina run` itself was killed from outside.
+    pub(super) fn killed_from_outside(mut self) -> Self {
+        self.child_signal = Some(SIGKILL);
+        self.signal = Some(SIGKILL);
+        self.exit_code = -1;
         self
     }
 
@@ -60,17 +84,21 @@ impl RunFacts {
 
     pub(super) fn no_envelope(mut self) -> Self {
         self.envelope = false;
+        self.class = None;
         self
     }
 
-    pub(super) fn refusal(mut self, class: &str) -> Self {
-        self.refusal = Some(class.to_string());
+    /// The run was stopped for `reason` under `class`.
+    pub(super) fn stopped(mut self, class: RunClass, reason: &str) -> Self {
+        self.class = Some(class);
+        self.stop = Some(reason.to_string());
+        self.exit_code = class.exit_code();
         self
     }
 
-    /// The status the GUEST reached before the refusal's abort replaced it.
-    pub(super) fn guest_exit(mut self, code: i32) -> Self {
-        self.refusal_guest_exit_code = Some(code);
+    /// The run's recording was lost under a class that is the guest's own.
+    pub(super) fn trace_unusable(mut self) -> Self {
+        self.trace_unusable = true;
         self
     }
 
@@ -79,6 +107,10 @@ impl RunFacts {
             kind: kind.to_string(),
             label: label.to_string(),
         });
+        if kind == "violation" {
+            self.class = Some(RunClass::Violation);
+            self.exit_code = RunClass::Violation.exit_code();
+        }
         self
     }
 
@@ -88,6 +120,10 @@ impl RunFacts {
             kind: kind.to_string(),
             known_limit: false,
         });
+        if source == "liveness" {
+            self.class = Some(RunClass::Liveness);
+            self.exit_code = RunClass::Liveness.exit_code();
+        }
         self
     }
 
@@ -102,8 +138,8 @@ impl RunFacts {
 /// declared-rule GRAMMAR too, not just the matcher.
 pub(super) fn declared_rules_fixture() -> ClassifyRules {
     json_classify_rules(&serde_json::json!({
-        "patterns": {"VIOLATION": ["checksum mismatch"]},
-        "exit_codes": {"VIOLATION": [3]},
+        "patterns": {"violation": ["checksum mismatch"]},
+        "exit_codes": {"violation": [3]},
     }))
     .expect("the selftest's declared rules must parse")
 }
@@ -114,10 +150,8 @@ pub(super) fn declared_rules_fixture() -> ClassifyRules {
 #[test]
 fn classifier_and_detector_checks() {
     let mut failures = 0u32;
-    let mut fired: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
-    let mut check = |name: &str, want: CampaignClass, got: CampaignClass| {
+    let mut check = |name: &str, want: RunClass, got: RunClass| {
         if want == got {
-            fired.insert(got.as_str());
             println!("  ok   {name:<40} -> {}", got.as_str());
         } else {
             println!(
@@ -133,534 +167,164 @@ fn classifier_and_detector_checks() {
     // every class-deciding fact must be proven load-bearing: each check below is
     // paired with a red twin that removes exactly the one fact and lands
     // somewhere else. A check that cannot fail is a bug.
+    // A generation's class is the one its own `patina run` reported (the
+    // run-side classification has its own table); these are the rules only the
+    // campaign applies over it, each with the twin that lands somewhere else.
     let no_rules = ClassifyRules::default();
-    check(
-        "clean-exit-0",
-        CampaignClass::Ok,
-        classify(&planted(RunFacts::ok(), ""), &no_rules),
-    );
-
-    // A typed runtime limit must survive envelope reduction and must never
-    // spend the campaign's novel-guest-finding budget. Removing the bit is RED.
-    for (known_limit, expected) in [
-        (true, CampaignClass::Infra),
-        (false, CampaignClass::Liveness),
-    ] {
-        let facts = facts_from_envelope(&serde_json::json!({
-            "exit_code": 134,
-            "runtime_findings": [{"source": "liveness", "kind": "liveness", "known_limit": known_limit}]
-        }));
-        check(
-            "runtime-limit-bit-is-load-bearing",
-            expected,
-            classify(&planted(facts, ""), &no_rules),
-        );
-    }
-
-    // -- liveness: a runtime finding attributed to the watchdog ---------------
-    check(
-        "liveness-watchdog-finding",
-        CampaignClass::Liveness,
-        classify(
-            &planted(
-                RunFacts::ok().exit(1).finding("liveness", "no_progress"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    check(
-        "heal-then-converge-finding",
-        CampaignClass::Liveness,
-        classify(
-            &planted(RunFacts::ok().exit(2).finding("liveness", "converge"), ""),
-            &no_rules,
-        ),
-    );
-    // RED twin: the same run WITHOUT the liveness finding is not LIVENESS, so
-    // the finding is what fires the class (a schedule-sourced finding must not).
-    check(
-        "liveness-red-without-the-finding",
-        CampaignClass::Unclassified,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(1)
-                    .finding("schedule", "vacuous_schedule"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-
-    // -- violation: a `violation` verdict through the verdict ABI -------------
-    check(
-        "violation-verdict-on-exit-0",
-        CampaignClass::Violation,
-        classify(
-            &planted(RunFacts::ok().verdict("violation", "two-leaders"), ""),
-            &no_rules,
-        ),
-    );
-    check(
-        "always-violation-abort-is-violation-not-guest-abort",
-        CampaignClass::Violation,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .verdict("violation", "must-hold"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // RED twin: a `pass` verdict is not a finding.
-    check(
-        "violation-red-a-pass-verdict-is-not-a-finding",
-        CampaignClass::Ok,
-        classify(
-            &planted(RunFacts::ok().verdict("pass", "queue-drained"), ""),
-            &no_rules,
-        ),
-    );
-
-    // -- inert-plane coverage failures ---------------------------------------
-    for name in ["fs", "dns", "net", "entropy", "clock", "custom_op", "swarm"] {
-        check(
-            &format!("vacuous-{name}-plane"),
-            CampaignClass::Vacuous,
-            classify(&planted(RunFacts::ok().vacuous(name), ""), &no_rules),
-        );
-    }
-    // RED twin: a plane that is present but NOT vacuous fires nothing.
-    check(
-        "fs-plane-that-fired-is-not-vacuous",
-        CampaignClass::Ok,
-        classify(&planted(RunFacts::ok(), ""), &no_rules),
-    );
-    // A vacuous schedule plane is a runtime finding, not a coverage plane.
-    check(
-        "a-vacuous-schedule-plane-is-not-an-inert-fault-plane",
-        CampaignClass::Ok,
-        classify(
-            &planted(
-                facts_from_envelope(&serde_json::json!({
-                    "exit_code": 0,
-                    "fault_reports": {"schedule": {"vacuous": true}}
-                })),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // A real finding still wins: an inert fault plane never hides a SUT bug.
-    check(
-        "violation-beats-vacuous-swarm",
-        CampaignClass::Violation,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .vacuous("swarm")
-                    .verdict("violation", "two-leaders"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // Nor does it hide the guest's own failure: a guest that gave up (nonzero
-    // exit, no verdict) or aborted is classed exactly as it would be with the
-    // inert knob absent.
-    check(
-        "unverdicted-nonzero-exit-beats-vacuous-net",
-        CampaignClass::Unclassified,
-        classify(
-            &planted(RunFacts::ok().exit(4).vacuous("net"), ""),
-            &no_rules,
-        ),
-    );
-    check(
-        "guest-abort-beats-vacuous-net",
-        CampaignClass::GuestAbort,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .vacuous("net"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-
-    // Patina's own end-of-run recorder failure (an unwritable trace, a bundle
-    // that would not serialize) aborts the guest with a SIGABRT the guest never
-    // raised. When the GUEST itself came through clean that is the harness
-    // failing, not a finding: INFRA, like a timeout. Its red twin is the same
-    // SIGABRT with no refusal, two checks below.
-    check(
-        "shutdown-failure-over-a-clean-guest-is-infra",
-        CampaignClass::Infra,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal("shutdown_failure")
-                    .guest_exit(0),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // RED twin, and the whole point of the rule: the recorder gives out on LONG
-    // runs, which are the runs most likely to have found something. A guest that
-    // had ALREADY failed on its own — a panic (101), a nonzero return — is the
-    // finding; the unusable trace is a footnote the report still carries. Filing
-    // this INFRA would delete a real failure, and delete it selectively from the
-    // deepest generations in the campaign.
-    for guest_code in [1, 101, 2] {
-        check(
-            &format!("shutdown-failure-over-a-failing-guest-{guest_code}-keeps-the-guests-class"),
-            CampaignClass::Unclassified,
-            classify(
-                &planted(
-                    RunFacts::ok()
-                        .exit(SIGABRT_EXIT)
-                        .signal(SIGABRT)
-                        .refusal("shutdown_failure")
-                        .guest_exit(guest_code),
-                    "",
-                ),
-                &no_rules,
-            ),
-        );
-    }
-    // A guest verdict still outranks the refusal, as before: a violation the
-    // guest reported is a VIOLATION whatever the recorder then did.
-    check(
-        "violation-beats-shutdown-failure",
-        CampaignClass::Violation,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal("shutdown_failure")
-                    .guest_exit(101)
-                    .verdict("violation", "integrity-check"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // With no recorded guest status there is no evidence the guest failed, so
-    // the demotion stands — patina's recorder is the only thing known to have
-    // gone wrong.
-    check(
-        "shutdown-failure-with-no-recorded-guest-status-stays-infra",
-        CampaignClass::Infra,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal("shutdown_failure"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-
-    // Patina's own trace CHANNEL failing — the recorder's scratch file could not
-    // be opened, read, or renamed — is an operational condition of the host, in
-    // the same family as a timeout or an OOM kill. Before this it landed in
-    // UNCLASSIFIED, and because every such run's message named its own scratch
-    // path, one environmental problem read as dozens of separate novel findings.
-    check(
-        "trace-channel-failure-over-a-clean-guest-is-infra",
-        CampaignClass::Infra,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(2)
-                    .refusal("trace_unavailable")
-                    .guest_exit(0),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // With no recorded guest status, patina's channel is the only thing known to
-    // have gone wrong: the demotion stands.
-    check(
-        "trace-channel-failure-with-no-guest-status-stays-infra",
-        CampaignClass::Infra,
-        classify(
-            &planted(RunFacts::ok().exit(2).refusal("trace_unavailable"), ""),
-            &no_rules,
-        ),
-    );
-    // RED twin, and the difference from the recorder-budget rule: nothing about
-    // a channel failure interferes with the guest's own death, so a guest that
-    // aborted is still a GUEST_ABORT and one that exited nonzero is still
-    // UNCLASSIFIED — the guest's status falls through to its own rules rather
-    // than being consumed by the refusal.
-    check(
-        "trace-channel-failure-over-an-aborting-guest-is-still-a-guest-abort",
-        CampaignClass::GuestAbort,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal("trace_unavailable")
-                    .guest_exit(SIGABRT_EXIT),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    check(
-        "trace-channel-failure-over-a-failing-guest-keeps-the-guests-class",
-        CampaignClass::Unclassified,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(101)
-                    .refusal("trace_unavailable")
-                    .guest_exit(101),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // A guest verdict still outranks it, as with every other refusal.
-    check(
-        "violation-beats-a-trace-channel-failure",
-        CampaignClass::Violation,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(2)
-                    .refusal("trace_unavailable")
-                    .guest_exit(0)
-                    .verdict("violation", "integrity-check"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-
-    // -- host-side death vs guest-side death --------------------------------
-    // A SIGKILL is never the guest's doing: it cannot raise it, catch it, or
-    // survive it. It is INFRA — the same bucket as a timeout — and NOT a bug
-    // class, because a campaign that files an OOM kill as a finding reports a
-    // failure that does not exist and hands over a reproduce command that
-    // cannot reproduce it. The red twin below is the same fixture with SIGABRT.
-    check(
-        "sigkill-is-host-side-infra",
-        CampaignClass::Infra,
-        classify(
-            &planted(RunFacts::ok().exit(128 + SIGKILL).signal(SIGKILL), ""),
-            &no_rules,
-        ),
-    );
-    check(
-        "sigabrt-is-still-a-guest-abort",
-        CampaignClass::GuestAbort,
-        classify(
-            &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
-            &no_rules,
-        ),
-    );
-    // A guest that RETURNS 137 deliberately is not host-killed: only a real
-    // signal counts, or this rule would hide findings instead of unmasking them.
-    check(
-        "exit-137-without-a-signal-is-not-a-host-kill",
-        CampaignClass::Unclassified,
-        classify(&planted(RunFacts::ok().exit(128 + SIGKILL), ""), &no_rules),
-    );
-    // A host kill outranks the guest's own output: a killed generation ran no
-    // invariant to completion, so a declared pattern must not turn it into a bug.
-    let mut declares_violation = ClassifyRules::default();
-    declares_violation
-        .patterns
-        .insert(CampaignClass::Violation, vec!["CORRUPTION".to_string()]);
-    check(
-        "host-kill-outranks-a-declared-pattern",
-        CampaignClass::Infra,
-        classify(
-            &planted(
-                RunFacts::ok().exit(128 + SIGKILL).signal(SIGKILL),
-                "CORRUPTION detected",
-            ),
-            &declares_violation,
-        ),
-    );
-    // -- the GUEST_ABORT / FAIL_CLOSED_ABORT split (arc §4.4) ----------------
-    // The same SIGABRT lands in two different classes depending on ONE envelope
-    // field: whether patina attributed the failure to itself.
-    check(
-        "guest-abort-unattributed-sigabrt",
-        CampaignClass::GuestAbort,
-        classify(
-            &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
-            &no_rules,
-        ),
-    );
-    check(
-        "guest-abort-enriched-by-an-abort-intent-verdict",
-        CampaignClass::GuestAbort,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .verdict("abort_intent", "checksum"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    // A family whose supervisor sees only a code still splits on the refusal.
-    check(
-        "guest-abort-exit-134-without-a-signal",
-        CampaignClass::GuestAbort,
-        classify(&planted(RunFacts::ok().exit(SIGABRT_EXIT), ""), &no_rules),
-    );
-    // RED twin: the SAME abort WITH a patina refusal is patina's fault, not the
-    // guest's — this is the split the arc calls for.
-    check(
-        "fail-closed-abort-is-the-same-sigabrt-with-a-refusal",
-        CampaignClass::FailClosedAbort,
-        classify(
-            &planted(
-                RunFacts::ok()
-                    .exit(SIGABRT_EXIT)
-                    .signal(SIGABRT)
-                    .refusal("buggify_duplicate_label"),
-                "",
-            ),
-            &no_rules,
-        ),
-    );
-    check(
-        "fail-closed-refusal-without-an-abort",
-        CampaignClass::FailClosedAbort,
-        classify(
-            &planted(RunFacts::ok().exit(2).refusal("fingerprint_mismatch"), ""),
-            &no_rules,
-        ),
-    );
-
-    // Class pairing: campaign_forwards_the_prerun_gate_hatches_to_every_generation.
-    // The typed gate receipt is infrastructure, even when guest-like output or
-    // a spec pattern would otherwise claim a violation. Its runtime-refusal
-    // twin above must remain FAIL_CLOSED_ABORT.
-    let prerun = facts_from_envelope(&serde_json::json!({
-        "exit_code": 2,
-        "refusal": {"class": crate::output::NATIVE_PRERUN_REFUSAL}
-    }));
-    check(
-        "infra-structured-prerun-refusal",
-        CampaignClass::Infra,
-        classify(&planted(prerun, "CORRUPTION detected"), &declares_violation),
-    );
-
-    // -- the campaign backstop ----------------------------------------------
-    check(
-        "infra-wall-clock-timeout",
-        CampaignClass::Infra,
-        classify(&planted(RunFacts::ok().timed_out(), ""), &no_rules),
-    );
-    // A child that never produced a result envelope is patina's own harness
-    // failing (a build error, a pre-run gate refusal), not a SUT finding.
-    check(
-        "infra-child-produced-no-envelope",
-        CampaignClass::Infra,
-        classify(
-            &planted(
-                RunFacts::ok().exit(2).no_envelope(),
-                "patina: could not compile foo",
-            ),
-            &no_rules,
-        ),
-    );
-    check(
-        "bare-nonzero-is-unclassified-not-ok",
-        CampaignClass::Unclassified,
-        classify(&planted(RunFacts::ok().exit(2), ""), &no_rules),
-    );
-
-    // -- spec-declared rules for a level-1 guest (arc §4.3) ------------------
-    // The grep mechanism survives only as explicit per-guest configuration.
     let declared = declared_rules_fixture();
-    check(
-        "declared-pattern-classifies-a-level-1-guest",
-        CampaignClass::Violation,
-        classify(
-            &planted(RunFacts::ok(), "GUEST: checksum mismatch on page 7"),
-            &declared,
-        ),
-    );
-    // RED twin: the identical output with NO declared rule stays OK — the
-    // pattern, not the text, is what classifies.
-    check(
-        "declared-pattern-red-without-the-rule",
-        CampaignClass::Ok,
-        classify(
-            &planted(RunFacts::ok(), "GUEST: checksum mismatch on page 7"),
+    const SIGABRT: i32 = 6;
+    let level_one = "GUEST: checksum mismatch on page 7";
+    for (name, want, facts, output, rules) in [
+        ("clean", RunClass::Ok, RunFacts::ok(), "", &no_rules),
+        // The run's own class passes through, whichever it is.
+        (
+            "the-runs-class-passes-through",
+            RunClass::Unsupported,
+            RunFacts::ok().stopped(RunClass::Unsupported, "not_modeled"),
+            "",
             &no_rules,
         ),
-    );
-    check(
-        "declared-exit-code-classifies-a-level-1-guest",
-        CampaignClass::Violation,
-        classify(&planted(RunFacts::ok().exit(3), ""), &declared),
-    );
-    check(
-        "declared-exit-code-red-without-the-rule",
-        CampaignClass::Unclassified,
-        classify(&planted(RunFacts::ok().exit(3), ""), &no_rules),
-    );
-    // Declared rules ADD findings; they never downgrade one the envelope made.
-    check(
-        "declared-rules-never-downgrade-an-envelope-finding",
-        CampaignClass::Liveness,
-        classify(
-            &planted(
-                RunFacts::ok().exit(3).finding("liveness", "no_progress"),
-                "GUEST: checksum mismatch on page 7",
-            ),
+        // The campaign's wall-clock backstop, whatever the child had reported.
+        (
+            "wall-clock-backstop",
+            RunClass::Timeout,
+            RunFacts::ok().timed_out(),
+            "",
+            &no_rules,
+        ),
+        // A child killed from outside reported nothing the campaign can
+        // stand on, whatever its envelope said before it died. Its twin is a
+        // guest that died on a signal under a child that lived to report it.
+        (
+            "host-kill",
+            RunClass::Internal,
+            RunFacts::ok().killed_from_outside(),
+            "",
+            &no_rules,
+        ),
+        // The envelope's word is never taken over the process's: a child
+        // that reported clean and then exited otherwise did not finish the
+        // run it described.
+        (
+            "an-ok-envelope-over-a-failed-child",
+            RunClass::Internal,
+            RunFacts {
+                exit_code: 1,
+                ..RunFacts::ok()
+            },
+            "",
+            &no_rules,
+        ),
+        (
+            "host-kill-red-another-signal-is-the-guests",
+            RunClass::Crash,
+            RunFacts::ok().signal(SIGABRT),
+            "",
+            &no_rules,
+        ),
+        // A guest that RETURNS 137 deliberately is not host-killed: only a
+        // real signal counts, or the rule would hide findings.
+        (
+            "host-kill-red-exit-137-without-a-signal",
+            RunClass::Failure,
+            RunFacts::ok().exit(137),
+            "",
+            &no_rules,
+        ),
+        // A child that reported no run at all is patina failing to report.
+        (
+            "no-envelope",
+            RunClass::Internal,
+            RunFacts::ok().exit(2).no_envelope(),
+            "",
+            &no_rules,
+        ),
+        // Inert planes are judged only on a run that otherwise passed.
+        (
+            "vacuous-plane",
+            RunClass::Vacuous,
+            RunFacts::ok().vacuous("net"),
+            "",
+            &no_rules,
+        ),
+        (
+            "vacuous-red-a-failing-run-keeps-its-class",
+            RunClass::Failure,
+            RunFacts::ok().exit(4).vacuous("net"),
+            "",
+            &no_rules,
+        ),
+        (
+            "vacuous-red-a-finding-keeps-its-class",
+            RunClass::Violation,
+            RunFacts::ok()
+                .vacuous("swarm")
+                .verdict("violation", "two-leaders"),
+            "",
+            &no_rules,
+        ),
+        // Spec-declared rules for a level-1 guest: the grep mechanism survives
+        // only as explicit per-guest configuration, and only ADDS findings.
+        (
+            "declared-pattern",
+            RunClass::Violation,
+            RunFacts::ok(),
+            level_one,
             &declared,
         ),
-    );
+        (
+            "declared-pattern-red-without-the-rule",
+            RunClass::Ok,
+            RunFacts::ok(),
+            level_one,
+            &no_rules,
+        ),
+        (
+            "declared-exit-code",
+            RunClass::Violation,
+            RunFacts::ok().exit(3),
+            "",
+            &declared,
+        ),
+        (
+            "declared-exit-code-red-without-the-rule",
+            RunClass::Failure,
+            RunFacts::ok().exit(3),
+            "",
+            &no_rules,
+        ),
+        (
+            "declared-rules-never-downgrade-a-finding",
+            RunClass::Liveness,
+            RunFacts::ok().exit(3).finding("liveness", "no_progress"),
+            level_one,
+            &declared,
+        ),
+        (
+            "declared-rules-never-reclaim-a-patina-stop",
+            RunClass::Unsupported,
+            RunFacts::ok().stopped(RunClass::Unsupported, "prerun_audit"),
+            level_one,
+            &declared,
+        ),
+        // A host kill outranks the guest's own output: a killed generation ran
+        // no invariant to completion.
+        (
+            "host-kill-outranks-a-declared-pattern",
+            RunClass::Internal,
+            RunFacts::ok().killed_from_outside(),
+            level_one,
+            &declared,
+        ),
+    ] {
+        check(name, want, classify(&planted(facts, output), rules));
+    }
 
     // -- reproduction verification: the cross-run class -----------------------
     // Reached only by comparing a generation with a second run of it; each
     // comparison axis has a twin that differs there alone.
     for (name, want, got) in selftest_class_checks() {
         check(name, want, got);
-    }
-
-    // Non-vacuity: every class the campaign can report must have been fired
-    // above — a single-run class through the structured channel, the cross-run
-    // class through the comparison. A class nobody proved reachable is a class
-    // nobody can trust.
-    println!("-- class coverage --");
-    for class in CampaignClass::ALL {
-        if fired.contains(class.as_str()) {
-            println!("  ok   {:<40} -> fired", class.as_str());
-        } else {
-            println!(
-                "  FAIL {:<40} -> never fired in the selftest",
-                class.as_str()
-            );
-            failures += 1;
-        }
     }
 
     // Signature dedup + novelty, from the same structured facts.
@@ -691,13 +355,9 @@ fn classifier_and_detector_checks() {
     // the printed `reproduce` command cannot promise a replay that has no
     // artifact behind it.
     let unusable = signature(
-        CampaignClass::Unclassified,
+        RunClass::Failure,
         &planted(
-            RunFacts::ok()
-                .exit(SIGABRT_EXIT)
-                .signal(SIGABRT)
-                .refusal("shutdown_failure")
-                .guest_exit(101),
+            RunFacts::ok().exit(101).trace_unusable(),
             "thread 'main' panicked at src/x.rs:1:1:\nboom\n",
         ),
     );
@@ -711,14 +371,14 @@ fn classifier_and_detector_checks() {
         failures += 1;
     }
     let a = signature(
-        CampaignClass::Liveness,
+        RunClass::Liveness,
         &planted(
             RunFacts::ok().exit(1).finding("liveness", "no_progress"),
             "PATINA_VIOLATION liveness detail=no-progress vtime_ns=700 budget_ns=600",
         ),
     );
     let b = signature(
-        CampaignClass::Liveness,
+        RunClass::Liveness,
         &planted(
             RunFacts::ok().exit(1).finding("liveness", "no_progress"),
             "PATINA_VIOLATION liveness detail=no-progress vtime_ns=999999 budget_ns=600",
@@ -738,7 +398,7 @@ fn classifier_and_detector_checks() {
         failures += 1;
     }
     let c = signature(
-        CampaignClass::Violation,
+        RunClass::Violation,
         &planted(RunFacts::ok().verdict("violation", "two-leaders"), ""),
     );
     if a.key() != c.key() {
@@ -749,7 +409,7 @@ fn classifier_and_detector_checks() {
     }
     // Two violations under DIFFERENT verdict labels are different bugs.
     let other = signature(
-        CampaignClass::Violation,
+        RunClass::Violation,
         &planted(RunFacts::ok().verdict("violation", "lost-update"), ""),
     );
     if c.key() != other.key() {
@@ -762,7 +422,7 @@ fn classifier_and_detector_checks() {
     let at_depth = |depth: u64| {
         let mut generation = planted(RunFacts::ok().verdict("violation", "x"), "");
         generation.bug_depth = Some(depth);
-        signature(CampaignClass::Violation, &generation)
+        signature(RunClass::Violation, &generation)
     };
     let (shallow, deep) = (at_depth(1), at_depth(5));
     if shallow.key() != deep.key() {
@@ -779,11 +439,12 @@ fn classifier_and_detector_checks() {
     let supervisor_note = "note: 24 linked symbol(s) are deny-trap armed under patina \
 (a call aborts deterministically): fork (process), waitpid (process)";
     let shadowed = signature(
-        CampaignClass::Unclassified,
+        RunClass::Failure,
         &GenerationFacts {
             facts: RunFacts::ok().exit(1),
             output: format!("\nError: AlreadyInstalled\n{supervisor_note}\n"),
             guest_output: None,
+            stop_detail: None,
             result_line: Some("Error: AlreadyInstalled".to_string()),
             exact_verdicts: Vec::new(),
             bug_depth: None,
@@ -832,7 +493,7 @@ note: 24 linked symbol(s) are deny-trap armed under patina (a call aborts determ
 fork (process)\n";
     let shadowed_by_report = |activated: u32, edges: u32| {
         signature(
-            CampaignClass::Unclassified,
+            RunClass::Failure,
             &GenerationFacts {
                 facts: RunFacts::ok().exit(1),
                 output: format!(
@@ -842,6 +503,7 @@ fork (process)\n";
                 // What the run verb's last-stderr-line fallback actually returns
                 // for this guest: the runtime's report, not the guest's finding.
                 guest_output: None,
+                stop_detail: None,
                 result_line: reports(activated, edges)
                     .lines()
                     .next_back()
@@ -953,7 +615,7 @@ into the deterministic runtime via syscall-user-dispatch.",
     // Output that is NOTHING but diagnostics still gets a shape: an empty one
     // would collapse every such generation into one meaningless signature.
     let all_diagnostic = signature(
-        CampaignClass::Unclassified,
+        RunClass::Failure,
         &planted(
             RunFacts::ok().exit(1),
             "PATINA_SCHEDULE_REPORT tasks_spawned=3\nPATINA_SDK_REPORT enabled=1\n",
@@ -975,8 +637,8 @@ into the deterministic runtime via syscall-user-dispatch.",
     // when the kernel took it away — it must not spray novel signatures.
     let killed = |tail: &str| {
         signature(
-            CampaignClass::Infra,
-            &planted(RunFacts::ok().exit(128 + SIGKILL).signal(SIGKILL), tail),
+            RunClass::Internal,
+            &planted(RunFacts::ok().killed_from_outside(), tail),
         )
     };
     let first_kill = killed("inserting row 8123\n");
@@ -999,12 +661,9 @@ into the deterministic runtime via syscall-user-dispatch.",
     // which is exactly what it did on this campaign's B02 (26) and B08 (16).
     let channel_lost = |tail: &str| {
         signature(
-            CampaignClass::Infra,
+            RunClass::Internal,
             &planted(
-                RunFacts::ok()
-                    .exit(2)
-                    .refusal(TRACE_UNAVAILABLE_CLASS)
-                    .guest_exit(0),
+                RunFacts::ok().stopped(RunClass::Internal, crate::output::TRACE_UNAVAILABLE_STOP),
                 tail,
             ),
         )
@@ -1012,7 +671,7 @@ into the deterministic runtime via syscall-user-dispatch.",
     let first_loss = channel_lost(
         "PATINA_INFRA native_run trace=incomplete trace_path=\"a/generation-1.patina\"          reason=\"failed to open trace a/.generation-1.patina.tmp.11.0\"\n",
     );
-    if first_loss.shape == format!("refusal class={TRACE_UNAVAILABLE_CLASS}")
+    if first_loss.shape == format!("stop reason={}", crate::output::TRACE_UNAVAILABLE_STOP)
         && first_loss.key()
             == channel_lost(
                 "PATINA_INFRA native_run trace=incomplete trace_path=\"a/generation-77.patina\"                  reason=\"failed to open trace a/.generation-77.patina.tmp.22.0\"\n",
@@ -1033,13 +692,9 @@ into the deterministic runtime via syscall-user-dispatch.",
     // A timed-out generation is host-killed too (the backstop uses SIGKILL), but
     // WHY it died is the finding there, so it keeps the timeout marker.
     let timed_out_kill = signature(
-        CampaignClass::Infra,
+        RunClass::Timeout,
         &planted(
-            RunFacts::ok()
-                .no_envelope()
-                .timed_out()
-                .exit(128 + SIGKILL)
-                .signal(SIGKILL),
+            RunFacts::ok().no_envelope().timed_out().signal(SIGKILL),
             "patina: campaign generation exceeded timeout_secs=5",
         ),
     );
@@ -1059,9 +714,9 @@ into the deterministic runtime via syscall-user-dispatch.",
     // `abort()` and never said anything. Name the signal rather than dedupping
     // every crash onto whatever text happened to be last.
     let segfault = signature(
-        CampaignClass::Unclassified,
+        RunClass::Crash,
         &planted(
-            RunFacts::ok().exit(128 + 11).signal(11),
+            RunFacts::ok().signal(11),
             "inserting row 8123\nPATINA_SDK_REPORT enabled=1 sites_activated=7\n",
         ),
     );
@@ -1084,7 +739,7 @@ into the deterministic runtime via syscall-user-dispatch.",
     // sites stay two findings.
     let aborted = |tail: &str| {
         signature(
-            CampaignClass::GuestAbort,
+            RunClass::Crash,
             &planted(
                 RunFacts::ok().exit(134).signal(SIGABRT),
                 &format!("running the workload\n{tail}"),
@@ -1128,12 +783,12 @@ PoisonError { .. }";
          PATINA_SDK_REPORT enabled=1 sites_activated=7\n\
          patina: runtime shutdown failed: trace resource limit exceeded: timeline main has \
 3103466 events; limit is 1000000\n\
-         PATINA_INFRA native_run signal=6 trace=incomplete reason=\"record finalization did not \
+         PATINA_INFRA native_run trace=incomplete reason=\"record finalization did not \
 complete\"\n",
     );
     if infra_abort
         .shape
-        .starts_with("guest_abort unattributed PATINA_INFRA native_run signal=#")
+        .starts_with("guest_abort unattributed PATINA_INFRA native_run trace=incomplete")
     {
         println!(
             "  ok   guest-abort-keeps-patinas-own-diagnostic -> {}",
@@ -1151,18 +806,18 @@ complete\"\n",
     // the evidence.
     let faulted = |trace: &str, scratch: &str| {
         let marker = format!(
-            "PATINA_INFRA native_run signal=11 trace=incomplete trace_path=\"out/traces/{trace}\" \
+            "PATINA_INFRA native_run trace=incomplete trace_path=\"out/traces/{trace}\" \
 reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
         );
-        let generation = planted(RunFacts::ok().exit(139).signal(11), &format!("{marker}\n"));
+        let generation = planted(RunFacts::ok().signal(11), &format!("{marker}\n"));
         (
-            signature(CampaignClass::Unclassified, &generation).key(),
-            super::classify::primary_finding(CampaignClass::Unclassified, &generation),
+            signature(RunClass::Crash, &generation).key(),
+            super::classify::primary_finding(RunClass::Crash, &generation),
         )
     };
     let observed = faulted("generation-0.patina", "3f19a522fbd5938d");
     let reproduced = faulted("generation-0.verify.patina", "79f652e981513a58");
-    if observed == reproduced && observed.1.contains("signal=11") {
+    if observed == reproduced && observed.1.contains("signal=SIGSEGV") {
         println!(
             "  ok   fault-marker-paths-are-not-evidence      -> {}",
             observed.1
@@ -1175,7 +830,7 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     }
     // A cooperative `abort_intent` verdict still wins over any recovered text.
     let claimed = signature(
-        CampaignClass::GuestAbort,
+        RunClass::Crash,
         &planted(
             RunFacts::ok()
                 .exit(134)
@@ -1199,7 +854,7 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     // Without an envelope there is no result line: the raw output's last line is
     // the shape (the INFRA timeout marker relies on exactly this).
     let raw = signature(
-        CampaignClass::Infra,
+        RunClass::Timeout,
         &planted(
             RunFacts::ok().no_envelope().timed_out(),
             "some guest line\npatina: campaign generation exceeded timeout_secs=5",

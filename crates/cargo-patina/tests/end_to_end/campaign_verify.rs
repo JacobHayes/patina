@@ -71,9 +71,9 @@ mod tests {
 
         let (code, envelope) = campaign(&guest, &directory.path().join("det"), 2, &[], "det-exit");
         assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 2, "{envelope:#}");
+        assert_eq!(envelope["classes"]["failure"], 2, "{envelope:#}");
         assert!(
-            envelope["classes"].get("NONDETERMINISM").is_none(),
+            envelope["classes"].get("nondeterministic").is_none(),
             "{envelope:#}"
         );
         let records = signatures(&envelope);
@@ -99,21 +99,18 @@ mod tests {
             &[],
             "leak-number-exit",
         );
-        assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["NONDETERMINISM"], 1, "{envelope:#}");
-        assert!(
-            envelope["classes"].get("UNCLASSIFIED").is_none(),
-            "{envelope:#}"
-        );
+        assert_eq!(code, Some(2), "{envelope:#}");
+        assert_eq!(envelope["classes"]["nondeterministic"], 1, "{envelope:#}");
+        assert!(envelope["classes"].get("failure").is_none(), "{envelope:#}");
         let record = &signatures(&envelope)[0];
-        assert_eq!(record["class"], "NONDETERMINISM", "{record:#}");
+        assert_eq!(record["class"], "nondeterministic", "{record:#}");
         let verification = &record["verification"];
         assert_eq!(verification["path"], "replay", "{record:#}");
         assert_eq!(verification["status"], "nondeterministic", "{record:#}");
         // Both outcomes travel with the class: what the campaign saw, and what
         // its own reproduce command produced.
-        assert_eq!(verification["observed"]["class"], "UNCLASSIFIED");
-        assert_eq!(verification["reproduction"]["class"], "UNCLASSIFIED");
+        assert_eq!(verification["observed"]["class"], "failure");
+        assert_eq!(verification["reproduction"]["class"], "failure");
         assert_eq!(
             verification["observed"]["signature"], verification["reproduction"]["signature"],
             "{record:#}"
@@ -130,9 +127,9 @@ mod tests {
         let out = directory.path().join("unverified");
         let (code, envelope) = campaign(&guest, &out, 1, &["--no-verify"], "leak-number-exit");
         assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 1, "{envelope:#}");
+        assert_eq!(envelope["classes"]["failure"], 1, "{envelope:#}");
         assert!(
-            envelope["classes"].get("NONDETERMINISM").is_none(),
+            envelope["classes"].get("nondeterministic").is_none(),
             "{envelope:#}"
         );
         assert!(
@@ -164,9 +161,9 @@ mod tests {
             &["--seed-start", "2"],
             "leak-clean",
         );
-        assert_eq!(code, Some(1), "{envelope:#}");
-        assert_eq!(envelope["classes"]["NONDETERMINISM"], 1, "{envelope:#}");
-        assert_eq!(envelope["classes"]["OK"], gens - 1, "{envelope:#}");
+        assert_eq!(code, Some(2), "{envelope:#}");
+        assert_eq!(envelope["classes"]["nondeterministic"], 1, "{envelope:#}");
+        assert_eq!(envelope["classes"]["ok"], gens - 1, "{envelope:#}");
         assert_eq!(
             envelope["verification"]["clean"]["reruns"], 1,
             "{envelope:#}"
@@ -176,12 +173,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|run| run["class"] == "NONDETERMINISM")
+            .find(|run| run["class"] == "nondeterministic")
             .unwrap();
         let verification = &caught["verification"];
         assert_eq!(verification["path"], "rerun", "{caught:#}");
-        assert_eq!(verification["observed"]["class"], "OK", "{caught:#}");
-        assert_eq!(verification["reproduction"]["class"], "OK", "{caught:#}");
+        assert_eq!(verification["observed"]["class"], "ok", "{caught:#}");
+        assert_eq!(verification["reproduction"]["class"], "ok", "{caught:#}");
         // Only the trace tells the two passing runs apart.
         let observed = verification["observed"]["trace"].as_str().unwrap();
         let reproduced = verification["reproduction"]["trace"].as_str().unwrap();
@@ -197,9 +194,9 @@ mod tests {
         let directory = tempdir().unwrap();
         let out = directory.path().join("out");
         let (code, envelope) = campaign(&address_leak(), &out, 6, &[], "leak-after-verdict");
-        assert_eq!(code, Some(1), "{envelope:#}");
+        assert_eq!(code, Some(2), "{envelope:#}");
         assert!(
-            envelope["classes"].get("VIOLATION").is_none(),
+            envelope["classes"].get("violation").is_none(),
             "{envelope:#}"
         );
         for record in signatures(&envelope) {
@@ -230,7 +227,6 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&minimized.stderr);
         assert_eq!(minimized.status.code(), Some(2), "{stderr}");
-        assert!(stderr.contains("NONDETERMINISM"), "{stderr}");
         assert!(!output.exists());
     }
 
@@ -273,7 +269,7 @@ fn main() {
         );
         assert_eq!(code, Some(1), "{envelope:#}");
         assert!(
-            envelope["classes"].get("NONDETERMINISM").is_none(),
+            envelope["classes"].get("nondeterministic").is_none(),
             "{envelope:#}"
         );
         let records = signatures(&envelope);
@@ -314,7 +310,10 @@ fn main() {
             ("forge-native-run", "nondeterministic"),
         ] {
             let (code, envelope) = campaign(&guest, &directory.path().join(mode), 1, &[], mode);
-            assert_eq!(code, Some(1), "{mode}: {envelope:#}");
+            // A finding that reproduces is the guest's (exit 1); one that
+            // does not is patina failing to keep the run deterministic (2).
+            let exit = if status == "reproduced" { 1 } else { 2 };
+            assert_eq!(code, Some(exit), "{mode}: {envelope:#}");
             let record = &signatures(&envelope)[0];
             assert_eq!(
                 record["verification"]["status"], status,
@@ -322,7 +321,7 @@ fn main() {
             );
             if status == "reproduced" {
                 assert!(
-                    envelope["classes"].get("NONDETERMINISM").is_none(),
+                    envelope["classes"].get("nondeterministic").is_none(),
                     "{mode}: {envelope:#}"
                 );
                 assert!(

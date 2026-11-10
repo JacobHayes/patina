@@ -292,7 +292,11 @@ fn the_inherited_stack_limit_does_not_move_the_layout() {
     );
     assert!(!stopped.status.success(), "{stopped:?}");
     let result = envelope(&stopped);
-    assert_eq!(result["refusal"]["class"], "host_limit", "{result}");
+    assert_eq!(
+        (&result["result"], &result["stop"]["reason"]),
+        (&"internal".into(), &"host_limit".into()),
+        "{result}"
+    );
 
     let ran = run_with_stack_limit(&g, 1 << 20, None, &[FLAG, "--", NO_CHURN]);
     assert!(text(&assert_success(ran).stdout).contains("code="));

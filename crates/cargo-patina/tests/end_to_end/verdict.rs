@@ -58,7 +58,7 @@ mod tests {
 
     // ---------------------------------------------------------------------------
     // The verdict ABI (outcome-channel arc, Wave A): one shim verb, recorded as
-    // trace events and surfaced in `patina.result/v1`.
+    // trace events and surfaced in `patina.result/v2`.
     // ---------------------------------------------------------------------------
 
     /// The `PATINA_VERDICT` lines in a stderr stream, in order.
@@ -79,7 +79,7 @@ mod tests {
 
     // The native half of the verdict ABI end to end: `patina_dst::verdict` reaches
     // the shim's single `patina_verdict` verb, every call becomes a trace event, the
-    // run's `patina.result/v1` envelope carries the structured `verdicts[]`, and a
+    // run's `patina.result/v2` envelope carries the structured `verdicts[]`, and a
     // replay reproduces the verdict stream byte-identically.
     #[test]
     fn native_verdict_abi_records_replays_and_reaches_the_envelope() {
@@ -322,7 +322,8 @@ mod tests {
             "the replay must still reach the violation: {envelope:#}"
         );
         assert_eq!(
-            envelope["refusal"]["class"], "shim_fatal",
+            (&envelope["result"], &envelope["exit_code"]),
+            (&"nondeterministic".into(), &2.into()),
             "the unconsumed trace must fail the replay as a divergence: {envelope:#}"
         );
 

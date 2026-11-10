@@ -1,7 +1,7 @@
 //! Cross-generation aggregation of the cooperative-SUT site counters.
 //!
 //! Each run's counters arrive structured, as the `sdk` object of its
-//! `patina.runfacts/v1` document (carried into the `patina.result/v1`
+//! `patina.runfacts/v1` document (carried into the `patina.result/v2`
 //! envelope). Link-time declarations (`declared_sites`) fold into
 //! `<out>/sites.json` (`patina.campaign.sites/v1`) with `registered_gens=0`
 //! until an evaluated site registers them.

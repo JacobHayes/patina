@@ -53,9 +53,12 @@ fn main() {
             ],
         );
         let envelope: serde_json::Value = serde_json::from_slice(&recorded.stdout).unwrap();
-        assert_eq!(recorded.status.code(), Some(101), "{envelope}");
-        assert_eq!(envelope["exit_code"], 101, "{envelope}");
-        assert!(envelope["refusal"].is_null(), "{envelope}");
+        assert_eq!(recorded.status.code(), Some(1), "{envelope}");
+        assert_eq!(
+            (&envelope["result"], &envelope["guest_exit"]["code"]),
+            (&"failure".into(), &101.into()),
+            "{envelope}"
+        );
         assert!(
             envelope["stdout"]
                 .as_str()
@@ -81,8 +84,8 @@ fn main() {
             ],
         );
         let replayed: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
-        assert_eq!(replay.status.code(), Some(101), "{replayed}");
-        assert!(replayed["refusal"].is_null(), "{replayed}");
+        assert_eq!(replay.status.code(), Some(1), "{replayed}");
+        assert_eq!(replayed["result"], "failure", "{replayed}");
         assert_eq!(envelope["stdout"], replayed["stdout"]);
         assert_eq!(envelope["stderr"], replayed["stderr"]);
     }
@@ -120,7 +123,8 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
     let refusal: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(refused.status.code(), Some(2), "{refusal}");
     assert_eq!(
-        refusal["refusal"]["class"], "native_prerun_audit",
+        (&refusal["result"], &refusal["stop"]["reason"]),
+        (&"unsupported".into(), &"prerun_audit".into()),
         "{refusal}"
     );
     assert!(
@@ -136,14 +140,18 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
     );
 
     // RED: default-deny. Every generation is the child's pre-run refusal, filed
-    // as INFRA (harness/infrastructure failure, not a SUT finding) — pinned here
-    // so a forwarding change cannot quietly turn a known refusal into an
+    // as `unsupported` (what patina does not model, not a SUT finding) — pinned
+    // here so a forwarding change cannot quietly turn a known refusal into an
     // unrecognized outcome.
     let denied = campaign_run(&directory.path().join("red"), &guest, &[]);
     assert!(!denied.status.success(), "the gate must deny every child");
     let envelope = campaign_json_stdout(&denied);
-    assert_eq!(envelope["classes"]["INFRA"], 2, "{}", envelope["classes"]);
-    assert_eq!(envelope["classes"]["UNCLASSIFIED"], serde_json::Value::Null);
+    assert_eq!(
+        envelope["classes"]["unsupported"], 2,
+        "{}",
+        envelope["classes"]
+    );
+    assert_eq!(envelope["classes"]["failure"], serde_json::Value::Null);
 
     // GREEN (a): the blanket hatch.
     let hatched = campaign_run(
@@ -156,7 +164,7 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
         "--allow-unsupported-symbols must reach every generation:\nstderr:\n{}",
         String::from_utf8_lossy(&hatched.stderr)
     );
-    assert_eq!(campaign_json_stdout(&hatched)["classes"]["OK"], 2);
+    assert_eq!(campaign_json_stdout(&hatched)["classes"]["ok"], 2);
 
     // GREEN (b): the repeatable known-safe list, every occurrence forwarded (one
     // symbol alone still fails closed on the other, so a truncated list cannot
@@ -171,7 +179,7 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
         "both --allow occurrences must reach every generation:\nstderr:\n{}",
         String::from_utf8_lossy(&allowed.stderr)
     );
-    assert_eq!(campaign_json_stdout(&allowed)["classes"]["OK"], 2);
+    assert_eq!(campaign_json_stdout(&allowed)["classes"]["ok"], 2);
 
     let partial = campaign_run(
         &directory.path().join("partial"),

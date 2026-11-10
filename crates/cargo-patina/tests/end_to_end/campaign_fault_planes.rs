@@ -26,7 +26,7 @@ fn main() {
 "#;
 
     /// A generation in which an fs fault reached the guest is a VIOLATION.
-    const FS_FAULT_IS_A_VIOLATION: &str = r#"{"classify": {"exit_codes": {"VIOLATION": [3]}}}"#;
+    const FS_FAULT_IS_A_VIOLATION: &str = r#"{"classify": {"exit_codes": {"violation": [3]}}}"#;
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -125,7 +125,7 @@ fn main() {
         assert!(
             runs(&every)
                 .iter()
-                .any(|run| run["class"] == "VIOLATION" && drew(run, "--fs-")),
+                .any(|run| run["class"] == "violation" && drew(run, "--fs-")),
             "no every-plane generation faulted the guest's fs, so the subset run below \
              would prove nothing:\n{:#}",
             every["notable_runs"]
@@ -147,11 +147,11 @@ fn main() {
         for run in runs(&extended) {
             assert!(!drew(run, "--fs-"), "an fs knob was drawn: {run:#}");
             assert!(drew(run, "--net-") && drew(run, "--sleep-"), "{run:#}");
-            assert_ne!(run["class"], "VIOLATION", "an fs fault fired: {run:#}");
+            assert_ne!(run["class"], "violation", "an fs fault fired: {run:#}");
         }
         let classes = extended["classes"].as_object().unwrap();
         assert!(
-            classes.keys().all(|class| !class.starts_with("VACUOUS")),
+            classes.keys().all(|class| !class.starts_with("vacuous")),
             "a plane counted as vacuous: {classes:?}"
         );
 

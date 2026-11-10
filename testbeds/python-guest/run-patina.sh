@@ -134,8 +134,11 @@ grep -q '^  File "__main__.py", line [0-9]*, in <module>$' "$out/boom.err" \
 grep -v '^PATINA_SCHEDULE_REPORT ' "$out/boom-replay.raw" | diff - "$out/boom.err" >/dev/null \
   || fail "[5] the replay's traceback differs"
 
+# The guest's own SIGINT ends the run: a crash in the guest (exit 1), named
+# by the line patina prints last.
 run interrupt --seed 0 -- interrupt
-[[ $? == 130 ]] && grep -q '^KeyboardInterrupt$' "$out/interrupt.err" \
+[[ $? == 1 ]] && grep -q 'guest killed by SIGINT' "$out/interrupt.err" \
+  && grep -q '^KeyboardInterrupt$' "$out/interrupt.err" \
   || { cat "$out/interrupt.err" >&2; fail "[5] a KeyboardInterrupt did not end the run by SIGINT"; }
 
 echo "==> [6] os.fork() is the process refusal"

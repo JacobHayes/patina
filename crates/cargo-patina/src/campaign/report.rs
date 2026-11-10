@@ -1,7 +1,7 @@
 //! Campaign progress, coverage verdicts, and result rendering.
 
 use super::AllowUnmetSometimes;
-use super::classify::{HOST_KILL_SHAPE, SHUTDOWN_FAILURE_SHAPE};
+use super::classify::{HOST_KILL_SHAPE, SHUTDOWN_FAILURE_SHAPE, is_conclusive};
 use super::observe::EdgeCoverageState;
 use super::state::{
     CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord, allow_unmet_to_json,
@@ -11,15 +11,16 @@ use super::verify::{VerificationSummary, VerifyStatus};
 use crate::coverage::top_uncovered_crates;
 use crate::guided::GuidanceTally;
 use crate::sdk_report::{CoverageTally, ExercisedSite};
+use patina_dst_abi::RunClass;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
 /// The stable schema identifier for the campaign JSON envelope, extending the
-/// `patina.result/v1` family. `v2` is summary-first: `notable_runs` carries only
+/// `patina.result/v2` family. `v2` is summary-first: `notable_runs` carries only
 /// the novel/failing generations (v1's `runs` dumped every generation), and an
 /// `artifacts` object points at the full on-disk detail.
-const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v2";
+const CAMPAIGN_ENVELOPE_SCHEMA: &str = "patina.campaign/v3";
 
 pub(super) fn flush_stdout() {
     let _ = std::io::stdout().flush();
@@ -243,6 +244,8 @@ pub(super) struct CampaignSummaryInput<'a> {
     pub(super) failures: u64,
     pub(super) novel: u64,
     pub(super) generations: u64,
+    /// The class the campaign as a whole ends in.
+    pub(super) result: RunClass,
     pub(super) store_path: &'a Path,
     pub(super) sites_path: &'a Path,
 }
@@ -331,8 +334,15 @@ the run — the trace resource limit, an unwritable trace; not findings)"
     print_guidance_summary(input.guidance);
     println!("signature store: {}", input.store_path.display());
     let mut complete = format!(
-        "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={}",
-        input.generations, input.failures, input.novel
+        "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={} result={} attribution={}",
+        input.generations,
+        input.failures,
+        input.novel,
+        input.result,
+        input
+            .result
+            .attribution()
+            .map_or("-", |attribution| attribution.as_str()),
     );
     append_edge_coverage_complete(&mut complete, input.edge_coverage);
     if let Some(guidance) = input.guidance {
@@ -342,6 +352,17 @@ the run — the trace resource limit, an unwritable trace; not findings)"
         ));
     }
     println!("{complete}");
+    // The same last line a run ends on: whose move it is.
+    let stop = crate::output::Stop::new(
+        "campaign",
+        format!(
+            "{} of {} generation(s) did not end clean; the signatures above say how",
+            input.failures, input.generations
+        ),
+    );
+    if let Some(headline) = crate::output::Outcome::of(input.result, Some(stop)).headline(None) {
+        eprintln!("{headline}");
+    }
 }
 
 fn print_edge_coverage_summary(edge_coverage: &EdgeCoverageState, artifact_path: &Path) {
@@ -447,7 +468,7 @@ fn print_coverage_summary(
     );
 }
 
-/// Build the summary-first `patina.campaign/v2` JSON envelope. Progressive
+/// Build the summary-first `patina.campaign/v3` JSON envelope. Progressive
 /// disclosure: the top level carries the class-count histogram and the deduped
 /// signatures; `notable_runs` holds per-generation detail ONLY for novel and
 /// failing generations (the interesting minority — an OK generation adds no
@@ -459,8 +480,7 @@ fn print_coverage_summary(
 /// unreachable. Pure (returns the `Value`) so the shape is unit-testable without
 /// capturing stdout.
 pub(super) struct CampaignEnvelopeInput<'a> {
-    pub(super) result: &'a str,
-    pub(super) exit_code: i32,
+    pub(super) result: RunClass,
     pub(super) state: &'a CampaignState,
     pub(super) coverage: &'a CoverageTally,
     pub(super) coverage_verdict: &'a CoverageVerdict<'a>,
@@ -471,14 +491,15 @@ pub(super) struct CampaignEnvelopeInput<'a> {
     pub(super) sites_path: &'a Path,
 }
 
-/// How many distinct FINDINGS the store holds — the novel-signature budget.
-/// `INFRA` records are excluded: they are a condition of the run, not a result.
-/// They still appear in the class histogram and keep their signatures; what
-/// they do not do is claim to be a bug.
+/// How many distinct conclusive signatures the store holds — the
+/// novel-signature count. Inconclusive records (a timeout, an internal error,
+/// a child that could not start) are excluded: they are a condition of the
+/// run, not a result. They still appear in the class histogram and keep their
+/// signatures; what they do not do is claim to be something learned.
 pub(super) fn novel_findings(signatures: &BTreeMap<String, SignatureRecord>) -> u64 {
     signatures
         .values()
-        .filter(|record| record.class.is_finding())
+        .filter(|record| is_conclusive(record.class))
         .count() as u64
 }
 
@@ -548,8 +569,9 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
     let envelope = serde_json::json!({
         "schema": CAMPAIGN_ENVELOPE_SCHEMA,
         "verb": "campaign",
-        "result": input.result,
-        "exit_code": input.exit_code,
+        "result": input.result.as_str(),
+        "attribution": input.result.attribution().map(|attribution| attribution.as_str()),
+        "exit_code": input.result.exit_code(),
         "artifact": state.artifact.path.clone(),
         "generations": state.spec.generations,
         "seed_base": state.spec.seed_base,
@@ -678,14 +700,14 @@ fn sdk_sites_summary_json(
 mod tests {
     use super::super::observe::EdgeCoverageState;
     use super::super::state::{ArtifactIdentity, CampaignState, GenerationOutcome};
-    use super::super::{CampaignClass, CampaignSpec};
+    use super::super::{CampaignSpec, RunClass};
     use super::*;
     use crate::sdk_report::CoverageTally;
     use std::path::Path;
 
     /// Build the campaign envelope for `state`, with no coverage signal, written
     /// under `out/`.
-    fn envelope_for(state: &CampaignState, result: &str, exit_code: i32) -> serde_json::Value {
+    fn envelope_for(state: &CampaignState, result: RunClass) -> serde_json::Value {
         let coverage = CoverageTally {
             generations_observed: state.generations_done,
             ..CoverageTally::default()
@@ -694,7 +716,6 @@ mod tests {
         let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
         build_campaign_envelope(CampaignEnvelopeInput {
             result,
-            exit_code,
             state,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
@@ -727,43 +748,43 @@ mod tests {
     /// created).
     #[test]
     fn envelope_is_summary_first_with_artifact_pointers() {
-        let mk = |generation: u64, class: CampaignClass, novel: bool| GenerationOutcome {
+        let mk = |generation: u64, class: RunClass, novel: bool| GenerationOutcome {
             generation,
             seed: generation,
             class,
             flags: Vec::new(),
             novel,
-            signature_key: class.is_failure().then(|| "LIVENESS|shape|".to_string()),
+            signature_key: class.is_failure().then(|| "liveness|shape|".to_string()),
             verdicts: Vec::new(),
             verification: None,
         };
         // Two OK generations, one novel failure and one non-novel repeat.
         let outcomes = vec![
-            mk(0, CampaignClass::Ok, false),
-            mk(1, CampaignClass::Liveness, true),
-            mk(2, CampaignClass::Ok, false),
-            mk(3, CampaignClass::Liveness, false),
+            mk(0, RunClass::Ok, false),
+            mk(1, RunClass::Liveness, true),
+            mk(2, RunClass::Ok, false),
+            mk(3, RunClass::Liveness, false),
         ];
         let mut state = fresh_state(4);
-        state.classes.insert("OK".to_string(), 2);
-        state.classes.insert("LIVENESS".to_string(), 2);
+        state.classes.insert("ok".to_string(), 2);
+        state.classes.insert("liveness".to_string(), 2);
         state.generations_done = 4;
         state.notable_runs = outcomes
             .into_iter()
             .filter(GenerationOutcome::is_notable)
             .collect();
-        let envelope = envelope_for(&state, "failure", 1);
+        let envelope = envelope_for(&state, RunClass::Liveness);
 
         assert_eq!(envelope["schema"], CAMPAIGN_ENVELOPE_SCHEMA);
-        assert_eq!(envelope["classes"]["OK"], 2);
-        assert_eq!(envelope["classes"]["LIVENESS"], 2);
+        assert_eq!(envelope["classes"]["ok"], 2);
+        assert_eq!(envelope["classes"]["liveness"], 2);
         let notable = envelope["notable_runs"].as_array().unwrap();
         let gens: Vec<u64> = notable
             .iter()
             .map(|r| r["generation"].as_u64().unwrap())
             .collect();
         assert_eq!(gens, vec![1, 3], "OK generations must be elided");
-        assert!(notable.iter().all(|r| r["class"] == "LIVENESS"));
+        assert!(notable.iter().all(|r| r["class"] == "liveness"));
 
         let artifacts = &envelope["artifacts"];
         assert_eq!(artifacts["out_dir"], "out");
@@ -771,9 +792,9 @@ mod tests {
         assert!(artifacts.get("reports_dir").is_none());
 
         let mut clean = fresh_state(1);
-        clean.classes.insert("OK".to_string(), 1);
+        clean.classes.insert("ok".to_string(), 1);
         clean.generations_done = 1;
-        let envelope = envelope_for(&clean, "ok", 0);
+        let envelope = envelope_for(&clean, RunClass::Ok);
         assert_eq!(envelope["failures"], 0);
         assert!(envelope["notable_runs"].as_array().unwrap().is_empty());
         assert!(envelope["artifacts"].get("failures_dir").is_none());

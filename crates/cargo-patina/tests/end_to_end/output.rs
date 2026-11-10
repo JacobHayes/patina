@@ -164,8 +164,8 @@ fn main() {
         );
         assert_eq!(
             failed.status.code(),
-            Some(3),
-            "planted failure must propagate exit 3"
+            Some(1),
+            "a planted failure is a finding in the guest, whatever status the guest chose"
         );
         let page = fs::read_to_string(&report).unwrap();
         assert!(page.starts_with("<!doctype html>"));
@@ -196,10 +196,12 @@ fn main() {
                 "fail",
             ],
         );
-        assert_eq!(json.status.code(), Some(3));
+        assert_eq!(json.status.code(), Some(1));
         let value = envelope(&json);
         assert_eq!(value["result"], "failure");
-        assert_eq!(value["exit_code"], 3);
+        assert_eq!(value["attribution"], "guest");
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["guest_exit"]["code"], 3);
         assert_eq!(
             value["result_line"],
             "GUEST_VIOLATION planted two-leaders term=4"

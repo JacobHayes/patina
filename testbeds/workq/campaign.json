@@ -7,5 +7,5 @@
   "swarm": true,
   "faults": ["net", "sleep", "crash"],
   "allow_unmet_sometimes": true,
-  "classify": {"patterns": {"LIVENESS": ["WORKQ_FAILURE not-converged"]}}
+  "classify": {"patterns": {"liveness": ["WORKQ_FAILURE not-converged"]}}
 }

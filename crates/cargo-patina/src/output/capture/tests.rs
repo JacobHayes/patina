@@ -32,6 +32,33 @@ fn parse_facts_takes_the_last_complete_document_and_refuses_anything_else() {
     assert!(parse_facts(b"{\"schema\":\"patina.result/v1\"}\n").is_err());
 }
 
+/// The stop pipe: whether the runtime started, the first stop record, and a
+/// refusal of anything else rather than a reading of "no stop".
+#[test]
+fn parse_stop_reads_the_start_and_the_first_stop_and_refuses_anything_else() {
+    let schema = patina_dst_runtime::STOP_SCHEMA;
+    let started = format!("{{\"schema\":\"{schema}\",\"started\":true}}\n");
+    let record = |class: &str| {
+        format!(
+            "{{\"schema\":\"{schema}\",\"stop\":{{\"class\":\"{class}\",\"reason\":\"r\",\"detail\":\"d\"}}}}\n"
+        )
+    };
+    assert_eq!(parse_stop(b"").unwrap(), StopChannel::default());
+    let ran = parse_stop(started.as_bytes()).unwrap();
+    assert!(ran.started && ran.stop.is_none());
+    let both = format!("{started}{}{}", record("unsupported"), record("internal"));
+    let stopped = parse_stop(both.as_bytes()).unwrap();
+    assert!(stopped.started);
+    assert_eq!(stopped.stop.unwrap()["class"], "unsupported");
+    // A stop before the runtime started is still the shim's stop.
+    let early = parse_stop(record("internal").as_bytes()).unwrap();
+    assert!(!early.started && early.stop.is_some());
+    assert!(parse_stop(b"not json\n").is_err());
+    assert!(parse_stop(b"{\"schema\":\"patina.runstop/v0\",\"started\":true}\n").is_err());
+    assert!(parse_stop(format!("{{\"schema\":\"{schema}\"}}\n").as_bytes()).is_err());
+    assert!(parse_stop(document(true).as_bytes()).is_err());
+}
+
 #[test]
 fn every_contexts_latest_verdicts_survive_later_documents() {
     let doc = |context: u64, verdicts: &str| {

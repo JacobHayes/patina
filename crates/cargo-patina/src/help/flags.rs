@@ -13,7 +13,7 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--format",
         None,
         Value::Required("human|json", Kind::Enum(&["human", "json"])),
-        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v1) on stdout; `coverage --format json` prints patina.coverage/v1, and `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
+        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v2) on stdout; `coverage --format json` prints patina.coverage/v1, and `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
         false,
     ),
     f(

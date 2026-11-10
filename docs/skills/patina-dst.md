@@ -253,13 +253,17 @@ learn the surface.
 
 Three channels, and they are a stable contract even as flags move.
 
-**Exit code.** `0` is clean. A nonzero exit is the guest's own exit code — except
-`2`, which is a CLI-side error (bad flags, build failure, refused replay).
+**Exit code.** `0` is clean, `1` is a finding in the guest, `2` means Patina
+could not do what was asked (a usage or build error, something the guest did
+that Patina does not model, a failure of Patina's own). The guest's own exit
+status is reported in the envelope's `guest_exit`, never passed through.
 
 **stdout, machine-readable on request.** Every execution verb accepts
 `--format json`; it usually prints exactly one result envelope (schema
-`patina.result/v1`) carrying at least `schema`, `verb`, `result`
-(`ok`/`violation`/`liveness`/`infra`/`failure`/`error`), and `exit_code`, plus whatever applies to
+`patina.result/v2`) carrying at least `schema`, `verb`, `result` (the run's one
+outcome class; `patina --help` lists them), `attribution` (`guest`,
+`patina_unsupported`, `patina_internal` or `request`: whose move it is) and
+`exit_code`, plus a `stop` naming what stopped a run that did not end clean, and whatever applies to
 the run: family, artifact, seed, fingerprint, captured guest output, verdicts,
 SDK site counters, per-plane fault facts, trace metadata, coverage or depth. A few report verbs emit their own
 schemas instead. Prefer JSON whenever you are parsing rather than reading — and

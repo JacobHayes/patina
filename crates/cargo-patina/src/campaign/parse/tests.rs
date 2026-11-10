@@ -2,8 +2,7 @@
 
 use super::super::spec::json_classify_rules;
 use super::super::{
-    AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL,
-    FaultPlanes,
+    AllowUnmetSometimes, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes, RunClass,
 };
 use super::*;
 use std::ffi::OsString;
@@ -75,13 +74,16 @@ fn refusal(values: &[&str]) -> String {
 
 #[test]
 fn declared_rules_are_grammar_validated_and_loud() {
-    let cross_run = CampaignClass::ALL
+    let cross_run = RunClass::ALL
         .iter()
-        .find(|class| class.is_cross_run())
+        .find(|class| super::super::classify::is_cross_run(**class))
         .unwrap();
     for bad in [
         serde_json::json!({"patterns": {"NOT_A_CLASS": ["x"]}}),
-        serde_json::json!({"exit_codes": {"VIOLATION": ["3"]}}),
+        serde_json::json!({"exit_codes": {"violation": ["3"]}}),
+        // A rule names a finding in the guest, never an outcome of patina's.
+        serde_json::json!({"exit_codes": {"internal": [77]}}),
+        serde_json::json!({"patterns": {"timeout": ["slow"]}}),
         // No rule over one run's output can say that run would not reproduce.
         serde_json::json!({"patterns": {cross_run.as_str(): ["token"]}}),
     ] {

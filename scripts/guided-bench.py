@@ -58,15 +58,15 @@ class Testbed:
 TESTBEDS = (
     Testbed('staircase', 'testbeds/guided-bench/staircase.rs',
             ('--faults=fs,sleep',), (),
-            ('GUEST_ABORT', 'UNCLASSIFIED', 'VIOLATION'), 300,
+            ('crash', 'failure', 'violation'), 300,
             'three nested gates on fs error rate, short-write rate and sleep jitter'),
     Testbed('workq-fsync', 'testbeds/workq',
             ('--buggify', '--swarm', '--faults=net,sleep,crash', '--allow-unmet-sometimes'),
-            WORKQ_ARGS + ('--bug', 'skip-wal-fsync'), ('VIOLATION',), 200,
+            WORKQ_ARGS + ('--bug', 'skip-wal-fsync'), ('violation',), 200,
             'workq skip-wal-fsync: an unsynced WAL record lost to a machine crash'),
     Testbed('workq-lock', 'testbeds/workq',
             ('--buggify', '--swarm', '--faults=net,sleep', '--allow-unmet-sometimes'),
-            WORKQ_ARGS + ('--bug', 'apply-check-outside-lock'), ('VIOLATION',), 200,
+            WORKQ_ARGS + ('--bug', 'apply-check-outside-lock'), ('violation',), 200,
             'workq apply-check-outside-lock: a double apply needing a duplicate delivery race'),
 )
 
@@ -146,13 +146,13 @@ def generations_to_find(patina: str, artifact: Path, testbed: Testbed, seed_base
             continue
         fields = dict(token.split('=', 1) for token in line.split()[1:] if '=' in token)
         seen += 1
-        if fields.get('class') == 'INFRA':
+        if fields.get('class') in ('internal', 'timeout', 'error'):
             # A host-side failure is not a search that came up empty: counting
             # it as censored would bias the comparison.
             kill_group(process.pid)
             process.wait()
             raise BenchError(f'{testbed.name} seed base {seed_base} guided={guided}: generation '
-                             f'{fields.get("generation")} is INFRA; see {out_dir}')
+                             f'{fields.get("generation")} is {fields.get("class")}; see {out_dir}')
         if fields.get('class') in testbed.target:
             found = int(fields['generation']) + 1
             steer = fields.get('guided', '').split(':')[0] or None

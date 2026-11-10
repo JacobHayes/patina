@@ -38,19 +38,15 @@ mod tests {
 
         let (success, wide) = classes("wide", &guest, &["--timeout-secs", "20", "--", "wide"]);
         assert!(
-            success && wide["OK"] == 2,
+            success && wide["ok"] == 2,
             "a generation wider than the pipe buffer must be drained, not killed at the deadline: {wide}"
         );
 
         let (_, aborted) = classes("abort", &guest, &["--", "abort"]);
         assert_eq!(
-            aborted["GUEST_ABORT"], 2,
-            "an unattributed abort is the guest's own doing: {aborted}"
-        );
-        assert_eq!(
-            aborted["FAIL_CLOSED_ABORT"],
-            serde_json::Value::Null,
-            "a guest abort must not be blamed on patina: {aborted}"
+            aborted,
+            serde_json::json!({"crash": 2}),
+            "an abort is the guest's own doing, never blamed on patina"
         );
 
         let refusing = shared_sdk_guest("buggify-dup", BUGGIFY_DUP_MAIN);
@@ -70,29 +66,27 @@ mod tests {
             !String::from_utf8_lossy(&output.stdout).contains("unreachable"),
             "guest ran past the duplicate label"
         );
+        // The same SIGABRT, stopped by patina for an SDK contract the guest
+        // broke: the stop's class decides, not the signal.
         let (_, refused) = classes("refusal", &refusing, &[]);
         assert_eq!(
-            refused["FAIL_CLOSED_ABORT"], 2,
-            "an abort patina attributed to itself stays fail-closed: {refused}"
-        );
-        assert_eq!(
-            refused["GUEST_ABORT"],
-            serde_json::Value::Null,
-            "a patina refusal must not be filed as a guest finding: {refused}"
+            refused,
+            serde_json::json!({"violation": 2}),
+            "a duplicate label is the guest's violation, not a bare crash"
         );
 
         let (_, bare) = classes("bare", &guest, &["--", "level-one"]);
-        assert_eq!(bare["OK"], 2, "{bare}");
+        assert_eq!(bare["ok"], 2, "{bare}");
         let spec = directory.path().join("spec.json");
         fs::write(
             &spec,
-            r#"{"classify": {"patterns": {"VIOLATION": ["checksum mismatch"]}}}"#,
+            r#"{"classify": {"patterns": {"violation": ["checksum mismatch"]}}}"#,
         )
         .unwrap();
         let spec_arg = spec.to_str().unwrap();
         let (_, declared) = classes("declared", &guest, &["--spec", spec_arg, "--", "level-one"]);
         assert_eq!(
-            declared["VIOLATION"], 2,
+            declared["violation"], 2,
             "declared patterns must classify a level-1 guest: {declared}"
         );
         fs::write(&spec, r#"{"classify": {"patterns": {"NOPE": ["x"]}}}"#).unwrap();

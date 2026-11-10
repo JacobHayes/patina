@@ -191,7 +191,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{error}: {out:?}"));
             (
                 out.status.code(),
-                envelope["refusal"]["class"].clone(),
+                envelope["stop"]["reason"].clone(),
                 envelope["guest_exit"].is_null(),
             )
         };
@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(prebuilt, package_dir);
         assert_eq!(
             prebuilt,
-            (Some(2), serde_json::json!("native_prerun_audit"), true),
+            (Some(2), serde_json::json!("prerun_audit"), true),
             "the guest must be refused before it runs"
         );
     }

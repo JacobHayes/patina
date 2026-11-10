@@ -219,7 +219,7 @@ pub(crate) fn generation_repro(
         guest_args: state.spec.guest_args.clone(),
         timeout_secs: state.spec.timeout_secs,
         class: outcome.class.as_str().to_string(),
-        cross_run: outcome.class.is_cross_run(),
+        cross_run: super::classify::is_cross_run(outcome.class),
         verdicts: outcome.verdicts.clone(),
     })
 }

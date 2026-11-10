@@ -1,18 +1,27 @@
 //! Machine-readable result envelope serialization.
 
 use super::*;
+use patina_dst_abi::RunClass;
 
 /// The `crash_restart.terminal_outcome.kind` of a crash-restart replay that
 /// departed from its recording at or before the crash, so incarnation 1 never
 /// ran.
 pub const CRASH_REPLAY_DIVERGED: &str = "replay_diverged";
 
+/// The `crash_restart.terminal_outcome.kind` of a run whose crash point was
+/// reached and whose crash the supervisor found was not carried out.
+pub const CRASH_FAILED: &str = "crash_failed";
+
 /// A machine-readable result envelope. Fields absent for a given verb are
 /// omitted from the JSON. Documented in `llms.txt` and `TUTORIAL.md`.
+///
+/// `result` is the outcome's one class ([`RunClass`]); `attribution` and
+/// `exit_code` are derived from it, so an envelope cannot name a class
+/// without both, and `exit_code` is the tool's own exit status, never the
+/// guest's (`guest_exit`).
 pub struct Envelope {
     verb: String,
-    result: String,
-    exit_code: i32,
+    result: RunClass,
     pub(crate) artifact: Option<String>,
     pub(super) fingerprint: Option<String>,
     pub(super) seed: Option<u64>,
@@ -54,22 +63,26 @@ pub struct Envelope {
     pub(super) crash_restart: Option<serde_json::Value>,
     /// Operator-accepted relaxations that qualify the run's determinism.
     pub(super) qualifications: Vec<Qualification>,
-    /// Patina's own fail-closed refusal, when patina refused. Absent on a guest's
-    /// own abort.
-    pub(crate) refusal: Option<Refusal>,
+    /// What stopped a run that did not end clean: the reason's token and the
+    /// detail that names what was reached.
+    pub(crate) stop: Option<Stop>,
+    /// The run's recording is unusable although its class is the guest's own.
+    pub(crate) trace_unusable: bool,
     /// How the guest process ended (exit code, terminating signal).
     pub(super) guest_exit: Option<GuestExit>,
+    /// `guest_exit` as a child run's own envelope reported it, for a verb that
+    /// relays the run that decided its result (`test`).
+    pub(super) guest_exit_raw: Option<serde_json::Value>,
     pub(super) stdout: Option<String>,
     pub(super) stderr: Option<String>,
     pub(crate) message: Option<String>,
 }
 
 impl Envelope {
-    pub fn new(verb: &str, result: &str, exit_code: i32) -> Self {
+    pub fn new(verb: &str, result: RunClass) -> Self {
         Self {
             verb: verb.to_string(),
-            result: result.to_string(),
-            exit_code,
+            result,
             artifact: None,
             fingerprint: None,
             seed: None,
@@ -90,8 +103,10 @@ impl Envelope {
             replay_divergence: None,
             crash_restart: None,
             qualifications: Vec::new(),
-            refusal: None,
+            stop: None,
+            trace_unusable: false,
             guest_exit: None,
+            guest_exit_raw: None,
             stdout: None,
             stderr: None,
             message: None,
@@ -103,8 +118,11 @@ impl Envelope {
         let mut m = Map::new();
         m.insert("schema".into(), Value::from(ENVELOPE_SCHEMA));
         m.insert("verb".into(), Value::from(self.verb.clone()));
-        m.insert("result".into(), Value::from(self.result.clone()));
-        m.insert("exit_code".into(), Value::from(self.exit_code));
+        m.insert("result".into(), Value::from(self.result.as_str()));
+        if let Some(attribution) = self.result.attribution() {
+            m.insert("attribution".into(), Value::from(attribution.as_str()));
+        }
+        m.insert("exit_code".into(), Value::from(self.result.exit_code()));
         if let Some(v) = &self.artifact {
             m.insert("artifact".into(), Value::from(v.clone()));
         }
@@ -200,17 +218,20 @@ impl Envelope {
                 .collect();
             m.insert("qualifications".into(), Value::Array(rows));
         }
-        if let Some(v) = &self.refusal {
+        if let Some(v) = &self.stop {
             let mut rm = Map::new();
-            rm.insert("class".into(), Value::from(v.class.clone()));
-            rm.insert("message".into(), Value::from(v.message.clone()));
+            rm.insert("reason".into(), Value::from(v.reason.clone()));
+            rm.insert("detail".into(), Value::from(v.detail.clone()));
             if let Some(code) = v.guest_exit_code {
                 rm.insert("guest_exit_code".into(), Value::from(code));
             }
             if let Some(mismatch) = v.mismatch {
                 rm.insert("mismatch".into(), Value::from(mismatch));
             }
-            m.insert("refusal".into(), Value::Object(rm));
+            m.insert("stop".into(), Value::Object(rm));
+        }
+        if self.trace_unusable {
+            m.insert("trace_unusable".into(), Value::from(true));
         }
         if let Some(v) = &self.guest_exit {
             let mut gm = Map::new();
@@ -223,6 +244,8 @@ impl Envelope {
                 }
             }
             m.insert("guest_exit".into(), Value::Object(gm));
+        } else if let Some(v) = &self.guest_exit_raw {
+            m.insert("guest_exit".into(), v.clone());
         }
         if let Some(v) = &self.stdout {
             m.insert("stdout".into(), Value::from(v.clone()));

@@ -836,7 +836,8 @@ fn main() {
             crash_restart["terminal_outcome"]["kind"], "exited_without_crash",
             "{envelope:#}"
         );
-        assert!(envelope["refusal"].is_null(), "{envelope:#}");
+        // The guest's own early exit, not a crash patina failed to carry out.
+        assert_eq!(envelope["attribution"], "guest", "{envelope:#}");
     }
 
     /// Whether `operation` is an fsync.
@@ -887,7 +888,8 @@ fn main() {
                     )
                 });
             assert_eq!(
-                envelope["refusal"]["class"], "crash_failed",
+                (&envelope["result"], &envelope["stop"]["reason"]),
+                (&"internal".into(), &"crash_failed".into()),
                 "{case}: {envelope:#}"
             );
             let crash = &envelope["crash_restart"];
@@ -986,8 +988,19 @@ fn main() {
         let stdout = envelope["stdout"].as_str().unwrap();
         assert!(!stdout.contains("SYNC_RETURNED"), "{envelope:#}");
         assert!(!stdout.contains("RESTARTED"), "{envelope:#}");
-        assert_eq!(envelope["result"], "infra", "{envelope:#}");
-        assert_eq!(envelope["refusal"]["class"], "crash_failed", "{envelope:#}");
+        assert_eq!(
+            (
+                &envelope["result"],
+                &envelope["attribution"],
+                &envelope["stop"]["reason"]
+            ),
+            (
+                &"internal".into(),
+                &"patina_internal".into(),
+                &"crash_failed".into()
+            ),
+            "{envelope:#}"
+        );
         let crash = &envelope["crash_restart"];
         assert_eq!(crash["attempted"], true, "{envelope:#}");
         assert_eq!(crash["reached"], false, "{envelope:#}");
@@ -1020,7 +1033,11 @@ fn main() {
             );
             let stdout = envelope["stdout"].as_str().unwrap();
             assert!(!stdout.contains("READV_RETURNED"), "{envelope:#}");
-            assert_eq!(envelope["refusal"]["class"], "crash_failed", "{envelope:#}");
+            assert_eq!(
+                (&envelope["result"], &envelope["stop"]["reason"]),
+                (&"internal".into(), &"crash_failed".into()),
+                "{envelope:#}"
+            );
             assert_eq!(
                 envelope["crash_restart"]["terminal_outcome"]["kind"], "crash_failed",
                 "{envelope:#}"
@@ -1102,7 +1119,7 @@ fn main() {
         let spec = guest.dir.path().join("spec.json");
         fs::write(
             &spec,
-            r#"{"faults": ["crash"], "classify": {"exit_codes": {"VIOLATION": [3]}}}"#,
+            r#"{"faults": ["crash"], "classify": {"exit_codes": {"violation": [3]}}}"#,
         )
         .unwrap();
         let campaign = |name: &str, guest_args: &[&str]| {
@@ -1134,21 +1151,21 @@ fn main() {
 
         let (red, envelope) = campaign("red", &[]);
         let red_classes = classes(&envelope);
-        assert!(red_classes.contains_key("VIOLATION"), "{envelope:#}");
+        assert!(red_classes.contains_key("violation"), "{envelope:#}");
         assert!(
             red_classes
                 .keys()
-                .all(|class| class == "OK" || class == "VIOLATION"),
+                .all(|class| class == "ok" || class == "violation"),
             "{envelope:#}"
         );
         let (_, envelope) = campaign("green", &["--fsync-log"]);
         assert_eq!(
             classes(&envelope).into_keys().collect::<Vec<_>>(),
-            ["OK"],
+            ["ok"],
             "{envelope:#}"
         );
 
-        let violation = envelope_generation(&red, "VIOLATION");
+        let violation = envelope_generation(&red, "violation");
         let reduced = assert_success(
             invoke_with_deadline(
                 env!("CARGO_BIN_EXE_patina"),

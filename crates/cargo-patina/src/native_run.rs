@@ -15,6 +15,7 @@ use crate::{
     CliError, NATIVE_GUEST_ARGV0, NativeRunInvocation, NativeRunMode, UnsupportedPolicy, coverage,
 };
 use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
+use patina_dst_abi::RunClass;
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
     ENV_COVERAGE_FD, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CPUS,
@@ -172,14 +173,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // reference by the image it binds to, and a recording names each image, so
     // a replay against a different libc is refused like one against a
     // different executable.
-    let load_set = match crate::load_set::discover(&binary, image.bytes()) {
-        Ok(load_set) => load_set,
-        Err(error) if output::json_active() => {
-            output::emit_native_refusal(&binary, output::NATIVE_PRERUN_REFUSAL, error.to_string());
-            return Ok(2);
-        }
-        Err(error) => return Err(error),
-    };
+    let load_set = crate::load_set::discover(&binary, image.bytes())?;
     let identity = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
         NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
@@ -191,11 +185,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         && let Some(message) =
             native_identity_refusal(path, bundle.metadata.native.as_ref(), identity)
     {
-        if output::json_active() {
-            output::emit_native_refusal(&binary, output::FINGERPRINT_MISMATCH_REFUSAL, message);
-            return Ok(2);
-        }
-        return Err(CliError(message));
+        // The trace belongs to another build: the request's, judged before
+        // any guest runs.
+        return Ok(output::report_prerun_stop(
+            &binary,
+            RunClass::Error,
+            output::Stop::new(output::TRACE_MISMATCH_STOP, message),
+        ));
     }
     // The CPU count the guest's virtual machine has: on replay the trace's,
     // which a supplied `--cpus` must equal, refused here before the guest
@@ -234,11 +230,16 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         &invocation.allow_unsupported,
     ) {
         Ok(downgraded) => downgraded,
-        Err(error) if output::json_active() => {
-            output::emit_native_refusal(&binary, output::NATIVE_PRERUN_REFUSAL, error.to_string());
-            return Ok(2);
+        // The binary links something patina does not model: the refusal
+        // names each symbol and where it is reached from, and no guest runs.
+        Err(gate::GateRefusal::Unsupported(message)) => {
+            return Ok(output::report_prerun_stop(
+                &binary,
+                RunClass::Unsupported,
+                output::Stop::new(output::PRERUN_AUDIT_STOP, message),
+            ));
         }
-        Err(error) => return Err(error),
+        Err(gate::GateRefusal::Error(error)) => return Err(error),
     };
     if invocation.allow_randomized_layout {
         eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
@@ -327,16 +328,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 host_dir.display(),
                 mismatch.describe()
             );
-            if output::json_active() {
-                output::emit_native_mismatch_refusal(
-                    &binary,
-                    output::FINGERPRINT_MISMATCH_REFUSAL,
-                    message,
-                    Some(mismatch.input()),
-                );
-                return Ok(2);
-            }
-            return Err(CliError(message));
+            let mut stop = output::Stop::new(output::TRACE_MISMATCH_STOP, message);
+            stop.mismatch = Some(mismatch.input());
+            return Ok(output::report_prerun_stop(&binary, RunClass::Error, stop));
         }
     }
     let coverage_file = match &invocation.coverage_out {
@@ -358,6 +352,12 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         Some(tempfile::tempfile().map_err(|error| {
             CliError(format!("failed to create the run-facts channel: {error}"))
         })?);
+    // The stop pipe: where the shim says why it is ending the run, just before
+    // it does. A pipe rather than the facts file, so no file size limit, full
+    // disk or `SIGXFSZ` can lose the one record that keeps patina's own stop
+    // from reading as the guest's crash.
+    let (mut stop_reader, stop_writer) =
+        io::pipe().map_err(|error| CliError(format!("failed to create the stop pipe: {error}")))?;
 
     // Restore the guest arguments for a replay from the trace's recorded argv, so
     // a bare replay reproduces them without the `--` section being re-passed; a
@@ -479,6 +479,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             );
             fds.push(file.as_raw_fd());
         }
+        command.env(
+            patina_dst_runtime::ENV_STOP_FD,
+            stop_writer.as_raw_fd().to_string(),
+        );
+        fds.push(stop_writer.as_raw_fd());
         // The guest's environment is cleared above, so every end-of-run report
         // knob the operator set has to be forwarded explicitly or it never
         // reaches the guest at all. Driven by `Report::ALL` rather than a
@@ -659,6 +664,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;
     let mut channel_unavailable: Option<i32> = None;
+    // The recording is lost for a reason of patina's own, as opposed to a
+    // truncated trace a guest that died mid-record leaves behind.
+    let mut trace_lost: Option<String> = None;
     if let Some(sink) = trace_sink {
         // The supervisor stamps the build identity as it commits the trace, so
         // a recording replays against its own build whatever the recorder
@@ -690,29 +698,19 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                 // for a genuine reason). Either way the `PATINA_INFRA
                 // trace=incomplete` marker below says the artifact is missing
                 // and why, so nothing is silent.
-                if matches!(
-                    failure,
-                    TraceCommitFailure::Broken(_) | TraceCommitFailure::Unavailable(_)
-                ) && captured.exit_code == 0
-                {
-                    // The guest's own status is preserved for the classifier on
-                    // the `guest_exit_code=` of the channel line below; this
-                    // status is patina's, and says the artifact is missing.
-                    channel_unavailable =
-                        matches!(failure, TraceCommitFailure::Unavailable(_)).then_some(0);
-                    captured.exit_code = 2;
-                } else if matches!(failure, TraceCommitFailure::Unavailable(_)) {
+                let guest_clean = captured.exit_code == 0 && captured.signal.is_none();
+                if matches!(failure, TraceCommitFailure::Unavailable(_)) {
                     channel_unavailable = Some(captured.exit_code);
+                    trace_lost = Some(failure.reason().to_string());
+                } else if matches!(failure, TraceCommitFailure::Broken(_)) && guest_clean {
+                    trace_lost = Some(failure.reason().to_string());
                 }
                 trace_finalization_error = Some((path, failure.reason().to_string()));
             }
         }
     }
-    let native_signal = captured.signal;
-    let supervisor_infra = native_signal.is_some() || trace_finalization_error.is_some();
     append_native_infra_marker(
         &mut captured,
-        native_signal,
         trace_finalization_error
             .as_ref()
             .map(|(path, reason)| (path.as_path(), reason.as_str())),
@@ -723,7 +721,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // Read the facts document back off the inherited descriptor. The child wrote
     // through the same open file description, so the offset is at the end —
     // rewind before reading.
-    let facts = match facts_file {
+    let mut channel_defect: Option<String> = None;
+    let mut facts = match facts_file {
         Some(mut file) => {
             use std::io::{Read, Seek};
             file.rewind().map_err(|error| {
@@ -733,10 +732,46 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             file.read_to_end(&mut bytes).map_err(|error| {
                 CliError(format!("failed to read the run-facts channel: {error}"))
             })?;
-            output::parse_facts(&bytes)?
+            // A channel patina cannot read is patina's own defect: the run
+            // is judged `internal`, not waved through as an error of the
+            // request, and not judged from half the evidence.
+            match output::parse_facts(&bytes) {
+                Ok(facts) => facts,
+                Err(error) => {
+                    channel_defect = Some(error.to_string());
+                    None
+                }
+            }
         }
         None => None,
     };
+    // The shim's stop record, if it ended the run. Every incarnation has
+    // exited and this was the last other holder of the write end, so the read
+    // ends at what they wrote.
+    drop(stop_writer);
+    let stop = {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        stop_reader
+            .read_to_end(&mut bytes)
+            .map_err(|error| CliError(format!("failed to read the stop pipe: {error}")))?;
+        match output::parse_stop(&bytes) {
+            Ok(stop) => stop,
+            Err(error) => {
+                channel_defect.get_or_insert(error.to_string());
+                output::StopChannel::default()
+            }
+        }
+    };
+    let runtime_started = stop.started;
+    if let Some(stop) = stop.stop {
+        let document = facts.get_or_insert_with(
+            || serde_json::json!({ "schema": patina_dst_runtime::FACTS_SCHEMA }),
+        );
+        if let serde_json::Value::Object(root) = document {
+            root.insert("stop".into(), stop);
+        }
+    }
     let coverage = if let Some(path) = &invocation.coverage_out {
         let len = fs::metadata(path)
             .map(|metadata| metadata.len())
@@ -790,7 +825,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             coverage: coverage.clone(),
             crash_restart,
             facts,
-            supervisor_infra,
+            runtime_started,
+            channel_defect,
+            trace_lost,
             qualifications,
         },
         captured,

@@ -171,7 +171,7 @@ source-first native libtest harness mode for one exact test target.
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `patina trace info run.patina` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `nondeterministic`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `patina coverage ./app out/` |
 | `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `patina syscalls` |
@@ -201,11 +201,44 @@ registry (schema `patina.help/v2`) with progressive disclosure: bare
 usage forms, the global flags, and the environment protocol), while
 `patina <verb> --help --format json` returns that one verb's full flag
 detail — handy for scripts and AI agents. Results are available as JSON via
-`--format json` (usually a single `patina.result/v1` envelope; `coverage` emits
+`--format json` (usually a single `patina.result/v2` envelope; `coverage` emits
 `patina.coverage/v1`; `syscalls` emits `patina.syscalls/v3`; `trace events`
 streams `patina.trace.events/v1` JSON Lines;
 `trace info|stats|diff` nest their trace payloads in the normal result envelope),
 and `--render out.html` writes a self-contained HTML timeline of any traced run.
+
+### Outcomes and exit codes
+
+Every `run`, `test`, `replay` and `campaign` ends in exactly one outcome. It has
+the same name on the line Patina prints last, in `--format json` (`result`, with
+`attribution`) and in a campaign's class counts, and it decides the exit status.
+The guest's own exit status is reported (`guest_exit`), never passed through.
+
+| Outcome | Attributed to | Exit | Meaning |
+|---|---|---|---|
+| `ok` | | 0 | The run finished and nothing was found. |
+| `violation` | `guest` | 1 | An invariant the guest declared was violated: an `always!`, a `violation` verdict, a class a campaign spec declared, an SDK contract. |
+| `liveness` | `guest` | 1 | The guest stopped making progress: the liveness or convergence watchdog fired, or every thread is blocked (a deadlock). |
+| `failure` | `guest` | 1 | The guest exited nonzero: a panic, a failed assertion, its own error status. |
+| `crash` | `guest` | 1 | The guest died on a signal: `abort()`, a segmentation fault. |
+| `unsupported` | `patina_unsupported` | 2 | The guest did something Patina does not model. `stop.detail` names the syscall, symbol or operation. |
+| `timeout` | `patina_unsupported` | 2 | The run did not finish within a bound: the host-time compute bound, `--budget`, a campaign's `--timeout-secs`. Inconclusive: a spinning guest or a bound set too low. |
+| `nondeterministic` | `patina_internal` | 2 | Two runs of one recording or generation disagreed: a replay left its trace, a campaign's reproduction did not reproduce. |
+| `internal` | `patina_internal` | 2 | Patina itself failed, or the host took the run away (an out-of-memory kill). |
+| `vacuous` | `request` | 2 | A fault or exploration plane a campaign configured had nothing to act on (campaign only). |
+| `error` | `request` | 2 | The request could not be carried out: a usage error, a failed build, a missing or mismatched input. |
+
+The attribution says whose move it is. `guest` is a finding to investigate in
+your program. `patina_unsupported` is a limit of Patina your program reached,
+and no evidence of a bug in it. `patina_internal` is a bug in Patina or a
+failure of the host: please report it. `request` is the command, its inputs or
+its configuration. A run that did not end clean carries a `stop` (`reason`,
+`detail`) saying what stopped it.
+
+So the exit status is 0 for clean, 1 for a finding in the guest, and 2 when
+Patina could not do what was asked. A campaign exits 1 when any generation is a
+finding in the guest or its coverage gate fails, otherwise 2 when any generation
+did not end clean. `patina --help` prints the same table.
 
 ### Fault injection and schedule exploration
 
@@ -246,7 +279,7 @@ into the trace so replay reproduces them flag-free.
   ordinary `INADDR_ANY` server code is reached by a resolved name with no
   service-side registration.
   `campaign --dns-entry` hands the table to a sweep, which then bands both knobs
-  per generation and classifies an inert one as `VACUOUS` with the dns plane in its signature.
+  per generation and classifies an inert one as `vacuous` with the dns plane in its signature.
 - **Entropy**: `--entropy-fail-permille` models a guest that starts before the
   kernel's random pool is initialized: a `GRND_NONBLOCK` `getrandom` answers
   `EAGAIN` until a read shows the pool ready. No other entropy API can fail, so

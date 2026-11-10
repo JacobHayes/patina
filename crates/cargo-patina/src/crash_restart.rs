@@ -187,7 +187,7 @@ fn crash_failed(
         "crash_count": 0,
         "restart_count": 0,
         "incarnations": [{"id": 0, "host_pid": first_host_pid}],
-        "terminal_outcome": {"kind": "crash_failed", "exit_code": first.exit_code, "signal": first.signal},
+        "terminal_outcome": {"kind": output::CRASH_FAILED, "exit_code": first.exit_code, "signal": first.signal},
     });
     CrashRestartRun {
         captured: first,
@@ -566,25 +566,17 @@ fn crash_handoff_key(seed: u64) -> [u8; 32] {
 /// stderr: the guest's death signal and any trace the run left incomplete.
 pub(super) fn append_native_infra_marker(
     captured: &mut output::Captured,
-    signal: Option<i32>,
     trace_error: Option<(&Path, &str)>,
     channel_unavailable: Option<i32>,
 ) {
-    if signal.is_none() && trace_error.is_none() {
+    let Some((path, reason)) = trace_error else {
         return;
-    }
-    let mut line = String::from("PATINA_INFRA native_run");
-    if let Some(signal) = signal {
-        line.push_str(&format!(" signal={signal}"));
-    }
-    if let Some((path, reason)) = trace_error {
-        line.push_str(&format!(
-            " trace=incomplete trace_path={:?} reason={:?}",
-            path.display().to_string(),
-            reason
-        ));
-    }
-    line.push('\n');
+    };
+    let mut line = format!(
+        "PATINA_INFRA native_run trace=incomplete trace_path={:?} reason={:?}\n",
+        path.display().to_string(),
+        reason
+    );
     // A channel failure is patina's own operational condition, not a finding, so
     // it says so in the attributable form the envelope reads: one stable
     // sentence (the refusal class keys on it, so every such generation dedups

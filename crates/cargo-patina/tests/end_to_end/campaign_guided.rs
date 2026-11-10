@@ -180,7 +180,7 @@ fn main() {
             serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
         state["generations_done"] = serde_json::Value::from(torn);
         let classes = state["classes"].as_object_mut().unwrap();
-        let ok = classes.get_mut("OK").expect("a clean campaign records OK");
+        let ok = classes.get_mut("ok").expect("a clean campaign records OK");
         *ok = serde_json::Value::from(ok.as_u64().unwrap() - 1);
         fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
         let resumed = succeeded(

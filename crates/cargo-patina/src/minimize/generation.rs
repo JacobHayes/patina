@@ -181,8 +181,7 @@ pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, 
     if output::options().is_json() {
         output::emit_simple(
             "minimize",
-            "ok",
-            0,
+            patina_dst_abi::RunClass::Ok,
             Some(format!("{detail} command={command}")),
         );
     } else {

@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use patina_dst_runtime::FaultKnob;
 
 use super::planes::{FAULT_PLANE_NAMES, FaultPlanes};
-use super::{CampaignClass, ClassifyRules, FAULT_SCALE_FULL};
+use super::{ClassifyRules, FAULT_SCALE_FULL, RunClass};
 use crate::{CliError, help};
 
 pub(super) const DEFAULT_PLATEAU_AFTER: u64 = 200;
@@ -573,7 +573,7 @@ pub(super) fn json_classify_rules(value: &serde_json::Value) -> Result<ClassifyR
 fn classify_rule_map(
     kind: &str,
     value: &serde_json::Value,
-) -> Result<Vec<(CampaignClass, Vec<serde_json::Value>)>, CliError> {
+) -> Result<Vec<(RunClass, Vec<serde_json::Value>)>, CliError> {
     let object = value.as_object().ok_or_else(|| {
         CliError(format!(
             "campaign spec \"classify.{kind}\" must be a JSON object of class -> rules"
@@ -581,26 +581,32 @@ fn classify_rule_map(
     })?;
     let mut rules = Vec::new();
     for (name, entries) in object {
-        let class = CampaignClass::parse(name).ok_or_else(|| {
+        let class = RunClass::from_name(name).ok_or_else(|| {
             CliError(format!(
                 "campaign spec \"classify.{kind}\" names unknown class {name:?}; expected one of {}",
-                CampaignClass::ALL
+                RunClass::ALL
                     .iter()
                     .map(|class| class.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
         })?;
-        if class == CampaignClass::Ok {
+        if class == RunClass::Ok {
             return Err(CliError(format!(
                 "campaign spec \"classify.{kind}\" declares {:?}; declared rules may only ADD a finding, never downgrade one",
                 class.as_str()
             )));
         }
-        if class.is_cross_run() {
+        if !class.is_finding() {
             return Err(CliError(format!(
-                "campaign spec \"classify.{kind}\" declares {:?}; that class compares two runs of a generation, so no rule over one run's output can assign it",
-                class.as_str()
+                "campaign spec \"classify.{kind}\" declares {:?}; a declared rule names a finding in the guest ({}), never an outcome that is patina's or the request's",
+                class.as_str(),
+                RunClass::ALL
+                    .iter()
+                    .filter(|class| class.is_finding())
+                    .map(|class| class.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
         let entries = entries.as_array().ok_or_else(|| {
@@ -704,7 +710,7 @@ mod tests {
         let mut classified = CampaignSpec::default();
         classified
             .apply_json(&serde_json::json!({
-                "classify": {"patterns": {"VIOLATION": ["CORRUPTION"]}}
+                "classify": {"patterns": {"violation": ["CORRUPTION"]}}
             }))
             .unwrap();
         let specs = [

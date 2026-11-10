@@ -14,32 +14,29 @@ pub(super) const CAMPAIGN: Verb = Verb {
 A campaign runs `--gens` independent child `patina run` processes over one \
 artifact. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
-Each generation runs with --format json and is classified from its \
-patina.result/v1 envelope ALONE — verdicts, per-plane fault_reports vacuity, \
-runtime_findings, refusal, guest_exit — into one outcome class: a finding \
-(VIOLATION, LIVENESS, GUEST_ABORT), a harness class (FAIL_CLOSED_ABORT, \
-INFRA), OK, the loud UNCLASSIFIED catch-all, or VACUOUS, the \
-coverage class whose signature names the inert fault or exploration planes; \
-nothing in the classifier reads guest output. An unattributed SIGABRT is \
-GUEST_ABORT (the guest's own doing); the same abort carrying a patina refusal is \
-FAIL_CLOSED_ABORT. A guest that never calls the verdict ABI declares its own \
+Each generation runs with --format json and lands in the class its own \
+patina.result/v2 envelope reports (`result`: the outcome table of `patina --help`), \
+which the campaign overrides only with what it alone knows: its wall-clock backstop \
+is `timeout`, a generation killed from outside or one that reported no run is \
+`internal`, and a clean run whose fault or exploration plane went inert is `vacuous`, \
+the coverage class whose signature names the planes; nothing in the classifier \
+reads guest output. A guest that never calls the verdict ABI declares its own \
 rules in the spec (\"classify\": {\"patterns\": {CLASS: [substring, ...]}, \
-\"exit_codes\": {CLASS: [code, ...]}}), which may only ADD a finding where the \
-envelope reached none. Novel failure \
+\"exit_codes\": {CLASS: [guest exit code, ...]}}), which may only ADD a finding \
+where the run reached none (`ok`, or a bare `failure`). Novel failure \
 signatures are deduped and their traces saved with a reproduce command. Before a \
 novel finding is reported the campaign runs that reproduce command once — replay \
 of the saved trace, or the seeded re-run for a traceless failure — and a seeded \
 sample of clean generations (one in 16, chosen from --seed-start) runs twice; a \
-differing class, signature, verdict set or trace digest is NONDETERMINISM, the \
-most severe class, reported with both outcomes. A second run patina could not \
-finish (a timeout, a host kill) is counted as infra and leaves the class as \
-observed. --no-verify skips these runs for cost. A --spec \
+differing class, signature, verdict set or trace digest is `nondeterministic`, \
+reported with both outcomes. A second run patina could not finish (a timeout, a \
+host kill) is counted apart and leaves the class as observed. --no-verify skips these runs for cost. A --spec \
 FILE.json supplies overrides and individual flags override the spec. Campaigns \
 checkpoint their state in --out-dir; `--extend N` adds N generations to the recorded \
 target, and `--resume` finishes an interrupted campaign from the recorded out-dir \
 without re-supplying the artifact or spec flags. Output is summary-first: a human \
 report (novel/failing generations plus a periodic progress heartbeat, tuned by \
---progress-every) or a patina.campaign/v2 JSON envelope (class counts, deduped \
+--progress-every) or a patina.campaign/v3 JSON envelope (class counts, deduped \
 signatures, per-run detail for novel/failing generations, and pointers to the full \
 on-disk artifacts). Campaigns also write <out-dir>/sites.json (schema \
 patina.campaign.sites/v1), summarize SDK site coverage, and fail by default \
@@ -362,9 +359,9 @@ operation-first, then outcome, mirroring replay mismatch semantics and \n\
 reporting the first divergence without attempting LCS/re-sync alignment.\n\
 \n\
 `trace info --format json` follows the normal result-envelope contract: one \n\
-patina.result/v1 object carrying a nested patina.trace.info/v1 `trace_info` \n\
+patina.result/v2 object carrying a nested patina.trace.info/v1 `trace_info` \n\
 payload. `trace stats --format json` and `trace diff --format json` likewise \n\
-return one patina.result/v1 envelope carrying nested patina.trace.stats/v1 or \n\
+return one patina.result/v2 envelope carrying nested patina.trace.stats/v1 or \n\
 patina.trace.diff/v1 payloads. `trace events --format json` intentionally \n\
 streams JSON Lines instead of one large envelope: a patina.trace.events/v1 \n\
 header, one object per emitted event (with raw operation/outcome JSON intact), \n\

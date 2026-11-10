@@ -48,10 +48,10 @@ its own fixture object. C++ keeps the real iostream dependency; its earlier
 refusal is intentional and must be migrated when that surface changes. Neither
 that refusal nor the realtime-signal helper refusal is bypassed with an allowance.
 
-Runtime process doors currently report the symbol in captured stderr and an
-actual SIGABRT in the result envelope, without a dedicated process refusal class.
-The classifier reads that symbol token and the exit disposition, without pinning
-the surrounding prose. Pre-run gaps pair the run's `native_prerun_audit` class
+Runtime process doors end the run as `unsupported`, with `stop.reason`
+`deny_trap` and a `stop.detail` that names the door. The classifier reads that
+symbol token and the exit disposition, without pinning the surrounding prose.
+Pre-run gaps pair the run's `prerun_audit` stop
 with the audit's structured symbol finding. Native success relies on guest
 assertions, not on printed result lines or operation counts. Each guest emits an
 `MP_RESULT` digest for later benchmark consumption. Timed-out commands are

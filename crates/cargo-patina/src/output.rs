@@ -26,17 +26,25 @@ mod outcomes;
 mod reports;
 
 pub use capture::Captured;
+pub use capture::StopChannel;
 pub use capture::capture_active;
 pub use capture::end_guest_line;
-pub use capture::json_active;
 pub use capture::parse_facts;
+pub use capture::parse_stop;
+pub use envelope::CRASH_FAILED;
 pub use envelope::CRASH_REPLAY_DIVERGED;
 pub use envelope::Envelope;
 use markers::result_line;
 pub use outcomes::GuestExit;
-pub use outcomes::Refusal;
+pub(crate) use outcomes::HOST_KILL_STOP;
+pub use outcomes::Outcome;
+pub(crate) use outcomes::PRERUN_AUDIT_STOP;
 use outcomes::SIGNAL_NAMES;
-use outcomes::refusal;
+pub use outcomes::Stop;
+pub(crate) use outcomes::TRACE_MISMATCH_STOP;
+#[cfg(test)]
+pub(crate) use outcomes::TRACE_UNAVAILABLE_STOP;
+use patina_dst_abi::RunClass;
 pub use reports::CoverageReport;
 pub use reports::Qualification;
 pub use reports::RunReport;
@@ -45,7 +53,7 @@ pub use reports::finalize_run;
 
 /// The stable schema identifier stamped into every JSON envelope. Bump the
 /// version suffix only on a breaking change to the documented shape.
-pub const ENVELOPE_SCHEMA: &str = "patina.result/v1";
+pub const ENVELOPE_SCHEMA: &str = "patina.result/v2";
 
 /// How the CLI presents its result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,19 +148,18 @@ fn parse_format(value: &str) -> Result<OutputFormat, CliError> {
 }
 
 /// Emit a verb's envelope for the audit path: the findings are the flagged
-/// imports.
+/// imports, and an audit that flags any is `unsupported`.
 pub fn emit_audit(
     verb: &str,
     artifact: &str,
     findings: Vec<String>,
     finding_details: Vec<serde_json::Value>,
-    exit_code: i32,
+    result: RunClass,
 ) {
     if !options().is_json() {
         return;
     }
-    let result = if exit_code == 0 { "ok" } else { "violation" };
-    let mut env = Envelope::new(verb, result, exit_code);
+    let mut env = Envelope::new(verb, result);
     env.artifact = Some(artifact.to_string());
     env.findings = findings;
     env.finding_details = finding_details;
@@ -164,7 +171,7 @@ pub fn emit_build(output_path: &Path) {
     if !options().is_json() {
         return;
     }
-    let mut env = Envelope::new("build", "ok", 0);
+    let mut env = Envelope::new("build", RunClass::Ok);
     env.output_path = Some(output_path.to_string_lossy().into_owned());
     if let Ok(bytes) = std::fs::read(output_path) {
         // digest 0.11's output array no longer implements LowerHex; encode bytes.
@@ -178,62 +185,63 @@ pub fn emit_build(output_path: &Path) {
 }
 
 /// Emit a generic envelope for a verb that produced no rich structured result
-/// (minimize), or for a CLI error surfaced under `--output json`.
-pub fn emit_simple(verb: &str, result: &str, exit_code: i32, message: Option<String>) {
+/// (minimize), or for a CLI error surfaced under `--format json`.
+pub fn emit_simple(verb: &str, result: RunClass, message: Option<String>) {
     if !options().is_json() {
         return;
     }
-    let mut env = Envelope::new(verb, result, exit_code);
+    let mut env = Envelope::new(verb, result);
     env.message = message;
     env.emit();
 }
 
-/// This class is emitted only by the native audit gate, before guest launch.
-pub(crate) const NATIVE_PRERUN_REFUSAL: &str = "native_prerun_audit";
-
-/// The class of a replay refused because the trace belongs to another build.
-/// The native supervisor emits it before guest launch; the same class names a
-/// runtime's own fingerprint refusal read off a dying child's output.
-pub(crate) const FINGERPRINT_MISMATCH_REFUSAL: &str = "fingerprint_mismatch";
-
-/// Emit the envelope of a native run the supervisor refused before the guest
-/// started, so no `guest_exit` exists.
-pub(crate) fn emit_native_refusal(artifact: &Path, class: &str, message: String) {
-    emit_native_mismatch_refusal(artifact, class, message, None);
+/// Report a native run the supervisor stopped before the guest started, so no
+/// `guest_exit` exists: under `--format json` its envelope, otherwise the
+/// outcome's headline and the message on stderr. Returns the tool's exit
+/// status for `class`. The one way a pre-run stop is reported, so it cannot
+/// leave without a class.
+pub(crate) fn report_prerun_stop(artifact: &Path, class: RunClass, stop: Stop) -> i32 {
+    let outcome = Outcome::of(class, Some(stop));
+    if options().is_json() {
+        let mut env = Envelope::new("run", outcome.class);
+        env.artifact = Some(artifact.to_string_lossy().into_owned());
+        env.message = outcome.stop.as_ref().map(|stop| stop.detail.clone());
+        env.stop = outcome.stop;
+        env.emit();
+    } else {
+        if let Some(headline) = outcome.headline(None) {
+            eprintln!("{headline}");
+        }
+        // The headline carries the detail's first line; a refusal that lists
+        // what it refused (the audit's symbols) follows whole.
+        if let Some(stop) = &outcome.stop
+            && stop.detail.lines().count() > 1
+        {
+            eprintln!("{}", stop.detail);
+        }
+    }
+    class.exit_code()
 }
 
-/// [`emit_native_refusal`] of a mismatch the supervisor judged, naming which
-/// input differs (`refusal.mismatch`) when it knows.
-pub(crate) fn emit_native_mismatch_refusal(
-    artifact: &Path,
-    class: &str,
-    message: String,
-    mismatch: Option<&'static str>,
-) {
-    let mut env = Envelope::new("run", "error", 2);
-    env.artifact = Some(artifact.to_string_lossy().into_owned());
-    env.refusal = Some(Refusal {
-        class: class.into(),
-        message: message.clone(),
-        guest_exit_code: None,
-        mismatch,
-    });
-    env.message = Some(message);
-    env.emit();
+/// The `test` verb's envelope: the class of the seed that decided it, what
+/// stopped that seed's run, and how its guest ended.
+pub(crate) struct HarnessResult {
+    pub(crate) result: RunClass,
+    pub(crate) message: String,
+    pub(crate) trace: Option<TraceFacts>,
+    pub(crate) stop: Option<Stop>,
+    pub(crate) guest_exit: Option<serde_json::Value>,
 }
 
-pub(crate) fn emit_harness_result(
-    result: &str,
-    exit_code: i32,
-    message: String,
-    trace: Option<TraceFacts>,
-) {
+pub(crate) fn emit_harness_result(harness: HarnessResult) {
     if !options().is_json() {
         return;
     }
-    let mut env = Envelope::new("test", result, exit_code);
-    env.message = Some(message);
-    env.trace = trace;
+    let mut env = Envelope::new("test", harness.result);
+    env.message = Some(harness.message);
+    env.trace = harness.trace;
+    env.stop = harness.stop;
+    env.guest_exit_raw = harness.guest_exit;
     env.emit();
 }
 

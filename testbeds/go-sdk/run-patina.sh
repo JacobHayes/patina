@@ -131,9 +131,9 @@ assert {v["label"] for v in verdicts} == {"go-sdk-ledger-sorted"}, verdicts
 # The check detail names the failing ledger in a verdict of its own.
 assert any(v["detail"].startswith("ledger=[") for v in verdicts), verdicts
 assert envelope["result"] == "violation", envelope["result"]
-# A replay that diverged or was refused after reaching the verdict is no
-# reproduction of it.
-assert "replay_divergence" not in text and "refusal" not in envelope, "diverged or refused"
+# A replay that diverged after reaching the verdict is no reproduction of it;
+# the class and its attribution say the finding belongs to the guest.
+assert "replay_divergence" not in text and envelope["attribution"] == "guest", "diverged or refused"
 if len(sys.argv) > 2:
     recorded = json.load(open(sys.argv[2]))
     assert envelope["verdicts"] == recorded["verdicts"], (envelope["verdicts"], recorded["verdicts"])

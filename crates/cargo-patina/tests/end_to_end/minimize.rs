@@ -144,8 +144,8 @@ fn main() {
                 )
             });
         assert_eq!(
-            caught["class"], "VIOLATION",
-            "a generation with a violation verdict must classify VIOLATION"
+            caught["class"], "violation",
+            "a generation with a violation verdict must classify as a violation"
         );
         let generation = caught["generation"].as_u64().unwrap().to_string();
         let flag_tokens = caught["flags"].as_array().unwrap().len();
@@ -276,7 +276,7 @@ fn main() {
         );
         let envelope = campaign_json_stdout(&campaign);
         assert_eq!(
-            envelope["classes"]["VIOLATION"], 1,
+            envelope["classes"]["violation"], 1,
             "an always! failure is a safety finding: {}",
             envelope["classes"]
         );
@@ -426,7 +426,7 @@ fn main() {
             &["--seed-start", "5", "--faults"],
             "fault-or-refusal",
         );
-        assert_eq!(envelope["classes"]["UNCLASSIFIED"], 1, "{envelope:#}");
+        assert_eq!(envelope["classes"]["failure"], 1, "{envelope:#}");
         let generation = "0";
 
         let output = directory.path().join("minimized.patina");
@@ -480,7 +480,7 @@ fn main() {
                 ended["guest_exit"]["code"], 3,
                 "{args:?}: {ended:#}\n{report}"
             );
-            assert!(ended.get("refusal").is_none(), "{args:?}: {ended:#}");
+            assert_eq!(ended["result"], "failure", "{args:?}: {ended:#}");
         }
     }
 }

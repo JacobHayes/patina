@@ -2,6 +2,7 @@
 
 use super::{FindingFacts, GenerationFacts, RunFacts, VerdictFacts, recognize_verdicts};
 use crate::CliError;
+use patina_dst_abi::RunClass;
 use std::path::Path;
 use std::process::Command;
 
@@ -35,9 +36,14 @@ impl GenerationRun {
         (&self.stdout, &self.stderr)
     }
 
-    /// Patina's refusal class, from the result envelope, when it refused.
-    pub(crate) fn refusal(&self) -> Option<&str> {
-        self.facts.facts.refusal.as_deref()
+    /// What stopped the run when the stop is not the guest's own finding:
+    /// the reason of a class attributed to patina or to the request.
+    pub(crate) fn patina_stop(&self) -> Option<&str> {
+        let facts = &self.facts.facts;
+        facts
+            .class
+            .filter(|class| class.is_failure() && !class.is_finding())
+            .and(facts.stop.as_deref())
     }
 
     /// What the run reported through the verdict ABI. Read off the child's own
@@ -48,7 +54,7 @@ impl GenerationRun {
     }
 }
 
-/// Reduce the child run's `patina.result/v1` envelope to the classifier's
+/// Reduce the child run's `patina.result/v2` envelope to the classifier's
 /// structured input. Every field is read from the envelope by name — nothing here
 /// parses a diagnostic line back.
 pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
@@ -107,18 +113,27 @@ pub(super) fn facts_from_envelope(envelope: &serde_json::Value) -> RunFacts {
             .and_then(|exit| exit.get("signal"))
             .and_then(serde_json::Value::as_i64)
             .map(|signal| signal as i32),
+        child_signal: None,
         timed_out: false,
         envelope: true,
-        refusal: envelope
-            .get("refusal")
-            .and_then(|refusal| refusal.get("class"))
+        class: envelope
+            .get("result")
+            .and_then(serde_json::Value::as_str)
+            .and_then(RunClass::from_name),
+        stop: envelope
+            .get("stop")
+            .and_then(|stop| stop.get("reason"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
-        refusal_guest_exit_code: envelope
-            .get("refusal")
-            .and_then(|refusal| refusal.get("guest_exit_code"))
+        stop_guest_exit_code: envelope
+            .get("stop")
+            .and_then(|stop| stop.get("guest_exit_code"))
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32),
+        trace_unusable: envelope
+            .get("trace_unusable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         replay_diverged: envelope
             .get("replay_divergence")
             .is_some_and(serde_json::Value::is_string)
@@ -152,12 +167,13 @@ pub(crate) fn child_facts(
     // there is not.
     {
         use std::os::unix::process::ExitStatusExt;
+        facts.child_signal = status.signal();
         facts.signal = facts.signal.or(status.signal());
     }
     facts
 }
 
-/// A child's own `patina.result/v1` run envelope, if it produced one. The
+/// A child's own `patina.result/v2` run envelope, if it produced one. The
 /// envelope is a single JSON line on stdout; anything else the child wrote there
 /// is guest output the envelope itself carries, so the scan takes the last
 /// well-formed envelope line and is never confused by a guest that prints JSON.
@@ -180,6 +196,19 @@ pub(crate) fn run_envelope(stdout: &str) -> Option<serde_json::Value> {
         let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
         (field("schema") == Some(crate::output::ENVELOPE_SCHEMA) && field("verb") == Some("run"))
             .then_some(value)
+    })
+}
+
+/// Whether a child that left no run envelope reported, in a `cli` envelope,
+/// that it could not carry out the request.
+fn cli_error_envelope(stdout: &str) -> bool {
+    stdout.lines().rev().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line.trim()).is_ok_and(|value| {
+            let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+            field("schema") == Some(crate::output::ENVELOPE_SCHEMA)
+                && field("verb") == Some("cli")
+                && field("result") == Some(RunClass::Error.as_str())
+        })
     })
 }
 
@@ -261,7 +290,7 @@ fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
     command
         .arg(verb)
         // The structured outcome channel: the child reports its result as a
-        // `patina.result/v1` envelope rather than as diagnostics the campaign
+        // `patina.result/v2` envelope rather than as diagnostics the campaign
         // would have to grep. This is the classifier's ONLY input.
         .arg("--format")
         .arg("json");
@@ -362,6 +391,12 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     // streams are all there is.
     let envelope = run_envelope(&child_stdout);
     let mut facts = child_facts(envelope.as_ref(), status);
+    // A child that reported an error of the request's own instead of a run (a
+    // usage error, a build that failed) says so in a `cli` envelope: the
+    // generation could not start as asked, which is not patina failing.
+    if envelope.is_none() && cli_error_envelope(&child_stdout) {
+        facts.class = Some(RunClass::Error);
+    }
     facts.timed_out = timed_out;
     let envelope_stream = |key: &str| {
         envelope
@@ -371,6 +406,11 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
             .map(str::to_string)
     };
     let result_line = envelope_stream("result_line");
+    let stop_detail = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.pointer("/stop/detail"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
     let exact_verdicts = envelope
         .as_ref()
         .and_then(|envelope| envelope.get("verdicts"))
@@ -411,6 +451,7 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
             facts,
             output: format!("{stdout}\n{stderr}"),
             guest_output,
+            stop_detail,
             result_line,
             exact_verdicts,
             bug_depth,

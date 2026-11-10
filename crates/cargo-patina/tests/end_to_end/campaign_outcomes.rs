@@ -280,12 +280,12 @@ fn main() {
             String::from_utf8_lossy(&ran.stderr)
         );
         assert!(
-            !stdout.contains("FAIL_CLOSED_ABORT"),
+            !stdout.contains("class=unsupported") && !stdout.contains("class=internal"),
             "a swarm+buggify campaign must not abort on configuration incoherence\n{stdout}"
         );
         // A genuine mix: the planted bug fires on some generations and not others.
-        let liveness_gens = stdout.matches("class=LIVENESS").count();
-        let ok_gens = stdout.matches("class=OK").count();
+        let liveness_gens = stdout.matches("class=liveness").count();
+        let ok_gens = stdout.matches("class=ok").count();
         assert!(
             liveness_gens >= 1 && ok_gens >= 1,
             "expected a mix of LIVENESS and OK generations, got liveness={liveness_gens} ok={ok_gens}\n{stdout}"
@@ -309,7 +309,7 @@ fn main() {
             "expected exactly one deduplicated signature: {store:#}"
         );
         let signature = &signatures[0];
-        assert_eq!(signature["class"], "LIVENESS");
+        assert_eq!(signature["class"], "liveness");
         assert_eq!(
             signature["count"].as_u64().unwrap() as usize,
             liveness_gens,
@@ -318,7 +318,7 @@ fn main() {
         let state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
                 .unwrap();
-        assert_eq!(state["schema"], "patina.campaign.state/v2");
+        assert_eq!(state["schema"], "patina.campaign.state/v3");
         assert_eq!(state["generations_done"], 12);
         assert_eq!(state["artifact"]["path"], guest.to_str().unwrap());
         assert!(state["artifact"]["sha256"].as_str().unwrap().len() == 64);

@@ -94,7 +94,7 @@ A crash that lands but cannot be carried out is an infra refusal, never an errno
 
 The supervisor then:
 
-- names the refusal (`PATINA_INFRA crash_failed`, refusal class `crash_failed`, campaign class `INFRA`);
+- names the stop (`PATINA_INFRA crash_failed`, outcome `internal` with `stop.reason` `crash_failed`);
 - reports `crash_restart.attempted = true`, `reached = false` and `terminal_outcome.kind = "crash_failed"`;
 - keeps a recorded run's trace, which incarnation 0 writes just as it would for a crash that succeeds.
 

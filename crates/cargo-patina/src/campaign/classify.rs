@@ -3,168 +3,73 @@
 use super::Signature;
 use super::generation::SIGKILL;
 use super::state::json_required_str;
+use patina_dst_abi::RunClass;
 use std::collections::BTreeMap;
 
 // ===========================================================================
 // Classifier (pure) + signatures
 // ===========================================================================
 
-/// The per-generation outcome classes: `OK`, then the failure classes in
-/// descending severity. An explicit finding is never downgraded, and a nonzero
-/// exit is never silently OK.
-///
-/// The declaration order is the severity order: [`ClassifyRules`] iterates its
-/// declared classes through it, so two matching declarations always resolve to
-/// the more severe one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CampaignClass {
-    /// The run completed clean (exit 0, no finding).
-    Ok,
-    /// Running the generation again did not reproduce it: the campaign ran a
-    /// novel finding's reproduce path, or a sampled clean generation a second
-    /// time, and the class, signature, verdicts or trace digest differed. The
-    /// only cross-run class — [`classify`] never returns it, reproduction
-    /// verification does — and the most severe failure, because every other
-    /// class's reproduce command rests on the run being deterministic. The
-    /// observed outcome and the reproduction both travel with it.
-    Nondeterminism,
-    /// A system-under-test safety/assertion violation: a `VerdictKind::Violation`
-    /// the guest reported through the verdict ABI (which `always!` lowers to), or
-    /// a class a campaign spec declared for this guest ([`ClassifyRules`]).
-    Violation,
-    /// A liveness-watchdog violation: a `runtime_findings[]` entry with
-    /// `source=liveness` — a virtual-time no-progress wedge.
-    Liveness,
-    /// A fault or exploration plane went inert: a configured fault class saw
-    /// eligible work often enough to have fired several times over yet applied
-    /// zero effects, a custom-op knob reached no eligible operation, or a swarm
-    /// draw had nothing to select. The plane names come from the run's
-    /// `fault_reports{}` and travel in the signature. A coverage failure, not a
-    /// SUT finding.
-    Vacuous,
-    /// The guest aborted itself: a SIGABRT (or exit 134) that the envelope did
-    /// NOT attribute to a patina refusal, so it is the guest's own doing — a
-    /// `panic = "abort"` invariant failure, an `assert!`, a bare `abort()`. A
-    /// finding bucket, not infra noise: with patina's own refusals
-    /// envelope-attributed ([`CampaignClass::FailClosedAbort`]), an unattributed
-    /// abort can only have come from the system under test. A preceding
-    /// `abort_intent`/`violation` verdict enriches the signature but is not
-    /// required for the class to fire.
-    GuestAbort,
-    /// Patina fail-closed refusal: the envelope carries a `refusal` record — a
-    /// fingerprint/trace mismatch, a duplicate buggify label, a
-    /// declared-but-never-called setup gate, a runtime that refused to
-    /// initialize, a shim fatal abort.
-    FailClosedAbort,
-    /// Harness/build infrastructure failure, not a SUT finding: the campaign's
-    /// wall-clock backstop killed the generation, or the child `patina run`
-    /// never produced a `patina.result/v1` envelope at all (a build failure, a
-    /// pre-run gate refusal, a supervisor error — patina could not report a
-    /// result for this generation).
-    Infra,
-    /// A nonzero exit that matched no class above — an unknown/unparseable outcome.
-    /// Loud and always a failure, so a novel failure mode is surfaced for triage
-    /// rather than silently dropped or mislabeled.
-    Unclassified,
+/// Whether only comparing two runs of a generation can reach this class, so
+/// no single run's facts — and no spec-declared rule — can.
+pub(super) const fn is_cross_run(class: RunClass) -> bool {
+    matches!(class, RunClass::Nondeterministic)
 }
 
-impl CampaignClass {
-    /// Every class, in severity order. The compiler holds it complete: see
-    /// the exhaustive match below the `impl`.
-    pub const ALL: &'static [CampaignClass] = &[
-        CampaignClass::Ok,
-        CampaignClass::Nondeterminism,
-        CampaignClass::Violation,
-        CampaignClass::Liveness,
-        CampaignClass::Vacuous,
-        CampaignClass::GuestAbort,
-        CampaignClass::FailClosedAbort,
-        CampaignClass::Infra,
-        CampaignClass::Unclassified,
-    ];
-
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            CampaignClass::Ok => "OK",
-            CampaignClass::Nondeterminism => "NONDETERMINISM",
-            CampaignClass::Violation => "VIOLATION",
-            CampaignClass::Liveness => "LIVENESS",
-            CampaignClass::Vacuous => "VACUOUS",
-            CampaignClass::GuestAbort => "GUEST_ABORT",
-            CampaignClass::FailClosedAbort => "FAIL_CLOSED_ABORT",
-            CampaignClass::Infra => "INFRA",
-            CampaignClass::Unclassified => "UNCLASSIFIED",
-        }
-    }
-
-    pub(super) fn parse(value: &str) -> Option<Self> {
-        CampaignClass::ALL
-            .iter()
-            .copied()
-            .find(|class| class.as_str() == value)
-    }
-
-    /// Whether only comparing two runs of a generation can reach this class, so
-    /// no single run's facts — and no spec-declared rule — can.
-    pub const fn is_cross_run(&self) -> bool {
-        matches!(self, CampaignClass::Nondeterminism)
-    }
-
-    /// Whether this class is a failure the campaign must surface (everything but
-    /// `OK`).
-    pub const fn is_failure(&self) -> bool {
-        !matches!(self, CampaignClass::Ok)
-    }
-
-    /// Whether this class is a FINDING — something learned about the system under
-    /// test — as opposed to a condition of the run itself. `INFRA` is the
-    /// original one that is not: a timeout, a host-side SIGKILL, a build failure,
-    /// and patina's own recorder giving out all say the generation produced no
-    /// answer. They are still surfaced and still deduped, but they must not spend
-    /// the campaign's novel-signature budget, which exists to say "this many
-    /// DISTINCT BUGS were found".
-    pub const fn is_finding(&self) -> bool {
-        self.is_failure() && !matches!(self, CampaignClass::Infra)
-    }
+/// Whether a failing generation of this class reached a conclusion — about the
+/// guest, or about what patina models and reproduces — as opposed to producing
+/// no answer at all: a timeout, a host-side kill, patina's own recorder giving
+/// out, a child that could not start. The inconclusive ones are still surfaced
+/// and still deduped, but they are not verified by reproduction and do not
+/// spend the campaign's novel-signature count, which exists to say "this many
+/// DISTINCT things were learned".
+pub(super) const fn is_conclusive(class: RunClass) -> bool {
+    class.is_failure()
+        && !matches!(
+            class,
+            RunClass::Timeout | RunClass::Internal | RunClass::Error
+        )
 }
 
-// `CampaignClass::ALL` is complete by construction. The match has no
-// wildcard, so a variant added to the enum does not compile until it is given
-// a place here, its index in `ALL`; the loop then holds every entry of `ALL`
-// to its place and to declaration (severity) order.
-const _: () = {
-    const fn place(class: CampaignClass) -> usize {
-        match class {
-            CampaignClass::Ok => 0,
-            CampaignClass::Nondeterminism => 1,
-            CampaignClass::Violation => 2,
-            CampaignClass::Liveness => 3,
-            CampaignClass::Vacuous => 4,
-            CampaignClass::GuestAbort => 5,
-            CampaignClass::FailClosedAbort => 6,
-            CampaignClass::Infra => 7,
-            CampaignClass::Unclassified => 8,
-        }
+/// The class a whole campaign ends in, from the classes its generations
+/// landed in and its coverage gate: the campaign's `result`, and through it
+/// its attribution and exit status. A finding in the guest outranks every
+/// stop of patina's (the campaign did find something, and the summary lists
+/// the rest); an unmet coverage gate is the guest's own assertion failing
+/// (a `sometimes!` that never held, a `reachable!` never reached).
+pub(super) fn campaign_result(
+    classes: impl Iterator<Item = RunClass> + Clone,
+    coverage_gate_failed: bool,
+) -> RunClass {
+    let present = |class: RunClass| classes.clone().any(|seen| seen == class);
+    let first_present =
+        |candidates: &[RunClass]| candidates.iter().copied().find(|class| present(*class));
+    if let Some(finding) = first_present(&[
+        RunClass::Violation,
+        RunClass::Liveness,
+        RunClass::Crash,
+        RunClass::Failure,
+    ]) {
+        return finding;
     }
-    let all = CampaignClass::ALL;
-    let mut index = 0;
-    while index < all.len() {
-        assert!(place(all[index]) == index && all[index] as usize == index);
-        index += 1;
+    if coverage_gate_failed {
+        return RunClass::Violation;
     }
-};
+    first_present(&[
+        RunClass::Nondeterministic,
+        RunClass::Vacuous,
+        RunClass::Timeout,
+        RunClass::Unsupported,
+        RunClass::Internal,
+        RunClass::Error,
+    ])
+    .unwrap_or(RunClass::Ok)
+}
 
 /// The `fault_reports{}` planes whose `vacuous` bit is a coverage failure. The
 /// schedule plane is not one: its vacuity is a runtime finding of its own.
 pub(super) const VACUITY_PLANES: &[&str] =
     &["fs", "dns", "net", "entropy", "clock", "custom_op", "swarm"];
-
-/// The exit code a raw SIGABRT surfaces as (128 + SIGABRT(6)). A guest that dies
-/// on SIGABRT has either hit a patina refusal (the shim aborts fail-closed via
-/// `std::process::abort()`) or aborted itself; the envelope's `refusal` field is
-/// what tells the two apart (§4.4 of the outcome-channel arc).
-pub(super) const SIGABRT: i32 = 6;
-pub(super) const SIGABRT_EXIT: i32 = 128 + SIGABRT;
 
 /// The hardware/OS fault signals: the guest died executing bad code, which is a
 /// GUEST failure but not an abort — it never reached `abort()` and never got to
@@ -184,24 +89,8 @@ const FAULT_SIGNALS: &[(i32, &str)] = &[
 pub(super) const HOST_KILL_SHAPE: &str = "killed by SIGKILL (host-side; not a guest failure)";
 
 /// The shape a generation gets when patina's own end-of-run recorder failed, as
-/// the campaign summary counts them by it. Kept in sync with the
-/// `shutdown_failure` refusal class `output.rs` assigns.
-pub(super) const SHUTDOWN_FAILURE_SHAPE: &str = "refusal class=shutdown_failure";
-
-/// The refusal class patina's own end-of-run recorder failure carries.
-const SHUTDOWN_FAILURE_CLASS: &str = "shutdown_failure";
-/// The refusal class for a run whose trace CHANNEL failed — patina could not
-/// open, read, or rename the recorder's own scratch file. An operational
-/// condition of the host, in the same family as a timeout or an OOM kill.
-pub(super) const TRACE_UNAVAILABLE_CLASS: &str = "trace_unavailable";
-/// The refusal class for a run whose crash patina could not carry out
-/// (recovery, snapshot export or the handoff failed). Patina's own limit,
-/// never a result about the guest.
-pub(super) const CRASH_FAILED_CLASS: &str = "crash_failed";
-/// The refusal class for a run the host could not give what the virtual
-/// process granted (a stack limit past the host's hard limit). An operational
-/// condition of the host, like a timeout: never a result about the guest.
-pub(super) const HOST_LIMIT_CLASS: &str = "host_limit";
+/// the campaign summary counts them by it.
+pub(super) const SHUTDOWN_FAILURE_SHAPE: &str = "stop reason=shutdown_failure";
 
 /// One verdict the generation reported through the verdict ABI, reduced to what
 /// classification, signatures and `minimize`'s auto-target need. Lifted from the
@@ -249,7 +138,7 @@ impl VerdictFacts {
 }
 
 /// **The recognition primitive** (outcome-channel arc §4.5): the verdicts a
-/// `patina.result/v1` envelope reports, in call order.
+/// `patina.result/v2` envelope reports, in call order.
 ///
 /// One mechanism, two consumers asking different questions of it. The campaign
 /// classifies *from* this set — the multi-way, open "which class did this
@@ -291,7 +180,7 @@ pub struct FindingFacts {
 }
 
 /// The **structured** outcome facts of one generation: the child run's
-/// `patina.result/v1` envelope reduced to the fields classification reads, plus
+/// `patina.result` envelope reduced to the fields the campaign reads, plus
 /// the two facts only the campaign supervisor knows (whether it killed the
 /// generation on the wall-clock backstop, and whether the child produced an
 /// envelope at all).
@@ -303,36 +192,38 @@ pub struct FindingFacts {
 /// signature's last-resort fallback.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RunFacts {
-    /// The child process's exit status.
+    /// The child process's exit status: the tool's, which follows the run's
+    /// class and never the guest's status.
     pub exit_code: i32,
-    /// `guest_exit.code` — the status the guest itself exited with, which the
-    /// supervisor's own process status need not repeat.
+    /// `guest_exit.code` — the status the guest itself exited with.
     pub guest_exit_code: Option<i32>,
-    /// The signal the guest died on, from `guest_exit.signal`. `exit_code` alone
-    /// cannot express this (it is `128 + signal` there, the same value a guest
-    /// could have returned deliberately).
+    /// The signal the guest died on, from `guest_exit.signal`; without an
+    /// envelope, the signal the child itself died on.
     pub signal: Option<i32>,
+    /// The signal the child `patina run` process itself died on, if it did.
+    pub child_signal: Option<i32>,
     /// The campaign's wall-clock backstop killed this generation.
     pub timed_out: bool,
-    /// The child emitted a `patina.result/v1` envelope. `false` means patina's
-    /// own supervisor never reported a result for this generation.
+    /// The child emitted a `patina.result` run envelope. `false` means
+    /// patina's own supervisor never reported a run for this generation.
     pub envelope: bool,
-    /// `refusal.class` — patina's own fail-closed refusal, when patina refused.
-    /// Its ABSENCE is what makes an abort the guest's own doing.
-    pub refusal: Option<String>,
-    /// `refusal.guest_exit_code` — the status the GUEST itself reached, when the
-    /// refusal destroyed it. A `shutdown_failure` aborts the process from the
-    /// atexit hook, so `exit_code`/`signal` above describe patina's abort rather
-    /// than the guest; only this field can say whether the guest had already
-    /// failed on its own. `None` when the refusal did not record one.
-    pub refusal_guest_exit_code: Option<i32>,
+    /// `result` — the class the child's own run reported: the one
+    /// classification, made once, by the run. `None` without an envelope that
+    /// names a class this patina knows.
+    pub class: Option<RunClass>,
+    /// `stop.reason` — what stopped the run, when it did not end clean.
+    pub stop: Option<String>,
+    /// `stop.guest_exit_code` — the status the GUEST itself reached, when the
+    /// stop replaced it.
+    pub stop_guest_exit_code: Option<i32>,
+    /// `trace_unusable` — the class is the guest's own while the run's
+    /// recording was lost.
+    pub trace_unusable: bool,
     /// `replay_divergence` — a `replay` that ran but did not follow its trace
     /// (an operation past its end, a mismatched operation or outcome, recorded
     /// operations left over), as the runtime reported it on the facts channel;
     /// or a crash-restart replay that departed from its recording at the crash,
     /// as the supervisor reports it (`crash_restart.terminal_outcome.kind`).
-    /// Classification does not read it: only the replays of a generation's own
-    /// trace, reproduction verification and `minimize`'s oracle, do.
     pub replay_diverged: bool,
     /// `verdicts[]`, in call order.
     pub verdicts: Vec<VerdictFacts>,
@@ -344,7 +235,7 @@ pub struct RunFacts {
 
 impl RunFacts {
     /// The run's exit facts as one comparable string: the process's code, the
-    /// guest's full code, the signal, and patina's refusal class with the
+    /// guest's full code, the signal, and what stopped the run with the
     /// status the guest reached under it.
     pub(crate) fn exit_status(&self) -> String {
         let mut exit = format!("exit={}", self.exit_code);
@@ -354,11 +245,11 @@ impl RunFacts {
         if let Some(signal) = self.signal {
             exit.push_str(&format!(" signal={signal}"));
         }
-        if let Some(refusal) = &self.refusal {
-            exit.push_str(&format!(" refusal={refusal}"));
+        if let Some(stop) = &self.stop {
+            exit.push_str(&format!(" stop={stop}"));
         }
-        if let Some(code) = self.refusal_guest_exit_code {
-            exit.push_str(&format!(" refusal_guest_exit={code}"));
+        if let Some(code) = self.stop_guest_exit_code {
+            exit.push_str(&format!(" stop_guest_exit={code}"));
         }
         exit
     }
@@ -373,12 +264,18 @@ impl RunFacts {
             .find(|finding| finding.source == source)
     }
 
-    /// Whether this generation was killed from outside the guest. Only a real
-    /// signal counts: `128 + 9` is a value a guest could have returned
-    /// deliberately, and misreading one as a host kill would HIDE a finding —
-    /// the opposite error from the one this rule exists to fix.
+    /// Whether the child run itself was killed from outside: SIGKILL, which
+    /// it cannot deliver to itself, catch or survive. A guest killed under a
+    /// child that lived to report is the child's to classify (a host kill it
+    /// files `internal` itself; a SIGKILL the guest sent itself is its crash).
+    fn child_killed(&self) -> bool {
+        self.child_signal == Some(SIGKILL)
+    }
+
+    /// Whether the generation ended on a kill from outside, whoever saw it:
+    /// the campaign (the child died) or the child (its guest did).
     fn host_killed(&self) -> bool {
-        self.signal == Some(SIGKILL)
+        self.child_killed() || self.stop.as_deref() == Some(crate::output::HOST_KILL_STOP)
     }
 
     /// The name of the fault signal the guest died on, if it died on one.
@@ -388,16 +285,6 @@ impl RunFacts {
             .iter()
             .find(|(number, _)| *number == signal)
             .map(|(_, name)| *name)
-    }
-
-    /// Whether the guest died on SIGABRT. A signal is authoritative when the
-    /// envelope carried one; exit 134 is the fallback for the families whose
-    /// supervisor only sees a code.
-    fn aborted(&self) -> bool {
-        match self.signal {
-            Some(signal) => signal == SIGABRT,
-            None => self.exit_code == SIGABRT_EXIT,
-        }
     }
 }
 
@@ -415,6 +302,10 @@ pub struct GenerationFacts {
     /// build line, a pre-run advisory) names per-run paths and is never the
     /// guest's finding, so it must not be able to become a failure's shape.
     pub guest_output: Option<String>,
+    /// The envelope's `stop.detail`: patina's own line naming what stopped the
+    /// run. Text, so it lives here; read ONLY to tell one unsupported
+    /// operation's signature from another's.
+    pub stop_detail: Option<String>,
     /// The child envelope's `result_line`: the run verb's own single most
     /// representative line of the GUEST's streams (a violation marker, its
     /// `PATINA_RESULT`, else its last non-empty stderr line). Text, so it lives
@@ -448,14 +339,14 @@ impl GenerationFacts {
 /// spec JSON). The grep mechanism survives here, and only here: as explicit,
 /// versioned, per-guest configuration rather than a string baked into patina.
 ///
-/// Keyed by [`CampaignClass`], whose `Ord` is the severity order, so two matching
+/// Keyed by [`RunClass`], whose `Ord` is the severity order, so two matching
 /// declarations always resolve to the more severe class — deterministically.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClassifyRules {
     /// class -> output line substrings.
-    pub(super) patterns: BTreeMap<CampaignClass, Vec<String>>,
-    /// class -> child exit codes.
-    pub(super) exit_codes: BTreeMap<CampaignClass, Vec<i32>>,
+    pub(super) patterns: BTreeMap<RunClass, Vec<String>>,
+    /// class -> guest exit codes.
+    pub(super) exit_codes: BTreeMap<RunClass, Vec<i32>>,
 }
 
 impl ClassifyRules {
@@ -466,7 +357,7 @@ impl ClassifyRules {
     /// The class this guest's declared rules assign, if any. Patterns are checked
     /// before exit codes (a matched line is more specific than a bare code), and
     /// both in severity order.
-    fn declared(&self, generation: &GenerationFacts) -> Option<CampaignClass> {
+    fn declared(&self, generation: &GenerationFacts) -> Option<RunClass> {
         for (class, needles) in &self.patterns {
             if needles
                 .iter()
@@ -475,8 +366,14 @@ impl ClassifyRules {
                 return Some(*class);
             }
         }
+        // The GUEST's exit status: the child's own follows the run's class and
+        // says nothing a rule could key on.
         for (class, codes) in &self.exit_codes {
-            if codes.contains(&generation.facts.exit_code) {
+            if generation
+                .facts
+                .guest_exit_code
+                .is_some_and(|code| codes.contains(&code))
+            {
                 return Some(*class);
             }
         }
@@ -484,16 +381,16 @@ impl ClassifyRules {
     }
 }
 
-/// Classify one generation from its structured envelope facts plus the spec's
-/// declared rules.
+/// Classify one generation: the class its own run reported, adjusted by what
+/// only the campaign knows, plus the spec's declared rules.
 ///
-/// Envelope facts take precedence: a declared rule can only speak when the
-/// structured facts reached no verdict of their own (`OK`, or the loud
-/// `UNCLASSIFIED` catch-all), so a pattern can ADD a finding a level-1 guest
-/// would otherwise hide but can never downgrade one patina detected.
-pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> CampaignClass {
+/// The run's class takes precedence: a declared rule can only speak when the
+/// run found nothing structural of its own (`ok`, or a bare `failure`), so a
+/// pattern can ADD a finding a level-1 guest would otherwise hide but can never
+/// downgrade one patina detected.
+pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> RunClass {
     let built_in = built_in_class(&generation.facts);
-    if matches!(built_in, CampaignClass::Ok | CampaignClass::Unclassified)
+    if matches!(built_in, RunClass::Ok | RunClass::Failure)
         && let Some(declared) = rules.declared(generation)
     {
         return declared;
@@ -501,145 +398,47 @@ pub fn classify(generation: &GenerationFacts, rules: &ClassifyRules) -> Campaign
     built_in
 }
 
-/// The class the envelope's own facts imply, with no guest output in sight.
-/// Ordering encodes severity: an explicit finding wins over exit-status
-/// inference, a nonzero exit is never silently OK, and anything unrecognized
-/// lands LOUDLY in [`CampaignClass::Unclassified`] rather than being downgraded.
-fn built_in_class(facts: &RunFacts) -> CampaignClass {
-    // 1. The campaign's own wall-clock backstop killed this generation: it hung in
-    //    a way neither the virtual-time watchdog nor the child's budgets caught, so
-    //    the outcome is inconclusive (INFRA), never a silent OK.
+/// The class of a generation, with no guest output in sight: the one its own
+/// `patina run` reported, which the campaign does not second-guess, under
+/// the three facts only the campaign has. Total: a generation with no class
+/// to read lands in `internal`, never in `ok`.
+fn built_in_class(facts: &RunFacts) -> RunClass {
+    // 1. The campaign's own wall-clock backstop killed this generation: it hung
+    //    in a way neither the virtual-time watchdog nor the child's bounds
+    //    caught, so the outcome is inconclusive, never a silent `ok`.
     if facts.timed_out {
-        return CampaignClass::Infra;
+        return RunClass::Timeout;
     }
-    // 2. The guest was killed from OUTSIDE — SIGKILL, which it cannot deliver to
-    //    itself, cannot catch, and cannot survive. The kernel OOM killer under
-    //    parallel campaign load is the common source; a cgroup limit or an
-    //    operator are the others. That is a host-side condition, exactly like the
-    //    timeout above, and it is INFRA. Checked BEFORE every finding rule below
-    //    because a killed generation ran no invariant to completion: filing it as
-    //    a bug class reports a failure that does not exist, with a reproduce
-    //    command that cannot reproduce it, and burns a novel-signature slot that
-    //    a real bug should have had.
-    if facts.host_killed() {
-        return CampaignClass::Infra;
+    // 2. The child run was killed from OUTSIDE — SIGKILL. The kernel OOM
+    //    killer under parallel campaign load is the common source. Checked
+    //    before the child's own class because the child may have been killed
+    //    after it reported one, or along with its guest.
+    if facts.child_killed() {
+        return RunClass::Internal;
     }
-    // 3. No envelope at all: the child `patina run` failed before it could
-    //    report a result (a build failure, a pre-run gate refusal, a supervisor
-    //    error). That is a harness failure, not a system-under-test finding.
-    if !facts.envelope {
-        return CampaignClass::Infra;
+    // 3. No class to read: the child `patina run` left no run envelope (a
+    //    supervisor error, a child that died), or named a class this patina
+    //    does not know. Patina could not report a result for this generation.
+    let Some(class) = facts.class else {
+        return RunClass::Internal;
+    };
+    // 3a. The class the child reported and the status it then exited with must
+    //     agree, since the status is a function of the class: a child that
+    //     reported one outcome and ended another way (it died after printing
+    //     its envelope) did not finish the run it described. Never the
+    //     envelope's word over the process's.
+    if facts.exit_code != class.exit_code() {
+        return RunClass::Internal;
     }
-    // A pre-run refusal has an envelope, but no guest executed. Preserve the
-    // same infrastructure attribution as a CLI/build failure without a result.
-    if facts.refusal.as_deref() == Some(crate::output::NATIVE_PRERUN_REFUSAL) {
-        return CampaignClass::Infra;
+    // 4. A clean run whose fault or exploration plane went inert is a coverage
+    //    failure, and the signature names the planes. Vacuity is judged only
+    //    here, on a run that otherwise passed: a run that failed on its own
+    //    keeps that failure as its headline, exactly as it would without the
+    //    fault knobs that went inert.
+    if class == RunClass::Ok && !facts.vacuous_planes.is_empty() {
+        return RunClass::Vacuous;
     }
-    // A runtime limitation is infrastructure evidence, not a guest bug. Do not
-    // erase an independently reported safety verdict that preceded the stop.
-    if facts.findings.iter().any(|finding| finding.known_limit)
-        && facts.has_verdict("violation").is_none()
-    {
-        return CampaignClass::Infra;
-    }
-    // 4. A liveness/converge watchdog finding is its own class (a "never
-    //    converges" wedge), reported by the runtime as a `runtime_findings[]`
-    //    entry with `source=liveness`.
-    if facts
-        .findings
-        .iter()
-        .any(|finding| finding.source == "liveness" && !finding.known_limit)
-    {
-        return CampaignClass::Liveness;
-    }
-    // 5. A system-under-test safety violation: a `violation` verdict. Fires even
-    //    on exit 0 — a violated invariant is a bug however the process exited.
-    if facts.has_verdict("violation").is_some() {
-        return CampaignClass::Violation;
-    }
-    // 6. Patina fail-closed refusal: the envelope attributed the failure to
-    //    patina itself. Checked after the SUT findings above, so an `always!`
-    //    abort stays a VIOLATION.
-    if let Some(class) = &facts.refusal {
-        // Patina's OWN recorder gave out at the end of the run (the trace
-        // resource limit, an unwritable trace file). The shim `abort()`s after
-        // it, so a guest that had already finished dies on a SIGABRT it never
-        // raised — which, before this, was reported as `guest_abort
-        // unattributed`: a bug filed against the system under test for a failure
-        // inside patina, whose printed reproduce command could not reproduce it
-        // (the abort needs the `--record` the reproduce command omitted). It is
-        // INFRA for the same reason a timeout is: the harness, not a result.
-        //
-        // A failed trace CHANNEL (the scratch file vanished, its directory did,
-        // the filesystem refused) is the same bargain reached a different way:
-        // the guest ran, its verdict is whatever it reached, and only the
-        // artifact is lost. One difference — a guest that failed here may well
-        // have ABORTED, since nothing about a channel failure skips the guest's
-        // own death — so rather than naming a class outright, a guest that
-        // failed falls THROUGH to the rules below, which read the exit status
-        // and signal that are still its own.
-        // A crash patina could not carry out stopped the guest before it
-        // could reach a verdict of its own: the harness failing, like a
-        // timeout.
-        if class == CRASH_FAILED_CLASS || class == HOST_LIMIT_CLASS {
-            return CampaignClass::Infra;
-        }
-        if class == TRACE_UNAVAILABLE_CLASS {
-            match facts.refusal_guest_exit_code {
-                None | Some(0) => return CampaignClass::Infra,
-                Some(_) => {}
-            }
-        } else if class == SHUTDOWN_FAILURE_CLASS {
-            // ...but ONLY when the guest itself came through clean. The trace
-            // budget is spent by LONG runs, which are precisely the runs most
-            // likely to have found something; a generation that both failed for
-            // a real reason and broke the recorder must be filed under the
-            // GUEST's failure, or the finding vanishes into an infra bucket. The
-            // shim records the status the guest reached before the atexit abort
-            // replaced it (`refusal.guest_exit_code`), so the two cases are
-            // distinguishable here. The unusable trace does not stop being true
-            // — the report still says so — it just stops being the headline.
-            //
-            // An unrecorded status (`None`) keeps the INFRA demotion: with no
-            // evidence the guest failed, patina's own recorder is the only thing
-            // known to have gone wrong.
-            match facts.refusal_guest_exit_code {
-                None | Some(0) => return CampaignClass::Infra,
-                // The guest's own class. It cannot have aborted (an `abort()`
-                // skips atexit and never reaches finalization), so what is left
-                // is a panic or a deliberate nonzero exit: rule 9's bucket,
-                // reached directly because `exit_code`/`signal` here describe
-                // patina's abort and would otherwise misfile it as GUEST_ABORT.
-                Some(_) => return CampaignClass::Unclassified,
-            }
-        } else {
-            return CampaignClass::FailClosedAbort;
-        }
-    }
-    // 7. An abort patina did NOT attribute to itself is the guest's own doing.
-    //    This is §4.4's inversion: before the envelope carried `refusal`, every
-    //    unattributed SIGABRT was blamed on patina and buried in an infra-looking
-    //    bucket; now it is a finding in its own right.
-    if facts.aborted() {
-        return CampaignClass::GuestAbort;
-    }
-    // 8. A clean exit with no finding is OK, unless a fault or exploration plane
-    //    went inert: then it is a coverage failure, and the signature names the
-    //    planes. Vacuity is judged only here, on a run that otherwise passed: a
-    //    run that failed on its own (every rule above, and the nonzero exit
-    //    below) keeps that failure as its headline, exactly as it would without
-    //    the fault knobs that went inert.
-    if facts.exit_code == 0 {
-        if facts.vacuous_planes.is_empty() {
-            return CampaignClass::Ok;
-        }
-        return CampaignClass::Vacuous;
-    }
-    // 9. A nonzero exit that matched no class above is UNCLASSIFIED — surfaced
-    //    loudly for triage, never silently dropped as OK or mislabeled. A guest
-    //    that fails in a way patina cannot see structurally declares a
-    //    `classify` rule for it in its campaign spec (arc §4.3).
-    CampaignClass::Unclassified
+    class
 }
 
 /// Build a signature from a classified generation.
@@ -647,9 +446,9 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
 /// The shape comes from the same structured facts the class did, so two
 /// generations that hit the same invariant dedup to one signature regardless of
 /// how the guest worded its output. Only when the facts carry nothing for the
-/// class (`UNCLASSIFIED`, `INFRA`, a declared-pattern class) does it fall back to
+/// class (a bare `failure`, a declared-pattern class) does it fall back to
 /// the captured output, which is all there is in those cases.
-pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signature {
+pub fn signature(class: RunClass, generation: &GenerationFacts) -> Signature {
     let shape = normalize_shape(&primary_finding(class, generation));
     let policy = generation
         .bug_depth
@@ -667,20 +466,14 @@ pub fn signature(class: CampaignClass, generation: &GenerationFacts) -> Signatur
 /// cut from, before [`normalize_shape`] collapses its numbers. Reproduction
 /// verification compares it exactly, since a number that varies between two
 /// runs of one generation is the leak the shape hides.
-pub(super) fn primary_finding(class: CampaignClass, generation: &GenerationFacts) -> String {
+pub(super) fn primary_finding(class: RunClass, generation: &GenerationFacts) -> String {
     let shape = primary_finding_shape(class, generation);
-    // A generation whose class came from the GUEST while patina's own recorder
-    // also gave out is reproducible only up to a point: the finding stands, but
-    // the trace it would be replayed from was never written. Say so on the shape
+    // A generation whose class is the GUEST's while patina's own recorder also
+    // gave out is reproducible only up to a point: the finding stands, but the
+    // trace it would be replayed from was never written. Say so on the shape
     // itself — it is the line triage reads — rather than let a printed
-    // `reproduce` command promise an artifact that is not there. INFRA already
-    // names the refusal in its own shape and does not need the suffix.
-    if class != CampaignClass::Infra
-        && matches!(
-            generation.facts.refusal.as_deref(),
-            Some(SHUTDOWN_FAILURE_CLASS | TRACE_UNAVAILABLE_CLASS)
-        )
-    {
+    // `reproduce` command promise an artifact that is not there.
+    if generation.facts.trace_unusable && class.is_finding() {
         return format!("{shape} trace=unusable");
     }
     shape
@@ -688,68 +481,88 @@ pub(super) fn primary_finding(class: CampaignClass, generation: &GenerationFacts
 
 /// The class's own most representative description, before any cross-cutting
 /// annotation [`primary_finding`] adds.
-fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> String {
+fn primary_finding_shape(class: RunClass, generation: &GenerationFacts) -> String {
     let facts = &generation.facts;
+    // What stopped the run, as the run named it: the reason's token, which is
+    // patina's own and stable.
+    let stop_reason = || {
+        facts
+            .stop
+            .as_ref()
+            .map(|reason| format!("stop reason={reason}"))
+    };
     let structured = match class {
-        CampaignClass::Liveness => facts
+        RunClass::Liveness => facts
             .has_finding("liveness")
-            .map(|finding| format!("liveness kind={}", finding.kind)),
-        CampaignClass::Violation => facts
+            .map(|finding| format!("liveness kind={}", finding.kind))
+            .or_else(stop_reason),
+        RunClass::Violation => facts
             .has_verdict("violation")
-            .map(|verdict| format!("verdict kind=violation label={}", verdict.label)),
-        // An abort patina did not attribute to itself and the guest never
-        // claimed with an `abort_intent` verdict. `unattributed` is the honest
+            .map(|verdict| format!("verdict kind=violation label={}", verdict.label))
+            .or_else(stop_reason),
+        // A hardware/OS fault: the guest died executing bad code without ever
+        // reaching `abort()`. Name the signal — it is the whole finding — and
+        // keep the guest's last words after it for triage.
+        RunClass::Crash if facts.fault_signal().is_some() => {
+            facts
+                .fault_signal()
+                .map(|signal| match death_attribution(generation) {
+                    Some(evidence) => format!("guest_fault signal={signal} {evidence}"),
+                    None => format!("guest_fault signal={signal}"),
+                })
+        }
+        // The guest's own abort, which it may have claimed with an
+        // `abort_intent` verdict. Without one, `unattributed` is the honest
         // head — nothing structured says WHY — but it must not be the whole
         // shape: on a guest with no cooperative SDK (the common case) every
         // distinct abort in a campaign then dedups into ONE useless signature.
         // Recover what the streams do carry, so two different aborts stay two
         // findings and each names its own cause.
-        CampaignClass::GuestAbort => Some(match facts.has_verdict("abort_intent") {
+        RunClass::Crash => Some(match facts.has_verdict("abort_intent") {
             Some(verdict) => format!("guest_abort label={}", verdict.label),
             None => match death_attribution(generation) {
                 Some(evidence) => format!("guest_abort unattributed {evidence}"),
                 None => "guest_abort unattributed".to_string(),
             },
         }),
-        CampaignClass::FailClosedAbort => facts
-            .refusal
-            .as_ref()
-            .map(|class| format!("refusal class={class}")),
+        // What patina does not model is named by the stop's own detail (the
+        // syscall, the symbol, the operation), so two different gaps stay two
+        // signatures; its numbers collapse with the rest of the shape.
+        RunClass::Unsupported => stop_reason().map(|reason| {
+            match generation
+                .stop_detail
+                .as_deref()
+                .and_then(|detail| detail.lines().next())
+                .map(str::trim)
+                .filter(|detail| !detail.is_empty())
+            {
+                Some(detail) => format!("{reason} {detail}"),
+                None => reason,
+            }
+        }),
         // A host-side kill has ONE shape, always: there is no finding in it to
         // describe, and every such generation must dedup onto the same entry
         // rather than spraying novel signatures made of whatever the guest
         // happened to have printed when the kernel took it away.
-        // (A generation the campaign's own backstop killed is host-killed too,
-        // but it keeps the timeout marker as its shape: WHY it was killed is the
-        // finding there, and the backstop already said so.)
-        CampaignClass::Infra if facts.host_killed() && !facts.timed_out => {
-            Some(HOST_KILL_SHAPE.to_string())
+        RunClass::Internal if facts.host_killed() => Some(HOST_KILL_SHAPE.to_string()),
+        // A failure of patina's own is named by its reason alone: its detail
+        // carries per-run paths and pids, which would fragment the signature.
+        // A timeout the run itself reported (the compute bound, the step
+        // budget) likewise; the campaign's own backstop left only its marker
+        // in the output, which the fallback below reads.
+        RunClass::Timeout if facts.timed_out => None,
+        RunClass::Internal | RunClass::Timeout | RunClass::Error | RunClass::Nondeterministic => {
+            stop_reason()
         }
-        // An INFRA generation patina attributed to ITSELF (the recorder giving
-        // out) is named by that attribution rather than by whatever text trailed
-        // the run — the raw `PATINA_INFRA native_run ...` line carries per-run
-        // paths and a pid, which fragment the signature.
-        CampaignClass::Infra => facts
-            .refusal
-            .as_ref()
-            .map(|class| format!("refusal class={class}")),
-        // A hardware/OS fault: the guest died executing bad code without ever
-        // reaching `abort()`. Name the signal — it is the whole finding — and
-        // keep the guest's last words after it for triage.
         // The inert planes are the whole finding, in a fixed order so two
         // generations with the same planes share a signature.
-        CampaignClass::Vacuous => {
+        RunClass::Vacuous => {
             let mut planes = facts.vacuous_planes.clone();
             planes.sort();
             Some(format!("vacuous planes={}", planes.join(",")))
         }
-        // A fault signal is the fallback for the classes that carry no fact.
-        _ => facts
-            .fault_signal()
-            .map(|signal| match death_attribution(generation) {
-                Some(evidence) => format!("guest_fault signal={signal} {evidence}"),
-                None => format!("guest_fault signal={signal}"),
-            }),
+        // A bare failure carries no fact: its shape is the guest's own words.
+        RunClass::Failure | RunClass::Ok => None,
     };
     if let Some(shape) = structured {
         return shape;
@@ -990,65 +803,55 @@ mod tests {
     use super::*;
     use patina_dst_runtime::FaultKnob;
 
-    /// A stack limit the host could not apply, or a crash patina could not
-    /// carry out, ends the guest at the host's hand: INFRA, never a finding.
+    /// A campaign ends in one class: a finding in the guest outranks every
+    /// stop of patina's, an unmet coverage gate is the guest's, and only a
+    /// campaign with neither exits 2 for what patina could not do.
     #[test]
-    fn a_host_side_failure_is_infra() {
-        for generation in [
-            planted(
-                RunFacts::ok().exit(134).signal(6).refusal(HOST_LIMIT_CLASS),
-                "PATINA_INFRA host_limit reason=\"setrlimit(RLIMIT_STACK)\"\n",
-            ),
-            planted(
-                RunFacts::ok().exit(113).refusal(CRASH_FAILED_CLASS),
-                "PATINA_INFRA crash_failed reason=\"export failed\"\n",
-            ),
+    fn a_campaign_ends_in_the_class_that_decides_its_exit() {
+        use RunClass::*;
+        for (classes, gate_failed, want) in [
+            (vec![Ok], false, Ok),
+            (vec![Ok, Unsupported, Failure, Internal], false, Failure),
+            (vec![Ok, Failure, Violation], false, Violation),
+            (vec![Ok, Internal], true, Violation),
+            (vec![Ok, Internal, Unsupported], false, Unsupported),
+            (vec![Ok, Vacuous], false, Vacuous),
+            (vec![Ok, Timeout, Nondeterministic], false, Nondeterministic),
         ] {
-            let class = classify(&generation, &ClassifyRules::default());
-            assert_eq!(class, CampaignClass::Infra);
-            assert!(!class.is_finding());
+            let result = campaign_result(classes.iter().copied(), gate_failed);
+            assert_eq!(result, want, "{classes:?} gate_failed={gate_failed}");
+            assert_eq!(
+                result.exit_code() == 1,
+                gate_failed || classes.iter().any(|class| class.is_finding()),
+                "{classes:?}"
+            );
         }
     }
 
+    /// Every class a single generation can land in: the run's own passes
+    /// through, and the campaign's three overrides each fire.
     #[test]
-    fn every_class_is_reachable_from_structured_facts() {
+    fn a_generation_lands_in_its_runs_class_under_the_campaigns_overrides() {
         let rules = ClassifyRules::default();
-        let fired: Vec<CampaignClass> = vec![
-            classify(&planted(RunFacts::ok(), ""), &rules),
-            classify(
-                &planted(RunFacts::ok().verdict("violation", "x"), ""),
-                &rules,
-            ),
-            classify(
-                &planted(RunFacts::ok().finding("liveness", "no_progress"), ""),
-                &rules,
-            ),
+        for class in RunClass::ALL.iter().copied() {
+            if is_cross_run(class) || class == RunClass::Vacuous {
+                continue;
+            }
+            let facts = RunFacts::ok().stopped(class, "reason");
+            assert_eq!(classify(&planted(facts, ""), &rules), class);
+        }
+        assert_eq!(
             classify(&planted(RunFacts::ok().vacuous("fs"), ""), &rules),
-            classify(
-                &planted(RunFacts::ok().exit(SIGABRT_EXIT).signal(SIGABRT), ""),
-                &rules,
-            ),
-            classify(
-                &planted(
-                    RunFacts::ok()
-                        .exit(SIGABRT_EXIT)
-                        .signal(SIGABRT)
-                        .refusal("shim_fatal"),
-                    "",
-                ),
-                &rules,
-            ),
+            RunClass::Vacuous
+        );
+        assert_eq!(
             classify(&planted(RunFacts::ok().timed_out(), ""), &rules),
-            classify(&planted(RunFacts::ok().exit(3), ""), &rules),
-        ];
-        // The cross-run class is reached by comparing two runs, never from one
-        // run's facts; the selftest proves it fires through the comparison.
-        let single_run: Vec<CampaignClass> = CampaignClass::ALL
-            .iter()
-            .copied()
-            .filter(|class| !class.is_cross_run())
-            .collect();
-        assert_eq!(fired, single_run);
+            RunClass::Timeout
+        );
+        assert_eq!(
+            classify(&planted(RunFacts::ok().no_envelope(), ""), &rules),
+            RunClass::Internal
+        );
     }
 
     #[test]
@@ -1057,11 +860,11 @@ mod tests {
         // A level-1 guest's own text, with zero guest modification.
         assert_eq!(
             classify(&planted(RunFacts::ok(), "checksum mismatch"), &rules),
-            CampaignClass::Violation
+            RunClass::Violation
         );
         assert_eq!(
             classify(&planted(RunFacts::ok().exit(3), ""), &rules),
-            CampaignClass::Violation
+            RunClass::Violation
         );
         // The same text with no rule declared stays OK: the rule classifies, not
         // the string.
@@ -1070,18 +873,43 @@ mod tests {
                 &planted(RunFacts::ok(), "checksum mismatch"),
                 &ClassifyRules::default()
             ),
-            CampaignClass::Ok
+            RunClass::Ok
         );
-        // An envelope finding always wins over a declared rule.
+        // A class the run itself reached always wins over a declared rule.
         assert_eq!(
             classify(
                 &planted(
-                    RunFacts::ok().exit(3).refusal("fingerprint_mismatch"),
+                    RunFacts::ok()
+                        .exit(3)
+                        .stopped(RunClass::Unsupported, "not_modeled"),
                     "checksum mismatch"
                 ),
                 &rules
             ),
-            CampaignClass::FailClosedAbort
+            RunClass::Unsupported
+        );
+    }
+
+    /// Two operations patina does not model are two signatures, named by the
+    /// stop's own detail; a failure of patina's own is one, by its reason.
+    #[test]
+    fn an_unsupported_stop_is_signed_by_what_was_reached() {
+        let stopped = |class: RunClass, detail: &str| {
+            let mut generation = planted(RunFacts::ok().stopped(class, "reason"), "");
+            generation.stop_detail = Some(detail.to_string());
+            signature(class, &generation)
+        };
+        assert_ne!(
+            stopped(RunClass::Unsupported, "the guest called fork"),
+            stopped(RunClass::Unsupported, "the guest called dlopen")
+        );
+        assert_eq!(
+            stopped(RunClass::Unsupported, "syscall 435 at pc 0x7f01"),
+            stopped(RunClass::Unsupported, "syscall 435 at pc 0x7f02")
+        );
+        assert_eq!(
+            stopped(RunClass::Internal, "scratch /tmp/a"),
+            stopped(RunClass::Internal, "scratch /tmp/b")
         );
     }
 
@@ -1107,7 +935,7 @@ mod tests {
                 plane.unwrap_or_else(|| panic!("{knob:?} has a report but no vacuity plane"));
             let generation = planted(RunFacts::ok().vacuous(plane), "");
             let class = classify(&generation, &rules);
-            assert_eq!(class, CampaignClass::Vacuous, "{knob:?} on plane {plane:?}");
+            assert_eq!(class, RunClass::Vacuous, "{knob:?} on plane {plane:?}");
             assert!(
                 signature(class, &generation).shape.ends_with(plane),
                 "{knob:?}: the signature must name plane {plane:?}"

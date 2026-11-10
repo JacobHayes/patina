@@ -22,10 +22,10 @@ fn guest_exit_reports_the_core_flag() {
         } = crate::native_child_status(status);
         assert_eq!(signal, expected_signal);
         assert_eq!(core, status.core_dumped());
-        let mut env = Envelope::new("run", "failure", code);
+        let mut env = Envelope::new("run", RunClass::Failure);
         env.guest_exit = Some(GuestExit { code, signal, core });
         let json = env.to_json();
-        assert_eq!(json["schema"], "patina.result/v1");
+        assert_eq!(json["schema"], ENVELOPE_SCHEMA);
         assert_eq!(
             json["guest_exit"]
                 .get("core")
@@ -42,61 +42,236 @@ fn guest_exit_reports_the_core_flag() {
     }
 }
 
+/// One finished run's evidence, and the class it must land in.
+struct Case {
+    name: &'static str,
+    exit_code: i32,
+    signal: Option<i32>,
+    facts: Option<serde_json::Value>,
+    crash_replay_diverged: bool,
+    crash_failed: bool,
+    runtime_started: bool,
+    channel_defect: Option<&'static str>,
+    trace_lost: Option<&'static str>,
+    class: RunClass,
+}
+
+impl Case {
+    fn exited(name: &'static str, exit_code: i32, class: RunClass) -> Self {
+        Self {
+            name,
+            exit_code,
+            signal: None,
+            facts: None,
+            crash_replay_diverged: false,
+            crash_failed: false,
+            runtime_started: true,
+            channel_defect: None,
+            trace_lost: None,
+            class,
+        }
+    }
+
+    fn signalled(name: &'static str, signal: i32, class: RunClass) -> Self {
+        Self {
+            signal: Some(signal),
+            ..Self::exited(name, 128 + signal, class)
+        }
+    }
+
+    fn facts(mut self, facts: serde_json::Value) -> Self {
+        self.facts = Some(facts);
+        self
+    }
+
+    /// The shim's stop record for this run.
+    fn stopped(self, class: &str, reason: &str) -> Self {
+        self.facts(serde_json::json!({
+            "stop": {"class": class, "reason": reason, "detail": "what was reached"}
+        }))
+    }
+}
+
+fn cases() -> Vec<Case> {
+    use RunClass::*;
+    const SIGABRT: i32 = 6;
+    const SIGSEGV: i32 = 11;
+    let violation = serde_json::json!({"verdicts": [{"kind": "violation", "label": "ledger"}]});
+    let liveness = serde_json::json!({
+        "runtime_findings": [{"source": "liveness", "kind": "converge", "detail": "wedged"}]
+    });
+    let compute_bound = serde_json::json!({
+        "runtime_findings": [{"source": "liveness", "detail": "compute-bound", "known_limit": true}]
+    });
+    vec![
+        Case::exited("a clean exit", 0, Ok),
+        // An armed watchdog that did not fire, and a `pass` verdict, are no
+        // findings.
+        Case::exited("a clean exit with unremarkable facts", 0, Ok).facts(serde_json::json!({
+            "fault_reports": {}, "verdicts": [{"kind": "pass", "label": "drained"}]
+        })),
+        Case::exited("a panic or a nonzero exit", 101, Failure),
+        // Guest text cannot make a finding: with no structured fact a nonzero
+        // exit is a plain failure whatever the exit code is.
+        Case::exited("an exit status patina also uses", 2, Failure),
+        Case::signalled("the guest's own abort", SIGABRT, Crash),
+        Case::signalled("a segmentation fault", SIGSEGV, Crash),
+        // A violation is one whatever the guest's exit status says.
+        Case::exited("a violation verdict, then a clean exit", 0, Violation).facts(violation.clone()),
+        Case::signalled("an always! violation", SIGABRT, Violation).facts(serde_json::json!({
+            "verdicts": [{"kind": "violation", "label": "ledger"}],
+            "stop": {"class": "violation", "reason": "always", "detail": ""}
+        })),
+        Case::signalled("an SDK contract the guest broke", SIGABRT, Violation)
+            .stopped("violation", "sdk_misuse"),
+        Case::signalled("the liveness watchdog", SIGABRT, Liveness).facts(liveness.clone()),
+        Case::signalled("a deadlock", SIGABRT, Liveness).stopped("liveness", "deadlock"),
+        Case::signalled("the compute bound", SIGABRT, Timeout).facts(compute_bound.clone()),
+        Case::signalled("the step budget", SIGABRT, Timeout).stopped("timeout", "step_budget"),
+        Case::signalled("an operation patina does not model", SIGABRT, Unsupported)
+            .stopped("unsupported", "not_modeled"),
+        Case::signalled("a shim invariant", SIGABRT, Internal).stopped("internal", "shim_fatal"),
+        // A fault inside the shim dies on the fault's own signal; its stop
+        // record keeps it from reading as the guest's crash.
+        Case::signalled("a fault inside the shim", SIGSEGV, Internal)
+            .stopped("internal", "shim_fault"),
+        Case::signalled("a host kill", 9, Internal),
+        // A terminating signal no instruction raises: the guest's own when
+        // the virtual kernel's default action left its record, else sent
+        // from outside the run.
+        Case::signalled("the guest's own SIGTERM", 15, Crash).stopped("crash", "signal"),
+        Case::signalled(
+            "a SIGTERM with no record",
+            15,
+            if guest_signals_are_modeled() {
+                Internal
+            } else {
+                Crash
+            },
+        ),
+        // Evidence patina could not read leaves even a clean exit unjudged.
+        Case {
+            channel_defect: Some("the stop pipe carried bytes that are not JSON"),
+            ..Case::exited("an unreadable channel", 0, Internal)
+        },
+        Case::signalled("a stop the supervisor cannot read", SIGABRT, Internal)
+            .stopped("no-such-class", "x"),
+        // A replay that left its trace is judged first: nothing after the
+        // divergence describes the recorded run, a verdict included.
+        Case::signalled("a replay divergence", SIGABRT, Nondeterministic).facts(serde_json::json!({
+            "replay_divergence": "operation_mismatch",
+            "verdicts": [{"kind": "violation", "label": "ledger"}],
+            "stop": {"class": "internal", "reason": "shim_fatal", "detail": ""}
+        })),
+        Case {
+            crash_replay_diverged: true,
+            ..Case::exited("a crash-restart replay divergence", 0, Nondeterministic)
+        },
+        // A crash patina could not carry out, whose incarnation died on a
+        // signal before it could say so.
+        Case {
+            crash_failed: true,
+            ..Case::signalled("a crash that could not be carried out", 25, Internal)
+        },
+        // A process that never got as far as patina's runtime is not the
+        // guest crashing, whatever it died of; one that exits clean is clean.
+        Case {
+            runtime_started: false,
+            ..Case::signalled("a death before the runtime started", SIGSEGV, Internal)
+        },
+        Case {
+            runtime_started: false,
+            ..Case::exited("a failed load", 127, Internal)
+        },
+        Case {
+            runtime_started: false,
+            ..Case::exited("a clean exit before the runtime started", 0, Ok)
+        },
+        // The guest's own finding outlives a later stop of patina's.
+        Case::signalled("a violation, then the compute bound", SIGABRT, Violation).facts(
+            serde_json::json!({
+                "verdicts": [{"kind": "violation", "label": "ledger"}],
+                "runtime_findings": [{"source": "liveness", "known_limit": true}],
+                "stop": {"class": "timeout", "reason": "compute_bound", "detail": ""}
+            }),
+        ),
+        // Patina's finalization failing after the guest finished: its own
+        // failure when the guest was clean, the guest's when it had failed.
+        Case::signalled("a shutdown failure of a clean guest", SIGABRT, Internal).facts(
+            serde_json::json!({"stop": {
+                "class": "internal", "reason": "shutdown_failure", "detail": "", "guest_exit_code": 0
+            }}),
+        ),
+        Case::signalled("a shutdown failure of a failed guest", SIGABRT, Failure).facts(
+            serde_json::json!({"stop": {
+                "class": "internal", "reason": "shutdown_failure", "detail": "", "guest_exit_code": 3
+            }}),
+        ),
+        Case {
+            trace_lost: Some("the scratch file vanished"),
+            ..Case::exited("a recording lost under a clean guest", 0, Internal)
+        },
+        Case {
+            trace_lost: Some("the scratch file vanished"),
+            ..Case::exited("a recording lost under a failed guest", 3, Failure)
+        },
+    ]
+}
+
+/// The one classification, over every way a run ends: each lands in its
+/// class, and the class alone decides the attribution and the exit status.
 #[test]
-fn refusal_attributes_patinas_own_fail_closed_aborts() {
-    let attributed = refusal(
-            134,
-            "",
-            "patina: the deterministic runtime failed to initialize: trace fingerprint mismatch: runtime is a, trace is b",
-        )
-        .expect("a fingerprint mismatch is patina refusing");
-    assert_eq!(attributed.class, "fingerprint_mismatch");
-    assert!(attributed.message.contains("fingerprint mismatch"));
-
-    assert_eq!(
-        refusal(
-            134,
-            "",
-            "patina: this binary was built with `patina build` and must run under `patina run`"
-        )
-        .expect("no runtime installed is a refusal")
-        .class,
-        "no_runtime_installed"
-    );
-    assert_eq!(
-        refusal(2, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=x")
-            .expect("a duplicate buggify label is a refusal")
-            .class,
-        "buggify_duplicate_label"
-    );
-    // With patina's refusals attributed, an UNATTRIBUTED SIGABRT is the
-    // guest's own doing, and a clean run is never a refusal whatever it
-    // printed.
-    assert!(refusal(134, "APP_INVARIANT_BROKEN detail=ledger", "").is_none());
-    assert!(refusal(0, "", "fingerprint mismatch").is_none());
-    // A failed trace CHANNEL is patina's own refusal under one fixed prefix, carrying the status
-    // the GUEST reached; the incomplete trace a DYING guest leaves is a consequence of the run, not
-    // a refusal.
-    {
-        let line = format!(
-            "{} guest_exit_code=0 — the trace could not be written",
-            crate::TRACE_CHANNEL_UNAVAILABLE
+fn every_way_a_run_ends_lands_in_one_class() {
+    for case in cases() {
+        let outcome = classify(&RunEvidence {
+            exit_code: case.exit_code,
+            signal: case.signal,
+            facts: case.facts.as_ref(),
+            crash_replay_diverged: case.crash_replay_diverged,
+            crash_failed: case.crash_failed,
+            runtime_started: case.runtime_started,
+            channel_defect: case.channel_defect,
+            trace_lost: case.trace_lost,
+        });
+        assert_eq!(outcome.class, case.class, "{}", case.name);
+        // A run that did not end clean always says what stopped it.
+        assert_eq!(
+            outcome.stop.is_some(),
+            case.class.is_failure(),
+            "{}",
+            case.name
         );
-        let refused = refusal(2, "", &line).expect("a failed trace channel is a refusal");
-        assert_eq!(refused.class, "trace_unavailable");
-        assert_eq!(refused.guest_exit_code, Some(0));
-
-        // RED twin: the truncated trace a DYING guest leaves is a consequence of
-        // the run, not a refusal — attributing it to patina would make every
-        // guest abort mid-record look like patina's fault.
-        assert!(
-            refusal(
-                134,
-                "",
-                "PATINA_INFRA native_run signal=6 trace=incomplete trace_path=\"t.patina\"                  reason=\"empty trace file; record finalization did not complete\""
-            )
-            .is_none(),
-            "a trace left incomplete by a dying guest must not be attributed to patina"
+        let mut env = Envelope::new("run", outcome.class);
+        env.stop = outcome.stop;
+        let json = env.to_json();
+        assert_eq!(json["exit_code"], case.class.exit_code(), "{}", case.name);
+        assert_eq!(
+            json.get("attribution").and_then(serde_json::Value::as_str),
+            case.class
+                .attribution()
+                .map(|attribution| attribution.as_str()),
+            "{}",
+            case.name
         );
     }
+}
+
+/// A recording lost under a guest that failed on its own leaves the finding
+/// standing and says its trace is gone.
+#[test]
+fn a_lost_recording_marks_the_guests_own_failure_unreplayable() {
+    let failed_guest = |trace_lost| {
+        classify(&RunEvidence {
+            exit_code: 3,
+            signal: None,
+            facts: None,
+            crash_replay_diverged: false,
+            crash_failed: false,
+            runtime_started: true,
+            channel_defect: None,
+            trace_lost,
+        })
+    };
+    assert!(failed_guest(Some("gone")).trace_unusable);
+    assert!(!failed_guest(None).trace_unusable);
 }

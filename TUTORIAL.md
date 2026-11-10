@@ -284,9 +284,9 @@ draws the DNS knobs per generation alongside the fs and network ones:
 ```
 $ patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
     --out-dir ./dns-out
-PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=VIOLATION NOVEL verify=replay:reproduced
-  class OK                 19
-  class VIOLATION          1
+PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=violation NOVEL verify=replay:reproduced
+  class ok                 19
+  class violation          1
       reproduce: patina replay ./resolver ./dns-out/failures/generation-7.patina
 PATINA_CAMPAIGN_COMPLETE generations=20 failures=1 novel=1
 ```
@@ -308,20 +308,21 @@ service-side registration.
 ## 10. Machine-readable output for agents
 
 Any verb accepts `--format json`. Most emit one result envelope on stdout (schema
-`patina.result/v1`) with the guest output folded in; `coverage` emits
+`patina.result/v2`) with the guest output folded in; `coverage` emits
 `patina.coverage/v1`, and `trace events` uses streaming JSON Lines:
 
 ```
 $ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
-{"schema":"patina.result/v1","verb":"run","result":"violation",
- "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":22,
+{"schema":"patina.result/v2","verb":"run","result":"violation",
+ "attribution":"guest","exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":22,
  "event_count":...,"metadata":{...}},"verdicts":[...],
  "result_line":"BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]", ...}
 ```
 
-`result` is `ok | violation | liveness | infra | failure | error`, read from
-structured facts only: a guest that merely prints failure text is a `failure`.
-The selector is `--format`
+`result` is the run's one outcome and `attribution` whose move it is; both, and
+the exit status that follows from them, are the table in the README's "Outcomes
+and exit codes". They are read from structured facts only: a guest that merely
+prints failure text and exits nonzero is a `failure`. The selector is `--format`
 (not `--output`, which is the build/minimize artifact path).
 
 A guest that reports outcomes through the verdict ABI

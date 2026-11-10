@@ -3,6 +3,7 @@
 use crate::native_build::resolve_artifact;
 use crate::native_run::emit_native_deny_trap_note;
 use crate::{ArtifactRef, CliError, NativeAuditInvocation, output};
+use patina_dst_abi::RunClass;
 use patina_dst_target::{
     NativeAudit, NativeEscape, TargetError, native_binary_has_sud_marker,
     native_binary_has_tsc_marker, native_binary_is_shim_linked, native_escape_is_sud_manageable,
@@ -117,7 +118,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
                 // fail closed and render the provenance-rich audit result.
                 emit_native_audit_violation(&resolved.path, &denied, &host_identity);
                 emit_host_identity_note(&host_identity);
-                return Ok(2);
+                return Ok(RunClass::Unsupported.exit_code());
             }
             // Only trap-manageable instruction findings, and the matching
             // dispatcher is linked: report them as managed (both outcomes) and
@@ -143,7 +144,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
                     &resolved.path.display().to_string(),
                     findings,
                     details,
-                    0,
+                    RunClass::Ok,
                 );
             } else {
                 if sites > 0 {
@@ -190,7 +191,7 @@ named frozen-clock-churn abort.",
             &resolved.path.display().to_string(),
             findings,
             host_identity_details(&host_identity),
-            0,
+            RunClass::Ok,
         );
     } else {
         for finding in &findings {
@@ -248,7 +249,13 @@ fn emit_native_audit_violation(
         // binary was refused, and dropping them here would make the class visible
         // on some outcomes and silent on others.
         details.extend(host_identity_details(host_identity));
-        output::emit_audit("audit", &path.display().to_string(), findings, details, 2);
+        output::emit_audit(
+            "audit",
+            &path.display().to_string(),
+            findings,
+            details,
+            RunClass::Unsupported,
+        );
     } else {
         eprintln!("{}", render_native_escapes_grouped(denied));
         if let Some(note) = render_thread_pointer_note(denied) {

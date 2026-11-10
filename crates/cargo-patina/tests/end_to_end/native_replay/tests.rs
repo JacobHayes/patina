@@ -207,8 +207,8 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
     );
     assert_eq!(
         ran.status.code(),
-        Some(134),
-        "abort should be surfaced as 128+SIGABRT\nstdout:\n{}\nstderr:\n{}",
+        Some(1),
+        "an abort is a finding in the guest\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
@@ -240,7 +240,11 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
         assert_eq!(direct.status.signal(), Some(SIGABRT));
         assert_eq!(envelope["guest_exit"]["signal"], SIGABRT);
         assert_eq!(envelope["guest_exit"]["core"], direct.status.core_dumped());
-        assert!(envelope.get("refusal").is_none(), "{envelope:#}");
+        assert_eq!(
+            (&envelope["result"], &envelope["attribution"]),
+            (&"crash".into(), &"guest".into()),
+            "{envelope:#}"
+        );
         patina_dst_trace::TraceBundle::load(&trace)
             .expect("explicit guest abort finalizes; internal fatals do not");
         assert!(
@@ -253,18 +257,19 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
     #[cfg(target_os = "macos")]
     {
         assert!(!trace.exists(), "macOS abort is not a modeled guest event");
-        assert_eq!(envelope["result"], "infra");
+        // The guest's own abort all the same: a crash in the guest, whose
+        // trace is merely missing.
+        assert_eq!(
+            (&envelope["result"], &envelope["guest_exit"]["signal"]),
+            (&"crash".into(), &6.into()),
+            "{envelope:#}"
+        );
         assert!(
             envelope.get("trace").is_none(),
             "no absent trace fact should be advertised: {envelope:#}"
         );
         let stderr = envelope["stderr"].as_str().unwrap();
-        for detail in [
-            "PATINA_INFRA native_run",
-            "signal=6",
-            "trace=incomplete",
-            "empty trace",
-        ] {
+        for detail in ["PATINA_INFRA native_run", "trace=incomplete", "empty trace"] {
             assert!(stderr.contains(detail), "missing {detail:?}: {stderr}");
         }
     }
@@ -410,7 +415,15 @@ fn the_trace_names_its_build_and_refuses_any_other(
     // guest ran.
     let json = replay(&changed, trace, true);
     let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(envelope["refusal"]["class"], "fingerprint_mismatch");
+    assert_eq!(
+        (
+            &envelope["result"],
+            &envelope["stop"]["reason"],
+            &envelope["exit_code"]
+        ),
+        (&"error".into(), &"trace_mismatch".into(), &2.into()),
+        "{envelope}"
+    );
     assert!(
         envelope
             .get("guest_exit")

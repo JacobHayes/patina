@@ -1,5 +1,5 @@
 # Sourced by the testbed gates: run a guest under `--format json` and split its
-# `patina.result/v1` envelope, the run's one machine channel, into files the
+# `patina.result/v2` envelope, the run's one machine channel, into files the
 # gate greps. `jrun PREFIX ARGS...` runs `patina --format json ARGS...`
 # and leaves PREFIX.json (the envelope), PREFIX.verdicts (one
 # `<kind> <label> <detail>` line per verdict, in call order) and PREFIX.err (the

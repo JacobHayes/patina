@@ -3,7 +3,7 @@
 use super::observe::EdgeCoverageState;
 use super::spec::classify_rules_to_json;
 use super::verify::{CleanReruns, Verification};
-use super::{AllowUnmetSometimes, CampaignClass, CampaignSpec, FAULT_SCALE_FULL, VerdictFacts};
+use super::{AllowUnmetSometimes, CampaignSpec, FAULT_SCALE_FULL, RunClass, VerdictFacts};
 use crate::CliError;
 use crate::aux_store::validate_resume_watermark;
 use crate::sdk_report::CoverageTally;
@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 /// required field, not an optional one — a v1 out-dir is refused by name rather
 /// than resumed with a silently empty verdict set that would make an auto-target
 /// minimize look like "this generation reported nothing".
-const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v2";
-const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
+const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v3";
+const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v2";
 
 // ===========================================================================
 // Signature store
@@ -31,7 +31,7 @@ const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v1";
 /// One accumulated failure signature and its provenance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SignatureRecord {
-    pub(super) class: CampaignClass,
+    pub(super) class: RunClass,
     pub(super) shape: String,
     pub(super) policy: String,
     pub(super) first_seen_gen: u64,
@@ -87,7 +87,7 @@ impl SignatureRecord {
             .ok_or_else(|| "signature record must be an object".to_string())?;
         let key = json_required_str(object, "signature")?.to_string();
         let class_text = json_required_str(object, "class")?;
-        let class = CampaignClass::parse(class_text)
+        let class = RunClass::from_name(class_text)
             .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?;
         let shape = json_required_str(object, "shape")?.to_string();
         let policy = json_optional_str(object, "policy")?.unwrap_or_default();
@@ -133,7 +133,7 @@ impl SignatureRecord {
 pub(super) struct GenerationOutcome {
     pub(super) generation: u64,
     pub(super) seed: u64,
-    pub(super) class: CampaignClass,
+    pub(super) class: RunClass,
     pub(super) flags: Vec<String>,
     pub(super) novel: bool,
     pub(super) signature_key: Option<String>,
@@ -177,7 +177,7 @@ impl GenerationOutcome {
             .as_object()
             .ok_or_else(|| "notable run must be an object".to_string())?;
         let class_text = json_required_str(object, "class")?;
-        let class = CampaignClass::parse(class_text)
+        let class = RunClass::from_name(class_text)
             .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?;
         let flags = object
             .get("flags")
@@ -696,7 +696,7 @@ fn parse_class_counts(value: &serde_json::Value) -> Result<BTreeMap<String, u64>
         .ok_or_else(|| "classes must be an object".to_string())?;
     let mut classes = BTreeMap::new();
     for (class, count) in object {
-        CampaignClass::parse(class).ok_or_else(|| format!("unknown campaign class {class:?}"))?;
+        RunClass::from_name(class).ok_or_else(|| format!("unknown campaign class {class:?}"))?;
         let count = count
             .as_u64()
             .ok_or_else(|| format!("class count for {class:?} must be an unsigned integer"))?;
@@ -709,8 +709,8 @@ pub(super) fn class_counts_failures(class_counts: &BTreeMap<String, u64>) -> u64
     class_counts
         .iter()
         .filter_map(|(class, count)| {
-            CampaignClass::parse(class)
-                .filter(CampaignClass::is_failure)
+            RunClass::from_name(class)
+                .filter(|class| class.is_failure())
                 .map(|_| *count)
         })
         .sum()
@@ -1045,7 +1045,7 @@ fn lock_out_dir(file: &File) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CampaignClass, CampaignSpec, VerdictFacts};
+    use super::super::{CampaignSpec, RunClass, VerdictFacts};
     use super::*;
     use crate::sdk_report::CoverageTally;
     use std::fs;
@@ -1126,13 +1126,13 @@ mod tests {
             "sha256:supervisor".to_string(),
         );
         state.generations_done = 2;
-        state.classes.insert("OK".to_string(), 1);
-        state.classes.insert("LIVENESS".to_string(), 1);
-        let key = "LIVENESS|PATINA_VIOLATION liveness #|".to_string();
+        state.classes.insert("ok".to_string(), 1);
+        state.classes.insert("liveness".to_string(), 1);
+        let key = "liveness|PATINA_VIOLATION liveness #|".to_string();
         state.signatures.insert(
             key.clone(),
             SignatureRecord {
-                class: CampaignClass::Liveness,
+                class: RunClass::Liveness,
                 shape: "PATINA_VIOLATION liveness #".to_string(),
                 policy: String::new(),
                 first_seen_gen: 1,
@@ -1148,7 +1148,7 @@ mod tests {
         state.notable_runs.push(GenerationOutcome {
             generation: 1,
             seed: 42,
-            class: CampaignClass::Liveness,
+            class: RunClass::Liveness,
             flags: vec!["--liveness-watchdog".to_string(), "5".to_string()],
             novel: true,
             signature_key: Some(key),
@@ -1195,7 +1195,7 @@ mod tests {
             .remove("verdicts");
         assert!(CampaignState::from_json(&missing_verdicts).is_err());
         let mut bad_class = parsed_json;
-        bad_class["classes"] = serde_json::json!({"MYSTERY": 1, "OK": 1});
+        bad_class["classes"] = serde_json::json!({"mystery": 1, "ok": 1});
         assert!(CampaignState::from_json(&bad_class).is_err());
     }
 }

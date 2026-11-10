@@ -39,7 +39,7 @@ EXPECTED = {
 
 def classify(status, envelope, expected):
     """Only a failed, attributed boundary is a pending gap; success is drift."""
-    if envelope.get("schema") != "patina.result/v1" or status == 0:
+    if envelope.get("schema") != "patina.result/v2" or status == 0:
         return "unexpected"
     if envelope.get("exit_code") != status:
         return "unexpected"
@@ -53,11 +53,12 @@ def classify(status, envelope, expected):
         ):
             return "pending-gap"
     elif kind == "runtime":
-        # The existing process traps carry their door name in captured stderr,
-        # but do not yet carry a dedicated refusal class. Read just the symbol
-        # token bounded by ':' and ';', paired with the real abort disposition.
-        doors = re.findall(r":\s*([A-Za-z_][A-Za-z_0-9]*)\s*;", envelope.get("stderr", ""))
-        if (envelope.get("verb") == "run" and not envelope.get("refusal")
+        # A process trap is a stop patina attributes to what it does not
+        # model, whose detail names the door the guest called.
+        stop = envelope.get("stop", {})
+        doors = re.findall(r"[A-Za-z_][A-Za-z_0-9]*", stop.get("detail", ""))
+        if (envelope.get("verb") == "run" and envelope.get("result") == "unsupported"
+                and stop.get("reason") == "deny_trap"
                 and envelope.get("guest_exit", {}).get("signal") == 6
                 and name in doors):
             return "pending-gap"
@@ -68,9 +69,10 @@ def selftest():
     for expected in dict.fromkeys(EXPECTED.values()):
         workload = ":".join(expected)
         kind, name = expected
-        env = {"schema": "patina.result/v1", "verb": "run", "exit_code": 134}
+        env = {"schema": "patina.result/v2", "verb": "run", "exit_code": 2}
         if kind == "runtime":
-            env.update(stderr=f"boundary: {name}; diagnostic", guest_exit={"signal": 6})
+            env.update(result="unsupported", guest_exit={"signal": 6},
+                       stop={"reason": "deny_trap", "detail": f"the guest called {name} (process)"})
         else:
             env.update(verb="audit", exit_code=2,
                        finding_details=[{"symbol": name, "category": "unknown-import"}])
@@ -79,7 +81,7 @@ def selftest():
         assert classify(0, env, expected) == "unexpected", workload
         wrong = copy.deepcopy(env)
         if kind == "runtime":
-            wrong["stderr"] = "boundary: a_different_door; diagnostic"
+            wrong["stop"]["detail"] = "the guest called a_different_door (process)"
         else:
             wrong["finding_details"][0]["symbol"] = "a_different_door"
         assert classify(status, wrong, expected) == "unexpected", workload
@@ -92,7 +94,7 @@ def selftest():
             wrong["guest_exit"] = {"signal": 11}
             assert classify(status, wrong, expected) == "unexpected", workload
             wrong["guest_exit"] = {"signal": 6}
-            wrong["refusal"] = {"class": "runtime_init_failure"}
+            wrong["stop"]["reason"] = "shim_fatal"
             assert classify(status, wrong, expected) == "unexpected", workload
     print("multiproc classifier selftest: PASS")
 
@@ -234,8 +236,8 @@ def run():
             except ValueError as error:
                 raise RuntimeError(f"{name}: no result envelope\n{result.stdout}\n{result.stderr}") from error
             if expected[0] == "audit":
-                if (result.returncode != 2 or envelope.get("refusal", {}).get("class")
-                        != "native_prerun_audit"):
+                if (result.returncode != 2 or envelope.get("result") != "unsupported"
+                        or envelope.get("stop", {}).get("reason") != "prerun_audit"):
                     raise RuntimeError(f"{name}: expected the pre-run audit refusal\n{result.stdout}")
                 result = invoke([cli, "audit", str(built), "--format", "json"], timeout=15)
                 envelope = json.loads(result.stdout)

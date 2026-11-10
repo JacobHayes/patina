@@ -90,8 +90,19 @@ mod tests {
                 "json",
             ],
         );
-        assert_eq!(failing.status.code(), Some(101));
+        // A failing test body is a finding in the guest: exit 1, with the
+        // libtest harness's own status reported beside it.
+        assert_eq!(failing.status.code(), Some(1));
         let result: serde_json::Value = serde_json::from_slice(&failing.stdout).unwrap();
+        assert_eq!(
+            (
+                &result["result"],
+                &result["attribution"],
+                &result["guest_exit"]["code"]
+            ),
+            (&"failure".into(), &"guest".into(), &101.into()),
+            "{result}"
+        );
         // Positive control for the refusal detector: the receipt must contain real
         // trace facts, and the path it advertises must actually replay the failure.
         assert!(result["trace"].is_object(), "{result}");
@@ -112,7 +123,7 @@ mod tests {
                 trace.to_str().unwrap(),
             ],
         );
-        assert_eq!(replay.status.code(), Some(101));
+        assert_eq!(replay.status.code(), Some(1));
         assert!(
             String::from_utf8_lossy(&replay.stderr).contains("HARNESS_BUG"),
             "replay should reproduce the recorded failing libtest body:\nstdout:\n{}\nstderr:\n{}",
@@ -222,7 +233,52 @@ fn import_is_linked() {
                     "0",
                 ],
             );
-            assert_eq!(canary.status.code(), Some(101), "{selector}: {canary:?}");
+            assert_eq!(canary.status.code(), Some(1), "{selector}: {canary:?}");
+        }
+    }
+
+    /// `test` ends in the class of the seed's own run, with the attribution
+    /// and exit status that follow from it: the vocabulary and the table are
+    /// `run`'s.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_reports_the_class_of_the_run_that_decided_it() {
+        let directory = tempdir().unwrap();
+        create_native_harness_fixture(directory.path());
+        for (exact, result, attribution, exit) in [
+            ("tests::epoch_is_seeded", "ok", None, 0),
+            ("tests::always_is_violated", "violation", Some("guest"), 1),
+            ("tests::aborts", "crash", Some("guest"), 1),
+            ("tests::no_such_test", "error", Some("request"), 2),
+        ] {
+            let ran = invoke_unchecked(
+                env!("CARGO_BIN_EXE_patina"),
+                directory.path(),
+                &[
+                    "test",
+                    ".",
+                    "--harness-target",
+                    "dst_harness_fixture",
+                    "--exact",
+                    exact,
+                    "--seed",
+                    "1",
+                    "--format",
+                    "json",
+                ],
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&ran.stdout)
+                .unwrap_or_else(|error| panic!("{exact}: {error}: {ran:?}"));
+            assert_eq!(
+                (
+                    envelope["result"].as_str(),
+                    envelope["attribution"].as_str(),
+                    envelope["exit_code"].as_i64(),
+                    ran.status.code(),
+                ),
+                (Some(result), attribution, Some(i64::from(exit)), Some(exit)),
+                "{exact}: {envelope:#}"
+            );
         }
     }
 
@@ -254,6 +310,16 @@ mod tests {
         assert_eq!(epoch, DEFAULT_START_SECONDS);
     }
 
+
+    #[test]
+    fn always_is_violated() {
+        patina_dst::always!(std::env::args().count() > 64, "harness-always");
+    }
+
+    #[test]
+    fn aborts() {
+        std::process::abort();
+    }
 
     #[test]
     fn buggify_failure_records() {

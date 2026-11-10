@@ -152,11 +152,11 @@ pub(super) fn direct_observation(output: &Output, origin: Origin) -> Result<Obse
 }
 
 /// A `patina … --format json` run: the guest's streams and exit are in
-/// the `patina.result/v1` envelope; a refusal's message joins the stderr.
+/// the `patina.result/v2` envelope; a refusal's message joins the stderr.
 pub(super) fn envelope_observation(output: &Output, origin: Origin) -> Result<Observation, String> {
     let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         format!(
-            "not a patina.result/v1 envelope ({error}); patina {}: {}",
+            "not a patina.result/v2 envelope ({error}); patina {}: {}",
             output.status,
             text(&output.stderr)
         )
@@ -178,7 +178,7 @@ pub(super) fn envelope_observation(output: &Output, origin: Origin) -> Result<Ob
             "{}{}{}",
             text(&output.stderr),
             envelope["stderr"].as_str().unwrap_or(""),
-            envelope["refusal"]["message"].as_str().unwrap_or("")
+            envelope["stop"]["detail"].as_str().unwrap_or("")
         ),
     })
 }

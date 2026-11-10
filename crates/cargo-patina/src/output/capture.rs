@@ -34,12 +34,6 @@ pub fn capture_active() -> bool {
     options().wants_capture()
 }
 
-/// Whether this invocation emits a JSON envelope (and so answers a refused
-/// run with one rather than with an error).
-pub fn json_active() -> bool {
-    options().is_json()
-}
-
 /// Parse the facts read back off the channel. The runtime appends a complete
 /// document at each point the process might die and again at finish, so the
 /// LAST complete (newline-terminated) document is the run's state; a torn final
@@ -51,10 +45,11 @@ pub fn json_active() -> bool {
 /// document that carries no verdicts (a compute-bound stop's) does not either.
 ///
 /// No complete document means the run never got that far — it aborted before
-/// finalization, or this family does not carry the channel — and the envelope
-/// says so by omitting the fields (absent, never zero). A complete line that is
-/// not a `patina.runfacts/v1` document is a defect in patina's own channel, so
-/// it fails closed rather than being quietly dropped.
+/// finalization — and the envelope says so by omitting the fields (absent,
+/// never zero). A complete line that is not a `patina.runfacts` document of
+/// this schema is a defect in patina's own channel, or the facts of a guest
+/// built with another patina, so it fails closed rather than being quietly
+/// dropped.
 pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> {
     let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
         Some(end) => &bytes[..end],
@@ -92,6 +87,57 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
     Ok(Some(last))
 }
 
+/// What the shim said on the stop pipe.
+#[derive(Debug, Default, PartialEq)]
+pub struct StopChannel {
+    /// The runtime was installed: the guest ran under patina.
+    pub started: bool,
+    /// Why the shim ended the run (`RunStop`), as the `stop` object the run is
+    /// judged by; `None` when the shim ended nothing.
+    pub stop: Option<serde_json::Value>,
+}
+
+/// Read the stop pipe back: whether the runtime started, and the shim's stop
+/// record if it ended the run. The first stop stands, since a second can only
+/// be a consequence of the first. Bytes that are not records of this schema
+/// are a defect in patina's own channel, or the records of a guest built
+/// with another patina, and are refused rather than read as "no stop".
+pub fn parse_stop(bytes: &[u8]) -> Result<StopChannel, CliError> {
+    let unreadable = |what: String| {
+        CliError(format!(
+            "the stop pipe carried {what}; expected {} records. A guest built by another \
+             patina carries its own shim: rebuild it with this one",
+            patina_dst_runtime::STOP_SCHEMA
+        ))
+    };
+    let mut channel = StopChannel::default();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+    {
+        let mut record: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
+            unreadable(format!("{} bytes that are not JSON ({error})", line.len()))
+        })?;
+        if record.get("schema").and_then(serde_json::Value::as_str)
+            != Some(patina_dst_runtime::STOP_SCHEMA)
+        {
+            return Err(unreadable(format!("schema {:?}", record.get("schema"))));
+        }
+        if record.get("started").and_then(serde_json::Value::as_bool) == Some(true) {
+            channel.started = true;
+        } else if let Some(stop) = record
+            .get_mut("stop")
+            .map(serde_json::Value::take)
+            .filter(serde_json::Value::is_object)
+        {
+            channel.stop.get_or_insert(stop);
+        } else {
+            return Err(unreadable("a record that says nothing".to_string()));
+        }
+    }
+    Ok(channel)
+}
+
 fn parse_facts_document(line: &[u8]) -> Result<serde_json::Value, CliError> {
     let value: serde_json::Value = serde_json::from_slice(line).map_err(|error| {
         CliError(format!(
@@ -102,7 +148,8 @@ fn parse_facts_document(line: &[u8]) -> Result<serde_json::Value, CliError> {
     match value.get("schema").and_then(serde_json::Value::as_str) {
         Some(schema) if schema == patina_dst_runtime::FACTS_SCHEMA => Ok(value),
         other => Err(CliError(format!(
-            "the run-facts channel carried schema {other:?}; expected {}",
+            "the run-facts channel carried schema {other:?}; expected {}. A guest built by \
+             another patina carries its own shim: rebuild it with this one",
             patina_dst_runtime::FACTS_SCHEMA
         ))),
     }

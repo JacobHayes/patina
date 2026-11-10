@@ -9,12 +9,20 @@ use crate::shim_build::{
     RustcInvocation, apply_rustc_env, build_native_shim, check_native_toolchain_agreement,
     lock_target_dir, prepare_shim_sources, stage_instrumentation_object,
 };
-use crate::{CliError, NativeHarnessInvocation, cli, exit_code, output};
+use crate::{CliError, NativeHarnessInvocation, cli, output};
+use patina_dst_abi::RunClass;
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs};
+
+/// A child's exit code, or an error for one a signal ended.
+fn exit_code(status: std::process::ExitStatus) -> Result<i32, CliError> {
+    status
+        .code()
+        .ok_or_else(|| CliError("a child patina run was terminated by a signal".into()))
+}
 
 fn command_line(prefix: &str, args: &[OsString]) -> String {
     let mut parts = vec![prefix.to_string()];
@@ -34,8 +42,12 @@ struct NativeHarnessArtifact {
 }
 
 struct HarnessSeedRun {
-    exit_code: i32,
-    result: String,
+    /// The class the seed's own `patina run` reported.
+    result: RunClass,
+    /// What stopped the seed's run, and how its guest ended, as that run's
+    /// envelope reported them.
+    stop: Option<output::Stop>,
+    guest_exit: Option<serde_json::Value>,
     stdout: String,
     stderr: String,
     message: Option<String>,
@@ -74,20 +86,38 @@ pub(super) fn execute_native_harness(invocation: NativeHarnessInvocation) -> Res
     require_listed_test(&invocation, &built.guest, first_seed)?;
     for seed in invocation.seeds.iter() {
         let run = run_native_harness_seed(&invocation, &built.guest, seed, None)?;
-        if run.exit_code != 0 {
+        if run.result.is_failure() {
             let trace = built.directory.join(format!("seed-{seed}.patina"));
             let recorded = record_harness_failure(&run, &trace, || {
                 run_native_harness_seed(&invocation, &built.guest, seed, Some(&trace))
             })?;
-            let reproduced = recorded
-                .as_ref()
-                .map(|recorded| recorded.exit_code == run.exit_code);
+            // The recorded retry is the same seed: it must end the same way,
+            // class and guest status both. A retry patina could not finish (a
+            // timeout, a host kill, an error of its own) says nothing either
+            // way: the first run's finding stands, without a recording.
+            let recorded = recorded.filter(|recorded| {
+                !matches!(
+                    recorded.result,
+                    RunClass::Timeout | RunClass::Internal | RunClass::Error
+                ) || recorded.result == run.result
+            });
+            let reproduced = recorded.as_ref().map(|recorded| {
+                recorded.result == run.result && recorded.guest_exit == run.guest_exit
+            });
             let latest = recorded.as_ref().unwrap_or(&run);
+            // A seed that does not end the same way twice is not this test's
+            // finding: it is the run failing to be deterministic.
+            let result = if reproduced == Some(false) {
+                RunClass::Nondeterministic
+            } else {
+                run.result
+            };
             let block = native_harness_failure_block(NativeHarnessFailure {
                 invocation: &invocation,
                 built: &built,
                 test_name: &test_name,
                 seed,
+                result,
                 first: &run,
                 latest,
                 reproduced,
@@ -95,18 +125,14 @@ pub(super) fn execute_native_harness(invocation: NativeHarnessInvocation) -> Res
             if !output::options().is_json() {
                 eprintln!("{block}");
             }
-            let exit = if reproduced == Some(false) {
-                2
-            } else {
-                run.exit_code
-            };
-            let result = if reproduced == Some(false) {
-                "error"
-            } else {
-                latest.result.as_str()
-            };
-            output::emit_harness_result(result, exit, block, latest.trace.clone());
-            return Ok(exit);
+            output::emit_harness_result(output::HarnessResult {
+                result,
+                message: block,
+                trace: latest.trace.clone(),
+                stop: latest.stop.clone(),
+                guest_exit: latest.guest_exit.clone(),
+            });
+            return Ok(result.exit_code());
         }
     }
     let message = format!(
@@ -116,7 +142,7 @@ pub(super) fn execute_native_harness(invocation: NativeHarnessInvocation) -> Res
         built.guest.display()
     );
     if output::options().is_json() {
-        output::emit_simple("test", "ok", 0, Some(message));
+        output::emit_simple("test", RunClass::Ok, Some(message));
     } else {
         println!("PATINA_DST_TEST_PASS {message}");
     }
@@ -511,7 +537,7 @@ fn require_listed_test(
     seed: u64,
 ) -> Result<(), CliError> {
     let listing = run_native_harness_child(invocation, guest, seed, None, &["--list"])?;
-    if listing.exit_code != 0 {
+    if listing.result.is_failure() {
         return Ok(());
     }
     let tests: Vec<&str> = listing
@@ -627,11 +653,17 @@ fn harness_seed_outcome(
             "native harness seed {seed} did not produce a valid JSON envelope: {error}\nstdout:\n{stdout_text}\nstderr:\n{child_stderr}"
         ))
     })?;
+    // The seed's class is the one its own run named. A child that names none
+    // this patina knows has not reported a result this test can stand on.
     let result = envelope
         .get("result")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(if exit_code == 0 { "ok" } else { "failure" })
-        .to_string();
+        .and_then(RunClass::from_name)
+        .ok_or_else(|| {
+            CliError(format!(
+                "native harness seed {seed} reported no result class\nstdout:\n{stdout_text}\nstderr:\n{child_stderr}"
+            ))
+        })?;
     let guest_stdout = envelope
         .get("stdout")
         .and_then(serde_json::Value::as_str)
@@ -658,9 +690,22 @@ fn harness_seed_outcome(
     {
         stderr.push_str(message);
     }
+    // The child's exit status is a function of the class it reported. One
+    // that reported an outcome and exited another way did not finish the run
+    // it described, and its word is not taken over the process's.
+    if exit_code != result.exit_code() {
+        return Err(CliError(format!(
+            "native harness seed {seed} reported {result} and exited {exit_code}; its result \
+             cannot be trusted\nstderr:\n{child_stderr}"
+        )));
+    }
     Ok(HarnessSeedRun {
-        exit_code,
         result,
+        stop: output::Stop::from_envelope(&envelope),
+        // No guest ran when the run's envelope reports no guest status: a
+        // pre-run refusal, or an error before the launch.
+        pre_run_refusal: envelope.get("guest_exit").is_none(),
+        guest_exit: envelope.get("guest_exit").cloned(),
         stdout: guest_stdout,
         stderr,
         message,
@@ -671,7 +716,6 @@ fn harness_seed_outcome(
             .map(serde_json::from_value)
             .transpose()
             .map_err(|error| CliError(format!("invalid harness trace receipt: {error}")))?,
-        pre_run_refusal: envelope["refusal"]["class"] == output::NATIVE_PRERUN_REFUSAL,
     })
 }
 
@@ -785,6 +829,8 @@ struct NativeHarnessFailure<'a> {
     built: &'a BuiltNativeHarness,
     test_name: &'a str,
     seed: u64,
+    /// The class the test run ends in.
+    result: RunClass,
     first: &'a HarnessSeedRun,
     latest: &'a HarnessSeedRun,
     // None means the pre-run gate refused: no recorded retry was attempted.
@@ -812,19 +858,25 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
         ),
         None => ("not produced".to_string(), String::new()),
     };
+    // The block leads with whose move it is: the same line `run` leads with.
+    let outcome = output::Outcome::of(failure.result, failure.latest.stop.clone());
     let mut block = format!(
-        "patina dst test failed: {}\n  {}  exit={}  class={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}{replay}",
+        "{}\npatina dst test failed: {}\n  {}  class={}  guest_exit={}\n  trace: {}\n  stderr tail:\n{}\n  reproduce:\n    {repro}{replay}",
+        outcome.headline(None).unwrap_or_default(),
         failure.test_name,
         failure.invocation.seeds.contains(failure.seed),
-        failure.first.exit_code,
-        failure.latest.result,
+        failure.result,
+        guest_exit_text(failure.first),
         trace_note,
         indent_tail(&failure.latest.stderr, 20),
     );
     if failure.reproduced == Some(false) {
         block.push_str(&format!(
-            "\n  record-on-failure mismatch: first exit={} recorded exit={}; refusing to call this deterministic",
-            failure.first.exit_code, failure.latest.exit_code
+            "\n  record-on-failure mismatch: first class={} guest_exit={}, recorded class={} guest_exit={}; refusing to call this deterministic",
+            failure.first.result,
+            guest_exit_text(failure.first),
+            failure.latest.result,
+            guest_exit_text(failure.latest),
         ));
     }
     if failure.reproduced == Some(false) && failure.first.stderr != failure.latest.stderr {
@@ -842,6 +894,14 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
         block.push_str(&format!("\n  message: {message}"));
     }
     block
+}
+
+/// How a seed's guest ended, for a reader: its envelope's `guest_exit`, or
+/// that no guest ran.
+fn guest_exit_text(run: &HarnessSeedRun) -> String {
+    run.guest_exit
+        .as_ref()
+        .map_or_else(|| "none (no guest ran)".to_string(), ToString::to_string)
 }
 
 fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> String {
@@ -948,10 +1008,11 @@ mod tests {
 
     #[test]
     fn native_harness_records_failures_but_never_retries_a_prerun_refusal() {
-        fn outcome(exit_code: i32, pre_run_refusal: bool) -> HarnessSeedRun {
+        fn outcome(result: RunClass, pre_run_refusal: bool) -> HarnessSeedRun {
             HarnessSeedRun {
-                exit_code,
-                result: "error".into(),
+                result,
+                stop: None,
+                guest_exit: None,
                 stdout: String::new(),
                 stderr: String::new(),
                 message: None,
@@ -959,9 +1020,14 @@ mod tests {
                 pre_run_refusal,
             }
         }
-        // Exit 2 alone is not a pre-run refusal: other errors still get their
-        // recording attempt, as do assertion failures and guest aborts.
-        for (code, pre_run) in [(2, true), (2, false), (101, false), (134, false)] {
+        // A class that exits 2 is not by itself a pre-run refusal: other stops
+        // still get their recording attempt, as do failures and crashes.
+        for (code, pre_run) in [
+            (RunClass::Unsupported, true),
+            (RunClass::Unsupported, false),
+            (RunClass::Failure, false),
+            (RunClass::Crash, false),
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let trace = directory.path().join("seed-0.patina");
             fs::write(&trace, b"previous recording").unwrap();

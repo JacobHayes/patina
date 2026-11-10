@@ -1,5 +1,6 @@
 //! Campaign execution and continuation orchestration.
 
+use super::classify::{campaign_result, is_conclusive};
 use super::generation::{GenerationFiles, run_generation};
 use super::observe::{
     fold_edge_coverage_generation, fold_sites_generation, generation_reached_shutdown,
@@ -25,7 +26,7 @@ use super::verify::{
     samples_clean_rerun, trace_digest,
 };
 use super::{
-    CampaignClass, CampaignInvocation, classify, derive_flags, generation_hash, invocation_flags,
+    CampaignInvocation, RunClass, classify, derive_flags, generation_hash, invocation_flags,
     mutation_units, signature,
 };
 use crate::CliError;
@@ -299,12 +300,12 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             // A repeat of a signature already found not to reproduce is that
             // nondeterminism again, not the finding it pretends to be.
             Some(_) if state.signatures.contains_key(&filed_nondeterministic.key()) => {
-                (CampaignClass::Nondeterminism, None)
+                (RunClass::Nondeterministic, None)
             }
             // A novel finding: run its reproduce path once before reporting it.
             Some(seen)
                 if state.spec.verify
-                    && observed_class.is_finding()
+                    && is_conclusive(observed_class)
                     && !state.signatures.contains_key(&seen.key()) =>
             {
                 let observed = Observation::new(observed_class, &run.facts, None);
@@ -314,7 +315,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             }
             // A sampled clean generation: run it twice and compare the traces.
             None if state.spec.verify
-                && observed_class == CampaignClass::Ok
+                && observed_class == RunClass::Ok
                 && samples_clean_rerun(state.spec.seed_base, generation) =>
             {
                 let observed =
@@ -337,7 +338,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         let mut signature_key = None;
         if class.is_failure() {
             let sig = match class {
-                CampaignClass::Nondeterminism => filed_nondeterministic,
+                RunClass::Nondeterministic => filed_nondeterministic,
                 _ => observed_signature.expect("a failing class was observed as a failure"),
             };
             let key = sig.key();
@@ -378,9 +379,9 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 .entry(key.clone())
                 .and_modify(|record| record.count += 1)
                 .or_insert_with(|| {
-                    // A first-of-its-kind INFRA condition is recorded but is not
-                    // "novel": it is not a bug the campaign found.
-                    novel = class.is_finding();
+                    // A first-of-its-kind inconclusive condition is recorded but
+                    // is not "novel": the campaign learned nothing from it.
+                    novel = is_conclusive(class);
                     SignatureRecord {
                         class,
                         shape: sig.shape.clone(),
@@ -452,7 +453,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 // how a verified one was checked — so the line that names the
                 // class also says what it rests on.
                 let mut verified = String::new();
-                if class == CampaignClass::Nondeterminism {
+                if class == RunClass::Nondeterministic {
                     verified.push_str(&format!(" observed={}", observed_class.as_str()));
                 }
                 if let Some(verification) = &outcome.verification {
@@ -498,21 +499,21 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     let novel_count = novel_findings(&state.signatures);
     let coverage_verdict = coverage_verdict(&coverage, state.spec.allow_unmet_sometimes);
     let coverage_failure = coverage_verdict.gate == CoverageGate::Fail;
-    let result = if failures == 0 && !coverage_failure {
-        "ok"
-    } else {
-        "failure"
-    };
-    let exit_code = if failures == 0 && !coverage_failure {
-        0
-    } else {
-        1
-    };
+    // The campaign's own class, and through it its exit status: the same
+    // table every run's is read from.
+    let result = campaign_result(
+        state
+            .classes
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .filter_map(|(class, _)| RunClass::from_name(class)),
+        coverage_failure,
+    );
+    let exit_code = result.exit_code();
 
     if json_output {
         let envelope = build_campaign_envelope(CampaignEnvelopeInput {
             result,
-            exit_code,
             state: &state,
             coverage: &coverage,
             coverage_verdict: &coverage_verdict,
@@ -536,6 +537,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             failures,
             novel: novel_count,
             generations: state.spec.generations,
+            result,
             store_path: &store_path,
             sites_path: &sites_path,
         });

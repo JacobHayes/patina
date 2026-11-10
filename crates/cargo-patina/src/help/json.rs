@@ -149,6 +149,24 @@ detail with the command below, substituting {verb} with the verb name.",
     root.insert("schema".into(), J::from(HELP_SCHEMA));
     root.insert("global_flags".into(), global_flags_json());
     root.insert("environment".into(), environment_json());
+    // The outcome table: every class a run, test or campaign can end in,
+    // with the attribution and exit status that follow from it.
+    root.insert(
+        "outcomes".into(),
+        J::Array(
+            patina_dst_abi::RunClass::ALL
+                .iter()
+                .map(|class| {
+                    serde_json::json!({
+                        "result": class.as_str(),
+                        "attribution": class.attribution().map(|attribution| attribution.as_str()),
+                        "exit_code": class.exit_code(),
+                        "summary": class.summary(),
+                    })
+                })
+                .collect(),
+        ),
+    );
     root.insert("verbs".into(), J::Object(verbs));
     root.insert("verb_detail".into(), J::Object(verb_detail));
     J::Object(root)

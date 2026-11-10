@@ -773,8 +773,22 @@ mod linux {
         fn genuine_segv_is_not_swallowed() {
             let g = Guest::assert_build("tsc_segv_probe.rs");
             if kernel_supports(KernelFeature::Tsc) {
-                let out = g.assert_run_refused(1, &["PATINA_INFRA native_run signal=11"]);
-                assert!(!text(&out.stdout).contains("SURVIVED THE FAULT"));
+                // The guest's own fault ends the run on its signal: a crash
+                // in the guest, never answered as a counter read.
+                let out = g.command("run", &["--seed", "1", "--format", "json"]);
+                let envelope: serde_json::Value =
+                    serde_json::from_str(text(&out.stdout).lines().last().unwrap()).unwrap();
+                assert_eq!(
+                    (&envelope["result"], &envelope["guest_exit"]["signal"]),
+                    (&"crash".into(), &11.into()),
+                    "{envelope}"
+                );
+                assert!(
+                    !envelope["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .contains("SURVIVED THE FAULT")
+                );
             } else {
                 g.assert_run_refused(1, &["cpu-nondeterminism"]);
             }

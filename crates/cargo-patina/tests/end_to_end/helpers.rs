@@ -552,7 +552,11 @@ pub(super) fn assert_native_harness_prerun_refusal(
     );
     assert_eq!(refused.status.code(), Some(2));
     let receipt: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
-    assert_eq!(receipt["refusal"]["class"], "native_prerun_audit");
+    assert_eq!(
+        (&receipt["result"], &receipt["stop"]["reason"]),
+        (&"unsupported".into(), &"prerun_audit".into()),
+        "{receipt}"
+    );
     assert!(receipt["guest_exit"].is_null());
     assert!(receipt["trace"].is_null());
     let audit = invoke_unchecked(

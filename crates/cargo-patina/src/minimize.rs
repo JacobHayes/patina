@@ -139,7 +139,7 @@ pub(crate) fn execute(invocation: MinimizeInvocation) -> Result<i32, CliError> {
     }
 }
 
-/// How a candidate `patina run` ended, read off its `patina.result/v1`
+/// How a candidate `patina run` ended, read off its `patina.result/v2`
 /// envelope: the result it reported, and the guest's own exit code or the
 /// signal that killed it, so two different failures stay two.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,7 +176,7 @@ fn param_env() -> Option<String> {
 
 /// Run one candidate of a `--params` reduction and read how its run ended, or
 /// `None` when the command reported no run at all: it printed no
-/// `patina.result/v1` run envelope, so it is not a `patina run`, or patina
+/// `patina.result/v2` run envelope, so it is not a `patina run`, or patina
 /// refused it before any guest ran.
 fn ending_of(words: &[OsString]) -> Result<Option<Ending>, CliError> {
     let mut command = Command::new(&words[0]);
@@ -250,7 +250,7 @@ fn execute_params(invocation: &ParamsMinimize) -> Result<i32, CliError> {
     }
     let detail = format!("params=[{rendered}] oracle_runs={calls} repro: {repro}");
     if output::options().is_json() {
-        output::emit_simple("minimize", "ok", 0, Some(detail));
+        output::emit_simple("minimize", patina_dst_abi::RunClass::Ok, Some(detail));
     } else {
         println!("PATINA_MINIMIZE_PARAMS_COMPLETE {detail}");
     }

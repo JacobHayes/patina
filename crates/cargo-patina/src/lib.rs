@@ -17,8 +17,9 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 
+use patina_dst_abi::RunClass;
 use patina_dst_runtime::FaultKnob;
 use patina_dst_trace::remove_dead_scratch;
 use sha2::{Digest, Sha256};
@@ -65,7 +66,7 @@ use harness::execute_native_harness;
 use native_build::{
     Instrumentation, binary_instrumentation, execute_native_build, instrumentation_fingerprint,
 };
-use native_run::{TRACE_CHANNEL_UNAVAILABLE, execute_native_run};
+use native_run::execute_native_run;
 use parse::{ParseResult, current_verb, locate_positionals, parse};
 use shim_build::lock_target_dir;
 
@@ -529,7 +530,7 @@ fn exit_with(arguments: Vec<OsString>) -> ! {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("patina: {error}");
-            std::process::exit(2);
+            std::process::exit(RunClass::Error.exit_code());
         }
     }
 }
@@ -556,8 +557,8 @@ fn entrypoint(arguments: Vec<OsString>) -> Result<i32, CliError> {
     // parses one machine-readable object.
     match result {
         Err(error) if is_json => {
-            output::emit_simple("cli", "error", 2, Some(error.to_string()));
-            Ok(2)
+            output::emit_simple("cli", RunClass::Error, Some(error.to_string()));
+            Ok(RunClass::Error.exit_code())
         }
         other => other,
     }
@@ -614,12 +615,6 @@ fn hex(bytes: &[u8]) -> String {
         write!(output, "{byte:02x}").expect("writing to a String cannot fail");
         output
     })
-}
-
-fn exit_code(status: ExitStatus) -> Result<i32, CliError> {
-    status
-        .code()
-        .ok_or_else(|| CliError("Cargo process terminated by a signal".into()))
 }
 
 #[derive(Debug)]

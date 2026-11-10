@@ -342,11 +342,11 @@ fn campaign_finds_a_planted_mishandling(directory: &Path, bin: &str) {
         String::from_utf8_lossy(&found.stderr)
     );
     assert!(
-        stdout.contains("VIOLATION"),
+        stdout.contains("class=violation"),
         "the finding must be classified through the guest's own verdict:\n{stdout}"
     );
     assert!(
-        !stdout.contains("class=VACUOUS"),
+        !stdout.contains("class=vacuous"),
         "no generation may report an inert custom-op plane over a guest that \
          declares one on every fetch:\n{stdout}"
     );

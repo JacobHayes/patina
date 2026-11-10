@@ -36,17 +36,19 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
             out.to_str().unwrap(),
         ],
     );
+    // A campaign whose only stop is its own backstop found nothing in the
+    // guest: exit 2, patina could not finish what was asked.
     assert_eq!(
         ran.status.code(),
-        Some(1),
-        "timeout campaign should report the INFRA failure\nstdout:\n{}\nstderr:\n{}",
+        Some(2),
+        "timeout campaign should report the timeout\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&ran.stdout),
         String::from_utf8_lossy(&ran.stderr)
     );
     let stdout = String::from_utf8_lossy(&ran.stdout);
     assert!(
-        stdout.contains("class=INFRA"),
-        "timeout was not classified as INFRA:\n{stdout}"
+        stdout.contains("class=timeout"),
+        "timeout was not classified as a timeout:\n{stdout}"
     );
     assert!(
         stdout.contains("PATINA_CAMPAIGN_GEN generation=0"),
@@ -74,7 +76,7 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
     let store: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(out.join("signatures.json")).unwrap()).unwrap();
     let signature = &store["signatures"].as_array().unwrap()[0];
-    assert_eq!(signature["class"], "INFRA");
+    assert_eq!(signature["class"], "timeout");
     assert!(
         signature.get("trace").is_none(),
         "timeout signature should fall back to a rerun command, not an unreplayable trace: {signature:#}"
@@ -446,7 +448,7 @@ fn campaign_continuation_refusals_are_loud() {
     fs::create_dir_all(&pre_steering).unwrap();
     fs::write(
         pre_steering.join("signatures.json"),
-        r#"{"schema":"patina.campaign.signatures/v1","signatures":[]}"#,
+        r#"{"schema":"patina.campaign.signatures/v2","signatures":[]}"#,
     )
     .unwrap();
     assert_refuses(
@@ -555,7 +557,7 @@ fn campaign_continuation_refusals_are_loud() {
     assert!(
         extended_stdout.contains("PATINA_CAMPAIGN_PROGRESS generation=2/3")
             && extended_stdout.contains("failures=0")
-            && extended_stdout.contains("OK=2"),
+            && extended_stdout.contains("ok=2"),
         "extension heartbeat should be cumulative:\n{extended_stdout}"
     );
     assert!(

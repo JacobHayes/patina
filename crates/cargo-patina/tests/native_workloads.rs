@@ -114,8 +114,15 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
             assert!(!record.status.success());
             eprintln!("compute watchdog {mode}: record elapsed={elapsed:?} bound=25ms");
             let record: serde_json::Value = serde_json::from_slice(&record.stdout).unwrap();
+            // The host-time bound is patina's limit, not a verdict on the
+            // guest: a `timeout`, attributed to what patina does not model.
             assert_eq!(
-                record["result"], "liveness",
+                (
+                    &record["result"],
+                    &record["attribution"],
+                    &record["exit_code"]
+                ),
+                (&"timeout".into(), &"patina_unsupported".into(), &2.into()),
                 "finding mode={mode}: {record}"
             );
             assert_eq!(
@@ -174,7 +181,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
                 "replay waited for host bound: {elapsed:?}"
             );
             let replay: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
-            assert_eq!(replay["result"], "liveness", "{replay:#}");
+            assert_eq!(replay["result"], "timeout", "{replay:#}");
             assert_eq!(replay["guest_exit"]["signal_name"], "SIGABRT");
             assert_terminal_sample(
                 replay["stderr"].as_str().unwrap(),
@@ -283,7 +290,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     );
 }
 
-/// The `compute-bound` runtime finding of a `patina.result/v1` envelope.
+/// The `compute-bound` runtime finding of a `patina.result/v2` envelope.
 fn compute_bound_finding(envelope: &serde_json::Value) -> &serde_json::Value {
     envelope["runtime_findings"]
         .as_array()
@@ -314,7 +321,7 @@ fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
     };
     assert!(!output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["result"], "infra", "{result:#}");
+    assert_eq!(result["result"], "internal", "{result:#}");
     assert_eq!(result["guest_exit"]["signal_name"], "SIGABRT", "{result:#}");
     assert!(
         recorded_hazard(result["stderr"].as_str().unwrap(), "overflow-held"),
@@ -741,7 +748,7 @@ fn udp_arrival_order_varies_by_seed() {
 }
 
 /// One seeded run under a certain entropy fault rate, as the guest's stdout and
-/// the `fault_reports` object of its `patina.result/v1` envelope.
+/// the `fault_reports` object of its `patina.result/v2` envelope.
 fn certain_entropy_fault_run(g: &Guest) -> (String, serde_json::Value) {
     let output = g.command(
         "run",

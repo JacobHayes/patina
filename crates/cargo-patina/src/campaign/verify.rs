@@ -8,7 +8,7 @@
 //! rows with their details and, when both runs left a trace, the trace's
 //! content digest. A seeded sample of clean generations is run twice the same
 //! way, so a leak that never fails a run is caught too. A mismatch is
-//! [`CampaignClass::Nondeterminism`], and both outcomes travel with it.
+//! [`RunClass::Nondeterministic`], and both outcomes travel with it.
 //!
 //! The signature's policy annotation (`bug_depth=N`, the PCT change points
 //! the seeded schedule hit) describes how the run
@@ -24,12 +24,12 @@
 //! either way: it is [`VerifyStatus::Infra`], and the generation keeps the
 //! class it was observed with.
 
-use super::classify::primary_finding;
+use super::classify::{is_conclusive, primary_finding};
 #[cfg(test)]
 use super::generation::facts_from_envelope;
 use super::generation::{GenerationFiles, run_generation, run_replay};
 use super::state::{CampaignState, json_optional_str, json_required_str};
-use super::{CampaignClass, ClassifyRules, GenerationFacts, GenerationRun, Signature};
+use super::{ClassifyRules, GenerationFacts, GenerationRun, RunClass, Signature};
 use super::{classify, signature};
 use crate::CliError;
 use sha2::{Digest, Sha256};
@@ -68,13 +68,10 @@ pub(super) fn nondeterminism_signature(observed: Option<&Signature>) -> Signatur
             format!("observed={} {}", observed.class.as_str(), observed.shape),
             observed.policy.clone(),
         ),
-        None => (
-            format!("observed={}", CampaignClass::Ok.as_str()),
-            String::new(),
-        ),
+        None => (format!("observed={}", RunClass::Ok.as_str()), String::new()),
     };
     Signature {
-        class: CampaignClass::Nondeterminism,
+        class: RunClass::Nondeterministic,
         shape,
         policy,
     }
@@ -92,7 +89,7 @@ pub(super) fn nondeterminism_signature(observed: Option<&Signature>) -> Signatur
 /// finding line).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Observation {
-    pub(super) class: CampaignClass,
+    pub(super) class: RunClass,
     /// The failure signature key without its policy annotation; `None` for a
     /// clean run.
     pub(super) signature: Option<String>,
@@ -114,11 +111,7 @@ pub(super) struct Observation {
 }
 
 impl Observation {
-    pub(super) fn new(
-        class: CampaignClass,
-        facts: &GenerationFacts,
-        trace: Option<String>,
-    ) -> Self {
+    pub(super) fn new(class: RunClass, facts: &GenerationFacts, trace: Option<String>) -> Self {
         let failure = class.is_failure().then(|| signature(class, facts));
         Observation {
             class,
@@ -189,7 +182,7 @@ impl Observation {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Observation {
-            class: CampaignClass::parse(class_text)
+            class: RunClass::from_name(class_text)
                 .ok_or_else(|| format!("unknown campaign class {class_text:?}"))?,
             signature: json_optional_str(object, "signature")?,
             policy: json_optional_str(object, "policy")?.unwrap_or_default(),
@@ -295,7 +288,7 @@ impl Verification {
     ) -> Self {
         let status = if reproduction.replay_diverged {
             VerifyStatus::Nondeterministic
-        } else if reproduction.class.is_failure() && !reproduction.class.is_finding() {
+        } else if reproduction.class.is_failure() && !is_conclusive(reproduction.class) {
             VerifyStatus::Infra
         } else if observed.agrees_with(&reproduction, path) {
             VerifyStatus::Reproduced
@@ -311,9 +304,9 @@ impl Verification {
     }
 
     /// The class the generation is reported under.
-    pub(super) fn class(&self) -> CampaignClass {
+    pub(super) fn class(&self) -> RunClass {
         match self.status {
-            VerifyStatus::Nondeterministic => CampaignClass::Nondeterminism,
+            VerifyStatus::Nondeterministic => RunClass::Nondeterministic,
             VerifyStatus::Reproduced | VerifyStatus::Infra => self.observed.class,
         }
     }
@@ -393,7 +386,7 @@ impl VerificationSummary {
             .iter()
             .filter_map(|run| run.verification.as_ref())
         {
-            let clean = verification.observed.class == CampaignClass::Ok;
+            let clean = verification.observed.class == RunClass::Ok;
             match (clean, verification.status) {
                 (true, VerifyStatus::Nondeterministic) => summary.clean_nondeterministic += 1,
                 // A clean rerun that reproduced, or produced no answer, leaves
@@ -550,10 +543,10 @@ impl Verifier<'_> {
 /// whatever class carries it, any other reproduction patina could not finish
 /// keeps the observed class, and only a rerun is held to the policy annotation.
 #[cfg(test)]
-pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, CampaignClass)> {
+pub(super) fn selftest_class_checks() -> Vec<(&'static str, RunClass, RunClass)> {
     let failure = || Observation {
-        class: CampaignClass::Violation,
-        signature: Some("VIOLATION|verdict kind=violation label=x-#|".into()),
+        class: RunClass::Violation,
+        signature: Some("violation|verdict kind=violation label=x-#|".into()),
         policy: String::new(),
         exit: "exit=1".into(),
         finding: Some("verdict kind=violation label=x-1".into()),
@@ -562,7 +555,7 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
         replay_diverged: false,
     };
     let clean = |trace: &str| Observation {
-        class: CampaignClass::Ok,
+        class: RunClass::Ok,
         signature: None,
         policy: String::new(),
         exit: "exit=0".into(),
@@ -572,11 +565,11 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
         replay_diverged: false,
     };
     let infra = || Observation {
-        class: CampaignClass::Infra,
-        signature: Some("INFRA|refusal class=shutdown_failure|".into()),
+        class: RunClass::Internal,
+        signature: Some("internal|stop reason=shutdown_failure|".into()),
         policy: String::new(),
-        exit: "exit=134 signal=6 refusal=shutdown_failure refusal_guest_exit=0".into(),
-        finding: Some("refusal class=shutdown_failure".into()),
+        exit: "exit=2 guest_exit=134 signal=6 stop=shutdown_failure stop_guest_exit=0".into(),
+        finding: Some("stop reason=shutdown_failure".into()),
         verdicts: Vec::new(),
         trace: None,
         replay_diverged: false,
@@ -608,12 +601,11 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
     // A guest's exit code as its envelope reports it, beside the process
     // status the campaign observes, which keeps only the low eight bits.
     let exited = |code: i64| {
-        let mut facts = facts_from_envelope(
-            &serde_json::json!({"exit_code": code, "guest_exit": {"code": code}}),
-        );
-        facts.exit_code = (code & 0xff) as i32;
+        let facts = facts_from_envelope(&serde_json::json!({
+            "result": "failure", "exit_code": 1, "guest_exit": {"code": code}
+        }));
         Observation::new(
-            CampaignClass::Unclassified,
+            RunClass::Failure,
             &super::selftest::planted(facts, ""),
             None,
         )
@@ -621,34 +613,34 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
     vec![
         (
             "verify-guest-exit-past-the-process-status-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Replay, exited(3), exited(259)),
         ),
         (
             "verify-replay-that-reproduces-keeps-class",
-            CampaignClass::Violation,
+            RunClass::Violation,
             judged(VerifyPath::Replay, failure(), failure()),
         ),
         (
             "verify-signature-mismatch-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             differing(|run| {
-                run.signature = Some("VIOLATION|verdict kind=violation label=y|".into())
+                run.signature = Some("violation|verdict kind=violation label=y|".into())
             }),
         ),
         (
             "verify-exit-mismatch-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             differing(|run| run.exit = "exit=2".into()),
         ),
         (
             "verify-numbers-the-signature-collapses-are-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             differing(|run| run.finding = Some("verdict kind=violation label=x-2".into())),
         ),
         (
             "verify-verdict-detail-mismatch-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             differing(|run| {
                 run.verdicts =
                     vec![r#"{"detail":"2","kind":"violation","label":"x-1","seq":0}"#.into()]
@@ -656,42 +648,42 @@ pub(super) fn selftest_class_checks() -> Vec<(&'static str, CampaignClass, Campa
         ),
         (
             "verify-replay-is-not-held-to-the-seeded-policy",
-            CampaignClass::Violation,
+            RunClass::Violation,
             judged(VerifyPath::Replay, explored(), unexplored()),
         ),
         (
             "verify-rerun-policy-mismatch-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Rerun, explored(), unexplored()),
         ),
         (
             "verify-class-mismatch-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Rerun, failure(), other_class),
         ),
         (
             "verify-clean-rerun-same-trace-stays-ok",
-            CampaignClass::Ok,
+            RunClass::Ok,
             judged(VerifyPath::Rerun, clean("sha256:a"), clean("sha256:a")),
         ),
         (
             "verify-clean-rerun-trace-mismatch",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Rerun, clean("sha256:a"), clean("sha256:b")),
         ),
         (
             "verify-infra-reproduction-keeps-class",
-            CampaignClass::Violation,
+            RunClass::Violation,
             judged(VerifyPath::Rerun, failure(), infra()),
         ),
         (
             "verify-replay-divergence-under-an-infra-refusal-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Replay, failure(), diverged_infra),
         ),
         (
             "verify-replay-divergence-after-the-same-verdict-is-nondeterminism",
-            CampaignClass::Nondeterminism,
+            RunClass::Nondeterministic,
             judged(VerifyPath::Replay, failure(), diverged_same_verdict),
         ),
     ]
@@ -746,8 +738,8 @@ mod tests {
     #[test]
     fn a_diverging_reproduction_is_nondeterministic() {
         let observed = Observation {
-            class: CampaignClass::Unclassified,
-            signature: Some("UNCLASSIFIED|PLANTED token=#|".into()),
+            class: RunClass::Failure,
+            signature: Some("failure|PLANTED token=#|".into()),
             policy: "bug_depth=1".into(),
             exit: "exit=3".into(),
             finding: Some("PLANTED token=1".into()),
@@ -765,12 +757,12 @@ mod tests {
         // that observed the same failure dedup onto one record.
         {
             let observed = Signature {
-                class: CampaignClass::GuestAbort,
+                class: RunClass::Crash,
                 shape: "guest_abort unattributed PLANTED".into(),
                 policy: "bug_depth=#".into(),
             };
             let filed = nondeterminism_signature(Some(&observed));
-            assert_eq!(filed.class, CampaignClass::Nondeterminism);
+            assert_eq!(filed.class, RunClass::Nondeterministic);
             assert!(
                 filed.shape.contains(observed.class.as_str())
                     && filed.shape.contains(&observed.shape)

@@ -431,11 +431,12 @@ fn main() {
         });
         assert!(!restamped.status.success(), "{envelope:#}");
         assert_eq!(
-            envelope["refusal"]["class"], "fingerprint_mismatch",
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"error".into(), &"trace_mismatch".into()),
             "{envelope:#}"
         );
         assert_eq!(
-            envelope["refusal"]["mismatch"], "mount_metadata",
+            envelope["stop"]["mismatch"], "mount_metadata",
             "{envelope:#}"
         );
         assert!(envelope["guest_exit"].is_null(), "{envelope:#}");

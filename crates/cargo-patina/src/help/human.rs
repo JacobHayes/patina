@@ -156,6 +156,28 @@ skipped when scanning for the artifact; an UNKNOWN option stops the scan, since 
 could otherwise be misread as the artifact, and is then refused by name.",
     );
 
+    out.push_str("\nOutcomes and exit status (`run`, `test`, `campaign`):\n");
+    push_prose(
+        &mut out,
+        "Every run ends in exactly one class, reported as `result` (and `attribution`) under \
+--format json and on the line patina prints last. The exit status follows the class: 0 clean, \
+1 a finding in the guest, 2 Patina could not do what was asked. The guest's own exit status \
+is reported (`guest_exit`), never passed through. A campaign exits 1 when any generation is a \
+finding in the guest or its coverage gate fails, else 2 when any generation is not clean.",
+    );
+    out.push('\n');
+    for class in patina_dst_abi::RunClass::ALL {
+        out.push_str(&format!(
+            "  {:<17} {:<19} exit {}  {}\n",
+            class.as_str(),
+            class
+                .attribution()
+                .map_or("-", |attribution| attribution.as_str()),
+            class.exit_code(),
+            class.summary(),
+        ));
+    }
+
     out.push_str("\nENVIRONMENT:\n");
     push_prose(
         &mut out,

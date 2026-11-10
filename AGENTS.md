@@ -68,7 +68,15 @@ single source for the help text and the parsers: add a flag there and nowhere
 else. `PATINA_<FLAG>` defaults a registry flag and is derived for free;
 `PATINA_RT_*` is the supervisor-to-guest control plane, and a new control-plane
 variable takes that prefix. Execution verbs accept `--format json`
-(`patina.result/v1`); prefer it when parsing results.
+(`patina.result/v2`); prefer it when parsing results.
+
+Every run ends in one outcome class (`patina_dst_abi::RunClass`); its
+attribution (the guest, something Patina does not model, Patina's own failure,
+or the request) and the tool's exit status (0, 1 or 2) are functions of the
+class. A new way for a run to end names its class where it stops (the shim's
+`RunStop`, the supervisor's `classify`); nothing reports a result under
+another name, or a guest's exit status as the tool's. README's "Outcomes and
+exit codes" is the one table.
 
 ## Project doctrine
 

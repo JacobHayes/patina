@@ -9,11 +9,11 @@
 //! Per generation:
 //!   * the run seed and every randomized knob derive from `SHA-256("patina-campaign
 //!     -<seed_base>-<generation>")` (no wall clock, no `$RANDOM`);
-//!   * the child reports a `patina.result/v1` envelope: its verdicts, runtime
+//!   * the child reports a `patina.result/v2` envelope: its verdicts, runtime
 //!     findings, per-plane fault facts, SDK site counters and policy accounting,
 //!     all lifted from the runtime's `patina.runfacts/v1` document;
 //!   * the [`classify`] pure classifier assigns each generation one
-//!     [`CampaignClass`] — a finding, harness or catch-all class, or a
+//!     [`RunClass`] — a finding, harness or catch-all class, or a
 //!     `VACUOUS` coverage class naming the inert planes — in the precedence `built_in_class` encodes, with
 //!     a strict discipline (an explicit finding is never
 //!     downgraded, a nonzero exit is never silently OK, and an unrecognized outcome
@@ -24,8 +24,8 @@
 //!     signature is flagged and its trace saved with a `patina replay`/re-run
 //!     reproduce command.
 //!
-//! Output is a summary-first human report or a `patina.campaign/v2` JSON envelope
-//! (the `patina.result/v1` envelope family extended for a campaign). Both are
+//! Output is a summary-first human report or a `patina.campaign/v3` JSON envelope
+//! (the `patina.result/v2` envelope family extended for a campaign). Both are
 //! progressive-disclosure: the envelope carries class counts, deduped signatures,
 //! and per-run detail ONLY for novel/failing generations, with pointers to the
 //! full on-disk artifacts (the signature store, saved traces, reports); the human
@@ -47,11 +47,12 @@ mod state;
 mod verify;
 
 pub use classify::{
-    CampaignClass, ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,
+    ClassifyRules, FindingFacts, GenerationFacts, RunFacts, VerdictFacts, classify,
     recognize_verdicts, signature,
 };
 pub(crate) use generation::{GenerationRun, run_envelope};
 pub use parse::{CampaignInvocation, parse};
+pub use patina_dst_abi::RunClass;
 pub(crate) use planes::FAULT_PLANE_NAMES;
 pub use planes::{FaultPlane, FaultPlanes};
 pub(crate) use repro::{GenerationRepro, generation_repro, run_reduced_generation};
@@ -80,7 +81,7 @@ pub fn execute(invocation: CampaignInvocation) -> Result<i32, CliError> {
 /// the same signature are "the same bug"; a never-before-seen signature is NOVEL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
-    pub class: CampaignClass,
+    pub class: RunClass,
     pub shape: String,
     pub policy: String,
 }

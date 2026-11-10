@@ -480,7 +480,8 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
                     String::from_utf8_lossy(&json.stderr)
                 )
             });
-        assert_eq!(value["result"], "violation");
+        assert_eq!(value["result"], "unsupported");
+        assert_eq!(value["attribution"], "patina_unsupported");
         assert_eq!(value["exit_code"], 2);
         assert_json_finding_has_crate(&value, "system", "leaker_a");
         assert_json_finding_has_crate(&value, "shm_open", "leaker_b");

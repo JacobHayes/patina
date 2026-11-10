@@ -6,14 +6,14 @@ use super::*;
 /// never reads a fabricated empty object as "the plane reported nothing".
 #[test]
 fn envelope_omits_fields_nothing_produced() {
-    let mut env = Envelope::new("audit", "ok", 0);
+    let mut env = Envelope::new("audit", RunClass::Ok);
     env.findings = vec!["libc::open".into()];
     let json = env.to_json();
     assert_eq!(json["schema"], ENVELOPE_SCHEMA);
     assert_eq!(json["verb"], "audit");
     assert_eq!(json["result"], "ok");
     assert_eq!(json["findings"][0], "libc::open");
-    for absent in ["seed", "fault_reports", "refusal", "verdicts"] {
+    for absent in ["seed", "fault_reports", "stop", "attribution", "verdicts"] {
         assert!(json.get(absent).is_none(), "{absent} must be omitted");
     }
 }
