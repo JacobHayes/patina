@@ -70,6 +70,8 @@ fn record_harness_failure(
 pub(super) fn execute_native_harness(invocation: NativeHarnessInvocation) -> Result<i32, CliError> {
     let built = build_native_harness(&invocation)?;
     let test_name = format!("{}::{}", invocation.harness_target, invocation.exact);
+    let first_seed = invocation.seeds.iter().next().unwrap_or(0);
+    require_listed_test(&invocation, &built.guest, first_seed)?;
     for seed in invocation.seeds.iter() {
         let run = run_native_harness_seed(&invocation, &built.guest, seed, None)?;
         if run.exit_code != 0 {
@@ -498,11 +500,68 @@ fn safe_path_segment(value: &str) -> String {
     }
 }
 
+/// Refuse a `--exact` path the harness has no test for. libtest runs zero
+/// tests for a filter that matches nothing and exits 0, which every seed
+/// would then report as a pass of a test that never ran. The harness lists
+/// its own tests (`--list`), one `NAME: test` line each; a listing that
+/// itself fails is left for the first seed to report.
+fn require_listed_test(
+    invocation: &NativeHarnessInvocation,
+    guest: &Path,
+    seed: u64,
+) -> Result<(), CliError> {
+    let listing = run_native_harness_child(invocation, guest, seed, None, &["--list"])?;
+    if listing.exit_code != 0 {
+        return Ok(());
+    }
+    let tests: Vec<&str> = listing
+        .stdout
+        .lines()
+        .filter_map(|line| line.strip_suffix(": test"))
+        .collect();
+    if tests.contains(&invocation.exact.as_str()) {
+        return Ok(());
+    }
+    let mut message = format!(
+        "no test named {:?} in harness target {:?}: nothing would run. --exact takes the \
+         test's full path within the target",
+        invocation.exact, invocation.harness_target
+    );
+    if tests.is_empty() {
+        message.push_str("; the target lists no tests");
+    } else {
+        message.push_str("; it lists:");
+        for name in &tests {
+            message.push_str("\n  ");
+            message.push_str(name);
+        }
+    }
+    Err(CliError(message))
+}
+
 fn run_native_harness_seed(
     invocation: &NativeHarnessInvocation,
     guest: &Path,
     seed: u64,
     record: Option<&Path>,
+) -> Result<HarnessSeedRun, CliError> {
+    run_native_harness_child(
+        invocation,
+        guest,
+        seed,
+        record,
+        &["--exact", &invocation.exact, "--nocapture"],
+    )
+}
+
+/// One child `patina run` of the harness under `seed`, with `libtest_args`
+/// after the single-thread setting every harness run takes.
+fn run_native_harness_child(
+    invocation: &NativeHarnessInvocation,
+    guest: &Path,
+    seed: u64,
+    record: Option<&Path>,
+    libtest_args: &[&str],
 ) -> Result<HarnessSeedRun, CliError> {
     let executable = env::current_exe().map_err(|error| {
         CliError(format!(
@@ -524,9 +583,7 @@ fn run_native_harness_seed(
     append_native_harness_run_flags(&mut args, invocation);
     args.push(OsString::from("--"));
     args.push(OsString::from("--test-threads=1"));
-    args.push(OsString::from("--exact"));
-    args.push(OsString::from(&invocation.exact));
-    args.push(OsString::from("--nocapture"));
+    args.extend(libtest_args.iter().map(OsString::from));
     let mut command = Command::new(&executable);
     command.args(&args);
     // Every seed, and the recorded retry, is this same supervisor build.

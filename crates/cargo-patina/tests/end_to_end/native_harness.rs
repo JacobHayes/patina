@@ -50,6 +50,28 @@ mod tests {
             String::from_utf8_lossy(&audit.stderr)
         );
 
+        // A path the target has no test for runs nothing, so it is refused
+        // rather than passed: libtest itself exits 0 for it.
+        let unmatched = invoke_unchecked(
+            patina,
+            directory.path(),
+            &[
+                "test",
+                ".",
+                "--harness-target",
+                harness,
+                "--exact",
+                "tests::no_such_test",
+                "--seeds",
+                "2",
+                "--format",
+                "json",
+            ],
+        );
+        assert_eq!(unmatched.status.code(), Some(2), "{unmatched:?}");
+        let refused: serde_json::Value = serde_json::from_slice(&unmatched.stdout).unwrap();
+        assert_ne!(refused["result"], "ok", "{refused}");
+
         let failing = invoke_unchecked(
             patina,
             directory.path(),
