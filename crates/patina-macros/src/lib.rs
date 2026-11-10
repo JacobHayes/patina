@@ -7,6 +7,9 @@
 use proc_macro::{Delimiter, TokenStream, TokenTree};
 use std::str::FromStr;
 
+mod test_flags;
+use test_flags::{Arity, TEST_FLAGS};
+
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_test(attr, item) {
@@ -16,7 +19,7 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn expand_test(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
-    let cli_args = parse_cli_args(attr)?;
+    let cli_args = cli_args(&parse_arguments(attr)?)?;
     let parsed = parse_test_fn(item)?;
     let cli_args = cli_args
         .iter()
@@ -115,9 +118,11 @@ fn reject_arguments(tokens_after_name: &[TokenTree]) -> Result<(), String> {
     }
 }
 
-fn parse_cli_args(attr: TokenStream) -> Result<Vec<String>, String> {
+/// The attribute's arguments as written: each name, and its value if it has
+/// one.
+fn parse_arguments(attr: TokenStream) -> Result<Vec<(String, Option<String>)>, String> {
     let tokens = attr.into_iter().collect::<Vec<_>>();
-    let mut args = Vec::new();
+    let mut arguments = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
         if is_comma(&tokens[index]) {
@@ -125,35 +130,34 @@ fn parse_cli_args(attr: TokenStream) -> Result<Vec<String>, String> {
             continue;
         }
         let name = match &tokens[index] {
-            TokenTree::Ident(ident) => flag_name(&ident.to_string()),
+            TokenTree::Ident(ident) => {
+                let ident = ident.to_string();
+                ident.strip_prefix("r#").unwrap_or(&ident).to_string()
+            }
             other => {
                 return Err(format!(
-                    "expected a flag name in #[patina_dst::test(...)], got `{}`",
+                    "expected an argument name in #[patina_dst::test(...)], got `{}`",
                     other
                 ));
             }
         };
         index += 1;
+        let mut value = None;
         if index < tokens.len() && is_equals(&tokens[index]) {
             index += 1;
-            let Some(value) = tokens.get(index) else {
-                return Err(format!("missing value for `{name}`"));
-            };
-            let value = match value {
-                TokenTree::Literal(literal) => literal_to_cli_value(&literal.to_string())?,
-                other => {
+            value = Some(match tokens.get(index) {
+                Some(TokenTree::Literal(literal)) => literal_to_cli_value(&literal.to_string())?,
+                Some(other) => {
                     return Err(format!(
                         "value for `{name}` must be a literal, got `{}`",
                         other
                     ));
                 }
-            };
-            args.push(name);
-            args.push(value);
+                None => return Err(format!("missing value for `{name}`")),
+            });
             index += 1;
-        } else {
-            args.push(name);
         }
+        arguments.push((name, value));
         if index < tokens.len() {
             if is_comma(&tokens[index]) {
                 index += 1;
@@ -165,7 +169,69 @@ fn parse_cli_args(attr: TokenStream) -> Result<Vec<String>, String> {
             }
         }
     }
+    Ok(arguments)
+}
+
+/// The `patina test` words the arguments stand for. An argument that names no
+/// flag of `patina test`, or has a value where the flag takes none (or none
+/// where it takes one), is refused here, when the test is compiled, rather
+/// than by the tool when the test runs.
+fn cli_args(arguments: &[(String, Option<String>)]) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+    for (name, value) in arguments {
+        let Some((_, arity)) = TEST_FLAGS.iter().find(|(flag, _)| flag == name) else {
+            let mut message = format!("unknown #[patina_dst::test] argument `{name}`");
+            if let Some(near) = nearest_flag(name) {
+                message.push_str(&format!("; did you mean `{near}`?"));
+            }
+            message.push_str(" (the arguments are the flags of `patina test`, with `_` for `-`)");
+            return Err(message);
+        };
+        let flag = format!("--{}", name.replace('_', "-"));
+        match (arity, value) {
+            (Arity::Switch, None) | (Arity::OptionalValue, None) => args.push(flag),
+            (Arity::Value, Some(value)) => {
+                args.push(flag);
+                args.push(value.clone());
+            }
+            // An optional value is one word with its flag: `--flag VALUE`
+            // would read VALUE as a positional.
+            (Arity::OptionalValue, Some(value)) => args.push(format!("{flag}={value}")),
+            (Arity::Switch, Some(_)) => {
+                return Err(format!("`{name}` takes no value; write `{name}` alone"));
+            }
+            (Arity::Value, None) => {
+                return Err(format!("`{name}` needs a value; write `{name} = ...`"));
+            }
+        }
+    }
     Ok(args)
+}
+
+/// The flag a misspelled argument most likely meant: the closest by edit
+/// distance, when it is close.
+fn nearest_flag(name: &str) -> Option<&'static str> {
+    TEST_FLAGS
+        .iter()
+        .map(|(flag, _)| (edit_distance(name, flag), *flag))
+        .min()
+        .filter(|(distance, _)| *distance <= 2)
+        .map(|(_, flag)| flag)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let substituted = diagonal + usize::from(x != *y);
+            diagonal = row[j + 1];
+            row[j + 1] = substituted.min(diagonal + 1).min(row[j] + 1);
+        }
+    }
+    row[b.len()]
 }
 
 fn is_comma(token: &TokenTree) -> bool {
@@ -174,11 +240,6 @@ fn is_comma(token: &TokenTree) -> bool {
 
 fn is_equals(token: &TokenTree) -> bool {
     matches!(token, TokenTree::Punct(punct) if punct.as_char() == '=')
-}
-
-fn flag_name(ident: &str) -> String {
-    let ident = ident.strip_prefix("r#").unwrap_or(ident);
-    format!("--{}", ident.replace('_', "-"))
 }
 
 fn literal_to_cli_value(text: &str) -> Result<String, String> {
@@ -346,7 +407,39 @@ fn compile_error(message: &str) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::literal_to_cli_value;
+    use super::{cli_args, literal_to_cli_value};
+
+    fn words(arguments: &[(&str, Option<&str>)]) -> Result<Vec<String>, String> {
+        let arguments: Vec<(String, Option<String>)> = arguments
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.map(str::to_string)))
+            .collect();
+        cli_args(&arguments)
+    }
+
+    #[test]
+    fn arguments_are_checked_against_the_flags_of_patina_test() {
+        assert_eq!(
+            words(&[("seeds", Some("3")), ("buggify", None), ("release", None)]).unwrap(),
+            ["--seeds", "3", "--buggify", "--release"]
+        );
+        // A flag whose value is optional carries it in the same word.
+        assert_eq!(
+            words(&[("buggify", Some("500")), ("sched_pct", Some("3"))]).unwrap(),
+            ["--buggify=500", "--sched-pct=3"]
+        );
+        // A misspelled name, a value on a switch, a value flag without one,
+        // and the two flags the attribute supplies itself.
+        for refused in [
+            ("seedz", Some("2")),
+            ("release", Some("1")),
+            ("seeds", None),
+            ("exact", Some("a::b")),
+            ("harness_target", Some("lib:a")),
+        ] {
+            assert!(words(&[refused]).is_err(), "{refused:?} was accepted");
+        }
+    }
 
     #[test]
     fn literals_convert_to_cli_values_and_refuse_unsupported_escapes() {

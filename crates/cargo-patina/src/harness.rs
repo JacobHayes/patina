@@ -1006,6 +1006,37 @@ mod tests {
         assert_ne!(directory("lib:app"), directory("lib_app"));
     }
 
+    /// `#[patina_dst::test(...)]` refuses, when the test is compiled, an
+    /// argument that is not a flag of this verb. Its table of them is this
+    /// registry's, flag for flag and arity for arity.
+    #[test]
+    fn the_test_attribute_takes_exactly_this_verbs_flags() {
+        mod attribute {
+            include!("../../patina-macros/src/test_flags.rs");
+        }
+        use attribute::Arity;
+        let registered: BTreeMap<String, Arity> = help::verb("test")
+            .expect("the test verb")
+            .family_flags(help::Family::Sole)
+            // The attribute supplies these two itself.
+            .filter(|flag| !matches!(flag.name, "--harness-target" | "--exact"))
+            .map(|flag| {
+                let arity = match flag.value {
+                    help::Value::None => Arity::Switch,
+                    help::Value::Required(..) => Arity::Value,
+                    help::Value::Optional(..) => Arity::OptionalValue,
+                };
+                (flag.name.trim_start_matches("--").replace('-', "_"), arity)
+            })
+            .collect();
+        let table: BTreeMap<String, Arity> = attribute::TEST_FLAGS
+            .iter()
+            .map(|(name, arity)| (name.to_string(), *arity))
+            .collect();
+        assert_eq!(table, registered);
+        assert_eq!(table.len(), attribute::TEST_FLAGS.len(), "a flag twice");
+    }
+
     #[test]
     fn native_harness_records_failures_but_never_retries_a_prerun_refusal() {
         fn outcome(result: RunClass, pre_run_refusal: bool) -> HarnessSeedRun {

@@ -169,6 +169,25 @@
 //! [TUTORIAL]: https://github.com/JacobHayes/patina/blob/main/TUTORIAL.md
 //! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
 
+/// Run a test under Patina, across seeds, from plain `cargo test`.
+///
+/// The arguments are the flags of `patina test`, with `_` for `-`, and are
+/// checked when the test is compiled:
+///
+/// ```no_run
+/// #[patina_dst::test(seeds = 30, buggify = 500, fs_error_permille = 20)]
+/// fn survives_faults() {}
+/// ```
+///
+/// ```compile_fail
+/// #[patina_dst::test(seedz = 30)]
+/// fn a_misspelled_argument_does_not_compile() {}
+/// ```
+///
+/// ```compile_fail
+/// #[patina_dst::test(seeds)]
+/// fn nor_does_a_missing_value() {}
+/// ```
 #[cfg(feature = "macros")]
 pub use patina_dst_macros::test;
 
