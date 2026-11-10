@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-patina"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "clap",
@@ -308,7 +308,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "patina-dst"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-macros",
  "serde",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-abi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-conformance"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "patina-dst-syscalls",
@@ -335,14 +335,14 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-driver-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
 ]
 
 [[package]]
 name = "patina-dst-fs-crash"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-fs-mem"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
@@ -360,11 +360,11 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-macros"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "patina-dst-native-shim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "linux-raw-sys",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-net-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
@@ -390,14 +390,14 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-rng-seeded"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
 ]
 
 [[package]]
 name = "patina-dst-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
@@ -415,11 +415,11 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-syscalls"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "patina-dst-target"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gimli",
  "object",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-trace"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst-wrapper-fault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",

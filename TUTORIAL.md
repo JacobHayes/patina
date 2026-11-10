@@ -22,10 +22,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.2.0" }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.3.0" }
 
 [dev-dependencies]
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.2.0", features = ["macros"] }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.3.0", features = ["macros"] }
 ```
 
 `src/lib.rs`:

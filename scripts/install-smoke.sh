@@ -29,7 +29,7 @@ with their SDK dependency set to REF:
   * with --go, a Go program using the Go SDK at REF builds, runs simulated,
     and a recorded run replays.
 
-REF is a release tag (v0.2.0), a commit of github.com/JacobHayes/patina, or
+REF is a release tag (v0.3.0), a commit of github.com/JacobHayes/patina, or
 the path of a Patina checkout whose SDK to use (not with --go).
 The directory is removed on success and named on failure.
 EOF
