@@ -1,9 +1,5 @@
+//! The tool as a Cargo subcommand, which Cargo finds by this binary's name.
+
 fn main() {
-    match cargo_patina::entrypoint() {
-        Ok(code) => std::process::exit(code),
-        Err(error) => {
-            eprintln!("cargo-patina: {error}");
-            std::process::exit(2);
-        }
-    }
+    cargo_patina::main_as_cargo_subcommand()
 }

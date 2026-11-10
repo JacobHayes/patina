@@ -515,17 +515,41 @@ pub fn seal_shim(staticlib: &Path, posix: &Path, dir: &Path) -> Result<[PathBuf;
     Ok([sealed.facade, sealed.engine])
 }
 
-pub fn entrypoint() -> Result<i32, CliError> {
+/// Run the tool on this process's arguments and exit with its status: the
+/// whole of the `patina` binary.
+pub fn main() -> ! {
+    exit_with(env::args_os().skip(1).collect())
+}
+
+/// [`main`] for the package's second binary, the tool as a Cargo subcommand:
+/// Cargo passes the subcommand's own name ahead of the arguments.
+pub fn main_as_cargo_subcommand() -> ! {
+    let mut arguments: Vec<OsString> = env::args_os().skip(1).collect();
+    if arguments.first().is_some_and(|name| name == "patina") {
+        arguments.remove(0);
+    }
+    exit_with(arguments)
+}
+
+fn exit_with(arguments: Vec<OsString>) -> ! {
+    match entrypoint(arguments) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("cargo-patina: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn entrypoint(arguments: Vec<OsString>) -> Result<i32, CliError> {
     // A Go guest's build runs this executable as its `-toolexec` wrapper
     // around every Go tool; that role is not a verb, and it skips the
     // supervisor setup a run needs.
-    let mut raw = env::args_os().skip(1);
-    if raw.next().as_deref() == Some(OsStr::new(go_build::TOOLEXEC_ROLE)) {
-        return go_build::run_as_toolexec(raw.collect());
+    if arguments.first().map(OsString::as_os_str) == Some(OsStr::new(go_build::TOOLEXEC_ROLE)) {
+        return go_build::run_as_toolexec(arguments.into_iter().skip(1).collect());
     }
     lifeline::watch()?;
     supervisor_identity::establish()?;
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     // Strip the cross-cutting output flags (`--format`, `--render`,
     // `--report`) once, globally, before any per-verb routing —
     // the same pre-pass shape as `extract_target`. They are patina-level flags,

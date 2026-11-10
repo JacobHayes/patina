@@ -1,7 +1,8 @@
 [package]
 name = "cargo-patina"
-description = "Cargo subcommand for Patina deterministic runs"
+description = "The patina tool: deterministic simulation testing for native programs"
 readme = "../../README.md"
+default-run = "patina"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -58,6 +59,12 @@ object.workspace = true
 # unpublished conformance scenarios exist for the native_conformance test alone.
 patina-dst-conformance = { path = "../patina-conformance" }
 serde_json.workspace = true
+
+# The tool is the standalone `patina` binary. The second binary is the same
+# tool as a Cargo subcommand, for users who install this package with Cargo.
+[[bin]]
+name = "patina"
+path = "src/bin/patina.rs"
 
 [[bin]]
 name = "cargo-patina"

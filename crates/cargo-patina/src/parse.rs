@@ -95,10 +95,6 @@ fn version_requested(arguments: &[OsString]) -> bool {
 }
 
 pub(super) fn parse(mut arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
-    // `cargo patina ...` invokes this binary with a leading `patina` argument.
-    if arguments.first().and_then(|value| value.to_str()) == Some("patina") {
-        arguments.remove(0);
-    }
     if arguments.is_empty() {
         return Err(CliError::usage(
             "missing command (expected run, test, campaign, build, audit, replay, minimize, coverage, syscalls, or trace)",

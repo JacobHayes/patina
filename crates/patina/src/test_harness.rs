@@ -46,8 +46,8 @@ mod orchestration {
     ///
     /// The shim-linked guest calls the same wrapper, but `is_simulated()` is true
     /// there, so only the body executes. This function is therefore host-side
-    /// only: discover `cargo-patina`, ask it to rebuild the same libtest target
-    /// under the native shim, and panic loudly on any failure.
+    /// only: discover the `patina` tool, ask it to rebuild the same libtest
+    /// target under the native shim, and panic loudly on any failure.
     #[cfg(feature = "macros")]
     #[doc(hidden)]
     #[track_caller]
@@ -59,7 +59,7 @@ mod orchestration {
 
     #[cfg(feature = "macros")]
     fn orchestrate_inner(test: &DstTest) -> Result<(), String> {
-        let cli = resolve_cargo_patina(test)?;
+        let cli = resolve_cli(test)?;
         let exact = libtest_exact_name(test);
         let mut command = std::process::Command::new(&cli);
         command
@@ -75,7 +75,7 @@ mod orchestration {
         let rendered = render_command(&cli, command.get_args());
         let output = command.output().map_err(|error| {
             format!(
-                "patina dst test could not launch cargo-patina for {}: {error}\n  command: {rendered}",
+                "patina dst test could not launch patina for {}: {error}\n  command: {rendered}",
                 test.test_path
             )
         })?;
@@ -115,7 +115,7 @@ mod orchestration {
     }
 
     #[cfg(feature = "macros")]
-    fn resolve_cargo_patina(test: &DstTest) -> Result<std::path::PathBuf, String> {
+    fn resolve_cli(test: &DstTest) -> Result<std::path::PathBuf, String> {
         if let Some(raw) = std::env::var_os("PATINA_CLI") {
             if raw.as_os_str().is_empty() {
                 return Err(missing_cli_message(test, "PATINA_CLI is set but empty"));
@@ -125,7 +125,7 @@ mod orchestration {
                 return Err(missing_cli_message(
                     test,
                     &format!(
-                        "PATINA_CLI must be an absolute path to cargo-patina, got {}",
+                        "PATINA_CLI must be an absolute path to patina, got {}",
                         path.display()
                     ),
                 ));
@@ -144,22 +144,24 @@ mod orchestration {
 
         let path = std::env::var_os("PATH").unwrap_or_default();
         for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(executable_name("cargo-patina"));
+            let candidate = dir.join(executable_name("patina"));
             if is_executable(&candidate) {
                 return Ok(candidate);
             }
         }
         Err(missing_cli_message(
             test,
-            "PATINA_CLI is not set and cargo-patina was not found on PATH",
+            "PATINA_CLI is not set and patina was not found on PATH",
         ))
     }
 
     #[cfg(feature = "macros")]
     fn missing_cli_message(test: &DstTest, reason: &str) -> String {
         format!(
-            "patina dst test could not find cargo-patina for {}\n  reason: {reason}\n  remedies:\n    set PATINA_CLI to the absolute path of a cargo-patina binary\n    or put cargo-patina on PATH\n  DST tests never skip when the CLI is missing; absence is a test failure.",
-            test.test_path
+            "patina dst test could not find the patina tool for {}\n  reason: {reason}\n  install it (to ~/.local/bin):\n    curl -fsSL {}/releases/latest/download/install.sh | sh -s -- --version {}\n  or set PATINA_CLI to the absolute path of a patina binary\n  DST tests never skip when the tool is missing; absence is a test failure.",
+            test.test_path,
+            env!("CARGO_PKG_REPOSITORY"),
+            env!("CARGO_PKG_VERSION"),
         )
     }
 
