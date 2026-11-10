@@ -22,23 +22,11 @@ impl Replayer {
     /// trace's recorded configuration ([`RunMetadata::policy_fingerprint_suffix`])
     /// and the two must equal the recorded string.
     pub fn open(path: impl AsRef<Path>, base_fingerprint: &str) -> Result<Self, TraceError> {
-        Self::open_timeline(path, base_fingerprint, MAIN_TIMELINE)
-    }
-
-    pub fn open_timeline(
-        path: impl AsRef<Path>,
-        base_fingerprint: &str,
-        timeline: &str,
-    ) -> Result<Self, TraceError> {
-        Self::from_bundle(TraceBundle::load(path)?, base_fingerprint, timeline)
+        Self::from_bundle(TraceBundle::load(path)?, base_fingerprint)
     }
 
     /// Build a replayer from an already-loaded bundle.
-    pub fn from_bundle(
-        bundle: TraceBundle,
-        base_fingerprint: &str,
-        timeline: &str,
-    ) -> Result<Self, TraceError> {
+    pub fn from_bundle(bundle: TraceBundle, base_fingerprint: &str) -> Result<Self, TraceError> {
         let expected = format!(
             "{base_fingerprint}{}",
             bundle.metadata.policy_fingerprint_suffix()
@@ -49,7 +37,7 @@ impl Replayer {
                 recorded: bundle.metadata.fingerprint,
             });
         }
-        let decisions = bundle.resolved_timeline(timeline)?;
+        let decisions = bundle.resolved_timeline(MAIN_TIMELINE)?;
         if let Some(stop) = bundle.metadata.compute_stop
             && (stop.steps != decisions.len() as u64 || stop.task.0 == 0)
         {
@@ -57,16 +45,8 @@ impl Replayer {
                 "compute stop must name a task at the end of its exact prefix".into(),
             ));
         }
-        let execution_seed = bundle
-            .timelines
-            .iter()
-            .find(|candidate| candidate.id == timeline)
-            .and_then(|candidate| candidate.branch_seed)
-            .unwrap_or(bundle.metadata.root_seed);
-        let mut metadata = bundle.metadata;
-        metadata.root_seed = execution_seed;
         Ok(Self {
-            metadata,
+            metadata: bundle.metadata,
             decisions,
             next: 0,
         })

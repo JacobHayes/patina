@@ -15,29 +15,14 @@ use std::path::PathBuf;
 
 const DEFAULT_FINGERPRINT: &str = "direct-seeded-run-v1";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// How a run relates to a trace. A recording or a replay moves the trace
+/// through the [`TraceTransport`](crate::TraceTransport) installed on the
+/// builder, or through the file a path constructor names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionMode {
     Seeded,
-    Record {
-        path: PathBuf,
-    },
-    /// Record through an installed [`TraceTransport`] instead of a path.
-    RecordTransport,
-    Replay {
-        path: PathBuf,
-        timeline: String,
-    },
-    /// Replay through an installed [`TraceTransport`] instead of a path.
-    ReplayTransport {
-        timeline: String,
-    },
-    Branch {
-        path: PathBuf,
-        parent: String,
-        from_sequence: u64,
-        branch_id: String,
-        branch_seed: u64,
-    },
+    Record,
+    Replay,
 }
 
 pub use crate::fault_knob::{
@@ -109,8 +94,7 @@ impl LivenessConfig {
 /// metadata (guest argv, params).
 ///
 /// Construct one with [`RuntimeConfig::seeded`] (or
-/// [`record`](RuntimeConfig::record)/[`replay`](RuntimeConfig::replay)/
-/// [`branch`](RuntimeConfig::branch)) and refine it with the `with_*` builder
+/// [`record`](RuntimeConfig::record)/[`replay`](RuntimeConfig::replay)) and refine it with the `with_*` builder
 /// methods (an embedder overlays the `PATINA_*` control plane with the
 /// `apply_*_env` methods). Two runs with equal configs (and an identical
 /// guest) produce byte-identical effect sequences.
@@ -118,6 +102,8 @@ impl LivenessConfig {
 pub struct RuntimeConfig {
     pub(super) seed: u64,
     pub(super) mode: ExecutionMode,
+    /// The trace file a path constructor named, opened as the run's transport.
+    pub(super) trace_file: Option<PathBuf>,
     pub(super) fingerprint: String,
     pub(super) step_budget: Option<u64>,
     pub(super) params: BTreeMap<String, String>,
@@ -224,6 +210,7 @@ impl RuntimeConfig {
         Self {
             seed,
             mode: ExecutionMode::Seeded,
+            trace_file: None,
             boot_origin_nanos: None,
             fingerprint: DEFAULT_FINGERPRINT.into(),
             step_budget: None,
@@ -252,194 +239,40 @@ impl RuntimeConfig {
         }
     }
 
+    /// Record to the trace file at `path` (an in-process embedder or a test;
+    /// the native shim records through a transport).
     pub fn record(seed: u64, path: impl Into<PathBuf>, fingerprint: impl Into<String>) -> Self {
         Self {
-            seed,
-            mode: ExecutionMode::Record { path: path.into() },
-            boot_origin_nanos: None,
-            fingerprint: fingerprint.into(),
-            step_budget: None,
-            params: BTreeMap::new(),
-            faults: FaultConfig::default(),
-            buggify: BuggifyConfig::default(),
-            schedule_policy: SchedulePolicy::default(),
-            yield_stride: 0,
-            swarm: false,
-            guest_argv: None,
-            guest_env: BTreeMap::new(),
-            guest_cwd: None,
-            guest_stdin: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            cpus: None,
-            dns_entries: BTreeMap::new(),
-            liveness: LivenessConfig::default(),
-            reports: ReportConfig::default(),
-            sud: None,
-            tsc: None,
-            address_layout: None,
-            incarnation: Incarnation::First,
-            crash_supervised: false,
-            replayed_crash_kind: None,
+            trace_file: Some(path.into()),
+            ..Self::record_transport(seed, fingerprint)
         }
     }
 
+    /// Replay the trace file at `path`.
     pub fn replay(path: impl Into<PathBuf>, fingerprint: impl Into<String>) -> Self {
-        Self::replay_timeline(path, "main", fingerprint)
+        Self {
+            trace_file: Some(path.into()),
+            ..Self::replay_transport(fingerprint)
+        }
     }
 
-    /// Record through a [`TraceTransport`] installed on the builder.
+    /// Record through a [`TraceTransport`](crate::TraceTransport) installed on
+    /// the builder.
     pub fn record_transport(seed: u64, fingerprint: impl Into<String>) -> Self {
         Self {
-            seed,
-            mode: ExecutionMode::RecordTransport,
-            boot_origin_nanos: None,
+            mode: ExecutionMode::Record,
             fingerprint: fingerprint.into(),
-            step_budget: None,
-            params: BTreeMap::new(),
-            faults: FaultConfig::default(),
-            buggify: BuggifyConfig::default(),
-            schedule_policy: SchedulePolicy::default(),
-            yield_stride: 0,
-            swarm: false,
-            guest_argv: None,
-            guest_env: BTreeMap::new(),
-            guest_cwd: None,
-            guest_stdin: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            cpus: None,
-            dns_entries: BTreeMap::new(),
-            liveness: LivenessConfig::default(),
-            reports: ReportConfig::default(),
-            sud: None,
-            tsc: None,
-            address_layout: None,
-            incarnation: Incarnation::First,
-            crash_supervised: false,
-            replayed_crash_kind: None,
+            ..Self::seeded(seed)
         }
     }
 
-    /// Replay a timeline through a [`TraceTransport`] installed on the builder.
-    pub fn replay_transport_timeline(
-        timeline: impl Into<String>,
-        fingerprint: impl Into<String>,
-    ) -> Self {
+    /// Replay through a [`TraceTransport`](crate::TraceTransport) installed on
+    /// the builder.
+    pub fn replay_transport(fingerprint: impl Into<String>) -> Self {
         Self {
-            seed: 0,
-            mode: ExecutionMode::ReplayTransport {
-                timeline: timeline.into(),
-            },
-            boot_origin_nanos: None,
+            mode: ExecutionMode::Replay,
             fingerprint: fingerprint.into(),
-            step_budget: None,
-            params: BTreeMap::new(),
-            faults: FaultConfig::default(),
-            buggify: BuggifyConfig::default(),
-            schedule_policy: SchedulePolicy::default(),
-            yield_stride: 0,
-            swarm: false,
-            guest_argv: None,
-            guest_env: BTreeMap::new(),
-            guest_cwd: None,
-            guest_stdin: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            cpus: None,
-            dns_entries: BTreeMap::new(),
-            liveness: LivenessConfig::default(),
-            reports: ReportConfig::default(),
-            sud: None,
-            tsc: None,
-            address_layout: None,
-            incarnation: Incarnation::First,
-            crash_supervised: false,
-            replayed_crash_kind: None,
-        }
-    }
-
-    pub fn replay_timeline(
-        path: impl Into<PathBuf>,
-        timeline: impl Into<String>,
-        fingerprint: impl Into<String>,
-    ) -> Self {
-        Self {
-            seed: 0,
-            mode: ExecutionMode::Replay {
-                path: path.into(),
-                timeline: timeline.into(),
-            },
-            boot_origin_nanos: None,
-            fingerprint: fingerprint.into(),
-            step_budget: None,
-            params: BTreeMap::new(),
-            faults: FaultConfig::default(),
-            buggify: BuggifyConfig::default(),
-            schedule_policy: SchedulePolicy::default(),
-            yield_stride: 0,
-            swarm: false,
-            guest_argv: None,
-            guest_env: BTreeMap::new(),
-            guest_cwd: None,
-            guest_stdin: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            cpus: None,
-            dns_entries: BTreeMap::new(),
-            liveness: LivenessConfig::default(),
-            reports: ReportConfig::default(),
-            sud: None,
-            tsc: None,
-            address_layout: None,
-            incarnation: Incarnation::First,
-            crash_supervised: false,
-            replayed_crash_kind: None,
-        }
-    }
-
-    pub fn branch(
-        path: impl Into<PathBuf>,
-        parent: impl Into<String>,
-        from_sequence: u64,
-        branch_id: impl Into<String>,
-        branch_seed: u64,
-        fingerprint: impl Into<String>,
-    ) -> Self {
-        Self {
-            seed: branch_seed,
-            boot_origin_nanos: None,
-            mode: ExecutionMode::Branch {
-                path: path.into(),
-                parent: parent.into(),
-                from_sequence,
-                branch_id: branch_id.into(),
-                branch_seed,
-            },
-            fingerprint: fingerprint.into(),
-            step_budget: None,
-            params: BTreeMap::new(),
-            faults: FaultConfig::default(),
-            buggify: BuggifyConfig::default(),
-            schedule_policy: SchedulePolicy::default(),
-            yield_stride: 0,
-            swarm: false,
-            guest_argv: None,
-            guest_env: BTreeMap::new(),
-            guest_cwd: None,
-            guest_stdin: None,
-            realtime_epoch_nanos: None,
-            hostname: None,
-            cpus: None,
-            dns_entries: BTreeMap::new(),
-            liveness: LivenessConfig::default(),
-            reports: ReportConfig::default(),
-            sud: None,
-            tsc: None,
-            address_layout: None,
-            incarnation: Incarnation::First,
-            crash_supervised: false,
-            replayed_crash_kind: None,
+            ..Self::seeded(0)
         }
     }
 

@@ -62,13 +62,9 @@ fn a_replay_adopts_the_recorded_cpu_count_and_refuses_another() {
     assert_eq!(run(recorded).unwrap(), CPUS);
     assert_eq!(TraceBundle::load(&path).unwrap().metadata.cpus, CPUS);
 
-    // A flag-free replay and a branch both adopt the recorded count; a
-    // matching explicit count replays too.
+    // A flag-free replay adopts the recorded count; a matching explicit count
+    // replays too.
     assert_eq!(run(RuntimeConfig::replay(&path, "cpus-v1")).unwrap(), CPUS);
-    let branch =
-        Context::from_config(RuntimeConfig::branch(&path, "main", 1, "b1", 9, "cpus-v1")).unwrap();
-    assert_eq!(branch.cpus(), CPUS);
-    drop(branch);
     let matching = RuntimeConfig::replay(&path, "cpus-v1")
         .with_cpus(CPUS)
         .unwrap();

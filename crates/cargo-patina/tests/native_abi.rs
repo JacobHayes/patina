@@ -36,10 +36,9 @@ fn guest_clock_origins_and_uptime_are_coherent() {
 }
 
 /// The prefixed C ABI over the crash checkpoint: a seed decides the guest's
-/// entropy and virtual time, and the environment protocol records and replays
-/// without a seed.
+/// entropy and virtual time.
 #[test]
-fn prefixed_c_abi_preserves_crash_checkpoint_and_replays() {
+fn prefixed_c_abi_preserves_crash_checkpoint() {
     let g = assert_build_c_guest("probe.c", CLink::Shim);
     let result = |seed: &str| {
         let out = assert_standalone_success(&g.binary, &[seed], &[]).stdout;
@@ -67,24 +66,6 @@ fn prefixed_c_abi_preserves_crash_checkpoint_and_replays() {
         fields["random"],
         result("124")["random"],
         "entropy must vary, not just the printed seed"
-    );
-
-    let trace = g.dir.path().join("env.patina");
-    let env = [
-        ("PATINA_RT_MODE", "record"),
-        ("PATINA_RT_SEED", "123"),
-        ("PATINA_RT_TRACE", trace.to_str().unwrap()),
-        ("PATINA_RT_FINGERPRINT", "c-abi-v1"),
-    ];
-    let record = assert_standalone_success(&g.binary, &["env"], &env).stdout;
-    let replay_env = [
-        ("PATINA_RT_MODE", "replay"),
-        ("PATINA_RT_TRACE", trace.to_str().unwrap()),
-        ("PATINA_RT_FINGERPRINT", "c-abi-v1"),
-    ];
-    assert_eq!(
-        record,
-        assert_standalone_success(&g.binary, &["env"], &replay_env).stdout
     );
 }
 

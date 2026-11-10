@@ -6,7 +6,7 @@ use crate::config::{BuggifyConfig, ExecutionMode, FaultConfig, RuntimeConfig, va
 use crate::crash::{CrashArm, Incarnation};
 use crate::entropy::SeededEntropy;
 use crate::liveness::{Escalation, LivenessWatchdog, resolve_heal_after};
-use crate::recording::{Execution, RecordReservation, RecordSink, TraceTransport};
+use crate::recording::{Execution, FileTransport, TraceTransport};
 use crate::replay::{
     buggify_record, dns_record, fault_record, guest_env_record, installed_clock_epoch,
     reconcile_replay_address_layout, reconcile_replay_boot_origin, reconcile_replay_buggify,
@@ -26,7 +26,7 @@ use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::MemFs;
 use patina_dst_net_sim::SimNet;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
-use patina_dst_trace::{BranchSession, Recorder, Replayer, RunMetadata, TraceBundle};
+use patina_dst_trace::{Recorder, Replayer, RunMetadata, TraceBundle};
 use patina_dst_wrapper_fault::FaultFs;
 use std::collections::BTreeMap;
 
@@ -83,7 +83,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Install the byte-level trace channel required by the transport modes.
+    /// Install the byte-level trace channel a recording or a replay moves its
+    /// trace through.
     pub fn with_trace_transport(mut self, transport: impl TraceTransport + 'static) -> Self {
         self.trace_transport = Some(Box::new(transport));
         self
@@ -159,35 +160,45 @@ impl RuntimeBuilder {
             ));
         }
 
-        match self.config.mode {
-            ExecutionMode::RecordTransport | ExecutionMode::ReplayTransport { .. } => {
-                if self.trace_transport.is_none() {
-                    return Err(RuntimeError::Config(
-                        "trace transport mode requires an installed trace transport".into(),
-                    ));
-                }
+        // A path constructor's trace file is the run's transport.
+        if let Some(path) = self.config.trace_file.take() {
+            if self.trace_transport.is_some() {
+                return Err(RuntimeError::Config(format!(
+                    "a trace transport was installed beside the trace file {}",
+                    path.display()
+                )));
             }
-            _ => {
-                if self.trace_transport.is_some() {
-                    return Err(RuntimeError::Config(
-                        "a trace transport is only usable with transport record/replay modes"
-                            .into(),
-                    ));
-                }
+            if self.config.mode == ExecutionMode::Record && path.exists() {
+                return Err(RuntimeError::Config(format!(
+                    "refusing to overwrite existing trace {}",
+                    path.display()
+                )));
             }
+            self.trace_transport = Some(Box::new(FileTransport(path)));
+        }
+        match (self.config.mode, self.trace_transport.is_some()) {
+            (ExecutionMode::Seeded, true) => {
+                return Err(RuntimeError::Config(
+                    "a trace transport is only usable when recording or replaying".into(),
+                ));
+            }
+            (ExecutionMode::Record | ExecutionMode::Replay, false) => {
+                return Err(RuntimeError::Config(
+                    "recording and replaying require a trace transport".into(),
+                ));
+            }
+            _ => {}
         }
         // Swarm fault-class selection: for a record/seeded run, mask the enabled
         // fault classes down to a seed-derived subset BEFORE any driver or
         // metadata record consumes `self.config.faults`. Not applied on
-        // replay/branch, where the trace's recorded (already-masked) fault config
+        // replay, where the trace's recorded (already-masked) fault config
         // is authoritative and re-masking would double-select. The record is
         // attached to the recorder metadata below.
         let mut swarm_record = if self.config.swarm
             && matches!(
                 self.config.mode,
-                ExecutionMode::Seeded
-                    | ExecutionMode::Record { .. }
-                    | ExecutionMode::RecordTransport
+                ExecutionMode::Seeded | ExecutionMode::Record
             ) {
             Some(apply_swarm_mask(&mut self.config))
         } else {
@@ -209,12 +220,12 @@ impl RuntimeBuilder {
             )
         );
 
-        // A replayed or branched trace supplies its own authoritative fault
+        // A replayed trace supplies its own authoritative fault
         // configuration, applied to `self.config` after the match releases its
         // borrow. `None` leaves the operator-supplied configuration in place.
         let mut replay_fault_override: Option<FaultConfig> = None;
         // Same contract for the cooperative-SUT (buggify) configuration: a
-        // replayed/branched trace's recorded config is authoritative.
+        // replayed trace's recorded config is authoritative.
         let mut replay_buggify_override: Option<BuggifyConfig> = None;
         // Same contract for deterministic guest environment values.
         let mut replay_guest_env_override: Option<BTreeMap<String, String>> = None;
@@ -234,9 +245,9 @@ impl RuntimeBuilder {
         // Same contract for the exploration scheduling policy.
         let mut replay_schedule_override: Option<SchedulePolicy> = None;
         let mut replay_yield_stride: Option<u32> = None;
-        let (execution, root_seed) = match &self.config.mode {
+        let (execution, root_seed) = match self.config.mode {
             ExecutionMode::Seeded => (Execution::Seeded, self.config.seed),
-            ExecutionMode::Record { path } => (
+            ExecutionMode::Record => (
                 Execution::Record {
                     recorder: Recorder::new(
                         RunMetadata::new(
@@ -263,48 +274,18 @@ impl RuntimeBuilder {
                         .with_address_layout(self.config.address_layout),
                     )
                     .with_incarnation(self.config.incarnation.id()),
-                    sink: RecordSink::Path {
-                        path: path.clone(),
-                        _reservation: RecordReservation::acquire(path)?,
-                    },
+                    transport: self.trace_transport.take().expect("transport was checked"),
                 },
                 self.config.seed,
             ),
-            ExecutionMode::RecordTransport => (
-                Execution::Record {
-                    recorder: Recorder::new(
-                        RunMetadata::new(
-                            self.config.seed,
-                            record_fingerprint.clone(),
-                            recorded_realtime_epoch,
-                            self.config.hostname(),
-                        )
-                        .with_boot_origin_nanos(recorded_boot_origin)
-                        .with_cpus(self.config.cpus())
-                        .with_faults(fault_record(&self.config))
-                        .with_buggify(buggify_record(&self.config))
-                        .with_schedule_policy(schedule_policy_record(&self.config))
-                        .with_swarm(swarm_record.clone())
-                        .with_watchdog(watchdog_record(&self.config))
-                        .with_guest_argv(self.config.guest_argv.clone())
-                        .with_guest_env(guest_env_record(&self.config))
-                        .with_guest_cwd(self.config.guest_cwd.clone())
-                        .with_guest_stdin(self.config.guest_stdin.clone())
-                        .with_params(self.config.params.clone())
-                        .with_dns(dns_record(&self.config))
-                        .with_sud(self.config.sud)
-                        .with_tsc(self.config.tsc)
-                        .with_address_layout(self.config.address_layout),
-                    )
-                    .with_incarnation(self.config.incarnation.id()),
-                    sink: RecordSink::Transport(
-                        self.trace_transport.take().expect("transport was checked"),
-                    ),
-                },
-                self.config.seed,
-            ),
-            ExecutionMode::Replay { path, timeline } => {
-                let replayer = Replayer::open_timeline(path, &self.config.fingerprint, timeline)?;
+            ExecutionMode::Replay => {
+                let mut transport = self.trace_transport.take().expect("transport was checked");
+                let bytes = transport.read_bundle().map_err(|source| RuntimeError::Io {
+                    action: "read trace bundle from trace transport".into(),
+                    source,
+                })?;
+                let bundle = TraceBundle::from_slice(&bytes)?;
+                let replayer = Replayer::from_bundle(bundle, &self.config.fingerprint)?;
                 let root_seed = replayer.root_seed();
                 replay_boot_origin_override = Some(reconcile_replay_boot_origin(
                     &self.config,
@@ -359,136 +340,9 @@ impl RuntimeBuilder {
                 swarm_record = replayer.swarm_config().cloned();
                 (Execution::Replay(replayer), root_seed)
             }
-            ExecutionMode::ReplayTransport { timeline } => {
-                let mut transport = self.trace_transport.take().expect("transport was checked");
-                let bytes = transport.read_bundle().map_err(|source| RuntimeError::Io {
-                    action: "read trace bundle from trace transport".into(),
-                    source,
-                })?;
-                let bundle = TraceBundle::from_slice(&bytes)?;
-                let replayer = Replayer::from_bundle(bundle, &self.config.fingerprint, timeline)?;
-                let root_seed = replayer.root_seed();
-                replay_boot_origin_override = Some(reconcile_replay_boot_origin(
-                    &self.config,
-                    installed_boot_origin,
-                    replayer.boot_origin_nanos(),
-                )?);
-                replay_fault_override = Some(reconcile_replay_faults(
-                    &self.config,
-                    replayer.fault_config(),
-                )?);
-                replay_buggify_override = reconcile_replay_buggify(
-                    &self.config,
-                    replayer.buggify_config(),
-                    replayer.swarm_config(),
-                )?;
-                replay_guest_env_override = Some(reconcile_replay_guest_env(
-                    &self.config,
-                    replayer.guest_env(),
-                )?);
-                replay_guest_cwd_override =
-                    reconcile_replay_guest_cwd(&self.config, replayer.guest_cwd())?;
-                replay_guest_stdin_override = Some(reconcile_replay_guest_stdin(
-                    &self.config,
-                    replayer.guest_stdin(),
-                )?);
-                replay_params_override = Some(replayer.params().clone());
-                replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
-                    &self.config,
-                    installed_clock_epoch,
-                    replayer.realtime_epoch_nanos(),
-                )?);
-                replay_hostname_override = Some(reconcile_replay_hostname(
-                    &self.config,
-                    replayer.hostname(),
-                )?);
-                replay_cpus_override = Some(reconcile_replay_cpus(&self.config, replayer.cpus())?);
-                replay_dns_override = reconcile_replay_dns(&self.config, replayer.dns_config())?;
-                replay_schedule_override =
-                    reconcile_replay_schedule_policy(&self.config, replayer.schedule_policy())?;
-                replay_yield_stride = Some(reconcile_replay_yield_stride(
-                    &self.config,
-                    replayer.schedule_policy(),
-                )?);
-                reconcile_replay_sud(&self.config, replayer.sud())?;
-                reconcile_replay_tsc(&self.config, replayer.tsc())?;
-                reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
-                swarm_record = replayer.swarm_config().cloned();
-                (Execution::Replay(replayer), root_seed)
-            }
-            ExecutionMode::Branch {
-                path,
-                parent,
-                from_sequence,
-                branch_id,
-                branch_seed,
-            } => {
-                let reservation = RecordReservation::acquire_branch(path)?;
-                let session = BranchSession::open(
-                    path,
-                    &self.config.fingerprint,
-                    parent,
-                    *from_sequence,
-                    branch_id.clone(),
-                    *branch_seed,
-                )?;
-                replay_boot_origin_override = Some(reconcile_replay_boot_origin(
-                    &self.config,
-                    installed_boot_origin,
-                    session.boot_origin_nanos(),
-                )?);
-                // A branch replays the parent prefix, so it inherits the parent
-                // trace's fault configuration for the replayed drivers.
-                replay_fault_override = Some(reconcile_replay_faults(
-                    &self.config,
-                    session.fault_config(),
-                )?);
-                replay_buggify_override = reconcile_replay_buggify(
-                    &self.config,
-                    session.buggify_config(),
-                    session.swarm_config(),
-                )?;
-                replay_guest_env_override = Some(reconcile_replay_guest_env(
-                    &self.config,
-                    session.guest_env(),
-                )?);
-                replay_guest_cwd_override =
-                    reconcile_replay_guest_cwd(&self.config, session.guest_cwd())?;
-                replay_guest_stdin_override = Some(reconcile_replay_guest_stdin(
-                    &self.config,
-                    session.guest_stdin(),
-                )?);
-                replay_params_override = Some(session.params().clone());
-                replay_realtime_epoch_override = Some(reconcile_replay_realtime_epoch(
-                    &self.config,
-                    installed_clock_epoch,
-                    session.realtime_epoch_nanos(),
-                )?);
-                replay_hostname_override =
-                    Some(reconcile_replay_hostname(&self.config, session.hostname())?);
-                replay_cpus_override = Some(reconcile_replay_cpus(&self.config, session.cpus())?);
-                replay_dns_override = reconcile_replay_dns(&self.config, session.dns_config())?;
-                replay_schedule_override =
-                    reconcile_replay_schedule_policy(&self.config, session.schedule_policy())?;
-                replay_yield_stride = Some(reconcile_replay_yield_stride(
-                    &self.config,
-                    session.schedule_policy(),
-                )?);
-                // A branch inherits the parent's swarm decision along with its
-                // fault configuration; it does not re-draw the mask.
-                swarm_record = session.swarm_config().cloned();
-                (
-                    Execution::Branch {
-                        session: Box::new(session),
-                        _reservation: reservation,
-                    },
-                    *branch_seed,
-                )
-            }
         };
         let effective_fingerprint = match &execution {
             Execution::Replay(replayer) => replayer.fingerprint().to_owned(),
-            Execution::Branch { session, .. } => session.fingerprint().to_owned(),
             Execution::Seeded | Execution::Record { .. } => record_fingerprint,
         };
 
@@ -673,9 +527,7 @@ impl RuntimeBuilder {
             boot_origin_nanos,
             matches!(
                 self.config.mode,
-                ExecutionMode::Seeded
-                    | ExecutionMode::Record { .. }
-                    | ExecutionMode::RecordTransport
+                ExecutionMode::Seeded | ExecutionMode::Record
             ),
         );
 
@@ -697,10 +549,7 @@ impl RuntimeBuilder {
         // A crash ends the incarnation it fires in, and only a supervisor can
         // boot the next one, so a live first incarnation with a crash rate and
         // no supervisor would either never crash or crash into nothing.
-        let live = matches!(
-            execution,
-            Execution::Seeded | Execution::Record { .. } | Execution::Branch { .. }
-        );
+        let live = matches!(execution, Execution::Seeded | Execution::Record { .. });
         if self.config.draws_crashes()
             && live
             && !self.config.crash_supervised

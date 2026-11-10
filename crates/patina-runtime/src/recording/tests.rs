@@ -1,6 +1,5 @@
 //! Tests for trace transport, recording lifecycle, effect reconciliation, and outcome decoding.
 
-use crate::EntropyWait;
 use crate::builder::RuntimeBuilder;
 use crate::config::RuntimeConfig;
 use crate::recording::TraceTransport;
@@ -12,7 +11,6 @@ use patina_dst_abi::{ClockKind, OpenFlags, Operation};
 
 use crate::VirtualClock;
 use patina_dst_trace::{TraceBundle, TraceError};
-use std::ffi::OsString;
 use std::fs;
 use tempfile::tempdir;
 
@@ -99,25 +97,19 @@ fn trace_transport_records_and_replays_without_paths() {
     record.finish().unwrap();
     assert!(!transport.stored().is_empty());
 
-    let mut replay = RuntimeBuilder::new(RuntimeConfig::replay_transport_timeline(
-        "main",
-        "fixture-v1",
-    ))
-    .with_trace_transport(transport.clone())
-    .build()
-    .unwrap();
+    let mut replay = RuntimeBuilder::new(RuntimeConfig::replay_transport("fixture-v1"))
+        .with_trace_transport(transport.clone())
+        .build()
+        .unwrap();
     assert_eq!(replay.root_seed(), 99);
     assert_eq!(replay.monotonic_now_unrecorded().unwrap(), origin);
     assert_eq!(exercise(&mut replay).unwrap(), expected);
     replay.finish().unwrap();
 
-    let unconsumed = RuntimeBuilder::new(RuntimeConfig::replay_transport_timeline(
-        "main",
-        "fixture-v1",
-    ))
-    .with_trace_transport(transport)
-    .build()
-    .unwrap();
+    let unconsumed = RuntimeBuilder::new(RuntimeConfig::replay_transport("fixture-v1"))
+        .with_trace_transport(transport)
+        .build()
+        .unwrap();
     assert!(matches!(
         unconsumed.finish(),
         Err(RuntimeError::Trace(TraceError::UnconsumedEvents { .. }))
@@ -163,19 +155,18 @@ fn trace_transport_configuration_fails_loudly() {
             .build(),
         Err(RuntimeError::Config(_))
     ));
+    assert!(matches!(
+        RuntimeBuilder::new(RuntimeConfig::record(1, "unused.patina", "fixture-v1"))
+            .with_trace_transport(SharedTransport::default())
+            .build(),
+        Err(RuntimeError::Config(_))
+    ));
 }
 
 #[test]
-fn record_mode_rejects_concurrent_and_existing_trace_writers() {
+fn record_mode_refuses_to_overwrite_an_existing_trace() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("run.patina");
-    let first = Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")).unwrap();
-    assert!(matches!(
-        Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
-        Err(RuntimeError::Config(_))
-    ));
-    drop(first);
-
     Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1"))
         .unwrap()
         .finish()
@@ -184,60 +175,6 @@ fn record_mode_rejects_concurrent_and_existing_trace_writers() {
         Context::from_config(RuntimeConfig::record(1, &path, "fixture-v1")),
         Err(RuntimeError::Config(_))
     ));
-
-    let branch = |id: &str| RuntimeConfig::branch(&path, "main", 0, id, 2, "fixture-v1");
-    let first = Context::from_config(branch("first")).unwrap();
-    assert!(matches!(
-        Context::from_config(branch("second")),
-        Err(RuntimeError::Config(_))
-    ));
-    first.finish().unwrap();
-
-    // A released reservation leaves nothing beside the trace.
-    let entries: Vec<_> = fs::read_dir(directory.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(entries, [OsString::from("run.patina")]);
-}
-
-#[test]
-fn branch_replays_the_prefix_and_uses_a_new_seed_for_the_suffix() {
-    fn two_decisions(context: &mut Context) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
-        Ok((
-            context.entropy_bytes(8, EntropyWait::UntilReady)?,
-            context.entropy_bytes(8, EntropyWait::UntilReady)?,
-        ))
-    }
-
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("branches.patina");
-    let mut record = Context::from_config(RuntimeConfig::record(7, &path, "branches-v1")).unwrap();
-    let main = two_decisions(&mut record).unwrap();
-    record.finish().unwrap();
-
-    let mut branch = Context::from_config(RuntimeConfig::branch(
-        &path,
-        "main",
-        1,
-        "branch-99",
-        99,
-        "branches-v1",
-    ))
-    .unwrap();
-    let branched = two_decisions(&mut branch).unwrap();
-    branch.finish().unwrap();
-    assert_eq!(branched.0, main.0, "the prefix must replay exactly");
-    assert_ne!(branched.1, main.1, "the suffix must use the branch seed");
-
-    let mut replay = Context::from_config(RuntimeConfig::replay_timeline(
-        &path,
-        "branch-99",
-        "branches-v1",
-    ))
-    .unwrap();
-    assert_eq!(two_decisions(&mut replay).unwrap(), branched);
-    replay.finish().unwrap();
 }
 
 #[test]

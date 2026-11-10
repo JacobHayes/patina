@@ -59,12 +59,8 @@ fn recorded_configuration_round_trips_and_is_omitted_when_unset() {
     )])));
     let (_, reloaded) = reload(full.clone());
     assert_eq!(reloaded, full);
-    let replay = Replayer::from_bundle(
-        TraceBundle::new(reloaded, Vec::new()),
-        "fingerprint",
-        "main",
-    )
-    .unwrap();
+    let replay =
+        Replayer::from_bundle(TraceBundle::new(reloaded, Vec::new()), "fingerprint").unwrap();
     assert_eq!(replay.realtime_epoch_nanos(), 1_000_000_000);
     assert_eq!(replay.hostname(), "db-1");
 

@@ -4,8 +4,6 @@ use crate::config::RuntimeConfig;
 use crate::{Context, EntropyWait, RuntimeError};
 use patina_dst_abi::{ClockKind, TaskId};
 
-use patina_dst_trace::TraceBundle;
-use std::env;
 use tempfile::tempdir;
 
 /// A context over `config` whose facts documents append to `path`.
@@ -68,53 +66,4 @@ fn record_and_replay_cross_scheduler_network_clock_and_filesystem() {
     let mut replay = Context::from_config(RuntimeConfig::replay(&path, "simulation-v1")).unwrap();
     assert_eq!(simulation(&mut replay).unwrap(), expected);
     replay.finish().unwrap();
-}
-
-/// A process that dies without unwinding — an abort, a kill, `exit`, a
-/// panic=abort guest, a runtime held in a global — runs no destructor, so
-/// the claim on a trace path has to be one the kernel releases. Red while
-/// the claim was a sentinel file that only `Drop` removed: the path stayed
-/// refused as "another Patina recorder may be active" forever. The child is
-/// this test re-executed; it reserves the path and aborts.
-#[test]
-fn a_recorder_that_dies_without_unwinding_leaves_its_path_recordable() {
-    use std::os::unix::process::ExitStatusExt;
-    const CHILD_TRACE: &str = "PATINA_TEST_ABORTING_RECORDER_TRACE";
-    const SIGABRT: i32 = 6;
-    // This process-control sentinel belongs to the host test, not a run knob.
-    #[allow(clippy::disallowed_methods)]
-    let child_trace = env::var_os(CHILD_TRACE);
-    if let Some(trace) = child_trace {
-        let _recorder = Context::from_config(RuntimeConfig::record(1, trace, "fp")).unwrap();
-        std::process::abort();
-    }
-    let directory = tempdir().unwrap();
-    let trace = directory.path().join("aborted.patina");
-    let status = std::process::Command::new(env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "tests::a_recorder_that_dies_without_unwinding_leaves_its_path_recordable",
-            "--nocapture",
-        ])
-        .env(CHILD_TRACE, &trace)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert_eq!(
-        status.signal(),
-        Some(SIGABRT),
-        "the child must abort while holding the reservation: {status}"
-    );
-    assert!(!trace.exists(), "the aborted recorder wrote no trace");
-    let lock_file = directory.path().join(".aborted.patina.lock");
-    assert!(
-        lock_file.exists(),
-        "the aborted recorder left its lock file"
-    );
-
-    let recorder = Context::from_config(RuntimeConfig::record(2, &trace, "fp")).unwrap();
-    recorder.finish().unwrap();
-    TraceBundle::load(&trace).unwrap();
-    assert!(!lock_file.exists());
 }

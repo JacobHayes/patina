@@ -7,7 +7,7 @@ use crate::liveness::{CHURN_ABORT_ESCALATIONS, ESCALATION_POLLS, LivenessKind, W
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, CpuCharge, STARTUP_CPU_CHARGE, TaskId};
 
-use patina_dst_trace::{BranchSession, Replayer, TraceBundle};
+use patina_dst_trace::{Replayer, TraceBundle};
 use std::fs;
 
 use tempfile::tempdir;
@@ -562,33 +562,6 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
 }
 
 #[test]
-fn branch_sessions_do_not_arm_the_host_compute_detector() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("branch-compute.patina");
-    let setup = |ctx: &mut Context| {
-        let main = ctx.task_spawn("main").unwrap();
-        assert_eq!(ctx.scheduler_next().unwrap(), Some(main));
-        ctx.task_spawn("peer").unwrap();
-    };
-    let mut record =
-        Context::from_config(RuntimeConfig::record(1, &path, "branch-compute-v1")).unwrap();
-    setup(&mut record);
-    assert!(record.compute_watchdog_candidate().is_some());
-    record.finish().unwrap();
-    let mut branch = Context::from_config(RuntimeConfig::branch(
-        &path,
-        "main",
-        0,
-        "branch",
-        2,
-        "branch-compute-v1",
-    ))
-    .unwrap();
-    setup(&mut branch);
-    assert!(branch.compute_watchdog_candidate().is_none());
-}
-
-#[test]
 fn compute_stop_inside_an_open_custom_op_replays_only_the_committed_prefix() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("custom-compute.patina");
@@ -687,8 +660,7 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
     ));
     let mut bundle = TraceBundle::load(&path).unwrap();
     bundle.metadata.compute_stop.as_mut().unwrap().steps += 1;
-    assert!(Replayer::from_bundle(bundle, "compute-v1", "main").is_err());
-    assert!(BranchSession::open(&path, "compute-v1", "main", 1, "branch", 2).is_err());
+    assert!(Replayer::from_bundle(bundle, "compute-v1").is_err());
 }
 
 #[test]

@@ -48,7 +48,7 @@ systems.
   import audit and instruction scan, the syscall registry.
 - **CLI end-to-end** (`crates/cargo-patina/tests/end_to_end/`): fixture packages
   built and run through `patina` in separate processes: record/replay,
-  branching, faults, SDK reports, campaigns, minimization, help and flags.
+  faults, SDK reports, campaigns, minimization, help and flags.
 - **Native acceptance** (`crates/cargo-patina/tests/native_*.rs`, guests in
   `testbeds/native-boundary/`): ABI, workloads, containment, raw syscalls,
   signals, whole-run tracing and conformance. The map is in

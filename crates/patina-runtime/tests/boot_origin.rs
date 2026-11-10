@@ -64,7 +64,7 @@ fn uptime_translation_preserves_elapsed_fault_windows_and_cpu_accounting() {
 }
 
 #[test]
-fn recorded_origin_is_authoritative_for_replay_branch_and_installed_clocks() {
+fn recorded_origin_is_authoritative_for_replay_and_installed_clocks() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("origin.patina");
     let origin = DEFAULT_BOOT_ORIGIN_NANOS + 987_654_321;
@@ -98,19 +98,6 @@ fn recorded_origin_is_authoritative_for_replay_branch_and_installed_clocks() {
             .build()
             .is_err()
     );
-    let mut branch = Context::from_config(RuntimeConfig::branch(
-        &path,
-        "main",
-        1,
-        "branch",
-        3,
-        "origin+buggify",
-    ))
-    .unwrap();
-    assert_eq!(branch.monotonic_now_unrecorded().unwrap(), origin);
-    assert_eq!(workload(&mut branch), expected);
-    branch.finish().unwrap();
-
     let custom_path = dir.path().join("custom.patina");
     let mut custom = RuntimeBuilder::new(RuntimeConfig::record(3, &custom_path, "custom"))
         .with_clock(VirtualClock::at(origin, DEFAULT_REALTIME_EPOCH_NANOS))
@@ -168,15 +155,10 @@ fn boot_origin_signed_bounds_apply_to_config_installed_clocks_and_replay() {
         bundle.metadata.boot_origin_nanos = origin;
         bundle.metadata.realtime_epoch_nanos = epoch;
         bundle.write_atomic(&path).unwrap();
-        for config in [
-            RuntimeConfig::replay(&path, "bounds"),
-            RuntimeConfig::branch(&path, "main", 1, "branch", 1, "bounds"),
-        ] {
-            assert!(matches!(
-                Context::from_config(config),
-                Err(RuntimeError::Config(_))
-            ));
-        }
+        assert!(matches!(
+            Context::from_config(RuntimeConfig::replay(&path, "bounds")),
+            Err(RuntimeError::Config(_))
+        ));
     }
     // Inclusive bound, using the installed clock's epoch, not the unused default.
     let mut ctx = RuntimeBuilder::new(RuntimeConfig::seeded(1))

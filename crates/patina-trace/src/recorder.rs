@@ -102,10 +102,6 @@ pub(super) struct EventLedger {
 }
 
 impl EventLedger {
-    pub(super) const fn new(max_bytes: u64) -> Self {
-        Self::with_limits(max_bytes, MAX_TIMELINE_EVENTS as u64)
-    }
-
     const fn with_limits(max_bytes: u64, max_events: u64) -> Self {
         Self {
             bytes: 0,

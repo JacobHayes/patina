@@ -35,11 +35,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Run mode (seeded/record/replay); set by the supervisor for the guest.",
     },
     EnvVar {
-        name: "PATINA_RT_TRACE",
-        scope: "protocol",
-        doc: "On-disk trace path for record/replay.",
-    },
-    EnvVar {
         name: "PATINA_RT_TRACE_FD",
         scope: "protocol",
         doc: "Inherited already-open trace descriptor (native), so a fully interposed guest never recurses into the deterministic FS while finalizing its trace.",

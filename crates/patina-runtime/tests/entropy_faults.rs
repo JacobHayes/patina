@@ -165,40 +165,11 @@ fn entropy_failure_replays_self_contained_without_re_supplying_the_flag() {
 }
 
 #[test]
-fn a_branch_knows_the_pool_its_replayed_prefix_showed_ready() {
-    // The pool's state comes from outcomes, not draws, so a branch that replays
-    // a prefix and then goes live continues from the state the prefix reached.
-    // Here the prefix's waiting read showed the pool ready, so the branch's
-    // live nonblocking read cannot fail, even at a certain rate.
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("entropy.patina");
-    let prefix = [
-        (16, EntropyWait::FailIfUnready),
-        (8, EntropyWait::UntilReady),
-    ];
-    let (recorded, _) = entropy_run(
-        RuntimeConfig::record(4, &path, "patina-test").with_entropy_fail_permille(1000),
-        &prefix,
-    );
-    assert_eq!(recorded[0], Err(ErrorCode::WouldBlock));
-    let (branched, _) = entropy_run(
-        RuntimeConfig::branch(&path, "main", 2, "branch", 5, "patina-test"),
-        &[
-            (16, EntropyWait::FailIfUnready),
-            (8, EntropyWait::UntilReady),
-            (16, EntropyWait::FailIfUnready),
-        ],
-    );
-    assert_eq!(branched[..2], recorded[..]);
-    assert!(branched[2].is_ok(), "{branched:?}");
-}
-
-#[test]
 fn a_replay_that_asks_with_another_wait_diverges() {
     // The wait decides what a request can answer and what it shows of the
     // pool, so it is part of the operation: a replay that asks differently,
     // even at the same length, fails closed instead of handing a waiting
-    // request a recorded EAGAIN or a branch the wrong pool state.
+    // request a recorded EAGAIN.
     let directory = tempdir().unwrap();
     for (index, (recorded, replayed)) in [
         (EntropyWait::FailIfUnready, EntropyWait::UntilReady),

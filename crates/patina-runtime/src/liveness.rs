@@ -1,7 +1,7 @@
 //! Progress watchdogs, poll escalation, and compute stops.
 
 use crate::config::{LivenessConfig, RuntimeConfig};
-use crate::recording::{Execution, RecordSink};
+use crate::recording::Execution;
 use crate::{Context, RuntimeError, facts};
 use patina_dst_abi::{
     ChargeClass, ChargeCounts, ClockKind, EffectClass, Operation, Outcome, TaskId,
@@ -500,15 +500,13 @@ impl Context {
             }
         }
         if !self.recording_flushed
-            && let Execution::Record { recorder, sink } = &mut self.execution
+            && let Execution::Record {
+                recorder,
+                transport,
+            } = &mut self.execution
         {
             self.recording_flushed = true;
-            let result = match sink {
-                RecordSink::Transport(transport) => transport.write_prefix(recorder),
-                RecordSink::Path { path, .. } => std::fs::File::create(path)
-                    .and_then(|file| recorder.write_prefix(file).map_err(std::io::Error::other)),
-            };
-            if result.is_err() {
+            if transport.write_prefix(recorder).is_err() {
                 return RuntimeError::ComputeStopExport;
             }
         }

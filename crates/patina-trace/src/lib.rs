@@ -1,7 +1,7 @@
 //! Versioned trace bundles and strict replay matching.
 //!
 //! Internal crate: the `.patina` trace format — recording boundary events into a
-//! versioned JSON bundle (run metadata, timelines, branch sessions), refusing
+//! versioned JSON bundle (run metadata, timelines), refusing
 //! any other format version, and replaying with strict reconciliation
 //! (any operation/outcome divergence fails closed rather than lying). Adopters
 //! produce and consume traces through `patina run --record` / `replay`
@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use patina_dst_abi::{Operation, Outcome};
 use serde::{Deserialize, Serialize};
 
-mod branch;
 mod bundle;
 mod crash_restart;
 mod digest;
@@ -29,7 +28,6 @@ mod recorder;
 mod replay;
 mod stream;
 
-pub use branch::BranchSession;
 pub use bundle::{Timeline, TraceBundle, TraceEvent};
 pub use crash_restart::{CrashRestartError, CrashRestartSegments};
 pub use digest::Sha256Digest;

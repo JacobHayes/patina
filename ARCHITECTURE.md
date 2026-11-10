@@ -94,7 +94,7 @@ patina-dst (crates/patina)  # cooperative-SUT SDK (dependency-light)
 patina-dst-macros           # the SDK's proc macros
 patina-dst-abi              # boundary operations/outcomes, time-model constants
 patina-dst-runtime          # Context, drivers, scheduler policies, record/replay, params
-patina-dst-trace            # trace bundle, branch metadata, strict replay
+patina-dst-trace            # trace bundle, strict replay
 patina-dst-target           # target metadata, import audit, instruction scan
 patina-dst-syscalls         # syscall registry (generated identities + support)
 patina-dst-conformance      # host-oracle syscall scenarios (unpublished)
@@ -407,8 +407,8 @@ boots from it; see [docs/crash-restart-protocol.md](docs/crash-restart-protocol.
 
 A trace records decisions, not outputs: scheduler choices, time advances,
 entropy, network and filesystem fault decisions, permitted host responses. A
-`.patina` bundle holds run metadata and one or more timelines (`main` plus
-branches from recorded moments, with lifecycle markers for crash restart).
+`.patina` bundle holds run metadata and the run's timeline (`main`, with
+lifecycle markers for crash restart).
 
 - **Strict replay:** matching fingerprints and the same boundary events, or an
   error. A replay reaching an unrecorded host effect fails; there is no
@@ -427,8 +427,6 @@ branches from recorded moments, with lifecycle markers for crash restart).
 - **Bounded:** over `MAX_TRACE_BYTES` or `MAX_TIMELINE_EVENTS`, the recorder
   writes an abandoned-trace marker and reports `PATINA_INFRA trace=incomplete`;
   the guest's verdict stands. Every other finalization failure fails the run.
-- **Branching** replays a prefix exactly and records the suffix, under a
-  branch seed, as a new timeline.
 
 ## Host-alias doctrine
 

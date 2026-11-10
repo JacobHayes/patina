@@ -155,10 +155,6 @@ never called patina_dst::lifecycle::setup_complete()\n",
 /// died mid-run leaves; without the marker it could not tell "this run outgrew
 /// its budget" from "this run never finalized", and it must keep failing loudly
 /// on the latter.
-///
-/// In `PATINA_RT_TRACE` path mode there is no descriptor and no file — the budget
-/// is enforced before the trace is created — so the stderr lines are the whole
-/// report and a later `replay` simply finds nothing at the path.
 fn abandon_over_budget_trace(error: &TraceError) {
     let _ = host_write_all(2, over_budget_diagnostic(error).as_bytes());
     if let Ok(Some(fd)) = control_trace_fd() {

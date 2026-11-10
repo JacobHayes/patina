@@ -84,15 +84,6 @@ fn replay_reproduces_a_recorded_non_default_epoch_without_resupplying_it() {
     );
     replay.finish().unwrap();
 
-    // A branch inherits the parent's epoch the same way.
-    let mut branch =
-        Context::from_config(RuntimeConfig::branch(&path, "main", 1, "b1", 9, "epoch-v1")).unwrap();
-    assert_eq!(
-        branch.fs_time_unrecorded().unwrap(),
-        EPOCH + DEFAULT_BOOT_ORIGIN_NANOS
-    );
-    drop(branch);
-
     // A matching explicit epoch is accepted; a conflicting one is refused.
     let matching = RuntimeConfig::replay(&path, "epoch-v1").with_realtime_epoch_nanos(EPOCH);
     let mut matching = Context::from_config(matching).unwrap();

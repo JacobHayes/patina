@@ -75,7 +75,7 @@ fn assert_fixture_replays(bytes: &[u8], expected: impl IntoIterator<Item = (Oper
     let bundle = TraceBundle::from_slice(bytes).unwrap();
     bundle.validate().unwrap();
     assert_eq!(bundle.to_bytes().unwrap(), bytes);
-    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint", "main").unwrap();
+    let mut replay = Replayer::from_bundle(bundle, "fixture-fingerprint").unwrap();
     for (operation, outcome) in expected {
         assert_eq!(replay.expect(&operation).unwrap(), outcome);
     }

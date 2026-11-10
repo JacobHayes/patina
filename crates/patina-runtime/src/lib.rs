@@ -149,8 +149,6 @@ pub const ENV_MODE: &str = "PATINA_RT_MODE";
 
 pub const ENV_SEED: &str = "PATINA_RT_SEED";
 
-pub const ENV_TRACE: &str = "PATINA_RT_TRACE";
-
 pub const ENV_TRACE_FD: &str = "PATINA_RT_TRACE_FD";
 
 /// Inherited host descriptor receiving a `patina.covmap/v1` native edge-coverage
@@ -162,8 +160,8 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 /// Inherited host descriptor receiving this run's structured
 /// [`patina.runfacts/v1`](FACTS_SCHEMA) document. The guest filesystem is fully
 /// interposed, so the shim writes the document through a
-/// supervisor-owned host descriptor rather than through the deterministic FS —
-/// exactly the split between [`ENV_TRACE`] and [`ENV_TRACE_FD`].
+/// supervisor-owned host descriptor rather than through the deterministic FS,
+/// as the trace travels ([`ENV_TRACE_FD`]).
 pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
 
 /// Inherited host descriptor carrying an encoded `patina_dst_fs_mem::FsImage`. When
@@ -221,16 +219,6 @@ pub const ENV_ADDRESS_LAYOUT: &str = "PATINA_RT_ADDRESS_LAYOUT";
 /// the platform startup trailer. The shim fails closed if the trailer does not
 /// fit; this is reservation policy, not a claim about a platform's auxv size.
 pub const NATIVE_INITIAL_STACK_TRAILER_SLOTS: usize = 256;
-
-pub const ENV_BRANCH_FROM: &str = "PATINA_RT_BRANCH_FROM";
-
-pub const ENV_BRANCH_SEED: &str = "PATINA_RT_BRANCH_SEED";
-
-pub const ENV_BRANCH_ID: &str = "PATINA_RT_BRANCH_ID";
-
-pub const ENV_PARENT_TIMELINE: &str = "PATINA_RT_PARENT_TIMELINE";
-
-pub const ENV_TIMELINE: &str = "PATINA_RT_TIMELINE";
 
 pub const ENV_STEP_BUDGET: &str = "PATINA_RT_STEP_BUDGET";
 
@@ -637,7 +625,7 @@ pub struct Context {
     /// replay — is byte-for-byte unchanged.
     liveness: LivenessWatchdog,
     /// The swarm fault-class selection this run carried, or `None` when swarm was
-    /// not enabled. A record/seeded run draws it; a replay or branch adopts the
+    /// not enabled. A record/seeded run draws it; a replay adopts the
     /// recording's, so a replayed generation reports the same decision rather
     /// than re-drawing one. Drives `PATINA_SWARM_REPORT` and the
     /// `swarm_deselected` field of `PATINA_SDK_REPORT`.

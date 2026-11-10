@@ -1009,15 +1009,12 @@ pub(crate) fn runtime_config_from_control_plane()
     let mode = control_env(patina_dst_runtime::ENV_MODE).unwrap_or_else(|| "seeded".into());
     let seed = parse_control_u64(patina_dst_runtime::ENV_SEED)?.unwrap_or(0);
     let trace_fd = control_trace_fd()?;
-    if trace_fd.is_some()
-        && control_env(patina_dst_runtime::ENV_TRACE).is_some_and(|value| !value.is_empty())
-    {
-        return Err(RuntimeError::Config(format!(
-            "{} and {} must not both be set",
-            patina_dst_runtime::ENV_TRACE,
+    let trace_fd_required = || {
+        RuntimeError::Config(format!(
+            "{mode} mode requires {}",
             patina_dst_runtime::ENV_TRACE_FD
-        )));
-    }
+        ))
+    };
     let mut config = match (mode.as_str(), trace_fd) {
         ("seeded", None) => RuntimeConfig::seeded(seed),
         ("seeded", Some(_)) => {
@@ -1026,52 +1023,17 @@ pub(crate) fn runtime_config_from_control_plane()
                 patina_dst_runtime::ENV_TRACE_FD
             )));
         }
-        ("record", None) => RuntimeConfig::record(
-            seed,
-            required_control_string(patina_dst_runtime::ENV_TRACE)?,
-            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
-        ),
         ("record", Some(_)) => RuntimeConfig::record_transport(
             seed,
             required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
         ),
-        ("replay", None) => RuntimeConfig::replay_timeline(
-            required_control_string(patina_dst_runtime::ENV_TRACE)?,
-            control_env(patina_dst_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
-            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
-        ),
-        ("replay", Some(_)) => RuntimeConfig::replay_transport_timeline(
-            control_env(patina_dst_runtime::ENV_TIMELINE).unwrap_or_else(|| "main".into()),
-            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
-        ),
-        ("branch", None) => RuntimeConfig::branch(
-            required_control_string(patina_dst_runtime::ENV_TRACE)?,
-            control_env(patina_dst_runtime::ENV_PARENT_TIMELINE).unwrap_or_else(|| "main".into()),
-            parse_control_u64(patina_dst_runtime::ENV_BRANCH_FROM)?.ok_or_else(|| {
-                RuntimeError::Config(format!(
-                    "{} is required",
-                    patina_dst_runtime::ENV_BRANCH_FROM
-                ))
-            })?,
-            required_control_string(patina_dst_runtime::ENV_BRANCH_ID)?,
-            parse_control_u64(patina_dst_runtime::ENV_BRANCH_SEED)?.ok_or_else(|| {
-                RuntimeError::Config(format!(
-                    "{} is required",
-                    patina_dst_runtime::ENV_BRANCH_SEED
-                ))
-            })?,
-            required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
-        ),
-        ("branch", Some(_)) => {
-            return Err(RuntimeError::Config(format!(
-                "branch mode requires a {} path; {} is unsupported",
-                patina_dst_runtime::ENV_TRACE,
-                patina_dst_runtime::ENV_TRACE_FD
-            )));
-        }
+        ("replay", Some(_)) => RuntimeConfig::replay_transport(required_control_string(
+            patina_dst_runtime::ENV_FINGERPRINT,
+        )?),
+        ("record" | "replay", None) => return Err(trace_fd_required()),
         (value, _) => {
             return Err(RuntimeError::Config(format!(
-                "{} must be seeded, record, replay, or branch; got {value:?}",
+                "{} must be seeded, record or replay; got {value:?}",
                 patina_dst_runtime::ENV_MODE
             )));
         }
@@ -1103,27 +1065,15 @@ pub(crate) fn runtime_config_from_control_plane()
             config = config.with_param(key, value)?;
         }
     }
-    if let Some(latency) = parse_control_u64(patina_dst_runtime::ENV_NET_LATENCY)? {
-        config = config.with_net_latency_nanos(latency);
-    }
-    // Seed-driven fault knobs (crash point, sleep/net jitter, drop) are read from
-    // the scrubbed constructor-time control plane by the same parser the process
-    // environment path uses, so both entry points accept the identical protocol
-    // and fail closed on any malformed value.
+    // The fault knobs, the DNS host table, and the buggify, scheduling-policy,
+    // swarm and liveness knobs are read from the scrubbed constructor-time
+    // control plane by the runtime's parsers, which fail closed on any
+    // malformed value.
     config = config.apply_fault_env(control_env)?;
-    // The DNS host table rides the same scrubbed control plane as the fault
-    // knobs, through the same parser, so both entry points accept one protocol.
     config = config.apply_dns_env(control_env)?;
-    // Cooperative-SUT (buggify) knobs come from the same control plane through
-    // the shared parser, so the shim and the process-environment path agree.
     config = config.apply_buggify_env(control_env)?;
-    // Exploration scheduling-policy (PCT) and swarm fault-class
-    // selection knobs travel the same control plane through the shared parsers,
-    // so the shim and the process-environment path agree on the protocol.
     config = config.apply_schedule_env(control_env)?;
     config = config.apply_swarm_env(control_env)?;
-    // Liveness-watchdog knobs travel the same control plane through the shared
-    // parser, so the shim and the process-environment path agree on the protocol.
     config = config.apply_liveness_env(control_env)?;
     // Guest argv (recorded into the trace metadata) travels the same control
     // plane, so record mode captures the arguments the supervisor forwarded.

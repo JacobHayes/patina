@@ -13,14 +13,9 @@ use patina_dst_abi::{
     Datagram, EffectError, ErrorCode, Fd, FsDirectoryEntry, FsMetadata, Operation, Outcome,
     SendReport, SocketId, TaskId, TcpAccepted,
 };
-use patina_dst_trace::{
-    BranchSession, Recorder, Replayer, abandoned_trace_marker, lock_exclusive, path_names,
-    resource_limit_infra_line,
-};
-use std::ffi::OsString;
+use patina_dst_trace::{Recorder, Replayer, abandoned_trace_marker, resource_limit_infra_line};
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(super) const READ_CHUNK_SIZE: usize = 4096;
 
@@ -49,127 +44,29 @@ pub(super) enum Execution {
     Seeded,
     Record {
         recorder: Recorder,
-        sink: RecordSink,
+        transport: Box<dyn TraceTransport>,
     },
     Replay(Replayer),
-    Branch {
-        // Boxed: a `BranchSession` is by far the largest variant payload, and
-        // branch runs are the rare path, so keeping it out of line avoids
-        // inflating every `Execution` (clippy::large_enum_variant).
-        session: Box<BranchSession>,
-        _reservation: RecordReservation,
-    },
 }
 
-pub(super) enum RecordSink {
-    Path {
-        path: PathBuf,
-        _reservation: RecordReservation,
-    },
-    Transport(Box<dyn TraceTransport>),
-}
+/// The transport a path constructor names ([`RuntimeConfig::record`],
+/// [`RuntimeConfig::replay`]): the trace file itself.
+///
+/// [`RuntimeConfig::record`]: crate::RuntimeConfig::record
+/// [`RuntimeConfig::replay`]: crate::RuntimeConfig::replay
+pub(super) struct FileTransport(pub(super) PathBuf);
 
-/// One recorder's claim on a trace path: an exclusive advisory lock on
-/// `.<trace>.lock` beside it, held for the recorder's life. The kernel releases
-/// the lock when the recorder dies without unwinding, so a crashed recording
-/// never locks its path; a lock file left behind by one is unlocked and taken
-/// over by the next recorder.
-pub(super) struct RecordReservation {
-    lock_path: PathBuf,
-    _lock: File,
-}
-
-impl RecordReservation {
-    pub(super) fn acquire(trace_path: &Path) -> Result<Self, RuntimeError> {
-        let reservation = Self::acquire_lock(trace_path)?;
-        if trace_path.exists() {
-            return Err(RuntimeError::Config(format!(
-                "refusing to overwrite existing trace {}",
-                trace_path.display()
-            )));
-        }
-        Ok(reservation)
+impl TraceTransport for FileTransport {
+    fn read_bundle(&mut self) -> std::io::Result<Vec<u8>> {
+        fs::read(&self.0)
     }
 
-    pub(super) fn acquire_branch(trace_path: &Path) -> Result<Self, RuntimeError> {
-        if !trace_path.is_file() {
-            return Err(RuntimeError::Config(format!(
-                "cannot branch from missing trace {}",
-                trace_path.display()
-            )));
+    fn write_bundle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if let Some(parent) = self.0.parent() {
+            fs::create_dir_all(parent)?;
         }
-        Self::acquire_lock(trace_path)
+        fs::write(&self.0, bytes)
     }
-
-    fn acquire_lock(trace_path: &Path) -> Result<Self, RuntimeError> {
-        let parent = trace_path
-            .parent()
-            .filter(|value| !value.as_os_str().is_empty());
-        if let Some(parent) = parent {
-            fs::create_dir_all(parent).map_err(|source| RuntimeError::Io {
-                action: format!("create trace directory {}", parent.display()),
-                source,
-            })?;
-        }
-        let lock_path = record_lock_path(trace_path)?;
-        let io_error = |source| RuntimeError::Io {
-            action: format!(
-                "reserve trace {} using {}",
-                trace_path.display(),
-                lock_path.display()
-            ),
-            source,
-        };
-        loop {
-            let lock = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&lock_path)
-                .map_err(io_error)?;
-            match lock_exclusive(&lock, false) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Err(RuntimeError::Config(format!(
-                        "refusing to record trace {}: another Patina recorder holds {}",
-                        trace_path.display(),
-                        lock_path.display()
-                    )));
-                }
-                Err(error) => return Err(io_error(error)),
-            }
-            // A releasing recorder unlinks the lock file before closing it, so a
-            // lock won on a descriptor opened before that unlink guards a name
-            // no other recorder opens; take the file the name holds now instead.
-            if path_names(&lock_path, &lock).map_err(io_error)? {
-                return Ok(Self {
-                    lock_path,
-                    _lock: lock,
-                });
-            }
-        }
-    }
-}
-
-impl Drop for RecordReservation {
-    /// Unlink the lock file while still holding its lock, which is released
-    /// when `_lock` closes after this.
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.lock_path);
-    }
-}
-
-fn record_lock_path(trace_path: &Path) -> Result<PathBuf, RuntimeError> {
-    let file_name = trace_path.file_name().ok_or_else(|| {
-        RuntimeError::Config(format!(
-            "trace path has no file name: {}",
-            trace_path.display()
-        ))
-    })?;
-    let mut lock_name = OsString::from(".");
-    lock_name.push(file_name);
-    lock_name.push(".lock");
-    Ok(trace_path.with_file_name(lock_name))
 }
 
 fn invalid_outcome(operation: &Operation, outcome: Outcome) -> RuntimeError {
@@ -453,10 +350,7 @@ impl Context {
     /// time model, a recorded compute stop); a record or seeded run notes
     /// nothing, since there is no recording to diverge from.
     pub(super) fn diverged(&mut self, error: RuntimeError) -> RuntimeError {
-        if matches!(
-            self.execution,
-            Execution::Replay(_) | Execution::Branch { .. }
-        ) {
+        if matches!(self.execution, Execution::Replay(_)) {
             self.note_replay_divergence(error.replay_divergence());
         }
         error
@@ -586,7 +480,6 @@ a recorded result or a replay fetch",
         // are written, so the divergence is noted here first.
         let incomplete = match &self.execution {
             Execution::Replay(replayer) => replayer.check_complete().err(),
-            Execution::Branch { session, .. } => session.check_prefix_complete().err(),
             _ => None,
         };
         if let Some(error) = incomplete {
@@ -606,27 +499,20 @@ a recorded result or a replay fetch",
         }
         match self.execution {
             Execution::Seeded => Ok(()),
-            Execution::Record { mut recorder, sink } => match sink {
-                RecordSink::Path { path, _reservation } => {
-                    recorder.set_buggify(buggify_record);
-                    recorder.finish(path).map_err(Into::into)
-                }
-                RecordSink::Transport(mut transport) => {
-                    recorder.set_buggify(buggify_record);
-                    let bytes = recorder.into_bundle()?.to_bytes()?;
-                    transport
-                        .write_bundle(&bytes)
-                        .map_err(|source| RuntimeError::Io {
-                            action: "write trace bundle to trace transport".into(),
-                            source,
-                        })
-                }
-            },
+            Execution::Record {
+                mut recorder,
+                mut transport,
+            } => {
+                recorder.set_buggify(buggify_record);
+                let bytes = recorder.into_bundle()?.to_bytes()?;
+                transport
+                    .write_bundle(&bytes)
+                    .map_err(|source| RuntimeError::Io {
+                        action: "write trace bundle to trace transport".into(),
+                        source,
+                    })
+            }
             Execution::Replay(replayer) => replayer.finish().map_err(Into::into),
-            Execution::Branch {
-                session,
-                _reservation,
-            } => session.finish().map_err(Into::into),
         }
     }
 
@@ -649,7 +535,11 @@ a recorded result or a replay fetch",
         }
         self.recording_flushed = true;
         let buggify_record = self.buggify.to_record();
-        let Execution::Record { recorder, sink } = &mut self.execution else {
+        let Execution::Record {
+            recorder,
+            transport,
+        } = &mut self.execution
+        else {
             unreachable!("execution was checked to be Record");
         };
         recorder.set_buggify(buggify_record);
@@ -666,12 +556,10 @@ a recorded result or a replay fetch",
                     "{}",
                     resource_limit_infra_line(&error)
                 ));
-                if let RecordSink::Transport(transport) = sink {
-                    let _ = transport.write_bundle(&abandoned_trace_marker(
-                        "resource-limit",
-                        &error.to_string(),
-                    ));
-                }
+                let _ = transport.write_bundle(&abandoned_trace_marker(
+                    "resource-limit",
+                    &error.to_string(),
+                ));
                 return;
             }
             Err(error) => {
@@ -682,19 +570,14 @@ a recorded result or a replay fetch",
                 return;
             }
         };
-        let result = match sink {
-            RecordSink::Path { path, .. } => bundle
-                .write_atomic(&*path)
-                .map_err(|error| format!("write truncated trace to {}: {error}", path.display())),
-            RecordSink::Transport(transport) => bundle
-                .to_bytes()
-                .map_err(|error| format!("serialize truncated trace: {error}"))
-                .and_then(|bytes| {
-                    transport
-                        .write_bundle(&bytes)
-                        .map_err(|error| format!("write truncated trace to transport: {error}"))
-                }),
-        };
+        let result = bundle
+            .to_bytes()
+            .map_err(|error| format!("serialize truncated trace: {error}"))
+            .and_then(|bytes| {
+                transport
+                    .write_bundle(&bytes)
+                    .map_err(|error| format!("write truncated trace to transport: {error}"))
+            });
         if let Err(reason) = result {
             crate::reports::diagnostic!(
                 "PATINA_INFRA truncated_trace write_failed reason={reason:?}"
@@ -736,9 +619,6 @@ a recorded result or a replay fetch",
                     )),
                 }
             }
-            Execution::Branch { session, .. } => session
-                .expect_prefix(operation)
-                .map_err(|error| (error.replay_divergence(), error.into())),
             _ => Ok(None),
         };
         expected.map_err(|(divergence, error)| {
@@ -748,14 +628,8 @@ a recorded result or a replay fetch",
     }
 
     pub(super) fn complete(&mut self, operation: Operation, actual: Outcome) -> Outcome {
-        match &mut self.execution {
-            Execution::Record { recorder, .. } => {
-                recorder.observe(operation, actual.clone());
-            }
-            Execution::Branch { session, .. } => {
-                session.observe(operation, actual.clone());
-            }
-            _ => {}
+        if let Execution::Record { recorder, .. } = &mut self.execution {
+            recorder.observe(operation, actual.clone());
         }
         actual
     }
@@ -786,9 +660,6 @@ a recorded result or a replay fetch",
             let compared = match &self.execution {
                 Execution::Replay(replayer) => {
                     replayer.compare_outcome(sequence, &recorded, &actual)
-                }
-                Execution::Branch { session, .. } => {
-                    session.compare_outcome(sequence, &recorded, &actual)
                 }
                 _ => Ok(()),
             };

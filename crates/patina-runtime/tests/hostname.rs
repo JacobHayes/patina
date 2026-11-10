@@ -75,22 +75,11 @@ fn replay_reproduces_a_recorded_hostname_without_resupplying_it() {
     );
     assert_eq!(TraceBundle::load(&path).unwrap().metadata.hostname, NAME);
 
-    // Flag-free replay and a branch both adopt the recorded name.
+    // A flag-free replay adopts the recorded name.
     assert_eq!(
         replay(RuntimeConfig::replay(&path, "hostname-v1")).unwrap(),
         NAME
     );
-    let branch = Context::from_config(RuntimeConfig::branch(
-        &path,
-        "main",
-        1,
-        "b1",
-        9,
-        "hostname-v1",
-    ))
-    .unwrap();
-    assert_eq!(branch.hostname(), NAME);
-    drop(branch);
 
     // A matching explicit name replays; a conflicting one is refused.
     let matching = RuntimeConfig::replay(&path, "hostname-v1")
