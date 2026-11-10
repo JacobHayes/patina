@@ -58,16 +58,6 @@ pub struct KnobMeta {
     pub env: &'static str,
     pub plumbing: Plumbing,
     pub plane: Plane,
-    /// The `fault_domain` labels the knob's seeded stream(s) derive from. Empty
-    /// for a knob that draws nothing (a deterministic setting such as the base
-    /// network latency, the partition set, or the TCP buffer size).
-    ///
-    /// Several knobs SHARE a label on purpose — the crash and torn-write models
-    /// are one stream, and SimNet is handed one network seed — and a knob whose
-    /// effect exists both in `SimNet` and in the explicit `FaultNet` wrapper
-    /// names both. Domain labels are shared constants; merely declaring an
-    /// unused label has no effect on a run.
-    pub injection_domains: &'static [&'static str],
     /// The swarm mask owner, including modifiers sharing their primary knob's
     /// class. Semantic configuration has no owner: swarm masks faults, not workload.
     pub swarm_class: Option<&'static str>,
@@ -158,7 +148,6 @@ fault_registry! {
                     flag: "--machine-crash-permille",
                     env: ENV_MACHINE_CRASH_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::CRASH_POINT, fault_domain::FS_CRASH],
                     swarm_class: Some("crash"),
                     // A crash fires at most once and ends the incarnation, so there
                     // is no "should have fired N times" judgement to report: a run
@@ -176,7 +165,6 @@ fault_registry! {
                     flag: "--process-crash-permille",
                     env: ENV_PROCESS_CRASH_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::CRASH_POINT],
                     swarm_class: Some("crash"),
                     report: None,
                 },
@@ -190,7 +178,6 @@ fault_registry! {
                     flag: "--fs-error-permille",
                     env: ENV_FS_ERROR_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FAULT_FS_ERROR],
                     swarm_class: Some("fs_error"),
                     report: Some(ENV_FS_FAULT_REPORT),
                 },
@@ -207,7 +194,6 @@ fault_registry! {
                     flag: "--fs-error-at",
                     env: ENV_FS_ERROR_AT,
                     plumbing: Plumbing::Repeatable(RepeatableFormat::FsErrorTargets),
-                    injection_domains: &[],
                     swarm_class: None,
                     report: Some(ENV_FS_FAULT_REPORT),
                 },
@@ -219,7 +205,6 @@ fault_registry! {
                     flag: "--fs-short-permille",
                     env: ENV_FS_SHORT_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FAULT_FS_SHORT],
                     swarm_class: Some("fs_short"),
                     report: Some(ENV_FS_FAULT_REPORT),
                 },
@@ -232,7 +217,6 @@ fault_registry! {
                     flag: "--fs-latency-nanos",
                     env: ENV_FS_LATENCY,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::FS_LATENCY],
                     swarm_class: Some("fs_latency"),
                     report: Some(ENV_FS_FAULT_REPORT),
                 },
@@ -248,7 +232,6 @@ fault_registry! {
                     plumbing: Plumbing::Scalar,
                     // A deterministic base link latency: applied to every delivery
                     // rather than drawn, so it derives no stream of its own.
-                    injection_domains: &[],
                     swarm_class: Some("net_latency"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -260,7 +243,6 @@ fault_registry! {
                     flag: "--net-jitter-nanos",
                     env: ENV_NET_JITTER,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::NET_FAULT],
                     swarm_class: Some("net_jitter"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -272,7 +254,6 @@ fault_registry! {
                     flag: "--net-drop-permille",
                     env: ENV_NET_DROP_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::NET_FAULT, fault_domain::FAULT_NET_DROP],
                     swarm_class: Some("net_drop"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -285,10 +266,6 @@ fault_registry! {
                     flag: "--net-duplicate-permille",
                     env: ENV_NET_DUPLICATE_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[
-                    fault_domain::NET_DUPLICATE,
-                    fault_domain::FAULT_NET_DUPLICATE,
-                    ],
                     swarm_class: Some("net_duplicate"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -301,7 +278,6 @@ fault_registry! {
                     flag: "--net-connect-refuse-permille",
                     env: ENV_NET_CONNECT_REFUSE_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::NET_CONNECT_REFUSE],
                     swarm_class: Some("net_connect_refuse"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -314,7 +290,6 @@ fault_registry! {
                     flag: "--net-reset-permille",
                     env: ENV_NET_RESET_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::NET_RESET],
                     swarm_class: Some("net_reset"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -330,7 +305,6 @@ fault_registry! {
                     plumbing: Plumbing::Repeatable(RepeatableFormat::AddressPairs),
                     // Deterministic (rate 1.0): a datagram across a partition is
                     // always dropped, so nothing is drawn.
-                    injection_domains: &[],
                     swarm_class: Some("net_partition"),
                     report: Some(ENV_NET_FAULT_REPORT),
                 },
@@ -346,7 +320,6 @@ fault_registry! {
                     flag: "--net-tcp-buffer-bytes",
                     env: ENV_NET_TCP_BUFFER_BYTES,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[],
                     swarm_class: Some("net_tcp_buffer"),
                     // A capacity setting, not a fault: there is no rate that "should
                     // have fired", so no vacuity counter to report.
@@ -362,7 +335,6 @@ fault_registry! {
                     flag: "--sleep-jitter-nanos",
                     env: ENV_SLEEP_JITTER,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::SLEEP_JITTER],
                     swarm_class: Some("sleep_jitter"),
                     // The clock plane has no fault report: a sleep that was delayed
                     // is indistinguishable from a longer sleep, so there is nothing
@@ -379,7 +351,6 @@ fault_registry! {
                     flag: "--epoch-jump-nanos",
                     env: ENV_EPOCH_JUMP_NANOS,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::EPOCH_JUMP],
                     swarm_class: Some("epoch_jump"),
                     report: Some(ENV_CLOCK_FAULT_REPORT),
                 },
@@ -395,7 +366,6 @@ fault_registry! {
                     flag: "--dns-fail-permille",
                     env: ENV_DNS_FAIL_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::DNS_FAULT],
                     swarm_class: Some("dns_fail"),
                     report: Some(ENV_DNS_FAULT_REPORT),
                 },
@@ -408,7 +378,6 @@ fault_registry! {
                     flag: "--dns-latency-nanos",
                     env: ENV_DNS_LATENCY,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::DNS_LATENCY],
                     swarm_class: Some("dns_latency"),
                     report: Some(ENV_DNS_FAULT_REPORT),
                 },
@@ -426,7 +395,6 @@ fault_registry! {
                     flag: "--entropy-fail-permille",
                     env: ENV_ENTROPY_FAIL_PERMILLE,
                     plumbing: Plumbing::Scalar,
-                    injection_domains: &[fault_domain::ENTROPY_FAULT],
                     swarm_class: Some("entropy_fail"),
                     report: Some(ENV_ENTROPY_FAULT_REPORT),
                 },
@@ -452,7 +420,6 @@ fault_registry! {
                     // custom-op label draws from its own child stream keyed by this
                     // domain and the label's hash, so arming the knob over one
                     // operation class does not shift another's decisions.
-                    injection_domains: &[fault_domain::CUSTOM_OP_FAULT],
                     swarm_class: Some("custom_op_fail"),
                     report: Some(ENV_CUSTOMOP_FAULT_REPORT),
                 },
@@ -464,7 +431,6 @@ fault_registry! {
             flag: "--dns-entry",
             env: ENV_DNS_ENTRIES,
             plumbing: Plumbing::Repeatable(RepeatableFormat::DnsEntries),
-            injection_domains: &[],
             swarm_class: None,
             report: None,
         }; }

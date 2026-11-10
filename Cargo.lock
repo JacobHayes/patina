@@ -454,7 +454,6 @@ dependencies = [
  "patina-dst-abi",
  "patina-dst-driver-api",
  "patina-dst-fs-mem",
- "patina-dst-net-sim",
  "patina-dst-rng-seeded",
 ]
 

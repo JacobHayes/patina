@@ -32,10 +32,6 @@ pub mod fault_domain {
     /// priority/change-point stream.
     pub const SCHED_PCT: &str = "patina.sched.pct";
 
-    /// Explicit `FaultNet` wrapper datagram-drop stream.
-    pub const FAULT_NET_DROP: &str = "patina.wrapper.fault_net.drop";
-    /// Explicit `FaultNet` wrapper datagram-duplication stream.
-    pub const FAULT_NET_DUPLICATE: &str = "patina.wrapper.fault_net.duplicate";
     /// Managed/default `FaultFs` filesystem-error stream.
     pub const FAULT_FS_ERROR: &str = "patina.wrapper.fault_fs.error";
     /// Managed/default `FaultFs` short-I/O stream.

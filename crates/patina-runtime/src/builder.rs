@@ -21,7 +21,7 @@ use crate::scheduler::{DetScheduler, SchedulePolicy};
 use crate::swarm::apply_swarm_mask;
 use crate::{Context, CrashAttemptSink, FactsSink, RuntimeError, facts};
 use patina_dst_abi::ClockKind;
-use patina_dst_driver_api::{FsDriver, NetDriver};
+use patina_dst_driver_api::FsDriver;
 use patina_dst_fs_crash::CrashFs;
 use patina_dst_fs_mem::MemFs;
 use patina_dst_net_sim::SimNet;
@@ -50,7 +50,6 @@ pub struct RuntimeBuilder {
     /// mutually exclusive.
     fs_image: Option<MemFs>,
     clock: Option<VirtualClock>,
-    network: Option<Box<dyn NetDriver>>,
     /// Byte channel for the run's structured facts document, for embedders whose
     /// guest cannot write a host file directly (the native shim).
     facts_sink: Option<Box<dyn FactsSink>>,
@@ -65,7 +64,6 @@ impl RuntimeBuilder {
             filesystem: None,
             fs_image: None,
             clock: None,
-            network: None,
             facts_sink: None,
             crash_attempt_sink: None,
         }
@@ -109,11 +107,6 @@ impl RuntimeBuilder {
 
     pub fn with_clock(mut self, clock: VirtualClock) -> Self {
         self.clock = Some(clock);
-        self
-    }
-
-    pub fn with_network(mut self, driver: impl NetDriver + 'static) -> Self {
-        self.network = Some(Box::new(driver));
         self
     }
 
@@ -592,7 +585,7 @@ impl RuntimeBuilder {
             || !self.config.faults.fs.error_at.is_empty()
             || self.config.faults.fs.short_permille != 0;
         if self.filesystem.is_some() {
-            // An explicit filesystem (`with_filesystem`/`with_captured_filesystem`)
+            // An explicit filesystem (`with_filesystem`)
             // cannot reflect config-driven fs fault knobs, and an accompanying base
             // image would be ignored. Fail closed rather than proceed silently.
             if fs_fault_knobs_set {
@@ -651,29 +644,24 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| VirtualClock::at(boot_origin_nanos, realtime_epoch));
         let entropy = SeededEntropy::new(domain_seed(root_seed, fault_domain::ENTROPY));
         let scheduler = DetScheduler::with_policy(root_seed, self.config.schedule_policy);
-        let network = match self.network.take() {
-            Some(network) => network,
-            None => {
-                let net = &self.config.faults.net;
-                let mut network = SimNet::builder()
-                    .base_latency_nanos(net.latency_nanos)
-                    .fault_seed(domain_seed(root_seed, fault_domain::NET_FAULT))
-                    .drop_permille(net.drop_permille)
-                    .duplicate_permille(net.duplicate_permille)
-                    .connect_refuse_permille(net.connect_refuse_permille)
-                    .reset_permille(net.reset_permille);
-                if let Some((min, max)) = net.jitter_nanos {
-                    network = network.jitter_nanos(min, max);
-                }
-                if let Some(bytes) = net.tcp_buffer_bytes {
-                    network = network.tcp_buffer_bytes(bytes);
-                }
-                for (left, right) in &net.partitions {
-                    network = network.partition(left.clone(), right.clone());
-                }
-                Box::new(network.build().map_err(RuntimeError::Effect)?) as Box<dyn NetDriver>
-            }
-        };
+        let net = &self.config.faults.net;
+        let mut network = SimNet::builder()
+            .base_latency_nanos(net.latency_nanos)
+            .fault_seed(domain_seed(root_seed, fault_domain::NET_FAULT))
+            .drop_permille(net.drop_permille)
+            .duplicate_permille(net.duplicate_permille)
+            .connect_refuse_permille(net.connect_refuse_permille)
+            .reset_permille(net.reset_permille);
+        if let Some((min, max)) = net.jitter_nanos {
+            network = network.jitter_nanos(min, max);
+        }
+        if let Some(bytes) = net.tcp_buffer_bytes {
+            network = network.tcp_buffer_bytes(bytes);
+        }
+        for (left, right) in &net.partitions {
+            network = network.partition(left.clone(), right.clone());
+        }
+        let network = Box::new(network.build().map_err(RuntimeError::Effect)?);
 
         // Build the liveness watchdog before the Context literal consumes
         // `self.config` fields. The heal-then-converge arm arms at the fault-window

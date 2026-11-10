@@ -194,7 +194,7 @@ pub struct RuntimeConfig {
     /// run on a SUD kernel). Recorded into the trace's [`RunMetadata::sud`] so a
     /// cross-kernel replay is refused up front. `None` on every non-SUD run
     /// (macOS, non-SUD kernel, standalone). Set by the native shim from the C
-    /// arming state; not a fingerprint input. SUD-DESIGN.md §7.3.
+    /// arming state; not a fingerprint input.
     pub(super) sud: Option<bool>,
     /// Whether the timestamp-counter trap (`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`)
     /// was armed for this run, so `rdtsc`/`rdtscp` were answered from the virtual
@@ -799,13 +799,6 @@ impl RuntimeConfig {
     /// The run's edge-hook yield stride (0 = no added scheduling points).
     pub const fn yield_stride(&self) -> u32 {
         self.yield_stride
-    }
-
-    /// Set the edge-hook yield stride directly (tests, explicit embedders).
-    #[must_use]
-    pub fn with_yield_stride(mut self, stride: u32) -> Self {
-        self.yield_stride = stride;
-        self
     }
 
     /// Whether swarm fault-class selection is enabled for this run.

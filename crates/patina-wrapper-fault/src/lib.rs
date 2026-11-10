@@ -10,9 +10,6 @@ use patina_dst_driver_api::{
 };
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
 
-mod net;
-pub use net::FaultNet;
-
 /// Injects seeded filesystem errors and short I/O around another filesystem
 /// driver. The wrapper sits above durable/crash-model drivers: an injected error
 /// returns before the inner filesystem is touched (a failed writeback excepted,
@@ -1009,10 +1006,7 @@ fn permille_fires(rng: &mut SplitMix64, permille: u16) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use patina_dst_abi::SendDisposition;
-    use patina_dst_driver_api::NetDriver;
     use patina_dst_fs_mem::MemFs;
-    use patina_dst_net_sim::SimNet;
 
     use super::*;
 
@@ -1402,62 +1396,6 @@ mod tests {
         assert!(report.short_vacuity_diagnosable);
         assert_eq!(report.shorts_applied, 0);
         assert!(report.is_vacuous());
-    }
-
-    fn decisions(seed: u64) -> Vec<(SendDisposition, usize)> {
-        let mut net = FaultNet::new(SimNet::new(), seed)
-            .drop_permille(333)
-            .duplicate_permille(500);
-        let left = net.bind("left").unwrap();
-        net.bind("right").unwrap();
-        (0..100)
-            .map(|index| {
-                let report = net.send(left, "right", &[index as u8], index).unwrap();
-                (report.disposition, report.copies)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_same_seed_selects_the_same_fault_locations() {
-        assert_eq!(decisions(9), decisions(9));
-        let decisions = decisions(9);
-        assert!(
-            decisions
-                .iter()
-                .any(|(disposition, _)| *disposition == SendDisposition::DroppedByFault)
-        );
-        assert!(decisions.iter().any(|(_, copies)| *copies == 2));
-    }
-
-    /// Datagram faults reach the receiver, while TCP passes through fault
-    /// injection unchanged.
-    #[test]
-    fn datagram_faults_are_observable_and_tcp_is_untouched() {
-        let mut net = FaultNet::new(SimNet::new(), 1).duplicate_permille(1000);
-        let left = net.bind("left").unwrap();
-        let right = net.bind("right").unwrap();
-        let report = net.send(left, "right", b"twice", 0).unwrap();
-        assert_eq!(report.copies, 2);
-        assert_eq!(net.recv(right, 0).unwrap().unwrap().bytes, b"twice");
-        assert_eq!(net.recv(right, 0).unwrap().unwrap().bytes, b"twice");
-
-        let mut net = FaultNet::new(SimNet::new(), 1).drop_permille(1000);
-        let udp_left = net.bind("udp-left").unwrap();
-        let udp_right = net.bind("udp-right").unwrap();
-        assert_eq!(
-            net.send(udp_left, "udp-right", b"lost", 0)
-                .unwrap()
-                .disposition,
-            SendDisposition::DroppedByFault
-        );
-        assert_eq!(net.recv(udp_right, 0).unwrap(), None);
-
-        let listener = net.tcp_listen("server", 1).unwrap();
-        let client = net.tcp_connect("client", "server", 0).unwrap();
-        let server = net.tcp_accept(listener, 0).unwrap().unwrap().socket;
-        assert_eq!(net.tcp_send(client, b"reliable", 0).unwrap(), 8);
-        assert_eq!(net.tcp_recv(server, 16, 0).unwrap().unwrap(), b"reliable");
     }
 
     fn target(text: &str) -> FsErrorTarget {

@@ -430,7 +430,7 @@ impl Context {
     /// it. Reading the LIVE entry through the inode is what makes a `chmod`
     /// after the open visible here, exactly as it is through a regular file's
     /// descriptor. Latency and fault eligibility match
-    /// [`DeterministicContext::fs_fd_metadata`] because this IS that `fstat`,
+    /// [`Context::fs_fd_metadata`] because this IS that `fstat`,
     /// not an extra lookup beside it.
     pub fn fs_inode_metadata(&mut self, ino: u64) -> Result<FsMetadata, RuntimeError> {
         self.apply_fs_latency()?;
@@ -577,15 +577,6 @@ impl Context {
         )
     }
 
-    pub fn fs_set_inode_times(
-        &mut self,
-        ino: u64,
-        atime_nanos: Option<i128>,
-        mtime_nanos: Option<i128>,
-    ) -> Result<(), RuntimeError> {
-        self.fs_set_inode_times_spec(ino, atime_nanos.into(), mtime_nanos.into())
-    }
-
     pub fn fs_set_inode_times_spec(
         &mut self,
         ino: u64,
@@ -603,20 +594,6 @@ impl Context {
             },
             |fs| fs.set_inode_times(clock, ino, atime_nanos, mtime_nanos),
         )
-    }
-
-    pub fn fs_read_directory(&mut self, path: &str) -> Result<Vec<FsDirectoryEntry>, RuntimeError> {
-        self.apply_fs_latency()?;
-        let operation = Operation::FsReadDirectory { path: path.into() };
-        let expected = self.replay_expected(&operation)?;
-        let clock = self.fs_clock()?;
-        let result = self.filesystem.read_directory(clock, path);
-        let actual = match result {
-            Ok(entries) => Outcome::DirectoryEntries(entries),
-            Err(error) => Outcome::Error(error),
-        };
-        let outcome = self.reconcile(operation.clone(), expected, actual)?;
-        decode_directory_entries(&operation, outcome)
     }
 
     /// `getdents`/`readdir` on a directory DESCRIPTOR. The access was charged
@@ -638,7 +615,7 @@ impl Context {
     }
 
     /// `fchmod` through a descriptor the filesystem holds no handle for. Latency
-    /// and fault eligibility match [`DeterministicContext::fs_set_fd_mode`],
+    /// and fault eligibility match [`Context::fs_set_fd_mode`],
     /// because this IS that `fchmod`, named by node instead of by descriptor.
     pub fn fs_set_inode_mode(&mut self, ino: u64, mode: u32) -> Result<(), RuntimeError> {
         self.filesystem_unit_clocked(
@@ -649,7 +626,7 @@ impl Context {
 
     /// Take a node reference for a descriptor the filesystem holds no handle
     /// for — a FIFO endpoint. No modeled latency and no fault eligibility, for
-    /// the same reason [`DeterministicContext::fs_fd_path`] has none: this is
+    /// the same reason [`Context::fs_fd_path`] has none: this is
     /// the reference count inside `open`, not a second trip to storage.
     pub fn fs_retain_inode(&mut self, ino: u64) -> Result<(), RuntimeError> {
         self.filesystem_unit_undelayed(Operation::FsRetainInode { ino }, |filesystem| {
@@ -657,7 +634,7 @@ impl Context {
         })
     }
 
-    /// Drop the reference [`DeterministicContext::fs_retain_inode`] took.
+    /// Drop the reference [`Context::fs_retain_inode`] took.
     pub fn fs_release_inode(&mut self, ino: u64) -> Result<(), RuntimeError> {
         self.filesystem_unit_undelayed(Operation::FsReleaseInode { ino }, |filesystem| {
             filesystem.release_inode(ino)
@@ -905,7 +882,7 @@ impl Context {
 
     /// The inode an open descriptor names: the identity record and `flock`
     /// locks key on. No modeled latency and no fault eligibility, for the
-    /// reason [`DeterministicContext::fs_fd_path`] has none: a lock is
+    /// reason [`Context::fs_fd_path`] has none: a lock is
     /// bookkeeping that does no I/O, and no real `fcntl` or `flock` fails with
     /// an injected `EIO`.
     pub fn fs_fd_ino(&mut self, fd: Fd) -> Result<u64, RuntimeError> {

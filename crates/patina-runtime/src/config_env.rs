@@ -64,11 +64,10 @@ impl RuntimeConfig {
         self.apply_knob_env(Plane::DnsTable, get)
     }
 
-    /// Apply the fault-injection knobs from a control-plane accessor. Shared by
-    /// [`RuntimeConfig::from_env`] (reading the process environment) and the
-    /// native shim (reading its scrubbed constructor-time control plane), so both
-    /// entry points parse the fault protocol identically and fail closed on any
-    /// malformed value. Each knob defaults off when its variable is absent.
+    /// Apply the fault-injection knobs from a control-plane accessor (the
+    /// native shim reads its scrubbed constructor-time control plane), failing
+    /// closed on any malformed value. Each knob defaults off when its variable
+    /// is absent.
     pub fn apply_fault_env<F>(self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -245,8 +244,7 @@ impl RuntimeConfig {
 
     /// Apply the guest's initial working directory from a control-plane
     /// accessor. Presence of [`ENV_GUEST_CWD`] sets it (validated and
-    /// canonicalized); absence leaves it unset (`/`). Shared by
-    /// [`RuntimeConfig::from_env`] and the native shim.
+    /// canonicalized); absence leaves it unset (`/`).
     pub fn apply_guest_cwd_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -259,8 +257,7 @@ impl RuntimeConfig {
 
     /// Apply the guest's node name from a control-plane accessor. Presence of
     /// [`ENV_GUEST_HOSTNAME`] sets it (validated by [`validate_hostname`]);
-    /// absence leaves the default. Shared by [`RuntimeConfig::from_env`] and the
-    /// native shim.
+    /// absence leaves the default.
     pub fn apply_hostname_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -276,7 +273,7 @@ impl RuntimeConfig {
     /// Apply the virtual machine's CPU count from a control-plane accessor.
     /// Presence of [`ENV_GUEST_CPUS`] sets it (a decimal count
     /// [`validate_cpus`] accepts; anything else fails closed); absence leaves
-    /// the default. Shared by [`RuntimeConfig::from_env`] and the native shim.
+    /// the default.
     pub fn apply_cpus_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -297,7 +294,6 @@ impl RuntimeConfig {
     /// Apply the run's virtual realtime epoch from a control-plane accessor.
     /// Presence of [`ENV_REALTIME_EPOCH_NANOS`] sets it (a decimal `u64` of
     /// nanoseconds; anything else fails closed); absence leaves the default.
-    /// Shared by [`RuntimeConfig::from_env`] and the native shim.
     pub fn apply_realtime_epoch_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -317,9 +313,7 @@ impl RuntimeConfig {
     /// Apply the guest program arguments from a control-plane accessor, mirroring
     /// [`RuntimeConfig::apply_fault_env`]. Presence of [`ENV_GUEST_ARGV`] sets the
     /// recorded argv from its JSON string-array value; absence leaves it unset
-    /// (zero behavior change). Malformed JSON is rejected fail-closed. Shared by
-    /// [`RuntimeConfig::from_env`] and the native shim so both entry points parse
-    /// the argv protocol identically.
+    /// (zero behavior change). Malformed JSON is rejected fail-closed.
     pub fn apply_guest_argv_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -336,7 +330,7 @@ impl RuntimeConfig {
     /// Apply deterministic guest environment values from a control-plane
     /// accessor. Presence of [`ENV_GUEST_ENV`] sets the environment from its JSON
     /// object value; absence leaves it empty. Malformed JSON or invalid keys/values
-    /// fail closed. Shared by [`RuntimeConfig::from_env`] and the native shim.
+    /// fail closed.
     pub fn apply_guest_env_env<F>(mut self, get: F) -> Result<Self, RuntimeError>
     where
         F: Fn(&str) -> Option<String>,
@@ -417,19 +411,6 @@ impl RuntimeConfig {
             );
         }
         Ok(self)
-    }
-
-    /// Apply the end-of-run report-suppression knobs from a control-plane
-    /// accessor, mirroring [`RuntimeConfig::apply_fault_env`]. Every [`Report`]'s
-    /// variable is resolved here, ONCE, because finalization has no usable view
-    /// of the process environment on the native path.
-    #[must_use]
-    pub fn apply_report_env<F>(mut self, get: F) -> Self
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        self.reports = self.reports.applied(get);
-        self
     }
 
     /// Apply the liveness-watchdog knobs from a control-plane accessor. A present
