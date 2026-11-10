@@ -1,5 +1,5 @@
 /* The Patina Python launcher: CPython, linked statically below the shim,
- * importing every module from the blobs `cargo patina build --python` froze
+ * importing every module from the blobs `patina build --python` froze
  * (python/freeze.py) and running the application's main module, as
  * `python -m` runs one.
  *
@@ -30,7 +30,7 @@ struct reader {
 };
 
 static void corrupt(void) {
-    fprintf(stderr, "patina: the frozen Python modules are corrupt; rebuild with cargo patina build --python\n");
+    fprintf(stderr, "patina: the frozen Python modules are corrupt; rebuild with patina build --python\n");
     exit(70);
 }
 

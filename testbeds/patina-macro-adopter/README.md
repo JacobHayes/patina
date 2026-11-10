@@ -10,7 +10,7 @@ it must not create `testbeds/patina-macro-adopter/target`. It covers:
 
 - a passing two-seed DST test;
 - a planted seeded failure whose panic output must include the seed, a
-  `cargo patina test` repro, and a `cargo patina replay` repro;
+  `patina test` repro, and a `patina replay` repro;
 - a PATH-scrubbed run with `PATINA_CLI` unset, proving a missing CLI is a loud
   test failure rather than a skip.
 

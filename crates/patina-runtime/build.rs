@@ -1,8 +1,8 @@
-// This crate is part of the native-shim build closure that `cargo-patina`
+// This crate is part of the native-shim build closure that `patina`
 // carries embedded and unpacks to build a guest's linked shim. The only job of
 // this build script is to publish this crate's source directory to the build
 // script of any direct dependent via cargo's `links`/`DEP_*` metadata channel
-// (see `crates/patina-native-shim/AGENTS.md`), which is how `cargo-patina`'s
+// (see `crates/patina-native-shim/AGENTS.md`), which is how `patina`'s
 // build script discovers every crate to embed — in-tree, from the crates.io
 // registry checkout, and from a git checkout alike.
 fn main() {

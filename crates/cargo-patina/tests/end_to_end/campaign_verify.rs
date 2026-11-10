@@ -51,11 +51,7 @@ mod tests {
         if !mode.is_empty() {
             args.extend(["--allow-randomized-address-layout", "--", mode]);
         }
-        let output = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &args,
-        );
+        let output = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args);
         (output.status.code(), campaign_json_stdout(&output))
     }
 
@@ -126,7 +122,7 @@ mod tests {
             record["reproduce"]
                 .as_str()
                 .unwrap()
-                .starts_with("cargo patina replay"),
+                .starts_with("patina replay"),
             "{record:#}"
         );
         assert_eq!(envelope["verification"]["findings"]["nondeterministic"], 1);
@@ -218,7 +214,7 @@ mod tests {
 
         let output = directory.path().join("minimized.patina");
         let minimized = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "minimize",

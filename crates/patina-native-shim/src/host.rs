@@ -422,7 +422,7 @@ pub(crate) mod hostapi {
 // so neither a named import nor a plain
 // `dlsym` can reach the real host vehicles. The resolution primitive is instead
 // `__real_dlsym`, the real glibc resolver reached through `-Wl,--wrap=dlsym`
-// (added by `cargo patina native-build`).
+// (added by `patina native-build`).
 // `dlsym(RTLD_NEXT, "read")` then returns glibc's `read`, not the shim's strong
 // def (RTLD_NEXT searches images *after* the main executable), so the trace-fd
 // I/O, the baton semaphore, and the managed host-thread creator (`pthread_create`)
@@ -444,7 +444,7 @@ pub(crate) mod hostapi {
     // host vehicle (managed threads / trace-fd I/O / baton) must link
     // `-Wl,--wrap=dlsym`, the single wrap the shim needs (thread creation is a
     // strong-def interposer whose real vehicle this same table resolves, so it
-    // needs no wrap of its own); `cargo patina native-build` always links it, and
+    // needs no wrap of its own); `patina native-build` always links it, and
     // the direct-`cc` native_abi probes pass it explicitly.
     unsafe extern "C" {
         fn __real_dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
@@ -700,7 +700,7 @@ pub(crate) mod hostapi {
 // DEFAULT-allocator shim never deadlocked here. The allocator is bound DIRECTLY as
 // an `extern "C"` symbol (below), NOT resolved through the host-alias `dlsym`
 // table: that table's Linux resolver reaches the real glibc `dlsym` through
-// `__real_dlsym` (the `-Wl,--wrap=dlsym` alias), which only a `cargo patina build`
+// `__real_dlsym` (the `-Wl,--wrap=dlsym` alias), which only a `patina build`
 // binary links — the plain Rust lib-test binary links neither `patina_posix.c` nor
 // the wrap, so `__real_dlsym` is an UNRESOLVED WEAK NULL and calling it SIGSEGVs.
 // A direct `extern "C"` reference makes `hostcoll` self-sufficient in ANY link

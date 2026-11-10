@@ -506,7 +506,7 @@ fn run_native_harness_seed(
 ) -> Result<HarnessSeedRun, CliError> {
     let executable = env::current_exe().map_err(|error| {
         CliError(format!(
-            "failed to locate current cargo-patina executable: {error}"
+            "failed to locate current patina executable: {error}"
         ))
     })?;
     let mut args = vec![
@@ -537,7 +537,7 @@ fn run_native_harness_seed(
     harness_seed_outcome(seed, &output)
 }
 
-/// What one harness seed's child `cargo patina run` reported.
+/// What one harness seed's child `patina run` reported.
 fn harness_seed_outcome(
     seed: u64,
     output: &std::process::Output,
@@ -545,7 +545,7 @@ fn harness_seed_outcome(
     let exit_code = exit_code(output.status)?;
     let stdout_text = String::from_utf8_lossy(&output.stdout).into_owned();
     let child_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    // A child that is another cargo-patina build (the executable was replaced
+    // A child that is another patina build (the executable was replaced
     // under the run) stops the test run rather than being filed as a seed
     // failure: it is not the supervisor this run started with.
     if let Some(refusal) =
@@ -742,7 +742,7 @@ fn native_harness_failure_block(failure: NativeHarnessFailure<'_>) -> String {
             format!(
                 "\n    {}",
                 cli::without_env_defaults(format!(
-                    "cargo patina replay {} {}{}",
+                    "patina replay {} {}{}",
                     cli::shell_quote(failure.built.guest.as_os_str()),
                     cli::shell_quote(OsStr::new(&trace.path)),
                     if failure.invocation.allow_randomized_layout {
@@ -811,7 +811,7 @@ fn native_harness_repro(invocation: &NativeHarnessInvocation, seed: u64) -> Stri
     }
     append_native_harness_run_flags(&mut args, invocation);
     // Each seed ran as an isolated child from these resolved flags alone.
-    cli::without_env_defaults(command_line("cargo patina", &args))
+    cli::without_env_defaults(command_line("patina", &args))
 }
 
 fn indent_tail(text: &str, max_lines: usize) -> String {
@@ -933,7 +933,7 @@ mod tests {
             .arg("-c")
             .arg(format!(
                 "echo '{{\"result\":\"failure\"}}'; \
-                 echo 'cargo-patina: {} this cargo-patina is another build' >&2; exit 2",
+                 echo 'patina: {} this patina is another build' >&2; exit 2",
                 crate::supervisor_identity::SUPERVISOR_MISMATCH
             ))
             .output()

@@ -363,7 +363,7 @@ pub const TRAP_REMOVED: &str = "removed";
 pub const TRAP_CLASSES: &[&str] = &[TRAP_PROCESS, TRAP_PRIVILEGED, TRAP_UNMODELED, TRAP_REMOVED];
 
 impl Disposition {
-    /// The disposition's kind, as printed by `cargo patina syscalls`.
+    /// The disposition's kind, as printed by `patina syscalls`.
     pub fn kind(&self) -> &'static str {
         match self {
             Disposition::Modeled => "modeled",

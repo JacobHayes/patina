@@ -6,7 +6,7 @@
 # backend. On Linux that backend (linux_raw) emits raw inline `syscall`
 # instructions with no libc wrapper — the exact binary class the import audit
 # cannot see and the instruction scan refuses. Built through the packaged native
-# path, `cargo patina build` DROPS `--cfg rustix_use_libc` on x86_64 (SUD is
+# path, `patina build` DROPS `--cfg rustix_use_libc` on x86_64 (SUD is
 # available there), so the raw syscalls stay raw and are trapped at run time by
 # the SIGSYS dispatcher into the deterministic runtime.
 #
@@ -34,9 +34,9 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/rustix-default}"
 export CARGO_TARGET_DIR="$target_dir"
 out="$target_dir/patina"
 built="$out/rustix-default"
-# PATINA_CLI names a cargo-patina already built from this checkout (the local
+# PATINA_CLI names a patina already built from this checkout (the local
 # check runner passes one CLI to every rung); otherwise the release CLI builds here.
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green.
@@ -44,7 +44,7 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3
@@ -82,12 +82,12 @@ if [[ "$sud_kernel" != 1 ]]; then
 fi
 
 echo "==> building the rustix-default MRE (packaged native build; rustix_use_libc dropped on x86_64)"
-if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+if ! "$PATINA" build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the rustix-default MRE failed" >&2; exit 3
 fi
 
 echo "==> [1] audit: the raw-syscall sites must be reported SUD-managed"
-if ! "$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1; then
+if ! "$PATINA" audit "$built" >"$out/audit.txt" 2>&1; then
   echo "rustix-default: FAIL [1] audit refused a SUD-managed binary" >&2
   cat "$out/audit.txt" >&2; exit 1
 fi
@@ -97,9 +97,9 @@ if ! grep -q 'SUD-managed' "$out/audit.txt"; then
 fi
 
 echo "==> [2]/[3] run + byte-identical repeats (seed 1)"
-r1="$("$PATINA" patina run "$built" --seed 1 2>"$out/run1.err")" || {
+r1="$("$PATINA" run "$built" --seed 1 2>"$out/run1.err")" || {
   echo "rustix-default: FAIL [2] run exited nonzero" >&2; cat "$out/run1.err" >&2; exit 1; }
-r2="$("$PATINA" patina run "$built" --seed 1 2>/dev/null)" || {
+r2="$("$PATINA" run "$built" --seed 1 2>/dev/null)" || {
   echo "rustix-default: FAIL [2] second run exited nonzero" >&2; exit 1; }
 if [[ "$r1" != "$r2" ]]; then
   echo "rustix-default: FAIL [3] two same-seed runs differ" >&2
@@ -110,17 +110,17 @@ if ! grep -q '^RUSTIX_RESULT fs=rustix-default-mre dents=alpha,beta ' <<<"$r1"; 
 fi
 
 echo "==> [4] entropy varies across seeds"
-distinct="$(for s in 1 2 3 4; do "$PATINA" patina run "$built" --seed "$s" 2>/dev/null; done \
+distinct="$(for s in 1 2 3 4; do "$PATINA" run "$built" --seed "$s" 2>/dev/null; done \
   | grep -o 'rand=[0-9a-f]*' | sort -u | wc -l | tr -d ' ')"
 if [[ "$distinct" -lt 2 ]]; then
   echo "rustix-default: FAIL [4] raw getrandom did not vary across seeds" >&2; exit 1
 fi
 
 echo "==> [5] record → replay byte-identical"
-"$PATINA" patina run "$built" --seed 1 --record "$out/mre.patina" \
+"$PATINA" run "$built" --seed 1 --record "$out/mre.patina" \
   --fingerprint rustix-mre-v1 >"$out/record.out" 2>/dev/null || {
   echo "rustix-default: FAIL [5] record run failed" >&2; exit 1; }
-"$PATINA" patina replay "$built" "$out/mre.patina" \
+"$PATINA" replay "$built" "$out/mre.patina" \
   --fingerprint rustix-mre-v1 >"$out/replay.out" 2>/dev/null || {
   echo "rustix-default: FAIL [5] replay failed" >&2; exit 1; }
 if ! cmp -s "$out/record.out" "$out/replay.out"; then

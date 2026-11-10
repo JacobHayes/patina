@@ -495,7 +495,7 @@ extracts the member holding the Rust constructor;
 Linux dlsym routes use hidden aliases, never cross-object C alias attributes.
 A successful many-codegen-unit build does not replace this extraction contract,
 especially on Darwin, where the Linux routing table is absent. The one exception
-is the debug archive cargo-patina seals on either platform
+is the debug archive patina seals on either platform
 (`POSIX_SEALED_RUST_FLAGS`): the seal links it whole and, on Linux, turns its
 route aliases into door references.
 
@@ -531,7 +531,7 @@ the compiled ABI acceptance cases.
 
 ## Source bundle and `links`
 
-`cargo-patina` does not build this crate from a source checkout: it embeds the
+`patina` does not build this crate from a source checkout: it embeds the
 shim's whole workspace dependency closure (this crate and the eleven runtime
 crates beneath it) at its own build time and unpacks it into a per-user cache
 when a guest is built, so an installed binary is self-sufficient (see
@@ -542,7 +542,7 @@ ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
   that to the build script of every DIRECT dependent as `DEP_<PKG>_SRC_DIR`,
   which is how `cargo-patina`'s build script learns where each crate's source
   is — the one documented channel for that, and it works the same in-tree, from
-  the crates.io registry checkout, and from a git checkout. `cargo-patina`
+  the crates.io registry checkout, and from a git checkout. `patina`
   depends directly on all twelve crates for this reason alone; do not "clean
   up" the ones it does not otherwise use.
 - `links` has a side effect: cargo refuses two versions of a `links` crate in
@@ -577,12 +577,12 @@ ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
   `extern` block — and changing an argument list means changing all three; the
   compiler catches two of them and the third is a link-time surprise.
 - After editing `build_support.rs`, a slice under `c/posix/`, or related
-  embedded C sources, rebuild `cargo-patina`; validating with a stale runner is
+  embedded C sources, rebuild `patina`; validating with a stale runner is
   an accidental false green.
-- Guest binaries pick a shim change up on their own: the flags `cargo patina
+- Guest binaries pick a shim change up on their own: the flags `patina
   build` injects carry a hash of the shim link inputs' bytes, so Cargo relinks
   the guest whenever this crate (or the runtime beneath it) is rebuilt. A guest
-  still showing the old behavior after a rebuilt `cargo-patina` is a real
+  still showing the old behavior after a rebuilt `patina` is a real
   result, not a stale build.
 - Run targeted shim tests and `mise run check -p cargo-patina --test native_abi`
   for first feedback on a native interposition change; `mise run check:full`

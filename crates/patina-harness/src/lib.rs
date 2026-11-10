@@ -27,9 +27,9 @@
 //! (startup Option B, deferred initialization):
 //!
 //! ```sh
-//! cargo patina run path/to/harness/Cargo.toml --seed 1
-//! cargo patina run path/to/harness/Cargo.toml --record trace.patina
-//! cargo patina replay path/to/harness/Cargo.toml trace.patina
+//! patina run path/to/harness/Cargo.toml --seed 1
+//! patina run path/to/harness/Cargo.toml --record trace.patina
+//! patina replay path/to/harness/Cargo.toml trace.patina
 //! ```
 //!
 //! A harness binary identifies itself: this crate embeds a marker
@@ -49,7 +49,7 @@
 //!
 //! [`HarnessBuilder`] knobs are applied as an overlay on top of the CLI-provided
 //! control plane, flowing through the **same** `RuntimeConfig` fields the
-//! `cargo patina run` environment path sets. There is no separate harness
+//! `patina run` environment path sets. There is no separate harness
 //! fingerprint component: the existing fingerprint folds and the runtime's
 //! `reconcile_replay_*` conflict checks apply unchanged. On replay, a harness
 //! configuration that conflicts with the recorded trace fails closed
@@ -112,7 +112,7 @@ use std::fmt;
 use patina_dst_runtime as rt;
 
 /// The bytes of [`rt::HARNESS_MARKER`], placed in every program that links this
-/// crate. `cargo patina run` scans the image for them (as it does for the
+/// crate. `patina run` scans the image for them (as it does for the
 /// instrumentation marker) and defers runtime installation to [`run_with`].
 #[used]
 static HARNESS_MARKER: [u8; rt::HARNESS_MARKER.len()] = {
@@ -128,12 +128,12 @@ static HARNESS_MARKER: [u8; rt::HARNESS_MARKER.len()] = {
 /// An error from a harness run.
 #[derive(Debug)]
 pub enum HarnessError {
-    /// The binary is not running under `cargo patina run`: there is no
+    /// The binary is not running under `patina run`: there is no
     /// Patina control plane (plain `cargo run`, or a missing supervisor). The
     /// application closure never ran.
     NotUnderPatina,
     /// A deterministic runtime is already installed. Call
-    /// [`run`]/[`run_with`] once, from a binary run through `cargo patina`.
+    /// [`run`]/[`run_with`] once, from a binary run through `patina`.
     AlreadyInstalled,
     /// A deterministic boundary effect ran before the harness installed the
     /// runtime, so reconfiguring it would make replay ambiguous.
@@ -154,12 +154,12 @@ impl fmt::Display for HarnessError {
             HarnessError::NotUnderPatina => write!(
                 formatter,
                 "not running under Patina: build and run the harness with \
-                 `cargo patina run <manifest>`"
+                 `patina run <manifest>`"
             ),
             HarnessError::AlreadyInstalled => write!(
                 formatter,
                 "a deterministic runtime is already installed; call run/run_with exactly once, \
-                 from a binary run through `cargo patina`"
+                 from a binary run through `patina`"
             ),
             HarnessError::BoundaryBeforeInstall => write!(
                 formatter,
@@ -184,7 +184,7 @@ impl Error for HarnessError {
 
 /// Desired runtime configuration for a harness run, applied as an overlay over the
 /// CLI-provided control plane. Every knob maps to the same `PATINA_*` control-plane
-/// value the `cargo patina run` environment path sets, so harness configuration
+/// value the `patina run` environment path sets, so harness configuration
 /// flows through the identical `RuntimeConfig` fields (and the same fingerprint
 /// folds and replay-reconciliation checks). See the [crate docs](crate) for the
 /// non-fingerprinted vs. fingerprinted knob distinction under `--record`/`replay`.
@@ -230,7 +230,7 @@ impl HarnessBuilder {
     }
 
     /// A run parameter default, read by the application through
-    /// `patina_dst::param(key)`. A `cargo patina run --param` for the same key
+    /// `patina_dst::param(key)`. A `patina run --param` for the same key
     /// overrides it; the merged set is recorded and restored on replay.
     #[must_use]
     pub fn param(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -461,7 +461,7 @@ where
     }
     #[cfg(not(patina_shim))]
     {
-        // Not built through `cargo patina build` (no shim linked below): the
+        // Not built through `patina build` (no shim linked below): the
         // deterministic runtime cannot exist, so fail closed before running any
         // application code rather than execute it against host effects.
         let _ = (builder.into_overlay(), entry);
@@ -470,7 +470,7 @@ where
 }
 
 /// FFI into the native shim. Present only when the shim is actually linked
-/// (`cfg(patina_shim)`, injected by `cargo patina build`). Under a plain
+/// (`cfg(patina_shim)`, injected by `patina build`). Under a plain
 /// `cargo build` these symbols are never referenced, so nothing is left
 /// unresolved at link time — mirroring `patina-dst`'s own shim bridge.
 #[cfg(patina_shim)]

@@ -50,7 +50,7 @@ pub fn rng() -> u64 {
     }
 }
 
-/// The run parameter `key`, from `cargo patina run --param KEY=VALUE` or a
+/// The run parameter `key`, from `patina run --param KEY=VALUE` or a
 /// harness's `.param()` default (the CLI value wins). Recorded into the trace
 /// and restored on replay, so parameter-dependent behavior reproduces from the
 /// trace alone. `None` when the run has no such parameter, and always outside

@@ -2,7 +2,7 @@
 ###############################################################################
 # workq under Patina: the self-checking regression gate. Exits nonzero on any
 # regression:
-#   [1] a short `cargo patina campaign` over campaign.json: guest-drawn workload
+#   [1] a short `patina campaign` over campaign.json: guest-drawn workload
 #       sizes, net/sleep/buggify/swarm faults, a process or machine crash and
 #       restart at a drawn per-operation rate, and an in-process server restart
 #       per generation, with the campaign's own re-run check. Every generation
@@ -24,7 +24,7 @@ repo_root="$(cd "$here/../.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/workq}"
 export CARGO_TARGET_DIR="$target_dir"
 built="$target_dir/patina/workq"
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 GENS="${WORKQ_CAMPAIGN_GENS:-24}"
 
 cd "$repo_root"
@@ -32,12 +32,12 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 if ! mkdir -p "$target_dir/patina"; then
   echo "FATAL: mkdir $target_dir/patina failed" >&2; exit 3
 fi
-if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+if ! "$PATINA" build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the workq harness failed" >&2; exit 3
 fi
 
@@ -45,11 +45,11 @@ work="$(mktemp -d)"
 trap 'printf "Logs: %s\n" "$work"' EXIT
 fail=0
 start_secs=$SECONDS
-run() { "$PATINA" patina run "$built" "$@"; }
+run() { "$PATINA" run "$built" "$@"; }
 stderr_tail() { [[ -s "$1" ]] && sed -n '1,20p' "$1" | sed 's/^/      stderr| /'; }
 
 echo "==> [1] campaign: $GENS generations of campaign.json"
-if ! "$PATINA" patina campaign "$built" --spec "$here/campaign.json" --gens "$GENS" \
+if ! "$PATINA" campaign "$built" --spec "$here/campaign.json" --gens "$GENS" \
     --out-dir "$work/campaign" >"$work/campaign.out" 2>&1; then
   echo "    FAIL: the campaign found something"; fail=1
   grep -A3 -- '-- failure signatures --' "$work/campaign.out" | sed 's/^/      /'

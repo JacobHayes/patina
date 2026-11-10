@@ -19,7 +19,7 @@ mod tests {
     fn run_and_audit_route_a_native_artifact() {
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let patina = env!("CARGO_BIN_EXE_patina");
 
         let source = directory.path().join("noop.rs");
         // The file write gives `--budget` boundary operations to bound.
@@ -93,14 +93,14 @@ mod tests {
             String::from_utf8_lossy(&guest.stderr)
         );
         assert!(
-            !String::from_utf8_lossy(&guest.stdout).contains("cargo patina run"),
+            !String::from_utf8_lossy(&guest.stdout).contains("patina run"),
             "a --help after -- wrongly triggered Patina help"
         );
         // Before `--`: the bare `--help` is intercepted and prints run help (exit 0).
         let help = run(&["run", module, "--help"]);
         assert!(help.status.success(), "run --help should exit 0");
         assert!(
-            String::from_utf8_lossy(&help.stdout).contains("cargo patina run"),
+            String::from_utf8_lossy(&help.stdout).contains("patina run"),
             "--help should show run help:\n{}",
             String::from_utf8_lossy(&help.stdout)
         );
@@ -123,9 +123,9 @@ mod tests {
     fn per_verb_help_and_json_registry() {
         let directory = tempdir().unwrap();
 
-        // `cargo patina campaign --help` exits 0 with the campaign synopsis + --gens.
+        // `patina campaign --help` exits 0 with the campaign synopsis + --gens.
         let help = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             directory.path(),
             &["campaign", "--help"],
         );
@@ -137,7 +137,7 @@ mod tests {
         );
         let stdout = String::from_utf8_lossy(&help.stdout);
         assert!(
-            stdout.contains("cargo patina campaign"),
+            stdout.contains("patina campaign"),
             "campaign --help missing synopsis:\n{stdout}"
         );
         assert!(
@@ -150,11 +150,8 @@ mod tests {
             (&["--help", "--format", "json"][..], None),
             (&["run", "--help", "--format", "json"][..], Some("run")),
         ] {
-            let output = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                directory.path(),
-                arguments,
-            );
+            let output =
+                invoke_unchecked(env!("CARGO_BIN_EXE_patina"), directory.path(), arguments);
             assert!(
                 output.status.success(),
                 "{arguments:?} exited {}",
@@ -175,7 +172,7 @@ mod tests {
     #[test]
     fn flag_env_defaults_yield_to_typed_flags() {
         let directory = tempdir().unwrap();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let patina = env!("CARGO_BIN_EXE_patina");
         let fixture = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../patina-trace/tests/fixtures/current-crash-restart.patina"

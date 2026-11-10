@@ -186,11 +186,8 @@ mod tests {
             trace.to_str().unwrap(),
         ];
         arguments.extend_from_slice(mode);
-        let recorded = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &arguments,
-        );
+        let recorded =
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &arguments);
         let stderr = String::from_utf8_lossy(&recorded.stderr);
         assert!(
             !recorded.status.success(),
@@ -229,7 +226,7 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn assert_replays_identically(recording: &AlwaysRecording) {
         let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "replay",
@@ -305,7 +302,7 @@ mod tests {
         bundle.write_atomic(&recording.trace).unwrap();
 
         let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "replay",

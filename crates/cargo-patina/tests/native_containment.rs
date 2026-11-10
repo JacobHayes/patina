@@ -7,7 +7,7 @@ use common::native::*;
 
 /// The raw audit refuses a stock program's escapes by class: a raw syscall
 /// or an unmanaged thread, an unknown import and a shared-memory import; the
-/// plain audit refuses a binary `cargo patina build` did not make. On Linux a
+/// plain audit refuses a binary `patina build` did not make. On Linux a
 /// raw syscall outside the shim is refused before it runs, without blaming a
 /// kernel that has syscall-user-dispatch, and on x86_64 a vsyscall
 /// materialization is refused.
@@ -16,7 +16,7 @@ fn raw_audit_refuses_each_unlinked_escape_class() {
     let escape = assert_build_c_guest("escape_probe.c", CLink::Unlinked);
     assert_refused(
         escape.command("audit", &[]),
-        &["not built with `cargo patina build`"],
+        &["not built with `patina build`"],
     );
     let out = assert_refused(escape.command("audit", &["--raw"]), &["PATINA_RAW_AUDIT"]);
     let error = text(&out.stderr);
@@ -292,7 +292,7 @@ fn the_initial_stack_environment_is_whole_or_refused() {
             .collect();
         let trace = g.dir.path().join(format!("stack-{entries}.patina"));
         let run = |replay: bool| {
-            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_patina"));
             command
                 .env_clear()
                 .arg(if replay { "replay" } else { "run" })

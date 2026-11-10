@@ -181,7 +181,7 @@ impl Guest {
         let mut argv = vec![verb, self.binary.to_str().unwrap()];
         argv.extend_from_slice(args);
         invoke_with_deadline(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &argv,
             Duration::from_secs(60),
@@ -294,7 +294,7 @@ impl Guest {
 
     /// Replay a [`record_standalone`](Self::record_standalone) trace the same way,
     /// through an inherited host fd. A standalone recording carries no native
-    /// build identity, so `cargo patina replay` refuses it.
+    /// build identity, so `patina replay` refuses it.
     pub fn replay_standalone(&self, trace: &Path, args: &[&str]) -> Output {
         let mut command = Command::new("/bin/sh");
         command
@@ -448,7 +448,7 @@ fn build_native_guest(mut cc: Command, name: &str, link: CLink, flags: &[&str]) 
                     .args(super::shim_linker_args(archive, dir.path()));
             }
             CLink::PosixShim | CLink::PosixShimWithoutSud => {
-                // Sealed as `cargo patina build` seals: the façade and the
+                // Sealed as `patina build` seals: the façade and the
                 // engine in place of the POSIX object and the archive.
                 let archive = ARCHIVE.get_or_init(super::shim_archive);
                 let seams: &[&str] = match link {

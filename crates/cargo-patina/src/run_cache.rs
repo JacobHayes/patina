@@ -11,7 +11,7 @@
 //! which is computed afresh on every run from the bytes the run then uses: an
 //! executable changed in place, whatever its size, timestamps or inode, has
 //! another digest and is judged again. Entries live under a directory named by
-//! the running `cargo-patina`'s own build ID, so a rebuilt supervisor, whose
+//! the running `patina`'s own build ID, so a rebuilt supervisor, whose
 //! gate may judge differently, never reads an older one's results; a
 //! supervisor without a build ID keeps nothing. Everything here is
 //! best-effort: an entry that cannot be read or written is derived again.
@@ -149,7 +149,7 @@ fn file_size_limit_admits(_len: usize) -> bool {
     true
 }
 
-/// `<patina cache>/run-cache/<build ID of this cargo-patina>`.
+/// `<patina cache>/run-cache/<build ID of this patina>`.
 fn dir() -> Option<&'static Path> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
     DIR.get_or_init(|| {
@@ -164,7 +164,7 @@ fn dir() -> Option<&'static Path> {
 const KEEP_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Remove the other supervisors' entry directories that gained no entry for
-/// [`KEEP_IDLE`]. Each development build of `cargo-patina` has its own, so
+/// [`KEEP_IDLE`]. Each development build of `patina` has its own, so
 /// without this they would pile up.
 fn prune(root: &Path, own: &Path) {
     let Ok(entries) = fs::read_dir(root) else {

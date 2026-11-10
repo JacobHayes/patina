@@ -22,7 +22,7 @@
 //!
 //! The overflow path (`__chk_fail`, `__fortify_fail`: SIGABRT before any
 //! syscall) is not exercised: observing it needs a forked child, which patina
-//! refuses by design; the shim's own fortify aborts are cargo-patina's
+//! refuses by design; the shim's own fortify aborts are patina's
 //! native_signals `raw::guest_ended_runs_finalize_their_traces`.
 //!
 //! libc only: glibc's symbols, imported (the shim defines them; the `libc`

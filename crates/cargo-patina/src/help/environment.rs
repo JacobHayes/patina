@@ -27,7 +27,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_CLI",
         scope: "user",
-        doc: "Absolute path to the cargo-patina a `#[patina_dst::test]` launches under plain `cargo test` (default: cargo-patina on PATH).",
+        doc: "Absolute path to the patina a `#[patina_dst::test]` launches under plain `cargo test` (default: patina on PATH).",
     },
     EnvVar {
         name: "PATINA_RT_MODE",
@@ -77,7 +77,7 @@ pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_RT_EXPECTED_SUPERVISOR_SHA256",
         scope: "protocol",
-        doc: "Digest of the cargo-patina that launched this one (campaign and reduction children); a cargo-patina of another build refuses before running anything.",
+        doc: "Digest of the patina that launched this one (campaign and reduction children); a patina of another build refuses before running anything.",
     },
     EnvVar {
         name: "PATINA_RT_GUEST_ARGV",

@@ -98,7 +98,7 @@ def build(patina: Optional[str], work: Path, testbeds: Sequence[Testbed]) -> Tup
     if patina is None:
         run_checked(['cargo', 'build', '--release', '--quiet', '-p', 'cargo-patina'], cwd=ROOT)
         target = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
-        patina = str(target / 'release' / 'cargo-patina')
+        patina = str(target / 'release' / 'patina')
     artifacts: Dict[str, Path] = {}
     env = dict(os.environ)
     env.setdefault('CARGO_TARGET_DIR', str(ROOT / 'target' / 'testbeds' / 'guided-bench'))
@@ -106,7 +106,7 @@ def build(patina: Optional[str], work: Path, testbeds: Sequence[Testbed]) -> Tup
         if testbed.source in artifacts:
             continue
         output = work / (Path(testbed.source).stem + '-instrumented')
-        run_checked([patina, 'patina', 'build', str(ROOT / testbed.source), '--instrument',
+        run_checked([patina, 'build', str(ROOT / testbed.source), '--instrument',
                      '--release', '--output', str(output)], cwd=ROOT, env=env)
         artifacts[testbed.source] = output
     return patina, artifacts
@@ -114,7 +114,7 @@ def build(patina: Optional[str], work: Path, testbeds: Sequence[Testbed]) -> Tup
 
 def staircase_reachable(patina: str, artifact: Path) -> bool:
     """Non-vacuity: at the knob ceiling the planted bug fires."""
-    result = subprocess.run([patina, 'patina', 'run', str(artifact), '--seed', '1',
+    result = subprocess.run([patina, 'run', str(artifact), '--seed', '1',
                              '--fs-error-permille', '100', '--fs-short-permille', '200',
                              '--sleep-jitter-nanos', '0..2550000'],
                             capture_output=True, text=True)
@@ -127,7 +127,7 @@ def generations_to_find(patina: str, artifact: Path, testbed: Testbed, seed_base
     target-class generation, or None when it reached the cap without one, and
     for a guided campaign how that generation was derived (exploit, explore or
     none)."""
-    argv = [patina, 'patina', 'campaign', str(artifact), '--gens', str(testbed.cap),
+    argv = [patina, 'campaign', str(artifact), '--gens', str(testbed.cap),
             '--seed-start', str(seed_base), '--no-verify', '--progress-every', '1',
             '--out-dir', str(out_dir), *testbed.flags]
     if guided:
@@ -212,7 +212,7 @@ def main(argv: Sequence[str]) -> int:
                         help='testbed to run (repeatable; default all)')
     parser.add_argument('--cap', type=int, help="generation cap (default: the testbed's own)")
     parser.add_argument('--jobs', type=int, default=4, help='concurrent campaigns (default 4)')
-    parser.add_argument('--patina', help='a cargo-patina binary (default: build this checkout)')
+    parser.add_argument('--patina', help='a patina binary (default: build this checkout)')
     parser.add_argument('--work-dir', help='keep campaign out-dirs here (default: a temp dir)')
     parser.add_argument('--json', help='write every run and the summaries here')
     args = parser.parse_args(argv)

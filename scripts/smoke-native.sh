@@ -20,7 +20,7 @@ Takes no positional arguments. Requires a C compiler.
 
 Environment:
   CARGO_TARGET_DIR   override the Cargo target directory (default <repo>/target).
-  PATINA_CLI         a cargo-patina built from this checkout, used instead of
+  PATINA_CLI         a patina built from this checkout, used instead of
                      building the release CLI.
   CC                 C compiler to use (default cc).
 
@@ -111,10 +111,10 @@ if [[ -n ${PATINA_CLI:-} ]]; then
   runner=$PATINA_CLI
 else
   cargo build --release --locked --manifest-path "$root/Cargo.toml" -p cargo-patina >/dev/null
-  runner="$target_dir/release/cargo-patina"
+  runner="$target_dir/release/patina"
 fi
 if [[ ! -x $runner ]]; then
-  echo "smoke-native: $runner is not an executable cargo-patina" >&2
+  echo "smoke-native: $runner is not an executable patina" >&2
   exit 2
 fi
 

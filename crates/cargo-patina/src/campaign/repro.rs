@@ -23,7 +23,7 @@ pub(super) fn reproduce_command(
     // contain them.
     if let Some(trace) = trace {
         let mut parts = vec![
-            "cargo patina replay".to_string(),
+            "patina replay".to_string(),
             artifact.display().to_string(),
             trace.to_string(),
         ];
@@ -31,7 +31,7 @@ pub(super) fn reproduce_command(
         return crate::cli::without_env_defaults(crate::cli::shell_words(&parts));
     }
     let mut parts = vec![
-        "cargo patina run".to_string(),
+        "patina run".to_string(),
         artifact.display().to_string(),
         "--seed".to_string(),
         seed.to_string(),
@@ -188,7 +188,7 @@ pub(crate) fn generation_repro(
     let state_path = out_dir.join("campaign-state.json");
     if !state_path.is_file() {
         return Err(CliError(format!(
-            "campaign out-dir {} has no campaign-state.json; --generation reduces a recorded campaign generation, so point --out-dir at the out-dir a `cargo patina campaign` run wrote",
+            "campaign out-dir {} has no campaign-state.json; --generation reduces a recorded campaign generation, so point --out-dir at the out-dir a `patina campaign` run wrote",
             out_dir.display()
         )));
     }
@@ -402,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             replay,
-            "cargo patina replay guest-bin out/failures/generation-0.patina \
+            "patina replay guest-bin out/failures/generation-0.patina \
              --allow-unsupported-symbols all --allow-randomized-address-layout"
         );
         // The traceless form re-runs, and its flag list already contains them.

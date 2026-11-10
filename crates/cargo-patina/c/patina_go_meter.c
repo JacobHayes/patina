@@ -1,4 +1,4 @@
-/* The compute meter of a Go guest built by `cargo patina build --go`.
+/* The compute meter of a Go guest built by `patina build --go`.
  *
  * WHY THIS EXISTS. Patina runs one guest thread at a time and moves virtual
  * time by what guest calls cost, so a goroutine computing without calls would
@@ -42,7 +42,7 @@ extern void patina_note_metered_runtime(void);
 #define PATINA_STRINGIFY_(x) #x
 #define PATINA_STRINGIFY(x) PATINA_STRINGIFY_(x)
 
-/* The build-mode marker `cargo patina run` scans for. */
+/* The build-mode marker `patina run` scans for. */
 __attribute__((used, retain))
 static const char PATINA_GO_METER_MARKER[] =
     "PATINA_GO_METER_V1 stride=" PATINA_STRINGIFY(PATINA_GO_METER_STRIDE) ";";

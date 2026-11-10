@@ -61,14 +61,14 @@ pub(super) fn initialize_edge_coverage(
     if state.spec.yield_stride && !instrumentation.yield_hook {
         return Err(CliError(format!(
             "--yield-stride draws a scheduling-point stride per generation, but {} was not built \
-with cargo patina build --instrument, so it has no edge hook to take them",
+with patina build --instrument, so it has no edge hook to take them",
             artifact_path.display()
         )));
     }
     if !instrumentation.edge_counters {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",
-            Some("rebuild with cargo patina build --instrument"),
+            Some("rebuild with patina build --instrument"),
         ));
     }
     let coverage_dir = out_dir.join("coverage");
@@ -122,7 +122,7 @@ pub(super) fn guidance_source_or_refuse(edge_coverage: &EdgeCoverageState) -> Re
     }
     Err(CliError(
         "--guided needs a novelty signal but this campaign has no edge coverage; rebuild with \
-cargo patina build --instrument so generations have edge coverage to steer by"
+patina build --instrument so generations have edge coverage to steer by"
             .to_string(),
     ))
 }

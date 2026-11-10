@@ -43,7 +43,7 @@ mod tests {
 
         // Split: the shim half and the guest half resolve different compilers.
         let refused = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             &package,
             &[
                 "build",
@@ -163,7 +163,7 @@ mod tests {
             env::var_os("PATH").unwrap_or_default().to_string_lossy()
         );
 
-        let built = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let built = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(&package)
             .args([
                 "build",
@@ -208,7 +208,7 @@ mod tests {
             .unwrap();
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let aligned = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let aligned = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(&package)
             .args([
                 "build",
@@ -306,7 +306,7 @@ mod tests {
             fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
             let output = package.join("must-not-exist");
             let refused = invoke_unchecked_clean_env(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 &package,
                 &[
                     "build",

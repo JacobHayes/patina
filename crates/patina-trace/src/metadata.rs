@@ -407,7 +407,7 @@ pub struct RunMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address_layout: Option<AddressLayout>,
     /// The build a native recording belongs to: stamped by the supervisor into
-    /// every trace `cargo patina run --record` commits for a native binary, and
+    /// every trace `patina run --record` commits for a native binary, and
     /// absent on standalone recordings and the other families' traces. Native replay refuses a trace without it, and one
     /// whose identity differs from the build replaying it, before the guest
     /// starts. See [`NativeIdentityRecord`].

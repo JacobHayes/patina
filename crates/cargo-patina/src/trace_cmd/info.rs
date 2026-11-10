@@ -158,7 +158,7 @@ pub(super) fn print_info_human(facts: &Value) {
         println!("sud: armed");
     }
     println!(
-        "next: `cargo patina trace events {}` for the event stream",
+        "next: `patina trace events {}` for the event stream",
         facts["path"].as_str().unwrap_or("<TRACE>")
     );
 }

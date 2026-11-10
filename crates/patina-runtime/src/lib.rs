@@ -9,7 +9,7 @@
 //! # Where this crate sits
 //!
 //! Application code does not depend on this crate. Programs run under
-//! `cargo patina run`, where the native shim installs one [`Context`] for the
+//! `patina run`, where the native shim installs one [`Context`] for the
 //! process and routes interposed `std` calls into it; the crate an application
 //! ships is the dependency-light SDK, `patina-dst`, and `patina-dst-harness`
 //! configures a run in code. See [USAGE-MODES.md] for the map and
@@ -211,13 +211,13 @@ pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";
 /// `patina_dst_harness::run`/`run_with` installs it explicitly, after applying
 /// the harness's configuration overlay. An interposed effect that reaches the
 /// boundary before the harness installs fails closed loudly (never auto-inits).
-/// Set by `cargo patina run` (and `replay`) for a program carrying
+/// Set by `patina run` (and `replay`) for a program carrying
 /// [`HARNESS_MARKER`]. Off when
 /// unset (the ordinary constructor-installs-at-startup path).
 pub const ENV_DEFER_INIT: &str = "PATINA_RT_DEFER_INIT";
 
 /// The bytes a harness binary embeds in its image (`patina-dst-harness` places
-/// them, `cargo patina` scans for them, the same way it does for
+/// them, `patina` scans for them, the same way it does for
 /// `PATINA_INSTRUMENTED_V1`): the program owns runtime installation, so the
 /// supervisor sets [`ENV_DEFER_INIT`] without being told.
 pub const HARNESS_MARKER: &[u8] = b"PATINA_HARNESS_V1";
@@ -491,7 +491,7 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_RT_HEAL_AFTER_NANOS";
 pub const HARNESS_OK: i32 = 0;
 
 /// No `PATINA_RT_MODE` in the control plane: the harness binary was not run under
-/// `cargo patina run` (plain execution or missing supervisor protocol).
+/// `patina run` (plain execution or missing supervisor protocol).
 pub const HARNESS_ERR_NOT_UNDER_PATINA: i32 = -1;
 
 /// The runtime is already installed (a non-deferred startup, or a second

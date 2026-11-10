@@ -76,7 +76,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       # The testbed scripts each default to a private target dir; one after
-      # another here, they share one and build the release cargo-patina and
+      # another here, they share one and build the release patina and
       # native shim once.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
@@ -117,10 +117,10 @@ jobs:
       # fail-closed planted-bug legs).
       - run: testbeds/pubsub/run-patina.sh
       # `#[patina_dst::test]` as an adopter's own crate uses it, driving the
-      # release cargo-patina the testbeds above built.
+      # release patina the testbeds above built.
       - run: testbeds/patina-macro-adopter/run.sh
         env:
-          PATINA_CLI: ${{ github.workspace }}/target/release/cargo-patina
+          PATINA_CLI: ${{ github.workspace }}/target/release/patina
       # The ecosystem symbol-audit corpus: 20 per-crate MREs built + audited,
       # each compared strictly (both directions) to a committed platform
       # expectation file. Linux x86_64 runs it here; the
@@ -145,7 +145,7 @@ jobs:
     env:
       # The testbed scripts each default to a private target dir; one after
       # another here, they share the workspace's and build the release
-      # cargo-patina once.
+      # patina once.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
@@ -186,7 +186,7 @@ jobs:
       - if: matrix.part == 'testbeds'
         run: testbeds/patina-macro-adopter/run.sh
         env:
-          PATINA_CLI: ${{ github.workspace }}/target/release/cargo-patina
+          PATINA_CLI: ${{ github.workspace }}/target/release/patina
       - if: matrix.part == 'testbeds'
         run: testbeds/audit-corpus/run.sh
 
@@ -204,7 +204,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          # The campaigns build cargo-patina and the guests under the root target dir.
+          # The campaigns build patina and the guests under the root target dir.
           workspaces: .
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # The native shim's per-user build cache.
@@ -216,9 +216,9 @@ jobs:
           CARGO_TARGET_DIR: target/testbeds/campaigns
         run: |
           cargo build --release --quiet -p cargo-patina
-          "$CARGO_TARGET_DIR/release/cargo-patina" patina build testbeds/workq \
+          "$CARGO_TARGET_DIR/release/patina" build testbeds/workq \
             --output "$CARGO_TARGET_DIR/patina/workq" --release >/dev/null
-          "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
+          "$CARGO_TARGET_DIR/release/patina" campaign \
             "$CARGO_TARGET_DIR/patina/workq" --spec testbeds/workq/campaign.json \
             --out-dir "$CARGO_TARGET_DIR/workq-campaign"
       # pubsub's network faults. Runs even when workq found something.
@@ -226,9 +226,9 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/testbeds/campaigns
         run: |
-          "$CARGO_TARGET_DIR/release/cargo-patina" patina build testbeds/pubsub \
+          "$CARGO_TARGET_DIR/release/patina" build testbeds/pubsub \
             --output "$CARGO_TARGET_DIR/patina/pubsub" --release >/dev/null
-          "$CARGO_TARGET_DIR/release/cargo-patina" patina campaign \
+          "$CARGO_TARGET_DIR/release/patina" campaign \
             "$CARGO_TARGET_DIR/patina/pubsub" --spec testbeds/pubsub/campaign.json \
             --out-dir "$CARGO_TARGET_DIR/pubsub-campaign"
       # RustSec advisories against the root lockfile and the testbeds', which

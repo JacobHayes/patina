@@ -1,7 +1,7 @@
 //! The images a program's loader maps, in the order it searches them.
 //!
 //! The audit judges a reference by where it binds at load, so it needs the
-//! images that can satisfy it. `cargo-patina` discovers them (on Linux by
+//! images that can satisfy it. `patina` discovers them (on Linux by
 //! asking the program's own loader) and hands them here; this module only
 //! holds them and reads the dynamic-table facts discovery needs.
 

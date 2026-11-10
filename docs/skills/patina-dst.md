@@ -64,7 +64,7 @@ trace recorded from that reduction replays it without flags. That path needs no 
 already recognized the generation through the verdict channel, and preserving
 those verdicts is the question every candidate is judged on. A nondeterministic
 generation is refused: two runs disagreeing is not something a one-run oracle can
-preserve, so find the uncontrolled input first. `minimize --params -- cargo
+preserve, so find the uncontrolled input first. `minimize --params --
 patina run ...` shrinks the `--param` set a failing run needs, keeping a
 candidate only while it fails the way the original did.
 
@@ -110,7 +110,7 @@ interleavings were never actually explored.
 binary under a default-deny allowlist. Any un-interposed effect symbol is a
 finding. This is the gate that keeps "deterministic" honest — and it runs before
 every native run, so a guest reaching an unmodeled effect is refused rather than
-quietly escaping. `cargo patina syscalls` prints the target-local inventory
+quietly escaping. `patina syscalls` prints the target-local inventory
 (`--format json` gives schema `patina.syscalls/v3`). Linux rows describe runtime
 dispositions; Darwin ARM64 rows describe source entries and raw-interposition
 gaps, separately from C symbol models. Ask this surface rather than guessing
@@ -178,8 +178,8 @@ cover essentially everything.
 the global flags, and the environment protocol:
 
 ```sh
-cargo patina --help                    # human
-cargo patina --help --format json      # machine-readable (schema patina.help/v2)
+patina --help                    # human
+patina --help --format json      # machine-readable (schema patina.help/v2)
 ```
 
 The JSON index is progressive-disclosure: it carries **no per-verb flag rows** by
@@ -189,8 +189,8 @@ which is literally the drill-down command to run.
 **2. Drill into one verb.** This is where flags live:
 
 ```sh
-cargo patina <verb> --help                    # human
-cargo patina <verb> --help --format json      # full flag detail for that verb
+patina <verb> --help                    # human
+patina <verb> --help --format json      # full flag detail for that verb
 ```
 
 The payload is under `.verb`: `forms` (usage shapes), and `flag_groups[]`, each
@@ -215,10 +215,10 @@ Three things there are worth reading deliberately rather than skimming:
 Useful shapes to fold into your own queries:
 
 ```sh
-cargo patina --help --format json | jq -r '.verbs | keys[]'
-cargo patina <verb> --help --format json |
+patina --help --format json | jq -r '.verbs | keys[]'
+patina <verb> --help --format json |
   jq -r '.verb.flag_groups[] | "\(.title) [\((.families // ["all"]) | join(","))]"'
-cargo patina <verb> --help --format json |
+patina <verb> --help --format json |
   jq -c '[.verb.flag_groups[].flags[] | select(.requires) | {name, requires}]'
 ```
 
@@ -228,7 +228,7 @@ may set from the internal supervisor protocol that is listed only for
 transparency:
 
 ```sh
-cargo patina --help --format json | jq -r '.environment[] | select(.scope=="user") | .name'
+patina --help --format json | jq -r '.environment[] | select(.scope=="user") | .name'
 ```
 
 **4. Let refusals teach you.** The CLI does not accept a flag it will ignore. A
@@ -486,11 +486,11 @@ fn main() {
 }
 EOF
 
-cargo patina run /tmp/snippet.rs --seed 7    # note the order
-cargo patina run /tmp/snippet.rs --seed 7    # identical — determinism
-cargo patina run /tmp/snippet.rs --seed 8    # different — seed variation
-cargo patina audit /tmp/snippet.rs           # the residual effect surface
-cargo patina campaign /tmp/snippet.rs --gens 20   # a seed sweep
+patina run /tmp/snippet.rs --seed 7    # note the order
+patina run /tmp/snippet.rs --seed 7    # identical — determinism
+patina run /tmp/snippet.rs --seed 8    # different — seed variation
+patina audit /tmp/snippet.rs           # the residual effect surface
+patina campaign /tmp/snippet.rs --gens 20   # a seed sweep
 ```
 
 `HashMap` iteration order is the cheapest visible proof: normally randomized per

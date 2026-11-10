@@ -1,5 +1,5 @@
 /* The SanitizerCoverage hooks of an instrumented build
- * (`cargo patina build --instrument`).
+ * (`patina build --instrument`).
  *
  * LLVM's trace-pc-guard instrumentation calls `__sanitizer_cov_trace_pc_guard`
  * at every instrumented edge, loop backedges included. Each call does two
@@ -42,7 +42,7 @@ extern void patina_yield_point(const void *site);
  * executable, so the linker resolves the load to a direct one). */
 extern uint32_t PATINA_YIELD_STRIDE;
 
-/* The marker `cargo patina run` scans an executable for, to tell an instrumented
+/* The marker `patina run` scans an executable for, to tell an instrumented
  * binary from a plain one and fold that into the compatibility fingerprint.
  * `used` + `retain` keeps it past `-dead_strip`, and the guard-init reference
  * below anchors it on every toolchain. */

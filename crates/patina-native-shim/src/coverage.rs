@@ -136,7 +136,7 @@ impl core::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unavailable => f.write_str(
-                "requested coverage is unavailable: the binary registered no edge counters; rebuild with `cargo patina build --instrument` (or `--go`)",
+                "requested coverage is unavailable: the binary registered no edge counters; rebuild with `patina build --instrument` (or `--go`)",
             ),
             Self::Empty { edges_total } => write!(
                 f,

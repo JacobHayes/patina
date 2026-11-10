@@ -130,7 +130,7 @@ impl Leg<'_> {
     }
 
     fn cargo_patina(&self, run_name: &str, arguments: &[&str]) -> Result<Output, String> {
-        let output = run(Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let output = run(Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(common::native_workspace())
             .args(arguments))?;
         self.keep(run_name, &output);
@@ -159,7 +159,7 @@ impl Leg<'_> {
             let output = self.cargo_patina(run_name, &arguments)?;
             return envelope_observation(&output, self.origin(compare::Leg::Patina));
         };
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
         command
             .current_dir(common::native_workspace())
             .args(&arguments)
@@ -224,7 +224,7 @@ impl Leg<'_> {
         )?;
         if !output.status.success() {
             return Err(format!(
-                "cargo patina trace events failed: {}",
+                "patina trace events failed: {}",
                 text(&output.stderr)
             ));
         }

@@ -1,4 +1,4 @@
-/* The compute meter of a Python guest built by `cargo patina build --python`.
+/* The compute meter of a Python guest built by `patina build --python`.
  *
  * Patina runs one guest thread at a time and moves virtual time by what
  * guest calls cost, so a thread computing without calls holds the thread:

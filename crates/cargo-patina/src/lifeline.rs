@@ -1,6 +1,6 @@
-//! A `cargo-patina` child dies with the `cargo-patina` that ran it.
+//! A `patina` child dies with the `patina` that ran it.
 //!
-//! A parent that runs `cargo-patina` children (campaign generations, their
+//! A parent that runs `patina` children (campaign generations, their
 //! verification reruns, a reduction's candidate replays) holds the write end of
 //! one pipe for as long as it lives, and hands each child the read end. Nothing
 //! is ever written: the child's watcher blocks reading it, and the read returns

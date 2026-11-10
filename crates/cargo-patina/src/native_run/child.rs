@@ -39,7 +39,7 @@ pub(super) fn reconcile_replay_argv(
     let Some(recorded) = &bundle.metadata.guest_argv else {
         return Err(CliError(format!(
             "trace {} records no guest arguments, so it was not recorded by \
-`cargo patina run --record` of a native binary. Re-record it.",
+`patina run --record` of a native binary. Re-record it.",
             trace.display()
         )));
     };

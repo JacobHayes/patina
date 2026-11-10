@@ -9,7 +9,7 @@ mod tests {
     fn native_harness_mode_filters_records_replays_and_refuses_missing_target() {
         let directory = tempdir().unwrap();
         create_native_harness_fixture(directory.path());
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let patina = env!("CARGO_BIN_EXE_patina");
         let harness = "dst_harness_fixture";
         let passing_args = [
             "test",
@@ -171,7 +171,7 @@ fn import_is_linked() {
             )
             .unwrap();
         }
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let patina = env!("CARGO_BIN_EXE_patina");
         let ambiguous = invoke_unchecked(
             patina,
             root,

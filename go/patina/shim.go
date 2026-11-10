@@ -7,7 +7,7 @@ package patina
 #include <stdint.h>
 
 // The native shim's SDK entries (crates/patina-native-shim/include/patina_native.h),
-// resolved when `cargo patina build --go` links the shim beneath the guest.
+// resolved when `patina build --go` links the shim beneath the guest.
 int32_t patina_is_simulated(void);
 int32_t patina_buggify(const uint8_t *label, size_t label_len,
                        const uint8_t *site, size_t site_len, int32_t prob_permille);
@@ -111,7 +111,7 @@ func IsSimulated() bool { return C.patina_is_simulated() != 0 }
 // function of the seed, recorded and replayed with the run.
 func Rng() uint64 { return uint64(C.patina_rng()) }
 
-// Param is the run parameter key (`cargo patina run --param KEY=VALUE`),
+// Param is the run parameter key (`patina run --param KEY=VALUE`),
 // recorded in the trace and restored on replay; false when the run has none.
 func Param(key string) (string, bool) {
 	k, kLen := text(key)

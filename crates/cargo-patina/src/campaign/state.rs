@@ -308,7 +308,7 @@ pub(super) struct CampaignState {
     /// its generation `OK`, and so out of `notable_runs`; this is its only
     /// record.
     pub(super) clean_reruns: CleanReruns,
-    /// The `sha256:` digest of the `cargo-patina` executable that started the
+    /// The `sha256:` digest of the `patina` executable that started the
     /// campaign. Every generation is a run that supervisor built, so a
     /// continuation or a reduction by another supervisor build is refused.
     pub(super) supervisor_sha256: String,
@@ -726,7 +726,7 @@ pub(super) fn artifact_identity(path: &Path) -> Result<ArtifactIdentity, CliErro
 }
 
 /// Refuse to continue or reduce a campaign with anything but the build that
-/// ran it: the same artifact bytes, and the same `cargo-patina` executable,
+/// ran it: the same artifact bytes, and the same `patina` executable,
 /// which built every generation's run.
 pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliError> {
     verify_artifact_identity(&state.artifact)?;
@@ -736,10 +736,10 @@ pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliErro
     let current = crate::supervisor_identity::supervisor_sha256()?.to_string();
     match &state.supervisor_sha256 {
         recorded if *recorded != current => Err(CliError(format!(
-            "campaign out-dir was run by supervisor (cargo-patina executable) {recorded} but this \
-             cargo-patina is {current}; the supervisor builds every generation's run, so results \
+            "campaign out-dir was run by supervisor (patina executable) {recorded} but this \
+             patina is {current}; the supervisor builds every generation's run, so results \
              from different supervisor builds are not comparable. Finish it with the \
-             cargo-patina that started it, or start a new out-dir."
+             patina that started it, or start a new out-dir."
         ))),
         _ => Ok(()),
     }
@@ -838,7 +838,7 @@ pub(super) fn load_campaign_state(path: &Path) -> Result<CampaignState, CliError
     match CampaignState::from_json(&json) {
         Ok(state) => Ok(state),
         Err(error) if error.starts_with("unsupported schema") => Err(CliError(format!(
-            "campaign state {} has {error}; this out-dir was written by a different cargo-patina version; finish it with that version or start a new out-dir",
+            "campaign state {} has {error}; this out-dir was written by a different patina version; finish it with that version or start a new out-dir",
             path.display()
         ))),
         Err(error) => Err(CliError(format!(
@@ -1146,7 +1146,7 @@ mod tests {
                 first_seen_gen: 1,
                 count: 1,
                 seed: 42,
-                reproduce: "cargo patina run guest --seed 42".to_string(),
+                reproduce: "patina run guest --seed 42".to_string(),
                 trace: None,
                 log: None,
                 report: None,

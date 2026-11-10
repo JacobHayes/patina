@@ -9,7 +9,7 @@ use object::{Object, ObjectSymbol};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The shim's control-plane entry symbol, defined (`#[no_mangle] extern "C"`)
-/// only in a `cargo patina build` binary — the packaged startup constructor
+/// only in a `patina build` binary — the packaged startup constructor
 /// calls it, so it is present and not dead-stripped. Its *defined* presence is
 /// the marker that a native binary was linked against the shim staticlib: a
 /// stock `cargo build` output has no such symbol. Mach-O decorates it with a
@@ -366,7 +366,7 @@ pub fn native_missing_live_interposers(
 }
 
 /// The shim's own host control-plane symbols the pre-run gate tolerates in a
-/// `cargo patina native-build` binary for the current platform.
+/// `patina native-build` binary for the current platform.
 ///
 /// Under the host-alias doctrine (see the native shim's `hostapi` module and
 /// ARCHITECTURE.md "Host-alias doctrine") the shim reaches every host vehicle —

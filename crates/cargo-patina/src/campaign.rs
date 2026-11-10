@@ -1,7 +1,7 @@
-//! `cargo patina campaign` — a config-driven, deterministic fault-and-schedule
+//! `patina campaign` — a config-driven, deterministic fault-and-schedule
 //! sweep.
 //!
-//! A campaign runs `generations` independent child `cargo patina run` processes
+//! A campaign runs `generations` independent child `patina run` processes
 //! over one artifact. Everything is a pure function of the generation number, so a
 //! re-run with the same spec reproduces the same seeds, the same per-generation
 //! knobs, the same outcomes, and the same failure signatures.
@@ -21,7 +21,7 @@
 //!   * a per-failure [`Signature`] (class + normalized violation-detail shape +
 //!     policy/bug-depth annotation) is accumulated into a signature store in the
 //!     output directory: repeats are deduped, the first occurrence of a novel
-//!     signature is flagged and its trace saved with a `cargo patina replay`/re-run
+//!     signature is flagged and its trace saved with a `patina replay`/re-run
 //!     reproduce command.
 //!
 //! Output is a summary-first human report or a `patina.campaign/v2` JSON envelope
@@ -303,7 +303,7 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
 /// Their own function because the reproduce commands need exactly this set and
 /// nothing else. Native replay restores every semantic input from the trace, but
 /// these controls (including the host-time compute bound) are host/build facts a trace cannot carry (see
-/// `parse_native_replay`), so a `cargo patina replay` line that dropped them would
+/// `parse_native_replay`), so a `patina replay` line that dropped them would
 /// hand the operator a command that fails closed on the guest the campaign just
 /// swept. `--cpus` is the exception the trace does carry: a replay checks it
 /// against the recording's, so it rides here too, and a minimized or reproduced

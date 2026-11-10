@@ -259,13 +259,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     })?;
     if invocation.coverage_out.is_some() && !instrumented.edge_counters {
         return Err(CliError::usage(
-            "--coverage-out requires a native binary with edge counters: one built with `cargo patina build --instrument` (or a Go guest built with `--go`)",
+            "--coverage-out requires a native binary with edge counters: one built with `patina build --instrument` (or a Go guest built with `--go`)",
         ));
     }
     if invocation.schedule.yield_stride != 0 && !instrumented.yield_hook {
         return Err(CliError::usage(format!(
             "--yield-stride {} takes its scheduling points at the edge hooks of a binary built with \
-`cargo patina build --instrument`; {} has none, so the stride would be inert",
+`patina build --instrument`; {} has none, so the stride would be inert",
             invocation.schedule.yield_stride,
             binary.display()
         )));

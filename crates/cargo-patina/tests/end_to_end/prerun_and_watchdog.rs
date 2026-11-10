@@ -40,7 +40,7 @@ fn main() {
     for attempt in 0..2 {
         let trace = directory.path().join(format!("panic-{attempt}.patina"));
         let recorded = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "run",
@@ -71,7 +71,7 @@ fn main() {
             baseline = Some(bytes);
         }
         let replay = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "replay",
@@ -114,7 +114,7 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
 
     // Prove the fixture still reaches the pre-run gate, before classifying it.
     let refused = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         native_workspace(),
         &["run", guest.to_str().unwrap(), "--format", "json"],
     );

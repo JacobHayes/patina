@@ -1,7 +1,7 @@
 //! Embedded native interposer sources and compile flags.
 
 /// The POSIX interposer C translation unit, exposed as text so out-of-tree
-/// tooling (`cargo patina build`) can reproduce the native link recipe from the
+/// tooling (`patina build`) can reproduce the native link recipe from the
 /// installed crate without the workspace source tree. It lives here — the crate
 /// that generates `patina_posix.c` — so the shim's C and any embedded copy can
 /// never drift, and so both this crate and `cargo-patina` package cleanly for
@@ -14,7 +14,7 @@ pub const POSIX_C_SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/patina_
 /// Guest-only flags keep the extraction anchor and aliases with the definitions.
 /// Never apply these to a dependency rlib or bare prefixed-ABI archive.
 pub const POSIX_RUST_FLAGS: &[&str] = &["--cfg=patina_posix_exports", "-Ccodegen-units=1"];
-/// [`POSIX_RUST_FLAGS`] for an archive `cargo patina` seals before any guest
+/// [`POSIX_RUST_FLAGS`] for an archive `patina` seals before any guest
 /// links it, without the single codegen unit: the sealed engine is one object
 /// holding every door, so nothing is extracted, and the seal resolves every
 /// route alias to its door, whichever unit defined it.

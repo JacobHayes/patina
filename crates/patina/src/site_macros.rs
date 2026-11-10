@@ -63,7 +63,7 @@ declare_site_macros! { $;
 ///
 /// Use it to make rare paths — retries, evictions, early returns, error
 /// branches — reachable on seed-chosen runs. Enable with
-/// `cargo patina run --buggify`; without that flag (and always outside Patina)
+/// `patina run --buggify`; without that flag (and always outside Patina)
 /// every site is inert.
 ///
 /// ```

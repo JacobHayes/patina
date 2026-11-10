@@ -1,13 +1,13 @@
 # Sourced by the testbed gates: run a guest under `--format json` and split its
 # `patina.result/v1` envelope, the run's one machine channel, into files the
-# gate greps. `jrun PREFIX ARGS...` runs `cargo patina --format json ARGS...`
+# gate greps. `jrun PREFIX ARGS...` runs `patina --format json ARGS...`
 # and leaves PREFIX.json (the envelope), PREFIX.verdicts (one
 # `<kind> <label> <detail>` line per verdict, in call order) and PREFIX.err (the
 # guest's captured stderr, then the CLI's own), returning the run's exit code.
 jrun() {
   local prefix="$1" code=0
   shift
-  "$PATINA" patina --format json "$@" >"$prefix.json" 2>"$prefix.cli.err" || code=$?
+  "$PATINA" --format json "$@" >"$prefix.json" 2>"$prefix.cli.err" || code=$?
   python3 -B - "$prefix" <<'PY'
 import json, sys
 prefix = sys.argv[1]

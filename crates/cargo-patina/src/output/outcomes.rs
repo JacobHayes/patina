@@ -52,7 +52,7 @@ const REFUSAL_CLASSES: &[(&str, &str)] = &[
         "the deterministic runtime failed to initialize",
         "runtime_init_failure",
     ),
-    ("must run under `cargo patina run`", "no_runtime_installed"),
+    ("must run under `patina run`", "no_runtime_installed"),
     (
         "harness has not installed the runtime yet",
         "harness_before_install",

@@ -20,7 +20,7 @@ use std::{env, fs, io};
 /// counters at every edge, and a scheduling point every `--yield-stride`th one.
 pub(super) const PATINA_SANCOV_C: &str = include_str!("../c/patina_sancov.c");
 /// A Go guest's compute meter: the libFuzzer comparison hooks its
-/// instrumentation calls, linked only by `cargo patina build --go`.
+/// instrumentation calls, linked only by `patina build --go`.
 pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c");
 /// Weak, inert SanitizerCoverage entry points so an instrumented artifact that
 /// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
@@ -663,7 +663,7 @@ pub(super) fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliE
 /// cfg(patina)/cfg(dst) family plus, under `--instrument`, the
 /// SanitizerCoverage codegen flags. Encoded with the `0x1f` unit separator so values containing
 /// spaces survive intact. Any pre-existing `RUSTFLAGS` are preserved ahead of
-/// the injected flags, matching how `cargo patina run` layers its cfgs onto the
+/// the injected flags, matching how `patina run` layers its cfgs onto the
 /// user's flags.
 ///
 /// Everything here is deliberately whole-graph: Cargo forwards `RUSTFLAGS` to

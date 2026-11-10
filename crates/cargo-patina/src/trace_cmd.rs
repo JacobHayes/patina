@@ -1,4 +1,4 @@
-//! `cargo patina trace` inspection commands.
+//! `patina trace` inspection commands.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -81,7 +81,7 @@ fn reject_render_report() -> Result<(), CliError> {
     let opts = output::options();
     if opts.render.is_some() || opts.report.is_some() {
         return Err(CliError::usage(
-            "trace inspection is read-only and does not accept --render/--report; use `cargo patina trace events` for textual inspection or run/replay --render when executing a guest",
+            "trace inspection is read-only and does not accept --render/--report; use `patina trace events` for textual inspection or run/replay --render when executing a guest",
         ));
     }
     Ok(())

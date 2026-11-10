@@ -225,7 +225,7 @@ impl Observation {
 /// How a generation was run again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum VerifyPath {
-    /// `cargo patina replay` of the saved trace.
+    /// `patina replay` of the saved trace.
     Replay,
     /// A seeded re-run with the generation's recorded knobs.
     Rerun,

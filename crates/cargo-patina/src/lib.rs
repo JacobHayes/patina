@@ -1,11 +1,11 @@
-//! Process-level implementation behind the `cargo-patina` binary.
+//! Process-level implementation behind the `patina` binary.
 //!
-//! Internal crate: the `cargo patina` CLI — verb parsing (`build`, `run`,
+//! Internal crate: the `patina` CLI — verb parsing (`build`, `run`,
 //! `test`, `audit`, `replay`, `campaign`, `minimize`, `trace`), artifact
 //! resolution (a shim-linked native binary, or a source built into one),
 //! build orchestration, the supervisor protocol that hands the `PATINA_*`
 //! control plane to a guest, and result rendering (`--format json`,
-//! `--render`). The user-facing contract is `cargo patina <verb> --help` (and
+//! `--render`). The user-facing contract is `patina <verb> --help` (and
 //! `--help --format json` for the machine-readable registry), not this crate's
 //! API. See [ARCHITECTURE.md] for how the CLI drives the runtime.
 //!
@@ -467,7 +467,7 @@ enum UnsupportedPolicy {
 
 /// The compiler-driver arguments that route Rust's allocator entry points
 /// through the arena router of the engine sealed from the shim archive
-/// `staticlib`, for a link `cargo patina build` does not drive (the test
+/// `staticlib`, for a link `patina build` does not drive (the test
 /// suites' C and C++ guests): the routing object is compiled into `dir` with
 /// `cc`.
 #[doc(hidden)]
@@ -497,7 +497,7 @@ pub fn shim_allocator_linker_args(staticlib: &Path, dir: &Path) -> Result<Vec<Os
 }
 
 /// Seal the shim archive `staticlib` with the C seams object `posix` into
-/// `dir`, as `cargo patina build` seals it, for a link it does not drive:
+/// `dir`, as `patina build` seals it, for a link it does not drive:
 /// returns the façade and the engine objects, which a guest links in place of
 /// the two. Always seals afresh, replacing a previous seal in `dir`
 /// atomically. Refuses an engine the seal's gate refuses.
@@ -535,7 +535,7 @@ fn exit_with(arguments: Vec<OsString>) -> ! {
     match entrypoint(arguments) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("cargo-patina: {error}");
+            eprintln!("patina: {error}");
             std::process::exit(2);
         }
     }
@@ -559,7 +559,7 @@ fn entrypoint(arguments: Vec<OsString>) -> Result<i32, CliError> {
     output::install(options);
     let result = dispatch(arguments);
     // Under `--output json` a CLI-side failure becomes a JSON error envelope
-    // rather than the bare `cargo-patina: {error}` stderr line, so an agent always
+    // rather than the bare `patina: {error}` stderr line, so an agent always
     // parses one machine-readable object.
     match result {
         Err(error) if is_json => {
@@ -586,7 +586,7 @@ fn dispatch(arguments: Vec<OsString>) -> Result<i32, CliError> {
             Ok(0)
         }
         ParseResult::Version => {
-            println!("cargo-patina {}", env!("CARGO_PKG_VERSION"));
+            println!("patina {}", env!("CARGO_PKG_VERSION"));
             println!(
                 "virtual Linux kernel: {} (pinned: Ubuntu 24.04's GA kernel)",
                 patina_dst_syscalls::VIRTUAL_ABI

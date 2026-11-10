@@ -3,7 +3,7 @@
 //! findings, the guest's verdicts, the cooperative-SUT site counters and the
 //! exploration-policy accounting all travel here, built from the same report
 //! structs the human `PATINA_*` stderr lines are formatted from. Those lines are
-//! for a reader; nothing parses them back. `cargo patina` folds the document
+//! for a reader; nothing parses them back. `patina` folds the document
 //! into the `patina.result/v1` envelope.
 //!
 //! The document is emitted only when the embedder installs an output channel

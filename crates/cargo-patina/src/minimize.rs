@@ -17,11 +17,11 @@
 //! reduction. Each knob candidate is a fresh seeded `run`, spelled exactly as
 //! the campaign spelled its generations, so the output is a standalone
 //! reproduction command. `minimize --params` reduces the `--param` set of a
-//! failing `cargo patina run`.
+//! failing `patina run`.
 //!
 //! # Candidates are independent
 //!
-//! Each knob candidate runs through `cargo patina run`, whose filesystem, clock,
+//! Each knob candidate runs through `patina run`, whose filesystem, clock,
 //! network and entropy are all virtualized, into a temp directory of its own.
 //! Two candidates cannot observe each other, so patina runs them in parallel
 //! by default.

@@ -74,7 +74,7 @@ stages the binary under `CARGO_TARGET_DIR` (default:
 `../../target/testbeds/workq/patina/workq` from this directory):
 
 ```sh
-cargo patina run ../../target/testbeds/workq/patina/workq --seed 1 -- --data-dir /workq
+patina run ../../target/testbeds/workq/patina/workq --seed 1 -- --data-dir /workq
 ```
 
 Unless `--jobs`, `--workers` or `--producers` pin them, the queue draws its
@@ -112,7 +112,7 @@ is caught by the queue's *own* invariants — no special test assertion.
 Watch Patina catch one (it fails, loudly and reproducibly):
 
 ```sh
-cargo patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify=500 --buggify-after-setup \
+patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify=500 --buggify-after-setup \
   -- --jobs 24 --data-dir /workq --bug skip-redelivery-commit
 ```
 
@@ -123,7 +123,7 @@ reproduces byte-for-byte.
 
 ## Fuzzing many faults at once
 
-`campaign.json` crosses every fault `cargo patina campaign` can draw for the
+`campaign.json` crosses every fault `patina campaign` can draw for the
 queue. Each generation draws its schedule seed, its workload, net and sleep
 faults, cooperative buggify faults and a swarm subset of them from the
 generation number, restarts the server in-process once six jobs complete, and
@@ -137,5 +137,5 @@ The campaign always sweeps the *clean* app; the seeded bugs live only in the
 demo above.
 
 ```sh
-cargo patina campaign ../../target/testbeds/workq/patina/workq --spec campaign.json
+patina campaign ../../target/testbeds/workq/patina/workq --spec campaign.json
 ```

@@ -185,7 +185,7 @@ fn strip_native_identity(source: &Path, dest: &Path) {
     fs::write(dest, serde_json::to_vec(&value).unwrap()).unwrap();
 }
 
-/// Copy the trace at `source` to `dest` as though another `cargo-patina` build
+/// Copy the trace at `source` to `dest` as though another `patina` build
 /// with the same package version had recorded it.
 fn record_as_another_supervisor_build(source: &Path, dest: &Path) {
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(source).unwrap()).unwrap();

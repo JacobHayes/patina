@@ -121,13 +121,13 @@ directory:
 
 ## Campaign
 
-`campaign.json` sweeps the clean broker with `cargo patina campaign`: every
+`campaign.json` sweeps the clean broker with `patina campaign`: every
 generation draws its schedule seed and its net and sleep faults from the
 generation number, and a sample of clean generations is re-run to check they
 reproduce.
 
 ```sh
-cargo patina campaign ../../target/testbeds/pubsub/patina/pubsub --spec campaign.json
+patina campaign ../../target/testbeds/pubsub/patina/pubsub --spec campaign.json
 ```
 
 The spec excludes connection-refused and reset faults

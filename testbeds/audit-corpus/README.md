@@ -1,7 +1,7 @@
 # audit-corpus — the ecosystem symbol-audit corpus (strict-xfail)
 
 Twenty minimal reproducers (MREs), one per widely-used crate, each built and
-audited through the packaged native path (`cargo patina audit`). The corpus is a
+audited through the packaged native path (`patina audit`). The corpus is a
 **strict-xfail gate**: the residual set of unsupported native imports for each
 crate is pinned in a committed, per-platform expectation file, and any deviation
 in **either** direction fails the gate. It is the standing punchlist for the
@@ -101,7 +101,7 @@ testbeds/audit-corpus/run.sh --update   # re-record THIS platform's expectations
 testbeds/audit-corpus/run.sh --selftest # prove both drift directions fire (tampered copies in $TMPDIR)
 ```
 
-`run.sh` builds the workspace `cargo-patina` (release) first, then audits each
+`run.sh` builds the workspace `patina` (release) first, then audits each
 MRE by absolute directory path — the same invocation pattern the other testbeds
 use. Network access to crates.io may be needed the first time (CI runners have
 it); thereafter the pinned lockfiles + cargo cache make it offline.

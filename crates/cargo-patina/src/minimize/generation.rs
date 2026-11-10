@@ -68,11 +68,8 @@ fn generation_target(
 pub(super) fn execute_generation(invocation: GenerationMinimize) -> Result<i32, CliError> {
     let repro = crate::campaign::generation_repro(&invocation.out_dir, invocation.generation)?;
     let target = generation_target(invocation.marker.as_deref(), invocation.generation, &repro)?;
-    let self_exe = std::env::current_exe().map_err(|error| {
-        CliError(format!(
-            "failed to resolve the cargo-patina binary: {error}"
-        ))
-    })?;
+    let self_exe = std::env::current_exe()
+        .map_err(|error| CliError(format!("failed to resolve the patina binary: {error}")))?;
     let jobs = invocation.jobs.unwrap_or_else(default_jobs);
 
     // The pinned invocation flags lead the recorded vector, so dropping them

@@ -1,6 +1,6 @@
 # Patina Architecture
 
-Patina is a deterministic OS personality for Rust. `cargo patina` builds a
+Patina is a deterministic OS personality for Rust. `patina` builds a
 program for a Patina target, routes its platform effects through a
 deterministic boundary, installs virtual drivers, wraps them with
 record/replay and fault behaviour, and runs the program under a deterministic
@@ -51,7 +51,7 @@ trace format.
   baton. On x86_64 Linux, syscall-user-dispatch (SUD) traps inline syscall
   instructions into the same entry points, and the timestamp-counter trap
   answers `rdtsc`/`rdtscp` from the virtual clock.
-- **Go.** `cargo patina build <DIR> --go` (Linux) links a Go main package
+- **Go.** `patina build <DIR> --go` (Linux) links a Go main package
   externally (`CGO_ENABLED=1`, `-linkmode=external`) with the same shim
   objects, so goroutine threads start through the shim's `pthread_create`.
   Every Go guest carries a compute meter (`crates/cargo-patina/src/go_build.rs`,
@@ -62,9 +62,9 @@ trace format.
   (`patina_coverage_register_u8`), so a Go guest has edge coverage
   (`--coverage-out`, campaigns, `--guided`) without the `--instrument` yield
   hook. Go records no pcs, so the covmap gives its edges the zero (unknown)
-  site and `cargo patina coverage` attributes each to its package by the
+  site and `patina coverage` attributes each to its package by the
   counter's `<package>..stmp_N` symbol.
-- **Python.** `cargo patina build <SCRIPT.py|DIR> --python` builds CPython
+- **Python.** `patina build <SCRIPT.py|DIR> --python` builds CPython
   statically by a fixed recipe (`crates/cargo-patina/src/python_build.rs`):
   every extension module in `libpython`, none needing a library the recipe
   does not build, and the C library functions the shim has no model for
@@ -134,7 +134,7 @@ redefine it.
 ### The shim build
 
 The shim must be compiled by the exact rustc that compiles the guest, and an
-installed `cargo-patina` has no source checkout. Its build script therefore
+installed `patina` has no source checkout. Its build script therefore
 embeds the shim's workspace dependency closure (found through each crate's
 `links` metadata) and its `Cargo.lock`. At guest-build time the bundle is
 unpacked into a per-user cache (`$XDG_CACHE_HOME/patina`, else the platform
@@ -147,7 +147,7 @@ cache dir; `PATINA_SHIM_TARGET_DIR` moves the shim build). Cache rules:
   removes an entry in use;
 - guest links read only published `artifacts/` entries, never Cargo scratch
   state;
-- every cargo-patina Cargo build holds `.patina-build.lock` in its target
+- every patina Cargo build holds `.patina-build.lock` in its target
   directory from before Cargo runs until it has read back what it consumes.
 
 Both halves of a link use the guest's verified concrete compiler: the build
@@ -232,7 +232,7 @@ is freed by the allocator whose range holds it. Darwin's linker has no
 Patina fails closed. Before a native guest runs:
 
 - a **default-deny import audit**: every resolved symbol is interposed,
-  effect-free, or explicitly `--allow`ed (`cargo patina audit` reports what
+  effect-free, or explicitly `--allow`ed (`patina audit` reports what
   `run` enforces); it is version-aware, refusing GLIBC-versioned imports that
   bypass an interposer;
 - an **instruction scan** for raw syscall, counter and entropy opcodes,
@@ -505,7 +505,7 @@ number newer than `VIRTUAL_ABI` is `Absent` (`ENOSYS`).
 binary; `crates/cargo-patina/tests/native_conformance.rs` runs each natively
 (the host kernel is the oracle) and under patina, comparing observations live
 except for each scenario's declared normalizations and gaps. A scenario
-declares which registry entries it covers. `cargo patina syscalls` emits the
+declares which registry entries it covers. `patina syscalls` emits the
 compiled target's `patina.syscalls/v3` inventory.
 
 ## Invariants

@@ -407,7 +407,7 @@ fn main() {
                 LABEL,
             ];
             args.extend_from_slice(extra);
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &args)
         };
         let replayed = replay(mount_arg, &[]);
         assert!(
@@ -525,7 +525,7 @@ fn main() {
         );
 
         let output = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );

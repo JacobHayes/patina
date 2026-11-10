@@ -10,8 +10,8 @@ pub(super) const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "cargo patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
-        "cargo patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
+        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--fingerprint STR] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
 `run` is source-first with artifacts accepted uniformly. A built artifact \
@@ -29,7 +29,7 @@ denials to a loud warning (an instruction-class finding matches by its own \
 A `patina-dst-harness` (configure-then-run) binary is recognised by the marker it \
 embeds and defers runtime installation on its own; no flag is needed on `run` or \
 `replay`. Reproduce a recorded run with \
-`cargo patina replay`.",
+`patina replay`.",
     families: &[fam(Family::Sole, "`run`", None)],
     groups: &[
         Group {
@@ -191,7 +191,7 @@ pub(super) const TEST: Verb = Verb {
     name: "test",
     summary: "Run one libtest test of a source package shim-linked, across seeds.",
     synopsis: &[
-        "cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
+        "patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--budget N] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]",
     ],
     prose: "\
 Patina rebuilds the requested Cargo libtest target shim-linked with `cargo rustc`, stages \
@@ -349,10 +349,10 @@ pub(super) const BUILD: Verb = Verb {
     name: "build",
     summary: "Build a guest linked against the native shim.",
     synopsis: &[
-        "cargo patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
-        "cargo patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
-        "cargo patina build <GO PACKAGE DIR> --go [--go-test] --output <PATH> [--release] [-- GO BUILD OPTIONS]",
-        "cargo patina build <SCRIPT.py|DIR> --python --output <PATH> [--python-path DIR]... [--python-source TARBALL|DIR] [--release]",
+        "patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
+        "patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
+        "patina build <GO PACKAGE DIR> --go [--go-test] --output <PATH> [--release] [-- GO BUILD OPTIONS]",
+        "patina build <SCRIPT.py|DIR> --python --output <PATH> [--python-path DIR]... [--python-source TARBALL|DIR] [--release]",
     ],
     prose: "\
 `build` packages the native linked-shim target: it \
@@ -378,7 +378,7 @@ pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
 and -o and adds the `patina` build tag, which selects the Go SDK's (`go/patina`) \
 shim-backed sites; other `go build` options follow `--`. `--release` builds the shim in \
 release mode; --instrument is Rust-only. Every Go guest keeps Go's own 8-bit \
-edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
+edge counters, so --coverage-out, `patina coverage` and `campaign \
 --guided` work on it; it has no edge hook, so `run --yield-stride` is refused. \
 `--go-test` builds the package's test binary (`go test -c`) instead of a main \
 package, so a package's own tests run as a guest: give `go test` flags such as \
@@ -493,8 +493,8 @@ pub(super) const AUDIT: Verb = Verb {
     name: "audit",
     summary: "Report the true post-interposition residual effect surface of a binary.",
     synopsis: &[
-        "cargo patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--allow SYMBOL]...   (builds shim-linked, then audits)",
-        "cargo patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `cargo patina build`-linked unless --raw)",
+        "patina audit <SOURCE.rs|DIR|Cargo.toml> [--package NAME] [--bin NAME] [--allow SYMBOL]...   (builds shim-linked, then audits)",
+        "patina audit <ARTIFACT> [--allow SYMBOL]... [--raw]   (a prebuilt binary; must be `patina build`-linked unless --raw)",
     ],
     prose: "\
 `audit` is source-first: only a shim-linked binary shows the true \
@@ -502,7 +502,7 @@ post-interposition residual, so auditing a source/package links the shim first a
 the report is the handful of effect-surface symbols that genuinely escape. A stock \
 `cargo build` binary lists every libc call the shim would interpose as an \
 unsupported import — the opposite of the truth — so `audit <prebuilt>` fails closed \
-unless the binary was produced by `cargo patina build`. `--raw` overrides that gate \
+unless the binary was produced by `patina build`. `--raw` overrides that gate \
 and runs the full audit anyway under a loud banner.",
     families: &[fam(Family::Sole, "`audit`", None)],
     groups: &[
@@ -532,7 +532,7 @@ and runs the full audit anyway under a loud banner.",
 pub(super) const REPLAY: Verb = Verb {
     name: "replay",
     summary: "Reproduce a recorded run of an artifact, source, or package.",
-    synopsis: &["cargo patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [REPLAY OPTIONS]"],
+    synopsis: &["patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [REPLAY OPTIONS]"],
     prose: "\
 `replay <ARTIFACT|SOURCE|PKG> <TRACE>` replays a native binary (or a \
 source/package built on the fly) under the native supervisor. It restores every recorded semantic input (seed, fault knobs, buggify, \

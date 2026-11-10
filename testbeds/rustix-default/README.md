@@ -45,7 +45,7 @@ entropy across seeds, and records/replays byte-identically, then prints
 
 ## Why it is the MRE
 
-`cargo patina build` injects `--cfg rustix_use_libc` (rustix's own escape hatch,
+`patina build` injects `--cfg rustix_use_libc` (rustix's own escape hatch,
 flipping it to interposable libc imports) **only on non-SUD targets** now; on
 x86_64 it is dropped, because SUD traps the raw syscalls instead. So a green
 `run-patina.sh` here is the end-to-end proof that the default rustix backend runs

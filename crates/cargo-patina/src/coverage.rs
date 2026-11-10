@@ -1,5 +1,5 @@
 //! Native yield-point coverage map parsing, campaign accumulation, and the
-//! `cargo patina coverage` offline report verb.
+//! `patina coverage` offline report verb.
 //!
 //! This is the single parser for `patina.covmap/v1`. `run --coverage-out`, the
 //! campaign accumulator, and the read-only coverage verb all come through this

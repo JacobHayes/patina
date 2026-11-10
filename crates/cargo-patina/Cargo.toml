@@ -18,7 +18,7 @@ patina-dst-native-shim.workspace = true
 patina-dst-runtime.workspace = true
 patina-dst-target.workspace = true
 patina-dst-trace.workspace = true
-# The native-shim source bundle. `cargo-patina` carries the shim's full source
+# The native-shim source bundle. `patina` carries the shim's full source
 # closure embedded (build.rs packs it) so an installed binary can build a guest's
 # linked shim without the Patina checkout present. build.rs learns each crate's
 # source directory over cargo's `links`/`DEP_<pkg>_SRC_DIR` channel, which cargo

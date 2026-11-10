@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The package's tests, built by `cargo patina build --go --go-test` and run
+// The package's tests, built by `patina build --go --go-test` and run
 // as a guest: a test of the package's own code, one of the guest filesystem,
 // and one that fails only when the run plants a failure, so the test binary's
 // exit status is shown to carry a failing test out.

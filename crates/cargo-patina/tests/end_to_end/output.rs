@@ -57,7 +57,7 @@ fn main() {
         let source = directory.path().join("render_guest.rs");
         fs::write(&source, RENDER_GUEST_SOURCE).unwrap();
         let workspace = native_workspace();
-        let patina = env!("CARGO_BIN_EXE_cargo-patina");
+        let patina = env!("CARGO_BIN_EXE_patina");
         let bin = directory.path().join("render-guest");
         let built = envelope(&invoke(
             workspace,

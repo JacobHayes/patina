@@ -3,7 +3,7 @@
 # audit-corpus — the ecosystem symbol-audit corpus, run as a strict-xfail gate.
 #
 # 20 minimal reproducers (one per popular crate) are each built + audited
-# through the packaged native path (`cargo patina audit <dir>`). The residual
+# through the packaged native path (`patina audit <dir>`). The residual
 # set of unsupported native imports is normalized to sorted `symbol class`
 # lines and compared, EXACTLY and in BOTH directions, against a committed
 # per-crate, per-platform expectation file under expected/.
@@ -49,11 +49,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 crates_dir="$here/crates"
 expected_dir="$here/expected"
-# cargo-patina and every MRE's guest build stage under one target directory,
+# patina and every MRE's guest build stage under one target directory,
 # never a target/ inside a corpus crate.
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/audit-corpus}"
 export CARGO_TARGET_DIR="$target_dir"
-PATINA="$target_dir/release/cargo-patina"
+PATINA="$target_dir/release/patina"
 
 # The complete corpus, in a stable order. Keep in sync with crates/ and with the
 # per-crate expectation files under expected/.
@@ -131,7 +131,7 @@ normalize() {
 audit_normalized() {
   local crate="$1" log="$2"
   local rc
-  "$PATINA" patina audit "$crates_dir/$crate" >"$log" 2>&1
+  "$PATINA" audit "$crates_dir/$crate" >"$log" 2>&1
   rc=$?
   if grep -q 'unsupported native imports:' "$log"; then
     normalize "$log"
@@ -159,7 +159,7 @@ help() {
 audit-corpus — the ecosystem symbol-audit corpus, run as a strict-xfail gate.
 
 Builds + audits 20 minimal reproducers (one per popular crate) through the
-packaged native path (`cargo patina audit <dir>`), normalizes each residual set
+packaged native path (`patina audit <dir>`), normalizes each residual set
 of unsupported native imports to sorted `symbol class` lines, and compares them
 EXACTLY and in BOTH directions against the committed per-crate, per-platform
 expectation files under expected/. A regression (an expected-CLEAN crate going
@@ -180,7 +180,7 @@ Usage:
 
 Environment:
   TMPDIR            base directory for the scratch work/log dirs (default /tmp).
-  CARGO_TARGET_DIR  target directory for cargo-patina and every MRE build
+  CARGO_TARGET_DIR  target directory for patina and every MRE build
                     (default <repo>/target/testbeds/audit-corpus).
 
 The platform is auto-detected (macos / linux); arch is not distinguished. Bump

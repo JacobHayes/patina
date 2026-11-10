@@ -38,9 +38,9 @@ for target in "${cross[@]}"; do
   step "clippy-$target" cargo clippy --workspace --all-targets --locked --target "$target" -- -D warnings || exit
 done
 step macros cargo test --quiet -p patina-dst --features macros --locked || exit
-# One build of the workspace suite; its cargo-patina drives every testbed.
+# One build of the workspace suite; its patina drives every testbed.
 step build cargo nextest run --profile local --workspace --locked --no-run || exit
-export PATINA_CLI="$PWD/target/debug/cargo-patina"
+export PATINA_CLI="$PWD/target/debug/patina"
 
 # The suite leaves cores idle and a testbed is mostly one guest run after
 # another, so they overlap: the suite and the doctests in the workspace's

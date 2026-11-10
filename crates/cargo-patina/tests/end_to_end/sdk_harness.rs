@@ -220,11 +220,7 @@ mod tests {
         if !mode.is_empty() {
             args.extend(["--", mode]);
         }
-        invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &args,
-        )
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args)
     }
 
     // Knobs a harness turns on in code are recorded with the policy part of the
@@ -264,7 +260,7 @@ mod tests {
     // One harness binary carries every interposed-service claim. Executed directly
     // (no Patina control plane) it fails loudly with NotUnderPatina before any
     // application code runs, never a silent host-effect fallback. Under
-    // `cargo patina run` each scenario runs with its std effects
+    // `patina run` each scenario runs with its std effects
     // interposed and its recording finalized, and a replay carrying no
     // flag (the binary's marker defers init: no semantic flags, no guest arguments, since the
     // trace is authoritative) prints the same bytes. The harness closure re-applies
@@ -301,7 +297,7 @@ mod tests {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("not running under `cargo patina run`"),
+            stderr.contains("not running under `patina run`"),
             "missing NotUnderPatina diagnostic:\nstderr:\n{stderr}"
         );
         assert!(

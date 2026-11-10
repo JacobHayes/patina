@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# python-guest — a Python application built by `cargo patina build --python`.
+# python-guest — a Python application built by `patina build --python`.
 #
 # The guest (app/) is a directory application: its __main__.py imports its own
 # module, a package and a namespace package from site-packages/ (frozen in with
@@ -38,7 +38,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/python-guest}"
 export CARGO_TARGET_DIR="$target_dir"
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 out="$target_dir/patina"
 built="$out/python-guest"
 
@@ -46,20 +46,20 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 mkdir -p "$out" || { echo "FATAL: mkdir $out failed" >&2; exit 3; }
 rm -f "$built"
 
 fail() { echo "python-guest: FAIL $*" >&2; exit 1; }
 
-echo "==> building the guest (cargo patina build --python)"
-"$PATINA" patina build "$here/app" --python --python-path "$here/site-packages" \
+echo "==> building the guest (patina build --python)"
+"$PATINA" build "$here/app" --python --python-path "$here/site-packages" \
   --output "$built" --release >"$out/build.log" 2>&1 \
   || { cat "$out/build.log" >&2; echo "FATAL: patina build --python failed" >&2; exit 3; }
 
 echo "==> [1] audit: clean"
-"$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1 \
+"$PATINA" audit "$built" >"$out/audit.txt" 2>&1 \
   || { cat "$out/audit.txt" >&2; fail "[1] audit refused the guest"; }
 
 # A POSIX rule zone, which names no zoneinfo file on any host.
@@ -68,7 +68,7 @@ zone='XST5XDT,M3.2.0,M11.1.0'
 # A run's stdout and stderr, the stderr without the run's own reports.
 run() {
   local name=$1; shift
-  "$PATINA" patina run "$built" --env "TZ=$zone" "$@" >"$out/$name.out" 2>"$out/$name.raw"
+  "$PATINA" run "$built" --env "TZ=$zone" "$@" >"$out/$name.out" 2>"$out/$name.raw"
   local status=$?
   grep -v '^PATINA_SCHEDULE_REPORT ' "$out/$name.raw" >"$out/$name.err"
   return "$status"
@@ -108,7 +108,7 @@ cmp -s "$out/seed0.out" "$out/again.out" && cmp -s "$out/seed0.err" "$out/again.
   || fail "[3] two seed-0 runs differ"
 run record --seed 0 --record "$out/run.trace" -- first second || fail "[3] the recorded run failed"
 cmp -s "$out/seed0.out" "$out/record.out" || fail "[3] the recorded run differs from the plain one"
-"$PATINA" patina replay "$built" "$out/run.trace" >"$out/replay.out" 2>"$out/replay.raw" \
+"$PATINA" replay "$built" "$out/run.trace" >"$out/replay.out" 2>"$out/replay.raw" \
   || { cat "$out/replay.raw" >&2; fail "[3] replay failed"; }
 cmp -s "$out/record.out" "$out/replay.out" || fail "[3] the replay differs from the record"
 
@@ -130,7 +130,7 @@ grep -q '^  File "__main__.py", line [0-9]*, in <module>$' "$out/boom.err" \
   && grep -q '^  File "ledger.py", line [0-9]*, in settle$' "$out/boom.err" \
   && grep -q "^RuntimeError: unsettled accounts: \['open'\]$" "$out/boom.err" \
   || { cat "$out/boom.err" >&2; fail "[5] the traceback does not show the application's lines"; }
-"$PATINA" patina replay "$built" "$out/boom.trace" >"$out/boom-replay.out" 2>"$out/boom-replay.raw"
+"$PATINA" replay "$built" "$out/boom.trace" >"$out/boom-replay.out" 2>"$out/boom-replay.raw"
 grep -v '^PATINA_SCHEDULE_REPORT ' "$out/boom-replay.raw" | diff - "$out/boom.err" >/dev/null \
   || fail "[5] the replay's traceback differs"
 
@@ -148,7 +148,7 @@ extension="$out/extension-site"
 rm -rf "$extension" && mkdir -p "$extension/fast" && : >"$extension/fast/__init__.py" \
   && : >"$extension/fast/_speedups.cpython-314-x86_64-linux-gnu.so" \
   || { echo "FATAL: cannot stage the extension fixture" >&2; exit 3; }
-if "$PATINA" patina build "$here/app" --python --python-path "$extension" \
+if "$PATINA" build "$here/app" --python --python-path "$extension" \
   --output "$out/extension-guest" >"$out/extension.log" 2>&1; then
   fail "[7] a build with an extension module succeeded"
 fi

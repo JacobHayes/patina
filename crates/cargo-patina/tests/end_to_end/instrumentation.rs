@@ -147,7 +147,7 @@ fn main() {
         let short = directory.join("short.patina");
         drop_trailing_task_yield(&trace, &short);
         let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["replay", bin, short.to_str().unwrap()],
         );
@@ -256,7 +256,7 @@ fn main() {
         let quiet_trace = directory.path().join("quiet.patina");
         let run = |trace: &Path, envs: &[(&str, &str)]| {
             let output = invoke_unchecked_clean_env(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &[
                     "run",
@@ -325,7 +325,7 @@ fn main() {
         // settings and reproduces the same guest output — suppression reaches neither
         // the fingerprint nor anything replay checks.
         let replayed = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["replay", bin, loud_trace.to_str().unwrap()],
             &silenced,
@@ -345,7 +345,7 @@ fn main() {
         // binary fails closed with the build hint.
         let refused_map = directory.path().join("plain.covmap");
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "run",
@@ -360,7 +360,7 @@ fn main() {
         assert!(
             !refused.status.success()
                 && refused_stderr.contains("--coverage-out requires")
-                && refused_stderr.contains("cargo patina build --instrument"),
+                && refused_stderr.contains("patina build --instrument"),
             "plain-binary coverage request should fail closed with the build hint:\n{refused_stderr}"
         );
     }
@@ -452,8 +452,7 @@ fn main() {
                 "--instrument",
             ],
         );
-        let run =
-            |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);
+        let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, args);
         let lost =
             |output: &Output| String::from_utf8_lossy(&output.stdout).contains("LOST_UPDATE");
         let seeds: Vec<String> = (0..8).map(|seed| seed.to_string()).collect();

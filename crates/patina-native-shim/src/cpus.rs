@@ -61,7 +61,7 @@ pub(crate) fn confirm(installed: u32) -> Result<(), String> {
     }
     Err(format!(
         "the run's virtual machine has {installed} CPUs, but this process started with \
-         {booted} ({ENV_GUEST_CPUS}); a replay needs the trace's count, which `cargo patina \
+         {booted} ({ENV_GUEST_CPUS}); a replay needs the trace's count, which `patina \
          replay` supplies: set {ENV_GUEST_CPUS}={installed} when launching the guest directly"
     ))
 }

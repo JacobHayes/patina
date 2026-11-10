@@ -7,7 +7,7 @@
 //! call (see [`observe`]). Every scenario is built into ONE probe binary
 //! (`conformance-probe <scenario> --vehicle V --dir D`). The
 //! `crates/cargo-patina/tests/native_conformance.rs` tests run it natively and
-//! under `cargo patina` in the same test and [`compare::judge`] the streams:
+//! under `patina` in the same test and [`compare::judge`] the streams:
 //! exact by default, differing only where the scenario declares a
 //! [`catalog::Gap`].
 //!

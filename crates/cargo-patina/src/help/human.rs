@@ -104,15 +104,15 @@ fn push_output_and_env_footer(out: &mut String) {
     for flag in GLOBAL_OUTPUT {
         push_flag(out, flag);
     }
-    out.push_str("\nRun `cargo patina --help` for the environment protocol and shared sections.\n");
+    out.push_str("\nRun `patina --help` for the environment protocol and shared sections.\n");
 }
 
 /// Render the compact top-level overview.
 fn render_overview() -> String {
     let mut out = String::new();
     out.push_str("Patina deterministic Cargo runner\n\n");
-    out.push_str("Usage: cargo patina <VERB> [OPTIONS]\n\n");
-    out.push_str("Verbs (run `cargo patina <verb> --help` for details):\n");
+    out.push_str("Usage: patina <VERB> [OPTIONS]\n\n");
+    out.push_str("Verbs (run `patina <verb> --help` for details):\n");
     let width = VERBS.iter().map(|v| v.name.len()).max().unwrap_or(0);
     for verb in VERBS {
         out.push_str(&format!(
@@ -182,10 +182,7 @@ for transparency), and honored tool vars. `--help --format json` emits the full 
 /// Render a single verb's focused section.
 fn render_verb(verb: &Verb) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "cargo patina {} — {}\n\n",
-        verb.name, verb.summary
-    ));
+    out.push_str(&format!("patina {} — {}\n\n", verb.name, verb.summary));
     out.push_str("Usage:\n");
     for line in verb.synopsis {
         out.push_str("  ");
@@ -234,19 +231,16 @@ pub fn usage_synopsis(current_verb: Option<&str>) -> String {
                 out.push_str(line);
                 out.push('\n');
             }
-            out.push_str(&format!(
-                "\nrun `cargo patina {} --help` for details",
-                verb.name
-            ));
+            out.push_str(&format!("\nrun `patina {} --help` for details", verb.name));
         }
         None => {
-            out.push_str("Usage: cargo patina <VERB> [OPTIONS]\n");
+            out.push_str("Usage: patina <VERB> [OPTIONS]\n");
             for verb in VERBS {
                 out.push_str("  ");
                 out.push_str(verb.synopsis[0]);
                 out.push('\n');
             }
-            out.push_str("\nrun `cargo patina <verb> --help` for details");
+            out.push_str("\nrun `patina <verb> --help` for details");
         }
     }
     out

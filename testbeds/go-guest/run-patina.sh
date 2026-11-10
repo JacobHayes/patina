@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 ###############################################################################
-# go-guest — a pure-Go program built by `cargo patina build --go` (Linux).
+# go-guest — a pure-Go program built by `patina build --go` (Linux).
 #
 # The guest (main.go) uses only the Go standard library: goroutines that block
 # (so the runtime starts threads, through the shim's pthread_create), a channel,
@@ -24,7 +24,7 @@
 #   [5] four other seeds reach the same GO_GUEST_RESULT;
 #   [6] Go's own edge counters are coverage: `--coverage-out` writes a map
 #       with covered edges, byte-identical across same-seed runs and between
-#       a record and its replay, and `cargo patina coverage` attributes covered
+#       a record and its replay, and `patina coverage` attributes covered
 #       edges to the guest's own package; the guest has no edge hook, so
 #       `--yield-stride` is refused;
 #   [7] a `--guided` campaign over the guest folds that coverage.
@@ -39,9 +39,9 @@ repo_root="$(cd "$here/../.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/go-guest}"
 export CARGO_TARGET_DIR="$target_dir"
 built="$target_dir/patina/go-guest"
-# PATINA_CLI names a cargo-patina already built from this checkout; otherwise
+# PATINA_CLI names a patina already built from this checkout; otherwise
 # the release CLI builds here.
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 out="$target_dir/patina"
 
 if [[ $(uname -s) != Linux ]]; then
@@ -62,19 +62,19 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3
 fi
 
-echo "==> building the Go guest (cargo patina build --go)"
-if ! "$PATINA" patina build "$here" --go --output "$built" --release -- -trimpath >/dev/null; then
+echo "==> building the Go guest (patina build --go)"
+if ! "$PATINA" build "$here" --go --output "$built" --release -- -trimpath >/dev/null; then
   echo "FATAL: patina build --go of the Go guest failed" >&2; exit 3
 fi
 
 echo "==> [1] audit: clean, the build marker reported as one"
-if ! "$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1; then
+if ! "$PATINA" audit "$built" >"$out/audit.txt" 2>&1; then
   echo "go-guest: FAIL [1] audit refused the guest" >&2
   cat "$out/audit.txt" >&2; exit 1
 fi
@@ -86,7 +86,7 @@ fi
 
 echo "==> [2]/[3] run + byte-identical repeats (seed 1)"
 for run in 1 2; do
-  if ! "$PATINA" patina run "$built" --seed 1 >"$out/run$run.out" 2>"$out/run$run.err"; then
+  if ! "$PATINA" run "$built" --seed 1 >"$out/run$run.out" 2>"$out/run$run.err"; then
     echo "go-guest: FAIL [2] run $run exited nonzero" >&2
     cat "$out/run$run.out" "$out/run$run.err" >&2; exit 1
   fi
@@ -115,10 +115,10 @@ if ! grep -q '^GO_GUEST_STDERR ' "$out/run1.err"; then
 fi
 
 echo "==> [4] record → replay byte-identical"
-"$PATINA" patina run "$built" --seed 1 --record "$out/go-guest.patina" \
+"$PATINA" run "$built" --seed 1 --record "$out/go-guest.patina" \
   >"$out/record.out" 2>"$out/record.err" || {
   echo "go-guest: FAIL [4] record run failed" >&2; cat "$out/record.err" >&2; exit 1; }
-"$PATINA" patina replay "$built" "$out/go-guest.patina" \
+"$PATINA" replay "$built" "$out/go-guest.patina" \
   >"$out/replay.out" 2>"$out/replay.err" || {
   echo "go-guest: FAIL [4] replay failed" >&2; cat "$out/replay.err" >&2; exit 1; }
 for stream in out err; do
@@ -131,7 +131,7 @@ done
 
 echo "==> [5] the same result under four other seeds"
 for seed in 0 2 3 4; do
-  if ! "$PATINA" patina run "$built" --seed "$seed" >"$out/seed-$seed.out" 2>&1; then
+  if ! "$PATINA" run "$built" --seed "$seed" >"$out/seed-$seed.out" 2>&1; then
     echo "go-guest: FAIL [5] seed $seed exited nonzero" >&2
     cat "$out/seed-$seed.out" >&2; exit 1
   fi
@@ -143,15 +143,15 @@ done
 
 echo "==> [6] edge coverage: seed-stable, record → replay identical, attributed"
 for run in 1 2; do
-  if ! "$PATINA" patina run "$built" --seed 1 --coverage-out "$out/cov$run.map" \
+  if ! "$PATINA" run "$built" --seed 1 --coverage-out "$out/cov$run.map" \
       >"$out/cov$run.out" 2>&1; then
     echo "go-guest: FAIL [6] --coverage-out run $run failed" >&2
     cat "$out/cov$run.out" >&2; exit 1
   fi
 done
-"$PATINA" patina run "$built" --seed 1 --record "$out/cov.patina" --coverage-out "$out/cov-record.map" \
+"$PATINA" run "$built" --seed 1 --record "$out/cov.patina" --coverage-out "$out/cov-record.map" \
   >"$out/cov-record.out" 2>&1 \
-  && "$PATINA" patina replay "$built" "$out/cov.patina" --coverage-out "$out/cov-replay.map" \
+  && "$PATINA" replay "$built" "$out/cov.patina" --coverage-out "$out/cov-replay.map" \
     >"$out/cov-replay.out" 2>&1 || {
   echo "go-guest: FAIL [6] coverage record/replay failed" >&2
   cat "$out/cov-record.out" "$out/cov-replay.out" >&2; exit 1; }
@@ -160,7 +160,7 @@ for map in cov2 cov-record cov-replay; do
     echo "go-guest: FAIL [6] $map.map differs from the first seed-1 map" >&2; exit 1
   fi
 done
-if ! "$PATINA" patina coverage "$built" "$out/cov1.map" --format json >"$out/cov-report.json" \
+if ! "$PATINA" coverage "$built" "$out/cov1.map" --format json >"$out/cov-report.json" \
   || ! python3 -c '
 import json, sys
 report = json.load(open(sys.argv[1]))
@@ -171,7 +171,7 @@ assert main and main[0]["edges_covered"] > 0, "no covered edge attributed to pac
   echo "go-guest: FAIL [6] the coverage report has no covered edges in package main" >&2
   cat "$out/cov-report.json" >&2; exit 1
 fi
-"$PATINA" patina run "$built" --seed 1 --yield-stride 1 >"$out/stride.out" 2>&1
+"$PATINA" run "$built" --seed 1 --yield-stride 1 >"$out/stride.out" 2>&1
 if [[ $? != 2 ]]; then
   echo "go-guest: FAIL [6] --yield-stride was not refused on a guest with no edge hook" >&2
   cat "$out/stride.out" >&2; exit 1
@@ -179,7 +179,7 @@ fi
 
 echo "==> [7] a --guided campaign folds the edge coverage"
 rm -rf "$out/campaign"
-if ! "$PATINA" patina campaign "$built" --gens 3 --guided --out-dir "$out/campaign" \
+if ! "$PATINA" campaign "$built" --gens 3 --guided --out-dir "$out/campaign" \
     >"$out/campaign.out" 2>&1 \
   || ! grep -Eq '^PATINA_CAMPAIGN_COMPLETE .*covered_permille=[1-9]' "$out/campaign.out"; then
   echo "go-guest: FAIL [7] the guided campaign reported no edge coverage" >&2
@@ -187,19 +187,19 @@ if ! "$PATINA" patina campaign "$built" --gens 3 --guided --out-dir "$out/campai
 fi
 
 echo "==> [8] --go-test builds the package's tests into a guest that runs them"
-if ! "$PATINA" patina build "$here" --go --go-test --output "$out/go-guest.test" --release -- -trimpath \
+if ! "$PATINA" build "$here" --go --go-test --output "$out/go-guest.test" --release -- -trimpath \
     >"$out/test-build.out" 2>&1; then
   echo "go-guest: FAIL [8] patina build --go --go-test failed" >&2
   cat "$out/test-build.out" >&2; exit 1
 fi
-if ! "$PATINA" patina run "$out/go-guest.test" --seed 1 -- -test.v >"$out/tests.out" 2>&1 \
+if ! "$PATINA" run "$out/go-guest.test" --seed 1 -- -test.v >"$out/tests.out" 2>&1 \
   || ! grep -q -- '--- PASS: TestComputeIsCancelled' "$out/tests.out" \
   || ! grep -q -- '--- PASS: TestTempDirRoundTrip' "$out/tests.out" \
   || ! grep -q -- '--- SKIP: TestPlantedFailure' "$out/tests.out"; then
   echo "go-guest: FAIL [8] the package's tests did not all run and pass under patina" >&2
   cat "$out/tests.out" >&2; exit 1
 fi
-"$PATINA" patina run "$out/go-guest.test" --seed 1 --env GO_GUEST_PLANT_FAILURE=1 \
+"$PATINA" run "$out/go-guest.test" --seed 1 --env GO_GUEST_PLANT_FAILURE=1 \
   -- -test.run TestPlantedFailure >"$out/tests-planted.out" 2>&1
 if [[ $? == 0 ]] || ! grep -q -- '--- FAIL: TestPlantedFailure' "$out/tests-planted.out"; then
   echo "go-guest: FAIL [8] a failing test did not fail the test guest" >&2

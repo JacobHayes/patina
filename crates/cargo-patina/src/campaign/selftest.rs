@@ -583,7 +583,7 @@ fn classifier_and_detector_checks() {
         classify(
             &planted(
                 RunFacts::ok().exit(2).no_envelope(),
-                "cargo-patina: could not compile foo",
+                "patina: could not compile foo",
             ),
             &no_rules,
         ),
@@ -923,7 +923,7 @@ into the deterministic runtime via syscall-user-dispatch.",
         "patina: step budget of 100 boundary operations was exhausted",
         "patina: the deterministic runtime failed to initialize: fingerprint mismatch",
         "patina: interposed call before deterministic runtime initialization",
-        "cargo-patina: could not compile guest",
+        "patina: could not compile guest",
         "Error: disk I/O error",
     ];
     let missed: Vec<&str> = family

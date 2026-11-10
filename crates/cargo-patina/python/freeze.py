@@ -1,6 +1,6 @@
 """Freeze Python modules into a blob the Patina Python launcher imports.
 
-Run by `cargo patina build --python` with the interpreter it built, so the
+Run by `patina build --python` with the interpreter it built, so the
 bytecode is that interpreter's. Two shapes:
 
     freeze.py --stdlib OUT ROOT...

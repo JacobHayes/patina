@@ -5,7 +5,7 @@
 // points as the Rust SDK (patina-dst), so a site, verdict or custom op means
 // the same thing in either language.
 //
-// It is inert outside Patina. `cargo patina build --go` adds the `patina`
+// It is inert outside Patina. `patina build --go` adds the `patina`
 // build tag, which links the sites to the native shim; any other build gets
 // no-op stand-ins with no cgo and no dependencies, so code ships the SDK
 // unconditionally.
@@ -150,7 +150,7 @@ type BuggifySite struct{ s site }
 func Buggify(label string) *BuggifySite { return &BuggifySite{declare(kindFault, label)} }
 
 // Fires reports whether the site fires on this evaluation, at the run's
-// default probability. Under Patina an active site (`cargo patina run
+// default probability. Under Patina an active site (`patina run
 // --buggify`) fires as a pure function of the seed; outside Patina, and in a
 // run without --buggify, it never does.
 func (b *BuggifySite) Fires() bool { return buggify(b.s, -1) }
@@ -214,7 +214,7 @@ const (
 func Verdict(kind VerdictKind, label, detail string) { verdict(kind, label, detail) }
 
 // SetupComplete marks the boundary between setup and the workload. With
-// `cargo patina run --buggify-after-setup`, fault sites stay inert until it is
+// `patina run --buggify-after-setup`, fault sites stay inert until it is
 // called (and a run that never calls it fails). It does nothing outside
 // Patina.
 func SetupComplete() { setupComplete() }

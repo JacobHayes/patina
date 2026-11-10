@@ -50,7 +50,7 @@ layout and qualified determinism"
     if !crate::arena::routed() {
         return Err(RuntimeError::Config(
             "the runtime's allocations reach the guest's heap: this binary was linked without \
-Patina's allocator routing (`cargo patina build` links it), so its heap addresses would differ \
+Patina's allocator routing (`patina build` links it), so its heap addresses would differ \
 between a seeded run, a recording and its replay"
                 .to_owned(),
         ));

@@ -44,7 +44,7 @@ mod tests {
                 String::from_utf8_lossy(&compiled.stderr)
             );
             let audit = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 root,
                 &["audit", object.to_str().unwrap(), "--raw"],
             );
@@ -133,7 +133,7 @@ mod tests {
                 );
             }
             let audit = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 root,
                 &[
                     "audit",
@@ -339,7 +339,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
 
         let replay_source = || {
             invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &[
                     "replay",
@@ -425,7 +425,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         );
 
         let human = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["audit", bin.to_str().unwrap()],
         );
@@ -469,7 +469,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         );
 
         let json = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["audit", bin.to_str().unwrap(), "--format", "json"],
         );
@@ -492,7 +492,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         // the guest runs, naming the same denied process-class symbol.
         let denied_line = |target: &Path| -> String {
             let out = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &["run", target.to_str().unwrap(), "--seed", "1"],
             );
@@ -609,7 +609,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         );
     }
 
-    // Auditing a *prebuilt* native binary that was NOT produced by `cargo patina
+    // Auditing a *prebuilt* native binary that was NOT produced by `patina
     // build` fails closed: its imports are unsatisfied libc calls (the surface the
     // shim interposes once linked), not the post-interposition residual, so a raw
     // listing is the opposite of the truth. The refusal names the source-first form.
@@ -623,7 +623,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         let directory = tempdir().unwrap();
         let workspace = native_workspace();
 
-        // A stock binary built by plain `rustc` — no `cargo patina build`, so the
+        // A stock binary built by plain `rustc` — no `patina build`, so the
         // shim staticlib is not linked and `patina_init_from_env` is undefined.
         let source = directory.path().join("stock.rs");
         fs::write(&source, "fn main() { println!(\"STOCK\"); }").unwrap();
@@ -642,7 +642,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
 
         // (a) A bare audit of the stock binary is refused, not silently listed.
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["audit", stock.to_str().unwrap()],
         );
@@ -654,8 +654,8 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         );
         let refusal = String::from_utf8_lossy(&refused.stderr);
         assert!(
-            refusal.contains("not built with `cargo patina build`")
-                && refusal.contains("cargo patina audit ./Cargo.toml")
+            refusal.contains("not built with `patina build`")
+                && refusal.contains("patina audit ./Cargo.toml")
                 && refusal.contains("--raw"),
             "refusal must explain the shim-link gap and point to source-first + --raw:\n{refusal}"
         );
@@ -665,7 +665,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         // closed — but now with the real categorized findings, which is what makes
         // `--raw` useful for planted-escape fixtures (instruction scan included).
         let raw = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["audit", stock.to_str().unwrap(), "--raw"],
         );
@@ -832,7 +832,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
         )
         .unwrap();
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             directory.path(),
             &["audit", with_rdtsc.to_str().unwrap(), "--raw"],
         );

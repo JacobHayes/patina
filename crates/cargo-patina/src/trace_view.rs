@@ -1,7 +1,7 @@
 //! Shared semantic view of a recorded trace.
 //!
 //! This module is the read-only decode layer behind both the HTML renderer and
-//! the `cargo patina trace` inspection commands. It owns the scheduler-cursor
+//! the `patina trace` inspection commands. It owns the scheduler-cursor
 //! lane attribution walk, virtual-time reconstruction, operation categories,
 //! one-line event summaries, notable-event detection, and the operation-kind
 //! registry used for filter validation.

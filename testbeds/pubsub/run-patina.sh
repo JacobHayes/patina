@@ -46,9 +46,9 @@ repo_root="$(cd "$here/../.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/pubsub}"
 export CARGO_TARGET_DIR="$target_dir"
 built="$target_dir/patina/pubsub"
-# PATINA_CLI names a cargo-patina already built from this checkout (the local
+# PATINA_CLI names a patina already built from this checkout (the local
 # check runner passes one CLI to every rung); otherwise the release CLI builds here.
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 
 # No --allow-unsupported-symbols: the harness passes the default-deny gate clean.
 # Escape hatch: export PATINA_ALLOW_SYMS=name[,name...] if a
@@ -82,12 +82,12 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 if ! mkdir -p "$target_dir/patina"; then
   echo "FATAL: mkdir $target_dir/patina failed" >&2; exit 3
 fi
-if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+if ! "$PATINA" build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the pubsub harness failed" >&2; exit 3
 fi
 work="$(mktemp -d)"
@@ -95,7 +95,7 @@ trap 'printf "Logs: %s\n" "$work"' EXIT
 # dlsym is the shim's Linux `__real_dlsym` control-plane residue (tolerated as
 # control-plane on macOS too) — the identical allowance the shim's own
 # native_workloads::std_runs_seeded_and_replayable_but_not_standalone audits carry. Nothing else.
-if ! "$PATINA" patina audit "$built" --allow dlsym >"$work/audit.log" 2>&1; then
+if ! "$PATINA" audit "$built" --allow dlsym >"$work/audit.log" 2>&1; then
   cat "$work/audit.log" >&2
   echo "    FAIL: audit found residue beyond the dlsym control-plane"; exit 1
 fi

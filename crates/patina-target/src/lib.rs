@@ -1,6 +1,6 @@
 //! Target metadata and fail-closed import auditing.
 //!
-//! Internal crate: the analysis behind `cargo patina audit` and the pre-run
+//! Internal crate: the analysis behind `patina audit` and the pre-run
 //! default-deny gate. It parses native (Mach-O/ELF)
 //! artifacts, classifies every externally resolved import against the
 //! interposed/known-safe allowlists, and reports the residual effect surface —

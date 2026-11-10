@@ -5,7 +5,7 @@ pselect, epoll_pwait and sleep. A helper generates SIGUSR1 only after the main
 thread parks; assertions pin EINTR despite SA_RESTART, mask restoration and
 libc timeout-output conventions.
 
-The typed `cargo-patina` integration test `native_signals` compiles it with the
+The typed `patina` integration test `native_signals` compiles it with the
 current shim and requires every named wait case to succeed. Rust state/restart
 detectors and the signals-family conformance scenarios supply the complementary
 raw-door, trace/replay and host-oracle evidence.

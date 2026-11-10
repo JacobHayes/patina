@@ -1,4 +1,4 @@
-//! `cargo patina syscalls`: the live syscall registry, printed.
+//! `patina syscalls`: the live syscall registry, printed.
 //!
 //! The registry (`patina_dst_native_shim::registry`) is code — the SUD
 //! dispatcher is generated from it and the vendored-table gates hold it

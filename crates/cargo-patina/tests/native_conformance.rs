@@ -1,6 +1,6 @@
 //! Syscall conformance: every scenario of
 //! `crates/patina-conformance`, natively — the host kernel is the oracle — and
-//! under `cargo patina`, in the same test, through every vehicle it has.
+//! under `patina`, in the same test, through every vehicle it has.
 //!
 //! Per vehicle: the native run passes (every check holds) and agrees with the
 //! scenario's first passing vehicle; the patina run, recorded, equals it or fails

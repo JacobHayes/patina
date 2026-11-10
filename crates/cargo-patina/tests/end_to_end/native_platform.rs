@@ -993,11 +993,7 @@ fn main() {
                 "json",
             ],
         ] {
-            let output = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
-                native_workspace(),
-                &args,
-            );
+            let output = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args);
             let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
                 .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stderr)));
             assert_eq!(envelope["guest_exit"]["signal"], SIGTERM, "{envelope:#}");

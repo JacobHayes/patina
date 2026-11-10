@@ -29,7 +29,7 @@ resolver = "2"
 [profile.dev]
 debug = "line-tables-only"
 
-# `cargo test` builds the cargo-patina binary that the integration suites drive
+# `cargo test` builds the patina binary that the integration suites drive
 # with the test profile, and the suites invoke it about a thousand times. Each
 # call pushes the whole guest binary (tens of MB for a debug guest) through
 # third-party code: `object` parses it, `memchr` searches it for markers, and a
@@ -50,7 +50,7 @@ opt-level = 3
 opt-level = 3
 
 # The other workspace crates, among them the runtime, trace and filesystem
-# crates the cargo-patina binary links, build at opt-level 1: the supervisor
+# crates the patina binary links, build at opt-level 1: the supervisor
 # moves every recorded event through their generic code, which unoptimized
 # costs seconds per large recording. cargo-patina itself, the crate an edit
 # recompiles most, stays at opt-level 0, and so does the shim crate, whose unit

@@ -17,7 +17,6 @@ fn params_minimization_lifts_the_commands_own_params_out() {
         "minimize",
         "--params",
         "--",
-        "cargo",
         "patina",
         "run",
         "./guest",
@@ -39,7 +38,7 @@ fn params_minimization_lifts_the_commands_own_params_out() {
     );
     assert_eq!(
         invocation.head,
-        strings(&["cargo", "patina", "run", "./guest", "--seed", "3"])
+        strings(&["patina", "run", "./guest", "--seed", "3"])
     );
     // The guest's own arguments stay the guest's.
     assert_eq!(invocation.tail, strings(&["--", "--param", "guest=arg"]));

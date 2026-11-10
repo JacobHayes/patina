@@ -1,4 +1,4 @@
-//! The build identity of the running `cargo-patina`.
+//! The build identity of the running `patina`.
 //!
 //! A recording depends on its supervisor as well as on its guest: the
 //! supervisor builds the guest's initial state, its stack, environment block,
@@ -27,13 +27,13 @@ use sha2::{Digest, Sha256};
 use crate::CliError;
 use crate::run_cache::Image;
 
-/// The environment variable a `cargo-patina` sets on the `cargo-patina`
+/// The environment variable a `patina` sets on the `patina`
 /// children it runs (campaign generations, their verification replays, a
 /// reduction's candidates): its own digest, which the child must match.
 pub(crate) const ENV_EXPECTED_SUPERVISOR: &str = "PATINA_RT_EXPECTED_SUPERVISOR_SHA256";
 
 /// The prefix of the refusal a child prints when it is another build than the
-/// `cargo-patina` that ran it. The parent stops on it rather than filing the
+/// `patina` that ran it. The parent stops on it rather than filing the
 /// child's result.
 pub(crate) const SUPERVISOR_MISMATCH: &str = "PATINA_INFRA supervisor_mismatch";
 
@@ -42,7 +42,7 @@ static EXECUTABLE: OnceLock<Result<(PathBuf, fs::File), String>> = OnceLock::new
 static DIGEST: OnceLock<Result<Sha256Digest, String>> = OnceLock::new();
 
 /// Open the running executable, and refuse to run as a child of another
-/// `cargo-patina` build. Called first thing in the entry point, before any
+/// `patina` build. Called first thing in the entry point, before any
 /// build or launch.
 ///
 /// The identity is read later, the first time it is needed, but from the
@@ -60,7 +60,7 @@ pub(crate) fn establish() -> Result<(), CliError> {
         let own = supervisor_sha256()?;
         if expected.to_str() != Some(own.to_string().as_str()) {
             return Err(CliError(format!(
-                "{SUPERVISOR_MISMATCH}: this cargo-patina is {own}, but the cargo-patina that \
+                "{SUPERVISOR_MISMATCH}: this patina is {own}, but the patina that \
                  launched it is {}; its executable was replaced while it ran, so this run would \
                  not be comparable with the ones before it.",
                 expected.to_string_lossy()
@@ -70,7 +70,7 @@ pub(crate) fn establish() -> Result<(), CliError> {
     Ok(())
 }
 
-/// The identity of the running `cargo-patina` executable, read from the
+/// The identity of the running `patina` executable, read from the
 /// descriptor [`establish`] opened: the SHA-256 of its build ID, or of its
 /// bytes when it carries none.
 pub(crate) fn supervisor_sha256() -> Result<Sha256Digest, CliError> {
@@ -79,7 +79,7 @@ pub(crate) fn supervisor_sha256() -> Result<Sha256Digest, CliError> {
             let image = image()?;
             let digest = match build_id_bytes(image) {
                 Some(id) => Sha256::new()
-                    .chain_update(b"cargo-patina build id\0")
+                    .chain_update(b"patina build id\0")
                     .chain_update(&id)
                     .finalize(),
                 None => Sha256::digest(image.bytes()),
@@ -90,7 +90,7 @@ pub(crate) fn supervisor_sha256() -> Result<Sha256Digest, CliError> {
         .map_err(CliError)
 }
 
-/// The build ID the linker gave the running `cargo-patina` (an ELF
+/// The build ID the linker gave the running `patina` (an ELF
 /// `NT_GNU_BUILD_ID` note or a Mach-O `LC_UUID`), in hex: it names the
 /// supervisor's run cache. `None` when it carries none.
 pub(crate) fn build_id() -> Option<String> {
@@ -115,7 +115,7 @@ fn image() -> Result<&'static Image, String> {
             let (path, file) = executable().as_ref().map_err(Clone::clone)?;
             Image::map(file).map_err(|error| {
                 format!(
-                    "failed to read the running cargo-patina executable {} to compute its build \
+                    "failed to read the running patina executable {} to compute its build \
                      identity: {error}",
                     path.display()
                 )
@@ -127,12 +127,11 @@ fn image() -> Result<&'static Image, String> {
 
 fn executable() -> &'static Result<(PathBuf, fs::File), String> {
     EXECUTABLE.get_or_init(|| {
-        let path = running_executable().map_err(|error| {
-            format!("failed to locate the running cargo-patina executable: {error}")
-        })?;
+        let path = running_executable()
+            .map_err(|error| format!("failed to locate the running patina executable: {error}"))?;
         let file = fs::File::open(&path).map_err(|error| {
             format!(
-                "failed to open the running cargo-patina executable {}: {error}",
+                "failed to open the running patina executable {}: {error}",
                 path.display()
             )
         })?;
@@ -140,7 +139,7 @@ fn executable() -> &'static Result<(PathBuf, fs::File), String> {
     })
 }
 
-/// Require a `cargo-patina` child to be this same build, and give it no
+/// Require a `patina` child to be this same build, and give it no
 /// flag defaults from the operator's environment.
 ///
 /// Every child this supervisor spawns is told exactly what to do by its argv:

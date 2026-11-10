@@ -300,7 +300,7 @@ pub(super) fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnos
 to completion with no more scheduling boundaries than thread spawn/join alone incurs. Any loop in \
 their body was atomics-only and thus invisible to the scheduler, so their internal interleavings \
 are UNREACHABLE at any seed and a clean result here does NOT mean the concurrency was tested. \
-Build with `cargo patina build --instrument` and run with `--yield-stride N` (a scheduling point \
+Build with `patina build --instrument` and run with `--yield-stride N` (a scheduling point \
 every N edges a thread executes; 1 is every edge) to make atomics-only race windows schedulable.",
             diag.vacuous.len(),
         );

@@ -55,11 +55,15 @@ fn refusal_attributes_patinas_own_fail_closed_aborts() {
     assert!(attributed.message.contains("fingerprint mismatch"));
 
     assert_eq!(
-            refusal(134, "", "patina: this binary was built with `cargo patina build` and must run under `cargo patina run`")
-                .expect("no runtime installed is a refusal")
-                .class,
-            "no_runtime_installed"
-        );
+        refusal(
+            134,
+            "",
+            "patina: this binary was built with `patina build` and must run under `patina run`"
+        )
+        .expect("no runtime installed is a refusal")
+        .class,
+        "no_runtime_installed"
+    );
     assert_eq!(
         refusal(2, "", "PATINA_BUGGIFY_DUPLICATE_LABEL label=x")
             .expect("a duplicate buggify label is a refusal")

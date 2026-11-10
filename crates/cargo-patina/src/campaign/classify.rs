@@ -57,7 +57,7 @@ pub enum CampaignClass {
     /// initialize, a shim fatal abort.
     FailClosedAbort,
     /// Harness/build infrastructure failure, not a SUT finding: the campaign's
-    /// wall-clock backstop killed the generation, or the child `cargo patina run`
+    /// wall-clock backstop killed the generation, or the child `patina run`
     /// never produced a `patina.result/v1` envelope at all (a build failure, a
     /// pre-run gate refusal, a supervisor error — patina could not report a
     /// result for this generation).
@@ -509,7 +509,7 @@ fn built_in_class(facts: &RunFacts) -> CampaignClass {
     if facts.host_killed() {
         return CampaignClass::Infra;
     }
-    // 3. No envelope at all: the child `cargo patina run` failed before it could
+    // 3. No envelope at all: the child `patina run` failed before it could
     //    report a result (a build failure, a pre-run gate refusal, a supervisor
     //    error). That is a harness failure, not a system-under-test finding.
     if !facts.envelope {
@@ -809,7 +809,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
 ///    crash-restart supervisor's `PATINA_CRASH_RESTART` summary, which names
 ///    both incarnations' host pids.
 ///
-/// 2. **Supervisor pre-run advisories**, printed by the child `cargo patina run`
+/// 2. **Supervisor pre-run advisories**, printed by the child `patina run`
 ///    BEFORE the guest was launched. They surface at the *tail* only because the
 ///    campaign appends the child's own stderr after the guest's streams (two
 ///    pipes, no recoverable interleaving), so chronology cannot separate them
@@ -823,7 +823,7 @@ fn primary_finding_shape(class: CampaignClass, generation: &GenerationFacts) -> 
 /// some of them structurally — the rest reach a signature exactly through this
 /// fallback. Likewise kept: `PATINA_RESULT`, `PATINA_VIOLATION`,
 /// `PATINA_VERDICT`, `PATINA_INFRA`, the `PATINA_BUGGIFY_*` misuse markers, the
-/// `cargo-patina: ...` CLI errors, and the campaign's own
+/// `patina: ...` CLI errors, and the campaign's own
 /// `patina: campaign generation exceeded timeout_secs=` marker.
 pub(super) fn is_runtime_diagnostic(line: &str) -> bool {
     let line = line.trim_start();

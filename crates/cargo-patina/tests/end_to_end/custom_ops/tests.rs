@@ -122,7 +122,7 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     let mismatched = directory.join("custom-op-mismatch.patina");
     edited.write_atomic(&mismatched).unwrap();
     let refused = invoke_with_deadline(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         workspace,
         &["replay", bin, mismatched.to_str().unwrap()],
         Duration::from_secs(20),
@@ -321,7 +321,7 @@ fn campaign_finds_a_planted_mishandling(directory: &Path, bin: &str) {
         if custom_op_faults {
             args.push("--custom-op-faults");
         }
-        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &args)
     };
 
     // RED twin first: without the declaration the knob is not banded, no fetch

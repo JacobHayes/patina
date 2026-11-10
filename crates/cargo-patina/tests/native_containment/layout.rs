@@ -19,7 +19,7 @@ const NO_CHURN: &str = "no-churn";
 #[cfg(target_os = "linux")]
 const FLAG: &str = "--allow-randomized-address-layout";
 
-/// `cargo patina run` of `g` at seed 1 recording to `trace` in the no-churn
+/// `patina run` of `g` at seed 1 recording to `trace` in the no-churn
 /// mode, with `args` before the guest's.
 fn record_no_churn(g: &Guest, trace: &std::path::Path, args: &[&str]) -> std::process::Output {
     let mut argv = vec!["--seed", "1", "--record", trace.to_str().unwrap()];
@@ -70,7 +70,7 @@ fn replay_standalone(
 /// the promise but with randomization on stops before `main`, and runs
 /// without it. A launch without the supervisor keeps the host's
 /// randomization, so it may replay only a trace that ran randomized too: a
-/// fixed recording is refused and pointed at `cargo patina replay`, while a
+/// fixed recording is refused and pointed at `patina replay`, while a
 /// standalone recording, which records no layout, replays standalone. A
 /// native campaign records its layout policy from its first generation.
 #[test]
@@ -151,7 +151,7 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     assert!(!refused.status.success(), "{refused:?}");
     assert!(!text(&refused.stdout).contains("code="), "{refused:?}");
     assert!(
-        text(&refused.stderr).contains("cargo patina replay"),
+        text(&refused.stderr).contains("patina replay"),
         "{refused:?}"
     );
     let (recorded, standalone) = g.record_standalone(&[NO_CHURN]);
@@ -169,7 +169,7 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
         let mut argv = vec!["campaign"];
         argv.extend_from_slice(args);
         common::invoke_with_deadline(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             common::native_workspace(),
             &argv,
             std::time::Duration::from_secs(120),
@@ -195,7 +195,7 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     assert_success(campaign(&["--extend", "1", "--out-dir", out_dir]));
 }
 
-/// `cargo patina run` of `g` at seed 1, with `args`, from a parent whose soft
+/// `patina run` of `g` at seed 1, with `args`, from a parent whose soft
 /// stack limit is `soft` and whose hard limit is `hard` (`None` keeps the
 /// inherited one).
 #[cfg(target_os = "linux")]
@@ -206,7 +206,7 @@ fn run_with_stack_limit(
     args: &[&str],
 ) -> std::process::Output {
     use std::os::unix::process::CommandExt;
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_patina"));
     command
         .current_dir(common::native_workspace())
         .arg("run")
@@ -341,12 +341,12 @@ fn docker_personality_filter() -> Vec<libc::sock_filter> {
     program
 }
 
-/// `cargo patina VERB` from a parent under [`docker_personality_filter`].
+/// `patina VERB` from a parent under [`docker_personality_filter`].
 #[cfg(target_os = "linux")]
 fn under_docker_seccomp(args: &[&str]) -> std::process::Output {
     use std::os::unix::process::CommandExt;
     let program = docker_personality_filter();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_patina"));
     command.current_dir(common::native_workspace()).args(args);
     // SAFETY: `prctl` is async-signal-safe; the filter was built before the
     // fork and the hook allocates nothing.

@@ -7,7 +7,7 @@
 > to a trace and replayed byte-for-byte. Seed-driven fault injection (crashes,
 > torn writes, network loss/jitter, sleep jitter) and a FoundationDB-style
 > cooperative-SUT SDK (`buggify!`) turn a normal test into a deterministic
-> distributed-systems fuzzer. Everything below is the `cargo patina` CLI surface
+> distributed-systems fuzzer. Everything below is the `patina` CLI surface
 > and is verified against the current build.
 
 Patina has no host fallback: a supported `std` call is deterministic or the run
@@ -21,7 +21,7 @@ runs as is, and a `.rs` file, package directory, or `Cargo.toml` is built
 shim-linked on the fly, then run. `test <DIR|Cargo.toml>` rebuilds one libtest
 target shim-linked.
 
-A verb's flags are machine-readable: `cargo patina <verb> --help --format json`
+A verb's flags are machine-readable: `patina <verb> --help --format json`
 lists every flag group (tagged with the forms that accept it where a verb has
 several, e.g. the `trace` subcommands), plus `requires` for a flag that is inert
 without another. A flag given to the wrong form is refused by name, not as an
@@ -39,7 +39,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
 
 ## CLI verbs
 
-- `cargo patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--instrument]`
+- `patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--instrument]`
   Build a deterministic shim-linked artifact. `--instrument` adds an LLVM
   SanitizerCoverage hook at every edge: it keeps edge counters (`--coverage-out`,
   `coverage`, `campaign --guided`) and takes the scheduling points a run's
@@ -49,13 +49,13 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   and a replay takes it from there; an instrumented binary folds `+instrumented`
   into the compatibility fingerprint and a non-zero stride `+yieldstride`.
   Prints `PATINA_BUILD output=...`.
-- `cargo patina build <GO PACKAGE DIR> --go [--go-test] --output PATH [--release] [-- GO BUILD OPTIONS]` (`--go-test`: the package's test binary, `go test -c`)
+- `patina build <GO PACKAGE DIR> --go [--go-test] --output PATH [--release] [-- GO BUILD OPTIONS]` (`--go-test`: the package's test binary, `go test -c`)
   Build a Go main package as a native guest (Linux): `go build` in cgo mode
   (`CGO_ENABLED=1`), linked externally with the shim, so goroutine threads
   start through the shim's `pthread_create`. Patina sets `-ldflags` and `-o`
   and refuses them in the pass-through options; other `go build` options pass
   through. The `go` on PATH builds it (pin it with `GOTOOLCHAIN` or mise).
-- `cargo patina build <SCRIPT.py|DIR> --python --output PATH [--python-path DIR]... [--python-source TARBALL|DIR] [--release]`
+- `patina build <SCRIPT.py|DIR> --python --output PATH [--python-path DIR]... [--python-source TARBALL|DIR] [--release]`
   Build a Python application (a script, or a directory with `__main__.py`)
   as a native guest: CPython built statically by Patina's recipe (the pinned
   release fetched once and digest-checked, or `--python-source`) and cached,
@@ -66,7 +66,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   data is not carried; `zlib` is built in, `ssl` is not. Linux only. Every
   guest has the Python SDK, `import patina` (inert under plain Python with
   `crates/cargo-patina/python/sdk` on the path).
-- `cargo patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
+- `patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify[=PERMILLE]] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
   `--record PATH` writes a trace. `--env K=V` sets the guest's starting
   environment, `--cwd PATH` its starting working directory (an absolute path
@@ -101,7 +101,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run with the `host_limit` refusal.
-- `cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+- `patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test [--seed N | --seeds N] [--release] [--instrument] [FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   Native libtest harness mode: rebuilds the named Cargo test target shim-linked,
   stages it under `target/patina/dst/PACKAGE/KIND/NAME/TEST`, runs the exact libtest
   filter with one libtest thread, and records the first failing seed unless it is
@@ -110,17 +110,17 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   workspace member. Staging uses the resolved kind/name, not selector spelling.
   A test repro is always printed on failure; `trace` facts in the JSON envelope
   and a replay repro come only from that recorded child's receipt, never old files.
-- `cargo patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
+- `patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
   flag that conflicts is refused). A fingerprint or operation mismatch fails
   closed with a nonzero exit. A native trace also carries its build identity
-  (`metadata.native`: the executable's and the `cargo-patina` executable's
+  (`metadata.native`: the executable's and the `patina` executable's
   digests, plus the patina version, shim bundle and target as context, stamped
   by the supervisor when it commits the recording); replay against a different build, or of a
   trace with no identity, is refused before the guest starts, naming each
   differing component (refusal class `fingerprint_mismatch`).
-- `cargo patina trace info <TRACE>` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
+- `patina trace info <TRACE>` / `trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N|--last N] [--notable]` / `trace stats <TRACE>` / `trace diff <A> <B> [--context N]`
   Inspect an existing trace without executing a guest. `info` prints metadata,
   resolved event count, and virtual-time span. `events` prints the
   shared decoded event view; `--kind` accepts operation tags or categories
@@ -130,12 +130,12 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   `diff` compares two traces, exits 0 when identical and 1 when metadata/events
   diverge, and reports the first operation/outcome/length divergence. A metadata
   field that is an object on both sides is diffed by member (`native.executable_sha256`).
-- `cargo patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
+- `patina audit <ARTIFACT|SOURCE> [--allow SYMBOL]...`
   Strict fail-closed import allowlist. Any un-interposed effect symbol is a
-  finding. Audit source-first (or a `cargo patina build` artifact): only a
+  finding. Audit source-first (or a `patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `cargo patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR]` (`--mount`: the corpus every generation captures, forwarded to every reproduce command)
+- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR]` (`--mount`: the corpus every generation captures, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
   fault plane's knobs — `fs` (error/short/latency), `crash` (independent
@@ -205,14 +205,14 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   compares it with the default sweep, paired, over many seed bases: guidance
   finds a bug behind nested knob thresholds sooner, but not the workq bugs,
   so prefer the default sweep unless the target has that shape.
-- `cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
+- `patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native edge coverage (`--instrument`, or a
   Go guest). Resolves covmap PCs from the `patina_yield_point` anchor, demangles
   symbols, rolls edges up by crate/module/function (a Go edge, which has no pc,
   by its package only), refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
   `patina.coverage/v1` JSON envelope.
-- `cargo patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--jobs N]`
+- `patina minimize --generation N [--out-dir DIR] [--marker TEXT] [--output PATH] [--jobs N]`
   Reduce one failing campaign generation: delta-debug the fault-knob
   vector that generation drew (each candidate a fresh seeded `run`), print and
   write the standalone reproduction command to `DIR/minimized/generation-N.repro`,
@@ -230,13 +230,13 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   that two runs disagree, which no single-run oracle can preserve.
   Because that oracle is hermetic by construction, candidates are evaluated in
   parallel by default (`--jobs`, default half the CPUs).
-- `cargo patina minimize --params -- cargo patina run <BINARY> --param K=V... [RUN OPTIONS] [-- ARGS]`
+- `patina minimize --params -- patina run <BINARY> --param K=V... [RUN OPTIONS] [-- ARGS]`
   Shrink the `--param` set of a failing command: each candidate drops or
   shrinks a parameter (numbers toward zero, values toward empty) and re-runs
   the command; it still fails when it exits with the original's non-zero
   status. Prints `PATINA_MINIMIZE_PARAMS_COMPLETE params=[...] oracle_runs=N
   repro: <command>`.
-- `cargo patina syscalls`
+- `patina syscalls`
   Print a target-local kernel-entry inventory and its C symbol layer (default:
   this host). Linux x86_64/aarch64 rows carry runtime dispositions; Darwin
   aarch64 inventories pinned BSD, Mach, ARM-special and platform entries,
@@ -372,10 +372,10 @@ Patina. The default-off `macros` feature re-exports `#[patina_dst::test]` for
 dev-dependency use under plain `cargo test`.
 
 - `#[patina_dst::test]`: point-solution DST test. The plain test process finds
-  `cargo-patina` via absolute `PATINA_CLI` or `cargo-patina` on `PATH`, rebuilds
+  `patina` via absolute `PATINA_CLI` or `patina` on `PATH`, rebuilds
   the same libtest target shim-linked, sweeps 20 seeds by default (or macro args
   such as `seed = 7`, `seeds = 200`, `buggify`, `net_drop_permille = 50`), and
-  panics with the failing seed plus `cargo patina test` / `cargo patina replay`
+  panics with the failing seed plus `patina test` / `patina replay`
   repro commands. Missing CLI discovery is a failure, never a skip.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,

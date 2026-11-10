@@ -73,11 +73,11 @@ mod tests {
         // `--package`/`--bin` do not apply to an already-built artifact: fail closed
         // with a precise message rather than silently ignoring the selection.
         let rejected = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             build_workspace,
             &[
                 "audit",
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 "--package",
                 "whatever",
             ],
@@ -150,7 +150,7 @@ mod tests {
 
         let missing = directory.path().join("does-not-exist.patina");
         let out = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             &pkg,
             &["replay", pkg.to_str().unwrap(), missing.to_str().unwrap()],
         );
@@ -172,11 +172,7 @@ mod tests {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let out = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            &pkg,
-            &["run", "--seed", "1"],
-        );
+        let out = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), &pkg, &["run", "--seed", "1"]);
         assert!(
             !out.status.success()
                 && !String::from_utf8_lossy(&out.stdout).contains("TARGET_PKG_MARKER"),
@@ -223,7 +219,7 @@ mod tests {
         );
         let [prebuilt, package_dir] = [&bin, &pkg].map(|target| {
             verdict(&invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 &pkg,
                 &[
                     "run",

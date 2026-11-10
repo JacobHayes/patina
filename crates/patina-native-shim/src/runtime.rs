@@ -414,12 +414,12 @@ pub(crate) static STARTUP_CONSTRUCTOR_FINISHED: AtomicBool = AtomicBool::new(fal
 pub(crate) static LAST_BOUNDARY_SYMBOL: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Guarantee a deterministic runtime is installed before a boundary call, or
-/// fail closed. Ordinary programs built with `cargo patina native-build` do not
+/// fail closed. Ordinary programs built with `patina native-build` do not
 /// call `patina_init_from_env` themselves: the packaged startup path installs
 /// the runtime from the supervisor protocol. This is the belt-and-suspenders
 /// path — if the constructor has not run yet (static-init ordering) but the
 /// protocol is present, it initializes now; if the protocol is absent the
-/// binary is being run outside `cargo patina native-run`, which is a hard,
+/// binary is being run outside `patina native-run`, which is a hard,
 /// clearly reported error rather than a silent seeded-zero run.
 pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     if slot().lock().is_some() {
@@ -439,7 +439,7 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
     if !STARTUP_CONSTRUCTOR_FINISHED.load(Ordering::Acquire) {
         abort_preinit_interposed_call();
     }
-    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `cargo patina run` on a harness binary):
+    // Deferred harness init (PATINA_RT_DEFER_INIT=1, `patina run` on a harness binary):
     // the harness owns installation, so an effect that arrives with no context
     // installed and no install yet performed ran BEFORE `patina_harness_install`.
     // Do NOT auto-init from the env — that would race the harness's overlay and
@@ -462,8 +462,8 @@ pub(crate) fn ensure_runtime() -> Result<(), c_int> {
             abort_with_init_error(&message);
         }
     }
-    let message: &[u8] = b"patina: this binary was built with `cargo patina build` and must \
-run under `cargo patina run` (or with the PATINA_RT_MODE protocol set); no deterministic runtime is installed\n";
+    let message: &[u8] = b"patina: this binary was built with `patina build` and must \
+run under `patina run` (or with the PATINA_RT_MODE protocol set); no deterministic runtime is installed\n";
     let _ = host_write_all(2, message);
     crate::host_abort();
 }

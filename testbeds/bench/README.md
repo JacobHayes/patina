@@ -2,7 +2,7 @@
 
 Five small programs in one `std` binary, each isolating one cost that Patina adds
 to a native run. `mise run bench` (`scripts/bench.py`) runs them natively and
-under `cargo patina run` alongside the larger testbeds and prints, per
+under `patina run` alongside the larger testbeds and prints, per
 workload, wall and CPU medians, peak RSS and the Patina/native ratios. It is
 measurement, not a gate: it fails only when a run fails or two runs disagree.
 `workq` and `pubsub` sleep, which Patina's virtual clock skips, so read their CPU

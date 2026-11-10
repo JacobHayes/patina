@@ -33,7 +33,7 @@ mod tests {
         let guest = super::super::run_facts::shared_sdk_guest("dormant-always", main);
         let directory = tempdir().unwrap();
         let out = directory.path().join("campaign");
-        let run = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let run = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(native_workspace())
             .args([
                 "campaign",
@@ -90,7 +90,7 @@ fn main() {
         let guest = super::super::run_facts::shared_sdk_guest("site-families", main);
         let directory = tempdir().unwrap();
         let out = directory.path().join("campaign");
-        let run = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let run = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(native_workspace())
             .args([
                 "campaign",
@@ -144,7 +144,7 @@ fn main() {
                 out.to_str().unwrap().to_string(),
             ];
             args.extend(extra.iter().map(|arg| arg.to_string()));
-            let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+            let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
             command.current_dir(native_workspace()).args(&args);
             if let Some(value) = inherited_report {
                 command.env("PATINA_SDK_REPORT", value);
@@ -214,7 +214,7 @@ fn main() {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    // End-to-end coverage for `cargo patina campaign` + the liveness watchdog over
+    // End-to-end coverage for `patina campaign` + the liveness watchdog over
     // the buggify-driven planted-bug guest, under `--buggify --swarm`: the campaign
     // catches the planted liveness violation, deduplicates the signature across the
     // generations that fire it, verifies it and records a working reproduce
@@ -230,7 +230,7 @@ fn main() {
 
         let out = directory.path().join("camp");
         let ran = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "campaign",
@@ -316,12 +316,11 @@ fn main() {
         // The recorded reproduce command deterministically re-triggers the violation.
         let reproduce = signature["reproduce"].as_str().unwrap();
         let repro_args: Vec<&str> = reproduce
-            .strip_prefix("cargo patina ")
+            .strip_prefix("patina ")
             .unwrap()
             .split(' ')
             .collect();
-        let reproduced =
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &repro_args);
+        let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &repro_args);
         assert!(
             !reproduced.status.success()
                 && String::from_utf8_lossy(&reproduced.stderr)
@@ -347,7 +346,7 @@ fn main() {
                 continue;
             };
             let ran = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &[
                     "run",
@@ -414,7 +413,7 @@ fn main() {
             }
             let trace = directory.path().join(format!("swarm-{seed}.patina"));
             let ran = invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &[
                     "run",
@@ -478,7 +477,7 @@ fn main() {
             "a masked run must report swarm_deselected=1\nstderr:\n{dropped_stderr}"
         );
         let never_asked = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "run",
@@ -497,7 +496,7 @@ fn main() {
         // in both directions (the replay recomputes `+swarm` without `+buggify` from
         // the metadata), and the diagnostics are identical to the recording's.
         let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "replay",
@@ -552,7 +551,7 @@ fn main() {
             "an armed class must make the swarm draw non-vacuous\nstderr:\n{kept_stderr}"
         );
         let inert = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", guest.to_str().unwrap(), "--seed", "1", "--swarm"],
         );
@@ -574,7 +573,7 @@ fn main() {
         // subset is a usage error, before any generation runs.
         let out = directory.path().join("swarm-zero-campaign");
         let ran = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "campaign",

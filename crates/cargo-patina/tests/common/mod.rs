@@ -22,7 +22,7 @@ use object::{Object, ObjectSymbol};
 /// The profile directory (`.../target/debug` or `.../release`) that holds the
 /// test binary and, alongside it, the shim staticlib.
 pub fn profile_dir() -> PathBuf {
-    Path::new(env!("CARGO_BIN_EXE_cargo-patina"))
+    Path::new(env!("CARGO_BIN_EXE_patina"))
         .parent()
         .expect("cargo-patina bin has a parent profile directory")
         .to_path_buf()
@@ -97,7 +97,7 @@ pub fn workspace_manifest() -> PathBuf {
 }
 
 /// The linker arguments a guest linked by hand needs beside the shim archive
-/// `archive`, as `cargo patina build` passes them: on Linux the `dlsym` wrap
+/// `archive`, as `patina build` passes them: on Linux the `dlsym` wrap
 /// behind the host-alias table, the allocator routing that keeps the
 /// runtime's allocations off the guest's heap, whose object is compiled into
 /// `dir`, and libc again: the shim's objects follow the driver's own `-lc`,
@@ -128,7 +128,7 @@ pub fn shim_rustc_link_args(archive: &Path, dir: &Path) -> Vec<std::ffi::OsStrin
         .collect()
 }
 
-/// The façade and engine `cargo patina build` seals from `archive`, with the
+/// The façade and engine `patina build` seals from `archive`, with the
 /// POSIX object compiled under `flags`, for a guest linked by hand: sealed
 /// once per nextest run for each `variant`.
 pub fn sealed_shim(variant: &str, archive: &Path, flags: &[&str]) -> Vec<PathBuf> {
@@ -332,7 +332,7 @@ pub fn for_each_shim_member(archive_bytes: &[u8], mut visit: impl FnMut(&object:
 }
 
 /// Compile the embedded C POSIX layer (umbrella + family slices + header) into
-/// `dir` with the flags `cargo patina build` uses, returning the object path.
+/// `dir` with the flags `patina build` uses, returning the object path.
 pub fn compile_posix_object(dir: &Path) -> PathBuf {
     for (relative, source) in patina_dst_native_shim::POSIX_C_FAMILY_SOURCES {
         let path = dir.join(relative);
@@ -390,14 +390,14 @@ pub fn c_compiler() -> Command {
     Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
 }
 
-/// Require a successful invocation of the integration test's cargo-patina binary.
+/// Require a successful invocation of the integration test's patina binary.
 pub fn invoke(directory: &Path, arguments: &[&str]) -> Output {
-    invoke_with(env!("CARGO_BIN_EXE_cargo-patina"), directory, arguments)
+    invoke_with(env!("CARGO_BIN_EXE_patina"), directory, arguments)
 }
 
 /// Require a successful CLI invocation with explicit environment overrides.
 pub fn invoke_in_with_env(directory: &Path, arguments: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
     command.current_dir(directory).args(arguments);
     for (name, value) in envs {
         command.env(name, value);

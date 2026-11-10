@@ -8,7 +8,7 @@
 //! while another runs the routine waits until the routine returns; `pthread_getname_np` reads the thread's kernel name (`comm`, which a
 //! thread inherits from its creator and the main thread takes from the
 //! executable's basename, truncated to 15 bytes: the native run executes a
-//! link named `patina-guest`, as `cargo patina` names every guest in its
+//! link named `patina-guest`, as `patina` names every guest in its
 //! `argv[0]`), refusing a buffer
 //! shorter than `TASK_COMM_LEN` with `ERANGE`; `pthread_cancel` of a
 //! thread asleep in a cancellation point (`nanosleep`) ends it there, its

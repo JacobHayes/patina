@@ -1,4 +1,4 @@
-"""python-guest: a Python application built with `cargo patina build --python`.
+"""python-guest: a Python application built with `patina build --python`.
 
 It prints one `PYTHON_GUEST` line per fact it checks, so the testbed compares
 runs line by line. With the argument `boom` it raises after them, with

@@ -7,12 +7,12 @@ use crate::supervisor_identity::supervisor_sha256;
 use patina_dst_trace::{NativeIdentityRecord, NativeLibraryIdentity, Sha256Digest};
 
 /// The build identity of running `image`, the guest executable, under this
-/// `cargo-patina`.
+/// `patina`.
 ///
 /// The executable is hashed as the bytes the run maps, so the digest names
 /// exactly the bytes the guest executes; each library the loader maps beside
 /// it, by the bytes the audit judged; the supervisor by its own digest. The
-/// rest are facts of this `cargo-patina`.
+/// rest are facts of this `patina`.
 pub(super) fn native_identity(
     image: &Image,
     load_set: &patina_dst_target::LoadSet<'_>,
@@ -47,7 +47,7 @@ pub(super) fn native_identity_refusal(
     let Some(recorded) = recorded else {
         return Some(format!(
             "native fingerprint mismatch: trace {} carries no native build identity, so nothing \
-             says which build it replays against. Only `cargo patina run --record` of a native \
+             says which build it replays against. Only `patina run --record` of a native \
              binary records one; this trace was recorded some other way. Re-record it.",
             trace.display()
         ));
@@ -69,8 +69,8 @@ pub(super) fn native_identity_refusal(
     Some(format!(
         "native fingerprint mismatch: trace {} was recorded against a different build; differs \
          in: {differing}. The trace was recorded by \
-         cargo-patina {} for {} with shim bundle {}; this run is cargo-patina {} for {} with shim \
-         bundle {}. Replay it with the binary and the cargo-patina it was recorded with, or re-record it.",
+         patina {} for {} with shim bundle {}; this run is patina {} for {} with shim \
+         bundle {}. Replay it with the binary and the patina it was recorded with, or re-record it.",
         trace.display(),
         recorded.patina_version,
         recorded.target,

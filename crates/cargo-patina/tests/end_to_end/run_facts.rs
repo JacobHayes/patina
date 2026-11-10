@@ -21,7 +21,7 @@ pub(super) fn shared_guest(name: &str, build: impl FnOnce(&Path) -> PathBuf) -> 
 }
 
 /// An SDK guest package (`patina-dst` dependency, `main` as its source) built
-/// once per nextest run through `cargo patina build` and shared by name.
+/// once per nextest run through `patina build` and shared by name.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn shared_sdk_guest(name: &str, main: &str) -> PathBuf {
     shared_guest(name, |directory| {
@@ -133,11 +133,11 @@ mod tests {
             .collect()
     }
 
-    /// The envelope of `cargo patina <arguments>`, whatever its exit status.
+    /// The envelope of `patina <arguments>`, whatever its exit status.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn envelope(arguments: &[&str]) -> serde_json::Value {
         let output = invoke_with_deadline(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             arguments,
             Duration::from_secs(20),

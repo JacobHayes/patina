@@ -11,10 +11,10 @@ different schedule and different faults — a reproducible searchlight for the
 bugs that normally only show up in production.
 
 ```sh
-cargo patina run ./my-server --seed 42                       # a deterministic run
-cargo patina run ./my-server --seed 42 --record run.patina   # record it
-cargo patina replay ./my-server run.patina                   # reproduce it exactly, flag-free
-cargo patina campaign ./my-server --gens 1000                # hunt for failing seeds
+patina run ./my-server --seed 42                       # a deterministic run
+patina run ./my-server --seed 42 --record run.patina   # record it
+patina replay ./my-server run.patina                   # reproduce it exactly, flag-free
+patina campaign ./my-server --gens 1000                # hunt for failing seeds
 ```
 
 Patina is **experimental**. It is developed in the open, validated hard (see
@@ -58,7 +58,7 @@ Requires Rust 1.99 and a C compiler. The repository pins Rust 1.99.1 in
 git clone https://github.com/JacobHayes/patina
 cd patina
 cargo build --release -p cargo-patina
-export PATH="$PWD/target/release:$PATH"    # `cargo patina` now resolves
+export PATH="$PWD/target/release:$PATH"    # `patina` now resolves
 ```
 
 Save this as `lottery.rs` — plain `std`, nothing Patina-specific:
@@ -85,11 +85,11 @@ fn main() {
 Run it under the deterministic runtime (`run` builds sources on the fly):
 
 ```sh
-$ cargo patina run lottery.rs --seed 1
+$ patina run lottery.rs --seed 1
 ticket=817442 epoch=0s elapsed=3600s
-$ cargo patina run lottery.rs --seed 1
+$ patina run lottery.rs --seed 1
 ticket=817442 epoch=0s elapsed=3600s      # identical: entropy is seeded
-$ cargo patina run lottery.rs --seed 2
+$ patina run lottery.rs --seed 2
 ticket=361331 epoch=0s elapsed=3600s      # a different world
 ```
 
@@ -100,10 +100,10 @@ is a pure function of the seed.
 Now record a run, replay it byte-for-byte, and sweep seeds:
 
 ```sh
-cargo patina build lottery.rs --output lottery       # build once for run-many stability
-cargo patina run ./lottery --seed 1 --record run.patina
-cargo patina replay ./lottery run.patina             # no flags: the trace is authoritative
-cargo patina campaign ./lottery --gens 100          # sweep seeds, dedupe and reproduce failures
+patina build lottery.rs --output lottery       # build once for run-many stability
+patina run ./lottery --seed 1 --record run.patina
+patina replay ./lottery run.patina             # no flags: the trace is authoritative
+patina campaign ./lottery --gens 100          # sweep seeds, dedupe and reproduce failures
 ```
 
 From here, the [tutorial](./TUTORIAL.md) walks a small program from
@@ -119,18 +119,18 @@ source-first native libtest harness mode for one exact test target.
 
 | Verb | What it does | Example |
 |---|---|---|
-| `run` | Build (if needed) and run an artifact deterministically. | `cargo patina run app.rs --seed 7` |
-| `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `cargo patina test . --harness-target my_crate --exact tests::case --seeds 20` |
-| `build` | Build the shim-linked native binary, a Go main package (`--go`, Linux), or a Python application frozen into CPython (`--python`, Linux). | `cargo patina build ./pkg --output app` |
-| `audit` | Report the true residual effect surface of a binary; default-deny. | `cargo patina audit app.rs` |
-| `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `cargo patina replay ./app run.patina` |
-| `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `cargo patina trace info run.patina` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `cargo patina campaign ./app --gens 200 --buggify --out-dir out/` |
-| `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `cargo patina coverage ./app out/` |
-| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `cargo patina minimize --generation 14 --out-dir out/` |
-| `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `cargo patina syscalls` |
+| `run` | Build (if needed) and run an artifact deterministically. | `patina run app.rs --seed 7` |
+| `test` | Rebuild one libtest harness shim-linked and sweep an exact test across seeds. | `patina test . --harness-target my_crate --exact tests::case --seeds 20` |
+| `build` | Build the shim-linked native binary, a Go main package (`--go`, Linux), or a Python application frozen into CPython (`--python`, Linux). | `patina build ./pkg --output app` |
+| `audit` | Report the true residual effect surface of a binary; default-deny. | `patina audit app.rs` |
+| `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `patina replay ./app run.patina` |
+| `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `patina trace info run.patina` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `NONDETERMINISM`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `patina campaign ./app --gens 200 --buggify --out-dir out/` |
+| `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `patina coverage ./app out/` |
+| `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `patina minimize --generation 14 --out-dir out/` |
+| `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `patina syscalls` |
 
-Native harness mode is the tight point-solution loop: `cargo patina test
+Native harness mode is the tight point-solution loop: `patina test
 <DIR|Cargo.toml> --harness-target NAME --exact MOD::test --seeds N` runs the
 same Cargo libtest target under the native shim with a single libtest thread.
 Use `lib:NAME`, `bin:NAME` or `test:NAME` when target kinds share a name. A
@@ -139,8 +139,8 @@ commands.
 
 For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
-Rust test function. Plain `cargo test` then discovers `cargo-patina` through
-`PATINA_CLI` (absolute path) or `cargo-patina` on `PATH`, rebuilds the same
+Rust test function. Plain `cargo test` then discovers `patina` through
+`PATINA_CLI` (absolute path) or `patina` on `PATH`, rebuilds the same
 libtest target shim-linked, and sweeps the test (20 seeds by default). Missing
 CLI discovery is a test failure, never a skip.
 
@@ -151,9 +151,9 @@ control plane.
 
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare
-`cargo patina --help --format json` is a compact index (every verb's summary and
+`patina --help --format json` is a compact index (every verb's summary and
 usage forms, the global flags, and the environment protocol), while
-`cargo patina <verb> --help --format json` returns that one verb's full flag
+`patina <verb> --help --format json` returns that one verb's full flag
 detail — handy for scripts and AI agents. Results are available as JSON via
 `--format json` (usually a single `patina.result/v1` envelope; `coverage` emits
 `patina.coverage/v1`; `syscalls` emits `patina.syscalls/v3`; `trace events`
@@ -211,7 +211,7 @@ into the trace so replay reproduces them flag-free.
 - **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling) and
   `--swarm` (seed-derived fault-class subsets). `campaign --sched-pct` sweeps
   PCT per generation. To make atomics-only race windows schedulable, build with
-  `cargo patina build --instrument` and run with `--yield-stride N`: a
+  `patina build --instrument` and run with `--yield-stride N`: a
   scheduling point every N edges a thread executes, 1 being every edge (densest,
   and by far the most expensive). The stride is a run setting recorded in the
   trace; at the default 0 the same binary keeps only its edge counters, so
@@ -250,12 +250,12 @@ Effects Patina does not model (RPC, S3, devices) go through
 `patina_dst::custom_op` / `custom_op_faultable`: recorded, replayed without
 re-running, and, for the faultable form, failed on demand with
 `--custom-op-fail-permille`.
-Enable at run time with `cargo patina run --buggify`; decisions are pure
+Enable at run time with `patina run --buggify`; decisions are pure
 functions of the seed, and the run's `sdk` facts (and its human
 `PATINA_SDK_REPORT` line) prove sites actually fired (no vacuous "all clean").
 Literal-label SDK macro calls also declare a link-time site table under
 Patina, so never-reached `sometimes!`/`reachable!` oracles appear in reports
-with `registered_gens=0`. Each row carries `@file:line`. `cargo patina
+with `registered_gens=0`. Each row carries `@file:line`. `patina
 campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
 when a `sometimes!`/`reachable!` oracle is never satisfied; use
 `--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
@@ -264,7 +264,7 @@ is the source of truth for which sites the build declares. A declared `always!` 
 ### Record and replay
 
 `--record` captures every boundary decision into a compact JSON `.patina` trace
-(inspect with `jq` or `cargo patina trace info|events`). Replay is strict: the
+(inspect with `jq` or `patina trace info|events`). Replay is strict: the
 trace carries the seed, fault knobs, buggify config, guest argv, and native
 `--env` and `--param` values, and any mismatch — changed binary, changed
 config, diverging operation — fails closed rather than lying. A native trace
@@ -279,7 +279,7 @@ and `--yield-stride` sees more edges to preempt.
 Use `--release` (on `run`, or `build --release` then `run`) for performance
 measurement, long campaigns once the hunt is over, and release-only codegen
 paths. `--instrument` binaries and Go guests emit edge coverage
-(`--coverage-out`, `cargo patina coverage`), which campaigns accumulate and
+(`--coverage-out`, `patina coverage`), which campaigns accumulate and
 `campaign --guided` uses to bias generations toward new coverage.
 
 ### proptest
@@ -330,7 +330,7 @@ case. Two things differ from plain `cargo test`:
 | Linux arm64 | Supported for libc-path binaries; arm64 kernels lack syscall-user-dispatch, so raw-inline-syscall binaries are *refused* (fail closed), not run. |
 
 On Linux the virtual kernel is pinned to Ubuntu 24.04's 6.8 kernel and glibc
-2.39 (`cargo patina --version` names it): `uname` reports 6.8 and a syscall
+2.39 (`patina --version` names it): `uname` reports 6.8 and a syscall
 added later answers `ENOSYS`. The conformance scenarios are authoritative only
 on a host running that pin.
 

@@ -24,7 +24,7 @@
 //!
 //! The runtime's own string-comparison hooks copy both strings on every
 //! unequal comparison, which makes a loop over a long string quadratic. The
-//! build therefore runs `cargo-patina` as its `-toolexec` wrapper, which
+//! build therefore runs `patina` as its `-toolexec` wrapper, which
 //! compiles the `runtime` package from a copy of the toolchain's hook source
 //! whose string hooks only count ([`run_as_toolexec`]). A guest that names
 //! its own `-toolexec`, or a toolchain whose hooks Patina does not recognise,
@@ -63,7 +63,7 @@ const METER_GCFLAG: &str = "-d=libfuzzer";
 const METER_EXPERIMENT: &str = "preemptibleloops";
 
 /// The marker the meter object embeds (`patina_go_meter.c`): a program
-/// carrying it is a Go guest built by `cargo patina build --go`.
+/// carrying it is a Go guest built by `patina build --go`.
 const METER_MARKER: &[u8] = b"PATINA_GO_METER_V1";
 
 /// The processor count a metered Go guest's runtime schedules goroutines on
@@ -107,7 +107,7 @@ pub(super) fn check_go_args(go_args: &[OsString]) -> Result<(), CliError> {
             && RESERVED_GO_FLAGS.contains(&name)
         {
             return Err(CliError::usage(format!(
-                "go build option {text:?} is Patina's: a Go guest's link line and output are set by `cargo patina build --go`"
+                "go build option {text:?} is Patina's: a Go guest's link line and output are set by `patina build --go`"
             )));
         }
     }
@@ -166,7 +166,7 @@ pub(super) fn check_go_test_args(go_args: &[OsString]) -> Result<(), CliError> {
         {
             return Err(CliError::usage(format!(
                 "go test option {text:?} runs tests rather than building them, so `go test -c` \
-                 would ignore it; give it to the test guest instead: `cargo patina run <TEST BINARY> \
+                 would ignore it; give it to the test guest instead: `patina run <TEST BINARY> \
                  -- -test.{name}...`"
             )));
         }
@@ -300,7 +300,7 @@ fn metered_experiment(configured: &str) -> String {
     }
 }
 
-/// The first argument that makes `cargo-patina` run as a Go build's
+/// The first argument that makes `patina` run as a Go build's
 /// `-toolexec` wrapper ([`run_as_toolexec`]) rather than parse a verb.
 pub(super) const TOOLEXEC_ROLE: &str = "__patina-go-toolexec";
 
@@ -569,11 +569,8 @@ pub(super) fn build_go_package(
     let toolexec = if names_toolexec(&effective_args) {
         None
     } else {
-        let executable = std::env::current_exe().map_err(|error| {
-            CliError(format!(
-                "failed to locate the running cargo-patina: {error}"
-            ))
-        })?;
+        let executable = std::env::current_exe()
+            .map_err(|error| CliError(format!("failed to locate the running patina: {error}")))?;
         stage_runtime_hooks(package_dir, shim)?
             .map(|hooks| toolexec_value(&executable, &hooks))
             .transpose()?

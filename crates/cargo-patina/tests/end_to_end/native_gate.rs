@@ -48,7 +48,7 @@ fn main() {
         );
 
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );
@@ -68,7 +68,7 @@ fn main() {
         );
 
         let audited = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["audit", bin.to_str().unwrap()],
         );
@@ -133,7 +133,7 @@ fn main() {
         );
 
         let ran = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );
@@ -367,7 +367,7 @@ fn main() {
 
         let run_once = || {
             invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &["run", bin.to_str().unwrap(), "--seed", "1"],
             )
@@ -514,7 +514,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
         );
         let run = || {
             invoke_unchecked(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &["run", bin.to_str().unwrap(), "--seed", "1"],
             )
@@ -590,7 +590,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
         );
 
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );
@@ -651,7 +651,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
             ],
         );
         let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );
@@ -686,7 +686,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
                 bin.to_str().unwrap(),
             ],
         );
-        let exe = env!("CARGO_BIN_EXE_cargo-patina");
+        let exe = env!("CARGO_BIN_EXE_patina");
 
         // (1) Default-deny: refuses to run, names and categorizes the symbols, and
         // the guest never executes.
@@ -802,7 +802,7 @@ fn main() {
         );
 
         let ran = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", bin.to_str().unwrap(), "--seed", "1"],
         );
@@ -903,7 +903,7 @@ fn main() {
                 args.push("--release");
             }
             args.extend([target.to_str().unwrap(), "--seed", "1", "--", mode]);
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &args)
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &args)
         };
         let stdout = |output: &Output| String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = |output: &Output| String::from_utf8_lossy(&output.stderr).into_owned();

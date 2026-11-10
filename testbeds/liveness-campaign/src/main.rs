@@ -1,4 +1,4 @@
-//! Planted-bug guest for the Patina wave-13 liveness watchdog + `cargo patina
+//! Planted-bug guest for the Patina wave-13 liveness watchdog + `patina
 //! campaign` end-to-end coverage.
 //!
 //! The bug is a classic *liveness* bug — "never converges" — gated by a buggify

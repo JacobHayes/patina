@@ -11,7 +11,7 @@ repository.workspace = true
 patina-dst-runtime.workspace = true
 serde_json.workspace = true
 
-# `cargo patina build` injects `patina_shim` (only on the native paths that link
+# `patina build` injects `patina_shim` (only on the native paths that link
 # the shim below the guest), so the shim FFI here is referenced only where those
 # symbols actually resolve. Declaring the cfg keeps `-D warnings` clean.
 [lints.rust]

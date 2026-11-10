@@ -187,7 +187,7 @@ def command(args, *, cwd=ROOT, timeout=120):
     return result
 
 
-# A cold release cargo-patina build alone can take well over a minute on a
+# A cold release patina build alone can take well over a minute on a
 # loaded host; the guest-run default would kill it.
 CARGO_TIMEOUT = 900
 
@@ -212,7 +212,7 @@ def run():
         return
     # Honor the check runner's per-rung Cargo isolation. Locate products from
     # compiler artifact messages, never an assumed target/ directory.
-    cli = cargo_bins(["build", "--release", "--locked", "-p", "cargo-patina"])["cargo-patina"]
+    cli = cargo_bins(["build", "--release", "--locked", "-p", "cargo-patina"])["patina"]
     native = cargo_bins(["build", "--release", "--locked", "--manifest-path",
                          str(HERE / "Cargo.toml"), "--bins"])
     with tempfile.TemporaryDirectory(prefix="patina-multiproc-") as temp:
@@ -224,10 +224,10 @@ def run():
             native_result = command([binary, *args], timeout=15)
             print(f"{name}: native PASS", flush=True)
             built = out / name
-            command([cli, "patina", "build", str(HERE), "--bin", name,
+            command([cli, "build", str(HERE), "--bin", name,
                      "--release", "--output", str(built)])
             args = ([str(built)] if name in RUST else []) + [str(out / f"patina-{name}")]
-            argv = [cli, "patina", "run", str(built), "--format", "json", "--", *args]
+            argv = [cli, "run", str(built), "--format", "json", "--", *args]
             result = invoke(argv, timeout=15)
             try:
                 envelope = json.loads(result.stdout)
@@ -237,7 +237,7 @@ def run():
                 if (result.returncode != 2 or envelope.get("refusal", {}).get("class")
                         != "native_prerun_audit"):
                     raise RuntimeError(f"{name}: expected the pre-run audit refusal\n{result.stdout}")
-                result = invoke([cli, "patina", "audit", str(built), "--format", "json"], timeout=15)
+                result = invoke([cli, "audit", str(built), "--format", "json"], timeout=15)
                 envelope = json.loads(result.stdout)
             if classify(result.returncode, envelope, expected) != "pending-gap":
                 raise RuntimeError(f"{name}: unexpected Patina outcome\n{result.stdout}\n{result.stderr}")

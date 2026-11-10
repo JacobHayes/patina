@@ -7,7 +7,7 @@ the same native-shim entry points as the Rust SDK (patina-dst) and the Go SDK
 (go/patina), so a site, verdict or custom op means the same thing in every
 language.
 
-Every Python guest `cargo patina build --python` builds has this package. Under
+Every Python guest `patina build --python` builds has this package. Under
 plain Python (this directory on the path) it is inert: no site fires, every
 check returns its condition and nothing else happens, so code ships the SDK
 unconditionally.
@@ -166,7 +166,7 @@ class Buggify(_Site):
 
     def fires(self, probability=None):
         """Whether the site fires on this evaluation, at `probability` (0 to
-        1) or the run's default. Under Patina an active site (`cargo patina
+        1) or the run's default. Under Patina an active site (`patina
         run --buggify`) fires as a pure function of the seed; outside Patina,
         and in a run without --buggify, it never does."""
         if _patina is None:
@@ -233,7 +233,7 @@ def verdict(kind, label, detail=""):
 
 
 def setup_complete():
-    """Mark the boundary between setup and the workload. With `cargo patina
+    """Mark the boundary between setup and the workload. With `patina
     run --buggify-after-setup`, fault sites stay inert until it is called (and
     a run that never calls it fails). It does nothing outside Patina."""
     if _patina is not None:
@@ -267,7 +267,7 @@ def rng():
 
 
 def param(key):
-    """The run parameter `key` (`cargo patina run --param KEY=VALUE`) as str,
+    """The run parameter `key` (`patina run --param KEY=VALUE`) as str,
     recorded in the trace and restored on replay; None when the run has none
     (and always outside Patina)."""
     if _patina is None:

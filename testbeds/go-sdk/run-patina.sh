@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 ###############################################################################
 # go-sdk — a Go guest instrumented with Patina's Go SDK (go/patina), built by
-# `cargo patina build --go` (Linux).
+# `patina build --go` (Linux).
 #
 # The guest (main.go) declares its sites at package level: an Always, a
 # Sometimes its seeded draws satisfy, a Reachable it reaches and one it never
@@ -38,7 +38,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/go-sdk}"
 export CARGO_TARGET_DIR="$target_dir"
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 out="$target_dir/patina"
 built="$out/go-sdk"
 
@@ -57,18 +57,18 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 mkdir -p "$out" || { echo "FATAL: mkdir $out failed" >&2; exit 3; }
 
 fail() { echo "go-sdk: FAIL $*" >&2; exit 1; }
 
-echo "==> building the SDK guest (cargo patina build --go)"
-"$PATINA" patina build "$here" --go --output "$built" --release -- -trimpath >/dev/null \
+echo "==> building the SDK guest (patina build --go)"
+"$PATINA" build "$here" --go --output "$built" --release -- -trimpath >/dev/null \
   || { echo "FATAL: patina build --go of the SDK guest failed" >&2; exit 3; }
 
 echo "==> [1] audit: clean"
-"$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1 \
+"$PATINA" audit "$built" >"$out/audit.txt" 2>&1 \
   || { cat "$out/audit.txt" >&2; fail "[1] audit refused the guest"; }
 
 # The line of main.go that declares LABEL.
@@ -78,14 +78,14 @@ line_of() { grep -n "\"$1\"" "$here/main.go" | cut -d: -f1; }
 field_of() { sed -n "s/^GO_SDK_RESULT .* $2=\([^ ]*\).*/\1/p" "$1"; }
 
 echo "==> [2] the SDK is live: simulated, every site declared at its line"
-"$PATINA" patina run "$built" --seed 1 --format json >"$out/run1.json" 2>/dev/null \
+"$PATINA" run "$built" --seed 1 --format json >"$out/run1.json" 2>/dev/null \
   || { cat "$out/run1.json" >&2; fail "[2] the run exited nonzero"; }
 python3 -c '
 import json, sys
 verdicts = json.load(open(sys.argv[1]))["verdicts"]
 assert [(v["kind"], v["label"]) for v in verdicts] == [("pass", "go-sdk-ledger-settled")], verdicts
 ' "$out/run1.json" || { cat "$out/run1.json" >&2; fail "[2] the pass verdict is not the run's one verdict"; }
-"$PATINA" patina run "$built" --seed 1 >"$out/run1.out" 2>"$out/run1.err" \
+"$PATINA" run "$built" --seed 1 >"$out/run1.out" 2>"$out/run1.err" \
   || { cat "$out/run1.out" "$out/run1.err" >&2; fail "[2] the run exited nonzero"; }
 grep -q '^GO_SDK_RESULT simulated=true held=true ' "$out/run1.out" \
   || { cat "$out/run1.out" >&2; fail "[2] unexpected GO_SDK_RESULT"; }
@@ -108,10 +108,10 @@ done
   || { echo "$report" >&2; fail "[2] the never-reached site registered"; }
 
 echo "==> [3] same-seed repeat and record → replay are byte-identical"
-"$PATINA" patina run "$built" --seed 1 >"$out/run2.out" 2>"$out/run2.err" || fail "[3] repeat run failed"
-"$PATINA" patina run "$built" --seed 1 --record "$out/sdk.patina" >"$out/record.out" 2>"$out/record.err" \
+"$PATINA" run "$built" --seed 1 >"$out/run2.out" 2>"$out/run2.err" || fail "[3] repeat run failed"
+"$PATINA" run "$built" --seed 1 --record "$out/sdk.patina" >"$out/record.out" 2>"$out/record.err" \
   || fail "[3] record run failed"
-"$PATINA" patina replay "$built" "$out/sdk.patina" >"$out/replay.out" 2>"$out/replay.err" \
+"$PATINA" replay "$built" "$out/sdk.patina" >"$out/replay.out" 2>"$out/replay.err" \
   || { cat "$out/replay.err" >&2; fail "[3] replay failed"; }
 for pair in run1:run2 record:replay; do
   for stream in out err; do
@@ -140,16 +140,16 @@ if len(sys.argv) > 2:
     assert envelope["guest_exit"] == recorded["guest_exit"], (envelope["guest_exit"], recorded["guest_exit"])
 ' "$@"
 }
-"$PATINA" patina run "$built" --seed 1 --param violate=1 --record "$out/violate.patina" --format json \
+"$PATINA" run "$built" --seed 1 --param violate=1 --record "$out/violate.patina" --format json \
   >"$out/violate.json" 2>"$out/violate.err"
 violated "$out/violate.json" || { cat "$out/violate.json" >&2; fail "[4] no violation verdict"; }
-"$PATINA" patina replay "$built" "$out/violate.patina" --format json >"$out/violate-replay.json" 2>/dev/null
+"$PATINA" replay "$built" "$out/violate.patina" --format json >"$out/violate-replay.json" 2>/dev/null
 violated "$out/violate-replay.json" "$out/violate.json" || { cat "$out/violate-replay.json" >&2; fail "[4] the replay lost the verdict"; }
 
 echo "==> [5] armed buggify after setup fires the fault, delay and knob sites"
 [[ $(field_of "$out/run1.out" dropped) == 0 && $(field_of "$out/run1.out" width) == 8 ]] \
   || { cat "$out/run1.out" >&2; fail "[5] an unarmed run fired a site"; }
-"$PATINA" patina run "$built" --seed 1 --buggify-after-setup --buggify-activation-permille 1000 \
+"$PATINA" run "$built" --seed 1 --buggify-after-setup --buggify-activation-permille 1000 \
   >"$out/buggify.out" 2>"$out/buggify.err" \
   || { cat "$out/buggify.out" "$out/buggify.err" >&2; fail "[5] the armed run failed"; }
 armed="$(grep '^PATINA_SDK_REPORT ' "$out/buggify.err")" || fail "[5] no SDK report"
@@ -163,16 +163,16 @@ knob="$(sed -n 's/.* site=go-sdk-ledger-width|knob|a1|[^ ]*|k\([0-9]*\)|.*/\1/p'
 (( $(field_of "$out/buggify.out" dropped) > 0 )) || { cat "$out/buggify.out" >&2; fail "[5] no draw dropped"; }
 
 echo "==> [6] custom ops: performed on record, replayed without, and a seeded fault"
-"$PATINA" patina run "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
+"$PATINA" run "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
   || { cat "$out/ops.err" >&2; fail "[6] the custom-op run failed"; }
-"$PATINA" patina replay "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
+"$PATINA" replay "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
   || { cat "$out/ops-replay.err" >&2; fail "[6] the custom-op replay failed"; }
 [[ $(field_of "$out/ops.out" performed) == 2 && $(field_of "$out/ops-replay.out" performed) == 0 ]] \
   && [[ $(field_of "$out/ops-replay.out" fetched) == etag-7 && $(field_of "$out/ops-replay.out" plain) == 7 ]] \
   || { cat "$out/ops.out" "$out/ops-replay.out" >&2; fail "[6] a replay performed, or lost a result"; }
-"$PATINA" patina run "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
+"$PATINA" run "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
   >"$out/fault.out" 2>"$out/fault.err" || { cat "$out/fault.err" >&2; fail "[6] the faulted run failed"; }
-"$PATINA" patina replay "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
+"$PATINA" replay "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
   || { cat "$out/fault-replay.err" >&2; fail "[6] the faulted replay failed"; }
 # Only the op that declared a failure faults, and it does not perform.
 [[ $(field_of "$out/fault.out" performed) == 1 && $(field_of "$out/fault.out" fetched) == UNAVAILABLE ]] \
@@ -182,7 +182,7 @@ echo "==> [6] custom ops: performed on record, replayed without, and a seeded fa
 
 echo "==> [7] a campaign fails its gate on the never-reached site"
 rm -rf "$out/campaign"
-if "$PATINA" patina campaign "$built" --gens 2 --out-dir "$out/campaign" >"$out/campaign.out" 2>&1; then
+if "$PATINA" campaign "$built" --gens 2 --out-dir "$out/campaign" >"$out/campaign.out" 2>&1; then
   cat "$out/campaign.out" >&2; fail "[7] the campaign passed with a site never reached"
 fi
 grep -q "UNMET reachable 'go-sdk-never-reached'" "$out/campaign.out" \

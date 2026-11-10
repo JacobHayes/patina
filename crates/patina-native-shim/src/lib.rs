@@ -1,6 +1,6 @@
 //! Explicit native C ABI entry points for Patina.
 //!
-//! Internal crate: the native interposition layer that `cargo patina build`
+//! Internal crate: the native interposition layer that `patina build`
 //! links below a guest binary. The Rust side here exposes prefixed
 //! `patina_*` C ABI entry points over the deterministic runtime; the bundled C
 //! glue (the staged `patina_posix.c` and its slices under `c/posix/`,
@@ -83,7 +83,7 @@ pub use time_abi::*;
 
 // The syscall registry: every kernel number with its disposition, the symbol
 // layer mapped onto it, and the vendored-table gates. Platform-independent
-// data; `cargo patina syscalls` reads it and the Linux SUD dispatcher is
+// data; `patina syscalls` reads it and the Linux SUD dispatcher is
 // generated from it. See `registry/mod.rs`.
 pub mod registry;
 

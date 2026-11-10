@@ -240,7 +240,7 @@ pub(crate) unsafe fn scrub_environ() {
         let reserved = control_getenv(c"PATINA_RT_INITIAL_STACK".as_ptr());
         if reserved.is_null() {
             if count != 0 {
-                fatal(b"patina: unreserved initial-stack environment: nonempty map requires cargo patina run\n");
+                fatal(b"patina: unreserved initial-stack environment: nonempty map requires patina run\n");
             }
             ptr::write_bytes(STATE.host, 0, STATE.host_count + 1);
             patina_environ_install(STATE.host);

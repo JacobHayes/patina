@@ -26,7 +26,7 @@ mod tests {
 
         // A continuation needs nothing re-supplied either.
         let extended = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &[
                 "campaign",
@@ -97,7 +97,7 @@ mod tests {
 
         let refusing = shared_sdk_guest("buggify-dup", BUGGIFY_DUP_MAIN);
         let output = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &["run", refusing.to_str().unwrap(), "--seed", "1"],
         );

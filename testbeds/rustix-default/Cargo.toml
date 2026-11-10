@@ -5,7 +5,7 @@
 # DEFAULT backend (linux_raw on Linux — raw inline `syscall` instructions, no
 # libc wrappers). That is exactly the binary class the import audit could not
 # see and the instruction scan refused before SUD. Built through the packaged
-# native path, `cargo patina build` DROPS `--cfg rustix_use_libc` on x86_64
+# native path, `patina build` DROPS `--cfg rustix_use_libc` on x86_64
 # (SUD-capable), so the raw syscalls stay raw and are trapped at run time by the
 # SIGSYS dispatcher. There is deliberately NO buggify/patina dependency: the
 # same source is a plain std+rustix program.

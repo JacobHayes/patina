@@ -126,7 +126,7 @@ fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
 #[test]
 fn minimize_params_reduces_a_failing_native_runs_parameters() {
     let (_, binary) = sdk_guest();
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let patina = env!("CARGO_BIN_EXE_patina");
     // A `--param` environment default must not refill a parameter a candidate
     // dropped.
     let output = invoke_in_with_env(
@@ -166,7 +166,7 @@ fn every_declared_sdk_macro_emits_an_unreached_linked_descriptor() {
     let directory = tempdir().unwrap();
     let out = directory.path().join("campaign");
     let campaign = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         native_workspace(),
         &[
             "campaign",

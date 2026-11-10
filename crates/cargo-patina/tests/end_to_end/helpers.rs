@@ -456,7 +456,7 @@ pub(super) fn assert_campaign_sites_carry_identities(binary: &Path, expected_lab
     // The guest's unreached `reachable!` fails the campaign's coverage gate;
     // only the sites store it leaves behind matters here.
     invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         native_workspace(),
         &[
             "campaign",
@@ -520,7 +520,7 @@ pub(super) fn assert_native_harness_prerun_refusal(
         .output()
         .unwrap();
     assert!(native.status.success(), "{native:?}");
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let patina = env!("CARGO_BIN_EXE_patina");
     let staged =
         fixture_target_directory(root).join(format!("patina/dst/{name}/lib/{name}/{exact}"));
     fs::create_dir_all(&staged).unwrap();
@@ -591,7 +591,7 @@ pub(super) fn assert_native_harness_prerun_refusal(
 //
 // Validation gates for USAGE-MODES.md usage mode 2 (startup Option B, deferred
 // init). A harness binary depends on `patina-dst-harness` and is built and run
-// through `cargo patina run`; ordinary `std` effects in the application
+// through `patina run`; ordinary `std` effects in the application
 // closure are interposed by the native shim, and the harness's `HarnessBuilder`
 // overlay flows through the same `RuntimeConfig` fields the CLI env path sets.
 
@@ -614,7 +614,7 @@ pub(super) fn write_harness_fixture(dir: &Path, name: &str, main_rs: &str) {
     fs::write(dir.join("src/main.rs"), main_rs).unwrap();
 }
 
-/// Build a harness fixture into `out` through `cargo patina build`.
+/// Build a harness fixture into `out` through `patina build`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
     invoke(
@@ -630,7 +630,7 @@ pub(super) fn build_harness_bin(dir: &Path, out: &Path) {
 
 // ---- campaign forwards the native `run` invocation shape ---------------------
 //
-// A campaign spawns child `cargo patina run` processes. The
+// A campaign spawns child `patina run` processes. The
 // pre-run gate surface (`--allow`, `--allow-unsupported-symbols`) are host/build
 // facts, not seed-derived knobs: without them every generation of an affected
 // guest is refused IDENTICALLY, so the campaign is not a sweep that reports
@@ -654,11 +654,7 @@ pub(super) fn campaign_run(out: &Path, guest: &Path, extra: &[&str]) -> Output {
         "json",
     ];
     args.extend_from_slice(extra);
-    invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
-        native_workspace(),
-        &args,
-    )
+    invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -678,12 +674,12 @@ pub(super) fn build_facts_guest(directory: &Path, name: &str, source: &str) -> P
     binary
 }
 
-/// The `sha256:` identity of the `cargo-patina` under test, as a recording or
+/// The `sha256:` identity of the `patina` under test, as a recording or
 /// a campaign names it: the SHA-256 of its linker build ID, or of its bytes
 /// when it carries none.
 pub(super) fn supervisor_identity() -> String {
     use object::Object;
-    let bytes = fs::read(env!("CARGO_BIN_EXE_cargo-patina")).unwrap();
+    let bytes = fs::read(env!("CARGO_BIN_EXE_patina")).unwrap();
     let file = object::File::parse(&*bytes).unwrap();
     let id = match file.build_id() {
         Ok(Some(id)) => Some(id.to_vec()),
@@ -691,7 +687,7 @@ pub(super) fn supervisor_identity() -> String {
     };
     let digest = match id {
         Some(id) => Sha256::new()
-            .chain_update(b"cargo-patina build id\0")
+            .chain_update(b"patina build id\0")
             .chain_update(&id)
             .finalize(),
         None => Sha256::digest(&bytes),

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native-versus-Patina overhead benchmark over halting, self-checking workloads.
 
-Each workload runs natively and under `cargo patina run` (fixed seed, no faults)
+Each workload runs natively and under `patina run` (fixed seed, no faults)
 with warmup runs first and the timed runs in a shuffled order. Every run must
 print the same result line; a mismatch or a failed run fails the benchmark.
 Per run it records wall time, user+sys CPU and peak RSS through a small C
@@ -10,7 +10,7 @@ the CLI spawns, then reports per-workload medians, p90s, and the Patina/native
 ratio with a bootstrap 95% interval.
 
 `--baseline` swaps the native leg for a second Patina build (a git rev or a
-cargo-patina binary) so two builds are compared on identical inputs.
+patina binary) so two builds are compared on identical inputs.
 
 Output: a markdown table on stdout (and appended to --summary-md), and one JSON
 record per workload (schema patina.bench/v1) written to --output. Records carry the
@@ -259,8 +259,8 @@ def cargo_env(target_dir: Path) -> Dict[str, str]:
 
 def build_cargo_patina(source: Path, target_dir: Path, logs: Path) -> Path:
     run_build(['cargo', 'build', '--release', '--locked', '-p', 'cargo-patina'],
-              source, cargo_env(target_dir), logs / 'cargo-patina.log')
-    return target_dir / 'release' / 'cargo-patina'
+              source, cargo_env(target_dir), logs / 'patina.log')
+    return target_dir / 'release' / 'patina'
 
 
 def git_dir() -> Optional[str]:
@@ -289,7 +289,7 @@ def resolve_rev(rev: str) -> str:
 
 
 def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
-    """A cargo-patina for `spec` (an existing binary, or a revision), its
+    """A patina for `spec` (an existing binary, or a revision), its
     identity for the records, and the directory its guests build under.
 
     A revision is exported with `git archive` into a private build directory,
@@ -304,7 +304,7 @@ def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
         return as_path.resolve(), {'binary_sha256': digest}, base / 'baseline' / digest
     sha = resolve_rev(spec)
     home = base / 'baseline' / sha
-    binary = home / 'cargo-patina'
+    binary = home / 'patina'
     if binary.is_file():
         return binary, {'rev': sha}, home
     home.mkdir(parents=True, exist_ok=True)
@@ -319,9 +319,9 @@ def build_baseline(spec: str, base: Path) -> Tuple[Path, dict, Path]:
             # it) refuses members that would land outside `source`.
             safe = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}
             tar.extractall(source, **safe)
-        print(f'==> building baseline cargo-patina at {sha[:12]}', flush=True)
+        print(f'==> building baseline patina at {sha[:12]}', flush=True)
         built = build_cargo_patina(source, build / 'target', build / 'logs')
-        staged = build / 'cargo-patina'
+        staged = build / 'patina'
         shutil.copy2(built, staged)
         os.replace(staged, binary)
     except BuildError:
@@ -357,7 +357,7 @@ class Leg:
                       cargo_env(self.home), log)
         else:
             (self.home / 'guests').mkdir(parents=True, exist_ok=True)
-            run_build([str(self.cargo_patina), 'patina', 'build', str(source), '--output',
+            run_build([str(self.cargo_patina), 'build', str(source), '--output',
                        str(self.binary(testbed)), '--release'],
                       ROOT, cargo_env(self.home / 'cargo'), log)
 
@@ -365,7 +365,7 @@ class Leg:
         binary = str(self.binary(workload.testbed))
         if self.cargo_patina is None:
             return [binary] + expand(workload.args, n, directory)
-        return ([str(self.cargo_patina), 'patina', 'run', binary, '--seed', str(self.seed), '--']
+        return ([str(self.cargo_patina), 'run', binary, '--seed', str(self.seed), '--']
                 + expand(workload.args, n, VIRTUAL_DIR))
 
 
@@ -631,7 +631,7 @@ def main(argv: Sequence[str]) -> int:
     scratch.mkdir(parents=True, exist_ok=True)
     try:
         opts.launcher = build_launcher(base)
-        print('==> building cargo-patina', flush=True)
+        print('==> building patina', flush=True)
         current = build_cargo_patina(ROOT, base, base / 'logs')
         opts.baseline_info = None
         if opts.baseline:

@@ -60,7 +60,7 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         (output, started.elapsed())
     };
     let run = |verb: &str, args: &[&str], bound: &str| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
         command
             .arg(verb)
             .arg(&g.binary)
@@ -302,7 +302,7 @@ fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
     g.assert_audit_clean();
     let trace = g.dir.path().join("overflow.patina");
     let output = common::output_by_deadline(
-        Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        Command::new(env!("CARGO_BIN_EXE_patina"))
             .arg("run")
             .arg(&g.binary)
             .args(["--seed", "7", "--compute-watchdog-ms", "25", "--record"])
@@ -852,7 +852,7 @@ fn entropy_into_a_faulting_buffer_answers_the_bytes_written() {
     #[cfg(not(target_os = "linux"))]
     let doors: &[&[&str]] = &[&[]];
     for &door in doors {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-patina"));
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_patina"));
         command
             .current_dir(common::native_workspace())
             .args(["run", g.binary.to_str().unwrap(), "--seed", "1"])
@@ -956,7 +956,7 @@ fn recorded_clock_reads(g: &Guest, waits: usize, timeout_ns: u64) -> u64 {
     );
     let output = assert_success(
         common::invoke_with_deadline(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             common::native_workspace(),
             &[
                 "trace",

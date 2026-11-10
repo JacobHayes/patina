@@ -9,7 +9,7 @@
 //! one region, at a fixed address far from where the kernel puts the guest's
 //! heap and mappings, which the guest's allocator never sees.
 //!
-//! The link routes Rust's allocator entry points through this module: `cargo
+//! The link routes Rust's allocator entry points through this module: `
 //! patina build` wraps them (`--wrap`), so every Rust allocation in the
 //! program reaches a `patina_route_*` function, and the real entry points
 //! (the guest's `#[global_allocator]`, or the C library's `malloc` behind

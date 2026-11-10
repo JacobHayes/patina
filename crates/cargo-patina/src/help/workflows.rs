@@ -6,12 +6,12 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "cargo patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR] [-- GUEST ARGS]",
-        "cargo patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
-        "cargo patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
+        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR] [-- GUEST ARGS]",
+        "patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
+        "patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
     prose: "\
-A campaign runs `--gens` independent child `cargo patina run` processes over one \
+A campaign runs `--gens` independent child `patina run` processes over one \
 artifact. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
 Each generation runs with --format json and is classified from its \
@@ -304,7 +304,7 @@ pub(super) const COVERAGE: Verb = Verb {
     name: "coverage",
     summary: "Symbolize and roll up native yield-point coverage maps or campaign stores.",
     synopsis: &[
-        "cargo patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]",
+        "patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]",
     ],
     prose: "\
 `coverage` is a read-only offline report over native edge coverage (an \
@@ -345,10 +345,10 @@ pub(super) const TRACE: Verb = Verb {
     name: "trace",
     summary: "Inspect a recorded trace: metadata, filtered events, aggregates, or a two-trace diff.",
     synopsis: &[
-        "cargo patina trace info <TRACE>",
-        "cargo patina trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
-        "cargo patina trace stats <TRACE>",
-        "cargo patina trace diff <A.patina> <B.patina> [--context N]",
+        "patina trace info <TRACE>",
+        "patina trace events <TRACE> [--kind LIST] [--task SEL]... [--seq A..B] [--first N | --last N] [--notable]",
+        "patina trace stats <TRACE>",
+        "patina trace diff <A.patina> <B.patina> [--context N]",
     ],
     prose: "\
 `trace` strictly loads and validates an existing .patina trace, then inspects it \n\
@@ -460,8 +460,8 @@ pub(super) const MINIMIZE: Verb = Verb {
     name: "minimize",
     summary: "Reduce a failing campaign generation's fault knobs or a failing run's parameters.",
     synopsis: &[
-        "cargo patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--jobs N]",
-        "cargo patina minimize --params -- cargo patina run <BINARY> --param K=V... [RUN OPTIONS] [-- GUEST ARGS]",
+        "patina minimize --generation <N> [--out-dir <DIR>] [--marker <TEXT>] [--output <PATH>] [--jobs N]",
+        "patina minimize --params -- patina run <BINARY> --param K=V... [RUN OPTIONS] [-- GUEST ARGS]",
     ],
     prose: "\
 `minimize --generation N` reduces one failing generation of a recorded campaign: it \
@@ -562,7 +562,7 @@ mistaken for the failure. The reduced command is printed as the reproduction.",
 pub(super) const SYSCALLS: Verb = Verb {
     name: "syscalls",
     summary: "Print the target-local kernel-entry inventory and C symbol coverage.",
-    synopsis: &["cargo patina syscalls"],
+    synopsis: &["patina syscalls"],
     prose: "\
 `syscalls` prints the target-local kernel-entry inventory and C symbol layer \
 (this compiled target only). Linux x86_64/aarch64 rows describe runtime dispositions \

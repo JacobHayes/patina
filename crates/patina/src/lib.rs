@@ -29,8 +29,8 @@
 //! ```
 //!
 //! Instrumented programs run under the deterministic runtime with
-//! `cargo patina build` / `cargo patina run`; fault sites arm with
-//! `cargo patina run --buggify`, and every decision is a pure function of
+//! `patina build` / `patina run`; fault sites arm with
+//! `patina run --buggify`, and every decision is a pure function of
 //! `--seed`. See the repository [README] and [TUTORIAL] for the ten-minute
 //! version.
 //!
@@ -54,7 +54,7 @@
 //!   the operation, which is what `--custom-op-fail-permille` acts on.
 //!   [`custom_op`] and [`custom_op_faultable`] are the same two with
 //!   serde-typed keys and results.
-//! - [`param`] — a named run parameter (`cargo patina run --param K=V`, or a
+//! - [`param`] — a named run parameter (`patina run --param K=V`, or a
 //!   harness's `.param()` default), recorded and restored on replay; `None`
 //!   outside Patina.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
@@ -157,13 +157,13 @@
 //!
 //! This crate is a pure SDK by default: it does not run applications, and it
 //! never links the simulator. The `macros` feature adds a test orchestrator that
-//! shells out to `cargo-patina`; the guest still enters through the same native
-//! shim path. Under `cargo patina build`/`run` the native shim
+//! shells out to `patina`; the guest still enters through the same native
+//! shim path. Under `patina build`/`run` the native shim
 //! supplies the deterministic runtime below ordinary
 //! `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented production code
 //! needs no explicit runtime dependency (usage mode 1 of [USAGE-MODES.md]).
 //! The `cfg(patina)`/`cfg(patina_shim)` markers this crate compiles against are
-//! injected by `cargo patina build` — an adopter never sets them.
+//! injected by `patina build` — an adopter never sets them.
 //!
 //! To configure Patina in code and then drive normal application code through
 //! the same shims, use the shim-backed harness crate `patina-dst-harness`
@@ -206,7 +206,7 @@ pub mod lifecycle {
     /// Mark the boundary between setup and the workload under test. Emits a
     /// `PATINA_LIFECYCLE setup_complete` marker under Patina; a no-op outside.
     ///
-    /// Pair with `cargo patina run --buggify --buggify-after-setup`, which gates
+    /// Pair with `patina run --buggify --buggify-after-setup`, which gates
     /// fault injection off until this call (and fails the run loudly if the
     /// guest never makes it). See the crate docs for the honest limits of
     /// lifecycle gating.
@@ -222,7 +222,7 @@ pub mod lifecycle {
 pub mod __rt;
 
 /// FFI into the native shim. Present only when the shim is actually linked
-/// (`cfg(patina_shim)`, injected by `cargo patina build`). Under a plain
+/// (`cfg(patina_shim)`, injected by `patina build`). Under a plain
 /// `cargo build` these symbols are never referenced, so nothing is left
 /// unresolved at link time.
 #[cfg(patina_shim)]

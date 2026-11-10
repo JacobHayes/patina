@@ -14,9 +14,9 @@ use std::time::Duration;
 
 /// How long one run may take before its process group is killed.
 pub(super) const RUN_DEADLINE: Duration = Duration::from_secs(60);
-/// The seed of every `cargo patina` run.
+/// The seed of every `patina` run.
 pub(super) const PATINA_RT_SEED: &str = "1";
-/// The seed of the shim-linked binary run directly (no `cargo patina`).
+/// The seed of the shim-linked binary run directly (no `patina`).
 pub(super) const DIRECT_SEED: &str = "9";
 pub(super) const FINGERPRINT: &str = "patina-conformance";
 /// The virtual kernel's descriptor limit and initial umask: the native run
@@ -96,7 +96,7 @@ fn build_probes() -> Vec<PathBuf> {
     ]
 }
 
-/// A link to the native probe named as `cargo patina` names every guest in
+/// A link to the native probe named as `patina` names every guest in
 /// its `argv[0]` (`patina-guest`), for the native runs to execute: the kernel
 /// names the main thread (`comm`) after the file `execve` ran, and the shim
 /// after `argv[0]`, so both oracles start from the same thread name. Every
@@ -151,12 +151,12 @@ pub(super) fn direct_observation(output: &Output, origin: Origin) -> Result<Obse
     })
 }
 
-/// A `cargo patina … --format json` run: the guest's streams and exit are in
+/// A `patina … --format json` run: the guest's streams and exit are in
 /// the `patina.result/v1` envelope; a refusal's message joins the stderr.
 pub(super) fn envelope_observation(output: &Output, origin: Origin) -> Result<Observation, String> {
     let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         format!(
-            "not a patina.result/v1 envelope ({error}); cargo-patina {}: {}",
+            "not a patina.result/v1 envelope ({error}); patina {}: {}",
             output.status,
             text(&output.stderr)
         )

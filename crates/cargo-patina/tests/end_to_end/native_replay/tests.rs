@@ -36,7 +36,7 @@ fn native_replay_ties_the_trace_to_its_build_and_argv() {
 fn replay_init_error_reaches_every_bootstrap_window_entry_point(guest: &common::native::Guest) {
     let workspace = native_workspace();
     let bin = guest.binary.to_str().unwrap();
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let patina = env!("CARGO_BIN_EXE_patina");
 
     // Collected rather than asserted per entry: this is a class detector, so a
     // failure should name every entry point that swallows the error, not just
@@ -138,7 +138,7 @@ fn native_replay_init_error_aborts_under_a_custom_global_allocator() {
             bin.to_str().unwrap(),
         ],
     );
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let patina = env!("CARGO_BIN_EXE_patina");
 
     let trace = directory.path().join("custom-alloc.patina");
     let recorded = invoke_unchecked(
@@ -191,7 +191,7 @@ fn guest_abort_trace_finalization_is_platform_specific(guest: &common::native::G
     let bin = &guest.binary;
     let trace = directory.join("abort.patina");
     let ran = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         native_workspace(),
         &[
             "run",
@@ -312,7 +312,7 @@ fn incomplete_traces_are_refused_before_guest_exec(guest: &common::native::Guest
 }
 
 /// Guest argv is recorded into the trace metadata and restored on replay: a
-/// bare `cargo patina replay <bin> <trace>` reproduces a run recorded with
+/// bare `patina replay <bin> <trace>` reproduces a run recorded with
 /// non-default `-- ARGS`, a mismatched `--` section is refused up front naming
 /// both argv lists, a matching one is accepted, and a trace without the field
 /// still replays with explicit arguments.
@@ -337,7 +337,7 @@ fn guest_argv_is_restored_on_replay(guest: &common::native::Guest) {
         }
         argv
     }
-    let (exe, workspace) = (env!("CARGO_BIN_EXE_cargo-patina"), native_workspace());
+    let (exe, workspace) = (env!("CARGO_BIN_EXE_patina"), native_workspace());
     let bin = guest.binary.to_str().unwrap();
     for (what, args) in [("bare", &[][..]), ("matching", &args[..])] {
         let replayed = invoke_with(exe, workspace, &replay_args(bin, &trace, args));
@@ -384,7 +384,7 @@ fn the_trace_names_its_build_and_refuses_any_other(
     assert_eq!(
         native["supervisor_sha256"].as_str(),
         Some(supervisor_identity().as_str()),
-        "the trace must name the cargo-patina that recorded it"
+        "the trace must name the patina that recorded it"
     );
 
     let replay = |executable: &Path, trace: &Path, json: bool| {
@@ -393,11 +393,7 @@ fn the_trace_names_its_build_and_refuses_any_other(
             args.extend(["--format", "json"]);
         }
         args.extend([executable.to_str().unwrap(), trace.to_str().unwrap()]);
-        invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
-            native_workspace(),
-            &args,
-        )
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), native_workspace(), &args)
     };
     let assert_refused = |refused: &Output, component: &str| {
         let stderr = String::from_utf8_lossy(&refused.stderr);

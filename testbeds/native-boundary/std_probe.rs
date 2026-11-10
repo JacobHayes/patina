@@ -1,5 +1,5 @@
 // An ordinary Rust program: no Patina-specific init/shutdown calls. The
-// packaged `cargo patina build`/`run` startup path installs and
+// packaged `patina build`/`run` startup path installs and
 // finalizes the deterministic runtime around it.
 fn main() {
     use std::hash::{BuildHasher, Hasher};

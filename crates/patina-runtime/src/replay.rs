@@ -569,7 +569,7 @@ pub(super) fn reconcile_replay_address_layout(
         (Some(AddressLayout::Fixed), None) => Err(RuntimeError::Config(
             "this trace was recorded with a fixed address layout, but this replay was launched \
              without the supervisor, so the host randomized the guest's addresses. Replay it \
-             through `cargo patina replay`."
+             through `patina replay`."
                 .into(),
         )),
         (Some(AddressLayout::Randomized), Some(AddressLayout::Fixed)) => Err(RuntimeError::Config(
@@ -582,7 +582,7 @@ pub(super) fn reconcile_replay_address_layout(
         (None, Some(_)) => Err(RuntimeError::Config(
             "this trace records no address layout, so it was recorded by a binary launched \
              without the supervisor. Replay it the same way, or record it again through \
-             `cargo patina run --record`."
+             `patina run --record`."
                 .into(),
         )),
         (Some(AddressLayout::Fixed), Some(AddressLayout::Randomized)) => Err(RuntimeError::Config(

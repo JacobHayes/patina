@@ -8,13 +8,13 @@ usage() {
   cat <<'EOF'
 usage: testbeds/patina-macro-adopter/run.sh [--selftest]
 
-Builds the local cargo-patina binary (or uses PATINA_CLI, a cargo-patina built
+Builds the local patina binary (or uses PATINA_CLI, a patina built
 from this checkout), then drives the standalone adopter crate with plain cargo
 test commands:
   * a passing #[patina_dst::test] sweep;
   * a planted seeded failure whose panic must carry the seed plus test/replay
     repro commands;
-  * a PATH-scrubbed run proving missing cargo-patina is a loud test failure.
+  * a PATH-scrubbed run proving missing patina is a loud test failure.
 
 --selftest is accepted for consistency with classifier-style testbed scripts and
 runs the same planted proofs as the default mode.
@@ -32,7 +32,7 @@ MANIFEST="$ROOT/testbeds/patina-macro-adopter/Cargo.toml"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/testbeds/patina-macro-adopter}"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 OUT="$TARGET_DIR/patina-macro-adopter"
-CLI="${PATINA_CLI:-$TARGET_DIR/debug/cargo-patina}"
+CLI="${PATINA_CLI:-$TARGET_DIR/debug/patina}"
 
 if [[ ! -f "$ROOT/Cargo.toml" || ! -f "$MANIFEST" ]]; then
   echo "patina-macro-adopter: run from the Patina repository root" >&2
@@ -99,7 +99,7 @@ if start is None:
 out = []
 for line in lines[start:]:
     out.append(line.rstrip())
-    if "cargo patina replay" in line:
+    if "patina replay" in line:
         break
 print("\n".join(out))
 PY
@@ -130,10 +130,10 @@ extract_failure_block "$FAIL1" >"$BLOCK1"
 extract_failure_block "$FAIL2" >"$BLOCK2"
 diff -u "$BLOCK1" "$BLOCK2" >/dev/null
 assert_contains "$BLOCK1" "seed 7"
-assert_contains "$BLOCK1" "cargo patina test"
+assert_contains "$BLOCK1" "patina test"
 assert_contains "$BLOCK1" "--harness-target dst_macro"
 assert_contains "$BLOCK1" "--exact seeded_failure_reports_repro"
-assert_contains "$BLOCK1" "cargo patina replay"
+assert_contains "$BLOCK1" "patina replay"
 assert_contains "$FAIL1" "DST_MACRO_PLANTED_FAILURE"
 
 SCRUB_BIN="$OUT/path-scrub-bin"
@@ -141,8 +141,8 @@ rm -rf "$SCRUB_BIN"
 mkdir -p "$SCRUB_BIN"
 CARGO_BIN="$(rustup which cargo 2>/dev/null || command -v cargo)"
 RUSTC_BIN="$(rustup which rustc 2>/dev/null || command -v rustc)"
-# The leg's claim is "cargo-patina is not on PATH", not "PATH is empty": drop
-# exactly the PATH entries that hold a cargo-patina and keep every other one —
+# The leg's claim is "patina is not on PATH", not "PATH is empty": drop
+# exactly the PATH entries that hold a patina and keep every other one —
 # the toolchain, and any rustc wrapper (sccache, kache) the user's cargo config
 # names, which cargo resolves by NAME through PATH at startup. cargo/rustc are
 # invoked by absolute path/env below, so a dropped directory that also held them
@@ -151,11 +151,11 @@ SCRUB_PATH="$SCRUB_BIN"
 IFS=: read -r -a path_entries <<<"${PATH:-}"
 for entry in "${path_entries[@]}"; do
   [[ -z "$entry" ]] && continue
-  [[ -x "$entry/cargo-patina" ]] && continue
+  [[ -x "$entry/patina" ]] && continue
   SCRUB_PATH+=":$entry"
 done
-if PATH="$SCRUB_PATH" command -v cargo-patina >/dev/null 2>&1; then
-  echo "patina-macro-adopter: scrubbed PATH still finds cargo-patina" >&2
+if PATH="$SCRUB_PATH" command -v patina >/dev/null 2>&1; then
+  echo "patina-macro-adopter: scrubbed PATH still finds patina" >&2
   exit 1
 fi
 PATH_OUT="$OUT/path-scrub.out"
@@ -168,9 +168,8 @@ if [[ $PATH_STATUS -eq 0 ]]; then
   cat "$PATH_OUT" >&2
   exit 1
 fi
-assert_contains "$PATH_OUT" "could not find cargo-patina"
-assert_contains "$PATH_OUT" "set PATINA_CLI"
-assert_contains "$PATH_OUT" "put cargo-patina on PATH"
-assert_contains "$PATH_OUT" "DST tests never skip"
+# The failure names both remedies: the installer and the override.
+assert_contains "$PATH_OUT" "install.sh"
+assert_contains "$PATH_OUT" "PATINA_CLI"
 
 echo "patina macro adopter: PASS; logs: $OUT"

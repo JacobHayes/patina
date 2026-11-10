@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # The cooperative-SUT (buggify) SDK. Every macro is a no-op outside a Patina
 # build, so `cargo build`/`cargo run` here behave as an ordinary std program and
-# the SAME binary source runs under `cargo patina run`.
+# the SAME binary source runs under `patina run`.
 patina-dst = { path = "../../crates/patina" }
 # 256-bit digest for the WORKQ_RESULT outcome hash. Hex is formatted by hand
 # (no extra dep) to keep the dependency tree tiny.

@@ -2,7 +2,7 @@
 
 Patina runs a program interposed: its `std` (and libc) effects go through the
 deterministic runtime, whether the artifact is a prebuilt binary or a package
-path `cargo patina run` builds on the fly. Code meets that runtime in two ways.
+path `patina run` builds on the fly. Code meets that runtime in two ways.
 They are separable adoption levels of one system: both drive the same
 process-global runtime context, the same seed/config surface, and the same
 record/replay machinery. A workspace can mix them (an SDK-instrumented library
@@ -27,10 +27,10 @@ macro is a no-op or plain fallback
 outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
 in their code. The default-off `macros` feature re-exports
 `#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
-`cargo-patina` through `PATINA_CLI` or `PATH`, then rebuilds the same libtest
+`patina` through `PATINA_CLI` or `PATH`, then rebuilds the same libtest
 target shim-linked and runs the annotated body under the native harness. The
-runtime otherwise enters through `cargo patina build`/`run` (the shim),
-`cargo patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
+runtime otherwise enters through `patina build`/`run` (the shim),
+`patina test <DIR|Cargo.toml> --harness-target NAME --exact MOD::test`
 (the source-first native libtest harness for one point-solution test), or not
 at all.
 
@@ -74,9 +74,9 @@ counterpart does:
 | `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) | `custom_op(label, key, perform, on_fault=None)` (`json`, keys sorted) |
 | `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` | `setup_complete()`, `lifecycle_event(label)` |
 | `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` | `is_simulated()`, `rng()`, `param(key)` (None when absent) |
-| `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `cargo patina run`/`campaign` | none: a Python DST target is an application, swept with `cargo patina run`/`campaign` |
+| `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `patina run`/`campaign` | none: a Python DST target is an application, swept with `patina run`/`campaign` |
 
-`cargo patina build --go` adds the `patina` build tag, which links them to the
+`patina build --go` adds the `patina` build tag, which links them to the
 shim; any other build gets inert stand-ins with no cgo, so code ships the SDK
 unconditionally. Keep a guest's own assertion wrappers inert natively the same
 way, behind the `patina` tag. Put an expensive observer (one that re-walks a
@@ -87,7 +87,7 @@ build carries it, and a native build opts in. A guest's own `-tags` pass through
 
 ### Python guests
 
-`cargo patina build app.py --python --output app` (or a directory with a
+`patina build app.py --python --output app` (or a directory with a
 `__main__.py`) builds a Python application as a native guest, on Linux
 (x86_64 and aarch64; on macOS CPython reaches C library calls the shim does
 not yet model on Darwin, so the build refuses). Patina builds
@@ -103,7 +103,7 @@ root, earlier roots shadowing later ones as on `sys.path`; a virtualenv's
 dependencies are its site-packages directory:
 
 ```sh
-cargo patina build app/ --python --python-path .venv/lib/python3.14/site-packages --output app
+patina build app/ --python --python-path .venv/lib/python3.14/site-packages --output app
 ```
 
 A directory without an `__init__.py` is a namespace package. What a Python
@@ -156,7 +156,7 @@ flow rather than the interpreter's comparisons.
 
 ### Native startup environment
 
-Use `cargo patina run --env KEY=VALUE` to supply a native guest's startup map.
+Use `patina run --env KEY=VALUE` to supply a native guest's startup map.
 The supervisor reserves initial-stack space before exec; the shim publishes the
 map there so an argv-based environment walk, `main`'s envp and `environ` agree.
 Replay restores the map and its reservation from the trace without resupplying
@@ -183,7 +183,7 @@ patina_dst_harness::run_with(
 )
 ```
 
-Built and run through `cargo patina build` / `cargo patina run`; replays and
+Built and run through `patina build` / `patina run`; replays and
 campaigns need no flag. A harness binary carries a `PATINA_HARNESS_V1` marker
 (the same pattern as `PATINA_INSTRUMENTED_V1`), and the supervisor sets
 `PATINA_RT_DEFER_INIT=1` when it finds it. Startup is *Option B:
@@ -191,14 +191,14 @@ deferred init* (the name code comments reference): the shim's startup
 constructor still captures the control plane, registers finalization, and
 scrubs the environment, but leaves the runtime uninstalled;
 `patina_harness_install` applies the harness configuration as a control-plane
-overlay and installs through the same parsers `cargo patina run` uses, so there
+overlay and installs through the same parsers `patina run` uses, so there
 is no second config surface. The runtime computes the fingerprint's policy
 suffix (`+buggify`, `+pct`, `+swarm`, `+yieldstride`) from the configuration it
 installed, so knobs set in the harness record and replay without matching CLI
 flags. Fail-closed edges: an interposed
 effect before install aborts loudly (the runtime never auto-inits under
 defer); install after an effect boundary, double install, or running the
-binary outside `cargo patina run` are each distinct loud errors.
+binary outside `patina run` are each distinct loud errors.
 
 The harness can also name services: `dns_service(name)` allocates a virtual
 address and inserts the DNS host-table entry, while `dns_entry(name, addr)` pins
@@ -219,13 +219,13 @@ a worker still running at that point is cut off there.
 A run parameter is a named input the program reads through
 `patina_dst::param(key) -> Option<String>`: `None` outside Patina, so the
 lookup ships inert like the rest of the SDK. Supply one with
-`cargo patina run --param KEY=VALUE` (or `test --param`, which forwards it to
+`patina run --param KEY=VALUE` (or `test --param`, which forwards it to
 every seed's run); a harness's `.param(key, value)` sets a default the CLI value
 overrides for the same key. The run records the merged set in its trace and a
 replay restores it, so `replay` takes no `--param`. A parameter is not a
 fingerprint input: the recorded operation stream already reflects it.
 
-`cargo patina minimize --params -- cargo patina run <BINARY> --param K=V ...`
+`patina minimize --params -- patina run <BINARY> --param K=V ...`
 reduces a failing run's parameters: it drops and shrinks them while the run
 keeps failing the way the original did, and prints the reduced command.
 

@@ -139,7 +139,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
 
     // (6) IN THE REPRODUCE COMMAND. The scale is not a separate token to re-supply
     // — it is BAKED INTO the per-generation knob values, so the printed
-    // `cargo patina run … --fs-error-permille N …` re-runs the scaled generation
+    // `patina run … --fs-error-permille N …` re-runs the scaled generation
     // exactly. That is stronger than echoing the flag: the reproduce command
     // cannot disagree with the generation it reproduces.
     let hash = generation_hash(0, 3);

@@ -171,7 +171,7 @@ label or key argument is malformed"
 /// that produced it — which the run fingerprint already enforces. So the choice
 /// lives here, in the guest's build. JSON rather than a denser binary format
 /// because a custom op's value is triage: the key and result stay legible in
-/// `cargo patina trace`, which a non-self-describing encoding would reduce to a
+/// `patina trace`, which a non-self-describing encoding would reduce to a
 /// blob.
 ///
 /// The record pass returns the *decoded* encoding of what `perform` produced,

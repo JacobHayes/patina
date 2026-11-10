@@ -107,7 +107,7 @@ fn main() {
 
         let out = directory.path().join("camp");
         invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "campaign",
@@ -168,7 +168,7 @@ fn main() {
                 output.to_str().unwrap(),
             ];
             arguments.extend_from_slice(extra);
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &arguments)
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &arguments)
         };
 
         let serial_output = directory.path().join("serial.patina");
@@ -202,17 +202,12 @@ fn main() {
             fs::read_to_string(out.join(format!("minimized/generation-{generation}.repro")))
                 .expect("the reproduction command must be written into the out-dir");
         let tokens: Vec<&str> = repro.split_whitespace().collect();
-        assert_eq!(
-            &tokens[..2],
-            &["cargo", "patina"],
-            "unexpected repro: {repro}"
-        );
+        assert_eq!(tokens[0], "patina", "unexpected repro: {repro}");
         assert!(
             tokens.contains(&"--fs-short-permille"),
             "the reduced command dropped the knob the bug needs: {repro}"
         );
-        let reproduced =
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &tokens[2..]);
+        let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &tokens[1..]);
         assert!(
             String::from_utf8_lossy(&reproduced.stderr).contains("GUEST_TORN"),
             "the reduced command no longer reproduces:\n{repro}\nstdout:\n{}\nstderr:\n{}",
@@ -223,7 +218,7 @@ fn main() {
         // The recorded minimal-knob trace is the flag-free form of the same
         // reproduction: replaying it needs none of the knobs.
         let flag_free = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "replay",
@@ -270,7 +265,7 @@ fn main() {
 
         let out = directory.path().join("camp");
         let campaign = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "campaign",
@@ -291,7 +286,7 @@ fn main() {
         );
         let saved = out.join("failures/generation-0.patina");
         let replayed = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["replay", guest.to_str().unwrap(), saved.to_str().unwrap()],
         );
@@ -306,7 +301,7 @@ fn main() {
 
         let output = directory.path().join("minimized.patina");
         let minimized = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "minimize",
@@ -328,7 +323,7 @@ fn main() {
         );
         // The recorded minimal-knob trace replays the violation with no flags.
         let flag_free = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["replay", guest.to_str().unwrap(), output.to_str().unwrap()],
         );
@@ -413,7 +408,7 @@ fn main() {
         arguments.extend_from_slice(extra);
         arguments.extend(["--", mode]);
         campaign_json_stdout(&invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             native_workspace(),
             &arguments,
         ))
@@ -444,7 +439,7 @@ fn main() {
 
         let output = directory.path().join("minimized.patina");
         let minimized = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "minimize",
@@ -487,7 +482,7 @@ fn main() {
             "json",
         ];
         for args in [&rerun[..], &replay_args[..]] {
-            let ran = invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);
+            let ran = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, args);
             let ended = campaign_json_stdout(&ran);
             assert_eq!(
                 ended["guest_exit"]["code"], 3,

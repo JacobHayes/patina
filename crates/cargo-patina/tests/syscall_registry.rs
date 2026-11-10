@@ -378,7 +378,7 @@ fn allowlisted_imports_declare_how_they_reach_the_kernel() {
     }
 }
 
-/// The seal's gate over the engine and the façade `cargo patina build`
+/// The seal's gate over the engine and the façade `patina build`
 /// links: the shim archive seals, and each plant is refused, naming it: an
 /// engine export that is neither a registry row nor the runtime ABI, a raw
 /// system call in the engine's text, workspace code calling a host symbol

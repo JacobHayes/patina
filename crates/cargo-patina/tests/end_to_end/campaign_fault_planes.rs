@@ -53,7 +53,7 @@ fn main() {
     fn campaign(cwd: &Path, args: &[&str]) -> Output {
         let mut argv = vec!["campaign"];
         argv.extend_from_slice(args);
-        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), cwd, &argv)
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), cwd, &argv)
     }
 
     fn fresh(fixture: &Fixture, out: &Path, gens: &str, faults: &str) -> serde_json::Value {

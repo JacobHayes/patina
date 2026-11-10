@@ -35,9 +35,9 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target/testbeds/cap-std-dirfd}"
 export CARGO_TARGET_DIR="$target_dir"
 out="$target_dir/patina"
 built="$out/cap-std-dirfd"
-# PATINA_CLI names a cargo-patina already built from this checkout (the local
+# PATINA_CLI names a patina already built from this checkout (the local
 # check runner passes one CLI to every rung); otherwise the release CLI builds here.
-PATINA="${PATINA_CLI:-$target_dir/release/cargo-patina}"
+PATINA="${PATINA_CLI:-$target_dir/release/patina}"
 
 # The build prelude fails CLOSED (FATAL) — a gate that cannot build must never
 # read as a silent green.
@@ -45,7 +45,7 @@ if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; 
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
 fi
 if [[ ! -x $PATINA ]]; then
-  echo "FATAL: $PATINA is not an executable cargo-patina" >&2; exit 3
+  echo "FATAL: $PATINA is not an executable patina" >&2; exit 3
 fi
 if ! mkdir -p "$out"; then
   echo "FATAL: mkdir $out failed" >&2; exit 3
@@ -83,12 +83,12 @@ if [[ "$sud_kernel" != 1 ]]; then
 fi
 
 echo "==> building the cap-std-dirfd MRE (packaged native build)"
-if ! "$PATINA" patina build "$here" --output "$built" --release >/dev/null; then
+if ! "$PATINA" build "$here" --output "$built" --release >/dev/null; then
   echo "FATAL: patina build of the cap-std-dirfd MRE failed" >&2; exit 3
 fi
 
 echo "==> [1] audit: the raw *at sites must be reported SUD-managed"
-if ! "$PATINA" patina audit "$built" >"$out/audit.txt" 2>&1; then
+if ! "$PATINA" audit "$built" >"$out/audit.txt" 2>&1; then
   echo "cap-std-dirfd: FAIL [1] audit refused a SUD-managed binary" >&2
   cat "$out/audit.txt" >&2; exit 1
 fi
@@ -98,12 +98,12 @@ if ! grep -q 'SUD-managed' "$out/audit.txt"; then
 fi
 
 echo "==> [2]/[3] run + byte-identical repeats (seed 1)"
-if ! "$PATINA" patina run "$built" --seed 1 \
+if ! "$PATINA" run "$built" --seed 1 \
     >"$out/run1.out" 2>"$out/run1.err"; then
   echo "cap-std-dirfd: FAIL [2] run exited nonzero" >&2
   cat "$out/run1.out" "$out/run1.err" >&2; exit 1
 fi
-if ! "$PATINA" patina run "$built" --seed 1 \
+if ! "$PATINA" run "$built" --seed 1 \
     >"$out/run2.out" 2>"$out/run2.err"; then
   echo "cap-std-dirfd: FAIL [2] second run exited nonzero" >&2; exit 1
 fi
@@ -123,10 +123,10 @@ if ! grep -Eq "$expected" "$out/run1.out"; then
 fi
 
 echo "==> [4] record → replay byte-identical"
-"$PATINA" patina run "$built" --seed 1 --record "$out/mre.patina" \
+"$PATINA" run "$built" --seed 1 --record "$out/mre.patina" \
   --fingerprint capstd-dirfd-v1 >"$out/record.out" 2>/dev/null || {
   echo "cap-std-dirfd: FAIL [4] record run failed" >&2; exit 1; }
-"$PATINA" patina replay "$built" "$out/mre.patina" \
+"$PATINA" replay "$built" "$out/mre.patina" \
   --fingerprint capstd-dirfd-v1 >"$out/replay.out" 2>/dev/null || {
   echo "cap-std-dirfd: FAIL [4] replay failed" >&2; exit 1; }
 if ! cmp -s "$out/record.out" "$out/replay.out"; then

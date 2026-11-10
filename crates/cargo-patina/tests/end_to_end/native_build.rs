@@ -109,7 +109,7 @@ mod tests {
         // Multiple binary targets with no --bin selection fails with a clear message
         // rather than guessing.
         let ambiguous = invoke_unchecked(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["build", package.to_str().unwrap()],
         );
@@ -331,7 +331,7 @@ mod tests {
          println!(\"RELINK_PROBE={}\", unsafe { patina_relink_probe() });\n}\n",
         );
 
-        // Build once through cargo-patina so the private shim base is populated at
+        // Build once through patina so the private shim base is populated at
         // the exact namespaced path `build_native_shim` selected. The primer does
         // not call the doctored symbol; only the later builds do.
         let primer = directory.path().join("primer-pkg");
@@ -342,7 +342,7 @@ mod tests {
         );
         let pristine = directory.path().join("pristine");
         let primed = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "build",
@@ -391,7 +391,7 @@ mod tests {
             append_relink_probe(directory.path(), &staticlib, generation);
             let output = package.join(binary);
             let built = invoke_unchecked_clean_env(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &[
                     "build",
@@ -409,7 +409,7 @@ mod tests {
                 String::from_utf8_lossy(&built.stderr)
             );
             let ran = invoke_unchecked_clean_env(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 workspace,
                 &["run", output.to_str().unwrap(), "--seed", "5"],
                 envs,
@@ -497,7 +497,7 @@ mod tests {
 
         let output = package.join("guest");
         let built = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &[
                 "build",
@@ -522,7 +522,7 @@ mod tests {
          exposed to a rewrite"
         );
         let ran = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_cargo-patina"),
+            env!("CARGO_BIN_EXE_patina"),
             workspace,
             &["run", output.to_str().unwrap(), "--seed", "5"],
             &[],
@@ -592,7 +592,7 @@ mod tests {
         );
     }
 
-    /// A concurrent cargo-patina build caught mid-uplift: it holds `dir`'s build
+    /// A concurrent patina build caught mid-uplift: it holds `dir`'s build
     /// lock and its Cargo has put back only a prefix of `artifact`. Dropping it
     /// finishes the uplift and releases the lock.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -723,7 +723,7 @@ mod tests {
         let mut to_test = BufReader::new(fifo("to-test"));
         let mut to_cargo = fifo("to-cargo");
         let output_path = sync.join("built");
-        let child = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+        let child = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(&package)
             .args([
                 "build",
@@ -814,7 +814,7 @@ mod tests {
                 "\n[dependencies]\npatina-dst = {{ path = \"../patina-dst\" }}"
             )
             .unwrap();
-            Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+            Command::new(env!("CARGO_BIN_EXE_patina"))
                 .current_dir(native_workspace())
                 .args(["build", package.to_str().unwrap(), "--output"])
                 .arg(root.join("built"))

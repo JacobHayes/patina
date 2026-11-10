@@ -8,7 +8,7 @@ A scenario is a plain Rust function over the `Probe` call API
 (`src/scenarios/<family>/<name>.rs`). Every scenario is built into one probe
 binary, `conformance-probe <scenario> --vehicle libc|syscall|raw --dir DIR
 [--strict]`, which writes one typed JSON event per observed call. Each
-scenario's test runs it natively and under `cargo patina` through every
+scenario's test runs it natively and under `patina` through every
 vehicle it has, and compares the two streams exactly, apart from the
 normalizations the scenario declares at its call sites (allocated numbers,
 identities, clock readings, documented alternative answers) and its declared

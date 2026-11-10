@@ -325,16 +325,16 @@ them.",
                 "\nnote: the direct-syscall instruction site(s) above are raw inline syscalls. This \
 binary is not linked with Patina's shim (for example, it is static, stock, or built without \
 Patina), so it has no SUD dispatcher marker and the syscalls cannot be trapped in-process. Build \
-from source with `cargo patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the source/package to \
-`cargo patina run` to build and run it with the shim.",
+from source with `patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the source/package to \
+`patina run` to build and run it with the shim.",
             );
         }
         if has_raw_syscall && host.sud && shim_linked && !sud_marker {
             message.push_str(
                 "\nnote: this binary is linked with Patina, but its shim has no SUD dispatcher marker \
 (for example, it may have been built with an older shim); raw inline syscalls cannot be trapped \
-in-process. Rebuild from source with `cargo patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the \
-source/package to `cargo patina run` to link the current shim.",
+in-process. Rebuild from source with `patina build <SOURCE.rs|DIR|Cargo.toml>`, or pass the \
+source/package to `patina run` to link the current shim.",
             );
         }
         if let Some(note) = render_cpu_nondeterminism_note(&blocked) {

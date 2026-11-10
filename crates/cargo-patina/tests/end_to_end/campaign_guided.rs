@@ -95,7 +95,7 @@ fn main() {
         let module_path = module.to_str().unwrap().to_string();
         let run = |owned: Vec<String>| {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), directory.path(), &refs)
         };
         let gens = 12;
         let campaign_of = |out: &Path, guided: bool, gens: u64| {
@@ -328,7 +328,7 @@ fn main() {
         let module_path = module.to_str().unwrap().to_string();
         let run = |owned: Vec<String>| {
             let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-            invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), directory.path(), &refs)
+            invoke_unchecked(env!("CARGO_BIN_EXE_patina"), directory.path(), &refs)
         };
         // A pool that ever filled would steer from generation 1 on, so a few
         // generations past the bootstrap show it never did.

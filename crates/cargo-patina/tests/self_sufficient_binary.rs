@@ -1,6 +1,6 @@
 //! Class: **installed binary depends on the source checkout.**
 //!
-//! `cargo-patina` builds a guest's linked native shim at guest-build time. It
+//! `patina` builds a guest's linked native shim at guest-build time. It
 //! once located the shim crate by baking its own source checkout path into the
 //! binary (`env!("CARGO_MANIFEST_DIR")`) and running `cargo build -p
 //! patina-dst-native-shim` there — so a binary produced by `cargo install`
@@ -53,7 +53,7 @@ fn workspace_root() -> &'static str {
 
 #[test]
 fn the_cli_binary_does_not_name_its_source_checkout() {
-    let path = env!("CARGO_BIN_EXE_cargo-patina");
+    let path = env!("CARGO_BIN_EXE_patina");
     let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("reading {path}: {error}"));
     let file =
         object::File::parse(&*bytes).unwrap_or_else(|error| panic!("parsing {path}: {error}"));
@@ -85,7 +85,7 @@ fn the_cli_binary_does_not_name_its_source_checkout() {
     assert!(
         offenders.is_empty(),
         "{path} names its source checkout {:?} in loadable section(s) {}: an installed \
-         cargo-patina would depend on a checkout that is not there (the class this test pins: \
+         patina would depend on a checkout that is not there (the class this test pins: \
          installed binary depends on the source checkout)",
         workspace_root(),
         offenders.join(", ")

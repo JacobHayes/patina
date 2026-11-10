@@ -4,7 +4,7 @@
 //! versioned JSON bundle (run metadata, timelines, branch sessions), refusing
 //! any other format version, and replaying with strict reconciliation
 //! (any operation/outcome divergence fails closed rather than lying). Adopters
-//! produce and consume traces through `cargo patina run --record` / `replay`
+//! produce and consume traces through `patina run --record` / `replay`
 //! and the `patina-dst-runtime` execution modes, not this crate directly.
 //! See [ARCHITECTURE.md] for the trace design and its guarantees.
 //!
@@ -146,7 +146,7 @@ pub const MAX_TIMELINE_EVENTS: usize = 1_000_000;
 /// A bundle can never collide with it — a bundle's top-level object always
 /// carries `format_version` and never this key — so [`TraceBundle::decode`]
 /// recognizes a marker and refuses it as [`TraceError::Incomplete`], which is
-/// what makes `cargo patina replay` say "the recorder abandoned this trace"
+/// what makes `patina replay` say "the recorder abandoned this trace"
 /// rather than misread a marker file as a corrupt bundle.
 pub const ABANDONED_TRACE_KEY: &str = "patina_trace_abandoned";
 

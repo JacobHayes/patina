@@ -23,7 +23,7 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
 
     let out = directory.path().join("timeout-campaign");
     let ran = invoke_unchecked(
-        env!("CARGO_BIN_EXE_cargo-patina"),
+        env!("CARGO_BIN_EXE_patina"),
         workspace,
         &[
             "campaign",
@@ -128,7 +128,7 @@ fn campaign_extend_equals_fresh_campaign() {
         &[("CARGO_TARGET_DIR", target.to_str().unwrap())],
     );
 
-    let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, args);
+    let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, args);
     let campaign = |out: &Path, gens: u64| {
         run(&[
             "campaign",
@@ -276,7 +276,7 @@ fn main() {
     };
     let run = |owned: Vec<String>| {
         let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-        invoke_unchecked(env!("CARGO_BIN_EXE_cargo-patina"), workspace, &refs)
+        invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &refs)
     };
 
     let out = directory.path().join("camp");
@@ -294,7 +294,7 @@ fn main() {
     fs::remove_dir_all(&out).unwrap();
     let owned = campaign_args(&out);
     let refs = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_patina"))
         .current_dir(workspace)
         .args(&refs)
         .stdout(Stdio::piped())
@@ -398,7 +398,7 @@ fn main() {
 /// Every continuation and reduction that cannot honour an out-dir's recorded
 /// campaign is refused by name: a missing or completed state, flags that would
 /// override the recorded spec, an unknown schema, corrupt state, another
-/// `cargo-patina` build (the supervisor builds every generation's run, and its
+/// `patina` build (the supervisor builds every generation's run, and its
 /// package version stays the same across development builds that behave
 /// differently, so the campaign names it by its executable's digest), and an
 /// artifact that changed or vanished. A continuation that is allowed reports
@@ -413,7 +413,7 @@ fn campaign_continuation_refusals_are_loud() {
     let module = cwd.join("noop");
     fs::copy(&pristine, &module).unwrap();
     let module_arg = module.to_str().unwrap();
-    let patina = env!("CARGO_BIN_EXE_cargo-patina");
+    let patina = env!("CARGO_BIN_EXE_patina");
     let run = |args: &[&str]| invoke_unchecked(patina, cwd, args);
     let report = |output: &Output| {
         format!(
@@ -476,7 +476,7 @@ fn campaign_continuation_refusals_are_loud() {
     assert_eq!(
         read_state()["supervisor_sha256"].as_str(),
         Some(own.as_str()),
-        "a campaign records the digest of the cargo-patina that ran it"
+        "a campaign records the digest of the patina that ran it"
     );
 
     assert_refuses(
@@ -510,7 +510,7 @@ fn campaign_continuation_refusals_are_loud() {
     );
     let edits: [Edit; 2] = [
         (
-            "different cargo-patina version",
+            "different patina version",
             &|state| state["schema"] = "patina.campaign.state/v999".into(),
             &[extend],
         ),
@@ -617,7 +617,7 @@ fn a_killed_campaign_takes_its_generation_with_it() {
     let guest = spin_forever_guest();
 
     let out = directory.path().join("camp");
-    let mut campaign = Command::new(env!("CARGO_BIN_EXE_cargo-patina"))
+    let mut campaign = Command::new(env!("CARGO_BIN_EXE_patina"))
         .current_dir(workspace)
         .args([
             "campaign",

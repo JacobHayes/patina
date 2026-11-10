@@ -25,7 +25,7 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
             resolved.path.display()
         ))
     })?;
-    // Fail closed on a prebuilt binary that was not built with `cargo patina
+    // Fail closed on a prebuilt binary that was not built with `patina
     // build`: its import table lists the unsatisfied libc calls the shim would
     // interpose once linked (`open`, `clock_gettime`, `pthread_mutex_*`, ...),
     // not the true post-interposition residual. Auditing it raw reports ~the
@@ -40,12 +40,12 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     };
     if !shim_linked && !invocation.raw {
         return Err(CliError(format!(
-            "refusing to audit {}: this binary was not built with `cargo patina build`, so its \
+            "refusing to audit {}: this binary was not built with `patina build`, so its \
              imports are unsatisfied libc calls (open, clock_gettime, pthread_mutex_*, ...) — the \
              surface the shim *interposes* once linked — not the post-interposition residual. The \
              audit would be the opposite of the truth. Audit source-first so the shim is linked \
-             first:\n    cargo patina audit ./Cargo.toml --bin <NAME>\nor pass a Patina-built \
-             artifact (`cargo patina build ... --output <PATH>`). To list the raw imports of this \
+             first:\n    patina audit ./Cargo.toml --bin <NAME>\nor pass a Patina-built \
+             artifact (`patina build ... --output <PATH>`). To list the raw imports of this \
              exact binary anyway, re-run with --raw.",
             resolved.path.display()
         )));
@@ -57,9 +57,9 @@ pub(super) fn execute_native_audit(invocation: NativeAuditInvocation) -> Result<
     if !shim_linked && invocation.raw {
         eprintln!(
             "PATINA_RAW_AUDIT: auditing a NON-shim-linked binary. Import findings reflect \
-             unsatisfied libc imports — most are symbols the shim interposes once `cargo patina \
+             unsatisfied libc imports — most are symbols the shim interposes once `patina \
              build` links it in — NOT the post-interposition residual. Audit source-first \
-             (`cargo patina audit ./Cargo.toml --bin <NAME>`) for the true residual."
+             (`patina audit ./Cargo.toml --bin <NAME>`) for the true residual."
         );
     }
     // Shim-linked (or built on the fly, or --raw): render the real audit — for a

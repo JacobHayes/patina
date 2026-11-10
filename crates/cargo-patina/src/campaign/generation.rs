@@ -145,7 +145,7 @@ pub(crate) fn child_facts(
     // with the code that envelope reported.
     facts.exit_code = status.code().unwrap_or(-1);
     // The signal the CHILD itself died on. `code()` is `None` for a signalled
-    // child, and `-1` says nothing about why — so a `cargo patina run` the OOM
+    // child, and `-1` says nothing about why — so a `patina run` the OOM
     // killer took out (it dies alongside its guest under memory pressure) would
     // otherwise be indistinguishable from any other envelope-less failure. The
     // envelope's `guest_exit.signal` is the authority when there is one (it is
@@ -185,7 +185,7 @@ pub(crate) fn run_envelope(stdout: &str) -> Option<serde_json::Value> {
     })
 }
 
-/// Run one generation as a child `cargo patina run --record --format json`
+/// Run one generation as a child `patina run --record --format json`
 /// process, capturing its result envelope. The virtual-time watchdog and the
 /// child's own step budget bound the *deterministic* run, but a guest can
 /// still wedge in a way none of those observe (an uninterposed atomics-only busy
@@ -234,7 +234,7 @@ pub(super) fn run_generation(
     collect_child(command, timeout_secs)
 }
 
-/// Replay one recorded generation as a child `cargo patina replay --format json`
+/// Replay one recorded generation as a child `patina replay --format json`
 /// process: the reproduce command a campaign prints for a failure that left a
 /// valid trace, run with the same child shape, environment and timeout backstop
 /// as the generation it replays. `invocation` is the shape the trace cannot carry
@@ -254,7 +254,7 @@ pub(super) fn run_replay(
     collect_child(command, timeout_secs)
 }
 
-/// The child `cargo patina <verb> --format json` command every
+/// The child `patina <verb> --format json` command every
 /// campaign child shares, in its own process group and tied to this campaign's
 /// life ([`crate::lifeline`]).
 fn child_command(self_exe: &Path, verb: &str) -> Result<Command, CliError> {
@@ -348,7 +348,7 @@ fn collect_child(mut command: Command, timeout_secs: u64) -> Result<GenerationRu
     let stderr_bytes = stderr_reader.join().unwrap_or_default();
     let child_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let child_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-    // A child that is another cargo-patina build (the executable was replaced
+    // A child that is another patina build (the executable was replaced
     // under the campaign) stops the whole run: its result, and every one after
     // it, would come from a supervisor the campaign's state does not name.
     if let Some(refusal) =
@@ -424,7 +424,7 @@ fn kill_generation_process_tree(child: &mut std::process::Child) {
     {
         let pgid = -(child.id() as i32);
         // SAFETY: `kill` is called with a process-group id created for this
-        // generation's child `cargo patina run`, so the supervisor and its guest
+        // generation's child `patina run`, so the supervisor and its guest
         // are killed together on timeout rather than orphaning a spinning guest.
         let rc = unsafe { kill(pgid, SIGKILL) };
         if rc == 0 {
@@ -505,7 +505,7 @@ mod tests {
     fn a_child_of_another_supervisor_build_stops_the_campaign() {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(format!(
-            "echo 'cargo-patina: {} this cargo-patina is another build' >&2; exit 2",
+            "echo 'patina: {} this patina is another build' >&2; exit 2",
             crate::supervisor_identity::SUPERVISOR_MISMATCH
         ));
         let stopped = collect_child(child, 0).err().map(|error| error.to_string());
@@ -519,7 +519,7 @@ mod tests {
 
     /// A timed-out generation's trace scratch file is swept only once the last
     /// process holding it is gone. The backstop SIGKILLs the generation's whole
-    /// process group but reaps only its leader (the child `cargo patina run`);
+    /// process group but reaps only its leader (the child `patina run`);
     /// the guest that leader supervised holds the scratch lock through an
     /// inherited descriptor and dies on its own schedule. Sweeping as soon as
     /// the leader was reaped spared the file as a live recorder's, and on a

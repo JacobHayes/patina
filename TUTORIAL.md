@@ -6,8 +6,8 @@ records that run, replays it byte-for-byte, and renders its timeline to a
 self-contained HTML page. Every command here is run against the current CLI.
 
 Prerequisites: build the CLI once from the workspace root — `cargo build
---release -p cargo-patina` — and use `target/release/cargo-patina` (shown as
-`cargo patina` below). No extra toolchain is needed for the native target.
+--release -p cargo-patina` — and use `target/release/patina` (shown as
+`patina` below). No extra toolchain is needed for the native target.
 
 ## 1. A small program with a latent bug
 
@@ -70,7 +70,7 @@ the program behaves normally and ships with the instrumentation inert.
 ## 2. Build it for the deterministic runtime
 
 ```
-$ cargo patina build ./ledger --output ./ledger/ledger
+$ patina build ./ledger --output ./ledger/ledger
 PATINA_BUILD output=./ledger/ledger
 ```
 
@@ -82,14 +82,14 @@ route the SDK macros to the runtime.
 Most seeds do not activate the site or do not fire it, so the invariant holds:
 
 ```
-$ cargo patina run ./ledger/ledger --seed 0 --buggify
+$ patina run ./ledger/ledger --seed 0 --buggify
 LEDGER_OK entries=8
 ```
 
 Buggify is seeded by the run seed, so a different seed takes the rare path:
 
 ```
-$ cargo patina run ./ledger/ledger --seed 5 --buggify
+$ patina run ./ledger/ledger --seed 5 --buggify
 BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
 ```
 
@@ -105,14 +105,14 @@ For native edge coverage, build with `--instrument`, write a covmap, then use th
 read-only coverage report to symbolize and roll it up by crate/module/function:
 
 ```
-$ cargo patina build ./ledger --instrument --output ./ledger/ledger-inst
-$ cargo patina run ./ledger/ledger-inst --seed 5 --buggify --coverage-out ./ledger/run.covmap
-$ cargo patina coverage ./ledger/ledger-inst ./ledger/run.covmap --focus ledger --top 10
+$ patina build ./ledger --instrument --output ./ledger/ledger-inst
+$ patina run ./ledger/ledger-inst --seed 5 --buggify --coverage-out ./ledger/run.covmap
+$ patina coverage ./ledger/ledger-inst ./ledger/run.covmap --focus ledger --top 10
 ```
 
 A longer `campaign` over an instrumented binary automatically accumulates the union
 under `<out-dir>/coverage/`; inspect it with
-`cargo patina coverage ./ledger/ledger-inst <out-dir>`. The campaign report is tied
+`patina coverage ./ledger/ledger-inst <out-dir>`. The campaign report is tied
 to the recorded artifact hash, so passing a different binary fails closed instead
 of producing a mismatched symbol rollup.
 
@@ -126,7 +126,7 @@ deduplicates the failures it finds, and prints a reproduction command for each
 one (also kept in the campaign state under `--out-dir`):
 
 ```
-$ cargo patina campaign ./ledger/ledger --buggify --gens 50 --out-dir ./ledger-out
+$ patina campaign ./ledger/ledger --buggify --gens 50 --out-dir ./ledger-out
 ```
 
 "Where to go next" shows how to reduce a campaign failure to its minimal fault knobs.
@@ -137,7 +137,7 @@ Recording captures the seed, the buggify config, and the guest arguments into th
 trace, so the reproduction needs no flags later:
 
 ```
-$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina
+$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina
 BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1
 ```
 
@@ -146,7 +146,7 @@ The trace is compact JSON — inspect it with `jq . bug.patina` if you like.
 ## 6. Replay it — byte-for-byte, flag-free
 
 ```
-$ cargo patina replay ./ledger/ledger ./bug.patina
+$ patina replay ./ledger/ledger ./bug.patina
 BUG_CAUGHT reordered ledger=[0, 1, 3, 2, 4, 6, 5, 7]      # exit 1, identical
 ```
 
@@ -161,7 +161,7 @@ Add `--render` to write a self-contained HTML timeline (open it in any browser �
 no assets, no network):
 
 ```
-$ cargo patina replay ./ledger/ledger ./bug.patina --render ./bug.html
+$ patina replay ./ledger/ledger ./bug.patina --render ./bug.html
 ```
 
 `bug.html` shows per-task lanes over the trace, a metadata panel (seed, buggify
@@ -173,11 +173,11 @@ For CLI-only inspection of an existing trace, use `trace info` and a filtered
 `trace events` dump:
 
 ```
-$ cargo patina trace info ./bug.patina
-$ cargo patina trace events ./bug.patina --notable
-$ cargo patina trace stats ./bug.patina
-$ cargo patina trace diff ./bug.patina ./bug.patina
-$ cargo patina trace events ./bug.patina --kind filesystem --first 20 --format json
+$ patina trace info ./bug.patina
+$ patina trace events ./bug.patina --notable
+$ patina trace stats ./bug.patina
+$ patina trace diff ./bug.patina ./bug.patina
+$ patina trace events ./bug.patina --kind filesystem --first 20 --format json
 ```
 
 `trace diff` exits 0 for identical traces and 1 when metadata or events diverge.
@@ -189,7 +189,7 @@ Prefer a one-shot failure report? `--report OUT.html` renders the timeline *only
 when the run fails*, leading with a failure summary:
 
 ```
-$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --report ./report.html
+$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --report ./report.html
 ```
 
 ## 8. Keep a point-solution guard under plain cargo test
@@ -204,17 +204,17 @@ fn ledger_stays_sorted_under_faults() {
 }
 ```
 
-Plain `cargo test` finds `cargo-patina` through `PATINA_CLI` or `PATH`, rebuilds
+Plain `cargo test` finds `patina` through `PATINA_CLI` or `PATH`, rebuilds
 the same libtest target shim-linked, and runs only that test with one libtest
 thread. A failing seed panics with both repro commands:
 
 ```text
 reproduce:
-  cargo patina test . --harness-target my_crate --exact ledger_stays_sorted_under_faults --seed 5
-  cargo patina replay target/patina/dst/.../guest target/patina/dst/.../seed-5.patina
+  patina test . --harness-target my_crate --exact ledger_stays_sorted_under_faults --seed 5
+  patina replay target/patina/dst/.../guest target/patina/dst/.../seed-5.patina
 ```
 
-If `cargo-patina` is not discoverable, the test fails loudly instead of skipping.
+If `patina` is not discoverable, the test fails loudly instead of skipping.
 
 ## 9. Name resolution as a fault domain
 
@@ -251,13 +251,13 @@ declare with `--dns-entry NAME=ADDR` (repeatable); every other name is NXDOMAIN,
 deterministically:
 
 ```
-$ cargo patina build ./resolver.rs --output ./resolver
+$ patina build ./resolver.rs --output ./resolver
 PATINA_BUILD output=./resolver
 
-$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5
+$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5
 PATINA_RESULT ok=1 db.internal=10.0.0.5
 
-$ cargo patina run ./resolver --seed 1
+$ patina run ./resolver --seed 1
 PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
 ```
 
@@ -269,11 +269,11 @@ Both report on stderr whether they actually did anything, so a clean run cannot
 quietly mean "the knob never fired":
 
 ```
-$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 --dns-fail-permille 1000
+$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 --dns-fail-permille 1000
 PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
 PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 ... vacuous=0
 
-$ cargo patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 \
+$ patina run ./resolver --seed 1 --dns-entry db.internal=10.0.0.5 \
     --dns-latency-nanos 2000000..2000000
 PATINA_RESULT ok=1 db.internal=10.0.0.5
 PATINA_DNS_FAULT_REPORT resolutions=1 ... latency_applied=1 vacuous=0
@@ -284,12 +284,12 @@ whether a *realistic* failure rate finds it. Hand the table to a campaign and it
 draws the DNS knobs per generation alongside the fs and network ones:
 
 ```
-$ cargo patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
+$ patina campaign ./resolver --gens 20 --faults --dns-entry db.internal=10.0.0.5 \
     --out-dir ./dns-out
 PATINA_CAMPAIGN_GEN generation=7 seed=10045940371587287147 class=VIOLATION NOVEL verify=replay:reproduced
   class OK                 19
   class VIOLATION          1
-      reproduce: cargo patina replay ./resolver ./dns-out/failures/generation-7.patina
+      reproduce: patina replay ./resolver ./dns-out/failures/generation-7.patina
 PATINA_CAMPAIGN_COMPLETE generations=20 failures=1 novel=1
 ```
 
@@ -297,7 +297,7 @@ One generation in twenty caught it, and the reproducer needs no knob flags at
 all — the trace carries the host table and both knob settings:
 
 ```
-$ cargo patina replay ./resolver ./dns-out/failures/generation-7.patina
+$ patina replay ./resolver ./dns-out/failures/generation-7.patina
 PATINA_VIOLATION dns-startup detail=gave-up-after-one-lookup      # exit 1
 PATINA_DNS_FAULT_REPORT resolutions=1 ... failures_injected=1 latency_applied=1 vacuous=0
 ```
@@ -315,7 +315,7 @@ Any verb accepts `--format json`. Most emit one result envelope on stdout (schem
 `patina.coverage/v1`, and `trace events` uses streaming JSON Lines:
 
 ```
-$ cargo patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
+$ patina run ./ledger/ledger --seed 5 --buggify --record ./bug.patina --format json
 {"schema":"patina.result/v1","verb":"run","family":"native","result":"violation",
  "exit_code":1,"seed":5,"trace":{"path":"./bug.patina","format_version":22,
  "event_count":...,"metadata":{...}},"verdicts":[...],
@@ -351,12 +351,12 @@ reported none.
   provides, e.g. `rand`) instead of argv.
   That way every generation is still reproducible from its patina seed alone,
   and replay needs no extra flags.
-- Make atomics-only race windows schedulable: `cargo patina build --instrument`,
-  then `cargo patina run --yield-stride N` (a scheduling point every N edges a
+- Make atomics-only race windows schedulable: `patina build --instrument`,
+  then `patina run --yield-stride N` (a scheduling point every N edges a
   thread executes; 1 is every edge, the densest and slowest). At the default
   stride 0 the same binary only keeps edge counters, for
   `--coverage-out`/`--guided`.
-- Reduce a campaign failure to a one-line reproduction: `cargo patina minimize
+- Reduce a campaign failure to a one-line reproduction: `patina minimize
   --generation 14 --out-dir out/` delta-debugs that generation's fault knobs
   first (usually 17-18 down to 1-2, in about twenty seeded re-runs), prints the
   standalone command that still fails, and records the minimal-knob run as a
@@ -365,10 +365,10 @@ reported none.
   that generation, and the completion line names it (`target=verdicts[…]`). A
   guest that reports nothing through the verdict ABI is refused with a pointer
   to `--marker 'wal corruption'`, which names the failure text instead.
-- Feed the guest named inputs with `cargo patina run --param clients=40` (read
+- Feed the guest named inputs with `patina run --param clients=40` (read
   through `patina_dst::param("clients")`, recorded for flag-free replay), and
   shrink the parameters a failure needs:
-  `cargo patina minimize --params -- cargo patina run ./ledger/ledger --seed 5 --param clients=40`.
+  `patina minimize --params -- patina run ./ledger/ledger --seed 5 --param clients=40`.
 - See `llms.txt` for the full CLI/SDK map and `testbeds/workq` (a durable work
   queue: WAL crash-recovery, SimNet faults, buggify) for the flagship end-to-end
   demonstration.

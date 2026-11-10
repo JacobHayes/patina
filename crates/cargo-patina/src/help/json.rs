@@ -8,11 +8,11 @@ use super::*;
 //
 // The machine-readable help is served in two shapes under one schema tag:
 //
-//   * `cargo patina --help --format json` — the INDEX: the schema tag, the
+//   * `patina --help --format json` — the INDEX: the schema tag, the
 //     global output flags, the `PATINA_*` environment protocol, and every verb
 //     as `{summary, forms}` (NO flag_groups). A `verb_detail` hint field names
 //     the command that yields a verb's full flag detail.
-//   * `cargo patina <verb> --help --format json` — one VERB's detail: the schema
+//   * `patina <verb> --help --format json` — one VERB's detail: the schema
 //     tag, the same global flags, and that verb's full entry (name, summary,
 //     forms, flag_groups). No other verb and no environment block appear — the
 //     env protocol is a single global contract that lives only in the index.
@@ -142,7 +142,7 @@ detail with the command below, substituting {verb} with the verb name.",
     );
     verb_detail.insert(
         "command_template".into(),
-        J::from("cargo patina {verb} --help --format json"),
+        J::from("patina {verb} --help --format json"),
     );
 
     let mut root = Map::new();

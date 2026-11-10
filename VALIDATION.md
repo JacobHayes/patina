@@ -43,7 +43,7 @@ systems.
   each driver, scheduler policies, trace validation, runtime modes, reducers, the
   import audit and instruction scan, the syscall registry.
 - **CLI end-to-end** (`crates/cargo-patina/tests/end_to_end/`): fixture packages
-  built and run through `cargo patina` in separate processes: record/replay,
+  built and run through `patina` in separate processes: record/replay,
   branching, faults, SDK reports, campaigns, minimization, help and flags.
 - **Native acceptance** (`crates/cargo-patina/tests/native_*.rs`, guests in
   `testbeds/native-boundary/`): ABI, workloads, containment, raw syscalls,
@@ -85,7 +85,7 @@ explicit-context, native and testbed guests.
 
 **Strict record/replay.** A recorded run replays flag-free to the same output and
 consumes every event. Replay checks, in order: structure, native build identity
-(executable and `cargo-patina` digests), compatibility fingerprint, operation
+(executable and `patina` digests), compatibility fingerprint, operation
 equality at every boundary call, driver outcome equality, and no trailing events.
 A bundle of any other format version is refused. Oracle: replay of real
 recordings plus planted mutations of each field, which must fail by name.

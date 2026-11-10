@@ -149,7 +149,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         .map_err(|e| CliError(format!("failed to create traces dir: {e}")))?;
 
     let self_exe = std::env::current_exe()
-        .map_err(|e| CliError(format!("failed to resolve cargo-patina binary path: {e}")))?;
+        .map_err(|e| CliError(format!("failed to resolve patina binary path: {e}")))?;
 
     let json_output = crate::output::options().is_json();
     let full_stream = progress_every == 1;

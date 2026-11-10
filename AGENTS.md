@@ -30,7 +30,7 @@ and ast-grep, so run cargo and the repository scripts through `mise run` or
 1. **Iterate** with `mise run check`: format, host clippy, then the tests you
    name. Its arguments go to nextest (`-p patina-dst-runtime`,
    `-p cargo-patina --test native_abi`, `-E 'test(/replay/)'`); with none it
-   runs the workspace suite. `cargo patina` embeds the shim's C sources, so
+   runs the workspace suite. `patina` embeds the shim's C sources, so
    rebuild it after touching the C layer.
 2. **Land** by pushing the branch. CI is the gate: the suite and the testbeds
    on Linux x86_64 and aarch64 and on macOS. When it is green, fast-forward
@@ -49,13 +49,13 @@ check must go red without the fix.
 
 ## The CLI
 
-`cargo patina` is verb-first (`build`, `run`, `test`, `audit`, `replay`,
+`patina` is verb-first (`build`, `run`, `test`, `audit`, `replay`,
 `campaign`, `coverage`, `trace`, `minimize`, `syscalls`). Never guess a flag:
 ask the binary, whose help is progressive (the index, then per-verb detail).
 
 ```sh
-cargo run -q -p cargo-patina -- patina --help [--format json]
-cargo run -q -p cargo-patina -- patina run --help [--format json]
+cargo run -q -p cargo-patina -- --help [--format json]
+cargo run -q -p cargo-patina -- run --help [--format json]
 ```
 
 The registry in `crates/cargo-patina/src/help.rs` and its `help/` modules is the

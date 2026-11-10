@@ -32,7 +32,7 @@ unsafe fn buggify_label<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 /// [`abort_with_init_error`] so the marker lands after buffered guest output.
 ///
 /// Reserved for patina's own *refusals* — a duplicate buggify label and its
-/// peers, whose marker is what `cargo patina`'s envelope attributes the refusal
+/// peers, whose marker is what `patina`'s envelope attributes the refusal
 /// from. A system-under-test finding does NOT come through here: it is reported
 /// as a verdict ([`abort_after_verdict`]).
 pub(crate) fn abort_with_buggify_marker(marker: &str, label: &str) -> ! {

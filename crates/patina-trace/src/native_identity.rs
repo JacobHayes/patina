@@ -7,9 +7,9 @@ use crate::Sha256Digest;
 /// The build a native recording belongs to, stored as
 /// [`RunMetadata::native`](crate::RunMetadata::native).
 ///
-/// The supervisor (`cargo patina run --record`) computes it and stamps it into
+/// The supervisor (`patina run --record`) computes it and stamps it into
 /// the trace when it commits the recording, so it does not depend on what the
-/// recorder linked into the guest knows. `cargo patina replay` recomputes it for
+/// recorder linked into the guest knows. `patina replay` recomputes it for
 /// the binary it is about to run and refuses, before the guest starts, a trace
 /// whose identity differs, naming every component that does. The compatibility fingerprint string stays
 /// what it was: the operator's `--fingerprint` label and the policy suffixes.
@@ -30,23 +30,23 @@ pub struct NativeIdentityRecord {
     /// the guest runs their code too, and binds its references by what they
     /// define, so a replay against another libc is another program.
     pub libraries: Vec<NativeLibraryIdentity>,
-    /// Identity. The SHA-256 of the `cargo-patina` executable that launched the
+    /// Identity. The SHA-256 of the `patina` executable that launched the
     /// guest. The supervisor builds the guest's initial state (its stack,
     /// environment block, inherited descriptors and filesystem image) and
     /// decides the host traps it arms, none of which is inside the guest's
     /// executable. Its own digest names the build exactly: the package version
     /// stays the same across development builds that behave differently.
     pub supervisor_sha256: Sha256Digest,
-    /// Context. The package version of the recording `cargo-patina`, which says
+    /// Context. The package version of the recording `patina`, which says
     /// which release a refused trace came from.
     pub patina_version: String,
     /// Context. The content address of the shim source bundle the recording
-    /// `cargo-patina` links into the binaries it builds. A binary carries the
+    /// `patina` links into the binaries it builds. A binary carries the
     /// shim it was linked with, so a shim that differs already shows as a
     /// different executable; comparing this too would refuse an unchanged
-    /// prebuilt binary replayed by a `cargo-patina` that embeds another bundle.
+    /// prebuilt binary replayed by a `patina` that embeds another bundle.
     pub shim_bundle_sha256: Sha256Digest,
-    /// Context. The target triple the recording `cargo-patina` was built for:
+    /// Context. The target triple the recording `patina` was built for:
     /// the platform the guest ran on. An executable targets one platform, so it
     /// cannot differ while the executable digest matches.
     pub target: String,

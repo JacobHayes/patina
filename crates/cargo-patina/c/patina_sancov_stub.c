@@ -19,7 +19,7 @@
  * guest's own final link also carries `patina_sancov.c`'s strong definitions,
  * which override these; the guest's hot path is byte-for-byte what it was, with
  * no added branch. Nothing here can mask a broken guest build: the strong hooks
- * carry the `PATINA_INSTRUMENTED_V1` marker that `cargo patina run` requires
+ * carry the `PATINA_INSTRUMENTED_V1` marker that `patina run` requires
  * before it will treat a binary as instrumented, and these stubs deliberately
  * do not.
  */

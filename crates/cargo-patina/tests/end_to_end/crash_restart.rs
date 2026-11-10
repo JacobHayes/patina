@@ -897,7 +897,7 @@ fn main() {
                 .args([
                     "-c",
                     &format!("ulimit -f 0; {xfsz} exec \"$0\" \"$@\""),
-                    env!("CARGO_BIN_EXE_cargo-patina"),
+                    env!("CARGO_BIN_EXE_patina"),
                 ])
                 .args(&arguments)
                 .output()
@@ -1178,7 +1178,7 @@ fn main() {
         let violation = envelope_generation(&red, "VIOLATION");
         let reduced = assert_success(
             invoke_with_deadline(
-                env!("CARGO_BIN_EXE_cargo-patina"),
+                env!("CARGO_BIN_EXE_patina"),
                 native_workspace(),
                 &[
                     "minimize",

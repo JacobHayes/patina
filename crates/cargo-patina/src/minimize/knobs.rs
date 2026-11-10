@@ -34,7 +34,7 @@ pub(super) fn split_knobs(flags: &[String]) -> Result<Vec<Knob>, CliError> {
         let arity = help::flag_arity("run", name).ok_or_else(|| {
             CliError(format!(
                 "recorded generation flag {token:?} is not a `run` flag; this out-dir was written \
-                 by a different cargo-patina version"
+                 by a different patina version"
             ))
         })?;
         let mut tokens = vec![token.clone()];
@@ -277,7 +277,7 @@ pub(super) fn reduce_knobs(
 /// The standalone command that reproduces a reduced generation.
 pub(super) fn repro_command(oracle: &KnobOracle, knobs: &[Knob]) -> String {
     let mut parts = vec![
-        "cargo patina run".to_string(),
+        "patina run".to_string(),
         oracle.artifact.display().to_string(),
         "--seed".to_string(),
         oracle.seed.to_string(),
