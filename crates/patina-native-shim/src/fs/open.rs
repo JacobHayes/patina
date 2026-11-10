@@ -298,12 +298,16 @@ pub(crate) unsafe fn open_at(
     if let Err(errno) = ensure_free_numbers(1) {
         return fail(errno);
     }
-    let nofollow = flags & O_NOFOLLOW != 0;
-    let nonblocking = flags & O_NONBLOCK != 0;
     let path_only = flags & O_PATH != 0;
+    let creating = flags & O_CREATE != 0 && !path_only;
+    // An exclusive create follows no final symlink (Linux `build_open_flags`
+    // adds `O_NOFOLLOW`; POSIX `open`): a link there, dangling or not, is an
+    // existing entry.
+    let exclusive_create = creating && flags & O_EXCLUSIVE != 0;
+    let nofollow = flags & O_NOFOLLOW != 0 || exclusive_create;
+    let nonblocking = flags & O_NONBLOCK != 0;
     let cloexec = flags & O_CLOEXEC != 0;
     let directory = flags & O_DIRECTORY != 0;
-    let creating = flags & O_CREATE != 0 && !path_only;
     let resolved = match paths::resolve(
         dirfd,
         &path,
@@ -355,6 +359,11 @@ pub(crate) unsafe fn open_at(
         || open_flags.append
         || open_flags.exclusive;
     let entry = resolved.metadata.map(|metadata| metadata.kind);
+    // `open_last_lookups` finds an existing entry before `do_open` asks what
+    // it is: an exclusive create of a directory or a link is `EEXIST`.
+    if exclusive_create && entry.is_some() {
+        return fail(EEXIST);
+    }
     match entry {
         // Reachable under `O_NOFOLLOW` (the resolver followed otherwise) and
         // through a descriptor's procfs link, which lands on the link.

@@ -74,6 +74,33 @@ fn at_the_cursor(p: &Probe, root: &str) {
         "O_EXCL on an existing file is EEXIST",
         i64::from(again) == neg(EEXIST),
     );
+    // `O_CREAT|O_EXCL` follows no final symlink (`build_open_flags` adds
+    // `O_NOFOLLOW`) and finds any existing entry before asking what it is.
+    let directory = format!("{root}/excl-dir");
+    p.require(
+        "mkdirat excl-dir",
+        p.mkdirat(AT_FDCWD, &directory, 0o755) == 0,
+    );
+    let dangling = format!("{root}/excl-dangling");
+    p.require(
+        "symlinkat excl-dangling -> excl-absent",
+        p.symlinkat("excl-absent", AT_FDCWD, &dangling) == 0,
+    );
+    for (what, path) in [
+        ("a directory", &directory),
+        ("a dangling symlink", &dangling),
+    ] {
+        let created = p.openat(AT_FDCWD, path, O_WRONLY | O_CREAT | O_EXCL, 0o644);
+        p.check(
+            &format!("O_EXCL on {what} is EEXIST"),
+            i64::from(created) == neg(EEXIST),
+        );
+    }
+    let absent = p.openat(AT_FDCWD, &format!("{root}/excl-absent"), O_RDONLY, 0);
+    p.check(
+        "O_EXCL through a dangling symlink creates nothing",
+        i64::from(absent) == neg(ENOENT),
+    );
     let missing = p.openat(AT_FDCWD, &format!("{root}/missing"), O_RDONLY, 0);
     p.check(
         "a missing file is ENOENT",
