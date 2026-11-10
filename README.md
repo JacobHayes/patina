@@ -334,10 +334,10 @@ On Linux the virtual kernel is pinned to Ubuntu 24.04's 6.8 kernel and glibc
 added later answers `ENOSYS`. The conformance scenarios are authoritative only
 on a host running that pin.
 
-If you use [mise](https://mise.jdx.dev/): `mise run check` is
-the local landing gate, and `mise run demo` runs a small end-to-end demo. For focused shim ABI
-feedback, use `mise run check:native-abi`; the individually selectable native test
-targets and their platform coverage are listed in
+If you use [mise](https://mise.jdx.dev/): `mise run check` formats, lints and
+runs the tests you name (`mise run check -p cargo-patina --test native_abi` for
+focused shim ABI feedback), and CI is the landing gate. The individually
+selectable native test targets and their platform coverage are listed in
 [testbeds/native-boundary](testbeds/native-boundary/README.md).
 
 ## What Patina is not (yet)

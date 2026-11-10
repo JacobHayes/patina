@@ -36,24 +36,23 @@ Conventions:
 - Testbed scripts build through Cargo's normal `CARGO_TARGET_DIR`. When the
   variable is unset, the Patina-maintained scripts default to a per-testbed
   directory under the repository target base, such as
-  `target/testbeds/workq/patina/workq`; when the local check ladder runs them in
-  parallel, `scripts/check.sh` gives each rung its own target directory under
-  `target/check/parallel/`. A script must not create a real `testbeds/*/target`
+  `target/testbeds/workq/patina/workq`; `scripts/check.sh` (`mise run
+  check:full`) runs them in parallel, each in its own target directory under
+  `target/check/`. A script must not create a real `testbeds/*/target`
   tree; temporary run data belongs in `mktemp` directories or under its assigned
   target directory.
 - `PATINA_CLI` names a cargo-patina already built from this checkout; the
   core batteries (FIFO/rustix-default/cap-std, workq, pubsub, macro adopter,
   native smoke) use it instead of building their own, and
-  without it build the release CLI themselves. The local check ladder passes
+  without it build the release CLI themselves. `scripts/check.sh` passes
   the workspace suite's build, and sets `PATINA_SHIM_TARGET_DIR` so every
-  rung's guests share one native shim build.
-- The local gate runs the cheap classifier selftests (including multiproc) and the
-  workq/pubsub/macro-adopter `run-patina.sh` batteries, the native smoke, and
-  FIFO/rustix-default/cap-std gates. The multiproc native/pending-gap battery
-  runs in x86_64 Linux CI. Native acceptance tests (the syscall
-  conformance scenarios of `crates/patina-conformance` among them) run in the
-  full workspace-test tier and CI. The SUD-only
-  rustix-default/cap-std, go-guest and go-sdk gates run on x86_64 Linux. The audit corpus adds CI/final-gate breadth.
+  testbed's guests share one native shim build.
+- CI runs every testbed script on each push; `mise run check:full` runs the
+  ones this host supports, except the multiproc battery and the audit corpus.
+  The SUD-only rustix-default/cap-std, go-guest and go-sdk gates and the
+  multiproc battery run on x86_64 Linux; the audit corpus on x86_64 Linux and
+  macOS. Native acceptance tests (the syscall conformance scenarios of
+  `crates/patina-conformance` among them) are part of the workspace suite.
 - The sweep scripts (`audit-corpus/run.sh`) take `--help`, and classifier-carrying ones take
   `--selftest`, proving every outcome class can fire. The `run-patina.sh` gates
   take no arguments: run them and read the legs they print.

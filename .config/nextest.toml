@@ -1,6 +1,6 @@
 # The workspace suite runs under nextest everywhere: CI with `--profile ci`,
 # split into partitions across parallel jobs (.github/workflows/ci.yml), and
-# the local gates with `--profile local` through scripts/check.sh. Doctests run
+# locally with `--profile local` (`mise run check`, scripts/check.sh). Doctests run
 # separately with `cargo test --doc`, which nextest does not run.
 [profile.ci]
 # Run every test: one failure must not hide the rest of the partition's results.

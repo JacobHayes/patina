@@ -1,5 +1,5 @@
-//! Active identity/support consistency. Source translation is independently
-//! checked by scripts/test-refresh-syscalls.py; these tests do not parse sources.
+//! Active identity/support consistency. Source translation is the generator's
+//! concern (scripts/test-refresh-syscalls.py); these tests do not parse sources.
 
 use std::collections::{BTreeMap, BTreeSet};
 

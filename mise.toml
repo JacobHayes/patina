@@ -1,8 +1,4 @@
-# Local root-workspace setup for Patina.
-#
-# This intentionally covers only the main workspace and core validation scripts.
-# Heavy standalone testbeds keep their own setup and are not required for
-# ordinary local development.
+# Local root-workspace setup for Patina: the pinned tools and the task names.
 
 [settings]
 # Lock every configured tool, including tools added later.
@@ -17,25 +13,22 @@ RUSTUP_TOOLCHAIN = '''{{ exec(command=`awk -F'"' '/^channel/ {print $2}' rust-to
 
 [tools]
 ast-grep = "0.45.3"
-# The workspace test runner, locally (scripts/check.sh) and in CI.
+# The workspace test runner, locally and in CI.
 "github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
 
-# mise can't hide a passing rung's output while replaying a failed rung's
-# complete log, so a small shell runner does.
+# The inner loop. Arguments go to nextest: `mise run check -p patina-dst-runtime`,
+# `mise run check -p cargo-patina --test native_abi`, `mise run check -E 'test(/replay/)'`.
 [tasks.check]
-description = "Full local pre-landing validation (audit-corpus runs in CI/final gates)"
-run = "scripts/check.sh"
-
-[tasks."check:native-abi"]
-description = "Targetable native ABI feedback, without the full landing battery"
-run = "cargo test -p cargo-patina --test native_abi --locked"
-
-[tasks.smoke]
-description = "Run core Patina native smoke checks"
+description = "Format, host clippy, then the tests you name (nextest arguments); with none, the workspace suite"
 run = [
-  "cargo test -p cargo-patina --test native_abi --test native_containment --test native_raw --test native_signals --test native_trace --test native_workloads --locked",
-  "scripts/smoke-native.sh",
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  "cargo nextest run --profile local --locked",
 ]
+
+[tasks."check:full"]
+description = "Everything this host can check: cross-target clippy, the suite, doctests and the testbeds (CI is the landing gate)"
+run = "scripts/check.sh"
 
 [tasks.bench]
 description = "Native-versus-Patina overhead benchmark over halting workloads (measurement, not a gate)"

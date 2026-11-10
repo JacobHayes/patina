@@ -13,17 +13,17 @@ Each guest's internal assertions and its harness assertions form the proof.
 | `native_trace` | Whole-run std syscall containment and a planted host open through the same filter; explicit unsupported-ktrace policy | strace on both Linux architectures; static containment evidence on macOS |
 | `end_to_end` | `text_metadata_probe.rs`: native-return assertion, declared executable-text metadata refusal, and absent trace facts in the libtest result; portable import-refusal companion. `address_leak_probe.rs`: a guest whose failure token or recorded file write comes from its host-randomized stack address (campaigns run it under `--allow-randomized-address-layout`), and deterministic twins, for campaign reproduction verification (`NONDETERMINISM`) | Metadata Linux x86_64; import refusal Linux + macOS; address leak Linux |
 
-All seven targets run in `mise run check` and the workspace-test CI jobs:
+All seven targets run in a bare `mise run check` and the workspace-test CI jobs:
 Linux on both architectures and macOS, all on the pinned toolchain.
 
 ```sh
-mise run check:native-abi
+mise run check -p cargo-patina --test native_abi
 mise exec -- cargo test -p cargo-patina --test native_abi pipes_and_socketpairs_wake_alias_and_refuse_to_block
 mise exec -- cargo test -p cargo-patina --test native_containment rdrand_is_refused_on_every_kernel
 mise exec -- cargo test -p cargo-patina --test native_workloads condvar_waits_use_exact_virtual_deadlines
 ```
 
-`check:native-abi` selects the ABI target; Cargo's test-name filter selects one
+`--test native_abi` selects the ABI target; a test-name filter selects one
 behaviour. `end_to_end::native_build_package_audits_records_and_fails_closed`
 owns package/path-dependency/build-script/ambiguous-bin coverage in the full gate.
 
@@ -56,7 +56,7 @@ location without an override.
 Tokio supplies no rustix configuration override: the product selects raw on
 SUD targets and injects `rustix_use_libc` elsewhere.
 
-`mise run check` and CI run the FIFO workload everywhere and the
+`mise run check:full` and CI run the FIFO workload everywhere and the
 rustix-default/cap-std/go-guest workloads on x86_64 Linux, where missing SUD
 fails both the Rust tests and those testbeds.
 

@@ -461,7 +461,9 @@ Read the root `AGENTS.md`, `ARCHITECTURE.md`, `VALIDATION.md`, and
   the separate libc surface. SUD binds typed identities, never copied numbers.
 - Refresh with `scripts/refresh-syscalls.py` (pinned reproduction by default;
   explicit apply replaces one artifact atomically). No upstream raw files are
-  vendored and normal builds neither parse nor fetch source tables.
+  vendored and normal builds neither parse nor fetch source tables. The tool's
+  own tests are `python3 -B scripts/test-refresh-syscalls.py`; run them when
+  you edit it.
 
 Rules that follow:
 
@@ -582,10 +584,11 @@ ARCHITECTURE.md "The shim build" and `crates/cargo-patina/build.rs`).
   the guest whenever this crate (or the runtime beneath it) is rebuilt. A guest
   still showing the old behavior after a rebuilt `cargo-patina` is a real
   result, not a stale build.
-- Run targeted shim tests and `mise run check:native-abi` for first feedback on a
-  native interposition change; run `mise run check` for the full native typed
-  targets, ecosystem testbeds, the `scripts/smoke-native.sh` determinism smoke and landing
-  evidence.
+- Run targeted shim tests and `mise run check -p cargo-patina --test native_abi`
+  for first feedback on a native interposition change; `mise run check:full`
+  adds the other native typed targets, the Darwin-cfg clippy, the ecosystem
+  testbeds and the `scripts/smoke-native.sh` determinism smoke. A shim change
+  gets an independent review before it lands.
 - Rust ABI probes must align opaque output storage to the C layout. A byte array
   promises only byte alignment; use a target type or explicitly aligned storage,
   including for rusage and Mach task-info buffers.
