@@ -144,8 +144,11 @@ into the trace so replay reproduces them flag-free.
   crash keeps the page cache. A machine crash restarts from what the disk
   holds, as ext4 leaves it: metadata rolls back to the last journal commit (an
   `fsync` of a changed inode, `sync`/`syncfs`, or every 5 virtual seconds),
-  a file is the prefix that commit recorded, and each block overwritten in
-  place since keeps its old or new bytes.
+  a file comes back at the size that commit recorded, and each block
+  overwritten in place since keeps its old or new bytes. An unsynced append
+  that stays within the file's last committed block can come back as zeros:
+  ext4 records that size at once, so any commit, even another file's `fsync`,
+  carries it without the bytes.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR,
   and on procfs, which has no storage, only ENOMEM),
   `--fs-short-permille` (short reads/writes, procfs's reads too), and `--fs-latency-nanos MIN..MAX`

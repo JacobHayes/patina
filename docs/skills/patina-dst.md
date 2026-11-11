@@ -417,7 +417,8 @@ class of confusing first-run failures.
 - **Machine crashes follow ext4's journal.** Metadata rolls back to the last
   commit (an `fsync` of a changed inode, `sync`/`syncfs`, or 5 virtual seconds
   after the first change), so a create or rename nothing committed is lost,
-  and unsynced appended data never reaches the disk. A harness that skips an
+  and unsynced appended data never reaches the disk, though an append within
+  the last committed block can keep its new size and read back as zeros. A harness that skips an
   fsync will see crash sweeps "lose" what it considered written; that finding
   is about the code, not the model.
 - **Audit output that can fail after injected faults must not `expect()` or
