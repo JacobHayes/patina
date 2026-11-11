@@ -215,7 +215,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             parent,
             channel: hub,
             stops,
-            page,
+            page: Some(page),
             ready: false,
             status: None,
         },

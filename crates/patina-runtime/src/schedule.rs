@@ -713,6 +713,29 @@ impl Context {
         }
     }
 
+    /// Replay: how many of its recorded decisions this process consumed.
+    pub fn replay_consumed(&self) -> Option<u64> {
+        match &self.execution {
+            crate::recording::Execution::Replay(replayer) => Some(replayer.consumed()),
+            _ => None,
+        }
+    }
+
+    /// Replay: how many decisions child process `pid`'s recorded timeline
+    /// holds, or `None` when the replayed trace holds no such process.
+    pub fn machine_process_recorded(&self, pid: i32) -> Option<u64> {
+        let crate::recording::Execution::Replay(replayer) = &self.execution else {
+            return None;
+        };
+        Some(replayer.process(pid)?.decisions.len() as u64)
+    }
+
+    /// Replay: a child process left its recorded timeline (the machine
+    /// found it at its end), which the run's facts name.
+    pub fn machine_note_replay_divergence(&mut self) {
+        self.note_replay_divergence(Some("unconsumed_events"));
+    }
+
     /// Replay: the trace child process `pid` replays, serialized, or `None`
     /// when the replayed trace holds no such process.
     pub fn machine_process_trace(&self, pid: i32) -> Option<Result<Vec<u8>, RuntimeError>> {

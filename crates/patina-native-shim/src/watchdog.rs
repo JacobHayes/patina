@@ -426,6 +426,13 @@ impl Sample {
     }
 }
 static SAMPLE: Sample = Sample::new();
+
+/// Whether `thread` (a host handle) is the one the terminal sample froze:
+/// it runs no further.
+#[cfg(target_os = "linux")]
+pub(crate) fn sampled(thread: usize) -> bool {
+    SAMPLE.target.load(Ordering::Acquire) == thread
+}
 static SYMBOL: super::SpinMutex<Option<Symbol>> = super::SpinMutex::new(None);
 
 #[cfg(target_os = "linux")]

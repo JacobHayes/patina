@@ -405,8 +405,8 @@ fn the_sdk_reaches_the_runtime() {
     /// A package's binaries are admitted: its tests name each by the path
     /// `CARGO_BIN_EXE_*` gives them, which stands for a shim-linked build
     /// staged apart from the one Cargo installed there. A spawn of one runs
-    /// that staged artifact as a child process; a spawn of one the pre-run
-    /// gate refuses, or of
+    /// that staged artifact as a child process on Linux (elsewhere it stops
+    /// as not yet modeled); a spawn of one the pre-run gate refuses, or of
     /// anything else, is refused. A recording names each program by digest
     /// and verdict: its replay refuses a changed artifact or a changed
     /// verdict, and needs no artifact the run never spawned.
@@ -479,11 +479,12 @@ fn names_its_binary() {
             let test = test(name);
             (test["result"].clone(), test["stop"]["reason"].clone())
         };
-        assert_eq!(
-            stopped("spawns_its_own_binary"),
-            ("ok".into(), serde_json::Value::Null),
-            "{document:#}"
-        );
+        let spawned = if cfg!(target_os = "linux") {
+            ("ok".into(), serde_json::Value::Null)
+        } else {
+            ("unsupported".into(), "not_modeled".into())
+        };
+        assert_eq!(stopped("spawns_its_own_binary"), spawned, "{document:#}");
         for refused in ["spawns_a_refused_binary", "spawns_another_program"] {
             assert_eq!(
                 stopped(refused),

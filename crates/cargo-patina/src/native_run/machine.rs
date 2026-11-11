@@ -161,8 +161,21 @@ struct Running {
 pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
     std::thread::spawn(move || {
         use std::os::unix::process::ExitStatusExt;
-        let mut children = BTreeMap::new();
+        let mut children: BTreeMap<i32, Running> = BTreeMap::new();
+        // Children reaped while the root ran: their wait statuses, without
+        // the pidfd and thread each held (a machine may start any number).
+        let mut reaped: BTreeMap<i32, Option<i32>> = BTreeMap::new();
         while let Some((payload, fds)) = receive(channel.as_raw_fd()) {
+            let done: Vec<i32> = children
+                .iter()
+                .filter(|(_, child)| child.reaper.is_finished())
+                .map(|(pid, _)| *pid)
+                .collect();
+            for pid in done {
+                if let Some(child) = children.remove(&pid) {
+                    reaped.insert(pid, child.reaper.join().ok().flatten());
+                }
+            }
             let request = serde_json::from_slice(&payload)
                 .map_err(|error| CliError(format!("malformed process launch request: {error}")));
             match request {
@@ -199,9 +212,10 @@ pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
                     }
                 }
                 Ok(Request::Reaped(pid)) => {
-                    let status = children
-                        .remove(&pid)
-                        .and_then(|child: Running| child.reaper.join().ok().flatten());
+                    let status = match children.remove(&pid) {
+                        Some(child) => child.reaper.join().ok().flatten(),
+                        None => reaped.remove(&pid).flatten(),
+                    };
                     let answer = i64::from(status.unwrap_or(-1)).to_le_bytes();
                     // SAFETY: a live buffer of its length.
                     unsafe {

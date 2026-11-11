@@ -36,7 +36,7 @@ mod log;
 pub(crate) mod spawn;
 mod wire;
 
-pub(crate) use log::{DecisionLog, note_now};
+pub(crate) use log::{DecisionLog, note_step};
 
 use wire::Message;
 
@@ -109,8 +109,9 @@ struct Child {
     /// The read end of the pipe the child's signal front writes a stop
     /// record to (its `PATINA_STOP_FD`), which never enters Rust.
     stops: c_int,
-    /// Its page: its time, its compute stop, its decisions.
-    page: log::HubPage,
+    /// Its page: its time, its compute stop, its decisions; unmapped once
+    /// it ended.
+    page: Option<log::HubPage>,
     /// Whether it reported ready: before, its death is never its guest's.
     ready: bool,
     status: Option<i32>,
@@ -416,10 +417,11 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
     loop {
         match receive(channel) {
             Some(Message::AllocId) => {
-                send(
+                reply(
                     channel,
-                    &Message::Id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-                );
+                    Message::Id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+                    &[],
+                )?;
             }
             Some(Message::Fs { len }) => {
                 let request = receive_payload(channel, len)?;
@@ -438,13 +440,13 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
                 let answer = serde_json::to_vec(&answer).unwrap_or_else(|error| {
                     protocol_fatal_text(&format!("encoding a filesystem answer: {error}"))
                 });
-                send_frame(
+                reply(
                     channel,
                     Message::FsReply {
                         len: answer.len() as u64,
                     },
                     &answer,
-                );
+                )?;
             }
             Some(Message::Signal { pid: target, sig }) => {
                 let answer = if target == pid || target == crate::patina_pid() {
@@ -453,7 +455,7 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
                 } else {
                     signal_child(target, sig).unwrap_or(-i64::from(libc::ESRCH))
                 };
-                send(channel, &Message::Id(answer as i32));
+                reply(channel, Message::Id(answer as i32), &[])?;
             }
             Some(Message::TraceBegin { len }) => {
                 let metadata = receive_payload(channel, len)?;
@@ -488,28 +490,84 @@ fn process_facts(pid: i32, document: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The root's recording of child `pid`.
+struct RootRecording {
+    pid: i32,
+    /// A decision line the root's recorder refused, if one was.
+    refused: Option<patina_dst_runtime::RuntimeError>,
+}
+
+impl log::ProcessRecording for (&mut crate::Context, &mut RootRecording) {
+    fn decisions(&mut self, decisions: &[u8]) {
+        if let Err(error) = self.0.machine_process_decisions(self.1.pid, decisions) {
+            self.1.refused.get_or_insert(error);
+        }
+    }
+    fn overflowed(&mut self) {
+        self.0.machine_process_overflowed(self.1.pid);
+    }
+    fn compute_stop(&mut self, stop: patina_dst_trace::ComputeStop) {
+        self.0.machine_process_compute_stop(self.1.pid, stop);
+    }
+}
+
 /// Read what child `pid` recorded since the hub last looked into the root's
-/// recording of it.
+/// recording of it. A page no child writes stops the run on the child's
+/// account.
 fn collect(pid: i32) {
-    let Some((decisions, full, stop)) = CHILDREN.lock().get_mut(&pid).map(|child| {
-        let (decisions, full) = child.page.take();
-        (decisions, full, child.page.compute_stop())
-    }) else {
-        return;
+    if let Err(violation) = try_collect(pid)
+        && !STOPPING.load(Ordering::Relaxed)
+    {
+        page_violation(pid, violation);
+    }
+}
+
+/// [`collect`], answering a page no child writes.
+fn try_collect(pid: i32) -> Result<(), log::PageViolation> {
+    // Out of the table while the root's runtime takes it: no table lock is
+    // held under the runtime's.
+    let Some(mut page) = CHILDREN
+        .lock()
+        .get_mut(&pid)
+        .and_then(|child| child.page.take())
+    else {
+        return Ok(());
     };
-    crate::with_context_raw(|context| {
-        if !decisions.is_empty() {
-            context.machine_process_decisions(pid, &decisions)?;
-        }
-        if full {
-            context.machine_process_overflowed(pid);
-        }
-        if let Some(stop) = stop {
-            context.machine_process_compute_stop(pid, stop);
-        }
-        Ok(())
-    })
-    .unwrap_or_else(|errno| protocol_fatal_text(&format!("the root's runtime is gone ({errno})")));
+    let mut recording = RootRecording { pid, refused: None };
+    let collected =
+        crate::with_context_raw(|context| Ok(page.collect(&mut (context, &mut recording))))
+            .unwrap_or_else(|errno| {
+                protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
+            });
+    if let Some(child) = CHILDREN.lock().get_mut(&pid) {
+        child.page = Some(page);
+    }
+    if let Some(error) = recording.refused {
+        protocol_fatal_text(&error.to_string());
+    }
+    collected
+}
+
+/// Set once the run stops on a child's account: what the children still
+/// running leave as the machine ends adds nothing to the stop.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Child `pid`'s page holds what no child of this shim writes (its guest
+/// code wrote over it): the run stops, naming the child.
+fn page_violation(pid: i32, violation: log::PageViolation) -> ! {
+    let detail = format!(
+        "process {pid}'s page holds what its runtime never writes ({}); the machine \
+cannot trust what it says",
+        violation.0
+    );
+    machine_stop(
+        pid,
+        crate::RunStop::new(
+            patina_dst_abi::RunClass::Internal,
+            "process_page",
+            &[detail.as_bytes()],
+        ),
+    )
 }
 
 /// Child `pid`'s host process is gone without telling the hub how it ended
@@ -529,11 +587,7 @@ fn host_death(pid: i32) {
     if let Some(record) = queued_stop(pid).or_else(|| front_stop(pid)) {
         child_stopped(pid, &record);
     }
-    let Some((ready, now)) = CHILDREN
-        .lock()
-        .get(&pid)
-        .map(|child| (child.ready, child.page.now()))
-    else {
+    let Some(ready) = CHILDREN.lock().get(&pid).map(|child| child.ready) else {
         protocol_fatal_text(&format!("no process {pid} to end"))
     };
     match spawn::host_status(pid) {
@@ -542,13 +596,34 @@ fn host_death(pid: i32) {
                 && ready
                 && GUEST_FAULTS.contains(&libc::WTERMSIG(status)) =>
         {
-            context(|context| context.advance_to(now));
+            let floor = context(|context| context.machine_now());
+            let now = CHILDREN
+                .lock()
+                .get_mut(&pid)
+                .and_then(|child| child.page.as_mut())
+                .map(|page| page.now(floor));
+            match now {
+                Some(Ok(now)) => context(|context| context.advance_to(now)),
+                Some(Err(violation)) => page_violation(pid, violation),
+                None => {}
+            }
+            replay_whole(pid);
             ended(
                 pid,
                 signal_status(libc::WTERMSIG(status)),
                 ProcessEnd::Exit,
                 Notify::Parent,
             )
+        }
+        Some(status) if libc::WIFSIGNALED(status) && !ready => {
+            // A death before the child ran any guest code of its own is its
+            // startup's: Patina's, or the host's under it.
+            let detail = format!(
+                "process {pid} of the guest's machine died of signal {} while it started, \
+before it was ready to run guest code",
+                libc::WTERMSIG(status)
+            );
+            machine_stop(pid, crate::RunStop::internal(&[detail.as_bytes()]))
         }
         Some(status) if libc::WIFSIGNALED(status) => {
             let detail = format!(
@@ -570,14 +645,15 @@ run; not a guest failure",
 }
 
 /// The signals a guest's own code raises synchronously (a fault), whose
-/// default action the shim's signal front leaves to the host.
-const GUEST_FAULTS: [i32; 6] = [
+/// default action the shim's signal front leaves to the host. Not `SIGSYS`:
+/// under system call user dispatch the shim handles every one the guest
+/// raises, so a death by it is the host's (a seccomp kill, say).
+const GUEST_FAULTS: [i32; 5] = [
     libc::SIGSEGV,
     libc::SIGBUS,
     libc::SIGILL,
     libc::SIGFPE,
     libc::SIGTRAP,
-    libc::SIGSYS,
 ];
 
 /// A stop record child `pid` sent before it died that the hub has not read
@@ -687,6 +763,8 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
             return;
         };
         child.status = Some(status);
+        // Read for the last time above: a zombie keeps no page mapped.
+        child.page = None;
         (child.channel, child.stops)
     };
     close(channel);
@@ -790,11 +868,48 @@ fn kill(pid: i32, notify: Notify) {
             return;
         }
     }
+    replay_whole(pid);
     let end = match notify {
         Notify::Parent => ProcessEnd::Killed,
         Notify::Nobody => ProcessEnd::Teardown,
     };
     ended(pid, KILLED, end, notify);
+}
+
+/// A replayed child `pid` that ends where it cannot check its own replay
+/// (killed, torn down, dead of a fault) must have consumed its whole
+/// recorded timeline: one with decisions left over has diverged, as a
+/// child that exits finds for itself.
+fn replay_whole(pid: i32) {
+    let consumed = CHILDREN
+        .lock()
+        .get(&pid)
+        .and_then(|child| child.page.as_ref())
+        .map(log::HubPage::consumed);
+    let recorded = crate::with_context_raw(|context| Ok(context.machine_process_recorded(pid)))
+        .ok()
+        .flatten();
+    if let (Some(consumed), Some(recorded)) = (consumed, recorded)
+        && consumed != recorded
+        && !STOPPING.load(Ordering::Relaxed)
+    {
+        let detail = format!(
+            "process {pid} ended having replayed {consumed} of its {recorded} recorded \
+decisions"
+        );
+        let _ = crate::with_context_raw(|context| {
+            context.machine_note_replay_divergence();
+            Ok(())
+        });
+        machine_stop(
+            pid,
+            crate::RunStop::new(
+                patina_dst_abi::RunClass::Nondeterministic,
+                "replay_divergence",
+                &[detail.as_bytes()],
+            ),
+        )
+    }
 }
 
 /// Run `wait`, a host wait on another process, as if another process held
@@ -846,7 +961,8 @@ fn machine_stop(pid: i32, stop: crate::RunStop<'_>) -> ! {
 /// the child's last decisions are read and it is done, every other child is
 /// killed, and the root's facts and recording so far go out.
 fn end_machine(pid: i32) {
-    collect(pid);
+    STOPPING.store(true, Ordering::Relaxed);
+    let _ = try_collect(pid);
     if let Some(child) = CHILDREN.lock().get_mut(&pid)
         && child.status.is_none()
     {
@@ -923,19 +1039,20 @@ pub(crate) fn exit_status(code: i32) -> i32 {
 }
 
 /// A child ships `bytes` to the hub as a `header` frame, where a stop may be
-/// (no allocation, no blocking lock): `false` when it cannot, because it
-/// reported its end already, or another of its threads is sending a frame
-/// and does not finish (this one may be that thread, stopping mid-send).
+/// (no allocation): `false` when it cannot, because it reported its end
+/// already, or this thread was stopped mid-send and holds the channel
+/// itself. Another thread's frame is waited out: it is mid-send, and the
+/// hub reads while the child holds the baton.
 fn ship(header: Message, bytes: &[u8]) -> bool {
     if !is_child() || EXITED.load(Ordering::Relaxed) {
         return false;
     }
-    let Some(_sending) = Sending::try_take() else {
+    let Some(_sending) = Sending::unless_mine() else {
         return false;
     };
-    let _ = send_bytes_once(channel(), &header.encode());
+    let _ = send_raw(channel(), &header.encode());
     for chunk in bytes.chunks(wire::CHUNK_BYTES) {
-        let _ = send_bytes_once(channel(), chunk);
+        let _ = send_raw(channel(), chunk);
     }
     true
 }
@@ -960,8 +1077,9 @@ pub(crate) fn ship_stop(record: &[u8]) {
 
 /// A child's channel is one thread's to send a frame on at a time: a
 /// frame's packets never interleave with another's (a guest thread's
-/// request, the observer's stop).
-static SENDING: AtomicBool = AtomicBool::new(false);
+/// request, the observer's stop). Holds the host thread handle of the
+/// thread sending, or 0.
+static SENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The right to send one frame on this child's channel.
 struct Sending;
@@ -969,28 +1087,29 @@ struct Sending;
 impl Sending {
     /// Wait for the channel (a guest thread's request).
     fn take() -> Self {
-        while SENDING.swap(true, Ordering::Acquire) {
-            std::hint::spin_loop();
-        }
-        Sending
+        Self::unless_mine()
+            .unwrap_or_else(|| protocol_fatal_text("a thread sends a frame inside its own frame"))
     }
 
-    /// Wait a bounded while for the channel (a stop, which may interrupt
-    /// the thread that holds it).
-    fn try_take() -> Option<Self> {
-        for _ in 0..1 << 20 {
-            if !SENDING.swap(true, Ordering::Acquire) {
-                return Some(Sending);
+    /// Wait for the channel, unless the thread holding it never finishes
+    /// its frame: this thread (a stop that interrupted it mid-send), or the
+    /// thread the compute observer froze to sample it. Whether it can is
+    /// decided by which thread holds it, never by how long it is held.
+    fn unless_mine() -> Option<Self> {
+        let me = crate::watchdog::host_thread_self();
+        loop {
+            match SENDING.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed) {
+                Ok(_) => return Some(Sending),
+                Err(holder) if holder == me || crate::watchdog::sampled(holder) => return None,
+                Err(_) => std::hint::spin_loop(),
             }
-            std::hint::spin_loop();
         }
-        None
     }
 }
 
 impl Drop for Sending {
     fn drop(&mut self) {
-        SENDING.store(false, Ordering::Release);
+        SENDING.store(0, Ordering::Release);
     }
 }
 
@@ -999,7 +1118,8 @@ pub(crate) struct ChannelFactsSink;
 
 impl patina_dst_runtime::FactsSink for ChannelFactsSink {
     fn write_facts(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        // Facts a stop cannot ship are lost: the stop itself is not.
+        // Facts a stop cannot ship (it interrupted this thread mid-send)
+        // are lost: the stop itself is not.
         let _ = ship(
             Message::Facts {
                 len: bytes.len() as u64,
@@ -1061,8 +1181,8 @@ fn send_frame(fd: c_int, header: Message, payload: &[u8]) {
     }
 }
 
-/// One packet, or `false` if the peer is gone.
-fn send_bytes_once(fd: c_int, bytes: &[u8]) -> bool {
+/// One packet: `Err(errno)` when it is not sent whole.
+fn send_raw(fd: c_int, bytes: &[u8]) -> Result<(), c_int> {
     loop {
         // SAFETY: a live buffer of `bytes.len()` bytes.
         let sent = unsafe {
@@ -1076,10 +1196,27 @@ fn send_bytes_once(fd: c_int, bytes: &[u8]) -> bool {
                 0,
             )
         };
-        if sent < 0 && crate::abi::host_errno() == libc::EINTR {
-            continue;
+        if sent < 0 {
+            match crate::abi::host_errno() {
+                libc::EINTR => continue,
+                errno => return Err(errno),
+            }
         }
-        return sent == bytes.len() as i64;
+        return if sent == bytes.len() as i64 {
+            Ok(())
+        } else {
+            Err(libc::EMSGSIZE)
+        };
+    }
+}
+
+/// One packet: `false` if the peer is gone (its end closed); any other
+/// failure is the shim's own, and fatal.
+fn send_bytes_once(fd: c_int, bytes: &[u8]) -> bool {
+    match send_raw(fd, bytes) {
+        Ok(()) => true,
+        Err(libc::EPIPE | libc::ECONNRESET) => false,
+        Err(errno) => protocol_fatal_text(&format!("sending on channel {fd} failed ({errno})")),
     }
 }
 
@@ -1092,6 +1229,21 @@ fn send_bytes(fd: c_int, bytes: &[u8]) {
         orphaned();
     }
     protocol_fatal_text(&format!("sending on channel {fd} failed"));
+}
+
+/// The hub's answer to child `pid`'s request: `None` when the child is gone
+/// first (killed from outside while it waited), whose death the caller
+/// takes on the one path.
+fn reply(channel: c_int, header: Message, payload: &[u8]) -> Option<()> {
+    if !send_bytes_once(channel, &header.encode()) {
+        return None;
+    }
+    for chunk in payload.chunks(wire::CHUNK_BYTES) {
+        if !send_bytes_once(channel, chunk) {
+            return None;
+        }
+    }
+    Some(())
 }
 
 /// A frame's `len` payload bytes, or `None` if the peer is gone first.

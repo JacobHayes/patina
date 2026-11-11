@@ -427,12 +427,18 @@ its own runtime, and the processes run in lockstep: one runs at a time
   parent's working directory.
 - Each child has a page (`src/machine/log.rs`), a memory file it shares
   with the hub, which it writes what must outlive it to as it happens: its
-  time as of its latest runtime step, the compute-bound stop it took, and,
-  recording, its decisions. The hub reads it whenever it takes the baton
-  back and when the child ends, however it ends.
+  time as of its latest runtime step, the compute-bound stop it took,
+  replaying, how many recorded decisions it consumed, and, recording, its
+  decisions. The hub reads it whenever it takes the baton back and when the
+  child ends, however it ends, and unmaps it then. The child's guest code
+  can write to the page, so the hub checks what it reads (the log only
+  grows within its bounds, a compute stop is one the runtime writes and
+  falls within the decisions read, the time never goes back): a page no
+  child writes stops the run, `internal`/`process_page`, naming the child.
 - A child's frames on its channel never interleave: one thread sends a
-  frame at a time. A stop that cannot take the channel (the observer
-  stopping a thread mid-send) goes to the child's stop pipe instead.
+  frame at a time, and another waits for it. A stop that interrupts the
+  thread sending (the thread's own signal) cannot take the channel and goes
+  to the child's stop pipe instead; its facts are lost, the stop is not.
 - While another process holds the baton, or the hub waits on the host for
   a child (its launch and ready, its death after `SIGKILL`), a process runs
   no guest code: the compute observer has no candidate there.
@@ -456,13 +462,18 @@ its own runtime, and the processes run in lockstep: one runs at a time
   its signal front left on its stop pipe, stops the run naming the child;
   else the hub asks the launcher, which reaped it, for its host wait
   status. Only a synchronous fault its guest code raised (`SIGSEGV`,
-  `SIGBUS`, `SIGILL`, `SIGFPE`, `SIGTRAP`, `SIGSYS`), which the front leaves
-  to the default action, in a child that was ready, is the guest's: the
-  child died of that signal, the machine goes on with the carried state it
-  resumed the child with, at the time the child reached (its page), and its
-  parent reaps it. Any other signal came from outside the run (an
-  operator, the out-of-memory killer, a resource limit): the run stops as
-  `internal`/`host_kill`. Any other silent end is an internal stop naming
+  `SIGBUS`, `SIGILL`, `SIGFPE`, `SIGTRAP`), which the front leaves to the
+  default action, in a child that was ready, is the guest's: the child died
+  of that signal, the machine goes on with the carried state it resumed the
+  child with, at the time the child reached (its page), and its parent
+  reaps it. (`SIGSYS` is not among them: under system call user dispatch
+  the shim handles every one the guest raises, so a death by it is the
+  host's, a seccomp kill.) A signal death before the child was ready is its
+  startup's, an internal stop. Any other signal came from outside the run
+  (an operator, the out-of-memory killer, a resource limit): the run stops
+  as `internal`/`host_kill`, also when the hub finds the child gone as it
+  answers a request the child was waiting on. Any other silent end, and any
+  channel failure but the peer's end closing, is an internal stop naming
   its pid. The hub closes the root's filesystem handles a child held when
   it ends.
 - `kill(pid, SIGKILL)` of a child, from the root or (through the hub) a
@@ -499,8 +510,10 @@ its own runtime, and the processes run in lockstep: one runs at a time
   its timeline as a trace of its own, in a memory file the launcher passes
   as the child's `PATINA_RT_TRACE_FD`; each child replays strictly, so a
   child that diverges, or ends with recorded decisions left over, fails the
-  replay, and a replay that spawns a child the recording lacks diverges
-  (`trace_mismatch`).
+  replay (a child that exits checks itself; for one killed, torn down or
+  dead of a fault the hub compares the decisions its page says it consumed
+  with its recorded timeline), and a replay that spawns a child the
+  recording lacks diverges (`trace_mismatch`).
 - Not modeled yet, each a named stop (`unsupported`/`not_modeled`, never
   `deny_trap`, which is for programs outside the admission): spawn from a
   child,

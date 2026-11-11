@@ -193,13 +193,16 @@ versions, target triple and fingerprint.
   interleaving; record-to-replay of a self-spawn, a shared filesystem, a
   SIGKILL, an abort, a child's host fault mid-quantum, a child's own
   stop and a child's compute-bound stop; a planted divergence, a planted
-  truncation and a planted extra decision in a child's timeline; a child's
+  truncation and a planted extra decision in the timeline of a child that
+  exits or is killed; a child's
   death mid-quantum keeping the time it reached; a host signal from
-  outside to a running or frozen child, and a root or supervisor killed
+  outside to a running, waiting or frozen child, and a root or supervisor killed
   from outside, stopping the run with no process left; the root's end and a
   child's stop recording each other child's teardown; the compute
-  observer quiet in a process serving another's computation; and a forged
-  admission request judged again); `testbeds/multiproc` pins each workload's first refusal or
+  observer quiet in a process serving another's computation; two hundred
+  short-lived children in turn; and a forged
+  admission request judged again), and the shim's unit tests the hub's
+  checks of a child's page; `testbeds/multiproc` pins each workload's first refusal or
   pass on x86_64 Linux; arm64 and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block

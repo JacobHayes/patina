@@ -32,6 +32,8 @@ const NOW: usize = 2;
 const STOP: usize = 3;
 const STOP_STEPS: usize = 4;
 const STOP_TASK: usize = 5;
+/// A replaying child: how many of its recorded decisions it consumed.
+const CONSUMED: usize = 6;
 
 /// The header's size.
 const HEADER: usize = 64;
@@ -65,11 +67,33 @@ fn word(base: usize, index: usize) -> &'static AtomicU64 {
 }
 
 /// The hub's side of child `pid`'s page.
+///
+/// The child's guest code can write to the page as to any of its memory, so
+/// the hub checks what it reads: a header no child of this shim writes is a
+/// [`PageViolation`], never trusted.
 pub(super) struct HubPage {
     base: usize,
     bytes: usize,
     /// How many committed bytes the hub has read.
     read: usize,
+    /// How many decisions those bytes hold.
+    decisions: u64,
+    /// The latest time the hub read.
+    now: u64,
+}
+
+/// A page header no child of this shim writes: what is wrong with it.
+#[derive(Debug)]
+pub(super) struct PageViolation(pub(super) String);
+
+/// What the hub does with what a child recorded: the root's recording of it.
+pub(super) trait ProcessRecording {
+    /// The child's `decisions`, one JSON pair a line, since the last call.
+    fn decisions(&mut self, decisions: &[u8]);
+    /// The child's log filled: its decisions past those are missing.
+    fn overflowed(&mut self);
+    /// The child's compute-bound stop.
+    fn compute_stop(&mut self, stop: ComputeStop);
 }
 
 impl HubPage {
@@ -108,46 +132,91 @@ impl HubPage {
                 base,
                 bytes,
                 read: 0,
+                decisions: 0,
+                now,
             },
             fd,
         )
     }
 
-    /// The decisions committed since the last call, and whether the log
-    /// filled (decisions are missing past them). The child is frozen or
-    /// gone while the hub reads.
-    pub(super) fn take(&mut self) -> (Vec<u8>, bool) {
-        let committed =
-            (word(self.base, COMMITTED).load(Ordering::Acquire) as usize).min(self.bytes - HEADER);
+    /// Hand `recording` what the child recorded since the last call: its
+    /// decisions, whether its log filled (decisions are missing past them),
+    /// and the compute-bound stop it took. The child is frozen or gone
+    /// while the hub reads.
+    pub(super) fn collect(
+        &mut self,
+        recording: &mut impl ProcessRecording,
+    ) -> Result<(), PageViolation> {
+        let committed = word(self.base, COMMITTED).load(Ordering::Acquire);
+        let room = (self.bytes - HEADER) as u64;
+        if committed < self.read as u64 || committed > room {
+            return Err(PageViolation(format!(
+                "its log's committed length {committed} is outside {}..={room}",
+                self.read
+            )));
+        }
+        let committed = committed as usize;
         let start = self.base + HEADER + self.read;
         // SAFETY: inside the mapping, past what was read, up to what the
-        // child committed.
+        // child committed (checked above).
         let decisions =
-            unsafe { std::slice::from_raw_parts(start as *const u8, committed - self.read) }
-                .to_vec();
+            unsafe { std::slice::from_raw_parts(start as *const u8, committed - self.read) };
         self.read = committed;
-        (
-            decisions,
-            word(self.base, FULL).load(Ordering::Acquire) != 0,
-        )
+        self.decisions += decisions.iter().filter(|byte| **byte == b'\n').count() as u64;
+        let full = word(self.base, FULL).load(Ordering::Acquire) != 0;
+        let stop = self.compute_stop(full)?;
+        if !decisions.is_empty() {
+            recording.decisions(decisions);
+        }
+        if full {
+            recording.overflowed();
+        }
+        if let Some(stop) = stop {
+            recording.compute_stop(stop);
+        }
+        Ok(())
     }
 
-    /// The child's time as of its latest runtime step.
-    pub(super) fn now(&self) -> u64 {
-        word(self.base, NOW).load(Ordering::Acquire)
-    }
-
-    /// The compute-bound stop the child took, if it took one.
-    pub(super) fn compute_stop(&self) -> Option<ComputeStop> {
+    /// The compute-bound stop the child took, if it took one; a whole log
+    /// holds the decisions it stopped after.
+    fn compute_stop(&self, full: bool) -> Result<Option<ComputeStop>, PageViolation> {
         let task = match word(self.base, STOP).load(Ordering::Acquire) {
-            0 => return None,
+            0 => return Ok(None),
             1 => None,
-            _ => Some(TaskId(word(self.base, STOP_TASK).load(Ordering::Acquire))),
+            2 => Some(TaskId(word(self.base, STOP_TASK).load(Ordering::Acquire))),
+            other => {
+                return Err(PageViolation(format!("its compute stop is marked {other}")));
+            }
         };
-        Some(ComputeStop {
-            steps: word(self.base, STOP_STEPS).load(Ordering::Acquire),
-            task,
-        })
+        let steps = word(self.base, STOP_STEPS).load(Ordering::Acquire);
+        if !full && steps > self.decisions {
+            return Err(PageViolation(format!(
+                "its compute stop is after step {steps}, past its {} decisions",
+                self.decisions
+            )));
+        }
+        Ok(Some(ComputeStop { steps, task }))
+    }
+
+    /// The child's time as of its latest runtime step: never before what
+    /// the hub read last, nor before `floor`, the machine's time when the
+    /// child last took the baton.
+    pub(super) fn now(&mut self, floor: u64) -> Result<u64, PageViolation> {
+        let now = word(self.base, NOW).load(Ordering::Acquire);
+        if now < self.now.max(floor) {
+            return Err(PageViolation(format!(
+                "its time {now} is before {}",
+                self.now.max(floor)
+            )));
+        }
+        self.now = now;
+        Ok(now)
+    }
+
+    /// A replaying child: how many of its recorded decisions it consumed
+    /// as of its latest runtime step.
+    pub(super) fn consumed(&self) -> u64 {
+        word(self.base, CONSUMED).load(Ordering::Acquire)
     }
 }
 
@@ -180,11 +249,15 @@ pub(super) fn open(fd: c_int) -> Option<u64> {
     Some(word(base, NOW).load(Ordering::Acquire))
 }
 
-/// This child's time is `now` as of its latest runtime step.
-pub(crate) fn note_now(now: u64) {
+/// This child as of its latest runtime step: its time is `now`, and,
+/// replaying, it consumed `consumed` recorded decisions.
+pub(crate) fn note_step(now: u64, consumed: Option<u64>) {
     let base = PAGE.load(Ordering::Relaxed);
     if base != 0 {
         word(base, NOW).fetch_max(now, Ordering::Release);
+        if let Some(consumed) = consumed {
+            word(base, CONSUMED).store(consumed, Ordering::Release);
+        }
     }
 }
 
@@ -271,23 +344,94 @@ impl DecisionLog {
 mod tests {
     use super::*;
 
-    /// A log that fills says so, and holds every decision committed before.
+    /// What the hub handed the root's recording.
+    #[derive(Default)]
+    struct Recorded {
+        decisions: Vec<u8>,
+        abandoned: bool,
+        stop: Option<ComputeStop>,
+    }
+
+    impl ProcessRecording for Recorded {
+        fn decisions(&mut self, decisions: &[u8]) {
+            self.decisions.extend_from_slice(decisions);
+        }
+        fn overflowed(&mut self) {
+            self.abandoned = true;
+        }
+        fn compute_stop(&mut self, stop: ComputeStop) {
+            self.stop = Some(stop);
+        }
+    }
+
+    fn append(hub: &HubPage, written: &mut usize, count: usize) {
+        for _ in 0..count {
+            DecisionLog::append(
+                hub.base,
+                hub.bytes,
+                written,
+                &Operation::SchedulerNext,
+                &Outcome::Unit,
+            );
+        }
+    }
+
+    /// A log that fills abandons the root's recording of the child, which
+    /// keeps every decision committed before.
     #[test]
-    fn a_full_log_reports_it_is_full() {
+    fn a_full_log_abandons_the_recording() {
         let (mut hub, fd) = HubPage::create_sized(7, HEADER + 64);
         close(fd);
-        let operation = Operation::SchedulerNext;
-        let outcome = Outcome::Unit;
         let mut written = 0;
-        for _ in 0..10 {
-            DecisionLog::append(hub.base, hub.bytes, &mut written, &operation, &outcome);
-        }
-        let (decisions, full) = hub.take();
-        assert!(full);
-        let lines = decisions
+        append(&hub, &mut written, 10);
+        let mut recorded = Recorded::default();
+        hub.collect(&mut recorded).unwrap();
+        assert!(recorded.abandoned);
+        let lines = recorded
+            .decisions
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty());
         assert!(lines.count() >= 1);
-        assert_eq!(hub.now(), 7);
+    }
+
+    /// A header no child writes (its guest code scribbled on the page) is a
+    /// violation, never read as the child's.
+    #[test]
+    fn a_page_no_child_writes_is_a_violation() {
+        let plant = |plant: &dyn Fn(usize)| {
+            let (mut hub, fd) = HubPage::create_sized(7, HEADER + 4096);
+            close(fd);
+            let mut written = 0;
+            append(&hub, &mut written, 3);
+            hub.collect(&mut Recorded::default()).unwrap();
+            plant(hub.base);
+            hub.collect(&mut Recorded::default())
+                .and_then(|()| hub.now(7).map(drop))
+                .is_err()
+        };
+        let set = |index: usize, value: u64| {
+            move |base: usize| word(base, index).store(value, Ordering::Relaxed)
+        };
+        let wrong: Vec<&str> = [
+            ("committed shrank", &set(COMMITTED, 1) as &dyn Fn(usize)),
+            ("committed past the log", &set(COMMITTED, 1 << 40)),
+            ("stop marked 3", &set(STOP, 3)),
+            ("stop past the decisions", &|base| {
+                set(STOP_STEPS, 4)(base);
+                set(STOP, 1)(base);
+            }),
+            ("time before the start", &set(NOW, 6)),
+        ]
+        .into_iter()
+        .filter(|(_, planted)| !plant(*planted))
+        .map(|(name, _)| name)
+        .collect();
+        assert!(wrong.is_empty(), "accepted: {wrong:?}");
+        // The child's own writes are no violation.
+        assert!(!plant(&|base| {
+            set(STOP_STEPS, 3)(base);
+            set(STOP, 1)(base);
+            set(NOW, 9)(base);
+        }));
     }
 }

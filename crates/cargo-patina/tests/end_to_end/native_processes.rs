@@ -104,13 +104,14 @@ fn main() {
             println!("RELAY status={:?} out={out}", status.code());
         }
         ["bursts"] => {
-            // Two threads take turns computing, each burst well inside the
-            // compute bound and the whole beyond it, in host time (a plain
-            // build's computation takes no virtual time).
+            // Two threads take turns computing, in host time (a plain build's
+            // computation takes no virtual time): each burst far inside the
+            // compute bound on any host (tens of milliseconds), the whole
+            // well beyond it (seconds).
             let burst = || {
-                for _ in 0..6 {
+                for _ in 0..120 {
                     let mut spin = 0u64;
-                    for _ in 0..200_000_000u64 {
+                    for _ in 0..10_000_000u64 {
                         spin = std::hint::black_box(spin.wrapping_add(1));
                     }
                     std::thread::yield_now();
@@ -410,6 +411,28 @@ fn main() {
                 spin = std::hint::black_box(spin.wrapping_add(1));
             }
         }
+        ["fs-spin", _token] => {
+            // Reads a large file from the hub again and again, until
+            // something outside stops it: it spends most of its time
+            // waiting on the hub's answer.
+            std::fs::write("/tmp/fs-spin", vec![7u8; 1 << 20]).unwrap();
+            loop {
+                std::hint::black_box(std::fs::read("/tmp/fs-spin").unwrap());
+            }
+        }
+        [binary, "fs-spin-child", token] => {
+            use std::os::unix::process::ExitStatusExt;
+            let status = Command::new(binary).args(["fs-spin", token]).status().unwrap();
+            println!("SPUN signal={:?}", status.signal());
+        }
+        [binary, "many-children", count] => {
+            // Short-lived children, one after another, each reaped.
+            let count: usize = count.parse().unwrap();
+            let ok = (0..count)
+                .filter(|_| Command::new(binary).args(["child", "0"]).status().unwrap().success())
+                .count();
+            println!("MANY {ok}");
+        }
         [binary, "spin-child", token] => {
             use std::os::unix::process::ExitStatusExt;
             let status = Command::new(binary).args(["spin", token]).status().unwrap();
@@ -458,15 +481,13 @@ fn main() {
             println!("STOPPED {status:?}");
         }
         [binary, "frozen-child", token] => {
-            // The child is frozen (asleep for an hour) while its parent
-            // computes, then the parent waits for it.
-            let mut child = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let mut spin = 0u64;
-            for _ in 0..1_000_000_000u64 {
-                spin = std::hint::black_box(spin.wrapping_add(1));
+            // The child is frozen (asleep an hour at a time) while its parent
+            // naps for good: the machine resumes the child once an hour of
+            // naps, a moment of host time, and runs until it finds it gone.
+            let _child = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            println!("WAITED {:?}", child.wait());
         }
         _ => panic!("unexpected arguments {args:?}"),
     }
@@ -1230,12 +1251,32 @@ fn main() {
     }
 
     /// A replayed child that ends with recorded decisions left over has
-    /// diverged.
+    /// diverged, whether it exits (it finds that itself) or is killed (the
+    /// machine finds it).
     #[test]
     fn a_replayed_child_consumes_its_whole_timeline() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
         let binary = guest.binary.to_str().unwrap();
-        let trace = guest.dir.path().join("parent.patina");
+        let mut wrong = Vec::new();
+        for mode in ["parent", "kill-child"] {
+            let replayed = replay_with_a_planted_decision(&guest, binary, mode);
+            if (&replayed["result"], &replayed["stop"]["reason"])
+                != (&"nondeterministic".into(), &"replay_divergence".into())
+            {
+                wrong.push(format!("{mode}: {replayed:#}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Record `mode`, plant one more decision at the end of its first
+    /// child's timeline, and replay that.
+    fn replay_with_a_planted_decision(
+        guest: &common::native::Guest,
+        binary: &str,
+        mode: &str,
+    ) -> serde_json::Value {
+        let trace = guest.dir.path().join(format!("{mode}.patina"));
         common::native::assert_success(guest.command(
             "run",
             &[
@@ -1245,7 +1286,7 @@ fn main() {
                 trace.to_str().unwrap(),
                 "--",
                 binary,
-                "parent",
+                mode,
             ],
         ));
         let mut bundle: serde_json::Value =
@@ -1260,16 +1301,22 @@ fn main() {
             .last_mut()
             .unwrap();
         end["order"] = (end["order"].as_u64().unwrap() + 1).into();
-        let planted = guest.dir.path().join("extra.patina");
+        let planted = guest.dir.path().join(format!("{mode}-extra.patina"));
         fs::write(&planted, serde_json::to_vec(&bundle).unwrap()).unwrap();
-        let replayed = json_envelope(
-            &guest.command("replay", &[planted.to_str().unwrap(), "--format", "json"]),
-        );
-        assert_eq!(
-            (&replayed["result"], &replayed["stop"]["reason"]),
-            (&"nondeterministic".into(), &"replay_divergence".into()),
-            "{replayed:#}"
-        );
+        json_envelope(&guest.command("replay", &[planted.to_str().unwrap(), "--format", "json"]))
+    }
+
+    /// A machine that starts and reaps many short-lived children runs to
+    /// its end: nothing a child held outlives it.
+    #[test]
+    fn many_short_lived_children_run_one_after_another() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let output = common::native::assert_success(guest.command(
+            "run",
+            &["--seed", "1", "--", binary, "many-children", "200"],
+        ));
+        assert_eq!(stdout_line_with(&output, "MANY"), "MANY 200");
     }
 
     /// A child the host ends from outside the run (an operator's signal, the
@@ -1280,11 +1327,24 @@ fn main() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
         let binary = guest.binary.to_str().unwrap();
         let mut wrong = Vec::new();
-        for (sig, token) in [
-            (libc::SIGTERM, "patina-term-child"),
-            (libc::SIGKILL, "patina-kill-child"),
-        ] {
-            let args: &'static [&'static str] = Box::leak(Box::new(["spin", token]));
+        // A child computing, and one asking the hub for filesystem calls,
+        // killed while it waits for an answer or while it computes: a few
+        // times, as where the kill lands is the host's doing.
+        let cases = [
+            (libc::SIGTERM, "spin-child", "spin", "patina-term-child"),
+            (libc::SIGKILL, "spin-child", "spin", "patina-kill-child"),
+        ]
+        .into_iter()
+        .chain((0..6).map(|_| {
+            (
+                libc::SIGKILL,
+                "fs-spin-child",
+                "fs-spin",
+                "patina-kill-fs-child",
+            )
+        }));
+        for (sig, parent, child, token) in cases {
+            let args: &'static [&'static str] = Box::leak(Box::new([child, token]));
             let output = run_with_outside(
                 &guest,
                 &[
@@ -1296,7 +1356,7 @@ fn main() {
                     "60000",
                     "--",
                     binary,
-                    "spin-child",
+                    parent,
                     token,
                 ],
                 &[],
@@ -1577,8 +1637,6 @@ fn main() {
                 "1",
                 "--format",
                 "json",
-                "--compute-watchdog-ms",
-                "60000",
                 "--",
                 binary,
                 "frozen-child",

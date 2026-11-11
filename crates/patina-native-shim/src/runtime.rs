@@ -591,6 +591,21 @@ pub(crate) fn with_bookkeeping<T>(
     gateway(|context| invoke(&mut context.bookkeeping()))
 }
 
+/// A child's page holds its time as of its latest step, which the machine
+/// keeps if the child dies before it yields, and, replaying, how many
+/// recorded decisions it consumed, which the hub checks at an end the child
+/// cannot check itself.
+fn note_page(context: &Context) {
+    #[cfg(target_os = "linux")]
+    if crate::machine::is_child()
+        && let Ok(now) = context.machine_now()
+    {
+        crate::machine::note_step(now, context.replay_consumed());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = context;
+}
+
 fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> Result<T, c_int> {
     let mut guard = slot().lock();
     let context = guard.as_mut().ok_or(ENOSYS)?;
@@ -606,14 +621,7 @@ fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> R
     thread::note_expiries(context);
     #[cfg(target_os = "linux")]
     crate::charge::note_room(context);
-    // A child's page holds its time as of its latest step, which the
-    // machine keeps if the child dies before it yields.
-    #[cfg(target_os = "linux")]
-    if crate::machine::is_child()
-        && let Ok(now) = context.machine_now()
-    {
-        crate::machine::note_now(now);
-    }
+    note_page(context);
     match result {
         Ok(value) => Ok(value),
         Err(RuntimeError::InjectedCrash(crash)) => terminate_for_injected_crash(*crash),
@@ -775,6 +783,7 @@ pub(crate) fn with_context_msg<T>(
     thread::note_expiries(context);
     #[cfg(target_os = "linux")]
     crate::charge::note_room(context);
+    note_page(context);
     result.map_err(|error| match &error {
         // A classified yield divergence gains the one fact only the shim knows:
         // the instrumented guest site of the in-flight guard hit (if any).
