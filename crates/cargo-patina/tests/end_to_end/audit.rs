@@ -318,6 +318,7 @@ fn main() { assert_eq!(unsafe { audit_probe() }, 42); println!("BOUNDARIES_OK");
             workspace,
             &[
                 "run",
+                "-v",
                 source.to_str().unwrap(),
                 "--seed",
                 "1",

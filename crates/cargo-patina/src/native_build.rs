@@ -115,10 +115,13 @@ fn build_noted(
         path.display(),
         hex(&hasher.finalize())
     );
-    if note_on_stderr {
-        eprintln!("{build_note}");
-    } else {
-        println!("{build_note}");
+    // What was built is detail: `--verbose` prints it.
+    if output::options().verbose {
+        if note_on_stderr {
+            eprintln!("{build_note}");
+        } else {
+            println!("{build_note}");
+        }
     }
     Ok(path)
 }
@@ -472,6 +475,10 @@ fn build_native_package(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     apply_rustc_env(&mut command, rustc);
+    // Cargo's progress lines are detail; its errors and warnings still print.
+    if !output::options().verbose {
+        command.arg("--quiet");
+    }
     // The SanitizerCoverage flags carried in the encoded rustflags are stable
     // `-C` codegen options, so no `RUSTC_BOOTSTRAP` is needed. They apply to every
     // crate Cargo compiles from source in this invocation (guest + its

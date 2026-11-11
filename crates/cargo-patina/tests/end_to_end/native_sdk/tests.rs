@@ -59,6 +59,7 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
     let gated = guest.command(
         "run",
         &[
+            "-v",
             "--seed",
             "1",
             "--buggify",
@@ -77,7 +78,7 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
         String::from_utf8_lossy(&gated.stderr)
     );
     // The same guest without the gate declaration runs clean.
-    let plain = guest.command("run", &["--seed", "1", "--buggify", "--", "no-setup"]);
+    let plain = guest.command("run", &["-v", "--seed", "1", "--buggify", "--", "no-setup"]);
     assert!(
         plain.status.success() && String::from_utf8_lossy(&plain.stdout).contains("RESULT"),
         "ungated run should finish cleanly: {}",
@@ -134,6 +135,7 @@ fn minimize_params_reduces_a_failing_native_runs_parameters() {
             "--",
             patina,
             "run",
+            "-v",
             binary.to_str().unwrap(),
             "--seed",
             "4",
@@ -235,7 +237,10 @@ fn an_sdk_build_into_a_shared_target_dir_does_not_reuse_another_binary() {
         ],
         &[("CARGO_TARGET_DIR", shared_sdk_target().to_str().unwrap())],
     );
-    let second = invoke(workspace, &["run", binary.to_str().unwrap(), "--seed", "1"]);
+    let second = invoke(
+        workspace,
+        &["run", "-v", binary.to_str().unwrap(), "--seed", "1"],
+    );
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(
         stdout.contains("SDK_TARGET_COLLISION second") && !stdout.contains("RESULT"),

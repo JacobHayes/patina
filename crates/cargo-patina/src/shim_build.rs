@@ -445,6 +445,10 @@ fn build_native_shim_at(
     }
     let mut build = command();
     build.args(["rustc", "--lib", "--locked", "-p", "patina-dst-native-shim"]);
+    // Cargo's progress lines are detail; its errors and warnings still print.
+    if !crate::output::options().verbose {
+        build.arg("--quiet");
+    }
     if release {
         build.arg("--release");
     }
@@ -453,6 +457,9 @@ fn build_native_shim_at(
     } else {
         patina_dst_native_shim::POSIX_SEALED_RUST_FLAGS
     });
+    // The shim's lints are Patina's to fix, not the guest author's, so none
+    // reach a run's stderr.
+    build.arg("--cap-lints=allow");
     let status = build
         .status()
         .map_err(|e| CliError(format!("building shim: {e}")))?;

@@ -29,6 +29,7 @@ mod tests {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     bin,
                     "--seed",
                     "70",
@@ -51,7 +52,7 @@ mod tests {
         );
         assert_eq!(fs::read(&trace).unwrap(), fs::read(&repeat_trace).unwrap());
         assert_non_vacuous(&eio, "the read EIO");
-        let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+        let replayed = invoke(workspace, &["replay", "-v", bin, trace.to_str().unwrap()]);
         assert_eq!(
             eio_line,
             stdout_line_with(&replayed, "NATIVE_FS_FAULT_RESULT"),
@@ -62,6 +63,7 @@ mod tests {
             workspace,
             &[
                 "run",
+                "-v",
                 bin,
                 "--seed",
                 "29",
@@ -78,6 +80,7 @@ mod tests {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     bin,
                     "--seed",
                     "5",
@@ -107,7 +110,7 @@ mod tests {
         // the calls' own charges alone (well under a microsecond each).
         let charged = elapsed_of(&invoke(
             workspace,
-            &["run", bin, "--seed", "4", "--", "latency"],
+            &["run", "-v", bin, "--seed", "4", "--", "latency"],
         ));
         assert!(
             charged < 10_000,
@@ -121,6 +124,7 @@ mod tests {
             workspace,
             &[
                 "run",
+                "-v",
                 bin,
                 "--seed",
                 "4",
@@ -139,7 +143,10 @@ mod tests {
             "native guest saw {elapsed}ns across the fs op, not whole 1ms latencies"
         );
         assert_non_vacuous(&delayed, "the latency knob");
-        let replayed = invoke(workspace, &["replay", bin, latency_trace.to_str().unwrap()]);
+        let replayed = invoke(
+            workspace,
+            &["replay", "-v", bin, latency_trace.to_str().unwrap()],
+        );
         assert_eq!(elapsed_of(&replayed), elapsed);
     }
 
@@ -158,7 +165,7 @@ mod tests {
         let bin = guest.binary.to_str().unwrap();
         let workspace = native_workspace();
         let run = |seed: &str, target: &str, mode: &str, record: Option<&Path>| {
-            let mut arguments = vec!["run", bin, "--seed", seed, "--fs-error-at", target];
+            let mut arguments = vec!["run", "-v", bin, "--seed", seed, "--fs-error-at", target];
             if let Some(trace) = record {
                 arguments.extend(["--record", trace.to_str().unwrap()]);
             }
@@ -185,7 +192,7 @@ mod tests {
                 "{mode}: the target must have landed:\n{stderr}"
             );
             assert_eq!(saw(&run("2", target, mode, None)), saw(&recorded));
-            let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+            let replayed = invoke(workspace, &["replay", "-v", bin, trace.to_str().unwrap()]);
             assert_eq!(saw(&replayed), saw(&recorded), "{mode}: flag-free replay");
         }
 

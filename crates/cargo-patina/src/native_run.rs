@@ -367,6 +367,10 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         Some(tempfile::tempfile().map_err(|error| {
             CliError(format!("failed to create the run-facts channel: {error}"))
         })?);
+    // Patina's end-of-run reports (and their warnings): kept apart from the guest's stderr, shown on `--verbose` and
+    // carried in the envelope, so they are never mistaken for the guest's words.
+    let reports_file = tempfile::tempfile()
+        .map_err(|error| CliError(format!("failed to create the reports channel: {error}")))?;
     // The stop pipe: where the shim says why it is ending the run, just before
     // it does. A pipe rather than the facts file, so no file size limit, full
     // disk or `SIGXFSZ` can lose the one record that keeps patina's own stop
@@ -505,6 +509,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             stop_writer.as_raw_fd().to_string(),
         );
         fds.push(stop_writer.as_raw_fd());
+        command.env(
+            patina_dst_runtime::ENV_REPORTS_FD,
+            reports_file.as_raw_fd().to_string(),
+        );
+        fds.push(reports_file.as_raw_fd());
         // The guest's environment is cleared above, so every end-of-run report
         // knob the operator set has to be forwarded explicitly or it never
         // reaches the guest at all. Driven by `Report::ALL` rather than a
@@ -774,6 +783,15 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         }
         None => None,
     };
+    let reports = {
+        use std::io::{Read, Seek};
+        let mut file = reports_file;
+        let mut bytes = Vec::new();
+        file.rewind()
+            .and_then(|()| file.read_to_end(&mut bytes))
+            .map_err(|error| CliError(format!("failed to read the reports channel: {error}")))?;
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
     // The shim's stop record, if it ended the run. Every incarnation has
     // exited and this was the last other holder of the write end, so the read
     // ends at what they wrote.
@@ -876,6 +894,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             coverage: coverage.clone(),
             crash_restart,
             facts,
+            reports,
             runtime_started,
             channel_defect,
             trace_lost,

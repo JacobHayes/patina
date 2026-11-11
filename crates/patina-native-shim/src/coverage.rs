@@ -416,7 +416,7 @@ pub(crate) fn finalize_coverage() -> Result<(), String> {
         return Ok(());
     };
     if control_reports().enabled(patina_dst_runtime::Report::Coverage) {
-        capture_stderr_line(&format!(
+        report_line(&format!(
             "PATINA_COVERAGE_REPORT edges_total={} edges_covered={} covered_permille={} hits_total={} hits_max={} saturated={}",
             prepared.summary.edges_total,
             prepared.summary.edges_covered,

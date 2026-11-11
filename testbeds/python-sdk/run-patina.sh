@@ -79,14 +79,14 @@ line_of() { grep -n "\"$1\"" "$here/app/__main__.py" | head -1 | cut -d: -f1; }
 field_of() { sed -n "s/^PY_SDK_RESULT .* $2=\([^ ]*\).*/\1/p" "$1"; }
 
 echo "==> [2] the SDK is live: simulated, every site declared at its line"
-"$PATINA" run "$built" --seed 1 --format json >"$out/run1.json" 2>/dev/null \
+"$PATINA" run -v "$built" --seed 1 --format json >"$out/run1.json" 2>/dev/null \
   || { cat "$out/run1.json" >&2; fail "[2] the run exited nonzero"; }
 python3 -c '
 import json, sys
 verdicts = json.load(open(sys.argv[1]))["verdicts"]
 assert [(v["kind"], v["label"]) for v in verdicts] == [("pass", "python-sdk-ledger-settled")], verdicts
 ' "$out/run1.json" || { cat "$out/run1.json" >&2; fail "[2] the pass verdict is not the run's one verdict"; }
-"$PATINA" run "$built" --seed 1 >"$out/run1.out" 2>"$out/run1.err" \
+"$PATINA" run -v "$built" --seed 1 >"$out/run1.out" 2>"$out/run1.err" \
   || { cat "$out/run1.out" "$out/run1.err" >&2; fail "[2] the run exited nonzero"; }
 grep -q '^PY_SDK_RESULT simulated=True held=True ' "$out/run1.out" \
   || { cat "$out/run1.out" >&2; fail "[2] unexpected PY_SDK_RESULT"; }
@@ -109,10 +109,10 @@ done
   || { echo "$report" >&2; fail "[2] the never-reached site registered"; }
 
 echo "==> [3] same-seed repeat and record → replay are byte-identical; seeds vary"
-"$PATINA" run "$built" --seed 1 >"$out/run2.out" 2>"$out/run2.err" || fail "[3] repeat run failed"
-"$PATINA" run "$built" --seed 1 --record "$out/sdk.patina" >"$out/record.out" 2>"$out/record.err" \
+"$PATINA" run -v "$built" --seed 1 >"$out/run2.out" 2>"$out/run2.err" || fail "[3] repeat run failed"
+"$PATINA" run -v "$built" --seed 1 --record "$out/sdk.patina" >"$out/record.out" 2>"$out/record.err" \
   || fail "[3] record run failed"
-"$PATINA" replay "$built" "$out/sdk.patina" >"$out/replay.out" 2>"$out/replay.err" \
+"$PATINA" replay -v "$built" "$out/sdk.patina" >"$out/replay.out" 2>"$out/replay.err" \
   || { cat "$out/replay.err" >&2; fail "[3] replay failed"; }
 for pair in run1:run2 record:replay; do
   for stream in out err; do
@@ -120,7 +120,7 @@ for pair in run1:run2 record:replay; do
       || { diff "$out/${pair%%:*}.$stream" "$out/${pair#*:}.$stream" >&2; fail "[3] $pair differ on std$stream"; }
   done
 done
-"$PATINA" run "$built" --seed 2 >"$out/seed2.out" 2>/dev/null || fail "[3] the seed-2 run failed"
+"$PATINA" run -v "$built" --seed 2 >"$out/seed2.out" 2>/dev/null || fail "[3] the seed-2 run failed"
 [[ $(field_of "$out/seed2.out" first) != "$(field_of "$out/run1.out" first)" ]] \
   || { cat "$out/run1.out" "$out/seed2.out" >&2; fail "[3] seed 2 drew seed 1's ledger"; }
 
@@ -144,16 +144,16 @@ if len(sys.argv) > 2:
     assert envelope["guest_exit"] == recorded["guest_exit"], (envelope["guest_exit"], recorded["guest_exit"])
 ' "$@"
 }
-"$PATINA" run "$built" --seed 1 --param violate=1 --record "$out/violate.patina" --format json \
+"$PATINA" run -v "$built" --seed 1 --param violate=1 --record "$out/violate.patina" --format json \
   >"$out/violate.json" 2>"$out/violate.err"
 violated "$out/violate.json" || { cat "$out/violate.json" >&2; fail "[4] no violation verdict"; }
-"$PATINA" replay "$built" "$out/violate.patina" --format json >"$out/violate-replay.json" 2>/dev/null
+"$PATINA" replay -v "$built" "$out/violate.patina" --format json >"$out/violate-replay.json" 2>/dev/null
 violated "$out/violate-replay.json" "$out/violate.json" || { cat "$out/violate-replay.json" >&2; fail "[4] the replay lost the verdict"; }
 
 echo "==> [5] armed buggify after setup fires the fault, delay and knob sites"
 [[ $(field_of "$out/run1.out" dropped) == 0 && $(field_of "$out/run1.out" width) == 8 ]] \
   || { cat "$out/run1.out" >&2; fail "[5] an unarmed run fired a site"; }
-"$PATINA" run "$built" --seed 1 --buggify-after-setup --buggify-activation-permille 1000 \
+"$PATINA" run -v "$built" --seed 1 --buggify-after-setup --buggify-activation-permille 1000 \
   >"$out/buggify.out" 2>"$out/buggify.err" \
   || { cat "$out/buggify.out" "$out/buggify.err" >&2; fail "[5] the armed run failed"; }
 armed="$(grep '^PATINA_SDK_REPORT ' "$out/buggify.err")" || fail "[5] no SDK report"
@@ -167,16 +167,16 @@ knob="$(sed -n 's/.* site=python-sdk-ledger-width|knob|a1|[^ ]*|k\([0-9]*\)|.*/\
 (( $(field_of "$out/buggify.out" dropped) > 0 )) || { cat "$out/buggify.out" >&2; fail "[5] no draw dropped"; }
 
 echo "==> [6] custom ops: performed on record, replayed without, and a seeded fault"
-"$PATINA" run "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
+"$PATINA" run -v "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
   || { cat "$out/ops.err" >&2; fail "[6] the custom-op run failed"; }
-"$PATINA" replay "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
+"$PATINA" replay -v "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
   || { cat "$out/ops-replay.err" >&2; fail "[6] the custom-op replay failed"; }
 [[ $(field_of "$out/ops.out" performed) == 2 && $(field_of "$out/ops-replay.out" performed) == 0 ]] \
   && [[ $(field_of "$out/ops-replay.out" fetched) == etag-7 && $(field_of "$out/ops-replay.out" plain) == 7 ]] \
   || { cat "$out/ops.out" "$out/ops-replay.out" >&2; fail "[6] a replay performed, or lost a result"; }
-"$PATINA" run "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
+"$PATINA" run -v "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
   >"$out/fault.out" 2>"$out/fault.err" || { cat "$out/fault.err" >&2; fail "[6] the faulted run failed"; }
-"$PATINA" replay "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
+"$PATINA" replay -v "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
   || { cat "$out/fault-replay.err" >&2; fail "[6] the faulted replay failed"; }
 # Only the op that declared a failure faults, and it does not perform.
 [[ $(field_of "$out/fault.out" performed) == 1 && $(field_of "$out/fault.out" fetched) == UNAVAILABLE ]] \

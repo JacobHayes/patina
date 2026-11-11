@@ -49,6 +49,83 @@ mod tests {
         );
     }
 
+    /// A failure's signature is the guest's, whatever Patina reported about the
+    /// run: half the seeds spawn a thread that draws a schedule report and its
+    /// warning, every seed fails the same way, and the campaign keeps one
+    /// signature. The reports ride the envelope's own field, never the
+    /// guest's stderr.
+    #[test]
+    fn patinas_reports_never_split_a_failure_signature() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("split.rs");
+        fs::write(
+            &source,
+            "use std::hash::{BuildHasher, Hasher};\n\
+             fn main() {\n\
+             let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();\n\
+             hasher.write_u8(0);\n\
+             if hasher.finish() % 2 == 0 {\n\
+             std::thread::spawn(|| ()).join().unwrap();\n\
+             }\n\
+             panic!(\"the ledger does not balance\");\n\
+             }\n",
+        )
+        .unwrap();
+        let mut reported = 0;
+        for seed in ["1", "2", "3", "4", "5", "6"] {
+            let output = invoke_unchecked(
+                env!("CARGO_BIN_EXE_patina"),
+                native_workspace(),
+                &[
+                    "run",
+                    source.to_str().unwrap(),
+                    "--seed",
+                    seed,
+                    "--format",
+                    "json",
+                ],
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(envelope["result"], "failure", "{envelope:#}");
+            let stderr = envelope["stderr"].as_str().unwrap();
+            assert!(
+                !stderr.lines().any(|line| line.starts_with("PATINA")),
+                "{envelope:#}"
+            );
+            reported += usize::from(
+                envelope["reports"]
+                    .as_str()
+                    .is_some_and(|reports| reports.contains("PATINA_SCHEDULE_REPORT")),
+            );
+        }
+        assert!(
+            reported > 0 && reported < 6,
+            "the seeds must differ in what Patina reports: {reported} of 6"
+        );
+
+        let out = directory.path().join("campaign");
+        let run = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            native_workspace(),
+            &[
+                "campaign",
+                source.to_str().unwrap(),
+                "--gens",
+                "6",
+                "--out-dir",
+                out.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        assert_eq!(run.status.code(), Some(1), "{run:?}");
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("campaign-state.json")).unwrap()).unwrap();
+        let signatures = state["signatures"].as_array().unwrap();
+        assert_eq!(signatures.len(), 1, "one failure, one signature: {state:#}");
+        assert_eq!(signatures[0]["count"], 6, "{state:#}");
+    }
+
     /// A declared `always!` no generation evaluates is reported, never gated: the
     /// campaign stays green and the store lists it as unregistered.
     #[test]
@@ -339,6 +416,7 @@ fn main() {
             .strip_prefix("patina ")
             .unwrap()
             .split(' ')
+            .chain(["-v"])
             .collect();
         let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &repro_args);
         assert!(
@@ -370,6 +448,7 @@ fn main() {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     guest.to_str().unwrap(),
                     "--seed",
                     seed,
@@ -436,6 +515,7 @@ fn main() {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     guest.to_str().unwrap(),
                     "--seed",
                     &seed.to_string(),
@@ -500,6 +580,7 @@ fn main() {
             workspace,
             &[
                 "run",
+                "-v",
                 guest.to_str().unwrap(),
                 "--seed",
                 &dropped_seed.to_string(),
@@ -519,6 +600,7 @@ fn main() {
             workspace,
             &[
                 "replay",
+                "-v",
                 guest.to_str().unwrap(),
                 dropped_trace.to_str().unwrap(),
             ],
@@ -572,7 +654,14 @@ fn main() {
         let inert = invoke_unchecked(
             env!("CARGO_BIN_EXE_patina"),
             workspace,
-            &["run", guest.to_str().unwrap(), "--seed", "1", "--swarm"],
+            &[
+                "run",
+                "-v",
+                guest.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--swarm",
+            ],
         );
         let stderr = String::from_utf8_lossy(&inert.stderr).to_string();
         assert!(

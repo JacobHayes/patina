@@ -174,7 +174,7 @@ mod tests {
         // The structured plane and the human line describe the same run, field for
         // field — including the per-op-kind breakdown and the vacuity bit.
         let printed = report_line_fields(
-            faulted["stderr"].as_str().unwrap(),
+            faulted["reports"].as_str().unwrap(),
             "PATINA_FS_FAULT_REPORT",
         );
         assert_eq!(

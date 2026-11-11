@@ -117,7 +117,7 @@ pub use reports::{
     ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_FAULT_REPORT,
     ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT,
     ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report,
-    ReportConfig, set_diagnostic_writer,
+    ReportConfig, set_diagnostic_writer, set_report_writer,
 };
 
 pub use patina_dst_abi::VerdictKind;
@@ -163,6 +163,14 @@ pub const ENV_COVERAGE_FD: &str = "PATINA_RT_COVERAGE_FD";
 /// supervisor-owned host descriptor rather than through the deterministic FS,
 /// as the trace travels ([`ENV_TRACE_FD`]).
 pub const ENV_FACTS_FD: &str = "PATINA_RT_FACTS_FD";
+
+/// Inherited host descriptor the native shim writes Patina's end-of-run
+/// reports to (with their warnings and the coverage report), so none of it joins the guest's stderr. Unset, they go to stderr
+/// as before. The supervisor shows them on `--verbose` and carries them in the
+/// result envelope; the structured facts ([`ENV_FACTS_FD`]) are what a run is
+/// judged from. A verdict, a violation marker or a refusal is the run's
+/// result, not a report, and stays beside the guest's output.
+pub const ENV_REPORTS_FD: &str = "PATINA_RT_REPORTS_FD";
 
 /// Inherited host descriptor the native shim writes its stop record to: one
 /// [`STOP_SCHEMA`] line saying why it is ending the run, written just before

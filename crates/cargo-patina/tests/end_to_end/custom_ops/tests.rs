@@ -47,6 +47,7 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
         workspace,
         &[
             "run",
+            "-v",
             bin,
             "--seed",
             "4",
@@ -87,7 +88,7 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     assert_eq!(events[1].2, patina_dst_abi::Outcome::Bytes(Vec::new()));
 
     // Replay: the guest sees the same values, but `perform` never ran.
-    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", "-v", bin, trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 object=etag-7 empty_len=0",
@@ -97,7 +98,10 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     );
 
     // A plain seeded run performs for real, exactly like the record pass.
-    let plain = invoke(workspace, &["run", bin, "--seed", "4", "--", "record"]);
+    let plain = invoke(
+        workspace,
+        &["run", "-v", bin, "--seed", "4", "--", "record"],
+    );
     assert_eq!(
         result_line(&plain),
         "PATINA_RESULT performed=2 object=etag-7 empty_len=0"
@@ -122,7 +126,7 @@ fn record_replay_and_key_mismatch(directory: &Path, bin: &str) {
     let refused = invoke_with_deadline(
         env!("CARGO_BIN_EXE_patina"),
         workspace,
-        &["replay", bin, mismatched.to_str().unwrap()],
+        &["replay", "-v", bin, mismatched.to_str().unwrap()],
         Duration::from_secs(20),
     )
     .expect("custom-op refusal must terminate rather than deadlock inside the shim");
@@ -152,6 +156,7 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
     let trace = directory.join("typed.patina");
     let recorded = run(&[
         "run",
+        "-v",
         bin,
         "--seed",
         "4",
@@ -164,7 +169,7 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
         result_line(&recorded),
         "PATINA_RESULT performed=2 head=etag-9:4096 fetched=etag-7"
     );
-    let replayed = run(&["replay", bin, trace.to_str().unwrap()]);
+    let replayed = run(&["replay", "-v", bin, trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 head=etag-9:4096 fetched=etag-7",
@@ -174,6 +179,7 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
     let faulted_trace = directory.join("typed-fault.patina");
     let faulted = run(&[
         "run",
+        "-v",
         bin,
         "--seed",
         "4",
@@ -189,7 +195,7 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
         "PATINA_RESULT performed=1 head=etag-9:4096 fetched=UNAVAILABLE",
         "only the faultable typed op may fault, and it must not perform"
     );
-    let replayed = run(&["replay", bin, faulted_trace.to_str().unwrap()]);
+    let replayed = run(&["replay", "-v", bin, faulted_trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 head=etag-9:4096 fetched=UNAVAILABLE",
@@ -200,7 +206,7 @@ fn typed_ops_record_replay_and_fault(directory: &Path, bin: &str) {
 fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
     let workspace = native_workspace();
     // Knob off: the declared failure is never reached, both closures run.
-    let clean = invoke(workspace, &["run", bin, "--seed", "4", "--", "probe"]);
+    let clean = invoke(workspace, &["run", "-v", bin, "--seed", "4", "--", "probe"]);
     assert_eq!(
         result_line(&clean),
         "PATINA_RESULT performed=2 faultable=obj-1 plain=7"
@@ -218,6 +224,7 @@ fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
         workspace,
         &[
             "run",
+            "-v",
             bin,
             "--seed",
             "4",
@@ -269,7 +276,7 @@ fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
     );
 
     // Flag-free replay: the trace restores the knob and reproduces the fault.
-    let replayed = invoke(workspace, &["replay", bin, trace.to_str().unwrap()]);
+    let replayed = invoke(workspace, &["replay", "-v", bin, trace.to_str().unwrap()]);
     assert_eq!(
         result_line(&replayed),
         "PATINA_RESULT performed=0 faultable=UNAVAILABLE plain=7",
@@ -283,6 +290,7 @@ fn faults_fire_report_and_replay(directory: &Path, bin: &str) {
         workspace,
         &[
             "run",
+            "-v",
             bin,
             "--seed",
             "4",

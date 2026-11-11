@@ -153,7 +153,7 @@ fn main() {
             let mode = format!("NET_MODE={mode}");
             let mut args = vec!["--seed", seed, "--env", &mode];
             args.extend_from_slice(flags);
-            common::native::assert_success(guest.command("run", &args))
+            common::native::assert_success(guest.command("run", &[&["-v"][..], &args[..]].concat()))
         };
         let result = |output: &Output| stdout_line_with(output, "NET_RESULT");
         let elapsed_of = |output: &Output| -> u64 {

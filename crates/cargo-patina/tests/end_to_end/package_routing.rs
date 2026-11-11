@@ -118,6 +118,7 @@ mod tests {
             &decoy,
             &[
                 "run",
+                "-v",
                 pkg.to_str().unwrap(),
                 "--seed",
                 "1",

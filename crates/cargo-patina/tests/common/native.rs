@@ -211,7 +211,8 @@ impl Guest {
         let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let seed = seed.to_string();
         let trace = self.dir.path().join(format!("run-{run}.patina"));
-        let mut seeded = vec!["--seed", &seed];
+        // `-v`: the end-of-run reports are what most callers check.
+        let mut seeded = vec!["-v", "--seed", &seed];
         seeded.extend_from_slice(flags);
         let plain = assert_success(self.command("run", &seeded));
         // Patina's own flags go before a `--` that starts the guest's.
@@ -219,13 +220,13 @@ impl Guest {
             .iter()
             .position(|flag| *flag == "--")
             .unwrap_or(flags.len());
-        let mut record = vec!["--seed", &seed];
+        let mut record = vec!["-v", "--seed", &seed];
         record.extend_from_slice(&flags[..split]);
         record.extend(["--record", trace.to_str().unwrap()]);
         record.extend_from_slice(&flags[split..]);
         let recorded = assert_success(self.command("run", &record));
         assert_same_guest_output(&plain, &recorded, "seeded and recorded runs");
-        let replay = assert_success(self.command("replay", &[trace.to_str().unwrap()]));
+        let replay = assert_success(self.command("replay", &["-v", trace.to_str().unwrap()]));
         assert_same_guest_output(&recorded, &replay, "recorded run and its replay");
         (recorded, trace)
     }

@@ -73,9 +73,16 @@ fn drain_runtime_diagnostics() {
 }
 
 /// Append a diagnostic line to the captured stderr buffer so it interleaves with
-/// guest output and flushes at exit (lifecycle markers). Bounded like guest I/O.
+/// guest output and flushes at exit. Bounded like guest I/O.
 pub(crate) fn capture_stderr_line(line: &str) {
     stdio_slot().lock().put(1, &[line.as_bytes(), b"\n"]);
+}
+
+/// A report line of Patina's own (the coverage report): to the supervisor's
+/// reports descriptor, else the captured stderr. A lifecycle marker is not
+/// one: the guest asked for it where it stands among its own output.
+pub(crate) fn report_line(line: &str) {
+    crate::runtime::write_runtime_report(format!("{line}\n").as_bytes());
 }
 
 /// Shared body for the site-evaluating buggify entry points: read the label and

@@ -349,7 +349,7 @@ fn main() {
                 &[
                     &["--seed", "1"][..],
                     &crash("machine"),
-                    &["--swarm", "--record", swarm.to_str().unwrap()],
+                    &["-v", "--swarm", "--record", swarm.to_str().unwrap()],
                 ]
                 .concat(),
             ),

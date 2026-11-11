@@ -159,14 +159,24 @@ pub(super) fn native_prerun_gate(
         tsc: platform_supports_tsc_trap(),
     };
     let entry = verdict_entry(binary, image, load_set, effective, host);
+    // A clean verdict's notes only inform (the deny-trap armed symbols, the
+    // trapped instruction sites): they print on `--verbose`. A verdict that
+    // downgrades or refuses prints its notes always: they qualify or explain
+    // the run.
+    let verbose = crate::output::options().verbose;
     if let Some(notes) = run_cache::load(&entry) {
-        eprint!("{notes}");
+        if verbose {
+            eprint!("{notes}");
+        }
         return Ok(Vec::new());
     }
     let mut notes = String::new();
     let outcome = judge(binary, load_set, effective, policy, host, &mut notes);
-    eprint!("{notes}");
-    if matches!(&outcome, Ok(downgraded) if downgraded.is_empty()) {
+    let clean = matches!(&outcome, Ok(downgraded) if downgraded.is_empty());
+    if verbose || !clean {
+        eprint!("{notes}");
+    }
+    if clean {
         image.store_unchanged(&entry, &notes);
     }
     outcome

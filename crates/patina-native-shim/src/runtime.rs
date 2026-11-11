@@ -1332,14 +1332,40 @@ pub(crate) fn write_runtime_diagnostic(text: &[u8]) {
     }
 }
 
+/// The supervisor's reports descriptor ([`patina_dst_runtime::ENV_REPORTS_FD`]),
+/// read once at install; -1 when the supervisor gave none.
+static REPORTS_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+/// The runtime's report writer: with a supervisor reports descriptor the text
+/// goes there, one host write, apart from the guest's output; without one it
+/// is a diagnostic like any other. A failed write goes to the host's stderr,
+/// never through the capture, so whether the host write succeeded never
+/// changes what the capture bound answers the guest.
+pub(crate) fn write_runtime_report(text: &[u8]) {
+    let fd = REPORTS_FD.load(core::sync::atomic::Ordering::Relaxed);
+    if fd < 0 {
+        write_runtime_diagnostic(text);
+    } else if host_write_all(fd, text).is_err() {
+        let _ = host_write_all(2, text);
+    }
+}
+
 pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     let mut context = match context {
         Ok(context) => context,
         Err(error) => return fail(runtime_errno(&error)),
     };
     // The runtime's own diagnostics go out beside guest stderr through the
-    // capture, never through std's stderr lock, which the guest shares.
+    // capture, never through std's stderr lock, which the guest shares; its
+    // end-of-run reports go to the supervisor's descriptor when it gave one.
+    if let Some(fd) = control_env(patina_dst_runtime::ENV_REPORTS_FD)
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| *fd >= 0)
+    {
+        REPORTS_FD.store(fd, core::sync::atomic::Ordering::Relaxed);
+    }
     let _ = patina_dst_runtime::set_diagnostic_writer(write_runtime_diagnostic);
+    let _ = patina_dst_runtime::set_report_writer(write_runtime_report);
     if let Err(error) = declare_link_time_sites(&mut context) {
         record_init_failure(&error);
         return fail(runtime_errno(&error));

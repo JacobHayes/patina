@@ -30,6 +30,13 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "Like --render but only when the run fails; the HTML leads with a failure summary.",
         false,
     ),
+    f(
+        "--verbose",
+        Some("-v"),
+        Value::None,
+        "Also print Patina's own detail on stderr: the end-of-run reports of every plane, the pre-run notes and build lines. Without it a run prints the guest's output, a warning for a requested fault that never landed, and one result line; --format json carries the reports as `reports`.",
+        false,
+    ),
 ];
 
 pub const HELP_FLAGS: &[Flag] = &[

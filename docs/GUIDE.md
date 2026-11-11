@@ -221,8 +221,8 @@ Effects Patina does not model (RPC, S3, devices) go through
 re-running, and, for the faultable form, failed on demand with
 `--custom-op-fail-permille`.
 Enable at run time with `patina run --buggify`; decisions are pure
-functions of the seed, and the run's `sdk` facts (and its human
-`PATINA_SDK_REPORT` line) prove sites actually fired (no vacuous "all clean").
+functions of the seed, and the run's `sdk` facts (and its
+`PATINA_SDK_REPORT` line under `--verbose`) prove sites actually fired (no vacuous "all clean").
 Literal-label SDK macro calls also declare a link-time site table under
 Patina, so never-reached `sometimes!`/`reachable!` oracles appear in reports
 with `registered_gens=0`. Each row carries `@file:line`. `patina

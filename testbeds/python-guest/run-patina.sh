@@ -68,7 +68,7 @@ zone='XST5XDT,M3.2.0,M11.1.0'
 # A run's stdout and stderr, the stderr without the run's own reports.
 run() {
   local name=$1; shift
-  "$PATINA" run "$built" --env "TZ=$zone" "$@" >"$out/$name.out" 2>"$out/$name.raw"
+  "$PATINA" run -v "$built" --env "TZ=$zone" "$@" >"$out/$name.out" 2>"$out/$name.raw"
   local status=$?
   grep -v '^PATINA_SCHEDULE_REPORT ' "$out/$name.raw" >"$out/$name.err"
   return "$status"
@@ -108,7 +108,7 @@ cmp -s "$out/seed0.out" "$out/again.out" && cmp -s "$out/seed0.err" "$out/again.
   || fail "[3] two seed-0 runs differ"
 run record --seed 0 --record "$out/run.trace" -- first second || fail "[3] the recorded run failed"
 cmp -s "$out/seed0.out" "$out/record.out" || fail "[3] the recorded run differs from the plain one"
-"$PATINA" replay "$built" "$out/run.trace" >"$out/replay.out" 2>"$out/replay.raw" \
+"$PATINA" replay -v "$built" "$out/run.trace" >"$out/replay.out" 2>"$out/replay.raw" \
   || { cat "$out/replay.raw" >&2; fail "[3] replay failed"; }
 cmp -s "$out/record.out" "$out/replay.out" || fail "[3] the replay differs from the record"
 
@@ -130,7 +130,7 @@ grep -q '^  File "__main__.py", line [0-9]*, in <module>$' "$out/boom.err" \
   && grep -q '^  File "ledger.py", line [0-9]*, in settle$' "$out/boom.err" \
   && grep -q "^RuntimeError: unsettled accounts: \['open'\]$" "$out/boom.err" \
   || { cat "$out/boom.err" >&2; fail "[5] the traceback does not show the application's lines"; }
-"$PATINA" replay "$built" "$out/boom.trace" >"$out/boom-replay.out" 2>"$out/boom-replay.raw"
+"$PATINA" replay -v "$built" "$out/boom.trace" >"$out/boom-replay.out" 2>"$out/boom-replay.raw"
 grep -v '^PATINA_SCHEDULE_REPORT ' "$out/boom-replay.raw" | diff - "$out/boom.err" >/dev/null \
   || fail "[5] the replay's traceback differs"
 

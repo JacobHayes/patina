@@ -36,6 +36,34 @@ macro_rules! diagnostic {
     };
 }
 pub(crate) use diagnostic;
+
+/// Where the end-of-run reports and their warnings go when an embedder keeps
+/// them apart from the run's result ([`set_report_writer`]).
+static REPORT_WRITER: OnceLock<fn(&[u8])> = OnceLock::new();
+
+/// Send the end-of-run reports and their warnings through `writer` instead of
+/// the diagnostic writer. They describe how the run went, not what it found:
+/// a verdict, a violation marker or a `PATINA_INFRA` line still goes through
+/// [`set_diagnostic_writer`]'s writer beside the guest's output. Answers false,
+/// changing nothing, when a writer is already installed.
+pub fn set_report_writer(writer: fn(&[u8])) -> bool {
+    REPORT_WRITER.set(writer).is_ok()
+}
+
+/// Write `text` through the installed report writer, else as a diagnostic.
+pub(crate) fn write_report(text: std::fmt::Arguments<'_>) {
+    match REPORT_WRITER.get() {
+        Some(writer) => writer(std::fmt::format(text).as_bytes()),
+        None => write_diagnostic(text),
+    }
+}
+
+/// `eprintln!` through [`write_report`].
+macro_rules! report {
+    ($($argument:tt)*) => {
+        $crate::reports::write_report(format_args!("{}\n", format_args!($($argument)*)))
+    };
+}
 // A report cannot be declared without its control-plane spelling. The same
 // rows generate the enum, ordered iteration, and public constants.
 macro_rules! report_registry {
@@ -198,9 +226,9 @@ pub(super) fn emit_swarm_report(
     if !reports.enabled(Report::Swarm) {
         return;
     }
-    diagnostic!("{}", swarm_report_line(record));
+    report!("{}", swarm_report_line(record));
     if record.is_vacuous() {
-        diagnostic!("{SWARM_VACUOUS_WARNING}");
+        report!("{SWARM_VACUOUS_WARNING}");
     }
 }
 
@@ -255,7 +283,7 @@ pub(super) fn emit_liveness_report(reports: ReportConfig, watchdog: &LivenessWat
             arm.stall_ops,
         ));
     }
-    diagnostic!("{line}");
+    report!("{line}");
 }
 
 /// Emit the default-on schedule-exploration diagnostic to stderr for a
@@ -287,7 +315,7 @@ pub(super) fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnos
             stat.cause.as_str()
         ));
     }
-    diagnostic!("{line}");
+    report!("{line}");
     if !diag.vacuous.is_empty() {
         let ids = diag
             .vacuous
@@ -295,7 +323,7 @@ pub(super) fn emit_schedule_report(reports: ReportConfig, diag: &ScheduleDiagnos
             .map(|task| task.0.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        diagnostic!(
+        report!(
             "PATINA WARNING: vacuous schedule exploration — {} spawned thread(s) (task id {ids}) ran \
 to completion with no more scheduling boundaries than thread spawn/join alone incurs. Any loop in \
 their body was atomics-only and thus invisible to the scheduler, so their internal interleavings \
@@ -321,7 +349,7 @@ pub(super) fn emit_dns_fault_report(
     if !reports.enabled(Report::DnsFault) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_DNS_FAULT_REPORT resolutions={} fail_vacuity_diagnosable={} failures_injected={} \
 latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
         report.resolutions,
@@ -332,7 +360,7 @@ latency_vacuity_diagnosable={} latency_applied={} vacuous={}",
         u8::from(report.is_vacuous()),
     );
     if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: DNS fault knobs inert — {} fault-eligible name resolution(s) \
 occurred, enough that the configured rate should have fired an enabled DNS fault class several \
 times over, yet it applied ZERO effects. A clean result here does NOT mean name-resolution \
@@ -357,7 +385,7 @@ pub(super) fn emit_entropy_fault_report(
     if !reports.enabled(Report::EntropyFault) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_ENTROPY_FAULT_REPORT requests={} fail_vacuity_diagnosable={} failures_injected={} vacuous={}",
         report.requests,
         u8::from(report.fail_vacuity_diagnosable),
@@ -365,7 +393,7 @@ pub(super) fn emit_entropy_fault_report(
         u8::from(report.is_vacuous()),
     );
     if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: entropy fault knobs inert — {} fault-eligible entropy request(s) \
 occurred (GRND_NONBLOCK reads before the random pool was known ready), enough that the configured \
 rate should have fired several times over, yet it applied ZERO effects.",
@@ -388,7 +416,7 @@ pub(super) fn emit_customop_fault_report(
     if !reports.enabled(Report::CustomOpFault) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_CUSTOMOP_FAULT_REPORT eligible_ops={} fail_vacuity_diagnosable={} \
 faults_injected={} vacuous={}",
         report.eligible_ops,
@@ -397,7 +425,7 @@ faults_injected={} vacuous={}",
         u8::from(report.is_vacuous()),
     );
     if report.eligible_ops == 0 {
-        diagnostic!(
+        report!(
             "PATINA WARNING: custom-op fault knob inert — the run armed \
 --custom-op-fail-permille and executed ZERO fault-eligible custom operations, so nothing could \
 have been failed. A clean result here does NOT mean custom-op failure was tested. Verify the \
@@ -405,7 +433,7 @@ guest declares a failure shape on the operations it wraps (`custom_op_bytes_faul
 exercised path reaches them.",
         );
     } else if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: custom-op fault knob inert — {} fault-eligible custom operation(s) \
 occurred, enough that the configured rate should have fired several times over, yet it applied \
 ZERO faults.",
@@ -427,7 +455,7 @@ pub(super) fn emit_clock_fault_report(
     if !reports.enabled(Report::ClockFault) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_CLOCK_FAULT_REPORT reads={} jump_vacuity_diagnosable={} jumps_applied={} vacuous={}",
         report.reads,
         u8::from(report.jump_vacuity_diagnosable),
@@ -435,7 +463,7 @@ pub(super) fn emit_clock_fault_report(
         u8::from(report.is_vacuous()),
     );
     if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: clock fault knobs inert — {} fault-eligible realtime-epoch read(s) \
 occurred, enough that the configured jump range should have applied a non-zero offset several \
 times over, yet it applied ZERO effects.",
@@ -461,16 +489,16 @@ pub(super) fn emit_fs_fault_report(
     if !reports.enabled(Report::FsFault) {
         return;
     }
-    diagnostic!("{}", fs_fault_report_line(report));
+    report!("{}", fs_fault_report_line(report));
     if report.targets_missed != 0 {
-        diagnostic!(
+        report!(
             "PATINA WARNING: {} --fs-error-at target(s) never landed — the run made fewer \
 operations of the kind than the ordinal, or another target took the same operation, so the fault \
 it names was not tested.",
             report.targets_missed,
         );
     } else if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: filesystem fault knobs inert — {} fault-eligible filesystem op(s) \
 occurred, enough that the configured rate should have fired an enabled fs fault class several \
 times over, yet it applied ZERO effects. A clean result here does NOT mean every configured \
@@ -531,7 +559,7 @@ pub(super) fn emit_net_fault_report(
     if !reports.enabled(Report::NetFault) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_NET_FAULT_REPORT send_ops={} drop_vacuity_diagnosable={} drops_applied={} \
 jitter_vacuity_diagnosable={} jitter_applied={} latency_vacuity_diagnosable={} latency_applied={} \
 duplicate_vacuity_diagnosable={} duplicates_applied={} connect_ops={} \
@@ -558,7 +586,7 @@ partition_blocks={} vacuous={}",
         u8::from(report.is_vacuous()),
     );
     if report.is_vacuous() {
-        diagnostic!(
+        report!(
             "PATINA WARNING: net fault knobs inert — fault-eligible network traffic occurred \
 ({} send(s), {} connect(s), {} stream op(s)), enough that an enabled net fault class should have \
 fired several times over, yet that class applied ZERO effects. The configured network fault is \
@@ -587,7 +615,7 @@ pub(super) fn emit_schedule_policy_report(
     if !reports.enabled(Report::SchedulePolicy) {
         return;
     }
-    diagnostic!(
+    report!(
         "PATINA_SCHEDULE_POLICY pct={} pct_depth={} pct_change_points={} pct_change_points_hit={} \
 decisions={} bug_depth={}",
         u8::from(report.pct),
@@ -606,7 +634,7 @@ pub(super) fn emit_sdk_report(reports: ReportConfig, diag: &BuggifyDiagnostics) 
         return;
     }
     if let Some(line) = sdk_report_line(diag) {
-        diagnostic!("{line}");
+        report!("{line}");
     }
 }
 

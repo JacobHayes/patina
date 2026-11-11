@@ -84,6 +84,8 @@ pub struct Envelope {
     pub(super) guest_exit_raw: Option<serde_json::Value>,
     pub(super) stdout: Option<String>,
     pub(super) stderr: Option<String>,
+    /// Patina's end-of-run reports, apart from the guest's output.
+    pub(super) reports: Option<String>,
     pub(crate) message: Option<String>,
 }
 
@@ -121,6 +123,7 @@ impl Envelope {
             guest_exit_raw: None,
             stdout: None,
             stderr: None,
+            reports: None,
             message: None,
         }
     }
@@ -273,6 +276,9 @@ impl Envelope {
         }
         if let Some(v) = &self.stderr {
             m.insert("stderr".into(), Value::from(v.clone()));
+        }
+        if let Some(v) = self.reports.as_ref().filter(|text| !text.is_empty()) {
+            m.insert("reports".into(), Value::from(v.clone()));
         }
         if let Some(v) = &self.message {
             m.insert("message".into(), Value::from(v.clone()));

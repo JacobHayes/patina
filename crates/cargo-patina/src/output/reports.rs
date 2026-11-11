@@ -41,6 +41,9 @@ pub struct RunReport<'a> {
     /// facts channel was installed and the run produced one. The one machine
     /// channel out of the run: nothing here reads the `PATINA_*` stderr lines.
     pub facts: Option<serde_json::Value>,
+    /// Patina's end-of-run reports (and their warnings), apart from the guest's output: printed on `--verbose`,
+    /// carried in the envelope, read by nothing that judges the run.
+    pub reports: String,
     /// Whether the shim reported the runtime installed: the guest ran under
     /// patina rather than ending before patina's runtime started.
     pub runtime_started: bool,
@@ -239,13 +242,26 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.result_line = result_line(&stdout_text, &stderr_text);
         env.stdout = Some(stdout_text);
         env.stderr = Some(stderr_text);
+        env.reports = Some(report.reports.clone());
         env.emit();
     } else {
-        if report
-            .facts
-            .as_ref()
-            .and_then(|facts| facts.get("executable_unavailable"))
-            .is_some_and(|value| value == true)
+        if opts.verbose {
+            let _ = std::io::stderr().write_all(report.reports.as_bytes());
+        } else if let Some(planes) = vacuous_planes(report.facts.as_ref()) {
+            // A fault the run was asked for that never landed is news even on
+            // a quiet run: the clean result did not test it.
+            eprintln!(
+                "patina: warning: the requested {planes} faults never landed, so this run did \
+                 not test them (--verbose shows each plane's report)"
+            );
+        }
+        // Only a run that did not end clean has a backtrace worth explaining.
+        if outcome.class.attribution().is_some()
+            && report
+                .facts
+                .as_ref()
+                .and_then(|facts| facts.get("executable_unavailable"))
+                .is_some_and(|value| value == true)
         {
             eprintln!(
                 "patina: note: the guest looked for its own executable (/proc/self/exe or \
@@ -269,6 +285,22 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
     // the guest, 2 patina could not do what was asked. The guest's status is
     // reported (`guest_exit`), never passed through.
     Ok(outcome.class.exit_code())
+}
+
+/// The fault planes the run's facts call vacuous (configured, given traffic,
+/// and never fired), joined for a reader; `None` when there are none.
+/// Exploration planes (schedule, swarm) are left to `--verbose`.
+fn vacuous_planes(facts: Option<&serde_json::Value>) -> Option<String> {
+    let planes = facts?.get("fault_reports")?.as_object()?;
+    let vacuous: Vec<&str> = planes
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "schedule" | "swarm"))
+        .filter(|(_, plane)| {
+            plane.get("vacuous").and_then(serde_json::Value::as_bool) == Some(true)
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+    (!vacuous.is_empty()).then(|| vacuous.join(", "))
 }
 
 /// The failure report's labeled facts, from the same structured sources the

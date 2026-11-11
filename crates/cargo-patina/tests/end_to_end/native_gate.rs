@@ -209,8 +209,12 @@ fn main() {
             "audit must note the referenced deny-trap symbol up front:\n{audit_stderr}"
         );
 
-        // run: the same note, and the dormant guest still runs to completion.
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+        // run: the same note under --verbose (a clean verdict's notes are
+        // detail), and the dormant guest still runs to completion.
+        let ran = invoke(
+            workspace,
+            &["run", "-v", bin.to_str().unwrap(), "--seed", "1"],
+        );
         let run_stderr = String::from_utf8_lossy(&ran.stderr);
         assert!(
             run_stderr.contains("IOServiceGetMatchingServices (host-introspection)"),
@@ -256,7 +260,10 @@ fn main() {
             String::from_utf8_lossy(&audited.stderr)
         );
 
-        let ran = invoke(workspace, &["run", bin.to_str().unwrap(), "--seed", "1"]);
+        let ran = invoke(
+            workspace,
+            &["run", "-v", bin.to_str().unwrap(), "--seed", "1"],
+        );
         assert!(
             !String::from_utf8_lossy(&ran.stderr).contains("deny-trap armed"),
             "run must emit no deny-trap note for a guest that references none:\n{}",

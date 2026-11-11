@@ -109,7 +109,7 @@ fn main() {
         let run = |args: &[&str]| {
             let mut argv = vec!["--seed", "4"];
             argv.extend_from_slice(args);
-            common::native::assert_success(guest.command("run", &argv))
+            common::native::assert_success(guest.command("run", &[&["-v"][..], &argv[..]].concat()))
         };
 
         // The guest environment starts empty; `--env` seeds it.
@@ -162,8 +162,9 @@ fn main() {
             "{}",
             stdout(&recorded)
         );
-        let replayed =
-            common::native::assert_success(guest.command("replay", &[cwd_trace.to_str().unwrap()]));
+        let replayed = common::native::assert_success(
+            guest.command("replay", &["-v", cwd_trace.to_str().unwrap()]),
+        );
         assert_eq!(
             recorded.stdout, replayed.stdout,
             "replay must restore --cwd"
@@ -180,7 +181,7 @@ fn main() {
             ("relative/dir", "must be an absolute virtual path"),
         ] {
             common::native::assert_refused(
-                guest.command("run", &["--seed", "3", "--cwd", cwd]),
+                guest.command("run", &["-v", "--seed", "3", "--cwd", cwd]),
                 &[diagnostic],
             );
         }
@@ -256,7 +257,9 @@ fn main() {
         ] {
             let mut args = args.to_vec();
             args.extend(["--", "admin"]);
-            let output = common::native::assert_success(guest.command("run", &args));
+            let output = common::native::assert_success(
+                guest.command("run", &[&["-v"][..], &args[..]].concat()),
+            );
             let count = |line: &str| lines(&output.stdout, &format!("CWD_ADMIN {line}")).len();
             assert_eq!(
                 count(before),

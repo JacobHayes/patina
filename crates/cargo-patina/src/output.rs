@@ -77,6 +77,8 @@ pub struct OutputOptions {
     /// `--report PATH`: write the timeline HTML *only when the run failed*, with a
     /// prominent failure-summary section.
     pub report: Option<PathBuf>,
+    /// `--verbose`: print Patina's own diagnostics beside the result.
+    pub verbose: bool,
 }
 
 impl OutputOptions {
@@ -179,6 +181,7 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
     }
     options.render = value("--render")?.map(PathBuf::from);
     options.report = value("--report")?.map(PathBuf::from);
+    options.verbose = value("--verbose")?.is_some();
     Ok((options, rest))
 }
 

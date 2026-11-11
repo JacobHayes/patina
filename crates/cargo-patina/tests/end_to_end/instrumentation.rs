@@ -119,6 +119,7 @@ fn main() {
         let recorded = covered(
             "run",
             &[
+                "-v",
                 "--seed",
                 "3",
                 "--yield-stride",
@@ -132,14 +133,18 @@ fn main() {
             recorded,
             covered(
                 "run",
-                &["--seed", "3", "--yield-stride", "1"],
+                &["-v", "--seed", "3", "--yield-stride", "1"],
                 "repeat.covmap"
             ),
             "same-seed coverage maps must be byte-identical"
         );
         assert_eq!(
             recorded,
-            covered("replay", &[cov_trace.to_str().unwrap()], "replay.covmap"),
+            covered(
+                "replay",
+                &["-v", cov_trace.to_str().unwrap()],
+                "replay.covmap"
+            ),
             "record and replay coverage maps must be byte-identical"
         );
 
@@ -148,7 +153,7 @@ fn main() {
         let replayed = invoke_unchecked(
             env!("CARGO_BIN_EXE_patina"),
             workspace,
-            &["replay", bin, short.to_str().unwrap()],
+            &["replay", "-v", bin, short.to_str().unwrap()],
         );
         assert!(
             !replayed.status.success(),
@@ -256,6 +261,7 @@ fn main() {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     bin,
                     "--seed",
                     "1",
@@ -323,7 +329,7 @@ fn main() {
         let replayed = invoke_unchecked_clean_env(
             env!("CARGO_BIN_EXE_patina"),
             workspace,
-            &["replay", bin, loud_trace.to_str().unwrap()],
+            &["replay", "-v", bin, loud_trace.to_str().unwrap()],
             &silenced,
         );
         assert!(
@@ -345,6 +351,7 @@ fn main() {
             workspace,
             &[
                 "run",
+                "-v",
                 bin,
                 "--seed",
                 "1",
@@ -450,7 +457,7 @@ fn main() {
             |output: &Output| String::from_utf8_lossy(&output.stdout).contains("LOST_UPDATE");
         let seeds: Vec<String> = (0..8).map(|seed| seed.to_string()).collect();
         for seed in &seeds {
-            let output = run(&["run", bin, "--seed", seed]);
+            let output = run(&["run", "-v", bin, "--seed", seed]);
             assert!(
                 output.status.success() && !lost(&output),
                 "stride 0 must leave the window unreachable (seed {seed}):\n{}",
@@ -459,11 +466,22 @@ fn main() {
         }
         let failing = seeds
             .iter()
-            .find(|seed| lost(&run(&["run", bin, "--seed", seed, "--yield-stride", "1"])))
+            .find(|seed| {
+                lost(&run(&[
+                    "run",
+                    "-v",
+                    bin,
+                    "--seed",
+                    seed,
+                    "--yield-stride",
+                    "1",
+                ]))
+            })
             .expect("stride 1 must reach the lost update at some seed");
         let trace = dir.path().join("lost.patina");
         let recorded = run(&[
             "run",
+            "-v",
             bin,
             "--seed",
             failing,
@@ -473,7 +491,7 @@ fn main() {
             trace.to_str().unwrap(),
         ]);
         assert!(lost(&recorded));
-        let replayed = run(&["replay", bin, trace.to_str().unwrap()]);
+        let replayed = run(&["replay", "-v", bin, trace.to_str().unwrap()]);
         assert_eq!(
             String::from_utf8_lossy(&replayed.stdout),
             String::from_utf8_lossy(&recorded.stdout),
@@ -542,6 +560,7 @@ fn main() {
                 workspace,
                 &[
                     "run",
+                    "-v",
                     bin,
                     "--yield-stride",
                     "300",
@@ -631,7 +650,7 @@ fn main() {
             ],
         );
         let run = |options: &[&str], mode: &str| -> serde_json::Value {
-            let mut arguments = vec!["run", bin, "--format", "json"];
+            let mut arguments = vec!["run", "-v", bin, "--format", "json"];
             arguments.extend_from_slice(options);
             arguments.extend_from_slice(&["--", mode]);
             let output = invoke_with_deadline(

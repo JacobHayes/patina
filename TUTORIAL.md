@@ -108,10 +108,9 @@ $ patina run ./ledger-guest --seed 0 --buggify
 ledger: [0, 1, 2, 3, 4, 5, 6, 7]
 ```
 
-Patina also writes to standard error. Every run prints a `note:` listing the
-calls it would refuse, and a run with `--buggify` prints a `PATINA_SDK_REPORT`
-line that counts how often each site was reached and fired. The output shown
-in this tutorial leaves those two lines out.
+Add `--verbose` to see what Patina reports about the run: the calls it would
+refuse, and, with `--buggify`, a `PATINA_SDK_REPORT` line that counts how often
+each site was reached and fired.
 
 On seed 0 the rare path was not taken. Try more seeds, and stop at the first
 that fails:
