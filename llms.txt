@@ -532,6 +532,11 @@ dev-dependency use under plain `cargo test`.
   trace and a loud one replay against each other. Nothing parses these lines:
   the envelope's structured fields carry the same facts whatever is silenced.
 - A trace is compact JSON: inspect it with `jq . run.patina`.
+- Debug a failing seed from its recording, not with added prints (they change
+  the binary and can change the schedule): `replay` with `-v`/`--render`,
+  `trace events --notable`, and `trace diff` against a changed build's
+  recording. docs/GUIDE.md, "Debugging a seed".
+
 ## Docs
 
 - Validation: `mise run check [nextest arguments]` is the inner loop (fmt, host

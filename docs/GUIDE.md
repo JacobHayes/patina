@@ -246,6 +246,25 @@ config, diverging operation — fails closed rather than lying. A native trace
 names its binary by digest, so replaying it against one that differs by a
 single byte is refused before the guest starts, naming what differs.
 
+## Debugging a seed
+
+A print changes the binary, and its write is one more operation, so the same
+seed can take another schedule and lose the bug. Debug from a recording
+instead:
+
+- `patina run <ARTIFACT> --seed N --record t.patina`, with
+  `--env RUST_BACKTRACE=full` if you want a backtrace (see Limits): the
+  environment is recorded, and a replay cannot add it.
+- `patina replay <ARTIFACT> t.patina` reruns the run exactly, guest output
+  included. `-v` adds Patina's end-of-run reports, `--render OUT.html` writes
+  a timeline of every task's operations, and `--report OUT.html` does so only
+  on failure.
+- `patina trace events t.patina --notable` lists crashes, boundary errors and
+  dropped datagrams; `--kind`, `--task`, `--seq` and `--last N` narrow to the
+  window before the failure, and `trace stats` sums it up.
+- If you must change the guest, record the new build at the same seed and
+  run `patina trace diff old.patina new.patina` to see where the runs part.
+
 ## Debug and release builds
 
 Guests build **debug by default**: `debug_assert!` and overflow checks in the
