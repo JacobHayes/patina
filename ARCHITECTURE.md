@@ -559,8 +559,9 @@ its own runtime, and the processes run in lockstep: one runs at a time
   `SIGCHLD`, no waiter woken: no guest code runs any more); the
   launcher then kills, by pidfd, and reaps anything left.
 - A child writes no facts, trace or stop record of its own: it ships its
-  facts (the hub marks them `process: N`; at each verdict, at its stop and
-  when it exits) and its stop record (detail prefixed `process N:`) to the
+  facts (the hub marks them `process: N`; at each verdict, at its stop,
+  when it exits, when it is killed or torn down, and when the machine
+  deadlocks) and its stop record (detail prefixed `process N:`) to the
   hub, which kills the other children, writes
   the root's facts and recording so far, as a stop the runtime takes does,
   and ends the run with that record, so the run has the child's class. The
@@ -571,7 +572,8 @@ its own runtime, and the processes run in lockstep: one runs at a time
   vacuous again from the sums: a fault that landed only in a child is the
   run's; the schedule and swarm planes stay the root's, each process's own
   scheduler's) and its buggify sites to the root's (each marked with its
-  `process`, counters summed), and the first replay divergence any process
+  `process`, counters summed; a campaign counts a site several processes
+  report once for its generation), and the first replay divergence any process
   noted; a run whose root wrote none has no facts.
 - A child's crash (an abort, a fatal signal's default action, a fault,
   in a signal handler too, a panic that aborts or exits 101) is a process

@@ -330,6 +330,12 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
         );
     }
 
+    // A finding names the process it is the account of: a child's its own,
+    // the root's (on a machine of several) the root, as its stop says.
+    let attributed = |process: Option<u64>| match process {
+        Some(pid) => vec![pid],
+        None => shim_stop.map(processes_of).unwrap_or_default(),
+    };
     let findings = rows("runtime_findings");
     let known_limit = |finding: &serde_json::Value| {
         finding
@@ -348,7 +354,7 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
             detail = format!("{detail} (process {pid})");
         }
         let mut stop = Stop::new("liveness", detail);
-        stop.processes = process.into_iter().collect();
+        stop.processes = attributed(process);
         return Outcome::of(RunClass::Liveness, Some(stop));
     }
     if let Some(verdict) = rows("verdicts")
@@ -365,7 +371,7 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
             detail = format!("{} (process {pid})", detail.trim());
         }
         let mut stop = Stop::new("violation_verdict", detail.trim());
-        stop.processes = process.into_iter().collect();
+        stop.processes = attributed(process);
         return Outcome::of(RunClass::Violation, Some(stop));
     }
 

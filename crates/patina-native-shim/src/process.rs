@@ -348,26 +348,6 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
     record.raw(b"\",\"reason\":\"");
     record.raw(stop.reason.as_bytes());
     record.raw(b"\",\"detail\":\"");
-    // Room for the closing quote, the guest status, the sampled site, the
-    // processes the stop is about and the document's end.
-    const TAIL: usize = 192;
-    if child {
-        record.raw(b"process ");
-        record.number(i64::from(crate::patina_pid()));
-        record.raw(b": ");
-    }
-    for part in stop.detail {
-        record.escaped(part, TAIL);
-    }
-    record.raw(b"\"");
-    if let Some(status) = stop.guest_exit {
-        record.raw(b",\"guest_exit_code\":");
-        record.number(i64::from(status));
-    }
-    if let Some(delta) = stop.yield_point_delta {
-        record.raw(b",\"yield_point_delta\":");
-        record.number(delta as i64);
-    }
     // Which processes of a machine of several the stop is about: the one
     // stopping, unless the stop names others.
     #[cfg(target_os = "linux")]
@@ -380,9 +360,36 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
         None if machine => Some(me.as_slice()),
         None => None,
     };
+    // Room for the closing quote, the guest status, the sampled site, the
+    // processes the stop is about (as many as fit, the detail cut for them
+    // first) and the document's end.
+    const PID: usize = 12;
+    let tail = 192 + processes.map_or(0, |pids| (pids.len() * PID).min(256));
+    if child {
+        record.raw(b"process ");
+        record.number(i64::from(crate::patina_pid()));
+        record.raw(b": ");
+    }
+    for part in stop.detail {
+        record.escaped(part, tail);
+    }
+    record.raw(b"\"");
+    if let Some(status) = stop.guest_exit {
+        record.raw(b",\"guest_exit_code\":");
+        record.number(i64::from(status));
+    }
+    if let Some(delta) = stop.yield_point_delta {
+        record.raw(b",\"yield_point_delta\":");
+        record.number(delta as i64);
+    }
     if let Some(processes) = processes {
         record.raw(b",\"processes\":[");
         for (index, pid) in processes.iter().enumerate() {
+            // A list too long for the record keeps what fits, and the
+            // record its end.
+            if record.len + PID + 4 > record.bytes.len() {
+                break;
+            }
             if index > 0 {
                 record.raw(b",");
             }

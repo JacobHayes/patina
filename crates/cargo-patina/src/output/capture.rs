@@ -169,7 +169,11 @@ fn add_activity(
     child: &serde_json::Value,
 ) {
     use serde_json::Value;
-    if let Some(Value::Object(planes)) = child.get("fault_reports") {
+    if let Some(Value::Object(planes)) = child.get("fault_reports")
+        && planes
+            .keys()
+            .any(|name| !matches!(name.as_str(), "schedule" | "swarm"))
+    {
         let run = document
             .entry("fault_reports")
             .or_insert_with(|| Value::Object(serde_json::Map::new()));

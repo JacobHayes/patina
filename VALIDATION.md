@@ -198,7 +198,8 @@ versions, target triple and fingerprint.
   interleaving; record-to-replay of a self-spawn, a shared filesystem, a
   SIGKILL, an abort, a child's host fault mid-quantum, a child's own
   stop and a child's compute-bound stop (attributed to the child, its
-  site located); a fault that lands only in a child counted in the run's
+  site located); a fault that lands only in a child (one that exits, is
+  killed, or is torn down at the root's end) counted in the run's
   fault plane; `kill(-1)` beside a child not yet reaped; a child's `kill`
   of a root thread's id reaching the root's handler, `kill(-1)` of an
   invalid signal beside another process (`EINVAL`), and a thread id of a

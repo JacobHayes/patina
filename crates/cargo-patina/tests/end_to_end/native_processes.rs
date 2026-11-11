@@ -1543,9 +1543,35 @@ fn main() {
                 .count();
             println!("FAULTED {failed}");
         }
+        ["faulted", "stay"] => {
+            // As `faulted`, then waits to be ended.
+            let failed = (0..4)
+                .filter(|_| unsafe { getrandom([0u8; 8].as_mut_ptr(), 8, 1) } < 0)
+                .count();
+            println!("FAULTED {failed}");
+            loop {
+                unsafe { pause() };
+            }
+        }
         [binary, "faulted-child"] => {
             let status = Command::new(binary).arg("faulted").status().unwrap();
             println!("FAULTED-CHILD {status:?}");
+        }
+        [binary, "faulted-child", end] => {
+            // The child draws, then is killed or left for the run's end.
+            use std::io::BufRead;
+            let mut child = Command::new(binary)
+                .args(["faulted", "stay"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            print!("{line}");
+            if end == "killed" {
+                child.kill().unwrap();
+                println!("FAULTED-CHILD {:?}", child.wait().unwrap());
+            }
         }
         ["idle", ..] => loop {
             std::thread::yield_now();
@@ -2590,23 +2616,34 @@ handled=true zombie-thread={esrch} reaped-thread={esrch}"
     fn a_fault_that_lands_in_a_child_is_the_runs() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
         let binary = guest.binary.to_str().unwrap();
-        let trace = guest.dir.path().join("faulted.patina");
-        let recorded = json_envelope(&guest.command(
-            "run",
-            &[
-                "--seed",
-                "3",
-                "--format",
-                "json",
-                "--entropy-fail-permille",
-                "1000",
-                "--record",
-                trace.to_str().unwrap(),
-                "--",
-                binary,
-                "faulted-child",
-            ],
-        ));
+        for end in [&[][..], &["killed"], &["left"]] {
+            let name = format!("faulted{}", end.join("-"));
+            a_fault_that_lands_in_a_child_is_the_runs_however_it_ends(&guest, binary, &name, end);
+        }
+    }
+
+    fn a_fault_that_lands_in_a_child_is_the_runs_however_it_ends(
+        guest: &common::native::Guest,
+        binary: &str,
+        name: &str,
+        end: &[&str],
+    ) {
+        let trace = guest.dir.path().join(format!("{name}.patina"));
+        let mut argv = vec![
+            "--seed",
+            "3",
+            "--format",
+            "json",
+            "--entropy-fail-permille",
+            "1000",
+            "--record",
+            trace.to_str().unwrap(),
+            "--",
+            binary,
+            "faulted-child",
+        ];
+        argv.extend(end);
+        let recorded = json_envelope(&guest.command("run", &argv));
         let failed: u64 = recorded["stdout"]
             .as_str()
             .and_then(|out| out.lines().find_map(|line| line.strip_prefix("FAULTED ")))

@@ -817,7 +817,11 @@ pub(crate) fn with_context_msg<T>(
                 // The root keeps its evidence (its facts, the recording so
                 // far, every process's timeline), as it does when a child
                 // stops the run: the deadlock replays.
-                if !crate::machine::is_child() {
+                if crate::machine::is_child() {
+                    // The child's activity is the run's: it ships its facts
+                    // before its stop.
+                    context.machine_process_facts();
+                } else {
                     context.machine_stopped();
                 }
                 crate::host_abort(

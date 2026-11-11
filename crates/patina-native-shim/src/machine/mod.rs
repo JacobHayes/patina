@@ -341,10 +341,15 @@ fn await_resume() -> (u64, ForeignState, MachineCarry) {
                 let info = receive_payload(channel(), len).unwrap_or_else(|| orphaned());
                 RAISED.lock().push(info_words(&info));
             }
-            Some(Message::Kill) => killed(),
+            Some(Message::Kill) => {
+                // Its activity so far is the run's, however it ends.
+                ship_facts();
+                killed()
+            }
             Some(Message::Describe) => {
                 // The machine is deadlocked: the hub names this process's
-                // blocked tasks.
+                // blocked tasks, and the run ends with its activity.
+                ship_facts();
                 let tasks = crate::with_context_raw(|context| Ok(context.machine_parked_tasks()))
                     .unwrap_or_default();
                 let answer = serde_json::to_vec(&[(crate::patina_pid(), blocked(&tasks))])
@@ -361,6 +366,15 @@ fn await_resume() -> (u64, ForeignState, MachineCarry) {
             None => orphaned(),
         }
     }
+}
+
+/// A child's facts as they stand go to the hub: it is about to end
+/// without exiting (killed, torn down, a deadlock).
+pub(crate) fn ship_facts() {
+    let _ = crate::with_context_raw(|context| {
+        context.machine_process_facts();
+        Ok(())
+    });
 }
 
 /// The signals a frozen child was sent, until it resumes.
@@ -541,9 +555,7 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
             }
             Some(Message::Facts { len }) => {
                 let facts = receive_payload(channel, len)?;
-                if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
-                    let _ = crate::host_write_all(fd, &process_facts(pid, &facts));
-                }
+                write_process_facts(pid, &facts);
             }
             Some(Message::Stop { len }) => {
                 let record = receive_payload(channel, len)?;
@@ -613,23 +625,42 @@ fn describe_others(asker: i32) -> Vec<(i32, String)> {
         .filter(|(pid, child)| **pid != asker && child.status.is_none())
         .map(|(pid, child)| (*pid, child.channel))
         .collect();
-    for (_, channel) in live {
-        described.extend(ask_describe(channel));
+    for (pid, channel) in live {
+        described.extend(ask_describe(pid, channel));
     }
     described
 }
 
-/// A frozen child's blocked tasks, which it answers on `channel`; none if
-/// it is gone.
-fn ask_describe(channel: c_int) -> Vec<(i32, String)> {
+/// Frozen child `pid`'s blocked tasks, which it answers on `channel`
+/// after its facts (written for the run); none if it is gone.
+fn ask_describe(pid: i32, channel: c_int) -> Vec<(i32, String)> {
     if !send_bytes_once(channel, &Message::Describe.encode()) {
         return Vec::new();
     }
-    match receive(channel) {
-        Some(Message::DescribeReply { len }) => receive_payload(channel, len)
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default(),
-        _ => Vec::new(),
+    off_guest(|| {
+        loop {
+            match receive(channel) {
+                Some(Message::Facts { len }) => {
+                    let Some(facts) = receive_payload(channel, len) else {
+                        return Vec::new();
+                    };
+                    write_process_facts(pid, &facts);
+                }
+                Some(Message::DescribeReply { len }) => {
+                    return receive_payload(channel, len)
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_default();
+                }
+                _ => return Vec::new(),
+            }
+        }
+    })
+}
+
+/// Write child `pid`'s facts document for the run.
+fn write_process_facts(pid: i32, facts: &[u8]) {
+    if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
+        let _ = crate::host_write_all(fd, &process_facts(pid, facts));
     }
 }
 
@@ -646,7 +677,7 @@ pub(crate) fn deadlock(tasks: &[(TaskId, String)]) -> Option<(String, Vec<i32>)>
     let mut described = vec![(crate::patina_pid(), blocked(tasks))];
     if is_child() {
         send(channel(), &Message::Describe);
-        match receive(channel()) {
+        match off_guest(|| receive(channel())) {
             Some(Message::DescribeReply { len }) => described.extend(
                 receive_payload(channel(), len)
                     .and_then(|bytes| serde_json::from_slice::<Vec<(i32, String)>>(&bytes).ok())
@@ -656,14 +687,14 @@ pub(crate) fn deadlock(tasks: &[(TaskId, String)]) -> Option<(String, Vec<i32>)>
             None => orphaned(),
         }
     } else {
-        let live: Vec<c_int> = CHILDREN
+        let live: Vec<(i32, c_int)> = CHILDREN
             .lock()
-            .values()
-            .filter(|child| child.status.is_none())
-            .map(|child| child.channel)
+            .iter()
+            .filter(|(_, child)| child.status.is_none())
+            .map(|(pid, child)| (*pid, child.channel))
             .collect();
-        for channel in live {
-            described.extend(ask_describe(channel));
+        for (pid, channel) in live {
+            described.extend(ask_describe(pid, channel));
         }
     }
     described.sort_by_key(|(pid, _)| *pid);
@@ -863,9 +894,7 @@ fn queued_stop(pid: i32) -> Option<Vec<u8>> {
             Message::Stop { len } => return receive_payload(channel, len),
             Message::Facts { len } => {
                 let facts = receive_payload(channel, len)?;
-                if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
-                    let _ = crate::host_write_all(fd, &process_facts(pid, &facts));
-                }
+                write_process_facts(pid, &facts);
             }
             _ => {}
         }
@@ -1135,6 +1164,10 @@ fn signal_process(from: i32, pid: i32, info: [u64; 16]) -> Option<i64> {
     // kernel does, a thread's id names its whole process to `kill`.
     let root = from != crate::patina_pid() && (pid == crate::patina_pid() || thread::live_tid(pid));
     let owner = CHILD_THREADS.lock().get(&pid).copied();
+    if owner == Some(from) {
+        // The caller's own thread, which it would have found had it lived.
+        return None;
+    }
     if let Some(owner) = owner.filter(|_| !root) {
         let owner_live = CHILDREN
             .lock()
@@ -1253,8 +1286,15 @@ fn kill(pid: i32, notify: Notify) {
     let stop = off_guest(|| {
         let mut stop = None;
         while let Some(message) = receive(channel) {
-            if let Message::Stop { len } = message {
-                stop = receive_payload(channel, len);
+            match message {
+                Message::Stop { len } => stop = receive_payload(channel, len),
+                // Its facts as it took the kill.
+                Message::Facts { len } => {
+                    if let Some(facts) = receive_payload(channel, len) {
+                        write_process_facts(pid, &facts);
+                    }
+                }
+                _ => {}
             }
         }
         stop

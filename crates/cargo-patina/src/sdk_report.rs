@@ -207,6 +207,22 @@ impl ExercisedSite {
     }
 }
 
+impl SdkSiteReport {
+    /// Add another process's report of the same site in the same run.
+    fn fold(&mut self, other: &Self) {
+        self.active |= other.active;
+        self.evals += other.evals;
+        self.fires += other.fires;
+        self.reachable |= other.reachable;
+        self.sometimes_satisfied |= other.sometimes_satisfied;
+        self.always_violated |= other.always_violated;
+        self.knob = match (self.knob, other.knob) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
 fn oracle_satisfied(site: &SdkSiteReport) -> bool {
     match site.kind.as_str() {
         "sometimes" => site.sometimes_satisfied,
@@ -252,8 +268,19 @@ impl CoverageTally {
                 .or_insert_with(|| ExercisedSite::declared(&site))
                 .reconcile_declaration(&site)?;
         }
+        // A run of several processes reports a site once per process that
+        // evaluated it: the generation exercised it once.
+        let mut folded: Vec<SdkSiteReport> = Vec::new();
         for site in report.sites {
             validate_identity(&site.label, &site.kind, &site.site)?;
+            match folded.iter_mut().find(|seen| {
+                (&seen.label, &seen.kind, &seen.site) == (&site.label, &site.kind, &site.site)
+            }) {
+                Some(seen) => seen.fold(&site),
+                None => folded.push(site),
+            }
+        }
+        for site in folded {
             self.sites
                 .entry(site.label.clone())
                 .or_insert_with(|| ExercisedSite::new(&site))
@@ -425,6 +452,22 @@ mod tests {
                 .observe_generation(2, 1, Some(&json!({"sites": 3})))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_site_every_process_of_a_run_reports_counts_once_for_its_generation() {
+        let mut tally = CoverageTally::default();
+        let mut child = site("x", 3, true);
+        child["process"] = json!(3);
+        tally
+            .observe_generation(0, 7, Some(&sdk(json!([site("x", 2, false), child]))))
+            .unwrap();
+        let site = &tally.sites["x"];
+        assert_eq!(
+            (site.registered_gens, site.satisfied_gens, site.evals),
+            (1, 1, 5)
+        );
+        assert!(site.registered_gens <= tally.generations_observed);
     }
 
     #[test]
