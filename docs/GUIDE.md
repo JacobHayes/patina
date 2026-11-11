@@ -256,9 +256,9 @@ instead:
   `--env RUST_BACKTRACE=full` if you want a backtrace (see Limits): the
   environment is recorded, and a replay cannot add it.
 - `patina replay <ARTIFACT> t.patina` reruns the run exactly, guest output
-  included. `-v` adds Patina's end-of-run reports, `--render OUT.html` writes
-  a timeline of every task's operations, and `--report OUT.html` does so only
-  on failure.
+  included. `-v` adds Patina's end-of-run reports, and `--render OUT.html`
+  writes a timeline of every task's operations, led by a failure summary when
+  the run failed.
 - `patina trace events t.patina --notable` lists crashes, boundary errors and
   dropped datagrams; `--kind`, `--task`, `--seq` and `--last N` narrow to the
   window before the failure, and `trace stats` sums it up.

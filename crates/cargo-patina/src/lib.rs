@@ -453,7 +453,7 @@ fn entrypoint(arguments: Vec<OsString>) -> Result<i32, CliError> {
     lifeline::watch()?;
     supervisor_identity::establish()?;
     // Strip the cross-cutting output flags (`--format`, `--render`,
-    // `--report`) once, globally, before any per-verb routing —
+    // `--verbose`) once, globally, before any per-verb routing —
     // the same pre-pass shape as `extract_target`. They are patina-level flags,
     // so they never reach the guest (anything after `--` is left in place).
     output::install_arguments(arguments.clone());

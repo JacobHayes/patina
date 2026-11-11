@@ -27,14 +27,7 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--render",
         None,
         Value::Required("OUT.html", Kind::Path),
-        "Write a self-contained HTML timeline of a run or replay to OUT.html.",
-        false,
-    ),
-    f(
-        "--report",
-        None,
-        Value::Required("OUT.html", Kind::Path),
-        "Like --render but only when the run fails; the HTML leads with a failure summary.",
+        "Write a self-contained HTML timeline of a run or replay to OUT.html; a failed run's page leads with a failure summary.",
         false,
     ),
     f(

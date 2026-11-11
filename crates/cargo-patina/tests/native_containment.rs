@@ -111,10 +111,7 @@ fn prerun_refuses_shm_open_and_hatch_warns() {
     let out = g.assert_run_refused(1, &["shm_open", "shared-memory-ipc"]);
     assert!(!text(&out.stdout).contains("GATE_REFUSAL_RAN"));
     // A replay re-checks the gate, so the hatch run is a plain seeded one.
-    let hatch = assert_success(g.command(
-        "run",
-        &["--seed", "1", "--allow", "all"],
-    ));
+    let hatch = assert_success(g.command("run", &["--seed", "1", "--allow", "all"]));
     assert_eq!(text(&hatch.stdout), "GATE_REFUSAL_RAN\n");
     assert!(text(&hatch.stderr).contains("WARNING"));
 }

@@ -1,5 +1,5 @@
 //! Machine-readable result envelopes (`--format json`), timeline rendering
-//! (`--render`), and per-failure reports (`--report`) for the CLI verbs.
+//! (`--render`) for the CLI verbs.
 //!
 //! These are cross-cutting *output* concerns, orthogonal to a run's semantics.
 //! To keep the hook-in edits in `lib.rs` small and additive (so concurrent work
@@ -77,9 +77,6 @@ pub struct OutputOptions {
     pub format: OutputFormat,
     /// `--render PATH`: always write the timeline HTML of a run or replay.
     pub render: Option<PathBuf>,
-    /// `--report PATH`: write the timeline HTML *only when the run failed*, with a
-    /// prominent failure-summary section.
-    pub report: Option<PathBuf>,
     /// `--verbose`: print Patina's own diagnostics beside the result.
     pub verbose: bool,
     /// `--progress`: under `--format json`, stream [`progress::PROGRESS_SCHEMA`]
@@ -91,20 +88,14 @@ pub struct OutputOptions {
 
 impl OutputOptions {
     /// Whether the guest's stdout/stderr must be captured rather than inherited.
-    /// Capture is needed to build a JSON envelope, and to populate a render/report
+    /// Capture is needed to build a JSON envelope, and to populate a render
     /// failure summary. When false the human default (inherited streaming) holds.
     pub fn wants_capture(&self) -> bool {
-        self.format == OutputFormat::Json || self.render.is_some() || self.report.is_some()
+        self.format == OutputFormat::Json || self.render.is_some()
     }
 
     pub fn is_json(&self) -> bool {
         self.format == OutputFormat::Json
-    }
-
-    /// Whether a timeline page was asked for (`--render`, `--report`). A page
-    /// is drawn from a trace, so a run that wants one records.
-    pub fn wants_page(&self) -> bool {
-        self.render.is_some() || self.report.is_some()
     }
 }
 
@@ -182,7 +173,6 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
         options.format = parse_format(&format.to_string_lossy())?;
     }
     options.render = value("--render")?.map(PathBuf::from);
-    options.report = value("--report")?.map(PathBuf::from);
     options.verbose = value("--verbose")?.is_some();
     options.progress = value("--progress")?.is_some();
     options.verb = rest.first().map(|verb| verb.to_string_lossy().into_owned());

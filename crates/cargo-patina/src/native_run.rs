@@ -118,11 +118,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
 
-    // A page (`--render`, `--report`) is drawn from a trace. A run asked for
+    // A page (`--render`) is drawn from a trace. A run asked for
     // one without `--record` records into a scratch directory that goes away
     // with the run.
     let scratch_trace = match &invocation.mode {
-        NativeRunMode::Seeded { seed } if output::options().wants_page() => {
+        NativeRunMode::Seeded { seed } if output::options().render.is_some() => {
             let directory = tempfile::tempdir().map_err(|error| {
                 CliError(format!(
                     "failed to create a scratch directory for the page's trace: {error}"

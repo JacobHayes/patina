@@ -513,10 +513,10 @@ fn a_binary_linked_without_the_allocator_routing_stops_the_run() {
         return;
     }
     // A replay re-checks the gate, so the allowed run is a plain seeded one.
-    let routed = assert_success(main_ran_guest(true, &["-fuse-ld=gold"]).command(
-        "run",
-        &["--seed", "1", "--allow", "splice"],
-    ));
+    let routed = assert_success(
+        main_ran_guest(true, &["-fuse-ld=gold"])
+            .command("run", &["--seed", "1", "--allow", "splice"]),
+    );
     assert!(text(&routed.stdout).contains("main ran"));
 }
 

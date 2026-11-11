@@ -68,7 +68,7 @@ pub(crate) struct TraceDiff {
 }
 
 pub(crate) fn execute(invocation: TraceInvocation) -> Result<i32, CliError> {
-    reject_render_report()?;
+    reject_render()?;
     match invocation {
         TraceInvocation::Info(info) => execute_info(&info),
         TraceInvocation::Events(events) => execute_events(&events),
@@ -77,11 +77,11 @@ pub(crate) fn execute(invocation: TraceInvocation) -> Result<i32, CliError> {
     }
 }
 
-fn reject_render_report() -> Result<(), CliError> {
+fn reject_render() -> Result<(), CliError> {
     let opts = output::options();
-    if opts.render.is_some() || opts.report.is_some() {
+    if opts.render.is_some() {
         return Err(CliError::usage(
-            "trace inspection is read-only and does not accept --render/--report; use `patina trace events` for textual inspection or run/replay --render when executing a guest",
+            "trace inspection is read-only and does not accept --render; use `patina trace events` for textual inspection or run/replay --render when executing a guest",
         ));
     }
     Ok(())

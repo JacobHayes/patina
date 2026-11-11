@@ -45,10 +45,10 @@ fn main() {
     }
 
     // Observability: the machine-readable `--format json` envelope of each verb has
-    // a stable, parseable shape, and the HTML timeline (`--render`/`--report`) is a
+    // a stable, parseable shape, and the HTML timeline (`--render`) is a
     // pure read-only consumer: rendering a trace does not change its bytes. A
     // run asked for a page without `--record` still writes it, and a failing
-    // run given both flags writes both pages.
+    // run's page leads with the failure summary.
     #[test]
     fn native_json_envelopes_and_html_timelines() {
         let directory = tempdir().unwrap();
@@ -162,10 +162,8 @@ fn main() {
             "the same seed draws the same timeline, recorded by request or not"
         );
 
-        // A failing run given both flags writes both pages, each carrying the
-        // failure summary and its violation line. `--report` alone needs no
-        // `--record` either.
-        let report = directory.path().join("report.html");
+        // A failing run's page carries the failure summary and its violation
+        // line.
         let rendered = directory.path().join("failed-timeline.html");
         let failed = invoke_unchecked(
             patina,
@@ -179,8 +177,6 @@ fn main() {
                 directory.path().join("fail.patina").to_str().unwrap(),
                 "--render",
                 rendered.to_str().unwrap(),
-                "--report",
-                report.to_str().unwrap(),
                 "--",
                 "fail",
             ],
@@ -190,32 +186,7 @@ fn main() {
             Some(1),
             "a planted failure is a finding in the guest, whatever status the guest chose"
         );
-        assert_eq!(
-            fs::read_to_string(&rendered).unwrap(),
-            fs::read_to_string(&report).unwrap(),
-            "a failing run's --render and --report pages are the same page"
-        );
-        let unrecorded_report = directory.path().join("unrecorded-report.html");
-        for (arguments, written) in [(&["fail"][..], true), (&[][..], false)] {
-            let _ = fs::remove_file(&unrecorded_report);
-            let mut command = vec![
-                "run",
-                bin.to_str().unwrap(),
-                "--seed",
-                "1",
-                "--report",
-                unrecorded_report.to_str().unwrap(),
-                "--",
-            ];
-            command.extend_from_slice(arguments);
-            invoke_unchecked(patina, workspace, &command);
-            assert_eq!(
-                unrecorded_report.exists(),
-                written,
-                "--report writes its page exactly when the run fails"
-            );
-        }
-        let page = fs::read_to_string(&report).unwrap();
+        let page = fs::read_to_string(&rendered).unwrap();
         assert!(page.starts_with("<!doctype html>"));
         assert!(
             page.contains("Run failed"),
@@ -223,7 +194,7 @@ fn main() {
         );
         assert!(
             page.contains("GUEST_VIOLATION planted"),
-            "violation line missing from report"
+            "violation line missing from the page"
         );
 
         // A source-first run of the same failure echoes its result line and

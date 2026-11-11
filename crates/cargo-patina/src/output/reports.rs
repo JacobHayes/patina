@@ -22,8 +22,8 @@ pub struct RunReport<'a> {
     /// The on-disk trace path for a record/replay run, or `None` for a plain
     /// seeded run (no trace was written).
     pub trace_path: Option<PathBuf>,
-    /// The trace is scratch, recorded only to draw a page from (`--render` or
-    /// `--report` without `--record`) and removed with the run: the result
+    /// The trace is scratch, recorded only to draw a page from (`--render`
+    /// without `--record`) and removed with the run: the result
     /// names no trace.
     pub trace_scratch: bool,
     /// The facts of the trace at `trace_path`, when the caller already loaded
@@ -147,21 +147,12 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         core: captured.core,
     };
 
-    // The timeline page: `--render` always writes it, `--report` only when the
-    // run failed, and a run given both writes both. The page is drawn from the
-    // run's trace.
+    // The timeline page `--render` asks for, drawn from the run's trace; a
+    // failed run's page leads with the failure summary.
     let mut render_path: Option<String> = None;
-    let pages: Vec<&PathBuf> = opts
-        .render
-        .iter()
-        .chain(opts.report.iter().filter(|_| failed))
-        .collect();
-    let mut render = || -> Result<(), CliError> {
+    let mut render = |out: &PathBuf| -> Result<(), CliError> {
         let trace = report.trace_path.as_ref().ok_or_else(|| {
-            CliError(
-                "--render/--report found no trace to draw: the run left no complete recording"
-                    .into(),
-            )
+            CliError("--render found no trace to draw: the run left no complete recording".into())
         })?;
         let failure = failed.then(|| {
             failure_summary(
@@ -179,22 +170,20 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             failure,
         )
         .map_err(|error| CliError(format!("failed to render trace timeline: {error}")))?;
-        for out in &pages {
-            std::fs::write(out, &html).map_err(|error| {
-                CliError(format!(
-                    "failed to write render output {}: {error}",
-                    out.display()
-                ))
-            })?;
-            render_path.get_or_insert_with(|| out.to_string_lossy().into_owned());
-            if !opts.is_json() {
-                eprintln!("PATINA_RENDER output={}", out.display());
-            }
+        std::fs::write(out, &html).map_err(|error| {
+            CliError(format!(
+                "failed to write render output {}: {error}",
+                out.display()
+            ))
+        })?;
+        render_path = Some(out.to_string_lossy().into_owned());
+        if !opts.is_json() {
+            eprintln!("PATINA_RENDER output={}", out.display());
         }
         Ok(())
     };
-    if !pages.is_empty()
-        && let Err(error) = render()
+    if let Some(out) = &opts.render
+        && let Err(error) = render(out)
     {
         // A page that could not be rendered must not take a failed run's
         // class with it: the run is still reported, the page's error beside

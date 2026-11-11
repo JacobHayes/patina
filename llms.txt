@@ -335,8 +335,8 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   a notable-events list (crashes, boundary errors, dropped datagrams). No
   external assets. Large traces aggregate into density buckets with a visible
   banner. Rendering only reads the trace, so it never changes a replay hash.
-- `--report OUT.html`: like `--render` but only on failure; the page leads with a
-  failure summary (what fired, exit code, the result/violation lines).
+  A failed run's page leads with a failure summary (what fired, exit code, the
+  result/violation lines).
 
 ### JSON result envelope (`patina.result/v2`)
 
