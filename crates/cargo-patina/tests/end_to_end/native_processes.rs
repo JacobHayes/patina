@@ -1398,6 +1398,10 @@ fn main() {
             let status = Command::new("/bin/true").status();
             println!("UNADMITTED {status:?}");
         }
+        [binary, "unadmitted-child"] => {
+            let status = Command::new(binary).arg("unadmitted").status();
+            println!("UNADMITTED-CHILD {status:?}");
+        }
         ["spin", _token] => {
             // Computes until something outside stops it.
             let mut spin = 0u64;
@@ -2350,6 +2354,11 @@ fn main() {
             if liveness_verdict(&replayed) != *expected {
                 wrong.push(format!("{args:?}: replayed {replayed:#}"));
             }
+            // Whatever stopped it, no process of the machine outlives the run.
+            let left = host_processes_with(args);
+            if !left.is_empty() {
+                wrong.push(format!("{args:?}: left host processes {left:?}"));
+            }
         }
         wrong
     }
@@ -2906,20 +2915,32 @@ fn main() {
         );
     }
 
+    /// A program the run does not admit is refused by name, from the root
+    /// or from a child.
     #[test]
     fn a_program_the_run_does_not_admit_is_still_refused() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
-        let refused = guest.command(
-            "run",
-            &["--seed", "1", "--format", "json", "--", "unadmitted"],
-        );
-        let envelope = json_envelope(&refused);
-        assert!(!refused.status.success(), "{envelope:#}");
-        assert_eq!(
-            (&envelope["result"], &envelope["stop"]["reason"]),
-            (&"unsupported".into(), &"deny_trap".into()),
-            "{envelope:#}"
-        );
+        let binary = guest.binary.to_str().unwrap();
+        // From the root, and from a child (the stop is the child's).
+        for (args, processes) in [
+            (&["unadmitted"][..], serde_json::Value::Null),
+            (&[binary, "unadmitted-child"][..], serde_json::json!([3])),
+        ] {
+            let mut argv = vec!["--seed", "1", "--format", "json", "--"];
+            argv.extend(args);
+            let refused = guest.command("run", &argv);
+            let envelope = json_envelope(&refused);
+            assert!(!refused.status.success(), "{envelope:#}");
+            assert_eq!(
+                (
+                    &envelope["result"],
+                    &envelope["stop"]["reason"],
+                    &envelope["stop"]["processes"]
+                ),
+                (&"unsupported".into(), &"deny_trap".into(), &processes),
+                "{envelope:#}"
+            );
+        }
     }
 
     /// Every mode of the `Command` shapes and spawn doors, with what its run

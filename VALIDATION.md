@@ -189,10 +189,17 @@ versions, target triple and fingerprint.
   replays its own timeline; `native_processes` pins the behaviour (same-seed
   trace bytes for a self-spawn, a kill, an abort, a timer nap and a poll,
   and the same liveness verdict for a machine that blocks or idles across
-  processes; seed variation of each child's draws and of the
+  processes: a deadlock across processes (a child reading a pipe its
+  waiting parent holds, a child hung on itself, a child that pauses)
+  naming every blocked process, and a child that computes, spins or polls
+  while its parent waits stopped (the compute budget, the no-progress
+  horizon) and attributed to it, each replayed and leaving no host
+  process; seed variation of each child's draws and of the
   interleaving; record-to-replay of a self-spawn, a shared filesystem, a
   SIGKILL, an abort, a child's host fault mid-quantum, a child's own
-  stop and a child's compute-bound stop; a planted divergence, a planted
+  stop and a child's compute-bound stop (attributed to the child, its
+  site located); a fault that lands only in a child counted in the run's
+  fault plane; `kill(-1)` beside a child not yet reaped; a planted divergence, a planted
   truncation and a planted extra decision in the timeline of a child that
   exits or is killed; a child's
   death mid-quantum keeping the time it reached; a host signal from
@@ -232,8 +239,8 @@ versions, target triple and fingerprint.
   child's pipe end, two threads of a child parked on one pipe, and 1 MiB
   from the root to a child, each shown able to fail by a planted revert;
   all with their record-to-replay and same-seed trace bytes; a `PATH`
-  search or exact path outside the admission and a `pre_exec` fallback
-  refused, and a socket, FIFO or `addopen` action across a spawn,
+  search or exact path outside the admission (from the root or a child)
+  and a `pre_exec` fallback refused, and a socket, FIFO or `addopen` action across a spawn,
   `FIONREAD` on a child's inherited pipe, a `PATH` candidate shadowing the
   admitted one (or a relative entry before it with a `chdir` or `fchdir`
   action), a non-UTF-8 `chdir` action and `F_SETFL` on a shared

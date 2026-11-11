@@ -473,7 +473,25 @@ its own runtime, and the processes run in lockstep: one runs at a time
   to the child's stop pipe instead; its facts are lost, the stop is not.
 - While another process holds the baton, or the hub waits on the host for
   a child (its launch and ready, its death after `SIGKILL`), a process runs
-  no guest code: the compute observer has no candidate there.
+  no guest code: the compute observer has no candidate there. Each process
+  has its own observer, so the one that runs is watched: a child that
+  computes while its parent waits for it is the child's compute-bound stop,
+  its sampled site located in the child's own admitted artifact (the hub
+  adds the artifact to the child's stop record), and a child that spins or
+  polls reaches the machine's no-progress horizon in its own runtime,
+  which carries it, as a liveness stop naming the child.
+- A deadlock is the machine's: the process that finds every one of its
+  tasks blocked, every other process's foreign task blocked too, asks each
+  frozen process for its parked tasks (`Describe`, answered from the
+  child's runtime while it waits to resume, or by the hub for every live
+  child), and stops the run as `liveness`/`deadlock` naming each process's
+  blocked tasks. A root that finds it writes its facts and recording first,
+  so it replays as a child's does.
+- Every stop record of a machine of several processes carries `processes`,
+  the pids it is the account of: the stopping process's, a child's for a
+  stop the hub takes on its account, every process's for a deadlock. The
+  supervisor carries it to the envelope's `stop`, and a child's liveness
+  finding (marked with its `process`) names the child there too.
 - Thread ids: a root that is still the whole machine numbers its threads
   after their tasks, unbounded; threads made once the machine holds several
   processes take the hub's ids, up to 65,536 thread tasks a process (past
@@ -529,18 +547,27 @@ its own runtime, and the processes run in lockstep: one runs at a time
   interrupts with `EINTR` or restarts under `SA_RESTART`, a read of a
   pipe the root holds included, a default action that ends it, which its
   parent's wait sees as its death by that signal, core dumped where the
-  default dumps core, or that discards it). A zombie takes nothing. When the root ends, the hub
+  default dumps core, or that discards it). A zombie takes nothing, but is
+  found: `kill(-1)` beside only children that ended and are not yet reaped
+  answers 0, as the kernel's does, where with no other process it is
+  `ESRCH`. When the root ends, the hub
   kills every child still running (each foreign task's end recorded, no
   `SIGCHLD`, no waiter woken: no guest code runs any more); the
   launcher then kills, by pidfd, and reaps anything left.
 - A child writes no facts, trace or stop record of its own: it ships its
-  facts (the hub marks them `process: N`) and its stop record (detail
-  prefixed `process N:`) to the hub, which kills the other children, writes
+  facts (the hub marks them `process: N`; at each verdict, at its stop and
+  when it exits) and its stop record (detail prefixed `process N:`) to the
+  hub, which kills the other children, writes
   the root's facts and recording so far, as a stop the runtime takes does,
   and ends the run with that record, so the run has the child's class. The
   supervisor reads the machine's facts as the root's last document with
   every process's verdicts (a child's marked with its `process`), each
-  child's latest findings and the first replay divergence any process
+  child's latest findings (each marked with its `process`), each child's
+  latest fault planes added to the root's (counts summed, a plane judged
+  vacuous again from the sums: a fault that landed only in a child is the
+  run's; the schedule and swarm planes stay the root's, each process's own
+  scheduler's) and its buggify sites to the root's (each marked with its
+  `process`, counters summed), and the first replay divergence any process
   noted; a run whose root wrote none has no facts.
 - A child's crash (an abort, a fatal signal's default action, a fault,
   in a signal handler too, a panic that aborts or exits 101) is a process
@@ -607,6 +634,7 @@ its own runtime, and the processes run in lockstep: one runs at a time
   - A child's interest in a pipe outlives its poll's timeout or other wake: a later change costs it a recheck.
   - `pidfd_open` of a child answers `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
   - A signal sent to a frozen child is pending in it only from its next resume: until then its `sigpending` and `/proc` status do not show it.
+  - The end-of-run text reports (`--verbose`, the envelope's `reports`) are the root's own; a child's fault and buggify activity reaches the run's facts (`fault_reports`, `sdk`) only.
 
 ## Virtual time
 
