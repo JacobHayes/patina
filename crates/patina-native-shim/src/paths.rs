@@ -305,7 +305,17 @@ pub(crate) fn chdir(dirfd: c_int, path: &str) -> Result<(), c_int> {
 /// closing the number changes nothing. The search check reads the in-memory
 /// inode's mode, as `inode_permission` does, so no filesystem fault can fail it.
 pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
-    let resolved = resolve_fd(guest_fd)?;
+    let handle = searchable_handle(&resolve_fd(guest_fd)?)?;
+    let duplicate = with_context(|context| context.fs_dup(handle))?;
+    #[cfg(target_os = "linux")]
+    crate::fsnotify::shared(handle, duplicate);
+    replace_cwd(duplicate)
+}
+
+/// The directory node a descriptor holds, as `fchdir(2)` takes it: a
+/// directory (opened plainly or `O_PATH`, both [`FdKind::Dir`]) searchable
+/// by the one modeled identity (`ENOTDIR`, `EACCES` otherwise).
+pub(crate) fn searchable_handle(resolved: &crate::fdtable::Resolved) -> Result<Fd, c_int> {
     if resolved.kind != FdKind::Dir {
         return Err(ENOTDIR);
     }
@@ -314,10 +324,7 @@ pub(crate) fn fchdir(guest_fd: c_int) -> Result<(), c_int> {
     if metadata.mode & 0o100 == 0 {
         return Err(EACCES);
     }
-    let duplicate = with_context(|context| context.fs_dup(handle))?;
-    #[cfg(target_os = "linux")]
-    crate::fsnotify::shared(handle, duplicate);
-    replace_cwd(duplicate)
+    Ok(handle)
 }
 
 /// Open the configured initial working directory at install, on the context

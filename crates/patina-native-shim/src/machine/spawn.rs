@@ -15,7 +15,10 @@
 //! (a duplicate of the root's handle, its offset shared), and a pipe end is
 //! the root's description, which the child reaches through the hub
 //! ([`super::pipes`]). The child asks for them before it is ready
-//! ([`install_plan`]).
+//! ([`install_plan`]), with the signals the caller ignores, less those the
+//! spawn resets (`POSIX_SPAWN_SETSIGDEF`): `execve` keeps `SIG_IGN`. A
+//! status-flag change on a description shared with another live process
+//! ([`shared`]) stops the run by name.
 //!
 //! A recording root keeps each child's recording (the child appends each
 //! decision to a log the hub maps, [`super::log`]); a replaying one hands
@@ -23,10 +26,11 @@
 //!
 //! What this slice does not model stops the run by name (`unsupported`,
 //! `not_modeled`): a spawn from a child, a file action that opens a file or
-//! one glibc's own code added, a descriptor of another kind (a socket, a
+//! one glibc's own code added, a `chdir` action to a path that is not
+//! UTF-8, a `PATH` search that passes a candidate the filesystem holds
+//! before the admitted one, a descriptor of another kind (a socket, a
 //! FIFO, a directory, an epoll instance, ...) open across exec, spawn
-//! attributes other than the signal mask and default dispositions a fresh
-//! process has anyway, a signal mask that is not empty, a run the
+//! attributes other than the signal mask and default dispositions, a signal mask that is not empty, a run the
 //! supervisor gave no launch channel (crash-restart and the
 //! scheduling-policy knobs), arguments or environment that are not UTF-8,
 //! and a launch request (the arguments and environment, encoded) over
@@ -36,7 +40,7 @@ use super::*;
 use crate::fdtable::{DescId, FdKind};
 use core::ffi::{CStr, c_char};
 use patina_dst_runtime::{ENV_LAUNCH_FD, ExecutionMode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::sync::atomic::AtomicU64;
 
@@ -45,10 +49,13 @@ const WNOHANG: u32 = 0x0000_0001;
 const WEXITED: u32 = 0x0000_0004;
 const WNOWAIT: u32 = 0x0100_0000;
 
-/// `POSIX_SPAWN_SETSIGDEF`, `POSIX_SPAWN_SETSIGMASK` and
-/// `POSIX_SPAWN_USEVFORK`: a fresh process has default dispositions and an
-/// empty mask, and how glibc makes it does not show.
+/// `POSIX_SPAWN_SETSIGDEF` (the child's ignored signals leave out the
+/// default set), `POSIX_SPAWN_SETSIGMASK` (an empty mask, as a fresh
+/// process has) and `POSIX_SPAWN_USEVFORK` (how glibc makes it does not
+/// show).
 const SPAWN_MODELED_FLAGS: i16 = 0x04 | 0x08 | 0x40;
+/// `POSIX_SPAWN_SETSIGDEF`.
+const SPAWN_SETSIGDEF: i16 = 0x04;
 /// `POSIX_SPAWN_SETSIGMASK`.
 const SPAWN_SETSIGMASK: i16 = 0x08;
 
@@ -59,6 +66,34 @@ const LAUNCH_LIMIT: usize = 120 << 10;
 
 /// Tasks of this process parked in a wait for a child.
 static WAITERS: SpinMutex<Vec<TaskId>> = SpinMutex::new(Vec::new());
+
+/// The descriptions this process shares with another live process, each
+/// with the processes it shares it with: in the root, the files and pipe
+/// ends each child was handed at its spawn (until the child ends, or
+/// closes the pipe end); in a child, the files and pipe ends its spawn
+/// handed it, which are the root's too. A change of their status flags
+/// would reach only this process's copy: it stops the run by name.
+static SHARED: SpinMutex<BTreeMap<DescId, BTreeSet<i32>>> = SpinMutex::new(BTreeMap::new());
+
+/// Whether description `desc` of this process is shared with another live
+/// process.
+pub(crate) fn shared(desc: DescId) -> bool {
+    SHARED
+        .lock()
+        .get(&desc)
+        .is_some_and(|pids| !pids.is_empty())
+}
+
+/// Process `pid` no longer shares `desc` (every description, for `None`).
+pub(super) fn unshare(pid: i32, desc: Option<DescId>) {
+    let mut shared = SHARED.lock();
+    shared.retain(|id, pids| {
+        if desc.is_none_or(|desc| desc == *id) {
+            pids.remove(&pid);
+        }
+        !pids.is_empty()
+    });
+}
 
 /// Each new child's descriptor plan, until it asks for it.
 pub(super) static PLANS: SpinMutex<BTreeMap<i32, Vec<u8>>> = SpinMutex::new(BTreeMap::new());
@@ -162,13 +197,16 @@ pub(crate) unsafe fn actions_destroy(acts: *mut libc::posix_spawn_file_actions_t
     }
 }
 
-/// The program `posix_spawnp` runs for `file`: `file` itself when it names
-/// a path (holds a `/`), else the first admitted program among the
-/// caller's `PATH` directories (glibc's default, `/bin:/usr/bin`, when it
-/// has none). `None` when no candidate is admitted, and the caller refuses
-/// `file` by name: the search never looks at the host.
+/// The program `posix_spawnp` (`symbol`) runs for `file`: `None` when
+/// `file` names a path (holds a `/`), else the first admitted program among
+/// the caller's `PATH` directories (glibc's default, `/bin:/usr/bin`, when
+/// it has none; an empty directory is the working directory). `None` when
+/// no candidate is admitted, and the caller refuses `file` by name: the
+/// search never looks at the host. A candidate before the admitted one
+/// that the simulated filesystem holds (or cannot say it lacks) is the one
+/// glibc would try first: the spawn stops the run by name.
 #[cfg(patina_posix_exports)]
-pub(crate) fn search(file: &CStr) -> Option<CString> {
+pub(crate) fn search(symbol: &CStr, file: &CStr) -> Option<CString> {
     use crate::admission::{Admission, admitted_program};
     let bytes = file.to_bytes();
     if bytes.is_empty() || bytes.contains(&b'/') {
@@ -182,15 +220,50 @@ pub(crate) fn search(file: &CStr) -> Option<CString> {
         // SAFETY: the environment's value, a C string.
         unsafe { CStr::from_ptr(path) }.to_bytes().to_vec()
     };
-    path.split(|byte| *byte == b':').find_map(|directory| {
+    let mut earlier: Option<CString> = None;
+    for directory in path.split(|byte| *byte == b':') {
         let mut candidate = directory.to_vec();
         if !candidate.is_empty() && !candidate.ends_with(b"/") {
             candidate.push(b'/');
         }
         candidate.extend_from_slice(bytes);
-        let candidate = CString::new(candidate).ok()?;
-        (!matches!(admitted_program(&candidate), Admission::Unadmitted)).then_some(candidate)
-    })
+        let Ok(candidate) = CString::new(candidate) else {
+            continue;
+        };
+        if !matches!(admitted_program(&candidate), Admission::Unadmitted) {
+            if let Some(shadow) = earlier {
+                refuse_named(
+                    symbol,
+                    file,
+                    &format!(
+                        "whose PATH search reaches `{}` before the admitted `{}`",
+                        shadow.to_string_lossy(),
+                        candidate.to_string_lossy()
+                    ),
+                );
+            }
+            return Some(candidate);
+        }
+        if earlier.is_none() && !absent(&candidate) {
+            earlier = Some(candidate);
+        }
+    }
+    None
+}
+
+/// Whether the simulated filesystem certainly holds nothing at `candidate`
+/// (relative to the working directory): its walk ends in `ENOENT` or
+/// `ENOTDIR`, as glibc's search moves on past.
+#[cfg(patina_posix_exports)]
+fn absent(candidate: &CStr) -> bool {
+    let Ok(text) = candidate.to_str() else {
+        return false;
+    };
+    match crate::paths::resolve_more(crate::paths::AT_FDCWD, text, 0) {
+        Ok(crate::paths::Resolution::Volume(resolved)) => resolved.metadata.is_none(),
+        Ok(crate::paths::Resolution::Virtual(_)) => false,
+        Err(errno) => errno == libc::ENOENT || errno == libc::ENOTDIR,
+    }
 }
 
 /// `posix_spawn`/`posix_spawnp` of `spawn.path`: `None` when the program is
@@ -226,14 +299,20 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             &format!("after the guest used {what}, which a child would not share"),
         );
     }
+    // What the caller ignores stays ignored across `execve`, but for the
+    // signals the spawn resets to their default.
+    let mut ignored = thread::ignored_signals();
     if !spawn.attr.is_null() {
         // SAFETY: the caller's attributes object, per the entry's contract.
-        let (flags, mask_empty) = unsafe { attributes(spawn.attr) };
+        let (flags, mask_empty, defaults) = unsafe { attributes(spawn.attr) };
         if flags & !SPAWN_MODELED_FLAGS != 0 {
             refuse(spawn, "with spawn attributes");
         }
         if flags & SPAWN_SETSIGMASK != 0 && !mask_empty {
             refuse(spawn, "with a signal mask");
+        }
+        if flags & SPAWN_SETSIGDEF != 0 {
+            ignored &= !defaults;
         }
     }
     // SAFETY: NULL-terminated arrays of strings, per the entry's contract.
@@ -286,7 +365,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     let (pgid, sid) = crate::identity::add_child(pid);
     let parent = crate::patina_pid();
     let seed = context(|context| Ok(child_seed(context.root_seed(), pid)));
-    let plan = plan(pid, &table, &files);
+    let plan = plan(pid, &table, &files, ignored);
     if !files.is_empty() {
         HANDLES
             .lock()
@@ -429,10 +508,17 @@ fn child_seed(root: u64, pid: i32) -> u64 {
 /// model.
 fn refuse(spawn: &Spawn, what: &str) -> ! {
     // SAFETY: a NUL-terminated string (checked non-null by the caller).
-    let path = unsafe { CStr::from_ptr(spawn.path) }.to_string_lossy();
+    let path = unsafe { CStr::from_ptr(spawn.path) };
+    refuse_named(spawn.symbol, path, what)
+}
+
+/// `symbol` of `path` stops the run: `what` is the part of it this slice
+/// does not model.
+fn refuse_named(symbol: &CStr, path: &CStr, what: &str) -> ! {
     let detail = format!(
-        "the guest called {} `{path}` {what}, which Patina does not model yet",
-        spawn.symbol.to_string_lossy()
+        "the guest called {} `{}` {what}, which Patina does not model yet",
+        symbol.to_string_lossy(),
+        path.to_string_lossy()
     );
     let line = format!("patina: process spawn reached under patina: {detail}; failing closed\n");
     let _ = crate::host_write_all(2, line.as_bytes());
@@ -446,8 +532,13 @@ enum Shared {
     /// The run's standard streams and the memory devices: the child's own
     /// description of the same kind and handle.
     Own(FdKind, u64, u32),
-    /// The root's open file `handle`, through a handle of the child's own.
-    File { handle: u64, status: u32 },
+    /// The root's open file `handle` (description `desc`), through a handle
+    /// of the child's own.
+    File {
+        desc: DescId,
+        handle: u64,
+        status: u32,
+    },
     /// The root's pipe end, description `desc`, the reading end when `read`.
     Pipe {
         desc: DescId,
@@ -517,7 +608,9 @@ fn arrange(
             }
             Action::Closefrom(from) => table.retain(|number, _| number < from),
             Action::Chdir(path) => {
-                let path = path.to_str().map_err(|_| libc::ENOENT)?;
+                let Ok(path) = path.to_str() else {
+                    refuse(spawn, "with a chdir action to a path that is not UTF-8");
+                };
                 let path = if path.starts_with('/') {
                     path.to_owned()
                 } else {
@@ -527,10 +620,7 @@ fn arrange(
             }
             Action::Fchdir(fd) => {
                 let (resolved, _) = *table.get(fd).ok_or(libc::EBADF)?;
-                if resolved.kind != FdKind::Dir {
-                    return Err(libc::ENOTDIR);
-                }
-                cwd = crate::paths::node_path(Fd(resolved.handle))?;
+                cwd = crate::paths::node_path(crate::paths::searchable_handle(&resolved)?)?;
             }
             Action::Open => unreachable!("refused with the actions"),
         }
@@ -545,6 +635,7 @@ fn arrange(
                 Shared::Own(resolved.kind, resolved.handle, resolved.status)
             }
             FdKind::File => Shared::File {
+                desc: resolved.desc,
                 handle: resolved.handle,
                 status: resolved.status,
             },
@@ -567,11 +658,17 @@ fn arrange(
     Ok((cwd, shared))
 }
 
-/// Child `pid`'s descriptor plan, as [`install_plan`] reads it: one entry
-/// per description the child holds, and each number's description. Each
+/// Child `pid`'s plan, as [`install_plan`] reads it: one entry per
+/// description the child holds, each number's description, and the signals
+/// it ignores (`ignored`, a mask). Each
 /// pipe the child holds is a reference of its own on the root's
 /// description, taken here; each file is the duplicate `files` names.
-fn plan(pid: i32, table: &BTreeMap<c_int, Shared>, files: &BTreeMap<u64, Fd>) -> Vec<u8> {
+fn plan(
+    pid: i32,
+    table: &BTreeMap<c_int, Shared>,
+    files: &BTreeMap<u64, Fd>,
+    ignored: u64,
+) -> Vec<u8> {
     let mut distinct: Vec<Shared> = Vec::new();
     let mut numbers = Vec::new();
     for (number, shared) in table {
@@ -590,13 +687,22 @@ fn plan(pid: i32, table: &BTreeMap<c_int, Shared>, files: &BTreeMap<u64, Fd>) ->
             Shared::Own(kind, handle, status) => {
                 serde_json::json!({"kind": kind.wire(), "handle": handle, "status": status})
             }
-            Shared::File { handle, status } => serde_json::json!({
-                "kind": FdKind::File.wire(),
-                "handle": files[&handle].0,
-                "status": status,
-            }),
+            Shared::File {
+                desc,
+                handle,
+                status,
+            } => {
+                SHARED.lock().entry(desc).or_default().insert(pid);
+                serde_json::json!({
+                    "kind": FdKind::File.wire(),
+                    "handle": files[&handle].0,
+                    "status": status,
+                    "shared": true,
+                })
+            }
             Shared::Pipe { desc, read, status } => {
                 super::pipes::retain(pid, desc);
+                SHARED.lock().entry(desc).or_default().insert(pid);
                 serde_json::json!({
                     "kind": FdKind::Pipe.wire(),
                     "remote": desc,
@@ -606,12 +712,16 @@ fn plan(pid: i32, table: &BTreeMap<c_int, Shared>, files: &BTreeMap<u64, Fd>) ->
             }
         })
         .collect();
-    serde_json::to_vec(&serde_json::json!({"descriptions": descriptions, "numbers": numbers}))
-        .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a plan: {error}")))
+    serde_json::to_vec(&serde_json::json!({
+        "descriptions": descriptions,
+        "numbers": numbers,
+        "ignored": ignored,
+    }))
+    .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a plan: {error}")))
 }
 
-/// A child, before it is ready: its descriptor table becomes what its
-/// spawn arranged.
+/// A child, before it is ready: its descriptor table and the signals it
+/// ignores become what its spawn arranged.
 pub(super) fn install_plan() {
     send(channel(), &Message::Plan);
     let len = match receive(channel()) {
@@ -632,10 +742,16 @@ pub(super) fn install_plan() {
         FdKind::MemDevice,
         FdKind::Pipe,
     ];
-    let descriptions: Vec<(FdKind, u64, u32)> = plan["descriptions"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let descriptions = plan["descriptions"].as_array().cloned().unwrap_or_default();
+    let shared: Vec<bool> = descriptions
+        .iter()
+        .map(|description| {
+            description["shared"].as_bool().unwrap_or_default()
+                || description.get("remote").is_some()
+        })
+        .collect();
+    let descriptions: Vec<(FdKind, u64, u32)> = descriptions
+        .iter()
         .map(|description| {
             let kind = field(description, "kind")
                 .and_then(|wire| kinds.into_iter().find(|kind| kind.wire() as u64 == wire))
@@ -657,12 +773,22 @@ pub(super) fn install_plan() {
         .flatten()
         .filter_map(|entry| Some((entry[0].as_i64()? as c_int, entry[1].as_u64()? as usize)))
         .collect();
-    let released = crate::state::fd_table()
+    let (released, ids) = crate::state::fd_table()
         .lock()
         .replace(&descriptions, &numbers)
         .unwrap_or_else(|errno| protocol_fatal_text(&format!("installing a plan ({errno})")));
+    // The root holds each file and pipe end the child was handed.
+    let root = crate::registry::ROOT_PID as i32;
+    for (id, shared) in ids.into_iter().zip(shared) {
+        if shared {
+            SHARED.lock().entry(id).or_default().insert(root);
+        }
+    }
     for release in released {
         let _ = crate::state::release_description(release);
+    }
+    if let Err(message) = thread::ignore_signals(field(&plan, "ignored").unwrap_or_default()) {
+        protocol_fatal_text(&message);
     }
 }
 
@@ -675,24 +801,30 @@ unsafe fn actions_used(actions: *const libc::posix_spawn_file_actions_t) -> c_in
     unsafe { actions.cast::<c_int>().add(1).read_unaligned() }
 }
 
-/// glibc's `posix_spawnattr_t`: its flags (`__flags`, the leading `short`)
-/// and whether its signal mask (`__ss`, after the flags, the group and the
-/// default set) is empty.
+/// glibc's `posix_spawnattr_t`: its flags (`__flags`, the leading `short`),
+/// whether its signal mask (`__ss`, after the flags, the group and the
+/// default set) is empty, and its default set (`__sd`) as a mask.
 ///
 /// # Safety
 /// `attr` is a live attributes object.
-unsafe fn attributes(attr: *const libc::posix_spawnattr_t) -> (i16, bool) {
-    const MASK_OFFSET: usize = 8 + size_of::<libc::sigset_t>();
-    // SAFETY: both fields lie inside glibc's attributes object.
+unsafe fn attributes(attr: *const libc::posix_spawnattr_t) -> (i16, bool, u64) {
+    const DEFAULT_OFFSET: usize = 8;
+    const MASK_OFFSET: usize = DEFAULT_OFFSET + size_of::<libc::sigset_t>();
+    // SAFETY: the fields lie inside glibc's attributes object.
     unsafe {
         let flags = attr.cast::<i16>().read_unaligned();
-        let mask = attr
-            .cast::<u8>()
-            .add(MASK_OFFSET)
-            .cast::<libc::sigset_t>()
-            .read_unaligned();
+        let set = |offset: usize| {
+            attr.cast::<u8>()
+                .add(offset)
+                .cast::<libc::sigset_t>()
+                .read_unaligned()
+        };
+        let (mask, defaults) = (set(MASK_OFFSET), set(DEFAULT_OFFSET));
         let empty = (1..=64).all(|sig| libc::sigismember(&mask, sig) != 1);
-        (flags, empty)
+        let defaults = (1..=64)
+            .filter(|sig| libc::sigismember(&defaults, *sig) == 1)
+            .fold(0u64, |bits, sig| bits | 1 << (sig - 1));
+        (flags, empty, defaults)
     }
 }
 

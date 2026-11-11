@@ -151,6 +151,39 @@ pub unsafe extern "C" fn patina_signal_action(
     0
 }
 
+/// The signals this process ignores (`SIG_IGN`): what `execve` keeps.
+#[cfg(target_os = "linux")]
+pub(in crate::thread) fn ignored_signals() -> u64 {
+    let state = lock_state();
+    (1..=SIGNAL_MAX as u8)
+        .filter(|sig| state.signals.actions[usize::from(*sig)].handler == SIG_IGN)
+        .fold(0, |mask, sig| mask | bit(sig))
+}
+
+/// A new process ignores `mask`'s signals, as the `execve` of its spawn
+/// left them; every other signal keeps its default action.
+#[cfg(target_os = "linux")]
+pub(in crate::thread) fn ignore_signals(mask: u64) -> Result<(), String> {
+    let ignore = Action {
+        handler: SIG_IGN,
+        ..Action::default()
+    };
+    for sig in 1..=SIGNAL_MAX as u8 {
+        if mask & bit(sig) == 0 || matches!(sig, SIGKILL | SIGSTOP) {
+            continue;
+        }
+        let mut state = lock_state();
+        if install_host_action(sig, ignore) != 0 {
+            return Err(format!(
+                "ignoring signal {sig} as the spawn left it failed ({})",
+                std::io::Error::last_os_error()
+            ));
+        }
+        state.signals.action(sig, ignore);
+    }
+    Ok(())
+}
+
 /// # Safety
 /// The optional mask pointers must be valid for eight bytes.
 pub unsafe fn patina_signal_mask(how: i32, set: *const u64, old: *mut u64, size: usize) -> i64 {

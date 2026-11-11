@@ -461,6 +461,8 @@ mod generation;
 /// The old mask is restored before either syscall door returns.
 mod mask;
 
+#[cfg(target_os = "linux")]
+pub(super) use actions::{ignore_signals, ignored_signals};
 pub use actions::{
     patina_signal_action, patina_signal_action_libc, patina_signal_altstack, patina_signal_mask,
     patina_signal_pending,

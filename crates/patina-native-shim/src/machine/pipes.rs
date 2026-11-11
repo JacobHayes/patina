@@ -79,6 +79,14 @@ fn request(op: u8, id: u64, arg: u64, block: bool, bytes: &[u8]) -> Answer {
         context(|context| context.task_foreign(ELSEWHERE, ForeignState::Runnable));
     }
     if woke & WOKE_SELF != 0 {
+        // Waking this process's remote waiters takes the thread runtime: a
+        // request made holding it (a readiness poll or watch, which wake
+        // nothing) must not come back having woken one of its own.
+        if thread::in_state_section() {
+            protocol_fatal_text(
+                "a pipe request made holding the thread runtime woke its own process",
+            );
+        }
         thread::wake_remote_waiters();
     }
     Answer {
@@ -142,6 +150,7 @@ fn release(pid: i32, desc: u64) {
             Some(count) if *count > 1 => *count -= 1,
             Some(_) => {
                 refs.remove(&(pid, desc));
+                super::spawn::unshare(pid, Some(desc));
             }
             None => return,
         }

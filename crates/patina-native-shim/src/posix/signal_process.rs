@@ -241,8 +241,9 @@ fn guest_c_string(addr: usize, buffer: &mut [u8]) -> Option<&CStr> {
 /// spawn itself. The structure is zeroed on `init`, as glibc leaves it, so
 /// nothing reads uninitialized bytes. On Linux they keep what a spawn of an
 /// admitted program consults (`crate::machine::spawn`) where glibc keeps it:
-/// an action counts in the actions object's `__used`, the flags and the
-/// group sit in the attributes object's `__flags` and `__pgrp`.
+/// an action counts in the actions object's `__used`, the flags, the group
+/// and the default set sit in the attributes object's `__flags`, `__pgrp`
+/// and `__sd`.
 ///
 /// # Safety
 /// `object` is null or a writable `T`.
@@ -551,6 +552,8 @@ unsafe extern "C" fn posix_spawn_file_actions_addfchdir_np(
     fd: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // glibc bounds only this action's descriptor below: one at or past the
+    // limit fails the spawn (`EBADF`).
     if fd < 0 {
         return libc::EBADF;
     }
@@ -567,7 +570,7 @@ unsafe extern "C" fn posix_spawn_file_actions_addclose(
     fd: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if fd < 0 {
+    if !spawn_fd(fd) {
         return libc::EBADF;
     }
     // SAFETY: the caller's actions object, per the entry's contract.
@@ -583,7 +586,7 @@ unsafe extern "C" fn posix_spawn_file_actions_addclosefrom_np(
     from: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if from < 0 {
+    if !spawn_fd(from) {
         return libc::EBADF;
     }
     // SAFETY: the caller's actions object, per the entry's contract.
@@ -604,7 +607,7 @@ unsafe extern "C" fn posix_spawn_file_actions_addopen(
     _mode: libc::mode_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if fd < 0 {
+    if !spawn_fd(fd) {
         return libc::EBADF;
     }
     // SAFETY: the caller's actions object, per the entry's contract.
@@ -686,10 +689,15 @@ unsafe fn spawn_door(
     #[cfg(target_os = "linux")]
     {
         let mut path = [0u8; libc::PATH_MAX as usize];
-        let found = search
-            .then(|| guest_c_string(file as usize, &mut path))
-            .flatten()
-            .and_then(crate::machine::spawn::search);
+        let name = guest_c_string(file as usize, &mut path);
+        // An empty name names no file: `execve` answers `ENOENT`, before
+        // any search.
+        if name.is_some_and(|name| name.to_bytes().is_empty()) {
+            return libc::ENOENT;
+        }
+        let found = name
+            .filter(|_| search)
+            .and_then(|name| crate::machine::spawn::search(symbol, name));
         let file = found.as_deref().map_or(file, CStr::as_ptr);
         let spawn = crate::machine::spawn::Spawn {
             symbol,
@@ -749,7 +757,7 @@ unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     newfd: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    if fd < 0 || newfd < 0 {
+    if !spawn_fd(fd) || !spawn_fd(newfd) {
         return libc::EBADF;
     }
     // SAFETY: the caller's actions object, per the entry's contract.
@@ -762,6 +770,14 @@ unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     unsafe {
         count_action(acts)
     }
+}
+
+/// Whether a file action may name descriptor `fd`: glibc's
+/// `__spawn_valid_fd`, below the soft `RLIMIT_NOFILE` the table enforces.
+/// An action past it is `EBADF` as it is added (but `fchdir`'s, which
+/// glibc checks only for a negative descriptor).
+fn spawn_fd(fd: c_int) -> bool {
+    usize::try_from(fd).is_ok_and(|fd| fd < crate::fd_limit())
 }
 
 /// Count one action in `acts`, so a spawn that would carry it out sees it
@@ -888,10 +904,23 @@ unsafe extern "C" fn posix_spawnattr_setpgroup(
 /// attr and sigdefault follow libc's spawn attributes contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnattr_setsigdefault(
-    _attr: *mut libc::posix_spawnattr_t,
-    _sigdefault: *const libc::sigset_t,
+    attr: *mut libc::posix_spawnattr_t,
+    sigdefault: *const libc::sigset_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    #[cfg(target_os = "linux")]
+    if !attr.is_null() && !sigdefault.is_null() {
+        // SAFETY: `__sd`, the set after the flags and the group in glibc's
+        // object; the caller's set is readable, per libc's contract.
+        unsafe {
+            attr.cast::<u8>()
+                .add(8)
+                .cast::<libc::sigset_t>()
+                .write_unaligned(sigdefault.read_unaligned())
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (attr, sigdefault);
     0
 }
 

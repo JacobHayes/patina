@@ -438,7 +438,12 @@ its own runtime, and the processes run in lockstep: one runs at a time
   (the staged `--stdin` included) is a duplicate of the root's driver
   handle, its offset shared; a pipe end stays the root's description. The
   child asks the hub for this plan before it reports ready and installs it
-  as its table. A `chdir` action is the child's starting directory.
+  as its table. A `chdir` or `fchdir` action is the child's starting
+  directory. A file action naming a descriptor at or past the limit is
+  `EBADF` as it is added, as glibc's is. The plan also carries the signals
+  the caller ignores, less a `POSIX_SPAWN_SETSIGDEF` set, which the child
+  ignores too (an `execve` keeps `SIG_IGN`); every other disposition starts
+  at its default.
 - A pipe a child holds (`src/machine/pipes.rs`) is a remote end: each read,
   write, readiness check and close is a request the hub serves on the
   root's pipe model, with the root holding one hidden reference per child
@@ -540,7 +545,10 @@ its own runtime, and the processes run in lockstep: one runs at a time
   recording lacks diverges (`trace_mismatch`).
 - Not modeled yet, each a named stop (`unsupported`/`not_modeled`, never
   `deny_trap`, which is for programs outside the admission): spawn from a
-  child, an `addopen` file action, a descriptor open across exec that is
+  child, an `addopen` file action, a `chdir` action to a path that is not
+  UTF-8, a `PATH` search that passes a candidate the filesystem holds before
+  the admitted one, a change of a status flag (`F_SETFL`, `FIONBIO`) on a
+  description another live process shares, a descriptor open across exec that is
   not a standard stream, memory device, file or anonymous pipe (a socket, a
   FIFO, a directory, an epoll instance, ...), a caller that made, while alone, state each process models on its
   own (a file lock, a FIFO, a shared file mapping, System V IPC, inotify),
@@ -554,26 +562,19 @@ its own runtime, and the processes run in lockstep: one runs at a time
   to every process, a socket in a child, `setpgid` and `setsid`; and after a
   child ran, `RUSAGE_CHILDREN`, `times`, and a wait that reaps into a
   resource-usage out-pointer.
-- Known limits: a child's environment is a map (`PATINA_RT_GUEST_ENV_JSON`):
-  its `envp` reaches it sorted by name, a duplicate name keeping its first
-  value (the one `getenv` finds). A child that dies of a host fault
-  mid-quantum gives back the clock and carried state the hub resumed it
-  with: what it charged in that quantum is lost to the machine. While
-  another process lives, `tkill` of any thread id not the caller's own is a
-  named stop, even one no process holds. The step budget
-  (`PATINA_RT_STEP_BUDGET`) bounds each process's own steps, not the
-  machine's. A child's recorded metadata lacks the finish-time buggify
-  activity record (forensics only; replay does not read it). The trace
-  budget is one for the whole machine: the root's timeline and every
-  child's count against it together. A child that dies after it told the
-  hub it ended (a destructor that faults after its exit) is not seen.
-  Status flags (`O_NONBLOCK`, `O_APPEND`) set on an inherited description
-  after the spawn are each process's own. An inherited pipe end's `st_ino`
-  differs per process. `splice`, `tee`, `vmsplice`, `FIONREAD` and the
-  pipe-size `fcntl`s on a child's pipe end are a named stop
-  (`not_modeled`). A child's pipe data travels in hub requests (a copy each way,
-  at most a pipe's capacity a request). `pidfd_open` of a child answers
-  `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
+- Known limits:
+  - A child's `envp` is a map (`PATINA_RT_GUEST_ENV_JSON`): sorted by name, a duplicate keeps its first value.
+  - A child that dies of a host fault mid-quantum loses what it charged in that quantum.
+  - While another process lives, `tkill` of any thread id not the caller's own is a named stop.
+  - The step budget (`PATINA_RT_STEP_BUDGET`) bounds each process's own steps, not the machine's.
+  - A child's recorded metadata lacks the finish-time buggify activity record (forensics only).
+  - The trace budget is one for the whole machine, every process's timeline counted together.
+  - A child that dies after it told the hub it ended (a destructor that faults) is not seen.
+  - An inherited pipe end's `st_ino` differs per process.
+  - `splice`, `tee`, `vmsplice`, `FIONREAD` and the pipe-size `fcntl`s on a child's pipe end are a named stop.
+  - A child's pipe data is copied through hub requests, at most 64 KiB a request, whatever the pipe's size.
+  - A child's interest in a pipe outlives its poll's timeout or other wake: a later change costs it a recheck.
+  - `pidfd_open` of a child answers `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
 
 ## Virtual time
 
@@ -753,9 +754,11 @@ lifecycle markers for crash restart).
   that names programs is byte-identical per checkout. Admission covers
   `posix_spawn`, `posix_spawnp` and `pidfd_spawnp`, matched exactly; a
   `posix_spawnp` of a name without a slash searches the guest's `PATH`
-  (default `/bin:/usr/bin`) for the first candidate the table lists as
-  admitted or refused, so a search never reaches a program outside the
-  table: a spawn of an admitted program runs it as a child process (see
+  (default `/bin:/usr/bin`; an empty entry is the working directory) for
+  the first candidate the table lists as admitted or refused, so a search
+  never reaches a program outside the table, and a candidate before it
+  that the simulated filesystem holds stops the run by name (glibc would
+  try it first); an empty name is `ENOENT`: a spawn of an admitted program runs it as a child process (see
   Processes), any other spawn is refused (`deny_trap`), and
   `fork` and the exec family (a `Command` that falls back to them included)
   are refused as before.

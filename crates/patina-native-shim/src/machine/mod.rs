@@ -823,6 +823,8 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
         }
         Ok(())
     });
+    // It shares no description with the root any more.
+    spawn::unshare(pid, None);
     match notify {
         Notify::Parent => {
             // What it held of the root's descriptions is released: the

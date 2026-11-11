@@ -1193,6 +1193,32 @@ fn tokio_signal_parking_lot_rustix_use_product_backend() {
     );
 }
 
+/// tokio::process runs this program again as admitted children:
+/// `output()` captures a child's streams and status, and an interactive
+/// child round trips lines through piped stdin and stdout before `wait()`
+/// reaps it. The current-thread runtime reaps through its signal driver,
+/// since a child's process descriptor is refused (`pidfd_open` answers
+/// `ESRCH`) and tokio falls back to waiting for SIGCHLD. The same seed
+/// records the same bytes, and the recording replays.
+#[cfg(target_os = "linux")]
+#[test]
+fn tokio_process_spawns_and_reaps_admitted_children() {
+    let g = Guest::assert_build("tokio-process");
+    let binary = g.binary.to_str().unwrap().to_owned();
+    let flags = ["--", binary.as_str()];
+    let (out, first) = g.assert_recorded(1, &flags);
+    assert_eq!(
+        text(&out.stdout),
+        "NATIVE_TOKIO_PROCESS_RESULT output=Some(3)/\"to-stdout\"/\"to-stderr\" \
+         answers=TOKIO,PROCESS rest=None code=Some(0)\n"
+    );
+    let (_, second) = g.assert_recorded(1, &flags);
+    assert!(
+        std::fs::read(first).unwrap() == std::fs::read(second).unwrap(),
+        "the same seed recorded different bytes"
+    );
+}
+
 fn tokio_tcp_elapsed_us(out: &[u8]) -> u64 {
     let fields = assert_fields(out, "NATIVE_TOKIO_TCP_RESULT ", &["reply", "elapsed_us"]);
     assert_eq!(fields["reply"], "pong", "{}", text(out));

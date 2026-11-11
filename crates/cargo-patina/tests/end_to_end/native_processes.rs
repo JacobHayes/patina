@@ -55,7 +55,77 @@ unsafe extern "C" {
         mode: u32,
     ) -> i32;
     fn socketpair(domain: i32, kind: i32, protocol: i32, fds: *mut i32) -> i32;
+    fn posix_spawn_file_actions_adddup2(actions: *mut [u64; 10], fd: i32, new: i32) -> i32;
+    fn posix_spawn_file_actions_addclose(actions: *mut [u64; 10], fd: i32) -> i32;
+    fn posix_spawn_file_actions_addclosefrom_np(actions: *mut [u64; 10], from: i32) -> i32;
+    fn posix_spawn_file_actions_addfchdir_np(actions: *mut [u64; 10], fd: i32) -> i32;
+    fn posix_spawn_file_actions_addchdir_np(actions: *mut [u64; 10], path: *const std::ffi::c_char) -> i32;
+    fn posix_spawnattr_init(attr: *mut [u64; 42]) -> i32;
+    fn posix_spawnattr_setflags(attr: *mut [u64; 42], flags: i16) -> i32;
+    fn posix_spawnattr_setsigdefault(attr: *mut [u64; 42], set: *const [u64; 16]) -> i32;
+    fn pipe2(fds: *mut i32, flags: i32) -> i32;
+    fn read(fd: i32, buf: *mut std::ffi::c_void, len: usize) -> isize;
+    fn write(fd: i32, buf: *const std::ffi::c_void, len: usize) -> isize;
+    fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+    fn poll(fds: *mut PollFd, count: u64, timeout: i32) -> i32;
+    fn select(count: i32, read: *mut [u64; 16], write: *mut [u64; 16], except: *mut [u64; 16], timeout: *mut [i64; 2]) -> i32;
+    fn epoll_create1(flags: i32) -> i32;
+    fn epoll_ctl(epoll: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
+    fn epoll_wait(epoll: i32, events: *mut EpollEvent, max: i32, timeout: i32) -> i32;
     static environ: *const *const std::ffi::c_char;
+}
+
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[cfg_attr(target_arch = "x86_64", repr(C, packed))]
+#[cfg_attr(not(target_arch = "x86_64"), repr(C))]
+struct EpollEvent {
+    events: u32,
+    data: u64,
+}
+
+const O_NONBLOCK: i32 = 0o4000;
+const O_CLOEXEC: i32 = 0o2000000;
+const O_PATH: i32 = 0o10000000;
+const F_GETFD: i32 = 1;
+const F_SETFL: i32 = 4;
+const SIGHUP: i32 = 1;
+const SIGUSR2: i32 = 12;
+
+/// `posix_spawn` of `binary` with `args`, `actions` and `attr` (null for
+/// none), then a wait for it: the spawn's answer.
+fn spawn_wait(binary: &str, args: &[&str], actions: *const [u64; 10], attr: *const [u64; 42]) -> i32 {
+    let strings: Vec<std::ffi::CString> = std::iter::once(binary)
+        .chain(args.iter().copied())
+        .map(|arg| std::ffi::CString::new(arg).unwrap())
+        .collect();
+    let mut argv: Vec<*const std::ffi::c_char> = strings.iter().map(|arg| arg.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    let mut pid = 0;
+    let spawned = unsafe {
+        posix_spawn(&mut pid, argv[0], actions.cast(), attr.cast(), argv.as_ptr(), environ)
+    };
+    if spawned == 0 {
+        let mut status = 0;
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+    }
+    spawned
+}
+
+/// Read exactly `buf.len()` bytes from `fd`.
+fn read_exact(fd: i32, buf: &mut [u8]) {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = unsafe { read(fd, buf[done..].as_mut_ptr().cast(), buf.len() - done) };
+        assert!(n > 0, "read {n}: {:?}", std::io::Error::last_os_error());
+        done += n as usize;
+    }
 }
 
 /// glibc's `struct sigaction` (x86_64 and aarch64).
@@ -239,11 +309,303 @@ fn main() {
             eprintln!("REDIRECTED code={:?} file={:?}", status.code(), written.trim());
         }
         [binary, "pipe-child"] => {
-            // A pipe open across exec: the child holds both ends too.
+            // Two pipes open across exec: the child reads the parent's word
+            // from one end it inherited and writes it back, in capitals,
+            // through the other.
+            let (mut there, mut back) = ([0; 2], [0; 2]);
+            assert_eq!(unsafe { pipe(there.as_mut_ptr()) }, 0);
+            assert_eq!(unsafe { pipe(back.as_mut_ptr()) }, 0);
+            let mut child = Command::new(binary)
+                .args(["pipe-relay", &there[0].to_string(), &back[1].to_string()])
+                .spawn()
+                .unwrap();
+            assert_eq!(unsafe { write(there[1], b"ping".as_ptr().cast(), 4) }, 4);
+            let mut word = [0u8; 4];
+            read_exact(back[0], &mut word);
+            let status = child.wait().unwrap();
+            println!("PIPED {} {:?}", String::from_utf8_lossy(&word), status.code());
+        }
+        ["pipe-relay", from, to] => {
+            let mut word = [0u8; 4];
+            read_exact(from.parse().unwrap(), &mut word);
+            word.make_ascii_uppercase();
+            assert_eq!(unsafe { write(to.parse().unwrap(), word.as_ptr().cast(), 4) }, 4);
+        }
+        ["say", what] => print!("{what}"),
+        [binary, "offset-child"] => {
+            // The child writes through the parent's open file, at the offset
+            // the two share, between two writes of the parent's.
+            use std::io::Write;
+            let mut file = std::fs::File::create("/tmp/shared").unwrap();
+            file.write_all(b"A").unwrap();
+            let status = Command::new(binary)
+                .args(["say", "B"])
+                .stdout(file.try_clone().unwrap())
+                .status()
+                .unwrap();
+            file.write_all(b"C").unwrap();
+            let written = std::fs::read_to_string("/tmp/shared").unwrap();
+            println!("OFFSET {written:?} code={:?}", status.code());
+        }
+        ["fds", ref roles @ ..] => {
+            // Which of the named descriptors are open.
+            let states: Vec<String> = roles
+                .iter()
+                .map(|role| {
+                    let (name, fd) = role.split_once(':').unwrap();
+                    let open = unsafe { fcntl(fd.parse().unwrap(), F_GETFD) } >= 0;
+                    format!("{name}={}", if open { "open" } else { "closed" })
+                })
+                .collect();
+            println!("FDS {}", states.join(" "));
+        }
+        [binary, "actions-child"] => {
+            // Each file action, in the order the caller added them.
+            let f1 = unsafe { open(c"/tmp/f1".as_ptr(), 0o101, 0o644) };
+            let f2 = unsafe { open(c"/tmp/f2".as_ptr(), 0o101 | O_CLOEXEC, 0o644) };
+            let roles = [format!("f1:{f1}"), format!("f2:{f2}"), "nine:9".to_owned()];
+            let mut args = vec!["fds"];
+            args.extend(roles.iter().map(String::as_str));
+            let mut answers = Vec::new();
+            let mut spawn = |add: &dyn Fn(*mut [u64; 10])| {
+                let mut actions = [0u64; 10];
+                unsafe { posix_spawn_file_actions_init(&mut actions) };
+                add(&mut actions);
+                answers.push(spawn_wait(binary, &args, &actions, std::ptr::null()));
+            };
+            unsafe {
+                // Close one; dup2 onto itself keeps a close-on-exec one open.
+                spawn(&|actions| {
+                    posix_spawn_file_actions_addclose(actions, f1);
+                    posix_spawn_file_actions_adddup2(actions, f2, f2);
+                });
+                // Close every descriptor from 3 on.
+                spawn(&|actions| {
+                    posix_spawn_file_actions_addclosefrom_np(actions, 3);
+                });
+                // A copy, then the original closed.
+                spawn(&|actions| {
+                    posix_spawn_file_actions_adddup2(actions, f1, 9);
+                    posix_spawn_file_actions_addclose(actions, f1);
+                });
+                // The original closed first: the copy fails, and no child runs.
+                spawn(&|actions| {
+                    posix_spawn_file_actions_addclose(actions, f1);
+                    posix_spawn_file_actions_adddup2(actions, f1, 9);
+                });
+            }
+            println!("ACTIONS {answers:?}");
+        }
+        [binary, how @ ("fchdir-child" | "fchdir-opath-child")] => {
+            // The child starts in the directory a descriptor holds (opened
+            // plainly or O_PATH).
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+            let flags = if how == "fchdir-opath-child" { O_PATH } else { 0 };
+            let directory = std::fs::OpenOptions::new().read(true).custom_flags(flags).open("/tmp").unwrap();
+            let mut actions = [0u64; 10];
+            unsafe {
+                posix_spawn_file_actions_init(&mut actions);
+                posix_spawn_file_actions_addfchdir_np(&mut actions, directory.as_raw_fd());
+            }
+            println!("FCHDIR {}", spawn_wait(binary, &["pwd"], &actions, std::ptr::null()));
+        }
+        [binary, "chdir-bytes-child"] => {
+            let mut actions = [0u64; 10];
+            unsafe {
+                posix_spawn_file_actions_init(&mut actions);
+                posix_spawn_file_actions_addchdir_np(&mut actions, c"/tmp/\xff".as_ptr());
+            }
+            println!("CHDIR-BYTES {}", spawn_wait(binary, &["pwd"], &actions, std::ptr::null()));
+        }
+        [_, "file-action-limits"] => unsafe {
+            // A descriptor at the limit is EBADF as the action is added.
+            let mut actions = [0u64; 10];
+            posix_spawn_file_actions_init(&mut actions);
+            let answers = [
+                posix_spawn_file_actions_adddup2(&mut actions, 1, 1024),
+                posix_spawn_file_actions_adddup2(&mut actions, 1024, 1),
+                posix_spawn_file_actions_addclose(&mut actions, 1024),
+                posix_spawn_file_actions_addclosefrom_np(&mut actions, 1024),
+                posix_spawn_file_actions_addfchdir_np(&mut actions, 1024),
+                posix_spawn_file_actions_addopen(&mut actions, 1024, c"/tmp/x".as_ptr(), 0, 0),
+                posix_spawn_file_actions_adddup2(&mut actions, 1, 1023),
+            ];
+            println!("LIMITS {answers:?}");
+        },
+        [_, "empty-name"] => unsafe {
+            let argv = [c"".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let searched = posix_spawnp(&mut pid, c"".as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ);
+            let exact = posix_spawn(&mut pid, c"".as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ);
+            println!("EMPTY {searched} {exact}");
+        },
+        [binary, "path-shadow-child", how] => {
+            // A file of the program's name on PATH before the admitted one.
+            use std::os::unix::fs::PermissionsExt;
+            let (directory, name) = binary.rsplit_once('/').unwrap();
+            std::fs::create_dir_all("/tmp/bin").unwrap();
+            let shadow = format!("/tmp/bin/{name}");
+            std::fs::write(&shadow, b"shadow").unwrap();
+            std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = if how == "empty" {
+                std::env::set_current_dir("/tmp/bin").unwrap();
+                format!(":{directory}")
+            } else {
+                format!("/tmp/bin:{directory}")
+            };
+            unsafe { std::env::set_var("PATH", path) };
+            let name = std::ffi::CString::new(name).unwrap();
+            let argv = [name.as_ptr(), c"child".as_ptr(), c"0".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawnp(&mut pid, name.as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            println!("SHADOWED {spawned}");
+        }
+        ["dispositions"] => {
+            let disposition = |sig| {
+                let mut old = SigAction { handler: 0, mask: [0; 16], flags: 0, restorer: 0 };
+                assert_eq!(unsafe { sigaction(sig, std::ptr::null(), &mut old) }, 0);
+                match old.handler {
+                    0 => "default",
+                    1 => "ignored",
+                    _ => "handled",
+                }
+            };
+            println!(
+                "DISP usr1={} usr2={} hup={}",
+                disposition(SIGUSR1),
+                disposition(SIGUSR2),
+                disposition(SIGHUP)
+            );
+        }
+        [binary, "dispositions-child"] => unsafe {
+            // A child keeps what its parent ignores, but for what its spawn
+            // resets; a handled signal is default in it.
+            signal(SIGUSR1, on_usr1 as usize);
+            signal(SIGUSR2, 1);
+            signal(SIGHUP, 1);
+            let plain = spawn_wait(binary, &["dispositions"], std::ptr::null(), std::ptr::null());
+            let mut attr = [0u64; 42];
+            let defaults = [1u64 << (SIGHUP - 1), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            posix_spawnattr_init(&mut attr);
+            posix_spawnattr_setsigdefault(&mut attr, &defaults);
+            posix_spawnattr_setflags(&mut attr, 0x04); // POSIX_SPAWN_SETSIGDEF
+            let reset = spawn_wait(binary, &["dispositions"], std::ptr::null(), &attr);
+            println!("DISPOSITIONS {plain} {reset}");
+        },
+        ["setfl-inherited", fd] => {
+            let set = unsafe { fcntl(fd.parse().unwrap(), F_SETFL, O_NONBLOCK) };
+            println!("SETFL {set}");
+        }
+        [binary, "setfl-shared", side] => {
+            // O_NONBLOCK set on a pipe end another live process holds.
             let mut fds = [0; 2];
             assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
-            let status = Command::new(binary).arg("pwd").status();
-            println!("PIPED {status:?}");
+            if side == "child" {
+                let status = Command::new(binary).args(["setfl-inherited", &fds[0].to_string()]).status();
+                println!("SETFL-CHILD {status:?}");
+            } else {
+                let _child = Command::new(binary).arg("sleeper").spawn().unwrap();
+                let set = unsafe { fcntl(fds[0], F_SETFL, O_NONBLOCK) };
+                println!("SETFL {set}");
+            }
+        }
+        ["readiness", from, to] => {
+            // A non-blocking end, empty: EAGAIN. Then poll, select and epoll
+            // each wait for a byte the parent writes after the child says it
+            // waits.
+            let (from, to): (i32, i32) = (from.parse().unwrap(), to.parse().unwrap());
+            let mut byte = [0u8; 1];
+            let first = unsafe { read(from, byte.as_mut_ptr().cast(), 1) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            let mut got = Vec::new();
+            let mut take = |got: &mut Vec<u8>| {
+                assert_eq!(unsafe { read(from, byte.as_mut_ptr().cast(), 1) }, 1);
+                got.push(byte[0]);
+            };
+            assert_eq!(unsafe { write(to, b"1".as_ptr().cast(), 1) }, 1);
+            let mut wanted = PollFd { fd: from, events: 1, revents: 0 };
+            let polled = unsafe { poll(&mut wanted, 1, -1) };
+            take(&mut got);
+            assert_eq!(unsafe { write(to, b"2".as_ptr().cast(), 1) }, 1);
+            let mut set = [0u64; 16];
+            set[from as usize / 64] |= 1 << (from % 64);
+            let selected = unsafe {
+                select(from + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
+            };
+            take(&mut got);
+            assert_eq!(unsafe { write(to, b"3".as_ptr().cast(), 1) }, 1);
+            let epoll = unsafe { epoll_create1(0) };
+            let mut event = EpollEvent { events: 1, data: from as u64 };
+            assert_eq!(unsafe { epoll_ctl(epoll, 1, from, &mut event) }, 0);
+            let mut ready = EpollEvent { events: 0, data: 0 };
+            let waited = unsafe { epoll_wait(epoll, &mut ready, 1, -1) };
+            take(&mut got);
+            println!(
+                "READY first={first} errno={errno:?} poll={polled}/{} select={selected} epoll={waited} got={}",
+                wanted.revents,
+                String::from_utf8_lossy(&got)
+            );
+        }
+        [binary, "readiness-child"] => {
+            let (mut input, mut back) = ([0; 2], [0; 2]);
+            assert_eq!(unsafe { pipe2(input.as_mut_ptr(), O_NONBLOCK) }, 0);
+            assert_eq!(unsafe { pipe(back.as_mut_ptr()) }, 0);
+            let mut child = Command::new(binary)
+                .args(["readiness", &input[0].to_string(), &back[1].to_string()])
+                .spawn()
+                .unwrap();
+            for byte in [b'x', b'y', b'z'] {
+                let mut go = [0u8; 1];
+                read_exact(back[0], &mut go);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                assert_eq!(unsafe { write(input[1], (&byte as *const u8).cast(), 1) }, 1);
+            }
+            println!("READINESS code={:?}", child.wait().unwrap().code());
+        }
+        ["two-readers"] => {
+            // Two threads parked on one inherited pipe, each taking a byte.
+            let reader = || {
+                let mut byte = [0u8; 1];
+                let n = unsafe { read(0, byte.as_mut_ptr().cast(), 1) };
+                (n, byte[0])
+            };
+            let other = std::thread::spawn(reader);
+            let mine = reader();
+            let theirs = other.join().unwrap();
+            let mut got = [mine.1, theirs.1];
+            got.sort();
+            println!("TWO-READERS {:?} {}", (mine.0, theirs.0), String::from_utf8_lossy(&got));
+        }
+        [binary, "two-readers-child"] => {
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut child = Command::new(binary).arg("two-readers").stdin(Stdio::piped()).spawn().unwrap();
+            let mut input = child.stdin.take().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            input.write_all(b"ab").unwrap();
+            drop(input);
+            println!("TWO code={:?}", child.wait().unwrap().code());
+        }
+        ["sum-stdin"] => {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::io::stdin().read_to_end(&mut data).unwrap();
+            let pattern = data.iter().enumerate().all(|(i, byte)| *byte == (i % 251) as u8);
+            println!("SUMMED n={} pattern={pattern}", data.len());
+        }
+        [binary, "big-write-child"] => {
+            // Far more than a pipe holds, from the root to its child.
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut child = Command::new(binary).arg("sum-stdin").stdin(Stdio::piped()).spawn().unwrap();
+            let data: Vec<u8> = (0..1usize << 20).map(|i| (i % 251) as u8).collect();
+            let mut input = child.stdin.take().unwrap();
+            input.write_all(&data).unwrap();
+            drop(input);
+            println!("BIG code={:?}", child.wait().unwrap().code());
         }
         ["speak"] => {
             print!("to-stdout");
@@ -1031,8 +1393,11 @@ fn main() {
     /// A spawn whose child would not see what its caller arranged: a socket
     /// open across exec, a file action that opens a file, state the caller
     /// made alone that the machine would share (an inotify instance, a
-    /// FIFO), an environment too large to launch. Each stops as not modeled
-    /// rather than running a child that silently differs.
+    /// FIFO), an environment too large to launch, a `PATH` candidate that
+    /// shadows the admitted program (in a directory or the working
+    /// directory), a `chdir` action that is not UTF-8, and `F_SETFL` on a
+    /// pipe end another live process holds (from either side). Each stops as
+    /// not modeled rather than running a child that silently differs.
     #[test]
     fn a_spawn_the_child_would_not_see_as_arranged_is_not_modeled() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
@@ -1040,22 +1405,28 @@ fn main() {
         // Every mode is judged, so a run shows each one that went wrong.
         let mut wrong = Vec::new();
         for (extra, mode) in [
-            (Vec::<&str>::new(), "socket-child"),
-            (vec![], "open-action-child"),
-            (vec![], "inotify-child"),
-            (vec![], "fifo-child"),
-            (vec![], "big-env-child"),
-            (vec![], "fionread-child"),
+            (Vec::<&str>::new(), vec!["socket-child"]),
+            (vec![], vec!["open-action-child"]),
+            (vec![], vec!["inotify-child"]),
+            (vec![], vec!["fifo-child"]),
+            (vec![], vec!["big-env-child"]),
+            (vec![], vec!["fionread-child"]),
+            (vec![], vec!["path-shadow-child", "dir"]),
+            (vec![], vec!["path-shadow-child", "empty"]),
+            (vec![], vec!["chdir-bytes-child"]),
+            (vec![], vec!["setfl-shared", "root"]),
+            (vec![], vec!["setfl-shared", "child"]),
         ] {
             let mut argv = vec!["--seed", "1", "--format", "json"];
             argv.extend(extra);
-            argv.extend(["--", binary, mode]);
+            argv.extend(["--", binary]);
+            argv.extend(mode.iter().copied());
             let output = guest.command("run", &argv);
             let envelope = json_envelope(&output);
             if (&envelope["result"], &envelope["stop"]["reason"])
                 != (&"unsupported".into(), &"not_modeled".into())
             {
-                wrong.push(format!("{mode}: {envelope:#}"));
+                wrong.push(format!("{mode:?}: {envelope:#}"));
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
@@ -1967,7 +2338,67 @@ fn main() {
                 "REDIRECTED code=Some(0) file=\"PWD /",
                 true,
             ),
-            (vec![], "pipe-child", "PIPED Ok(", false),
+            (vec![], "pipe-child", "PIPED PING Some(0)", false),
+            (vec![], "offset-child", "OFFSET \"ABC\" code=Some(0)", false),
+            (
+                vec![],
+                "actions-child",
+                "FDS f1=closed f2=open nine=closed",
+                false,
+            ),
+            (
+                vec![],
+                "actions-child",
+                "FDS f1=closed f2=closed nine=closed",
+                false,
+            ),
+            (
+                vec![],
+                "actions-child",
+                "FDS f1=closed f2=closed nine=open",
+                false,
+            ),
+            (vec![], "actions-child", "ACTIONS [0, 0, 0, 9]", false),
+            (vec![], "fchdir-child", "PWD /tmp", false),
+            (vec![], "fchdir-child", "FCHDIR 0", false),
+            (vec![], "fchdir-opath-child", "PWD /tmp", false),
+            (vec![], "fchdir-opath-child", "FCHDIR 0", false),
+            (
+                vec![],
+                "file-action-limits",
+                "LIMITS [9, 9, 9, 9, 0, 9, 0]",
+                false,
+            ),
+            (vec![], "empty-name", "EMPTY 2 2", false),
+            (
+                vec![],
+                "dispositions-child",
+                "DISP usr1=default usr2=ignored hup=ignored",
+                false,
+            ),
+            (
+                vec![],
+                "dispositions-child",
+                "DISP usr1=default usr2=ignored hup=default",
+                false,
+            ),
+            (vec![], "dispositions-child", "DISPOSITIONS 0 0", false),
+            (
+                vec![],
+                "readiness-child",
+                "READY first=-1 errno=Some(11) poll=1/1 select=1 epoll=1 got=xyz",
+                false,
+            ),
+            (vec![], "readiness-child", "READINESS code=Some(0)", false),
+            (vec![], "two-readers-child", "TWO-READERS (1, 1) ab", false),
+            (vec![], "two-readers-child", "TWO code=Some(0)", false),
+            (
+                vec![],
+                "big-write-child",
+                "SUMMED n=1048576 pattern=true",
+                false,
+            ),
+            (vec![], "big-write-child", "BIG code=Some(0)", false),
             (
                 vec![],
                 "posix-spawn-child",
@@ -1995,8 +2426,14 @@ fn main() {
     /// line; a pipeline's children move more than a pipe holds; a reader
     /// sees end of file when its writer exits; a writer whose reader exited
     /// gets `EPIPE` (or dies of `SIGPIPE`); `Stdio::null`, `current_dir`, a
-    /// redirected stream, a pipe open across exec, the run's staged stdin;
-    /// `posix_spawn` by path, and `posix_spawnp` by name through `PATH`.
+    /// redirected stream, the run's staged stdin; `posix_spawn` by path, and
+    /// `posix_spawnp` by name through `PATH`. Inherited pipe ends carry
+    /// bytes both ways, a file offset is shared, each file action takes
+    /// effect in order (and one at the descriptor limit is `EBADF`), an
+    /// empty name is `ENOENT`, `SIG_IGN` is inherited less a `SETSIGDEF`
+    /// set, a child's pipe end answers `O_NONBLOCK`, `poll`, `select` and
+    /// `epoll`, two of its threads share one pipe's bytes, and 1 MiB reaches
+    /// a child through a pipe.
     #[test]
     fn command_shapes_reach_an_admitted_child() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);

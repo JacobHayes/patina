@@ -345,6 +345,8 @@ Current limits. Each fails loudly rather than silently:
   program, `fork`, the exec family, `system`/`popen`, and a `Command` that
   falls back to `fork`+`exec` (`pre_exec`, a uid or gid, an `env("PATH")`
   with a bare program name) are denied; macOS has one process per run.
+  Changing `O_NONBLOCK` or `O_APPEND` on a descriptor a live child shares
+  stops the run as not modeled.
 - **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see
   one virtual host (`lo`, `eth0` at 10.0.0.1/24, no default route) and names
   resolve only through the run's `--dns-entry` table. TCP and UDP over the

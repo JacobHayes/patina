@@ -79,3 +79,13 @@ pub(crate) fn child_changed(pid: c_int, status: c_int) {
 pub(crate) fn children_reap_themselves() -> bool {
     signals::children_reap_themselves()
 }
+
+/// The signals this process ignores, which a process it spawns ignores too.
+pub(crate) fn ignored_signals() -> u64 {
+    signals::ignored_signals()
+}
+
+/// A new process ignores `mask`'s signals, as its spawn left them.
+pub(crate) fn ignore_signals(mask: u64) -> Result<(), String> {
+    signals::ignore_signals(mask)
+}

@@ -104,6 +104,9 @@ pub fn patina_fd_getfl(raw_fd: c_int) -> c_int {
 pub fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let resolved = fd_table().lock().resolve(raw_fd);
+    if let Some(resolved) = resolved {
+        refuse_shared_status(&resolved, O_SETFL_MASK, flags, "F_SETFL");
+    }
     if let Some(resolved) = resolved
         && resolved.kind == FdKind::File
         && (resolved.status ^ flags) & O_APPEND != 0
@@ -122,11 +125,30 @@ pub fn patina_fd_setfl(raw_fd: c_int, flags: u32) -> c_int {
     }
 }
 
+/// Stop the run by name when `call` would change `mask`'s status bits of a
+/// description another live process shares (`crate::machine`): each
+/// process keeps its own copy of the status flags, so the change would not
+/// reach the other.
+fn refuse_shared_status(resolved: &crate::fdtable::Resolved, mask: u32, bits: u32, call: &str) {
+    #[cfg(target_os = "linux")]
+    if (resolved.status ^ bits) & mask != 0 && crate::machine::spawn::shared(resolved.desc) {
+        crate::trap_unmodeled(&format!(
+            "{call} on a description shared with another process is not modeled; failing closed"
+        ));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (resolved, mask, bits, call);
+}
+
 /// `ioctl(FIONBIO)` / `SOCK_NONBLOCK` on accept: set or clear `O_NONBLOCK`
 /// alone, leaving the other status flags as they are.
 pub fn patina_fd_set_nonblocking(raw_fd: c_int, nonblocking: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let bits = if nonblocking != 0 { O_NONBLOCK } else { 0 };
+    let resolved = fd_table().lock().resolve(raw_fd);
+    if let Some(resolved) = resolved {
+        refuse_shared_status(&resolved, O_NONBLOCK, bits, "a change of O_NONBLOCK");
+    }
     match fd_table().lock().set_status(raw_fd, O_NONBLOCK, bits) {
         Ok(()) => {
             set_errno(0);

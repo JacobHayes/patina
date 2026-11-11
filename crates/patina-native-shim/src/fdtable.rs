@@ -734,14 +734,15 @@ impl GuestFdTable {
     /// A process's table as its spawn hands it over: `numbers` binds each
     /// number to the description at its index in `descriptions`, none of
     /// them close-on-exec, and nothing else is open. Returns the releases of
-    /// what the table held before. A number at or past the limit is
-    /// `EBADF`, and the table is left as it was.
+    /// what the table held before, and the id each of `descriptions` got. A
+    /// number at or past the limit is `EBADF`, and the table is left as it
+    /// was.
     #[cfg(target_os = "linux")]
     pub(crate) fn replace(
         &mut self,
         descriptions: &[(FdKind, u64, Status)],
         numbers: &[(c_int, usize)],
-    ) -> Result<Vec<Release>, c_int> {
+    ) -> Result<(Vec<Release>, Vec<DescId>), c_int> {
         if numbers.iter().any(|&(number, index)| {
             Self::slot_index(number).is_none_or(|slot| slot >= self.limit)
                 || index >= descriptions.len()
@@ -764,12 +765,12 @@ impl GuestFdTable {
             self.bind(number as usize, ids[index], false);
         }
         // A description no number names (the plan never makes one) is gone.
-        for id in ids {
-            if self.descriptions.get(&id).is_some_and(|d| d.refs == 0) {
-                self.descriptions.remove(&id);
+        for id in &ids {
+            if self.descriptions.get(id).is_some_and(|d| d.refs == 0) {
+                self.descriptions.remove(id);
             }
         }
-        Ok(released)
+        Ok((released, ids))
     }
 
     /// Every open number, lowest first — the kernel's iteration order for

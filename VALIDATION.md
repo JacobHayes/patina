@@ -206,11 +206,22 @@ versions, target triple and fingerprint.
   ways, a two-child pipeline of 10,000 lines, a reader gone (`EPIPE`, and
   `SIGPIPE` by default), `Stdio::null` and `inherit`, `current_dir`,
   `env_clear`, a redirect to a file, a staged `--stdin` a child reads on
-  from its parent's offset, plain `posix_spawn` and a `PATH` search, with
-  their record-to-replay and same-seed trace bytes; a `PATH` search or
-  exact path outside the admission and a `pre_exec` fallback refused, and
-  a socket, FIFO or `addopen` action across a spawn, and `FIONREAD` on a
-  child's inherited pipe, a named stop), and the shim's unit tests the hub's
+  from its parent's offset, plain `posix_spawn` and a `PATH` search; pipe
+  ends a child inherits read and written across processes, a file offset
+  the parent and child share, each file action (`close`, `closefrom`,
+  `dup2` onto itself clearing close-on-exec, the order of a `close` and a
+  `dup2`, `fchdir` to a plain or `O_PATH` directory) and an action's
+  descriptor at the limit, `SIG_IGN` inherited less a `SETSIGDEF` set, an
+  empty program name, `O_NONBLOCK` and `poll`, `select` and `epoll` on a
+  child's pipe end, two threads of a child parked on one pipe, and 1 MiB
+  from the root to a child, each shown able to fail by a planted revert;
+  all with their record-to-replay and same-seed trace bytes; a `PATH`
+  search or exact path outside the admission and a `pre_exec` fallback
+  refused, and a socket, FIFO or `addopen` action across a spawn,
+  `FIONREAD` on a child's inherited pipe, a `PATH` candidate shadowing the
+  admitted one, a non-UTF-8 `chdir` action and `F_SETFL` on a shared
+  description a named stop; `tokio::process` `output()` and an interactive
+  child reaped through the `SIGCHLD` fallback, recorded and replayed), and the shim's unit tests the hub's
   checks of a child's page; `testbeds/multiproc` pins each workload's first refusal or
   pass on x86_64 Linux; arm64 and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.
