@@ -28,7 +28,7 @@ pub(super) fn reproduce_command(
             trace.to_string(),
         ];
         parts.extend(invocation.iter().cloned());
-        return crate::cli::without_env_defaults(crate::cli::shell_words(&parts));
+        return crate::cli::shell_words(&parts);
     }
     let mut parts = vec![
         "patina run".to_string(),
@@ -56,10 +56,7 @@ pub(super) fn reproduce_command(
         parts.push("--".to_string());
         parts.extend(guest_args.iter().cloned());
     }
-    // The generation ran as an isolated child from these flags alone (see
-    // `expect_this_supervisor`), so the printed command must not pick up the
-    // operator's flag defaults either.
-    crate::cli::without_env_defaults(crate::cli::shell_words(&parts))
+    crate::cli::shell_words(&parts)
 }
 
 /// The generation flags and invocation shape a reproduce command is built from,

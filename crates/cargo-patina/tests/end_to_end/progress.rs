@@ -22,15 +22,13 @@ mod tests {
         let source = directory.path().join("half.rs");
         fs::write(&source, HALF_FAILING_GUEST).unwrap();
         let out = directory.path().join("campaign");
-        // The request comes from the environment default, which the
-        // campaign's `patina run` children must not inherit.
         let output = Command::new(env!("CARGO_BIN_EXE_patina"))
             .current_dir(native_workspace())
             .args(["campaign", source.to_str().unwrap()])
             .args(["--gens", "6", "--progress-every", "4", "--format", "json"])
+            .arg("--progress")
             .arg("--out-dir")
             .arg(&out)
-            .env("PATINA_PROGRESS", "1")
             .output()
             .unwrap();
         let envelope = campaign_json_stdout(&output);

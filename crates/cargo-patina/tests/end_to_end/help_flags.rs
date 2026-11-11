@@ -187,11 +187,13 @@ mod tests {
         }
     }
 
-    /// Every flag defaults from its `PATINA_<FLAG>` variable: a typed flag wins,
-    /// then a non-empty variable, then the built-in default. `trace events` on a
-    /// committed fixture observes this without building anything.
+    /// `PATINA_FORMAT` defaults `--format`: a typed flag wins, then a
+    /// non-empty variable, then the built-in default, and a malformed value
+    /// names its variable. A variable named after any other flag defaults
+    /// nothing. `trace events` on a committed fixture observes this without
+    /// building anything.
     #[test]
-    fn flag_env_defaults_yield_to_typed_flags() {
+    fn env_defaults_yield_to_typed_flags() {
         let directory = tempdir().unwrap();
         let patina = env!("CARGO_BIN_EXE_patina");
         let fixture = concat!(
@@ -218,26 +220,6 @@ mod tests {
             all.len() > 2,
             "fixture too small to observe --first: {all:?}"
         );
-        // Env over default.
-        assert_eq!(events(&[], &[("PATINA_FIRST", "2")]), all[..2]);
-        // Typed over env.
-        assert_eq!(
-            events(&["--first", "1"], &[("PATINA_FIRST", "2")]),
-            all[..1]
-        );
-        // A typed flag also beats a variable it is mutually exclusive with.
-        assert_eq!(
-            events(&["--last", "1"], &[("PATINA_FIRST", "2")]),
-            all[all.len() - 1..]
-        );
-        // An empty variable is unset.
-        assert_eq!(events(&[], &[("PATINA_FIRST", "")]), all);
-        // A switch: false-y is off, anything else is on.
-        let notable = events(&["--notable"], &[]);
-        assert_ne!(notable, all, "fixture cannot tell --notable apart");
-        assert_eq!(events(&[], &[("PATINA_NOTABLE", "off")]), all);
-        assert_eq!(events(&[], &[("PATINA_NOTABLE", "1")]), notable);
-        // A pre-pass global flag reads its variable too, and still yields.
         let json = events(&[], &[("PATINA_FORMAT", "json")]);
         assert!(
             json.iter()
@@ -248,40 +230,18 @@ mod tests {
             events(&["--format", "human"], &[("PATINA_FORMAT", "json")]),
             all
         );
+        assert_eq!(events(&[], &[("PATINA_FORMAT", "")]), all);
+        assert_eq!(events(&[], &[("PATINA_FIRST", "2")]), all);
 
-        // A selector's default routes like the typed selector: `--generation`
-        // takes no `-- <ORACLE>`, so the reduction reaches its out-dir check.
-        let missing = directory.path().join("no-campaign");
-        let routed = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &["minimize", "--out-dir", missing.to_str().unwrap()],
-            &[("PATINA_GENERATION", "14")],
-        );
-        let typed = invoke_unchecked_clean_env(
-            patina,
-            directory.path(),
-            &[
-                "minimize",
-                "--generation",
-                "14",
-                "--out-dir",
-                missing.to_str().unwrap(),
-            ],
-            &[],
-        );
-        assert_eq!(routed.stderr, typed.stderr);
-
-        // A malformed default names the variable it came from.
         let bad = invoke_unchecked_clean_env(
             patina,
             directory.path(),
             &["trace", "events", fixture],
-            &[("PATINA_FIRST", "many")],
+            &[("PATINA_FORMAT", "xml")],
         );
         assert!(!bad.status.success());
         assert!(
-            String::from_utf8_lossy(&bad.stderr).contains("PATINA_FIRST"),
+            String::from_utf8_lossy(&bad.stderr).contains("PATINA_FORMAT"),
             "a malformed env default did not name its variable:\n{}",
             String::from_utf8_lossy(&bad.stderr)
         );

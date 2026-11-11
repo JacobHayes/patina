@@ -387,7 +387,7 @@ pub(super) fn invoke_unchecked_clean_env(
 ) -> Output {
     let mut command = Command::new(executable);
     command.current_dir(fixture).args(arguments);
-    // Neither a flag default nor a control-plane variable from the caller's
+    // Neither an environment default nor a control-plane variable from the caller's
     // environment may reach the invocation under test.
     for (name, _) in env::vars_os() {
         if name.to_string_lossy().starts_with("PATINA_") {

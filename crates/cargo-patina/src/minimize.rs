@@ -167,13 +167,6 @@ impl Ending {
     }
 }
 
-/// The `PATINA_<FLAG>` variable that defaults `--param`. A candidate runs
-/// without it, so a parameter the reduction removed cannot come back through
-/// the environment, and the printed reproduction unsets it too.
-fn param_env() -> Option<String> {
-    crate::cli::flag("run", "--param").env_name()
-}
-
 /// Run one candidate of a `--params` reduction and read how its run ended, or
 /// `None` when the command reported no run at all: it printed no
 /// `patina.result/v2` run envelope, so it is not a `patina run`, or patina
@@ -185,9 +178,6 @@ fn ending_of(words: &[OsString]) -> Result<Option<Ending>, CliError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(name) = param_env() {
-        command.env_remove(name);
-    }
     let output = command.output().map_err(|error| {
         CliError(format!(
             "failed to run {}: {error}",
@@ -239,15 +229,12 @@ fn execute_params(invocation: &ParamsMinimize) -> Result<i32, CliError> {
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join(",");
-    let mut repro = invocation
+    let repro = invocation
         .command(&reduced)
         .iter()
         .map(|word| crate::cli::shell_quote(word))
         .collect::<Vec<_>>()
         .join(" ");
-    if let Some(name) = param_env().filter(|name| std::env::var_os(name).is_some()) {
-        repro = format!("env -u {name} {repro}");
-    }
     let detail = format!("params=[{rendered}] oracle_runs={calls} repro: {repro}");
     if output::options().is_json() {
         output::emit_simple("minimize", patina_dst_abi::RunClass::Ok, Some(detail));

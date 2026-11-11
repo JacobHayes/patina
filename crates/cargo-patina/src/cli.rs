@@ -15,14 +15,12 @@
 //!   `Command` exists. `crate::locate_positionals` finds them, using the
 //!   registry for arity, and hands the parser a flags-only token list.
 //!
-//! **Environment defaults.** Every registry flag except help/version can be
-//! defaulted from `PATINA_<FLAG>` ([`Flag::env_name`]) through clap's own `env`
+//! **Environment defaults.** `--seed`, `--seeds` and `--format` can be
+//! defaulted from a variable ([`help::ENV_DEFAULTS`]) through clap's own `env`
 //! support: a typed flag wins, then a non-empty variable, then the built-in
-//! default. A switch reads a false-y value (`0`, `false`, `no`, `off`, `n`, `f`)
-//! as off and anything else as on. A variable only defaults a flag where that
-//! flag is accepted; a family that does not take the flag ignores it. The
-//! pre-pass flags clap never sees read the same variables through
-//! [`env_value`].
+//! default. A variable only defaults a flag where that flag is accepted; a
+//! family that does not take the flag ignores it. `--format` is a pre-pass
+//! flag clap never sees and reads its variable through [`env_value`].
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -60,9 +58,7 @@ fn arg_of(flag: &'static Flag) -> Arg {
         arg = arg.env(name);
     }
     match flag.value {
-        Value::None => arg
-            .action(ArgAction::SetTrue)
-            .value_parser(clap::builder::FalseyValueParser::new()),
+        Value::None => arg.action(ArgAction::SetTrue),
         Value::Required(placeholder, kind) => arg
             .action(ArgAction::Append)
             .num_args(1)
@@ -180,51 +176,10 @@ pub(crate) fn parse(
 }
 
 /// A flag's environment default, when its variable is set and non-empty.
-fn env_default(flag: &Flag) -> Option<(String, OsString)> {
+fn env_default(flag: &Flag) -> Option<(&'static str, OsString)> {
     let name = flag.env_name()?;
-    let value = std::env::var_os(&name).filter(|value| !value.is_empty())?;
+    let value = std::env::var_os(name).filter(|value| !value.is_empty())?;
     Some((name, value))
-}
-
-/// The flag defaults set (non-empty) in this process's environment, by name.
-fn set_env_defaults() -> Vec<(String, OsString)> {
-    help::flag_env_names()
-        .into_iter()
-        .filter_map(|name| {
-            let value = std::env::var_os(&name).filter(|value| !value.is_empty())?;
-            Some((name, value))
-        })
-        .collect()
-}
-
-/// A printed command whose argv already carries every input, made immune to
-/// the operator's flag defaults: `env -u` for each one set here. Unchanged in
-/// a clean environment.
-pub(crate) fn without_env_defaults(command: String) -> String {
-    let unset: Vec<String> = set_env_defaults()
-        .into_iter()
-        .map(|(name, _)| format!("-u {name}"))
-        .collect();
-    if unset.is_empty() {
-        command
-    } else {
-        format!("env {} {command}", unset.join(" "))
-    }
-}
-
-/// A printed command that repeats this process's own, made to carry the flag
-/// defaults this process took from its environment: `env NAME=VALUE` for each
-/// one set here. Unchanged in a clean environment.
-pub(crate) fn with_env_defaults(command: String) -> String {
-    let set: Vec<String> = set_env_defaults()
-        .into_iter()
-        .map(|(name, value)| format!("{name}={}", shell_quote(&value)))
-        .collect();
-    if set.is_empty() {
-        command
-    } else {
-        format!("env {} {command}", set.join(" "))
-    }
 }
 
 /// A reproduce command's words joined for a POSIX shell: the leading verb
@@ -255,21 +210,15 @@ pub(crate) fn shell_quote(value: &OsStr) -> String {
 }
 
 /// The environment default of a flag clap never parses (a pre-pass flag),
-/// held to the flag's declared grammar. A switch yields `Some("")` when its
-/// variable is truthy and `None` when it is false-y.
+/// held to the flag's declared grammar.
 pub(crate) fn env_value(flag: &'static Flag) -> Result<Option<OsString>, CliError> {
     let Some((name, value)) = env_default(flag) else {
         return Ok(None);
     };
-    let Some(kind) = flag.value.grammar() else {
-        let off = value.to_str().is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off" | "n" | "f"
-            )
-        });
-        return Ok((!off).then(OsString::new));
-    };
+    let kind = flag
+        .value
+        .grammar()
+        .expect("only value flags have environment defaults");
     check_value(flag, kind, &value)
         .map_err(|message| CliError::usage(format!("{message} (from {name})")))?;
     Ok(Some(value))
@@ -326,17 +275,7 @@ impl Args {
                 continue;
             };
             if supplied(&matches, flag.name) && !supplied(&matches, parent) {
-                let origin = match matches.value_source(flag.name) {
-                    Some(ValueSource::EnvVariable) => flag
-                        .env_name()
-                        .map(|name| format!(" (set by {name})"))
-                        .unwrap_or_default(),
-                    _ => String::new(),
-                };
-                return Err(CliError::usage(format!(
-                    "{}{origin} requires {parent}",
-                    flag.name
-                )));
+                return Err(CliError::usage(format!("{} requires {parent}", flag.name)));
             }
         }
         // One generic duplicate check in place of a `set_once` per flag: the
@@ -483,17 +422,12 @@ impl Args {
 }
 
 /// Whether an argument was supplied, typed or by its environment default, as
-/// opposed to absent. A switch whose variable is false-y is not supplied.
+/// opposed to absent.
 fn supplied(matches: &ArgMatches, name: &str) -> bool {
-    match matches.value_source(name) {
-        Some(ValueSource::CommandLine) => true,
-        Some(ValueSource::EnvVariable) => matches
-            .try_get_one::<bool>(name)
-            .ok()
-            .flatten()
-            .is_none_or(|on| *on),
-        _ => false,
-    }
+    matches!(
+        matches.value_source(name),
+        Some(ValueSource::CommandLine | ValueSource::EnvVariable)
+    )
 }
 
 fn parsed<T: std::str::FromStr>(name: &str, value: &str) -> T {

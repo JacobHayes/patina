@@ -130,8 +130,6 @@ fn a_run_parameter_reaches_the_guest_and_replays_from_the_trace() {
 fn minimize_params_reduces_a_failing_native_runs_parameters() {
     let (_, binary) = sdk_guest();
     let patina = env!("CARGO_BIN_EXE_patina");
-    // A `--param` environment default must not refill a parameter a candidate
-    // dropped.
     let output = invoke_in_with_env(
         native_workspace(),
         &[
@@ -149,7 +147,7 @@ fn minimize_params_reduces_a_failing_native_runs_parameters() {
             "--param",
             "noise=loud",
         ],
-        &[("PATINA_PARAM", "naps=40")],
+        &[],
     );
     let line = String::from_utf8_lossy(&output.stdout)
         .lines()

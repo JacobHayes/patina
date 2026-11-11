@@ -336,7 +336,7 @@ impl Outcome<'_> {
             .guest
             .as_ref()
             .ok()?;
-        Some(cli::without_env_defaults(format!(
+        Some(format!(
             "patina replay {} {}{}",
             cli::shell_quote(guest.as_os_str()),
             cli::shell_quote(OsStr::new(&trace.path)),
@@ -345,7 +345,7 @@ impl Outcome<'_> {
             } else {
                 ""
             }
-        )))
+        ))
     }
 
     fn problem_why(problem: &Problem<'_>) -> String {

@@ -187,10 +187,8 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let mut binary = resolve_positional("run", &first)?;
     let selection = take_package_bin(scan.rest)?;
     apply_package_selection(&mut binary, selection.package, selection.bin)?;
-    apply_env_package_selection(&mut binary)?;
     let (release, rest) = take_release(selection.rest)?;
     apply_release(&mut binary, release)?;
-    apply_env_release(&mut binary)?;
     parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
 }
 
@@ -300,7 +298,6 @@ fn parse_audit(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     // Consumed here so the audit parser sees only its own flags.
     let selection = take_package_bin(scan.rest)?;
     apply_package_selection(&mut artifact, selection.package, selection.bin)?;
-    apply_env_package_selection(&mut artifact)?;
     parse_native_audit_from(artifact, selection.rest).map(ParseResult::NativeAudit)
 }
 

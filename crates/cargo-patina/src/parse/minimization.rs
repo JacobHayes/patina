@@ -8,14 +8,8 @@ pub(crate) fn parse_minimize(
     // `--generation` builds its own oracle, so it is the one form that takes no
     // `-- <ORACLE>` tail — and must be routed before the tail is demanded. The
     // name is read through the registry's splitter, so `--generation=14` routes
-    // exactly like `--generation 14`. A selector's environment default routes
-    // too, unless the other selector was typed.
-    let typed_generation = has_minimize_flag(&arguments, "--generation");
-    let typed_params = has_minimize_flag(&arguments, "--params");
-    let selected = |name: &str, other_typed: bool| -> Result<bool, CliError> {
-        Ok(!other_typed && cli::env_value(cli::flag("minimize", name))?.is_some())
-    };
-    if typed_generation || selected("--generation", typed_params)? {
+    // exactly like `--generation 14`.
+    if has_minimize_flag(&arguments, "--generation") {
         return parse_minimize_generation(arguments).map(minimize::MinimizeInvocation::Generation);
     }
     let delimiter = arguments
@@ -33,7 +27,7 @@ pub(crate) fn parse_minimize(
             "minimize --params requires the failing command after `--`",
         ));
     }
-    if typed_params || selected("--params", typed_generation)? {
+    if has_minimize_flag(&arguments, "--params") {
         parse_minimize_params(arguments, oracle).map(minimize::MinimizeInvocation::Params)
     } else {
         Err(CliError::usage(

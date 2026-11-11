@@ -99,10 +99,9 @@ Rust test function. Plain `cargo test` then discovers `patina` through
 for that one test (20 seeds by default). A
 missing tool is a test failure that prints the install line, never a skip.
 
-Any flag can be defaulted from the environment as `PATINA_<FLAG>` (`--seed` ->
-`PATINA_SEED`, `--format` -> `PATINA_FORMAT`); a typed flag still wins, and help
-shows each flag's variable. `PATINA_RT_*` is reserved for the runtime's internal
-control plane.
+`PATINA_SEED`, `PATINA_SEEDS` and `PATINA_FORMAT` default `--seed`, `--seeds`
+and `--format`; a typed flag still wins. Every other flag is set on the command
+line. `PATINA_RT_*` is reserved for the runtime's internal control plane.
 
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare

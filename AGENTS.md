@@ -66,8 +66,8 @@ cargo run -q -p cargo-patina -- run --help [--format json]
 
 The registry in `crates/cargo-patina/src/help.rs` and its `help/` modules is the
 single source for the help text and the parsers: add a flag there and nowhere
-else. `PATINA_<FLAG>` defaults a registry flag and is derived for free;
-`PATINA_RT_*` is the supervisor-to-guest control plane, and a new control-plane
+else. Only `--seed`, `--seeds` and `--format` have environment defaults
+(`help::ENV_DEFAULTS`); `PATINA_RT_*` is the supervisor-to-guest control plane, and a new control-plane
 variable takes that prefix. Execution verbs accept `--format json`
 (`patina.result/v2`); prefer it when parsing results.
 

@@ -139,19 +139,8 @@ fn executable() -> &'static Result<(PathBuf, fs::File), String> {
     })
 }
 
-/// Require a `patina` child to be this same build, and give it no
-/// flag defaults from the operator's environment.
-///
-/// Every child this supervisor spawns is told exactly what to do by its argv:
-/// a campaign generation's flags are recorded and replayed from the out-dir, a
-/// reduction candidate's are the knob vector under test. An inherited
-/// `PATINA_<FLAG>` would silently add a knob the parent never chose (a
-/// `PATINA_BUGGIFY` turning buggify on in a generation recorded without it),
-/// so the child sees none of them.
+/// Require a `patina` child to be this same build.
 pub(crate) fn expect_this_supervisor(command: &mut Command) -> Result<(), CliError> {
-    for name in crate::help::flag_env_names() {
-        command.env_remove(name);
-    }
     command.env(ENV_EXPECTED_SUPERVISOR, supervisor_sha256()?.to_string());
     Ok(())
 }

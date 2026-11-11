@@ -770,9 +770,7 @@ pub(crate) fn rerun_command(
         command.push(' ');
         command.push_str(&cli::shell_quote(arg));
     }
-    // The command carries every input; the operator's flag defaults must not
-    // change it.
-    cli::without_env_defaults(command)
+    command
 }
 
 /// Flush stderr after a progress line, so a long run shows each test as it

@@ -16,8 +16,8 @@
 //!
 //! Because one declaration produces both, a parser cannot accept a flag the
 //! help omits or reject one it advertises: those drift classes are
-//! unrepresentable rather than merely tested. It also documents the `PATINA_*`
-//! environment protocol and the honored tool variables.
+//! unrepresentable rather than merely tested. It also documents the
+//! environment variables the tool honors.
 
 mod environment;
 mod execution;
@@ -205,37 +205,23 @@ pub struct Flag {
     pub requires: Option<&'static str>,
 }
 
-/// The prefix of every flag's environment default (`--seed` → `PATINA_SEED`).
-pub const FLAG_ENV_PREFIX: &str = "PATINA_";
+/// The flags an environment variable defaults when they are not typed, and
+/// those variables. Every other flag is set on the command line or nowhere.
+pub const ENV_DEFAULTS: &[(&str, &str)] = &[
+    ("--seed", "PATINA_SEED"),
+    ("--seeds", "PATINA_SEEDS"),
+    ("--format", "PATINA_FORMAT"),
+];
 
 impl Flag {
-    /// The environment variable that defaults this flag when it is not typed:
-    /// `PATINA_` plus the long name in upper snake case (`--seed-start` →
-    /// `PATINA_SEED_START`). The help/version switches have none.
-    pub fn env_name(&self) -> Option<String> {
-        if HELP_FLAGS.iter().any(|help| help.name == self.name) {
-            return None;
-        }
-        Some(format!(
-            "{FLAG_ENV_PREFIX}{}",
-            self.name
-                .trim_start_matches('-')
-                .replace('-', "_")
-                .to_ascii_uppercase()
-        ))
+    /// The environment variable that defaults this flag when it is not typed,
+    /// if it has one ([`ENV_DEFAULTS`]).
+    pub fn env_name(&self) -> Option<&'static str> {
+        ENV_DEFAULTS
+            .iter()
+            .find(|(flag, _)| *flag == self.name)
+            .map(|(_, name)| *name)
     }
-}
-
-/// Every environment variable that defaults a registry flag, deduplicated.
-/// A flag name shared by several verbs shares one variable.
-pub fn flag_env_names() -> std::collections::BTreeSet<String> {
-    VERBS
-        .iter()
-        .flat_map(|verb| verb.groups.iter())
-        .flat_map(|group| group.flags.iter())
-        .chain(GLOBAL_OUTPUT.iter())
-        .filter_map(Flag::env_name)
-        .collect()
 }
 
 /// Terse constructor so the registry tables stay one-flag-per-line.

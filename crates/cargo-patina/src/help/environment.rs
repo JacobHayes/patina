@@ -5,9 +5,9 @@ use super::*;
 /// The `PATINA_*` environment protocol and honored tool variables.
 pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
-        name: "PATINA_<FLAG>",
+        name: "PATINA_SEED / PATINA_SEEDS / PATINA_FORMAT",
         scope: "user",
-        doc: "Default for any CLI flag except --help/--version: PATINA_ plus the long name in upper snake case (--seed → PATINA_SEED, --seed-start → PATINA_SEED_START), shown as [env: …] beside each flag. A typed flag wins, then a non-empty variable, then the built-in default; an empty variable is unset. A switch reads 0/false/no/off/n/f as off and anything else as on. A variable defaults its flag only where that flag is accepted, and campaign and minimize children never inherit one: their flags are explicit.",
+        doc: "Defaults for --seed, --seeds and --format where a verb takes them. A typed flag wins, then a non-empty variable, then the built-in default. No other flag has an environment default.",
     },
     EnvVar {
         name: "PATINA_RT_*",

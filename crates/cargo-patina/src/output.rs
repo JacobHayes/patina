@@ -119,7 +119,7 @@ pub fn install_arguments(arguments: Vec<OsString>) {
 
 /// The `patina run` command that repeats this process's run under `seed`:
 /// the words it was given, with the seed spelled out when they left it to the
-/// default, and the flag defaults it took from the environment carried along.
+/// default.
 /// `None` when the tool was not started as `run` (a unit test).
 pub fn run_again_command(seed: u64) -> Option<String> {
     let arguments = ARGUMENTS.get()?;
@@ -145,7 +145,7 @@ pub fn run_again_command(seed: u64) -> Option<String> {
         command.push(' ');
         command.push_str(&crate::cli::shell_quote(word));
     }
-    Some(crate::cli::with_env_defaults(command))
+    Some(command)
 }
 
 /// Install the parsed options once, at the top of `entrypoint`. A second call is
@@ -171,21 +171,14 @@ pub fn options() -> &'static OutputOptions {
 pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>), CliError> {
     let flags: Vec<&'static Flag> = help::GLOBAL_OUTPUT.iter().collect();
     let (found, rest) = crate::cli::strip(&flags, arguments)?;
-    // A typed flag wins; otherwise its `PATINA_<FLAG>` default applies.
-    let value = |name: &str| -> Result<Option<OsString>, CliError> {
-        match crate::cli::single(&found, name)? {
-            Some(value) => Ok(Some(value)),
-            None => crate::cli::env_value(
-                flags
-                    .iter()
-                    .copied()
-                    .find(|flag| flag.name == name)
-                    .expect("global output flag"),
-            ),
-        }
-    };
+    let value = |name: &str| crate::cli::single(&found, name);
     let mut options = OutputOptions::default();
-    if let Some(format) = value("--format")? {
+    // A typed --format wins; otherwise PATINA_FORMAT applies.
+    let format = match value("--format")? {
+        Some(format) => Some(format),
+        None => crate::cli::env_value(crate::cli::flag("run", "--format"))?,
+    };
+    if let Some(format) = format {
         options.format = parse_format(&format.to_string_lossy())?;
     }
     options.render = value("--render")?.map(PathBuf::from);

@@ -55,7 +55,7 @@ fn flag_json(flag: &Flag) -> serde_json::Value {
         }
     }
     m.insert("doc".into(), J::from(flag.doc));
-    // The `PATINA_<FLAG>` variable that defaults this flag when it is not typed.
+    // The variable that defaults this flag when it is not typed, if any.
     if let Some(env) = flag.env_name() {
         m.insert("env".into(), J::from(env));
     }
