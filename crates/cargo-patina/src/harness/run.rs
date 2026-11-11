@@ -4,9 +4,11 @@
 use super::build::{BuiltTarget, safe_path_segment};
 use super::select::Target;
 use super::{RunFlags, TestInvocation, Verdict};
+use crate::native_run::admission;
 use crate::parse::knob_flag_pairs;
 use crate::{CliError, cli, output};
 use patina_dst_abi::RunClass;
+use patina_dst_trace::NativeAdmittedProgram;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
@@ -181,11 +183,15 @@ fn run_tests(
     cases: Vec<TestCase>,
 ) -> Result<Vec<(TestCase, Verdict)>, CliError> {
     let seeds = invocation.seeds.list();
-    let guest = |case: &TestCase| -> &Path {
-        built[case.target]
-            .guest
-            .as_deref()
-            .expect("only staged targets are listed")
+    let guest = |case: &TestCase| -> (&Path, &[NativeAdmittedProgram]) {
+        let built = &built[case.target];
+        (
+            built
+                .guest
+                .as_deref()
+                .expect("only staged targets are listed"),
+            &built.admit,
+        )
     };
     // The lowest seed each test has failed on so far: a seed above it is not
     // run, since it cannot decide the test. Every seed below still runs, so
@@ -408,7 +414,13 @@ fn pool<T: Send>(
         .collect())
 }
 
-fn patina_command(args: Vec<OsString>) -> Result<Command, CliError> {
+/// A child `patina` run, told the programs its guest may spawn and this
+/// run's verdict on each ([`admission::ENV_ADMIT_REQUEST`]), if it may spawn
+/// any.
+fn patina_command(
+    args: Vec<OsString>,
+    admit: &[NativeAdmittedProgram],
+) -> Result<Command, CliError> {
     let executable = env::current_exe().map_err(|error| {
         CliError(format!(
             "failed to locate the running patina executable: {error}"
@@ -419,6 +431,14 @@ fn patina_command(args: Vec<OsString>) -> Result<Command, CliError> {
     // backstop can kill whole.
     crate::lifeline::tie(&mut command)?;
     command.args(args);
+    if !admit.is_empty() {
+        command.env(
+            admission::ENV_ADMIT_REQUEST,
+            serde_json::to_string(admit).map_err(|error| {
+                CliError(format!("failed to encode the admission table: {error}"))
+            })?,
+        );
+    }
     // Every child is this same supervisor build, or refuses to run.
     crate::supervisor_identity::expect_this_supervisor(&mut command)?;
     Ok(command)
@@ -451,14 +471,14 @@ fn list_command(
     }
     args.push("--".into());
     args.extend(libtest.iter().map(OsString::from));
-    patina_command(args)
+    patina_command(args, &[])
 }
 
 /// One test's run on one seed: `patina run` of the target's guest, libtest
 /// asked for this test alone on one thread.
 fn test_command(
     invocation: &TestInvocation,
-    guest: &Path,
+    (guest, admit): (&Path, &[NativeAdmittedProgram]),
     case: &TestCase,
     seed: u64,
     record: Option<&Path>,
@@ -477,7 +497,7 @@ fn test_command(
     }
     push_run_flags(&mut args, &invocation.run);
     args.extend(libtest_args(case).into_iter().map(OsString::from));
-    patina_command(args)
+    patina_command(args, admit)
 }
 
 /// What libtest is asked to run one test alone: its exact name, on one

@@ -402,6 +402,153 @@ fn the_sdk_reaches_the_runtime() {
         );
     }
 
+    /// A package's binaries are admitted: its tests name each by the path
+    /// `CARGO_BIN_EXE_*` gives them, which stands for a shim-linked build
+    /// staged apart from the one Cargo installed there. A spawn of one stops
+    /// as not yet modeled; a spawn of one the pre-run gate refuses, or of
+    /// anything else, is refused. A recording names each program by digest
+    /// and verdict: its replay refuses a changed artifact or a changed
+    /// verdict, and needs no artifact the run never spawned.
+    #[test]
+    fn a_packages_binaries_are_admitted_judged_and_replayed_by_digest() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"admits\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        // A binary the pre-run gate refuses: it links a libc entry Patina
+        // does not model.
+        fs::write(
+            root.join("src/bin/refused.rs"),
+            r#"
+unsafe extern "C" {
+    fn newlocale(mask: i32, locale: *const u8, base: *mut u8) -> *mut u8;
+}
+
+fn main() {
+    let _ = unsafe { newlocale(0, c"C".as_ptr().cast(), std::ptr::null_mut()) };
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/spawn.rs"),
+            r#"
+#[test]
+fn spawns_its_own_binary() {
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_admits")).status();
+}
+
+#[test]
+fn spawns_a_refused_binary() {
+    let _ = std::process::Command::new(env!("CARGO_BIN_EXE_refused")).status();
+}
+
+#[test]
+fn spawns_another_program() {
+    let _ = std::process::Command::new("/bin/true").status();
+}
+
+#[test]
+fn names_its_binary() {
+    panic!("{}", env!("CARGO_BIN_EXE_admits"));
+}
+"#,
+        )
+        .unwrap();
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let ran = invoke_unchecked(patina, root, &["test", "--format", "json"]);
+        let document = json_of(&ran);
+        let test = |name: &str| {
+            document["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|test| test["name"] == name)
+                .unwrap_or_else(|| panic!("no {name}: {document:#}"))
+                .clone()
+        };
+        let stopped = |name: &str| {
+            let test = test(name);
+            (test["result"].clone(), test["stop"]["reason"].clone())
+        };
+        assert_eq!(
+            stopped("spawns_its_own_binary"),
+            ("unsupported".into(), "not_modeled".into()),
+            "{document:#}"
+        );
+        for refused in ["spawns_a_refused_binary", "spawns_another_program"] {
+            assert_eq!(
+                stopped(refused),
+                ("unsupported".into(), "deny_trap".into()),
+                "{document:#}"
+            );
+        }
+
+        // The finding's recording names the programs it could spawn: each
+        // binary by the path its test was given, standing for the staged
+        // artifact, and whether it was admitted.
+        let finding = test("names_its_binary");
+        assert_eq!(finding["result"], "failure", "{finding:#}");
+        let trace = PathBuf::from(finding["trace"]["path"].as_str().unwrap());
+        let guest = trace.parent().unwrap().parent().unwrap().join("guest");
+        let info = json_of(&invoke_unchecked(
+            patina,
+            root,
+            &["trace", "info", trace.to_str().unwrap(), "--format", "json"],
+        ));
+        let admitted = info["trace_info"]["native"]["admitted"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{info:#}"));
+        let why = finding["why"].as_str().unwrap();
+        let binary = admitted
+            .iter()
+            .find(|program| why.ends_with(program["program"].as_str().unwrap()))
+            .unwrap_or_else(|| panic!("{why} is not admitted: {admitted:#?}"));
+        assert!(binary["refused"].is_null(), "{admitted:#?}");
+        assert_ne!(binary["artifact"], binary["program"]);
+        let refused = admitted
+            .iter()
+            .find(|program| !program["refused"].is_null())
+            .unwrap_or_else(|| panic!("no program is refused: {admitted:#?}"));
+
+        let replay = |extra: &[&str]| {
+            let mut args = vec![
+                "replay",
+                guest.to_str().unwrap(),
+                trace.to_str().unwrap(),
+                "--format",
+                "json",
+            ];
+            args.extend(extra);
+            let replayed = json_of(&invoke_unchecked(patina, root, &args));
+            (
+                replayed["result"].clone(),
+                replayed["stop"]["reason"].clone(),
+            )
+        };
+        assert_eq!(replay(&[]).0, "failure");
+        // Another verdict on the refused binary is another program.
+        assert_eq!(
+            replay(&["--allow", "newlocale"]),
+            ("error".into(), "trace_mismatch".into())
+        );
+        // An artifact the run never spawned need not be there.
+        fs::remove_file(binary["artifact"].as_str().unwrap()).unwrap();
+        assert_eq!(replay(&[]).0, "failure");
+        // One that is there must be the one recorded.
+        let artifact = PathBuf::from(refused["artifact"].as_str().unwrap());
+        let mut bytes = fs::read(&artifact).unwrap();
+        bytes.push(0);
+        fs::write(&artifact, bytes).unwrap();
+        assert_eq!(replay(&[]), ("error".into(), "trace_mismatch".into()));
+    }
+
     /// A test that reads its fixture by absolute host path fails under
     /// Patina, whose filesystem was never given it: the test keeps its class
     /// and the suite its exit status, and the test carries the path as a

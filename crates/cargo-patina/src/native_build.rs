@@ -50,6 +50,14 @@ pub(super) struct ResolvedArtifact {
     _workspace: Option<tempfile::TempDir>,
 }
 
+impl ResolvedArtifact {
+    /// Whether the artifact is the path the caller gave, not a build of
+    /// Patina's own in a scratch directory.
+    pub(super) fn is_prebuilt(&self) -> bool {
+        self._workspace.is_none()
+    }
+}
+
 /// The single shared resolution step: an already-built artifact is used
 /// directly; a source/package is built on the fly through the shared build
 /// pipeline (printing a one-line identity note) and its product used.

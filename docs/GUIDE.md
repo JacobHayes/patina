@@ -87,7 +87,11 @@ each seed (`--seed N`, `--seeds N`) as its own run, `--jobs` at a time
 and ends in one outcome. A finding is
 re-run recorded, and its block carries the `rerun:` and `replay:` commands.
 `--no-run` builds and prints where each target's guest is staged
-(`target/patina/dst/PACKAGE/KIND/TARGET/guest`). A test that reaches
+(`target/patina/dst/PACKAGE/KIND/TARGET/guest`). The tested packages' binaries are built
+shim-linked too and staged at `target/patina/dst/PACKAGE/programs/BIN`: the
+programs a test may spawn, by its `CARGO_BIN_EXE_<bin>` path (a spawn still
+stops as `not_modeled`). A finding's replay needs only the binaries its test
+spawned; one that is still there must be the one recorded. A test that reaches
 something Patina does not model is `unsupported` (exit 2), never a pass;
 `--accept-unsupported TEXT` lets such a test, when its stop names TEXT, not
 fail CI while it still reports as `unsupported`.

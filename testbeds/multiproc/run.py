@@ -16,13 +16,15 @@ ROOT = HERE.parent.parent
 RUST = {"spawn-wait", "fanout", "pipeline", "buildlike"}
 # The expected first unsupported boundary, not the eventual capability this
 # fixture will prove. A newly supported boundary requires deliberate migration.
+# "runtime" is a refused process door (`deny_trap`); "admitted" a spawn of an
+# admitted program (the guest itself), which stops as `not_modeled`.
 EXPECTED = {
-    "spawn-wait": ("runtime", "posix_spawnp"),
-    "fanout": ("runtime", "posix_spawnp"),
-    "pipeline": ("runtime", "posix_spawnp"),
+    "spawn-wait": ("admitted", "posix_spawnp"),
+    "fanout": ("admitted", "posix_spawnp"),
+    "pipeline": ("admitted", "posix_spawnp"),
     "forkwait-c": ("runtime", "fork"),
     "forkwait-cxx": ("audit", "newlocale"),
-    "buildlike": ("runtime", "posix_spawnp"),
+    "buildlike": ("admitted", "posix_spawnp"),
     "sigchld": ("runtime", "fork"),
     "failed-exec-enoent": ("runtime", "execvp"),
     "failed-exec-eacces": ("runtime", "execvp"),
@@ -35,6 +37,8 @@ EXPECTED = {
     "queued-signals": ("runtime", "fork"),
     "shared-futex": ("runtime", "fork"),
 }
+
+STOP_REASONS = {"runtime": "deny_trap", "admitted": "not_modeled"}
 
 
 def classify(status, envelope, expected):
@@ -52,7 +56,7 @@ def classify(status, envelope, expected):
             for finding in details
         ):
             return "pending-gap"
-    elif kind == "runtime":
+    elif kind in STOP_REASONS:
         # A process trap is a stop patina attributes to what it does not
         # model, whose detail names the door the guest called.
         stop = envelope.get("stop", {})
@@ -60,7 +64,7 @@ def classify(status, envelope, expected):
         # the detail may quote the program's arguments.
         door = re.search(r"the guest called ([A-Za-z_][A-Za-z_0-9]*)", stop.get("detail", ""))
         if (envelope.get("verb") == "run" and envelope.get("result") == "unsupported"
-                and stop.get("reason") == "deny_trap"
+                and stop.get("reason") == STOP_REASONS[kind]
                 and envelope.get("guest_exit", {}).get("signal") == 6
                 and door is not None and door.group(1) == name):
             return "pending-gap"
@@ -72,9 +76,10 @@ def selftest():
         workload = ":".join(expected)
         kind, name = expected
         env = {"schema": "patina.result/v2", "verb": "run", "exit_code": 2}
-        if kind == "runtime":
+        if kind in STOP_REASONS:
             env.update(result="unsupported", guest_exit={"signal": 6},
-                       stop={"reason": "deny_trap", "detail": f"the guest called {name} (process)"})
+                       stop={"reason": STOP_REASONS[kind],
+                             "detail": f"the guest called {name} (process)"})
         else:
             env.update(verb="audit", exit_code=2,
                        finding_details=[{"symbol": name, "category": "unknown-import"}])
@@ -82,7 +87,7 @@ def selftest():
         assert classify(status, env, expected) == "pending-gap", workload
         assert classify(0, env, expected) == "unexpected", workload
         wrong = copy.deepcopy(env)
-        if kind == "runtime":
+        if kind in STOP_REASONS:
             wrong["stop"]["detail"] = "the guest called a_different_door (process)"
         else:
             wrong["finding_details"][0]["symbol"] = "a_different_door"
@@ -91,13 +96,15 @@ def selftest():
         wrong = copy.deepcopy(env)
         wrong["exit_code"] = 0
         assert classify(status, wrong, expected) == "unexpected", workload
-        if kind == "runtime":
+        if kind in STOP_REASONS:
             wrong = copy.deepcopy(env)
             wrong["guest_exit"] = {"signal": 11}
             assert classify(status, wrong, expected) == "unexpected", workload
             wrong["guest_exit"] = {"signal": 6}
-            wrong["stop"]["reason"] = "shim_fatal"
-            assert classify(status, wrong, expected) == "unexpected", workload
+            for reason in ["shim_fatal", *STOP_REASONS.values()]:
+                if reason != STOP_REASONS[kind]:
+                    wrong["stop"]["reason"] = reason
+                    assert classify(status, wrong, expected) == "unexpected", workload
     print("multiproc classifier selftest: PASS")
 
 

@@ -30,6 +30,11 @@ pub struct NativeIdentityRecord {
     /// the guest runs their code too, and binds its references by what they
     /// define, so a replay against another libc is another program.
     pub libraries: Vec<NativeLibraryIdentity>,
+    /// Identity. Every program besides itself the guest could spawn (the
+    /// admission table), by the path the guest names it and the SHA-256 of
+    /// the artifact the run pinned: a spawned program runs its code too. A replay pins the
+    /// recorded artifacts again and refuses one whose bytes changed.
+    pub admitted: Vec<NativeAdmittedProgram>,
     /// Identity. The SHA-256 of the `patina` executable that launched the
     /// guest. The supervisor builds the guest's initial state (its stack,
     /// environment block, inherited descriptors and filesystem image) and
@@ -61,6 +66,25 @@ pub struct NativeLibraryIdentity {
     pub sha256: Sha256Digest,
 }
 
+/// One program a native recording could spawn, and whether it was admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAdmittedProgram {
+    /// The path the guest names the program by: where Cargo installs a
+    /// package's binary (`CARGO_BIN_EXE_*`). The guest itself is admitted
+    /// too, but by where its binary sits, which no recording names.
+    pub program: String,
+    /// Context. The host artifact that stands in for it, which a replay
+    /// pins again; never compared.
+    pub artifact: String,
+    /// The artifact's digest; `None` when no artifact was built.
+    pub sha256: Option<Sha256Digest>,
+    /// Why it was refused admission (a failed build, the pre-run audit);
+    /// `None` when admitted. Whether it was refused is compared; the reason
+    /// is context.
+    pub refused: Option<String>,
+}
+
 /// One identity component that differs between a recording and a replay.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeIdentityDifference {
@@ -80,6 +104,7 @@ impl NativeIdentityRecord {
         let Self {
             executable_sha256,
             libraries,
+            admitted,
             supervisor_sha256,
             patina_version: _,
             shim_bundle_sha256: _,
@@ -107,6 +132,30 @@ impl NativeIdentityRecord {
                 current: render(&current.libraries),
             });
         }
+        let programs = |admitted: &[NativeAdmittedProgram]| {
+            admitted
+                .iter()
+                .map(|program| {
+                    let digest = program
+                        .sha256
+                        .as_ref()
+                        .map_or("unbuilt".to_string(), ToString::to_string);
+                    let verdict = if program.refused.is_some() {
+                        "refused"
+                    } else {
+                        "admitted"
+                    };
+                    format!("{} {digest} {verdict}", program.program)
+                })
+                .collect::<Vec<_>>()
+        };
+        if programs(admitted) != programs(&current.admitted) {
+            differences.push(NativeIdentityDifference {
+                component: "admitted programs",
+                recorded: programs(admitted).join(", "),
+                current: programs(&current.admitted).join(", "),
+            });
+        }
         if *supervisor_sha256 != current.supervisor_sha256 {
             differences.push(NativeIdentityDifference {
                 component: "supervisor",
@@ -129,6 +178,12 @@ mod tests {
                 name: "libc.so.6".into(),
                 sha256: Sha256Digest([7; 32]),
             }],
+            admitted: vec![NativeAdmittedProgram {
+                program: "/target/debug/server".into(),
+                artifact: "/target/patina/dst/server".into(),
+                sha256: Some(Sha256Digest([9; 32])),
+                refused: Some("audit".into()),
+            }],
             supervisor_sha256: Sha256Digest([5; 32]),
             patina_version: "1.0.0".into(),
             shim_bundle_sha256: Sha256Digest([2; 32]),
@@ -136,8 +191,10 @@ mod tests {
         }
     }
 
-    /// The executable and supervisor digests are compared and named; the
-    /// version, shim bundle and target are context and never compared.
+    /// The executable, library, admitted-program and supervisor digests, and
+    /// each program's admission, are compared and named; the version, shim
+    /// bundle, target and an admitted program's artifact path and refusal
+    /// reason are context and never compared.
     #[test]
     fn identity_components_are_compared_and_named_and_context_is_not() {
         assert!(identity().differences(&identity()).is_empty());
@@ -145,14 +202,29 @@ mod tests {
         current.patina_version = "1.0.1".into();
         current.shim_bundle_sha256 = Sha256Digest([4; 32]);
         current.target = "aarch64-apple-darwin".into();
+        current.admitted[0].artifact = "/elsewhere/server".into();
+        current.admitted[0].refused = Some("another reason".into());
         assert!(identity().differences(&current).is_empty());
+
+        // Whether a program is admitted is compared like its digest.
+        current.admitted[0].refused = None;
+        let named: Vec<_> = identity()
+            .differences(&current)
+            .iter()
+            .map(|d| d.component)
+            .collect();
+        assert_eq!(named, ["admitted programs"]);
 
         current.executable_sha256 = Sha256Digest([3; 32]);
         current.libraries[0].sha256 = Sha256Digest([8; 32]);
+        current.admitted[0].sha256 = Some(Sha256Digest([10; 32]));
         current.supervisor_sha256 = Sha256Digest([6; 32]);
         let differences = identity().differences(&current);
         let named: Vec<_> = differences.iter().map(|d| d.component).collect();
-        assert_eq!(named, ["executable", "libraries", "supervisor"]);
+        assert_eq!(
+            named,
+            ["executable", "libraries", "admitted programs", "supervisor"]
+        );
         assert_eq!(
             differences[0].recorded,
             identity().executable_sha256.to_string()

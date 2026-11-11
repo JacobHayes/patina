@@ -511,12 +511,38 @@ lifecycle markers for crash restart).
 - **Fingerprints** describe the run that happened (swarm masking strips the
   components it dropped). A seeded run writes no trace and takes no
   fingerprint label.
-- **Native identity** (`metadata.native`): `executable_sha256` and
-  `supervisor_sha256` are compared on replay and refused as
-  `fingerprint_mismatch`; the version, shim bundle and target are context
-  only. Campaigns pin both digests, and child processes refuse to run as a
+- **Native identity** (`metadata.native`): `executable_sha256`, the
+  libraries, the admitted programs and `supervisor_sha256` are compared on
+  replay and refused as `fingerprint_mismatch`; the version, shim bundle,
+  target and each admitted program's artifact path are context only.
+  Campaigns pin both digests, and child processes refuse to run as a
   different supervisor build. Child process groups die with their parent
   (`src/lifeline.rs`).
+- **Admission.** A guest may spawn only itself and its package's own
+  binaries. `patina test` builds each `[[bin]]` of the selected packages
+  shim-linked, stages it at `target/patina/dst/PACKAGE/programs/BIN`, judges
+  it once with the pre-run gate (a binary that does not build or stage, or
+  two selected packages installing one path, is refused with the reason),
+  and hands each test's `patina run` its package's verdicts and digests,
+  keyed by the path `CARGO_BIN_EXE_<bin>` names; a listing run gets none.
+  The run adds the guest itself under the path it was given and its
+  canonical path (the guest observes no path of its own: `argv[0]` is fixed
+  and `/proc/self/exe` is absent; a guest built on the fly is not admitted).
+  The supervisor holds the table (`src/native_run/admission.rs`): it keeps
+  each admitted artifact open for the run and confirms the open file's
+  digest (staging replaces by rename, so the open file keeps the audited
+  bytes), and tells the shim only what each path is (`PATINA_RT_ADMIT`):
+  admitted with an artifact id, refused with the reason, or missing. A
+  recording names each program but the guest by path, digest and verdict; a
+  replay judges each artifact again under its own `--allow` and refuses a
+  changed digest or verdict, while an artifact that is gone refuses nothing
+  until a spawn reaches it. The keys are absolute host paths, so a recording
+  that names programs is byte-identical per checkout. Admission covers
+  `posix_spawnp` and `pidfd_spawnp` only, matched exactly (no `PATH`
+  search): a spawn of an admitted program still stops as `not_modeled` until
+  multi-process runs land, any other spawn is refused (`deny_trap`), and
+  `fork` and the exec family (a `Command` that falls back to them included)
+  are refused as before.
 - **One format version** (`TRACE_FORMAT_VERSION`); other versions are refused,
   never upgraded.
 - **A liveness stop is recorded.** The watchdog's stop flushes the recording

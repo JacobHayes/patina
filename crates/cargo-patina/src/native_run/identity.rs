@@ -11,11 +11,13 @@ use patina_dst_trace::{NativeIdentityRecord, NativeLibraryIdentity, Sha256Digest
 ///
 /// The executable is hashed as the bytes the run maps, so the digest names
 /// exactly the bytes the guest executes; each library the loader maps beside
-/// it, by the bytes the audit judged; the supervisor by its own digest. The
+/// it, by the bytes the audit judged; each program the guest may spawn
+/// (`admitted`), by its pinned copy; the supervisor by its own digest. The
 /// rest are facts of this `patina`.
 pub(super) fn native_identity(
     image: &Image,
     load_set: &patina_dst_target::LoadSet<'_>,
+    admitted: Vec<patina_dst_trace::NativeAdmittedProgram>,
 ) -> Result<NativeIdentityRecord, CliError> {
     let bundle = embedded_shim_bundle_sha256();
     let libraries = crate::load_set::library_digests(load_set)
@@ -25,6 +27,7 @@ pub(super) fn native_identity(
     Ok(NativeIdentityRecord {
         executable_sha256: image.sha256(),
         libraries,
+        admitted,
         supervisor_sha256: supervisor_sha256()?,
         patina_version: env!("CARGO_PKG_VERSION").to_string(),
         shim_bundle_sha256: Sha256Digest::parse(&format!("sha256:{bundle}")).map_err(|error| {

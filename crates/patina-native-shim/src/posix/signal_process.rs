@@ -44,7 +44,7 @@ extern "C" fn raise(sig: c_int) -> c_int {
 }
 
 fn process_trap(symbol: &CStr) -> ! {
-    spawn_trap(symbol, None)
+    spawn_trap(symbol, None, Door::Other)
 }
 
 /// The program a spawn or exec entry was asked to run, and its arguments,
@@ -56,9 +56,9 @@ struct Program {
 
 /// Fixed storage for a spawn refusal's text: no allocation, so the stop is
 /// safe wherever the guest reached it. The longest text the refusal builds
-/// (a 96-byte path, eight 40-byte arguments, their markers) fits.
+/// (a 192-byte path, eight 40-byte arguments, their markers) fits.
 struct Line {
-    bytes: [u8; 512],
+    bytes: [u8; 640],
     len: usize,
 }
 
@@ -104,17 +104,38 @@ impl Line {
     }
 }
 
+/// The kind of entry a process trap stops in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Door {
+    /// A spawn (`posix_spawnp`, `pidfd_spawnp`): its program may be admitted.
+    Spawn,
+    /// `fork` or the exec family: always refused.
+    Other,
+}
+
 /// The run stops where the guest asked for a new process: no spawn or exec
 /// reaches the host. When the entry was handed a program, the stop names it
-/// and its arguments, so a reader learns what was spawned, not only how.
-fn spawn_trap(symbol: &CStr, program: Option<Program>) -> ! {
+/// and its arguments, so a reader learns what was spawned, not only how. A
+/// spawn also says what the program is to the admission table
+/// ([`crate::admission`]): an admitted one stops as not yet modeled
+/// (`not_modeled`), a replay's missing one as a `trace_mismatch`, any other is
+/// refused (`deny_trap`) and the text says why or how a program is admitted.
+fn spawn_trap(symbol: &CStr, program: Option<Program>, door: Door) -> ! {
+    use crate::admission::Admission;
     let mut named = Line {
-        bytes: [0; 512],
+        bytes: [0; 640],
         len: 0,
     };
+    let mut admission = Admission::Unadmitted;
     if let Some(program) = program {
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        if door == Door::Spawn
+            && let Some(path) = guest_c_string(program.path as usize, &mut path)
+        {
+            admission = crate::admission::admitted_program(path);
+        }
         named.push(b" `");
-        named.push_guest(program.path as usize, 96);
+        named.push_guest(program.path as usize, 192);
         // argv[0] is the program's own name, which the path already says.
         // An unreadable or empty argv ends the list.
         let argv = program.argv as usize;
@@ -138,26 +159,81 @@ fn spawn_trap(symbol: &CStr, program: Option<Program>) -> ! {
         }
         named.push(b"`");
     }
+    let closed: &[u8] = b"; failing closed\n";
+    let (why, reason, suffix): (&[u8], &[u8], &[u8]) = match admission {
+        _ if door == Door::Other => (
+            b" (process spawn), which Patina does not model",
+            b"",
+            b"; the process class is a deterministic-runtime non-goal; failing closed\n",
+        ),
+        Admission::Admitted(_) => (
+            b" (process spawn) of an admitted program; Patina does not yet run a second process",
+            b"",
+            closed,
+        ),
+        Admission::Refused(reason) => (
+            b" (process spawn) of a program refused admission: ",
+            reason.as_bytes(),
+            closed,
+        ),
+        Admission::Missing(reason) => (
+            b" (process spawn) of an admitted program this replay cannot run: ",
+            reason.as_bytes(),
+            closed,
+        ),
+        Admission::Unadmitted => (
+            b" (process spawn) of a program Patina does not admit: only the guest itself and, \
+              under `patina test`, its package's `[[bin]]` targets, by their \
+              `CARGO_BIN_EXE_<name>` paths, can be spawned",
+            b"",
+            closed,
+        ),
+    };
     let prefix = b"patina: process spawn reached under patina: ";
-    let suffix = b"; the process class is a deterministic-runtime non-goal; failing closed\n";
     // SAFETY: each byte slice is a live read-only buffer for the synchronous stdio writes.
     unsafe {
         crate::patina_stdio_write(2, prefix.as_ptr().cast(), prefix.len());
         crate::patina_stdio_write(2, symbol.as_ptr().cast(), symbol.count_bytes());
         crate::patina_stdio_write(2, named.text().as_ptr().cast(), named.len);
+        crate::patina_stdio_write(2, why.as_ptr().cast(), why.len());
+        crate::patina_stdio_write(2, reason.as_ptr().cast(), reason.len());
         crate::patina_stdio_write(2, suffix.as_ptr().cast(), suffix.len());
     }
     crate::patina_flush_captured_stdio();
-    crate::host_abort(crate::RunStop::new(
-        patina_dst_abi::RunClass::Unsupported,
-        "deny_trap",
-        &[
-            b"the guest called ",
-            symbol.to_bytes(),
-            named.text(),
-            b" (process spawn), which Patina does not model",
-        ],
-    ))
+    let detail: &[&[u8]] = &[
+        b"the guest called ",
+        symbol.to_bytes(),
+        named.text(),
+        why,
+        reason,
+    ];
+    crate::host_abort(match admission {
+        _ if door == Door::Other => {
+            crate::RunStop::new(patina_dst_abi::RunClass::Unsupported, "deny_trap", detail)
+        }
+        Admission::Admitted(_) => crate::RunStop::unmodeled(detail),
+        Admission::Missing(_) => {
+            crate::RunStop::new(patina_dst_abi::RunClass::Error, "trace_mismatch", detail)
+        }
+        Admission::Refused(_) | Admission::Unadmitted => {
+            crate::RunStop::new(patina_dst_abi::RunClass::Unsupported, "deny_trap", detail)
+        }
+    })
+}
+
+/// The guest C string at `addr`, copied into `buffer` through `uaccess`;
+/// `None` when it is unreadable or longer than `buffer`.
+fn guest_c_string(addr: usize, buffer: &mut [u8]) -> Option<&CStr> {
+    if addr == 0 {
+        return None;
+    }
+    for offset in 0..buffer.len() {
+        crate::uaccess::read_into(addr.checked_add(offset)?, &mut buffer[offset..=offset]).ok()?;
+        if buffer[offset] == 0 {
+            return CStr::from_bytes_with_nul(&buffer[..=offset]).ok();
+        }
+    }
+    None
 }
 
 /// The spawn attribute and file-action calls only fill in the caller's own
@@ -187,7 +263,7 @@ extern "C" fn fork() -> libc::pid_t {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn execv(path: *const c_char, argv: *const *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    spawn_trap(c"execv", Some(Program { path, argv }))
+    spawn_trap(c"execv", Some(Program { path, argv }), Door::Other)
 }
 
 /// # Safety
@@ -199,7 +275,7 @@ unsafe extern "C" fn execve(
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    spawn_trap(c"execve", Some(Program { path, argv }))
+    spawn_trap(c"execve", Some(Program { path, argv }), Door::Other)
 }
 
 /// # Safety
@@ -207,7 +283,7 @@ unsafe extern "C" fn execve(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    spawn_trap(c"execvp", Some(Program { path: file, argv }))
+    spawn_trap(c"execvp", Some(Program { path: file, argv }), Door::Other)
 }
 
 /// # Safety
@@ -433,7 +509,11 @@ unsafe extern "C" fn posix_spawnp(
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    spawn_trap(c"posix_spawnp", Some(Program { path: file, argv }))
+    spawn_trap(
+        c"posix_spawnp",
+        Some(Program { path: file, argv }),
+        Door::Spawn,
+    )
 }
 /// # Safety
 /// acts follows libc's spawn file actions contract.

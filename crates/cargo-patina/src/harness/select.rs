@@ -59,9 +59,17 @@ pub(crate) struct SkippedTarget {
     pub(crate) reason: String,
 }
 
+/// A `[[bin]]` of a selected package: a program its tests may spawn.
+pub(super) struct Program {
+    pub(super) package: String,
+    pub(super) bin: String,
+}
+
 pub(super) struct Selected {
     pub(super) targets: Vec<Target>,
     pub(super) skipped: Vec<SkippedTarget>,
+    /// The selected packages' binaries the invocation's features build.
+    pub(super) programs: Vec<Program>,
     pub(super) target_dir: PathBuf,
 }
 
@@ -128,6 +136,7 @@ pub(super) fn select(invocation: &TestInvocation, metadata: &Value) -> Result<Se
         )));
     }
     Ok(Selected {
+        programs: programs(&packages, &invocation.features),
         targets,
         skipped,
         target_dir: metadata_target_dir(metadata)?,
@@ -345,6 +354,39 @@ pub(super) fn select_targets(
     targets.sort();
     targets.dedup();
     Ok((targets, skipped))
+}
+
+/// The `[[bin]]` targets of `packages` whose required features `features`
+/// enables.
+fn programs(packages: &[&Value], features: &CargoFeatures) -> Vec<Program> {
+    let mut programs = Vec::new();
+    for package in packages {
+        let enabled = enabled_features(package, features);
+        for target in package
+            .get("targets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|target| strings(target, "kind") == ["bin"])
+        {
+            let builds = strings(target, "required-features")
+                .into_iter()
+                .all(|feature| {
+                    enabled
+                        .as_ref()
+                        .is_none_or(|enabled| enabled.contains(feature))
+                });
+            if let (true, Some(package), Some(bin)) =
+                (builds, text(package, "name"), text(target, "name"))
+            {
+                programs.push(Program {
+                    package: package.to_string(),
+                    bin: bin.to_string(),
+                });
+            }
+        }
+    }
+    programs
 }
 
 /// The package's features the invocation enables, closed over the features

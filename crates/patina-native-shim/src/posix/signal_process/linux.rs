@@ -1,7 +1,7 @@
 //! Linux libc signal layouts, diagnostics and process-descriptor adapters.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use super::{Program, process_trap, spawn_trap};
+use super::{Door, Program, process_trap, spawn_trap};
 use crate::sud::Word;
 use crate::thread::signals::{self, Action, Info};
 use core::ffi::{c_char, c_int};
@@ -707,7 +707,11 @@ unsafe extern "C" fn pidfd_spawnp(
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    spawn_trap(c"pidfd_spawnp", Some(Program { path: file, argv }))
+    spawn_trap(
+        c"pidfd_spawnp",
+        Some(Program { path: file, argv }),
+        Door::Spawn,
+    )
 }
 /// # Safety
 /// infop follows libc's waitid output contract.

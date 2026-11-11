@@ -42,7 +42,9 @@ pub use metadata::{
     PctPolicyRecord, RunMetadata, SchedulePolicyRecord, SwarmConfigRecord, WatchdogConfigRecord,
     policy_fingerprint_suffix,
 };
-pub use native_identity::{NativeIdentityDifference, NativeIdentityRecord, NativeLibraryIdentity};
+pub use native_identity::{
+    NativeAdmittedProgram, NativeIdentityDifference, NativeIdentityRecord, NativeLibraryIdentity,
+};
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;
 pub use stream::TraceStream;
@@ -138,7 +140,10 @@ pub use stream::TraceStream;
 /// - 31: the metadata records the compute budget
 ///   ([`RunMetadata::compute_budget_nanos`]), which a replay derives its
 ///   compute stop from.
-pub const TRACE_FORMAT_VERSION: u32 = 31;
+/// - 32: the native build identity records the admission table
+///   ([`NativeAdmittedProgram`]): every program besides itself the guest
+///   could spawn, by its path and the digest of the artifact the run pinned.
+pub const TRACE_FORMAT_VERSION: u32 = 32;
 /// The most a recorded trace may hold: 256 MiB serialized, and 4,000,000
 /// events in a timeline. A recording past either is abandoned
 /// ([`ABANDONED_TRACE_KEY`]) and the run goes on to its own outcome.

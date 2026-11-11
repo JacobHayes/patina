@@ -245,6 +245,16 @@ pub const ENV_STEP_BUDGET: &str = "PATINA_RT_STEP_BUDGET";
 
 pub const ENV_PARAMS_JSON: &str = "PATINA_RT_PARAMS_JSON";
 
+/// The programs the guest may name in a spawn, as a JSON object mapping each
+/// path to what it is: `{"admitted": ID}` (the supervisor holds artifact ID;
+/// 0 is the guest itself; the spawn still stops as `not_modeled`),
+/// `{"refused": REASON}` (a failed build or the pre-run audit), or, on a
+/// replay, `{"missing": REASON}` (the recording's artifact is gone). The
+/// guest itself is keyed by the paths it was run from; under `patina test`,
+/// its package's binaries by the paths `CARGO_BIN_EXE_*` names. Absent is
+/// the empty table.
+pub const ENV_ADMIT: &str = "PATINA_RT_ADMIT";
+
 /// The guest program arguments (`argv[1..]`, i.e. everything after `--`) as a
 /// JSON string array. The supervisor forwards this in record mode so the run's
 /// arguments are captured into the trace metadata; the runtime records them and

@@ -182,7 +182,9 @@ versions, target triple and fingerprint.
   (libc doors); only the trap handlers deliver from C. `native_signals`
   (`signals/frame_abandon.c`, `planted-faults` shim) pins each such delivery
   origin. Ambient host signals are outside the model.
-- **Multi-process.** Process spawning is a non-goal: the spawn family deny-traps.
+- **Multi-process.** No second process runs. A spawn of an admitted program
+  (the guest itself, or its package's binary under `patina test`) stops as
+  `not_modeled`; any other spawn, `fork` and the exec family deny-trap.
   `testbeds/multiproc` pins each workload's first refusal on x86_64 Linux; arm64
   and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.

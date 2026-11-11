@@ -1,19 +1,23 @@
 //! Build each selected libtest target once, shim-linked, and stage it where
 //! every test of the target runs from.
 
+use super::CargoFeatures;
 use super::TestInvocation;
-use super::select::{Target, TargetKind};
+use super::select::{Program, Target, TargetKind};
 use crate::CliError;
 use crate::native_build::{
     NATIVE_AUDIT_METADATA_ARGS, host_target_triple, install_built_executable,
     native_package_link_args, native_package_rustflags, stage_sancov_stub, stage_sdk_stub,
 };
+use crate::native_run::admission;
 use crate::shim_build::{
     RustcInvocation, ShimSources, apply_rustc_env, build_native_shim,
     check_native_toolchain_agreement, lock_target_dir, prepare_shim_sources,
     stage_instrumentation_object,
 };
+use patina_dst_trace::NativeAdmittedProgram;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,6 +42,10 @@ pub(crate) struct BuiltTarget {
     /// `Ok(guest)`, or the reason the build failed (Cargo's own diagnostics
     /// went to stderr as it ran).
     pub(crate) guest: Result<PathBuf, String>,
+    /// The programs its runs may spawn: each of its package's binaries by
+    /// the path `CARGO_BIN_EXE_*` names, its shim-linked build staged beside
+    /// the guests, and `patina test`'s verdict on that build.
+    pub(crate) admit: Vec<NativeAdmittedProgram>,
 }
 
 /// The directory a target's guest is staged in, and its recordings beside it:
@@ -74,10 +82,21 @@ pub(crate) fn safe_path_segment(value: &str) -> String {
 /// and `cargo rustc` takes them for one target at a time. Every build carries
 /// the same `RUSTFLAGS`, so dependencies compile once for all of them. A target
 /// that fails to build is reported and the others still run.
+///
+/// The selected packages' binaries (`programs`) are built the same way, as
+/// the programs their tests may spawn, and judged once here
+/// ([`admission::judge`]); each test's runs are handed its package's
+/// verdicts, keyed by the path Cargo installs each binary at, which is what
+/// `CARGO_BIN_EXE_*` names. Cargo builds a package's binaries beside its
+/// integration tests without the shim; the shim-linked build is a unit of
+/// its own (the link arguments are part of its identity), so neither build
+/// invalidates the other. Both are installed at the one path Cargo names, so
+/// each is staged as soon as it is built.
 pub(super) fn build_all(
     invocation: &TestInvocation,
     toolchain: &Toolchain,
     targets: &[Target],
+    programs: &[Program],
     target_dir: &Path,
 ) -> Result<Vec<BuiltTarget>, CliError> {
     let rustc = &toolchain.rustc;
@@ -98,40 +117,121 @@ pub(super) fn build_all(
         &built_shim.allocator_link_args(&host_target)?,
         yield_object.as_deref(),
     );
+    let cargo_rustc =
+        |package: &str, selection: Vec<String>, features: &CargoFeatures, profile: &str| {
+            let mut command = Command::new(&rustc.cargo_command);
+            command
+                .arg("rustc")
+                .arg("--manifest-path")
+                .arg(&invocation.manifest)
+                .arg("--package")
+                .arg(package)
+                .arg("--target")
+                .arg(&host_target)
+                .arg("--message-format=json-render-diagnostics")
+                .env_remove("RUSTFLAGS")
+                .env("CARGO_ENCODED_RUSTFLAGS", &rustflags)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            apply_rustc_env(&mut command, rustc);
+            command.args(selection);
+            command.args(features.cargo_args());
+            // Cargo's progress lines are detail; its errors and warnings still print.
+            if !crate::output::options().verbose {
+                command.arg("--quiet");
+            }
+            command
+                .arg("--profile")
+                .arg(profile)
+                .arg("--")
+                .args(&link_args)
+                .args(NATIVE_AUDIT_METADATA_ARGS);
+            command
+        };
+    // Each package's programs, by the path Cargo installs each at, and
+    // `patina test`'s verdict on it. Every test of the package is handed
+    // these; a binary that did not build or stage is refused, and says why.
+    let mut judged: Vec<(&str, NativeAdmittedProgram)> = Vec::with_capacity(programs.len());
+    for Program { package, bin } in programs {
+        // `cargo rustc` builds a binary in test mode under `test` or
+        // `bench`, so it is built under the profiles those inherit. Cargo
+        // builds the one beside an integration test under `test` or `bench`
+        // itself: the two differ only where a package overrides
+        // `[profile.test]` or `[profile.bench]`.
+        let profile = if invocation.release { "release" } else { "dev" };
+        let mut command = cargo_rustc(
+            package,
+            vec!["--bin".to_string(), bin.clone()],
+            &invocation.features,
+            profile,
+        );
+        let output = {
+            let _lock = lock_target_dir(target_dir)?;
+            command.output().map_err(|error| {
+                CliError(format!(
+                    "failed to run cargo rustc for {package} --bin {bin}: {error}"
+                ))
+            })?
+        };
+        // Where Cargo installs it, and so what the tests name it by.
+        let named = target_dir
+            .join(&host_target)
+            .join(if invocation.release {
+                "release"
+            } else {
+                "debug"
+            })
+            .join(bin);
+        let staged = crate::sdk_version::check_guest_sdk(&output.stdout)
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                if output.status.success() {
+                    stage_program(target_dir, package, bin, &named, &output.stdout)
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err(format!(
+                        "{package} --bin {bin} did not build with the shim (Cargo's errors \
+                         were printed by `patina test`)"
+                    ))
+                }
+            });
+        judged.push((
+            package.as_str(),
+            admission::judge(named.to_string_lossy().into_owned(), staged),
+        ));
+    }
+    // Two selected packages that install a binary at one path: neither's
+    // tests can know which they would spawn, so both are refused.
+    for index in 0..judged.len() {
+        let program = &judged[index].1.program;
+        if judged
+            .iter()
+            .filter(|(_, other)| other.program == *program)
+            .count()
+            > 1
+        {
+            judged[index].1.refused = Some(format!(
+                "more than one selected package installs a binary at {program}"
+            ));
+        }
+    }
+    let mut admit: BTreeMap<&str, Vec<NativeAdmittedProgram>> = BTreeMap::new();
+    for (package, program) in judged {
+        admit.entry(package).or_default().push(program);
+    }
     let mut built = Vec::with_capacity(targets.len());
     for target in targets {
-        let mut command = Command::new(&rustc.cargo_command);
-        command
-            .arg("rustc")
-            .arg("--manifest-path")
-            .arg(&invocation.manifest)
-            .arg("--package")
-            .arg(&target.package)
-            .arg("--target")
-            .arg(&host_target)
-            .arg("--message-format=json-render-diagnostics")
-            .env_remove("RUSTFLAGS")
-            .env("CARGO_ENCODED_RUSTFLAGS", &rustflags)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
-        apply_rustc_env(&mut command, rustc);
-        command.args(target.cargo_args());
-        command.args(invocation.features.cargo_args());
-        // Cargo's progress lines are detail; its errors and warnings still print.
-        if !crate::output::options().verbose {
-            command.arg("--quiet");
-        }
         // `cargo rustc` builds a target in test mode only under the `test` or
         // `bench` profile, and refuses `--release` beside `--profile`. `bench`
         // inherits `release`, so `--release` means the codegen a
         // `cargo test --release` harness gets, the package's
         // `[profile.release]` overrides included.
-        command
-            .arg("--profile")
-            .arg(if invocation.release { "bench" } else { "test" })
-            .arg("--")
-            .args(&link_args)
-            .args(NATIVE_AUDIT_METADATA_ARGS);
+        let mut command = cargo_rustc(
+            &target.package,
+            target.cargo_args(),
+            &invocation.features,
+            if invocation.release { "bench" } else { "test" },
+        );
         let output = {
             let _lock = lock_target_dir(target_dir)?;
             command.output().map_err(|error| {
@@ -153,6 +253,10 @@ pub(super) fn build_all(
         built.push(BuiltTarget {
             target: target.clone(),
             guest,
+            admit: admit
+                .get(target.package.as_str())
+                .cloned()
+                .unwrap_or_default(),
         });
     }
     Ok(built)
@@ -173,6 +277,52 @@ fn stage(target_dir: &Path, target: &Target, messages: &[u8]) -> Result<PathBuf,
     let guest = directory.join("guest");
     install_built_executable(&executable, &guest)?;
     Ok(guest)
+}
+
+/// Stage the binary `bin` of `package` Cargo just built, which it installed
+/// at `named`: copied to `<target-dir>/patina/dst/<package>/programs/<bin>`.
+fn stage_program(
+    target_dir: &Path,
+    package: &str,
+    bin: &str,
+    named: &Path,
+    messages: &[u8],
+) -> Result<PathBuf, CliError> {
+    let executable = messages
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find(|message| {
+            message.get("reason").and_then(Value::as_str) == Some("compiler-artifact")
+                && message.pointer("/profile/test").and_then(Value::as_bool) == Some(false)
+                && message.pointer("/target/name").and_then(Value::as_str) == Some(bin)
+                && message.pointer("/target/kind") == Some(&serde_json::json!(["bin"]))
+        })
+        .and_then(|message| message.get("executable")?.as_str().map(PathBuf::from))
+        .ok_or_else(|| {
+            CliError(format!(
+                "cargo rustc reported no executable for {package} --bin {bin}"
+            ))
+        })?;
+    if executable != named {
+        return Err(CliError(format!(
+            "Cargo installed {package} --bin {bin} at {}, not at {}",
+            executable.display(),
+            named.display()
+        )));
+    }
+    let directory = target_dir
+        .join("patina/dst")
+        .join(safe_path_segment(package))
+        .join("programs");
+    fs::create_dir_all(&directory).map_err(|error| {
+        CliError(format!(
+            "failed to create the staging directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let staged = directory.join(safe_path_segment(bin));
+    install_built_executable(&executable, &staged)?;
+    Ok(staged)
 }
 
 /// The test-profile executable Cargo reported for `target`.

@@ -33,6 +33,9 @@
 mod posix;
 #[cfg(patina_posix_exports)]
 mod posix_env;
+// The programs the guest may spawn. See `admission.rs`.
+#[cfg(any(test, patina_posix_exports))]
+mod admission;
 #[cfg(patina_posix_exports)]
 mod variadic;
 #[cfg(all(patina_posix_exports, target_os = "linux"))]

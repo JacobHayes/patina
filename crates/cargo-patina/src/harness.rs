@@ -154,6 +154,7 @@ pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> 
         &invocation,
         &toolchain,
         &selected.targets,
+        &selected.programs,
         &selected.target_dir,
     )?;
     let build_seconds = started.elapsed().as_secs_f64();

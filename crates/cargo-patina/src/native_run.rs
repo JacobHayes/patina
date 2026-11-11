@@ -19,7 +19,7 @@ use crate::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
 use patina_dst_abi::RunClass;
 use patina_dst_fs_mem::{FsImage, FsImageEntry};
 use patina_dst_runtime::{
-    ENV_COVERAGE_FD, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CPUS,
+    ENV_ADMIT, ENV_COVERAGE_FD, ENV_FINGERPRINT, ENV_FS_IMAGE_FD, ENV_GUEST_ARGV, ENV_GUEST_CPUS,
     ENV_GUEST_CWD, ENV_GUEST_ENV, ENV_GUEST_HOSTNAME, ENV_GUEST_STDIN_FD, ENV_INITIAL_STACK,
     ENV_MODE, ENV_PARAMS_JSON, ENV_REALTIME_EPOCH_NANOS, ENV_SEED, ENV_STEP_BUDGET, ENV_TRACE_FD,
     GUEST_STDIN_MAX_BYTES, NATIVE_INITIAL_STACK_TRAILER_SLOTS,
@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::{env, fs, io};
 
+pub(crate) mod admission;
 mod child;
 mod fs_image;
 mod gate;
@@ -201,11 +202,32 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // a replay against a different libc is refused like one against a
     // different executable.
     let load_set = crate::load_set::discover(&binary, image.bytes())?;
+    // The programs the guest may spawn (`admission`), each admitted one held
+    // open for the run: a replay's from its recording, judged again; a new
+    // run's from `patina test`'s verdicts; and the guest itself.
+    let admission = admission::admit(
+        match &replay_trace {
+            Some(bundle) => admission::Source::Recorded(
+                bundle
+                    .metadata
+                    .native
+                    .as_ref()
+                    .map_or(&[], |native| native.admitted.as_slice()),
+            ),
+            None => admission::Source::Request,
+        },
+        resolved.is_prebuilt().then_some(&*resolved.path),
+        &binary,
+        &invocation.allow,
+        &invocation.allow_unsupported,
+    )?;
     let identity = match &invocation.mode {
         NativeRunMode::Seeded { .. } => None,
-        NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => {
-            Some(native_identity(&image, &load_set)?)
-        }
+        NativeRunMode::Record { .. } | NativeRunMode::Replay { .. } => Some(native_identity(
+            &image,
+            &load_set,
+            admission.programs.clone(),
+        )?),
     };
     if let (NativeRunMode::Replay { path, .. }, Some(bundle), Some(identity)) =
         (&invocation.mode, &replay_trace, &identity)
@@ -525,6 +547,9 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
                 CliError(format!("failed to encode run parameters: {error}"))
             })?;
             command.env(ENV_PARAMS_JSON, encoded);
+        }
+        if let Some(table) = admission.env_value() {
+            command.env(ENV_ADMIT, table);
         }
         if let Some(cwd) = &invocation.cwd {
             command.env(ENV_GUEST_CWD, cwd);
