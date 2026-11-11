@@ -408,6 +408,36 @@ pub struct FsFaultTally {
     pub targets_landed: Vec<bool>,
 }
 
+/// What the network fault plane observed this run, per class. Kept beside the
+/// knobs rather than inside [`NetFaultReport`] because the report also carries
+/// the derived `*_vacuity_diagnosable` verdicts, which are a pure function of
+/// these counts and the configured rates. A crashed incarnation hands these
+/// to the next, which carries on from them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetFaultTally {
+    /// Datagram sends that reached the fault-decision point (not pre-empted by a
+    /// partition) plus `tcp_send`s that enqueued a segment.
+    pub send_ops: u64,
+    /// Datagram sends a drop did not pre-empt: the only draws duplication
+    /// takes, so the duplicate class's vacuity is judged against these alone.
+    pub datagram_send_ops: u64,
+    /// Deliveries queued (each datagram copy, each TCP segment): the draws
+    /// jitter and the base latency take. A dropped datagram queues none.
+    pub delivery_ops: u64,
+    pub drops_applied: u64,
+    pub jitter_applied: u64,
+    pub latency_applied: u64,
+    pub duplicates_applied: u64,
+    /// `tcp_connect` calls that would otherwise have succeeded.
+    pub connect_ops: u64,
+    pub connects_refused: u64,
+    /// Established-stream operations that moved data.
+    pub stream_ops: u64,
+    pub resets_injected: u64,
+    /// Sends and connects blocked by a configured partition.
+    pub partition_blocks: u64,
+}
+
 /// End-of-run summary of filesystem fault-injection activity, for the
 /// default-on vacuity diagnostic. It is deliberately per class: a run with both
 /// error and short-I/O knobs enabled must not hide one inert class behind the

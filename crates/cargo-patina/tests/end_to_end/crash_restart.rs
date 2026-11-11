@@ -1285,4 +1285,138 @@ fn main() {
         assert_eq!(replayed["result"], "ok", "{replayed:#}");
         assert_eq!(replayed["fault_reports"]["fs"], *fs, "{replayed:#}");
     }
+
+    // A guest that, in every incarnation, gives each of the DNS, network,
+    // entropy and clock fault planes the same opportunities, and in its first
+    // incarnation then reaches its first crash point, the marker's creation.
+    const PLANES_ACROSS_CRASH_SOURCE: &str = r#"
+use std::fs::{self, File};
+use std::net::{ToSocketAddrs, UdpSocket};
+use std::time::SystemTime;
+
+// A nonblocking getrandom may find the pool unready, which the entropy plane
+// can fail; macOS has no such request.
+#[cfg(target_os = "linux")]
+fn draw_entropy() {
+    unsafe extern "C" {
+        fn getrandom(buf: *mut core::ffi::c_void, len: usize, flags: u32) -> isize;
+    }
+    const GRND_NONBLOCK: u32 = 1;
+    let mut bytes = [0_u8; 8];
+    let _ = unsafe { getrandom(bytes.as_mut_ptr().cast(), bytes.len(), GRND_NONBLOCK) };
+}
+
+#[cfg(not(target_os = "linux"))]
+fn draw_entropy() {}
+
+fn main() {
+    let restarted = fs::metadata("/marker").is_ok();
+    let _receiver = UdpSocket::bind("0.0.0.0:7100").unwrap();
+    let socket = UdpSocket::bind("10.0.0.9:7200").unwrap();
+    for _ in 0..3 {
+        let _ = ("db.internal", 9400).to_socket_addrs();
+        let _ = socket.send_to(b"ping", "10.0.0.5:7100");
+        draw_entropy();
+        let _ = SystemTime::now();
+    }
+    if restarted {
+        println!("RESTARTED");
+        return;
+    }
+    File::create("/marker").unwrap();
+    println!("NO_CRASH");
+}
+"#;
+
+    /// Every fault plane's report covers every incarnation of a crash-restart
+    /// run: a run that crashes once and repeats the same work in its restarted
+    /// incarnation reports twice the opportunities of a run that does that work
+    /// once, so no incarnation's counts are lost or counted twice, and its
+    /// replay reports the same.
+    #[test]
+    fn every_fault_plane_counts_every_incarnation() {
+        let guest = build_guest("planes-across-crash", PLANES_ACROSS_CRASH_SOURCE);
+        // The crash lands right after the marker's creation, so the restarted
+        // incarnation sees it and repeats only the plane work.
+        let creates_marker =
+            |op: &Operation| matches!(op, Operation::FsOpen { path, .. } if path == "/marker");
+        let (permille, seeds) = crash_after(&guest, &[], 0, creates_marker, 1);
+        let knobs = [
+            "--seed",
+            &seeds[0],
+            "--dns-entry",
+            "db.internal=10.0.0.5",
+            "--dns-fail-permille",
+            "500",
+            "--net-drop-permille",
+            "500",
+            // Every request fails, so the pool is never found ready and every
+            // request stays eligible.
+            "--entropy-fail-permille",
+            "1000",
+            "--epoch-jump-nanos",
+            "1000000",
+            "--format",
+            "json",
+        ];
+        let replay = |trace: &Path| {
+            let replayed = guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]);
+            let replayed: serde_json::Value = serde_json::from_slice(&replayed.stdout).unwrap();
+            assert_eq!(replayed["result"], "ok", "{replayed:#}");
+            replayed
+        };
+        let run = |name: &str, extra: &[&str]| {
+            let trace = guest.dir.path().join(name);
+            let mut arguments = knobs.to_vec();
+            arguments.extend_from_slice(extra);
+            arguments.extend(["--record", trace.to_str().unwrap()]);
+            let recorded = run_envelope(&guest, &arguments);
+            let replayed = replay(&trace);
+            (recorded, replayed)
+        };
+        let (once, once_replayed) = run("once.patina", &[]);
+        assert!(
+            once["stdout"].as_str().unwrap().contains("NO_CRASH"),
+            "{once:#}"
+        );
+        let (restarted, restarted_replayed) =
+            run("restarted.patina", &["--process-crash-permille", &permille]);
+        assert_eq!(
+            restarted["crash_restart"]["terminal_outcome"]["kind"], "completed_after_restart",
+            "{restarted:#}"
+        );
+        assert!(
+            restarted["stdout"].as_str().unwrap().contains("RESTARTED"),
+            "{restarted:#}"
+        );
+
+        let count = |envelope: &serde_json::Value, plane: &str, opportunities: &str| {
+            envelope["fault_reports"][plane][opportunities].as_u64()
+        };
+        let mut planes = vec![
+            ("dns", "resolutions"),
+            ("net", "send_ops"),
+            ("clock", "reads"),
+        ];
+        if cfg!(target_os = "linux") {
+            planes.push(("entropy", "requests"));
+        }
+        for (plane, opportunities) in planes {
+            let single = count(&once, plane, opportunities)
+                .unwrap_or_else(|| panic!("no {plane} report: {once:#}"));
+            assert!(single > 0, "{plane}: {once:#}");
+            assert_eq!(
+                count(&restarted, plane, opportunities),
+                Some(2 * single),
+                "{plane}: {restarted:#}"
+            );
+            // A replay reports, across the restart, twice what a replay of
+            // the crash-free run reports.
+            assert_eq!(
+                count(&restarted_replayed, plane, opportunities),
+                count(&once_replayed, plane, opportunities).map(|single| 2 * single),
+                "{plane}: {restarted_replayed:#}"
+            );
+        }
+    }
 }

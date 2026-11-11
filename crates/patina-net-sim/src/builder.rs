@@ -18,9 +18,17 @@ pub struct SimNetBuilder {
     duplicate_permille: u16,
     connect_refuse_permille: u16,
     reset_permille: u16,
+    counts: FaultCounts,
 }
 
 impl SimNetBuilder {
+    /// Carry on from an earlier incarnation's fault counts, so the report
+    /// covers the whole run.
+    pub fn resume_counts(mut self, counts: patina_dst_driver_api::NetFaultTally) -> Self {
+        self.counts = counts;
+        self
+    }
+
     pub fn base_latency_nanos(mut self, value: u64) -> Self {
         self.base_latency_nanos = value;
         self
@@ -156,7 +164,7 @@ impl SimNetBuilder {
             duplicate_permille: self.duplicate_permille,
             connect_refuse_permille: self.connect_refuse_permille,
             reset_permille: self.reset_permille,
-            counts: FaultCounts::default(),
+            counts: self.counts,
         })
     }
 }

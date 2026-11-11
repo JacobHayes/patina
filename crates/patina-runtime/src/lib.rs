@@ -217,7 +217,7 @@ pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RT_RESTART_REALTIME_NANOS";
 
 /// The crashed incarnation's fault accounting ([`FaultCarry::encode`]): set by
 /// the native supervisor, from the handoff, for every restarted incarnation, so
-/// the run's fault report covers every incarnation.
+/// the run's fault reports cover every incarnation.
 pub const ENV_RESTART_FAULTS: &str = "PATINA_RT_RESTART_FAULTS";
 
 pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";

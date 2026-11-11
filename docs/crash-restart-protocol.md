@@ -49,7 +49,7 @@ The crash follows incarnation 0's last decision, whatever operation that is. The
 - the crash kind;
 - the consumed trace state (operation count and lifecycle order);
 - the realtime the crashed incarnation's clock had reached;
-- the crashed incarnation's filesystem fault counts (see "Fault reports" below);
+- the crashed incarnation's fault counts (see "Fault reports" below);
 - the bounded canonical `FsSnapshot` payload;
 - a domain-separated SHA-256 snapshot digest;
 - a domain-separated keyed SHA-256 seal.
@@ -87,7 +87,15 @@ Incarnation 0 reports its crash on a supervisor-owned pipe (`PATINA_RT_CRASH_REP
 
 ### Fault reports
 
-A run's filesystem fault report covers every incarnation. The handoff carries the crashed incarnation's filesystem fault counts (operations eligible, errors and short transfers applied, short-transfer draws, delays applied, and which `--fs-error-at` targets landed), and the supervisor hands them to the restarted incarnation (`PATINA_RT_RESTART_FAULTS`), whose counts carry on from them. Only counts travel: `PATINA_FS_FAULT_REPORT`, the facts and the vacuity and never-landed verdicts are judged over the sums, so a target that landed in any incarnation is not reported as missed. A target's ordinal counts within each incarnation, and each incarnation applies every target to its own operations. The other fault planes (network, DNS, entropy, clock) report the last incarnation only.
+A run's fault reports cover every incarnation. The handoff carries the crashed incarnation's fault counts, and the supervisor hands them to the restarted incarnation (`PATINA_RT_RESTART_FAULTS`), whose counts carry on from them:
+
+- filesystem: operations eligible, errors and short transfers applied, short-transfer draws, delays applied, and which `--fs-error-at` targets landed;
+- network: the network driver's send, delivery, connect and stream opportunities and the drops, jitter, latency, duplicates, refusals, resets and partition blocks applied;
+- DNS: resolutions, failures and latency applied;
+- entropy: eligible requests and failures applied;
+- clock: realtime reads and epoch jumps applied.
+
+Only counts travel: the `PATINA_*_FAULT_REPORT` lines, the facts and the vacuity and never-landed verdicts are judged over the sums, so a target that landed in any incarnation is not reported as missed. A target's ordinal counts within each incarnation, and each incarnation applies every target to its own operations. A replay carries the counts its own replayed incarnation 0 kept, never the recording's, so it reports what a replay of the same work without the crash would, summed over the incarnations.
 
 ### A crash that fails
 

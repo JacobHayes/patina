@@ -538,6 +538,11 @@ impl RuntimeBuilder {
         for (left, right) in &net.partitions {
             network = network.partition(left.clone(), right.clone());
         }
+        // A restarted incarnation's network faults carry on from the crashed
+        // one's counts.
+        if let Some(counts) = self.config.carried_faults.net() {
+            network = network.resume_counts(counts);
+        }
         let network = Box::new(network.build().map_err(RuntimeError::Effect)?);
 
         // Build the liveness watchdog before the Context literal consumes
@@ -653,14 +658,14 @@ impl RuntimeBuilder {
             dns_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_FAULT)),
             dns_latency_nanos: self.config.faults.dns.latency_nanos,
             dns_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_LATENCY)),
-            dns_report: patina_dst_driver_api::DnsFaultReport::default(),
+            dns_report: self.config.carried_faults.context_reports().0,
             entropy_fail_permille: self.config.faults.entropy.fail_permille,
             entropy_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::ENTROPY_FAULT)),
-            entropy_report: patina_dst_driver_api::EntropyFaultReport::default(),
+            entropy_report: self.config.carried_faults.context_reports().1,
             entropy_pool_ready: false,
             epoch_jump_nanos: self.config.faults.clock.epoch_jump_nanos,
             epoch_jump_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::EPOCH_JUMP)),
-            clock_report: patina_dst_driver_api::ClockFaultReport::default(),
+            clock_report: self.config.carried_faults.context_reports().2,
             schedule: ScheduleTracker::default(),
             buggify: Buggify::new(self.config.buggify, run_seed, root_seed),
             verdicts: Vec::new(),

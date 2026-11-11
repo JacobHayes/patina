@@ -1,6 +1,6 @@
 //! Network driver operations and socket readiness.
 
-use crate::{DriverResult, NetFaultReport};
+use crate::{DriverResult, NetFaultReport, NetFaultTally};
 use patina_dst_abi::{Datagram, EffectError, SendReport, ShutdownHow, SocketId, TcpAccepted};
 
 /// Level-triggered readiness of a virtual socket at a given virtual instant,
@@ -189,6 +189,13 @@ pub trait NetDriver: Send {
     /// vacuous. A pure `&self` inspection read once at run finalization.
     /// Wrappers forward it so a wrapped fault-modeling driver stays visible.
     fn fault_report(&self) -> Option<NetFaultReport> {
+        None
+    }
+
+    /// The fault plane's counts so far ([`NetFaultTally`]), which a crashed
+    /// incarnation hands the next one. `None` for a driver that models no
+    /// faults.
+    fn fault_tally(&self) -> Option<NetFaultTally> {
         None
     }
 

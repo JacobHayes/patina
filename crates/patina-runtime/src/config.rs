@@ -199,8 +199,8 @@ pub struct RuntimeConfig {
     /// What a replayed crash takes down
     /// ([`RuntimeConfig::with_replayed_crash_kind`]).
     pub(super) replayed_crash_kind: Option<patina_dst_abi::CrashKind>,
-    /// The earlier incarnations' filesystem fault accounting, which this
-    /// one's report carries on from ([`RuntimeConfig::with_carried_faults`]).
+    /// The earlier incarnations' fault accounting, which this one's fault
+    /// reports carry on from ([`RuntimeConfig::with_carried_faults`]).
     pub(super) carried_faults: crate::FaultCarry,
 }
 
@@ -688,10 +688,10 @@ impl RuntimeConfig {
         self
     }
 
-    /// What the crashed incarnation's filesystem fault plane did (its
-    /// handoff's accounting), for a restarted incarnation: its filesystem
-    /// fault report then covers the whole run, and a target that landed
-    /// before the crash is not reported as missed.
+    /// What the crashed incarnation's fault planes did (its handoff's
+    /// accounting), for a restarted incarnation: its fault reports then cover
+    /// the whole run, and a target that landed before the crash is not
+    /// reported as missed.
     pub fn with_carried_faults(mut self, faults: crate::FaultCarry) -> Self {
         self.carried_faults = faults;
         self

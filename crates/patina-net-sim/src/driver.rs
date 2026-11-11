@@ -12,34 +12,7 @@ use patina_dst_driver_api::{
     range_vacuity_is_diagnosable, vacuity_is_diagnosable, wildcard_bind_keys,
 };
 
-/// What the network fault plane observed this run, per class. Kept beside the
-/// knobs rather than inside [`NetFaultReport`] because the report also carries
-/// the derived `*_vacuity_diagnosable` verdicts, which are a pure function of
-/// these counts and the configured rates.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct FaultCounts {
-    /// Datagram sends that reached the fault-decision point (not pre-empted by a
-    /// partition) plus `tcp_send`s that enqueued a segment.
-    pub(super) send_ops: u64,
-    /// Datagram sends a drop did not pre-empt: the only draws duplication
-    /// takes, so the duplicate class's vacuity is judged against these alone.
-    datagram_send_ops: u64,
-    /// Deliveries queued (each datagram copy, each TCP segment): the draws
-    /// jitter and the base latency take. A dropped datagram queues none.
-    pub(super) delivery_ops: u64,
-    pub(super) drops_applied: u64,
-    pub(super) jitter_applied: u64,
-    pub(super) latency_applied: u64,
-    duplicates_applied: u64,
-    /// `tcp_connect` calls that would otherwise have succeeded.
-    connect_ops: u64,
-    connects_refused: u64,
-    /// Established-stream operations that moved data.
-    pub(super) stream_ops: u64,
-    pub(super) resets_injected: u64,
-    /// Sends and connects blocked by a configured partition.
-    partition_blocks: u64,
-}
+pub(super) use patina_dst_driver_api::NetFaultTally as FaultCounts;
 
 impl NetDriver for SimNet {
     fn bind(&mut self, address: &str) -> DriverResult<SocketId> {
@@ -721,6 +694,12 @@ impl NetDriver for SimNet {
             });
         }
         Err(invalid_socket(socket))
+    }
+
+    /// The raw counts behind [`Self::fault_report`], present exactly when it
+    /// is, for a restarted incarnation to carry on from.
+    fn fault_tally(&self) -> Option<patina_dst_driver_api::NetFaultTally> {
+        self.fault_report().map(|_| self.counts)
     }
 
     /// Report whenever a network knob was live, so the run is self-describing
