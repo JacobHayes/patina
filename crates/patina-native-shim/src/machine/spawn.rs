@@ -8,25 +8,37 @@
 //! to the table and to its scheduler as a runnable foreign task. The child
 //! runs when the scheduler picks it.
 //!
+//! The child's descriptors are the caller's that stay open across exec,
+//! after the spawn's file actions (`dup2`, `close`, `closefrom`, `chdir`,
+//! `fchdir`), each as the same description: the run's standard streams and
+//! the memory devices are the child's own, a file is the root's open file
+//! (a duplicate of the root's handle, its offset shared), and a pipe end is
+//! the root's description, which the child reaches through the hub
+//! ([`super::pipes`]). The child asks for them before it is ready
+//! ([`install_plan`]).
+//!
 //! A recording root keeps each child's recording (the child appends each
 //! decision to a log the hub maps, [`super::log`]); a replaying one hands
 //! each child its recorded timeline as a trace of its own, in a memory file.
 //!
 //! What this slice does not model stops the run by name (`unsupported`,
-//! `not_modeled`): a spawn from a child, file actions (a `chdir` action included), a caller whose
-//! descriptors 0, 1 and 2 are not the run's own standard streams (a staged
-//! `--stdin` included: the child would read EOF) or that holds any other
-//! descriptor open across exec, spawn attributes
-//! other than the signal mask and default dispositions a fresh process has
-//! anyway, a signal mask that is not empty, a run the supervisor gave no
-//! launch channel (crash-restart and the scheduling-policy knobs),
-//! arguments or environment that are not UTF-8, and a launch request (the
-//! arguments and environment, encoded) over [`LAUNCH_LIMIT`].
+//! `not_modeled`): a spawn from a child, a file action that opens a file or
+//! one glibc's own code added, a descriptor of another kind (a socket, a
+//! FIFO, a directory, an epoll instance, ...) open across exec, spawn
+//! attributes other than the signal mask and default dispositions a fresh
+//! process has anyway, a signal mask that is not empty, a run the
+//! supervisor gave no launch channel (crash-restart and the
+//! scheduling-policy knobs), arguments or environment that are not UTF-8,
+//! and a launch request (the arguments and environment, encoded) over
+//! [`LAUNCH_LIMIT`].
 
 use super::*;
+use crate::fdtable::{DescId, FdKind};
 use core::ffi::{CStr, c_char};
 use patina_dst_runtime::{ENV_LAUNCH_FD, ExecutionMode};
 use std::collections::BTreeMap;
+use std::ffi::CString;
+use std::sync::atomic::AtomicU64;
 
 /// `WNOHANG`, `WNOWAIT` and `WEXITED`.
 const WNOHANG: u32 = 0x0000_0001;
@@ -48,6 +60,9 @@ const LAUNCH_LIMIT: usize = 120 << 10;
 /// Tasks of this process parked in a wait for a child.
 static WAITERS: SpinMutex<Vec<TaskId>> = SpinMutex::new(Vec::new());
 
+/// Each new child's descriptor plan, until it asks for it.
+pub(super) static PLANS: SpinMutex<BTreeMap<i32, Vec<u8>>> = SpinMutex::new(BTreeMap::new());
+
 /// What a spawn entry was handed, as the caller handed it.
 pub(crate) struct Spawn {
     pub(crate) symbol: &'static CStr,
@@ -57,6 +72,125 @@ pub(crate) struct Spawn {
     pub(crate) attr: *const libc::posix_spawnattr_t,
     pub(crate) argv: *const *mut c_char,
     pub(crate) envp: *const *mut c_char,
+}
+
+/// One file action a spawn carries out in its child, as the caller added
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) enum Action {
+    Dup2 { fd: c_int, to: c_int },
+    Close(c_int),
+    Open,
+    Chdir(CString),
+    Fchdir(c_int),
+    Closefrom(c_int),
+}
+
+/// The actions of each live actions object, by the id its `init` wrote
+/// into it ([`ACTIONS_ID`]): glibc's own action array stays empty.
+static ACTIONS: SpinMutex<BTreeMap<u64, Vec<Action>>> = SpinMutex::new(BTreeMap::new());
+static NEXT_ACTIONS: AtomicU64 = AtomicU64::new(1);
+/// Where in glibc's actions object (its `__pad`, which glibc never reads)
+/// the shim keeps the object's id.
+const ACTIONS_ID: usize = 16;
+
+/// `posix_spawn_file_actions_init` on a zeroed object: it gets an id and an
+/// empty action list.
+///
+/// # Safety
+/// `acts` is null or a writable actions object.
+pub(crate) unsafe fn actions_init(acts: *mut libc::posix_spawn_file_actions_t) {
+    if acts.is_null() {
+        return;
+    }
+    let id = NEXT_ACTIONS.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: inside the object (glibc's is 80 bytes; the id fills 8 of its
+    // 64 padding bytes).
+    unsafe {
+        acts.cast::<u8>()
+            .add(ACTIONS_ID)
+            .cast::<u64>()
+            .write_unaligned(id)
+    };
+    ACTIONS.lock().insert(id, Vec::new());
+}
+
+/// The id `init` wrote into `acts`, 0 for none.
+///
+/// # Safety
+/// `acts` is a live actions object.
+unsafe fn actions_id(acts: *const libc::posix_spawn_file_actions_t) -> u64 {
+    // SAFETY: inside the object, per the contract.
+    unsafe {
+        acts.cast::<u8>()
+            .add(ACTIONS_ID)
+            .cast::<u64>()
+            .read_unaligned()
+    }
+}
+
+/// Add `action` to `acts`: 0, or `EINVAL` for an object no `init` of the
+/// shim's made.
+///
+/// # Safety
+/// `acts` is null or a live actions object.
+pub(crate) unsafe fn actions_add(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    action: Action,
+) -> c_int {
+    if acts.is_null() {
+        return libc::EINVAL;
+    }
+    // SAFETY: per the contract.
+    let id = unsafe { actions_id(acts) };
+    match ACTIONS.lock().get_mut(&id) {
+        Some(actions) => actions.push(action),
+        None => return libc::EINVAL,
+    }
+    0
+}
+
+/// `posix_spawn_file_actions_destroy`: the object's actions are gone.
+///
+/// # Safety
+/// `acts` is null or a live actions object.
+pub(crate) unsafe fn actions_destroy(acts: *mut libc::posix_spawn_file_actions_t) {
+    if !acts.is_null() {
+        // SAFETY: per the contract.
+        let id = unsafe { actions_id(acts) };
+        ACTIONS.lock().remove(&id);
+    }
+}
+
+/// The program `posix_spawnp` runs for `file`: `file` itself when it names
+/// a path (holds a `/`), else the first admitted program among the
+/// caller's `PATH` directories (glibc's default, `/bin:/usr/bin`, when it
+/// has none). `None` when no candidate is admitted, and the caller refuses
+/// `file` by name: the search never looks at the host.
+#[cfg(patina_posix_exports)]
+pub(crate) fn search(file: &CStr) -> Option<CString> {
+    use crate::admission::{Admission, admitted_program};
+    let bytes = file.to_bytes();
+    if bytes.is_empty() || bytes.contains(&b'/') {
+        return None;
+    }
+    // SAFETY: a static name; the read follows getenv's contract.
+    let path = unsafe { crate::posix_env::env_lookup(c"PATH".as_ptr()) };
+    let path = if path.is_null() {
+        b"/bin:/usr/bin".to_vec()
+    } else {
+        // SAFETY: the environment's value, a C string.
+        unsafe { CStr::from_ptr(path) }.to_bytes().to_vec()
+    };
+    path.split(|byte| *byte == b':').find_map(|directory| {
+        let mut candidate = directory.to_vec();
+        if !candidate.is_empty() && !candidate.ends_with(b"/") {
+            candidate.push(b'/');
+        }
+        candidate.extend_from_slice(bytes);
+        let candidate = CString::new(candidate).ok()?;
+        (!matches!(admitted_program(&candidate), Admission::Unadmitted)).then_some(candidate)
+    })
 }
 
 /// `posix_spawn`/`posix_spawnp` of `spawn.path`: `None` when the program is
@@ -82,9 +216,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
         refuse(spawn, "in a run the supervisor gives no launch channel");
     };
     // SAFETY: the caller's actions object, per the entry's contract.
-    if !spawn.file_actions.is_null() && unsafe { actions_used(spawn.file_actions) } != 0 {
-        refuse(spawn, "with file actions");
-    }
+    let actions = unsafe { file_actions(spawn) };
     if thread::children_reap_themselves() {
         refuse(spawn, "while SIGCHLD is ignored or carries SA_NOCLDWAIT");
     }
@@ -93,9 +225,6 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             spawn,
             &format!("after the guest used {what}, which a child would not share"),
         );
-    }
-    if let Some(what) = descriptor_gap() {
-        refuse(spawn, &what);
     }
     if !spawn.attr.is_null() {
         // SAFETY: the caller's attributes object, per the entry's contract.
@@ -123,14 +252,49 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     if let Err(message) = thread::activate() {
         protocol_fatal_text(&message);
     }
+    // The child starts in the caller's working directory, as its actions
+    // leave it, with the caller's descriptors as its actions leave them.
+    let cwd = crate::paths::cwd_path().unwrap_or_else(|errno| {
+        protocol_fatal_text(&format!("the working directory is unreadable ({errno})"))
+    });
+    let (cwd, table) = match arrange(spawn, &actions, cwd) {
+        Ok(arranged) => arranged,
+        // The child would fail before it ran anything: the spawn's answer.
+        Err(errno) => return Some(errno),
+    };
+    // A file the child holds is the root's open file: a handle of its own
+    // on it, which the hub closes when the child ends if the child did not.
+    let mut files = BTreeMap::new();
+    for shared in table.values() {
+        if let Shared::File { handle, .. } = *shared
+            && !files.contains_key(&handle)
+        {
+            match crate::with_context(|context| context.fs_dup(Fd(handle))) {
+                Ok(duplicate) => {
+                    files.insert(handle, duplicate);
+                }
+                Err(errno) => {
+                    for duplicate in files.into_values() {
+                        let _ = crate::with_context(|context| context.fs_close(duplicate));
+                    }
+                    return Some(errno);
+                }
+            }
+        }
+    }
     let pid = allocate_id();
     let (pgid, sid) = crate::identity::add_child(pid);
     let parent = crate::patina_pid();
     let seed = context(|context| Ok(child_seed(context.root_seed(), pid)));
-    // The child starts in the caller's working directory.
-    let cwd = crate::paths::cwd_path().unwrap_or_else(|errno| {
-        protocol_fatal_text(&format!("the working directory is unreadable ({errno})"))
-    });
+    let plan = plan(pid, &table, &files);
+    if !files.is_empty() {
+        HANDLES
+            .lock()
+            .entry(pid)
+            .or_default()
+            .extend(files.values());
+    }
+    PLANS.lock().insert(pid, plan);
     let [hub, child] = socketpair();
     // The launch request: the admitted artifact by its index in the
     // supervisor's list, and the child's arguments, environment, place in
@@ -276,24 +440,230 @@ fn refuse(spawn: &Spawn, what: &str) -> ! {
     crate::host_abort(crate::RunStop::unmodeled(&[detail.as_bytes()]))
 }
 
-/// How the caller's descriptor table differs from what a child is given
-/// (the run's own standard streams at 0, 1 and 2, nothing else), if it does:
-/// a child would not see what the caller arranged, so the spawn refuses.
-fn descriptor_gap() -> Option<String> {
-    use crate::fdtable::FdKind;
-    let table = crate::state::fd_table().lock();
-    for (number, kind) in [(0, FdKind::Stdin), (1, FdKind::Stdout), (2, FdKind::Stderr)] {
-        if table.kind(number) != Some(kind) {
-            return Some(format!(
-                "with descriptor {number} other than the run's own standard stream"
-            ));
+/// What a child is handed at one of its descriptors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shared {
+    /// The run's standard streams and the memory devices: the child's own
+    /// description of the same kind and handle.
+    Own(FdKind, u64, u32),
+    /// The root's open file `handle`, through a handle of the child's own.
+    File { handle: u64, status: u32 },
+    /// The root's pipe end, description `desc`, the reading end when `read`.
+    Pipe {
+        desc: DescId,
+        read: bool,
+        status: u32,
+    },
+}
+
+/// The spawn's file actions, or a refusal of what this slice does not
+/// carry out.
+///
+/// # Safety
+/// `spawn.file_actions` is null or a live actions object.
+unsafe fn file_actions(spawn: &Spawn) -> Vec<Action> {
+    if spawn.file_actions.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: per the contract.
+    let (id, used) = unsafe {
+        (
+            actions_id(spawn.file_actions),
+            actions_used(spawn.file_actions),
+        )
+    };
+    let actions = ACTIONS.lock().get(&id).cloned().unwrap_or_default();
+    // An action the shim did not record (one glibc's own code added) is
+    // one it cannot carry out.
+    if actions.len() != used as usize {
+        refuse(spawn, "with a file action Patina does not record");
+    }
+    if actions.iter().any(|action| matches!(action, Action::Open)) {
+        refuse(spawn, "with a file action that opens a file");
+    }
+    actions
+}
+
+/// Carry out the spawn's `actions` on the caller's descriptor table, as the
+/// child would before it execs, from working directory `cwd`: the child's
+/// working directory and what each of its descriptors is. `Err(errno)`
+/// when an action fails (the spawn answers it, and no child runs); a
+/// descriptor of a kind no child shares refuses the spawn.
+fn arrange(
+    spawn: &Spawn,
+    actions: &[Action],
+    mut cwd: String,
+) -> Result<(String, BTreeMap<c_int, Shared>), c_int> {
+    // Every open number, its description and its close-on-exec bit.
+    let mut table: BTreeMap<c_int, (crate::fdtable::Resolved, bool)> = {
+        let table = crate::state::fd_table().lock();
+        table
+            .numbers()
+            .into_iter()
+            .filter_map(|number| Some((number, (table.resolve(number)?, false))))
+            .map(|(number, (resolved, _))| (number, (resolved, resolved.cloexec)))
+            .collect()
+    };
+    for action in actions {
+        match action {
+            Action::Dup2 { fd, to } => {
+                // The copy stays open across exec; glibc's `dup2` of a
+                // number onto itself clears its close-on-exec bit.
+                let (resolved, _) = *table.get(fd).ok_or(libc::EBADF)?;
+                table.insert(*to, (resolved, false));
+            }
+            Action::Close(fd) => {
+                table.remove(fd);
+            }
+            Action::Closefrom(from) => table.retain(|number, _| number < from),
+            Action::Chdir(path) => {
+                let path = path.to_str().map_err(|_| libc::ENOENT)?;
+                let path = if path.starts_with('/') {
+                    path.to_owned()
+                } else {
+                    format!("{}/{path}", cwd.trim_end_matches('/'))
+                };
+                cwd = crate::paths::searchable_directory(crate::paths::AT_FDCWD, &path)?.path;
+            }
+            Action::Fchdir(fd) => {
+                let (resolved, _) = *table.get(fd).ok_or(libc::EBADF)?;
+                if resolved.kind != FdKind::Dir {
+                    return Err(libc::ENOTDIR);
+                }
+                cwd = crate::paths::node_path(Fd(resolved.handle))?;
+            }
+            Action::Open => unreachable!("refused with the actions"),
         }
     }
-    table
-        .numbers()
+    let mut shared = BTreeMap::new();
+    for (number, (resolved, cloexec)) in table {
+        if cloexec {
+            continue;
+        }
+        let what = match resolved.kind {
+            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::MemDevice => {
+                Shared::Own(resolved.kind, resolved.handle, resolved.status)
+            }
+            FdKind::File => Shared::File {
+                handle: resolved.handle,
+                status: resolved.status,
+            },
+            FdKind::Pipe if thread::fifo_end_ino(resolved.handle).is_none() => Shared::Pipe {
+                desc: resolved.desc,
+                read: resolved.status & crate::O_WRITE == 0,
+                status: resolved.status,
+            },
+            FdKind::Pipe => refuse(
+                spawn,
+                &format!("with descriptor {number}, a FIFO, open across exec"),
+            ),
+            other => refuse(
+                spawn,
+                &format!("with descriptor {number} ({other:?}) open across exec"),
+            ),
+        };
+        shared.insert(number, what);
+    }
+    Ok((cwd, shared))
+}
+
+/// Child `pid`'s descriptor plan, as [`install_plan`] reads it: one entry
+/// per description the child holds, and each number's description. Each
+/// pipe the child holds is a reference of its own on the root's
+/// description, taken here; each file is the duplicate `files` names.
+fn plan(pid: i32, table: &BTreeMap<c_int, Shared>, files: &BTreeMap<u64, Fd>) -> Vec<u8> {
+    let mut distinct: Vec<Shared> = Vec::new();
+    let mut numbers = Vec::new();
+    for (number, shared) in table {
+        let index = distinct
+            .iter()
+            .position(|known| known == shared)
+            .unwrap_or_else(|| {
+                distinct.push(*shared);
+                distinct.len() - 1
+            });
+        numbers.push(serde_json::json!([number, index]));
+    }
+    let descriptions: Vec<serde_json::Value> = distinct
+        .iter()
+        .map(|shared| match *shared {
+            Shared::Own(kind, handle, status) => {
+                serde_json::json!({"kind": kind.wire(), "handle": handle, "status": status})
+            }
+            Shared::File { handle, status } => serde_json::json!({
+                "kind": FdKind::File.wire(),
+                "handle": files[&handle].0,
+                "status": status,
+            }),
+            Shared::Pipe { desc, read, status } => {
+                super::pipes::retain(pid, desc);
+                serde_json::json!({
+                    "kind": FdKind::Pipe.wire(),
+                    "remote": desc,
+                    "read": read,
+                    "status": status,
+                })
+            }
+        })
+        .collect();
+    serde_json::to_vec(&serde_json::json!({"descriptions": descriptions, "numbers": numbers}))
+        .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a plan: {error}")))
+}
+
+/// A child, before it is ready: its descriptor table becomes what its
+/// spawn arranged.
+pub(super) fn install_plan() {
+    send(channel(), &Message::Plan);
+    let len = match receive(channel()) {
+        Some(Message::PlanReply { len }) => len,
+        Some(other) => protocol_fatal("a descriptor plan", &other),
+        None => orphaned(),
+    };
+    let bytes = receive_payload(channel(), len).unwrap_or_else(|| orphaned());
+    let plan: serde_json::Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|error| protocol_fatal_text(&format!("decoding a plan: {error}")));
+    let field =
+        |value: &serde_json::Value, name: &str| value.get(name).and_then(serde_json::Value::as_u64);
+    let kinds = [
+        FdKind::Stdin,
+        FdKind::Stdout,
+        FdKind::Stderr,
+        FdKind::File,
+        FdKind::MemDevice,
+        FdKind::Pipe,
+    ];
+    let descriptions: Vec<(FdKind, u64, u32)> = plan["descriptions"]
+        .as_array()
         .into_iter()
-        .find(|&number| number > 2 && table.cloexec(number) == Ok(false))
-        .map(|number| format!("with descriptor {number} open across exec"))
+        .flatten()
+        .map(|description| {
+            let kind = field(description, "kind")
+                .and_then(|wire| kinds.into_iter().find(|kind| kind.wire() as u64 == wire))
+                .unwrap_or_else(|| protocol_fatal_text("a plan's descriptor of no kind"));
+            let status = field(description, "status").unwrap_or_default() as u32;
+            let handle = match (kind, field(description, "remote")) {
+                (FdKind::Pipe, Some(remote)) => {
+                    let read = description["read"].as_bool().unwrap_or_default();
+                    thread::remote_end(remote, read) as u64
+                }
+                _ => field(description, "handle").unwrap_or_default(),
+            };
+            (kind, handle, status)
+        })
+        .collect();
+    let numbers: Vec<(c_int, usize)> = plan["numbers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some((entry[0].as_i64()? as c_int, entry[1].as_u64()? as usize)))
+        .collect();
+    let released = crate::state::fd_table()
+        .lock()
+        .replace(&descriptions, &numbers)
+        .unwrap_or_else(|errno| protocol_fatal_text(&format!("installing a plan ({errno})")));
+    for release in released {
+        let _ = crate::state::release_description(release);
+    }
 }
 
 /// glibc's `posix_spawn_file_actions_t.__used`: how many actions it holds.

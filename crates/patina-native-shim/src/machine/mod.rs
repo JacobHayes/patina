@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 pub(crate) mod fs;
 mod log;
+pub(crate) mod pipes;
 pub(crate) mod spawn;
 mod wire;
 
@@ -57,6 +58,24 @@ fn foreign_task(pid: i32) -> TaskId {
 /// Whether `task` stands for another process rather than a thread.
 pub(crate) fn is_foreign(task: TaskId) -> bool {
     task.0 >= FOREIGN_BASE
+}
+
+/// The foreign task that stands for child `pid` in the hub: what a root
+/// channel's interest of that child wakes.
+pub(crate) fn process_task(pid: c_int) -> TaskId {
+    foreign_task(pid)
+}
+
+/// A wait queue of this process named another process's foreign task (a
+/// child's interest in a root pipe): the machine wakes that process.
+pub(crate) fn remote_wake(task: TaskId) {
+    pipes::woke(Some(task));
+}
+
+/// A task of this process woke: what a child's request the hub serves now
+/// says it did to the rest of the machine.
+pub(crate) fn note_wake() {
+    pipes::woke(None);
 }
 
 const ROLE_SINGLE: u8 = 0;
@@ -249,6 +268,8 @@ pub(crate) fn child_start() {
         protocol_fatal_text(&message);
     }
     context(|context| context.task_foreign(ELSEWHERE, ForeignState::Parked));
+    // Its descriptors, as its spawn arranged them.
+    spawn::install_plan();
     // A recording child: the root keeps its recording, under the metadata
     // its runtime records with.
     if let Some(metadata) = context(|context| Ok(context.machine_recording_metadata())) {
@@ -470,6 +491,27 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
             Some(Message::Stop { len }) => {
                 let record = receive_payload(channel, len)?;
                 child_stopped(pid, &record);
+            }
+            Some(Message::Pipe { len }) => {
+                let request = receive_payload(channel, len)?;
+                let answer = pipes::serve(pid, &request);
+                reply(
+                    channel,
+                    Message::PipeReply {
+                        len: answer.len() as u64,
+                    },
+                    &answer,
+                )?;
+            }
+            Some(Message::Plan) => {
+                let plan = spawn::PLANS.lock().remove(&pid).unwrap_or_default();
+                reply(
+                    channel,
+                    Message::PlanReply {
+                        len: plan.len() as u64,
+                    },
+                    &plan,
+                )?;
             }
             Some(message) => return Some(message),
             None => return None,
@@ -783,6 +825,9 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
     });
     match notify {
         Notify::Parent => {
+            // What it held of the root's descriptions is released: the
+            // last writer gone, a reader sees end of file.
+            pipes::release_all(pid);
             thread::child_changed(pid, status);
             spawn::wake_waiters();
         }
@@ -994,9 +1039,15 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
         let (now, state, carry) = hand_over(ELSEWHERE);
         send(channel(), &Message::Yield { now, state, carry });
         let (now, view, carry) = await_resume();
-        let local = context(|context| {
+        context(|context| {
             context.advance_to(now)?;
             context.import_machine_carry(carry);
+            Ok(())
+        });
+        // Whatever the rest of the machine did meanwhile, each task parked
+        // on a pipe the root holds looks again.
+        thread::wake_remote_waiters();
+        let local = context(|context| {
             // Whether a task of this process is runnable: no timer counts.
             let local = context.process_view(Some(ELSEWHERE), None) == ForeignState::Runnable;
             if !local {

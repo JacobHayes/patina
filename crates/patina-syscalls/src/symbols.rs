@@ -1078,6 +1078,12 @@ symbol_rows! {
         SymbolStatus::Deny("process"),
     ),
     s(
+        "posix_spawn",
+        Platform::Both,
+        Serves::Syscalls(&["clone3", "execve"]),
+        SymbolStatus::Deny("process"),
+    ),
+    s(
         "pidfd_spawnp",
         Platform::Linux,
         Serves::Syscalls(&["clone3", "execve"]),
@@ -1204,6 +1210,30 @@ symbol_rows! {
         Platform::Both,
         Serves::LibcOnly,
         SymbolStatus::Modeled,
+    ),
+    s(
+        "posix_spawn_file_actions_addfchdir_np",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "posix_spawn_file_actions_addclose",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "posix_spawn_file_actions_addclosefrom_np",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Modeled,
+    ),
+    s(
+        "posix_spawn_file_actions_addopen",
+        Platform::Linux,
+        Serves::LibcOnly,
+        SymbolStatus::Partial,
     ),
     s(
         "socket",

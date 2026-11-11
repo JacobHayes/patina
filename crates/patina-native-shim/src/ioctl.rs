@@ -124,10 +124,13 @@ pub unsafe fn patina_ioctl(raw_fd: c_int, request: u64, arg: *mut c_void) -> c_i
         },
         FIONREAD => match resolved.kind {
             FdKind::File => file_fionread(Fd(resolved.handle), arg),
-            FdKind::Pipe => match thread::pipe_queued(resolved.handle) {
-                Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
-                None => fail(ENOTTY),
-            },
+            FdKind::Pipe => {
+                thread::refuse_remote(resolved.handle, "FIONREAD");
+                match thread::pipe_queued(resolved.handle) {
+                    Some(queued) => put_int(arg, i32::try_from(queued).unwrap_or(i32::MAX)),
+                    None => fail(ENOTTY),
+                }
+            }
             // A standard stream's pipe holds nothing: standard input's is
             // empty with its writer gone, and the supervisor drains the
             // others' as they are written.

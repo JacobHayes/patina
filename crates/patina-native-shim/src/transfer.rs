@@ -77,6 +77,9 @@ fn stream(resolved: &Resolved) -> bool {
 /// The pipe a descriptor is, for a splice: an anonymous pipe's or a FIFO's
 /// end.
 fn pipe_of(resolved: &Resolved) -> Option<u64> {
+    if resolved.kind == FdKind::Pipe {
+        thread::refuse_remote(resolved.handle, "a splice");
+    }
     (resolved.kind == FdKind::Pipe)
         .then(|| thread::splice_pipe(resolved.handle))
         .flatten()

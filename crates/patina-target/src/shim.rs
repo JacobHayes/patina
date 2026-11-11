@@ -188,6 +188,7 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("fork", "process"),
     ("pidfd_getpid", "process"),
     ("pidfd_spawnp", "process"),
+    ("posix_spawn", "process"),
     ("posix_spawnp", "process"),
     // dynamic-loading: linked by extension loaders, never modeled. glibc's own
     // loads (NSS, iconv, the unwinder) go through its internal entry points,

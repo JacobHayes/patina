@@ -59,6 +59,12 @@ pub(crate) struct NetState {
     /// `eventfds`: an internal identity the descriptor table maps guest
     /// numbers onto, never a number the guest sees (see `next_handle`).
     pub(crate) next_handle: c_int,
+    /// A child process's tasks parked on a description the root holds (a
+    /// pipe the machine shares, `crate::machine`): the hub noted each
+    /// one's interest, and every resume of this process wakes them all to
+    /// look again.
+    #[cfg(target_os = "linux")]
+    pub(in crate::thread) remote_waiters: WaitQueue<VecDeque<TaskId>>,
 }
 
 impl NetState {
@@ -84,6 +90,8 @@ impl NetState {
             #[cfg(target_os = "linux")]
             eventfds: BTreeMap::new(),
             next_handle: 0,
+            #[cfg(target_os = "linux")]
+            remote_waiters: WaitQueue::new(),
         }
     }
 }
@@ -110,6 +118,15 @@ pub(crate) fn wake_all(waiters: Vec<TaskId>) {
             continue;
         }
         woken.push(task);
+        // Another process's interest in a description this one holds (a
+        // child's, noted by the hub): the machine wakes that process.
+        #[cfg(target_os = "linux")]
+        if crate::machine::is_foreign(task) {
+            crate::machine::remote_wake(task);
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        crate::machine::note_wake();
         lock_state().remove_wait(task);
         if let Err(message) = scheduler.wake(task) {
             fatal(&message);

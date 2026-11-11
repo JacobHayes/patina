@@ -58,6 +58,14 @@ pub(crate) struct PipeChannel {
     pub(crate) read_events: u64,
     /// Write-direction sequence: bumped on space creation / reader close.
     pub(crate) write_events: u64,
+    /// The machine's other processes (by pid) that found this channel
+    /// empty (`remote_readers`) or full (`remote_writers`) through the hub
+    /// and wait for it to change: woken, once each, where a parked task of
+    /// this process would be.
+    #[cfg(target_os = "linux")]
+    pub(crate) remote_readers: std::collections::BTreeSet<c_int>,
+    #[cfg(target_os = "linux")]
+    pub(crate) remote_writers: std::collections::BTreeSet<c_int>,
 }
 
 /// Real pipes carry a fixed-capacity kernel buffer (Linux's default is 64 KiB);
@@ -101,6 +109,10 @@ impl PipeChannel {
             fifo_ino: None,
             read_events: 0,
             write_events: 0,
+            #[cfg(target_os = "linux")]
+            remote_readers: std::collections::BTreeSet::new(),
+            #[cfg(target_os = "linux")]
+            remote_writers: std::collections::BTreeSet::new(),
         }
     }
 
@@ -185,6 +197,20 @@ pub(crate) struct PipeEnd {
     /// (`net.pipe_inodes`); `None` for a FIFO end, whose node is
     /// `fifo_ino`'s.
     inode: Option<u64>,
+    /// In a child process: the root's description this end stands for
+    /// (`crate::machine`), whose channel the root holds; every operation on
+    /// the bytes goes to the hub. `None` for an end of this process's own.
+    #[cfg(target_os = "linux")]
+    pub(crate) remote: Option<RemoteEnd>,
+}
+
+/// A child process's end of a pipe the root holds: the root's description
+/// (its id in the root's table) and which side this end is.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteEnd {
+    pub(crate) id: u64,
+    pub(crate) read: bool,
 }
 
 /// The node behind an anonymous pipe (both ends share one, on pipefs) or a
@@ -355,22 +381,45 @@ pub(crate) fn pipe_filesystem(fd: c_int) -> Option<u32> {
     })
 }
 
+/// The tasks waiting for `channel`'s bytes, and the machine's processes
+/// that are (each as its foreign task, which [`wake_all`] wakes through the
+/// hub).
 fn drain_channel_recv_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
     state
         .net
         .pipe_channels
         .get_mut(&channel)
-        .map(|channel| channel.recv_waiters.drain().collect())
+        .map(|channel| {
+            let waiters = channel.recv_waiters.drain();
+            #[cfg(target_os = "linux")]
+            let waiters = waiters.chain(remote_drain(&mut channel.remote_readers));
+            waiters.collect()
+        })
         .unwrap_or_default()
 }
 
+/// The tasks and processes waiting for room in `channel`.
 fn drain_channel_send_waiters(state: &mut ThreadRuntime, channel: u64) -> Vec<TaskId> {
     state
         .net
         .pipe_channels
         .get_mut(&channel)
-        .map(|channel| channel.send_waiters.drain().collect())
+        .map(|channel| {
+            let waiters = channel.send_waiters.drain();
+            #[cfg(target_os = "linux")]
+            let waiters = waiters.chain(remote_drain(&mut channel.remote_writers));
+            waiters.collect()
+        })
         .unwrap_or_default()
+}
+
+/// Each process in `pids`, as its foreign task, leaving `pids` empty.
+#[cfg(target_os = "linux")]
+fn remote_drain(pids: &mut std::collections::BTreeSet<c_int>) -> Vec<TaskId> {
+    core::mem::take(pids)
+        .into_iter()
+        .map(crate::machine::process_task)
+        .collect()
 }
 
 /// Create a simplex pipe: `read_fd_out` is the read end, `write_fd_out` the
@@ -420,6 +469,8 @@ pub unsafe fn patina_pipe(
             write_channel: None,
             fifo_ino: None,
             inode: Some(inode),
+            #[cfg(target_os = "linux")]
+            remote: None,
         },
     );
     state.net.pipe_ends.insert(
@@ -429,6 +480,8 @@ pub unsafe fn patina_pipe(
             write_channel: Some(channel),
             fifo_ino: None,
             inode: Some(inode),
+            #[cfg(target_os = "linux")]
+            remote: None,
         },
     );
     let nonblock = if nonblocking != 0 { O_NONBLOCK } else { 0 };
@@ -616,6 +669,8 @@ pub(crate) fn fifo_open(
             write_channel: write.then_some(channel_id),
             fifo_ino: Some(ino),
             inode: None,
+            #[cfg(target_os = "linux")]
+            remote: None,
         },
     );
     // The guest number is reserved BEFORE the rendezvous, as the kernel's
@@ -789,6 +844,12 @@ pub(crate) unsafe fn pipe_read(
     let me = current_task();
     loop {
         let mut state = lock_state();
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = state.net.pipe_ends.get(&fd).and_then(|end| end.remote) {
+            drop(state);
+            // SAFETY: forwarded from the caller.
+            return unsafe { remote_read(remote, nonblocking, buf, len) };
+        }
         let channel = match state.net.pipe_ends.get(&fd) {
             // A read on the write-only end of a simplex pipe is EBADF (the end
             // is O_WRONLY), matching the kernel.
@@ -867,6 +928,11 @@ pub(crate) unsafe fn pipe_write(
     let mut written = 0;
     loop {
         let mut state = lock_state();
+        #[cfg(target_os = "linux")]
+        if let Some(remote) = state.net.pipe_ends.get(&fd).and_then(|end| end.remote) {
+            drop(state);
+            return remote_write(remote, nonblocking, src, nosignal);
+        }
         let channel = match state.net.pipe_ends.get(&fd) {
             // A write on the read-only end of a simplex pipe is EBADF.
             Some(end) => match end.write_channel {
@@ -1219,6 +1285,13 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
             state.net.pipe_inodes.remove(&ino);
         }
     }
+    // A child's end of a root pipe: the hub drops this process's reference.
+    #[cfg(target_os = "linux")]
+    if let Some(remote) = end.remote {
+        drop(state);
+        crate::machine::pipes::close(remote.id);
+        return Ok(());
+    }
     let mut waiters = Vec::new();
     let mut released_ino = None;
     // Dropping a READER reference: writers get EPIPE only once the last one
@@ -1230,6 +1303,8 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
         if channel.read_refs == 0 {
             channel.write_events = channel.write_events.wrapping_add(1);
             waiters.extend(channel.send_waiters.drain());
+            #[cfg(target_os = "linux")]
+            waiters.extend(remote_drain(&mut channel.remote_writers));
         }
     }
     // Dropping a WRITER reference: readers see EOF (once drained) only after
@@ -1241,6 +1316,8 @@ fn pipe_close_locked(handle: u64) -> Result<(), c_int> {
         if channel.write_refs == 0 {
             channel.read_events = channel.read_events.wrapping_add(1);
             waiters.extend(channel.recv_waiters.drain());
+            #[cfg(target_os = "linux")]
+            waiters.extend(remote_drain(&mut channel.remote_readers));
         }
     }
     // Reclaim any channel with no references left on either side. Channel ids
@@ -1298,7 +1375,10 @@ fn pipe_size_channel(state: &ThreadRuntime, fd: c_int) -> Option<u64> {
 pub fn patina_pipe_size(guest_fd: c_int) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let end = match class_entry(guest_fd) {
-        Ok(resolved) if resolved.kind == FdKind::Pipe => resolved.handle as c_int,
+        Ok(resolved) if resolved.kind == FdKind::Pipe => {
+            refuse_remote(resolved.handle, "F_GETPIPE_SZ");
+            resolved.handle as c_int
+        }
         // A standard stream's pipe: its capacity, the default sixteen pages
         // until `F_SETPIPE_SZ` resizes it.
         #[cfg(target_os = "linux")]
@@ -1345,6 +1425,9 @@ pub fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     if resolved.kind != FdKind::Pipe && stream.is_none() {
         return super::fail(EINVAL);
     }
+    if resolved.kind == FdKind::Pipe {
+        refuse_remote(resolved.handle, "F_SETPIPE_SZ");
+    }
     let requested = size as u32 as usize;
     if requested > 1 << 31 {
         return super::fail(EINVAL);
@@ -1371,4 +1454,293 @@ pub fn patina_pipe_set_size(guest_fd: c_int, size: c_int) -> c_int {
     channel.capacity = rounded;
     super::set_errno(0);
     c_int::try_from(rounded).unwrap_or_else(|_| super::fail(super::EOVERFLOW))
+}
+
+// ------------------------------------------------------------------
+// Pipes the machine's processes share (`crate::machine`). A pipe the root
+// made, handed to a child at its spawn, stays the root's: its channel, its
+// bytes and its waiters live here, in the root's runtime. The child holds
+// a remote end ([`RemoteEnd`]) and asks the hub for every transfer; one
+// that would block notes the child's interest on the channel (its
+// `remote_readers`/`remote_writers`) and parks the child's task on its
+// remote waiters. The channel's next change wakes the child's foreign task
+// in the root, and the child, resumed, wakes every remote waiter to look
+// again. The hub's transfers take no scheduling point of the root's: the
+// root is not running while it serves a child.
+
+/// The largest transfer one hub request carries: a pipe's whole buffer.
+#[cfg(target_os = "linux")]
+const REMOTE_CHUNK: usize = PIPE_CAPACITY;
+
+/// Stop the run by name when pipe end `handle` is a child's remote end:
+/// `call` (a splice, `FIONREAD`, a pipe size) reaches the channel itself,
+/// which lives in the root. Call it holding no lock of the runtime's.
+pub(crate) fn refuse_remote(handle: u64, call: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let remote = lock_state()
+            .net
+            .pipe_ends
+            .get(&(handle as c_int))
+            .is_some_and(|end| end.remote.is_some());
+        if remote {
+            crate::trap_unmodeled(&format!(
+                "{call} on a pipe end shared with another process is not modeled; failing closed"
+            ));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (handle, call);
+}
+
+/// A child's end of the root's description `id`, its reading end when
+/// `read`, on a pipefs node of this process's own (what `fstat` sees).
+#[cfg(target_os = "linux")]
+pub(crate) fn remote_end(id: u64, read: bool) -> c_int {
+    let now = pipe_inode_time();
+    let mut state = lock_state();
+    let inode = mint_pipe_inode(&mut state, false, now, 1);
+    let end = next_handle(&mut state);
+    state.net.pipe_ends.insert(
+        end,
+        PipeEnd {
+            read_channel: None,
+            write_channel: None,
+            fifo_ino: None,
+            inode: Some(inode),
+            remote: Some(RemoteEnd { id, read }),
+        },
+    );
+    end
+}
+
+/// Park the calling task until this process's next resume (or a transfer
+/// of its own on a shared pipe) wakes its remote waiters.
+#[cfg(target_os = "linux")]
+fn park_remote(me: TaskId, what: &'static str) -> Result<signals::Resumed, c_int> {
+    let mut state = lock_state();
+    let mut wait = Wait::new(BlockClass::Io, vec![]);
+    wait.enqueue(&mut state.net.remote_waiters, me, WaiterLoc::Remote);
+    match state.block(me, what, wait) {
+        Ok(Step::Switch(picked)) => switch_and_park(state, picked, me),
+        Ok(Step::Continue) => drop(state),
+        Err(error) => return Err(c_int::from(error.into_posix())),
+    }
+    lock_state().timed_out.remove(&me);
+    Ok(signals::resume())
+}
+
+/// Note `me` among this process's remote waiters, for a readiness park
+/// that also watches a shared pipe: its resume wakes it.
+#[cfg(target_os = "linux")]
+pub(super) fn watch_remote(state: &mut ThreadRuntime, me: TaskId, wait: &mut Wait) {
+    wait.enqueue(&mut state.net.remote_waiters, me, WaiterLoc::Remote);
+}
+
+/// Wake every task of this process parked on a shared pipe, to look again.
+#[cfg(target_os = "linux")]
+pub(crate) fn wake_remote_waiters() {
+    let waiters: Vec<TaskId> = lock_state().net.remote_waiters.drain().collect();
+    wake_all(waiters);
+}
+
+/// A child's `read` of a shared pipe's reading end.
+///
+/// # Safety
+/// `buf` must be writable for `len` bytes.
+#[cfg(target_os = "linux")]
+unsafe fn remote_read(remote: RemoteEnd, nonblocking: bool, buf: *mut c_void, len: usize) -> isize {
+    if !remote.read {
+        return super::fail(super::EBADF) as isize;
+    }
+    let me = current_task();
+    loop {
+        match crate::machine::pipes::read(remote.id, len.min(REMOTE_CHUNK), !nonblocking) {
+            Ok(bytes) => {
+                // SAFETY: the caller's buffer holds `len` bytes, and the hub
+                // answers at most that many.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), bytes.len())
+                };
+                return isize::try_from(bytes.len()).unwrap_or(isize::MAX);
+            }
+            Err(EWOULDBLOCK) if nonblocking => return super::fail(EWOULDBLOCK) as isize,
+            Err(EWOULDBLOCK) => match park_remote(me, "pipe-read") {
+                Ok(signals::Resumed::Eintr) => return super::fail(super::EINTR) as isize,
+                Ok(_) => {}
+                Err(errno) => return super::fail(errno) as isize,
+            },
+            Err(errno) => return super::fail(errno) as isize,
+        }
+    }
+}
+
+/// A child's `write` to a shared pipe's writing end: as [`pipe_write`], a
+/// blocking write returns once every byte is in.
+#[cfg(target_os = "linux")]
+fn remote_write(remote: RemoteEnd, nonblocking: bool, src: &[u8], nosignal: bool) -> isize {
+    if remote.read {
+        return super::fail(super::EBADF) as isize;
+    }
+    let me = current_task();
+    let mut written = 0;
+    loop {
+        let end = (written + REMOTE_CHUNK).min(src.len());
+        match crate::machine::pipes::write(remote.id, &src[written..end], !nonblocking) {
+            Ok(count) => {
+                written += count;
+                if written == src.len() || nonblocking {
+                    return isize::try_from(written).unwrap_or(isize::MAX);
+                }
+            }
+            Err(super::EPIPE) => {
+                if !nosignal {
+                    broken_pipe_signal();
+                }
+                if written > 0 {
+                    return isize::try_from(written).unwrap_or(isize::MAX);
+                }
+                return super::fail(super::EPIPE) as isize;
+            }
+            Err(EWOULDBLOCK) if nonblocking && written > 0 => {
+                return isize::try_from(written).unwrap_or(isize::MAX);
+            }
+            Err(EWOULDBLOCK) if nonblocking => return super::fail(EWOULDBLOCK) as isize,
+            Err(EWOULDBLOCK) => match park_remote(me, "pipe-write") {
+                Ok(signals::Resumed::Normal) => {}
+                Ok(_) if written > 0 => return isize::try_from(written).unwrap_or(isize::MAX),
+                Ok(signals::Resumed::Eintr) => return super::fail(super::EINTR) as isize,
+                Ok(signals::Resumed::Restart) => {}
+                Err(errno) => return super::fail(errno) as isize,
+            },
+            Err(errno) => return super::fail(errno) as isize,
+        }
+    }
+}
+
+/// What the hub does on a child's behalf to a root pipe end.
+#[cfg(target_os = "linux")]
+pub(crate) enum RemoteOp<'a> {
+    /// Take up to this many bytes.
+    Read(usize),
+    /// Put these bytes.
+    Write(&'a [u8]),
+    /// Its readiness: `poll`'s mask and the channel's arrival sequences.
+    Poll,
+    /// Note the child's interest in the end's channel changing.
+    Watch,
+}
+
+/// The hub's answer: the call's result (a count, a mask, or a negative
+/// errno), the bytes a read took, and the arrival sequences.
+#[cfg(target_os = "linux")]
+pub(crate) struct RemoteAnswer {
+    pub(crate) result: i64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) seqs: (u64, u64),
+}
+
+/// Serve `op` from child `pid` on the root's pipe end `handle`. A transfer
+/// that cannot go now notes `pid`'s interest when `block`.
+#[cfg(target_os = "linux")]
+pub(crate) fn serve_remote(handle: u64, pid: c_int, op: RemoteOp<'_>, block: bool) -> RemoteAnswer {
+    let fd = handle as c_int;
+    let answer = |result: i64| RemoteAnswer {
+        result,
+        bytes: Vec::new(),
+        seqs: (0, 0),
+    };
+    let mut state = lock_state();
+    let Some(end) = state.net.pipe_ends.get(&fd) else {
+        return answer(-i64::from(super::EBADF));
+    };
+    let (read_channel, write_channel) = (end.read_channel, end.write_channel);
+    match op {
+        RemoteOp::Read(max) => {
+            let Some(channel) = read_channel else {
+                return answer(-i64::from(super::EBADF));
+            };
+            let mut bytes = vec![0u8; max];
+            let outcome = state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .map(|channel| channel.try_read(&mut bytes))
+                .unwrap_or(PipeRead::Eof);
+            match outcome {
+                PipeRead::Read(count) => {
+                    bytes.truncate(count);
+                    let waiters = drain_channel_send_waiters(&mut state, channel);
+                    drop(state);
+                    wake_all(waiters);
+                    RemoteAnswer {
+                        result: count as i64,
+                        bytes,
+                        seqs: (0, 0),
+                    }
+                }
+                PipeRead::Eof => answer(0),
+                PipeRead::WouldBlock => {
+                    if block && let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                        channel.remote_readers.insert(pid);
+                    }
+                    answer(-i64::from(EWOULDBLOCK))
+                }
+            }
+        }
+        RemoteOp::Write(bytes) => {
+            let Some(channel) = write_channel else {
+                return answer(-i64::from(super::EBADF));
+            };
+            let outcome = state
+                .net
+                .pipe_channels
+                .get_mut(&channel)
+                .map(|channel| channel.try_write(bytes))
+                .unwrap_or(PipeWrite::BrokenPipe);
+            match outcome {
+                PipeWrite::Wrote(count) => {
+                    let waiters = drain_channel_recv_waiters(&mut state, channel);
+                    drop(state);
+                    wake_all(waiters);
+                    answer(count as i64)
+                }
+                PipeWrite::BrokenPipe => answer(-i64::from(super::EPIPE)),
+                PipeWrite::WouldBlock => {
+                    if block && let Some(channel) = state.net.pipe_channels.get_mut(&channel) {
+                        channel.remote_writers.insert(pid);
+                    }
+                    answer(-i64::from(EWOULDBLOCK))
+                }
+            }
+        }
+        RemoteOp::Poll => {
+            let (mask, seqs) = super::reactor::pipe_poll(&state, fd);
+            RemoteAnswer {
+                result: i64::from(mask),
+                bytes: Vec::new(),
+                seqs,
+            }
+        }
+        RemoteOp::Watch => {
+            if let Some(channel) = read_channel.and_then(|id| state.net.pipe_channels.get_mut(&id))
+            {
+                channel.remote_readers.insert(pid);
+            }
+            if let Some(channel) = write_channel.and_then(|id| state.net.pipe_channels.get_mut(&id))
+            {
+                channel.remote_writers.insert(pid);
+            }
+            answer(0)
+        }
+    }
+}
+
+/// Child `pid` ended: it waits for no channel any more.
+#[cfg(target_os = "linux")]
+pub(crate) fn forget_remote(pid: c_int) {
+    for channel in lock_state().net.pipe_channels.values_mut() {
+        channel.remote_readers.remove(&pid);
+        channel.remote_writers.remove(&pid);
+    }
 }

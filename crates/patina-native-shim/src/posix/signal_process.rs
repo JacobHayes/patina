@@ -484,23 +484,133 @@ unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -> c_
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
     acts: *mut libc::posix_spawn_file_actions_t,
-    _path: *const c_char,
+    path: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the caller's actions object, per the entry's contract.
-    unsafe { count_action(acts) }
+    // SAFETY: the caller's actions object and path, per the entry's contract.
+    unsafe { add_chdir(acts, path) }
 }
 /// # Safety
 /// acts and path follow libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_addchdir(
     acts: *mut libc::posix_spawn_file_actions_t,
-    _path: *const c_char,
+    path: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // SAFETY: the caller's actions object, per the entry's contract.
-    unsafe { count_action(acts) }
+    // SAFETY: the caller's actions object and path, per the entry's contract.
+    unsafe { add_chdir(acts, path) }
 }
+
+/// Record a `chdir` action.
+///
+/// # Safety
+/// `acts` is null or a live actions object; `path` is null or a C string.
+unsafe fn add_chdir(acts: *mut libc::posix_spawn_file_actions_t, path: *const c_char) -> c_int {
+    #[cfg(target_os = "linux")]
+    {
+        if path.is_null() {
+            return libc::EINVAL;
+        }
+        // SAFETY: a C string, per the contract.
+        let path = unsafe { CStr::from_ptr(path) }.to_owned();
+        // SAFETY: per the contract.
+        unsafe { add_action(acts, crate::machine::spawn::Action::Chdir(path)) }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        // SAFETY: the caller's actions object, per the entry's contract.
+        unsafe { count_action(acts) }
+    }
+}
+
+/// Record `action` in `acts` and count it where glibc counts its actions.
+///
+/// # Safety
+/// `acts` is null or a live actions object.
+#[cfg(target_os = "linux")]
+unsafe fn add_action(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    action: crate::machine::spawn::Action,
+) -> c_int {
+    // SAFETY: per the contract.
+    match unsafe { crate::machine::spawn::actions_add(acts, action) } {
+        // SAFETY: per the contract.
+        0 => unsafe { count_action(acts) },
+        errno => errno,
+    }
+}
+
+/// # Safety
+/// acts follows libc's spawn file actions contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addfchdir_np(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    fd: c_int,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if fd < 0 {
+        return libc::EBADF;
+    }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { add_action(acts, crate::machine::spawn::Action::Fchdir(fd)) }
+}
+
+/// # Safety
+/// acts follows libc's spawn file actions contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addclose(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    fd: c_int,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if fd < 0 {
+        return libc::EBADF;
+    }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { add_action(acts, crate::machine::spawn::Action::Close(fd)) }
+}
+
+/// # Safety
+/// acts follows libc's spawn file actions contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addclosefrom_np(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    from: c_int,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if from < 0 {
+        return libc::EBADF;
+    }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { add_action(acts, crate::machine::spawn::Action::Closefrom(from)) }
+}
+
+/// An open action: recorded, and refused when a spawn would carry it out.
+///
+/// # Safety
+/// acts, path and the flags follow libc's spawn file actions contract.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addopen(
+    acts: *mut libc::posix_spawn_file_actions_t,
+    fd: c_int,
+    _path: *const c_char,
+    _oflag: c_int,
+    _mode: libc::mode_t,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    if fd < 0 {
+        return libc::EBADF;
+    }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { add_action(acts, crate::machine::spawn::Action::Open) }
+}
+
 /// # Safety
 /// All pointers follow libc's posix_spawnp argument contract.
 #[unsafe(no_mangle)]
@@ -513,11 +623,76 @@ unsafe extern "C" fn posix_spawnp(
     envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    // An admitted program runs as a process of the machine.
+    // SAFETY: the pointers follow libc's posix_spawnp contract.
+    unsafe {
+        spawn_door(
+            c"posix_spawnp",
+            true,
+            pid,
+            file,
+            file_actions,
+            attrp,
+            argv,
+            envp,
+        )
+    }
+}
+
+/// # Safety
+/// All pointers follow libc's posix_spawn argument contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn(
+    pid: *mut libc::pid_t,
+    path: *const c_char,
+    file_actions: *const libc::posix_spawn_file_actions_t,
+    attrp: *const libc::posix_spawnattr_t,
+    argv: *const *mut c_char,
+    envp: *const *mut c_char,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // SAFETY: the pointers follow libc's posix_spawn contract.
+    unsafe {
+        spawn_door(
+            c"posix_spawn",
+            false,
+            pid,
+            path,
+            file_actions,
+            attrp,
+            argv,
+            envp,
+        )
+    }
+}
+
+/// `posix_spawn` (`search` false: `file` is the path) and `posix_spawnp`
+/// (`search`: a `file` without a `/` is looked up among the admitted
+/// programs on the caller's `PATH`). An admitted program runs as a process
+/// of the machine; anything else stops the run by name.
+///
+/// # Safety
+/// The pointers follow libc's posix_spawn argument contract.
+#[allow(clippy::too_many_arguments)]
+unsafe fn spawn_door(
+    symbol: &'static CStr,
+    search: bool,
+    pid: *mut libc::pid_t,
+    file: *const c_char,
+    file_actions: *const libc::posix_spawn_file_actions_t,
+    attrp: *const libc::posix_spawnattr_t,
+    argv: *const *mut c_char,
+    envp: *const *mut c_char,
+) -> c_int {
     #[cfg(target_os = "linux")]
     {
+        let mut path = [0u8; libc::PATH_MAX as usize];
+        let found = search
+            .then(|| guest_c_string(file as usize, &mut path))
+            .flatten()
+            .and_then(crate::machine::spawn::search);
+        let file = found.as_deref().map_or(file, CStr::as_ptr);
         let spawn = crate::machine::spawn::Spawn {
-            symbol: c"posix_spawnp",
+            symbol,
             pid,
             path: file,
             file_actions,
@@ -525,18 +700,17 @@ unsafe extern "C" fn posix_spawnp(
             argv,
             envp,
         };
-        // SAFETY: the pointers follow libc's posix_spawnp contract.
+        // SAFETY: the pointers follow libc's posix_spawn contract.
         if let Some(answer) = unsafe { crate::machine::spawn::spawn(&spawn) } {
             return answer;
         }
+        spawn_trap(symbol, Some(Program { path: file, argv }), Door::Spawn)
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (pid, file_actions, attrp, envp);
-    spawn_trap(
-        c"posix_spawnp",
-        Some(Program { path: file, argv }),
-        Door::Spawn,
-    )
+    {
+        let _ = (search, pid, file_actions, attrp, envp);
+        spawn_trap(symbol, Some(Program { path: file, argv }), Door::Spawn)
+    }
 }
 /// # Safety
 /// acts follows libc's spawn file actions contract.
@@ -557,7 +731,13 @@ unsafe extern "C" fn posix_spawn_file_actions_init(
     #[cfg(not(target_os = "macos"))]
     {
         // SAFETY: the caller's actions object, per libc's contract.
-        unsafe { zero(acts) }
+        let answer = unsafe { zero(acts) };
+        // SAFETY: as above, now zeroed.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            crate::machine::spawn::actions_init(acts)
+        };
+        answer
     }
 }
 /// # Safety
@@ -573,7 +753,15 @@ unsafe extern "C" fn posix_spawn_file_actions_adddup2(
         return libc::EBADF;
     }
     // SAFETY: the caller's actions object, per the entry's contract.
-    unsafe { count_action(acts) }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        add_action(acts, crate::machine::spawn::Action::Dup2 { fd, to: newfd })
+    }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        count_action(acts)
+    }
 }
 
 /// Count one action in `acts`, so a spawn that would carry it out sees it
@@ -609,6 +797,12 @@ unsafe extern "C" fn posix_spawn_file_actions_destroy(
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // SAFETY: the caller's actions object, per libc's contract.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            crate::machine::spawn::actions_destroy(acts)
+        };
+        #[cfg(not(target_os = "linux"))]
         let _ = acts;
         0
     }

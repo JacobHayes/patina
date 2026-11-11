@@ -58,6 +58,16 @@ pub(super) enum Message {
     /// A recording child's metadata (JSON of `len` bytes), before its
     /// first decision.
     TraceBegin { len: u64 },
+    /// Child to hub: an operation on a pipe the root holds
+    /// (`super::pipes`), of `len` bytes, follows in packets.
+    Pipe { len: u64 },
+    /// Hub to child: the operation's answer, of `len` bytes, follows.
+    PipeReply { len: u64 },
+    /// Child to hub, before it is ready: its descriptors, as its spawn
+    /// arranged them.
+    Plan,
+    /// Hub to child: the descriptor plan (JSON of `len` bytes) follows.
+    PlanReply { len: u64 },
 }
 
 /// The largest packet a frame's payload travels in: well inside a
@@ -120,6 +130,10 @@ impl Message {
             Message::Stop { len } => words(11, [len, 0, 0], None),
             Message::Facts { len } => words(12, [len, 0, 0], None),
             Message::TraceBegin { len } => words(13, [len, 0, 0], None),
+            Message::Pipe { len } => words(14, [len, 0, 0], None),
+            Message::PipeReply { len } => words(15, [len, 0, 0], None),
+            Message::Plan => words(16, [0; 3], None),
+            Message::PlanReply { len } => words(17, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -166,6 +180,10 @@ impl Message {
             11 => Message::Stop { len: words[1] },
             12 => Message::Facts { len: words[1] },
             13 => Message::TraceBegin { len: words[1] },
+            14 => Message::Pipe { len: words[1] },
+            15 => Message::PipeReply { len: words[1] },
+            16 => Message::Plan,
+            17 => Message::PlanReply { len: words[1] },
             _ => return None,
         })
     }
@@ -217,6 +235,10 @@ mod tests {
             Message::Stop { len: 300 },
             Message::Facts { len: 70_000 },
             Message::TraceBegin { len: 5 },
+            Message::Pipe { len: 24 },
+            Message::PipeReply { len: 32 },
+            Message::Plan,
+            Message::PlanReply { len: 2 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }

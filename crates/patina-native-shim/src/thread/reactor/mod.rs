@@ -198,11 +198,16 @@ fn poll_description(state: &ThreadRuntime, kind: FdKind, handle: u64) -> (u32, (
 /// up once no writer is left; the write side is writable while there is
 /// room and in error once no reader is left.
 #[cfg(any(target_os = "linux", patina_posix_exports))]
-fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
+pub(in crate::thread) fn pipe_poll(state: &ThreadRuntime, fd: c_int) -> (u32, (u64, u64)) {
     use net::abi::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDNORM, POLLWRNORM};
     let Some(end) = state.net.pipe_ends.get(&fd) else {
         return (POLLERR | POLLHUP, (0, 0));
     };
+    // A child's end of a root pipe: the hub reads the root's channel.
+    #[cfg(target_os = "linux")]
+    if let Some(remote) = end.remote {
+        return crate::machine::pipes::poll(remote.id);
+    }
     let read = end
         .read_channel
         .and_then(|id| state.net.pipe_channels.get(&id));
@@ -270,6 +275,10 @@ pub(super) enum WaiterLoc {
     Join(TaskId),
     PipeRecv(u64),
     PipeSend(u64),
+    /// Linux: a child process's task parked on a pipe the root holds
+    /// (`crate::machine`), on its process's remote waiters.
+    #[cfg(target_os = "linux")]
+    Remote,
     SockRecv(c_int),
     SockSend(c_int),
     /// Linux: parked on an eventfd's readable queue (an eventfd is always
@@ -390,6 +399,14 @@ pub(super) fn register_readiness_waiters(
             let Some(end) = state.net.pipe_ends.get(&fd) else {
                 continue;
             };
+            // A child's end of a root pipe: the hub notes the interest, and
+            // this process's next resume wakes the park.
+            #[cfg(target_os = "linux")]
+            if let Some(remote) = end.remote {
+                crate::machine::pipes::watch(remote.id);
+                super::pipe::watch_remote(state, me, &mut wait);
+                continue;
+            }
             let channel = match dir {
                 ReadyDir::Read => end.read_channel,
                 ReadyDir::Write => end.write_channel,
@@ -529,6 +546,8 @@ pub(super) fn unregister_waiters(state: &mut ThreadRuntime, me: TaskId, locs: &[
                     remove(&mut ch.send_waiters);
                 }
             }
+            #[cfg(target_os = "linux")]
+            WaiterLoc::Remote => remove(&mut state.net.remote_waiters),
             WaiterLoc::SockRecv(fd) => {
                 if let Some(socket) = state.net.sockets.table.get_mut(&fd) {
                     remove(&mut socket.recv_waiters);
