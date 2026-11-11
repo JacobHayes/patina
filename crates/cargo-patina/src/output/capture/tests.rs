@@ -60,11 +60,80 @@ fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
     );
     assert_eq!(
         parsed["runtime_findings"],
-        serde_json::json!([{"source": "liveness"}])
+        serde_json::json!([{"source": "liveness", "process": 3}])
     );
     assert_eq!(parsed["replay_divergence"], "operation");
     let children = [stream.lines().nth(1).unwrap(), "\n"].concat();
     assert_eq!(parse_facts(children.as_bytes()).unwrap(), None);
+}
+
+/// A fault or a buggify site that landed only in a child is the run's: each
+/// child's latest planes add to the root's, and a plane is vacuous only
+/// where the processes' sums leave a class armed and given traffic with
+/// nothing landed.
+#[test]
+fn parse_facts_adds_every_childs_fault_and_site_activity_to_the_runs() {
+    let schema = patina_dst_runtime::FACTS_SCHEMA;
+    let line = |body: &str| format!("{{\"schema\":\"{schema}\",{body}}}\n");
+    let entropy = |armed: bool, requests: u64, injected: u64| {
+        let vacuous = armed && injected == 0;
+        format!(
+            r#""entropy":{{"requests":{requests},"fail_vacuity_diagnosable":{armed},"failures_injected":{injected},"vacuous":{vacuous}}}"#
+        )
+    };
+    let sdk = |fires: u64| {
+        format!(
+            r#""sdk":{{"enabled":true,"sites_registered":1,"sites_activated":1,"total_firings":{fires},"cutoff_reached":false,"sites":[{{"label":"s","fires":{fires}}}]}}"#
+        )
+    };
+    let stream = [
+        line(&format!(
+            r#""context":0,"fault_reports":{{{},"schedule":{{"decisions":5}}}},{}"#,
+            entropy(true, 2, 0),
+            sdk(0)
+        )),
+        line(&format!(
+            r#""process":3,"context":0,"fault_reports":{{{},"schedule":{{"decisions":7}}}},{}"#,
+            entropy(true, 1, 0),
+            sdk(1)
+        )),
+        line(&format!(
+            r#""process":3,"context":0,"fault_reports":{{{},"schedule":{{"decisions":9}}}},{}"#,
+            entropy(true, 4, 3),
+            sdk(2)
+        )),
+    ]
+    .concat();
+    let parsed = parse_facts(stream.as_bytes()).unwrap().unwrap();
+    let plane = &parsed["fault_reports"]["entropy"];
+    assert_eq!(plane["requests"], 6);
+    assert_eq!(plane["failures_injected"], 3);
+    assert_eq!(plane["vacuous"], false);
+    // Each process's own scheduler is its own: the root's stands.
+    assert_eq!(parsed["fault_reports"]["schedule"]["decisions"], 5);
+    assert_eq!(parsed["sdk"]["total_firings"], 2);
+    let processes: Vec<_> = parsed["sdk"]["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|site| site.get("process").cloned())
+        .collect();
+    assert_eq!(processes, [None, Some(serde_json::json!(3))]);
+
+    // Armed in every process, landed in none: still vacuous.
+    let stream = [
+        line(&format!(
+            r#""context":0,"fault_reports":{{{}}}"#,
+            entropy(false, 0, 0)
+        )),
+        line(&format!(
+            r#""process":3,"context":0,"fault_reports":{{{}}}"#,
+            entropy(true, 2, 0)
+        )),
+    ]
+    .concat();
+    let parsed = parse_facts(stream.as_bytes()).unwrap().unwrap();
+    assert_eq!(parsed["fault_reports"]["entropy"]["vacuous"], true);
 }
 
 /// The stop pipe: whether the runtime started, the first stop record, and a

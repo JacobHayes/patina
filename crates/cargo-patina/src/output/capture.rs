@@ -48,8 +48,10 @@ pub fn capture_active() -> bool {
 /// whole machine: a child's are marked with its pid (`process`). The run's
 /// state is then the root's last document, with every process's verdicts
 /// (kept per process and context as above), each child's latest
-/// `runtime_findings` after the root's, and the first `replay_divergence`
-/// any process noted; with no document of the root's, the run has none.
+/// `runtime_findings` after the root's (each marked with its `process`),
+/// each child's latest fault planes and buggify sites added to the root's
+/// ([`add_activity`]), and the first `replay_divergence` any process noted;
+/// with no document of the root's, the run has none.
 ///
 /// No complete document means the run never got that far — it aborted before
 /// finalization — and the envelope says so by omitting the fields (absent,
@@ -66,6 +68,7 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
     let mut root = None;
     let mut verdicts: Vec<(Key, Vec<serde_json::Value>)> = Vec::new();
     let mut findings: Vec<(u64, Vec<serde_json::Value>)> = Vec::new();
+    let mut activity: Vec<(u64, serde_json::Value)> = Vec::new();
     let mut divergence = None;
     for line in complete
         .split(|byte| *byte == b'\n')
@@ -115,6 +118,10 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
                     Some(entry) => entry.1 = list,
                     None => findings.push((pid, list)),
                 }
+                match activity.iter_mut().find(|(seen, _)| *seen == pid) {
+                    Some(entry) => entry.1 = document.clone(),
+                    None => activity.push((pid, document.clone())),
+                }
             }
             None => root = Some(document),
         }
@@ -143,8 +150,160 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
         {
             list.extend(children);
         }
+        for (pid, child) in &activity {
+            add_activity(document, *pid, child);
+        }
     }
     Ok(Some(last))
+}
+
+/// Add child `pid`'s activity, its latest facts document `child`, to the
+/// run's `document`: each fault plane's counts (`fault_reports`, but the
+/// exploration planes, which are each process's own scheduler's) and its
+/// buggify sites (`sdk`), so a fault or a site that landed only in a child
+/// is the run's, and a plane is vacuous only where every process left it
+/// so.
+fn add_activity(
+    document: &mut serde_json::Map<String, serde_json::Value>,
+    pid: u64,
+    child: &serde_json::Value,
+) {
+    use serde_json::Value;
+    if let Some(Value::Object(planes)) = child.get("fault_reports") {
+        let run = document
+            .entry("fault_reports")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(run) = run {
+            for (name, plane) in planes {
+                if matches!(name.as_str(), "schedule" | "swarm") {
+                    continue;
+                }
+                match run.get_mut(name) {
+                    Some(existing) => {
+                        add_counts(existing, plane);
+                        judge_vacuity(existing);
+                    }
+                    None => {
+                        run.insert(name.clone(), plane.clone());
+                    }
+                }
+            }
+        }
+    }
+    let Some(Value::Object(sdk)) = child.get("sdk") else {
+        return;
+    };
+    // A child's sites are its own: each says which process it is.
+    let mut sdk = sdk.clone();
+    for list in ["declared_sites", "sites"] {
+        if let Some(Value::Array(sites)) = sdk.get_mut(list) {
+            for site in sites {
+                if let Value::Object(site) = site {
+                    site.insert("process".into(), pid.into());
+                }
+            }
+        }
+    }
+    let Some(Value::Object(run)) = document.get_mut("sdk") else {
+        document.insert("sdk".into(), Value::Object(sdk));
+        return;
+    };
+    for count in [
+        "sites_registered",
+        "sites_activated",
+        "total_firings",
+        "cutoff_suppressed",
+    ] {
+        let sum = [run.get(count), sdk.get(count)]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .sum::<u64>();
+        run.insert(count.into(), sum.into());
+    }
+    for flag in ["enabled", "cutoff_reached"] {
+        let either = [run.get(flag), sdk.get(flag)]
+            .into_iter()
+            .flatten()
+            .any(|value| value.as_bool() == Some(true));
+        run.insert(flag.into(), either.into());
+    }
+    for list in ["declared_sites", "sites"] {
+        if let Some(Value::Array(sites)) = sdk.remove(list)
+            && let Value::Array(run) = run.entry(list).or_insert_with(|| Value::Array(Vec::new()))
+        {
+            run.extend(sites);
+        }
+    }
+}
+
+/// Add `other`'s counts to `into`, both one plane of a fault report:
+/// numbers sum (an object of them, key by key), but `targets_missed`, a
+/// target every process has missed, is the least; a flag holds where
+/// either says so (`vacuous` is judged again from the sums, by
+/// [`judge_vacuity`]).
+fn add_counts(into: &mut serde_json::Value, other: &serde_json::Value) {
+    use serde_json::Value;
+    let (Value::Object(into), Value::Object(other)) = (into, other) else {
+        return;
+    };
+    for (key, value) in other {
+        let Some(existing) = into.get_mut(key) else {
+            into.insert(key.clone(), value.clone());
+            continue;
+        };
+        match (&*existing, value) {
+            (Value::Number(a), Value::Number(b)) => {
+                if let (Some(a), Some(b)) = (a.as_u64(), b.as_u64()) {
+                    *existing = if key == "targets_missed" {
+                        a.min(b)
+                    } else {
+                        a + b
+                    }
+                    .into();
+                }
+            }
+            (Value::Bool(a), Value::Bool(b)) => *existing = (*a || *b).into(),
+            (Value::Object(_), Value::Object(_)) => add_counts(existing, value),
+            _ => {}
+        }
+    }
+}
+
+/// Each fault class's `<class>_vacuity_diagnosable` flag (armed and given
+/// traffic) and the count of its faults that landed, as the runtime's
+/// fault reports pair them.
+const FAULT_CLASSES: &[(&str, &str)] = &[
+    ("error_vacuity_diagnosable", "errors_injected"),
+    ("short_vacuity_diagnosable", "shorts_applied"),
+    ("latency_vacuity_diagnosable", "latency_applied"),
+    ("fail_vacuity_diagnosable", "failures_injected"),
+    ("jump_vacuity_diagnosable", "jumps_applied"),
+    ("drop_vacuity_diagnosable", "drops_applied"),
+    ("jitter_vacuity_diagnosable", "jitter_applied"),
+    ("duplicate_vacuity_diagnosable", "duplicates_applied"),
+    ("connect_refuse_vacuity_diagnosable", "connects_refused"),
+    ("reset_vacuity_diagnosable", "resets_injected"),
+    ("partition_vacuity_diagnosable", "partition_blocks"),
+];
+
+/// Judge a merged fault plane's `vacuous` as the runtime judges one
+/// process's: a target missed, or a class armed and given traffic of which
+/// no fault landed, in any process.
+fn judge_vacuity(plane: &mut serde_json::Value) {
+    let serde_json::Value::Object(plane) = plane else {
+        return;
+    };
+    if !plane.contains_key("vacuous") {
+        return;
+    }
+    let count = |key: &str| plane.get(key).and_then(serde_json::Value::as_u64);
+    let vacuous = count("targets_missed").is_some_and(|missed| missed != 0)
+        || FAULT_CLASSES.iter().any(|(armed, landed)| {
+            plane.get(*armed).and_then(serde_json::Value::as_bool) == Some(true)
+                && count(landed) == Some(0)
+        });
+    plane.insert("vacuous".into(), vacuous.into());
 }
 
 /// What the shim said on the stop pipe.

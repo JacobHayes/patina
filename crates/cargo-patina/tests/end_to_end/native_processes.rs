@@ -65,6 +65,7 @@ unsafe extern "C" {
     fn posix_spawnattr_setsigdefault(attr: *mut [u64; 42], set: *const [u64; 16]) -> i32;
     fn pipe2(fds: *mut i32, flags: i32) -> i32;
     fn read(fd: i32, buf: *mut std::ffi::c_void, len: usize) -> isize;
+    fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
     fn write(fd: i32, buf: *const std::ffi::c_void, len: usize) -> isize;
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn fcntl(fd: i32, command: i32, ...) -> i32;
@@ -1439,6 +1440,19 @@ fn main() {
             let status = Command::new(binary).arg("pause").status();
             println!("STUCK {status:?}");
         }
+        ["faulted"] => {
+            // Asks for entropy without waiting for the pool (GRND_NONBLOCK),
+            // a few times: the entropy faults a run arms land here, in a
+            // child.
+            let failed = (0..4)
+                .filter(|_| unsafe { getrandom([0u8; 8].as_mut_ptr(), 8, 1) } < 0)
+                .count();
+            println!("FAULTED {failed}");
+        }
+        [binary, "faulted-child"] => {
+            let status = Command::new(binary).arg("faulted").status().unwrap();
+            println!("FAULTED-CHILD {status:?}");
+        }
         ["idle", ..] => loop {
             std::thread::yield_now();
         },
@@ -2372,6 +2386,57 @@ fn main() {
             ],
         );
         assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// A fault the run arms that lands only in a child is the run's: its
+    /// fault plane counts what the child asked for and what failed (as the
+    /// child saw it), and the recording replays.
+    #[test]
+    fn a_fault_that_lands_in_a_child_is_the_runs() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let trace = guest.dir.path().join("faulted.patina");
+        let recorded = json_envelope(&guest.command(
+            "run",
+            &[
+                "--seed",
+                "3",
+                "--format",
+                "json",
+                "--entropy-fail-permille",
+                "1000",
+                "--record",
+                trace.to_str().unwrap(),
+                "--",
+                binary,
+                "faulted-child",
+            ],
+        ));
+        let failed: u64 = recorded["stdout"]
+            .as_str()
+            .and_then(|out| out.lines().find_map(|line| line.strip_prefix("FAULTED ")))
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("{recorded:#}"));
+        assert!(failed > 0, "{recorded:#}");
+        let plane = |envelope: &serde_json::Value| {
+            let plane = &envelope["fault_reports"]["entropy"];
+            (
+                envelope["result"].clone(),
+                plane["failures_injected"].clone(),
+                plane["requests"].clone(),
+            )
+        };
+        let expected = ("ok".into(), failed.into(), failed.into());
+        assert_eq!(plane(&recorded), expected, "{recorded:#}");
+        let replayed =
+            json_envelope(&guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]));
+        // A replay draws no faults, so it has no fault planes (as with one
+        // process); the child sees the same failures in it.
+        assert_eq!(
+            (&replayed["result"], &replayed["stdout"]),
+            (&recorded["result"], &recorded["stdout"]),
+            "{replayed:#}"
+        );
     }
 
     /// A replayed child that ends with recorded decisions left over has

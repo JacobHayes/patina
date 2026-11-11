@@ -216,6 +216,12 @@ fn child_shutdown() -> c_int {
             &[detail.as_bytes()],
         ));
     }
+    // Its facts as it ends (fault planes, buggify sites, findings) reach the
+    // run with the rest of the machine's.
+    let _ = crate::with_context_raw(|context| {
+        context.machine_process_facts();
+        Ok(())
+    });
     let status = guest_exit_status().unwrap_or(0);
     crate::machine::child_exit(crate::machine::exit_status(status));
     // The baton is the hub's again: this process's runtime is done.

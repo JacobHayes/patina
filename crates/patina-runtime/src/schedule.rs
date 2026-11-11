@@ -763,6 +763,14 @@ impl Context {
         self.flush_recording();
     }
 
+    /// A child process of the machine ends: its facts document as it
+    /// stands (its fault planes, its buggify sites, its findings) goes out,
+    /// so the run's facts hold every process's activity. It writes no trace
+    /// of its own (the root holds its timeline) and no reports.
+    pub fn machine_process_facts(&mut self) {
+        self.emit_facts();
+    }
+
     /// Every parked task of this process with the reason it parked, in task
     /// order, unrecorded: what a deadlock of the whole machine names of
     /// this process.
