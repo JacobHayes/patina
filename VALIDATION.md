@@ -199,7 +199,10 @@ versions, target triple and fingerprint.
   SIGKILL, an abort, a child's host fault mid-quantum, a child's own
   stop and a child's compute-bound stop (attributed to the child, its
   site located); a fault that lands only in a child counted in the run's
-  fault plane; `kill(-1)` beside a child not yet reaped; a planted divergence, a planted
+  fault plane; `kill(-1)` beside a child not yet reaped; a child's `kill`
+  of a root thread's id reaching the root's handler, `kill(-1)` of an
+  invalid signal beside another process (`EINVAL`), and a thread id of a
+  child that ended, before and after its reaping (`ESRCH`); a planted divergence, a planted
   truncation and a planted extra decision in the timeline of a child that
   exits or is killed; a child's
   death mid-quantum keeping the time it reached; a host signal from

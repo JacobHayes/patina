@@ -498,7 +498,7 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
         match receive(channel) {
             Some(Message::AllocId) => {
                 let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                CHILD_THREADS.lock().insert(id);
+                CHILD_THREADS.lock().insert(id, pid);
                 reply(channel, Message::Id(id), &[])?;
             }
             Some(Message::Fs { len }) => {
@@ -1003,8 +1003,9 @@ const UNMODELED_SIGNAL: i64 = i32::MIN as i64;
 /// each as its sender made it.
 static PENDING: SpinMutex<BTreeMap<i32, Vec<[u64; 16]>>> = SpinMutex::new(BTreeMap::new());
 
-/// The thread ids the hub handed to children's threads.
-static CHILD_THREADS: SpinMutex<BTreeSet<i32>> = SpinMutex::new(BTreeSet::new());
+/// The thread ids the hub handed to children's threads, each with the
+/// child it went to.
+static CHILD_THREADS: SpinMutex<BTreeMap<i32, i32>> = SpinMutex::new(BTreeMap::new());
 
 /// `kill(pid, sig)` (or a queued signal, `queued`) with `info`, as the
 /// caller made it, where `pid` names another process of the machine, its
@@ -1039,10 +1040,16 @@ pub(crate) fn signal_elsewhere(
         };
         return Some(refused(answer, sig, pid));
     }
-    if queued || !(0..=SIGNAL_MAX).contains(&sig) {
+    let every = pid == -1;
+    if queued {
         return None;
     }
-    let every = pid == -1;
+    if !(0..=SIGNAL_MAX).contains(&sig) {
+        // The kernel judges the signal at each process `kill(-1)` finds:
+        // with another there (a zombie included), the answer is `EINVAL`,
+        // not the caller's own model's `ESRCH`.
+        return (every && (others_live() || unreaped())).then_some(-i64::from(libc::EINVAL));
+    }
     if !others_live() {
         // Every other process of the machine has ended: one not yet
         // reaped is still there to signal (to no effect), so `kill(-1)`
@@ -1124,9 +1131,21 @@ fn crosses(sig: i32) -> bool {
 /// 0 probes; a zombie takes nothing.
 fn signal_process(from: i32, pid: i32, info: [u64; 16]) -> Option<i64> {
     let sig = info[0] as u32 as i32;
-    let root = pid == crate::patina_pid() && from != pid;
-    if !root && CHILD_THREADS.lock().contains(&pid) {
-        // A thread of a child, which may have ended: the hub cannot tell.
+    // The root, by its pid or by one of its live threads' ids: as the
+    // kernel does, a thread's id names its whole process to `kill`.
+    let root = from != crate::patina_pid() && (pid == crate::patina_pid() || thread::live_tid(pid));
+    let owner = CHILD_THREADS.lock().get(&pid).copied();
+    if let Some(owner) = owner.filter(|_| !root) {
+        let owner_live = CHILDREN
+            .lock()
+            .get(&owner)
+            .is_some_and(|child| child.status.is_none());
+        if !owner_live {
+            // Its process has ended: none of its threads is left.
+            return None;
+        }
+        // A thread of a live child, which may have ended: the hub cannot
+        // tell.
         return Some(UNMODELED_SIGNAL);
     }
     let live = root

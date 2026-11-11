@@ -533,7 +533,11 @@ its own runtime, and the processes run in lockstep: one runs at a time
   a child through the hub, as its sender made it (`siginfo`: its code, the
   sender's pid and uid, a queued signal's value). Every process shares one
   credential, so each is permitted. The target is found first (`ESRCH`),
-  then the signal judged (`EINVAL`); signal 0 probes. The root takes a
+  then the signal judged (`EINVAL`, `kill(-1)`'s too beside another
+  process); signal 0 probes. A live thread's id names its whole process,
+  as the kernel's does (a child's `kill` of a root thread's id is a signal
+  to the root); a thread id of a child that has ended names nothing
+  (`ESRCH`). The root takes a
   signal in its own model at once (a task it wakes runs when the root
   next does). `kill(pid, SIGKILL)` of a child: the hub tells the frozen
   child, which raises `SIGKILL` on its host process; its channel's end
@@ -615,8 +619,8 @@ its own runtime, and the processes run in lockstep: one runs at a time
   file mappings, System V IPC, inotify, another pid's procfs directory,
   `SIGSTOP` (job control: no process of the machine stops; a stop
   signal's default action in any process is a stop of its own) and
-  `SIGSYS` to another process, a signal naming a thread of another process
-  (`kill` of a child's thread id, `tgkill`, `tkill`), a socket in a child,
+  `SIGSYS` to another process, a signal naming a thread of a live child
+  (`kill` of its thread id, `tgkill`, `tkill`), a socket in a child,
   `setpgid` and `setsid`; and after a
   child ran, `RUSAGE_CHILDREN`, `times`, and a wait that reaps into a
   resource-usage out-pointer.
@@ -634,6 +638,8 @@ its own runtime, and the processes run in lockstep: one runs at a time
   - A child's interest in a pipe outlives its poll's timeout or other wake: a later change costs it a recheck.
   - `pidfd_open` of a child answers `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
   - A signal sent to a frozen child is pending in it only from its next resume: until then its `sigpending` and `/proc` status do not show it.
+  - A signal and pipe data that both reach a frozen child before it resumes interrupt its read (`EINTR`) before the data is read; Linux may also return the data first, then run the handler.
+  - A root that signals a child after its `main` returns (in an `atexit` handler) records the child's foreign task as runnable in a window that otherwise records no scheduling decision; it replays as recorded.
   - The end-of-run text reports (`--verbose`, the envelope's `reports`) are the root's own; a child's fault and buggify activity reaches the run's facts (`fault_reports`, `sdk`) only.
 
 ## Virtual time

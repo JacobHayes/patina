@@ -214,6 +214,7 @@ const SIGUSR1: i32 = 10;
 extern "C" fn on_usr1(_: i32) {}
 
 const SIGPIPE: i32 = 13;
+const GETTID: i64 = if cfg!(target_arch = "aarch64") { 178 } else { 186 };
 const RLIMIT_NOFILE: i32 = 7;
 
 /// The SIGPIPE disposition `sigpipe-inherited` started with, read before
@@ -366,6 +367,75 @@ fn main() {
             let beside = [probe(-1, 0), probe(-1, 10), probe(0, 0), probe(0, 10)].join(" ");
             child.wait().unwrap();
             println!("KILL-ZOMBIE {alone} | {beside} | {}", probe(-1, 0));
+        }
+        ["kill-ids", tid] => {
+            // A thread id of the parent names the parent; kill(-1) of a
+            // signal that does not exist, with other processes there.
+            let probe = |pid: i32, sig: i32| {
+                let answer = unsafe { kill(pid, sig) };
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                format!("{answer}/{}", if answer == 0 { 0 } else { errno })
+            };
+            println!("{} {}", probe(tid.parse().unwrap(), SIGUSR1), probe(-1, 99));
+        }
+        ["thread-tid"] => {
+            let tid = std::thread::spawn(|| unsafe { syscall(GETTID) }).join().unwrap();
+            println!("{tid}");
+        }
+        [binary, "kill-ids"] => {
+            use std::io::BufRead;
+            let probe = |pid: i32, sig: i32| {
+                let answer = unsafe { kill(pid, sig) };
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                format!("{answer}/{}", if answer == 0 { 0 } else { errno })
+            };
+            unsafe { signal(SIGUSR1, on_signal as usize) };
+            // A thread of this process that lives while the child runs.
+            let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+            let thread = std::thread::spawn(move || {
+                tid_tx.send(unsafe { syscall(GETTID) }).unwrap();
+                let _ = done_rx.recv();
+            });
+            let tid = tid_rx.recv().unwrap();
+            let mut child = Command::new(binary)
+                .args(["kill-ids", &tid.to_string()])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let all_root = probe(-1, 99);
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+            let status = child.wait().unwrap();
+            for _ in 0..10 {
+                if HANDLED.load(std::sync::atomic::Ordering::SeqCst) == SIGUSR1 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            drop(done_tx);
+            thread.join().unwrap();
+            // A thread id of a child that has ended, before and after it
+            // is reaped.
+            let mut ended = Command::new(binary)
+                .arg("thread-tid")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ended_tid = String::new();
+            std::io::BufReader::new(ended.stdout.take().unwrap()).read_line(&mut ended_tid).unwrap();
+            let ended_tid: i32 = ended_tid.trim().parse().unwrap();
+            let mut info = [0i32; 32];
+            assert_eq!(unsafe { waitid(1, ended.id(), &mut info, 4 | 0x0100_0000) }, 0);
+            let zombie = probe(ended_tid, 0);
+            ended.wait().unwrap();
+            println!(
+                "KILL-IDS child=({}) {} root-all={all_root} handled={} zombie-thread={zombie} reaped-thread={}",
+                line.trim(),
+                described(status),
+                HANDLED.load(std::sync::atomic::Ordering::SeqCst) == SIGUSR1,
+                probe(ended_tid, 0)
+            );
         }
         ["abort"] => std::process::abort(),
         [binary, "abort-child"] => {
@@ -580,11 +650,13 @@ fn main() {
         }
         ["always"] => {
             let (label, site) = ("child-holds", "processes.rs:always");
+            println!("FINDING-PID {}", std::process::id());
             unsafe { patina_always(0, label.as_ptr(), label.len(), site.as_ptr(), site.len()) };
             println!("PAST-ALWAYS");
         }
         ["verdict"] => {
             let (label, detail) = ("child-ledger", "unbalanced");
+            println!("FINDING-PID {}", std::process::id());
             unsafe { patina_verdict(1, label.as_ptr(), label.len(), detail.as_ptr(), detail.len()) };
         }
         [binary, finding @ ("always-child" | "verdict-child")] => {
@@ -2459,6 +2531,58 @@ fn main() {
         );
     }
 
+    /// `kill` across processes answers as Linux does: a thread id of
+    /// another process names that process (its handler runs), `kill(-1)`
+    /// of a signal that does not exist is `EINVAL` beside another process,
+    /// and a thread of a child that has ended is gone (`ESRCH`), reaped or
+    /// not.
+    #[test]
+    fn kill_names_a_process_by_its_threads_and_judges_the_signal_as_linux() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let trace = guest.dir.path().join("kill-ids.patina");
+        let recorded = json_envelope(&guest.command(
+            "run",
+            &[
+                "--seed",
+                "3",
+                "--format",
+                "json",
+                "--record",
+                trace.to_str().unwrap(),
+                "--",
+                binary,
+                "kill-ids",
+            ],
+        ));
+        let (einval, esrch) = (
+            format!("-1/{}", libc::EINVAL),
+            format!("-1/{}", libc::ESRCH),
+        );
+        let expected = format!(
+            "KILL-IDS child=(0/0 {einval}) code=Some(0) signal=None core=false root-all={einval} \
+handled=true zombie-thread={esrch} reaped-thread={esrch}"
+        );
+        let answers = |envelope: &serde_json::Value| {
+            envelope["stdout"]
+                .as_str()
+                .and_then(|out| out.lines().find(|line| line.starts_with("KILL-IDS")))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            (&recorded["result"], answers(&recorded).as_deref()),
+            (&"ok".into(), Some(&*expected)),
+            "{recorded:#}"
+        );
+        let replayed =
+            json_envelope(&guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]));
+        assert_eq!(
+            (&replayed["result"], answers(&replayed)),
+            (&"ok".into(), Some(expected)),
+            "{replayed:#}"
+        );
+    }
+
     /// A fault the run arms that lands only in a child is the run's: its
     /// fault plane counts what the child asked for and what failed (as the
     /// child saw it), and the recording replays.
@@ -3395,11 +3519,16 @@ usr2=(code -1 from-child true uid-ok true value 4242)"
             );
             let envelope = json_envelope(&output);
             let stdout = envelope["stdout"].as_str().unwrap_or_default();
-            let attributed = envelope["verdicts"].as_array().is_some_and(|verdicts| {
-                verdicts
-                    .iter()
-                    .any(|verdict| verdict["kind"] == "violation" && verdict["process"] == 3)
-            });
+            let child: Option<i64> = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("FINDING-PID "))
+                .and_then(|pid| pid.parse().ok());
+            let attributed = child.is_some()
+                && envelope["verdicts"].as_array().is_some_and(|verdicts| {
+                    verdicts.iter().any(|verdict| {
+                        verdict["kind"] == "violation" && verdict["process"].as_i64() == child
+                    })
+                });
             if (
                 envelope["result"].as_str(),
                 envelope["attribution"].as_str(),

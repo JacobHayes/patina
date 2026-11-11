@@ -386,7 +386,9 @@ fn next(exit: &mut Exit) -> bool {
     for (instance, action, seen) in &batch {
         if action.handler == SIG_DFL {
             if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
-                fatal_unmodeled("default Stop-class signal would stop the only virtual process");
+                fatal_unmodeled(
+                    "a default Stop-class signal would stop a process of the guest's machine",
+                );
             }
             // A child of the machine dies of it: its parent sees the signal.
             #[cfg(target_os = "linux")]

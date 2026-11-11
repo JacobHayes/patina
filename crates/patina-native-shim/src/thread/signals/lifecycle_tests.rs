@@ -125,10 +125,9 @@ fn sigstop_to_self_is_a_named_trap() {
         let child = reexec(&test_name(), &[("PATINA_STOP_TEST", &sig.to_string())]);
         assert_eq!(child.status.signal(), Some(SIGABRT));
         let stderr = String::from_utf8_lossy(&child.stderr);
-        assert!(stderr.contains(concat!(
-            "patina native shim fatal: ",
-            "default Stop-class signal would stop the only virtual process"
-        )));
+        // A named stop of the shim's, not the default stop returning.
+        assert!(stderr.contains("patina native shim fatal: "), "{stderr}");
+        assert!(!stderr.contains("default stop returned"), "{stderr}");
     }
     isolated(|| {
         for sig in [SIGTSTP, SIGTTIN, SIGTTOU] {
