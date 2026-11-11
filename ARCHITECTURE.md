@@ -440,10 +440,13 @@ its own runtime, and the processes run in lockstep: one runs at a time
   child asks the hub for this plan before it reports ready and installs it
   as its table. A `chdir` or `fchdir` action is the child's starting
   directory. A file action naming a descriptor at or past the limit is
-  `EBADF` as it is added, as glibc's is. The plan also carries the signals
-  the caller ignores, less a `POSIX_SPAWN_SETSIGDEF` set, which the child
-  ignores too (an `execve` keeps `SIG_IGN`); every other disposition starts
-  at its default.
+  `EBADF` as it is added, as glibc's is, and a `dup2` action onto a number
+  at or past the soft limit at the spawn is the spawn's `EBADF`. The plan
+  also carries the caller's `RLIMIT_NOFILE`, soft and hard, which the
+  child's table enforces (a descriptor open across exec stays open above
+  it), and the signals the caller ignores, less a `POSIX_SPAWN_SETSIGDEF`
+  set, which the child ignores too (an `execve` keeps `SIG_IGN`); every
+  other disposition starts at its default.
 - A pipe a child holds (`src/machine/pipes.rs`) is a remote end: each read,
   write, readiness check and close is a request the hub serves on the
   root's pipe model, with the root holding one hidden reference per child
@@ -547,7 +550,8 @@ its own runtime, and the processes run in lockstep: one runs at a time
   `deny_trap`, which is for programs outside the admission): spawn from a
   child, an `addopen` file action, a `chdir` action to a path that is not
   UTF-8, a `PATH` search that passes a candidate the filesystem holds before
-  the admitted one, a change of a status flag (`F_SETFL`, `FIONBIO`) on a
+  the admitted one, or a relative `PATH` entry before it when the spawn
+  changes the working directory (glibc searches after the actions), a change of a status flag (`F_SETFL`, `FIONBIO`) on a
   description another live process shares, a descriptor open across exec that is
   not a standard stream, memory device, file or anonymous pipe (a socket, a
   FIFO, a directory, an epoll instance, ...), a caller that made, while alone, state each process models on its
@@ -758,7 +762,8 @@ lifecycle markers for crash restart).
   the first candidate the table lists as admitted or refused, so a search
   never reaches a program outside the table, and a candidate before it
   that the simulated filesystem holds stops the run by name (glibc would
-  try it first); an empty name is `ENOENT`: a spawn of an admitted program runs it as a child process (see
+  try it first), as does a relative entry before it when the spawn has a
+  `chdir` or `fchdir` action; an empty name is `ENOENT`: a spawn of an admitted program runs it as a child process (see
   Processes), any other spawn is refused (`deny_trap`), and
   `fork` and the exec family (a `Command` that falls back to them included)
   are refused as before.

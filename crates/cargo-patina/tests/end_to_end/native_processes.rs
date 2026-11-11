@@ -73,6 +73,9 @@ unsafe extern "C" {
     fn epoll_create1(flags: i32) -> i32;
     fn epoll_ctl(epoll: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32;
     fn epoll_wait(epoll: i32, events: *mut EpollEvent, max: i32, timeout: i32) -> i32;
+    fn close(fd: i32) -> i32;
+    fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
+    fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
     static environ: *const *const std::ffi::c_char;
 }
 
@@ -148,6 +151,23 @@ extern "C" fn on_chld(_: i32) {
 const SIGUSR1: i32 = 10;
 
 extern "C" fn on_usr1(_: i32) {}
+
+const SIGPIPE: i32 = 13;
+const RLIMIT_NOFILE: i32 = 7;
+
+/// The SIGPIPE disposition `sigpipe-inherited` started with, read before
+/// Rust's runtime sets its own: a C program's view of what it inherited.
+static INHERITED_SIGPIPE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+extern "C" fn stash_sigpipe(argc: i32, argv: *const *const std::ffi::c_char, _: *const *const std::ffi::c_char) {
+    if argc >= 2 && unsafe { std::ffi::CStr::from_ptr(*argv.add(1)) } == c"sigpipe-inherited" {
+        let mut old = SigAction { handler: 0, mask: [0; 16], flags: 0, restorer: 0 };
+        assert_eq!(unsafe { sigaction(SIGPIPE, std::ptr::null(), &mut old) }, 0);
+        INHERITED_SIGPIPE.store(old.handler, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[used]
+#[unsafe(link_section = ".init_array")]
+static STASH_SIGPIPE: extern "C" fn(i32, *const *const std::ffi::c_char, *const *const std::ffi::c_char) = stash_sigpipe;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -448,19 +468,37 @@ fn main() {
             let shadow = format!("/tmp/bin/{name}");
             std::fs::write(&shadow, b"shadow").unwrap();
             std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let path = if how == "empty" {
-                std::env::set_current_dir("/tmp/bin").unwrap();
-                format!(":{directory}")
-            } else {
-                format!("/tmp/bin:{directory}")
+            // `chdir` and `fchdir`: a relative PATH entry the child resolves
+            // after its working-directory action, where the file is.
+            let mut actions = [0u64; 10];
+            unsafe { posix_spawn_file_actions_init(&mut actions) };
+            let mut directory_fd = None;
+            let path = match how {
+                "empty" => {
+                    std::env::set_current_dir("/tmp/bin").unwrap();
+                    format!(":{directory}")
+                }
+                "chdir" => {
+                    unsafe { posix_spawn_file_actions_addchdir_np(&mut actions, c"/tmp".as_ptr()) };
+                    format!("bin:{directory}")
+                }
+                "fchdir" => {
+                    use std::os::fd::AsRawFd;
+                    let held = std::fs::File::open("/tmp/bin").unwrap();
+                    unsafe { posix_spawn_file_actions_addfchdir_np(&mut actions, held.as_raw_fd()) };
+                    directory_fd = Some(held);
+                    format!(":{directory}")
+                }
+                _ => format!("/tmp/bin:{directory}"),
             };
             unsafe { std::env::set_var("PATH", path) };
             let name = std::ffi::CString::new(name).unwrap();
             let argv = [name.as_ptr(), c"child".as_ptr(), c"0".as_ptr(), std::ptr::null()];
             let mut pid = 0;
             let spawned = unsafe {
-                posix_spawnp(&mut pid, name.as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+                posix_spawnp(&mut pid, name.as_ptr(), actions.as_ptr().cast(), std::ptr::null(), argv.as_ptr(), environ)
             };
+            drop(directory_fd);
             println!("SHADOWED {spawned}");
         }
         ["dispositions"] => {
@@ -494,6 +532,53 @@ fn main() {
             posix_spawnattr_setflags(&mut attr, 0x04); // POSIX_SPAWN_SETSIGDEF
             let reset = spawn_wait(binary, &["dispositions"], std::ptr::null(), &attr);
             println!("DISPOSITIONS {plain} {reset}");
+        },
+        ["nofile-report"] => {
+            let mut limit = [0u64; 2];
+            assert_eq!(unsafe { getrlimit(RLIMIT_NOFILE, &mut limit) }, 0);
+            let open = |fd| unsafe { fcntl(fd, F_GETFD) } >= 0;
+            println!("NOFILE-CHILD {} {} 2000={} 3000={}", limit[0], limit[1], open(2000), open(3000));
+        }
+        [binary, "nofile-child"] => unsafe {
+            // A child inherits RLIMIT_NOFILE, soft and hard, and every
+            // descriptor open across exec, above its soft limit or not; a
+            // dup2 action past the limit the child starts with is EBADF.
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &[4096, 4096]), 0);
+            assert_eq!(dup2(1, 3000), 3000);
+            let mut actions = [0u64; 10];
+            posix_spawn_file_actions_init(&mut actions);
+            assert_eq!(posix_spawn_file_actions_adddup2(&mut actions, 1, 2000), 0);
+            let raised = spawn_wait(binary, &["nofile-report"], &actions, std::ptr::null());
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &[1024, 4096]), 0);
+            let lowered = spawn_wait(binary, &["nofile-report"], &actions, std::ptr::null());
+            let plain = spawn_wait(binary, &["nofile-report"], std::ptr::null(), std::ptr::null());
+            println!("NOFILE {raised} {lowered} {plain}");
+        },
+        ["sigpipe-inherited", fd] => {
+            // As a C program would: SIGPIPE as inherited, then a write to a
+            // pipe nobody reads.
+            let inherited = INHERITED_SIGPIPE.load(std::sync::atomic::Ordering::SeqCst);
+            assert_ne!(inherited, usize::MAX, "the constructor read the disposition");
+            unsafe { signal(SIGPIPE, inherited) };
+            let written = unsafe { write(fd.parse().unwrap(), b"x".as_ptr().cast(), 1) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            std::process::exit(if written == -1 && errno == Some(32) { 32 } else { 1 });
+        }
+        [binary, "sigpipe-inherited-child"] => unsafe {
+            // The parent ignores SIGPIPE and closes the pipe's reader before
+            // the spawn (attributes NULL): the child's write is EPIPE.
+            signal(SIGPIPE, 1);
+            let mut fds = [0; 2];
+            assert_eq!(pipe(fds.as_mut_ptr()), 0);
+            assert_eq!(close(fds[0]), 0);
+            let writer = fds[1].to_string();
+            let strings = [binary, "sigpipe-inherited", &writer].map(|arg| std::ffi::CString::new(arg).unwrap());
+            let argv = [strings[0].as_ptr(), strings[1].as_ptr(), strings[2].as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            assert_eq!(posix_spawn(&mut pid, argv[0], std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ), 0);
+            let mut status = 0;
+            assert_eq!(waitpid(pid, &mut status, 0), pid);
+            println!("INHERITED-SIGPIPE code={} signal={}", (status >> 8) & 0xff, status & 0x7f);
         },
         ["setfl-inherited", fd] => {
             let set = unsafe { fcntl(fd.parse().unwrap(), F_SETFL, O_NONBLOCK) };
@@ -1395,7 +1480,8 @@ fn main() {
     /// made alone that the machine would share (an inotify instance, a
     /// FIFO), an environment too large to launch, a `PATH` candidate that
     /// shadows the admitted program (in a directory or the working
-    /// directory), a `chdir` action that is not UTF-8, and `F_SETFL` on a
+    /// directory), a relative `PATH` entry before the admitted program
+    /// when a `chdir` or `fchdir` action moves the child, a `chdir` action that is not UTF-8, and `F_SETFL` on a
     /// pipe end another live process holds (from either side). Each stops as
     /// not modeled rather than running a child that silently differs.
     #[test]
@@ -1413,6 +1499,8 @@ fn main() {
             (vec![], vec!["fionread-child"]),
             (vec![], vec!["path-shadow-child", "dir"]),
             (vec![], vec!["path-shadow-child", "empty"]),
+            (vec![], vec!["path-shadow-child", "chdir"]),
+            (vec![], vec!["path-shadow-child", "fchdir"]),
             (vec![], vec!["chdir-bytes-child"]),
             (vec![], vec!["setfl-shared", "root"]),
             (vec![], vec!["setfl-shared", "child"]),
@@ -2385,6 +2473,25 @@ fn main() {
             (vec![], "dispositions-child", "DISPOSITIONS 0 0", false),
             (
                 vec![],
+                "sigpipe-inherited-child",
+                "INHERITED-SIGPIPE code=32 signal=0",
+                false,
+            ),
+            (
+                vec![],
+                "nofile-child",
+                "NOFILE-CHILD 4096 4096 2000=true 3000=true",
+                false,
+            ),
+            (
+                vec![],
+                "nofile-child",
+                "NOFILE-CHILD 1024 4096 2000=false 3000=true",
+                false,
+            ),
+            (vec![], "nofile-child", "NOFILE 0 9 0", false),
+            (
+                vec![],
                 "readiness-child",
                 "READY first=-1 errno=Some(11) poll=1/1 select=1 epoll=1 got=xyz",
                 false,
@@ -2430,8 +2537,10 @@ fn main() {
     /// `posix_spawnp` by name through `PATH`. Inherited pipe ends carry
     /// bytes both ways, a file offset is shared, each file action takes
     /// effect in order (and one at the descriptor limit is `EBADF`), an
-    /// empty name is `ENOENT`, `SIG_IGN` is inherited less a `SETSIGDEF`
-    /// set, a child's pipe end answers `O_NONBLOCK`, `poll`, `select` and
+    /// empty name is `ENOENT`, `RLIMIT_NOFILE` is inherited with every
+    /// descriptor open across exec, `SIG_IGN` is inherited less a
+    /// `SETSIGDEF` set (so a write to a pipe with no reader is `EPIPE`), a
+    /// child's pipe end answers `O_NONBLOCK`, `poll`, `select` and
     /// `epoll`, two of its threads share one pipe's bytes, and 1 MiB reaches
     /// a child through a pipe.
     #[test]

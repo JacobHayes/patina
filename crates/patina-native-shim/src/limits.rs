@@ -100,6 +100,21 @@ pub(crate) fn soft(resource: u32) -> u64 {
     LIMITS.lock()[resource as usize].cur
 }
 
+/// The guest's `RLIMIT_NOFILE`, soft and hard: what a child it spawns
+/// starts with (limits survive `fork` and `execve`).
+#[cfg(target_os = "linux")]
+pub(crate) fn nofile() -> Rlimit {
+    LIMITS.lock()[RLIMIT_NOFILE as usize]
+}
+
+/// A child's `RLIMIT_NOFILE`: its parent's at the spawn, which its
+/// descriptor table then enforces.
+#[cfg(target_os = "linux")]
+pub(crate) fn inherit_nofile(limit: Rlimit) {
+    LIMITS.lock()[RLIMIT_NOFILE as usize] = limit;
+    crate::set_fd_limit(limit.cur);
+}
+
 /// `do_prlimit` on the table: `old` is the limit before, `new` replaces it.
 fn exchange(
     limits: &mut [Rlimit; RLIM_NLIMITS],

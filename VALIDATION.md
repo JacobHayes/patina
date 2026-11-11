@@ -211,7 +211,10 @@ versions, target triple and fingerprint.
   the parent and child share, each file action (`close`, `closefrom`,
   `dup2` onto itself clearing close-on-exec, the order of a `close` and a
   `dup2`, `fchdir` to a plain or `O_PATH` directory) and an action's
-  descriptor at the limit, `SIG_IGN` inherited less a `SETSIGDEF` set, an
+  descriptor at the limit, `RLIMIT_NOFILE` inherited (a `dup2` action
+  and an open descriptor past 1024 after raising it, and a `dup2` action
+  past a lowered one `EBADF`), `SIG_IGN` inherited less a `SETSIGDEF` set
+  (a child of a parent ignoring `SIGPIPE` gets `EPIPE`), an
   empty program name, `O_NONBLOCK` and `poll`, `select` and `epoll` on a
   child's pipe end, two threads of a child parked on one pipe, and 1 MiB
   from the root to a child, each shown able to fail by a planted revert;
@@ -219,7 +222,8 @@ versions, target triple and fingerprint.
   search or exact path outside the admission and a `pre_exec` fallback
   refused, and a socket, FIFO or `addopen` action across a spawn,
   `FIONREAD` on a child's inherited pipe, a `PATH` candidate shadowing the
-  admitted one, a non-UTF-8 `chdir` action and `F_SETFL` on a shared
+  admitted one (or a relative entry before it with a `chdir` or `fchdir`
+  action), a non-UTF-8 `chdir` action and `F_SETFL` on a shared
   description a named stop; `tokio::process` `output()` and an interactive
   child reaped through the `SIGCHLD` fallback, recorded and replayed), and the shim's unit tests the hub's
   checks of a child's page; `testbeds/multiproc` pins each workload's first refusal or

@@ -695,9 +695,10 @@ unsafe fn spawn_door(
         if name.is_some_and(|name| name.to_bytes().is_empty()) {
             return libc::ENOENT;
         }
-        let found = name
-            .filter(|_| search)
-            .and_then(|name| crate::machine::spawn::search(symbol, name));
+        let found = name.filter(|_| search).and_then(|name| {
+            // SAFETY: the caller's actions object, per the entry's contract.
+            unsafe { crate::machine::spawn::search(symbol, name, file_actions) }
+        });
         let file = found.as_deref().map_or(file, CStr::as_ptr);
         let spawn = crate::machine::spawn::Spawn {
             symbol,

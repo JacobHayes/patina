@@ -735,8 +735,9 @@ impl GuestFdTable {
     /// number to the description at its index in `descriptions`, none of
     /// them close-on-exec, and nothing else is open. Returns the releases of
     /// what the table held before, and the id each of `descriptions` got. A
-    /// number at or past the limit is `EBADF`, and the table is left as it
-    /// was.
+    /// number may be at or past the limit, as one open across exec stays
+    /// open whatever the new limit; a negative number, or an index past
+    /// `descriptions`, is `EBADF`, and the table is left as it was.
     #[cfg(target_os = "linux")]
     pub(crate) fn replace(
         &mut self,
@@ -744,8 +745,7 @@ impl GuestFdTable {
         numbers: &[(c_int, usize)],
     ) -> Result<(Vec<Release>, Vec<DescId>), c_int> {
         if numbers.iter().any(|&(number, index)| {
-            Self::slot_index(number).is_none_or(|slot| slot >= self.limit)
-                || index >= descriptions.len()
+            Self::slot_index(number).is_none() || index >= descriptions.len()
         }) {
             return Err(EBADF);
         }

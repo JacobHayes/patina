@@ -204,9 +204,19 @@ pub(crate) unsafe fn actions_destroy(acts: *mut libc::posix_spawn_file_actions_t
 /// no candidate is admitted, and the caller refuses `file` by name: the
 /// search never looks at the host. A candidate before the admitted one
 /// that the simulated filesystem holds (or cannot say it lacks) is the one
-/// glibc would try first: the spawn stops the run by name.
+/// glibc would try first: the spawn stops the run by name. So does a
+/// relative directory before the admitted one when the spawn's
+/// `actions` change the working directory: glibc searches in the child,
+/// after them, and the caller's working directory does not answer for it.
+///
+/// # Safety
+/// `actions` is null or a live actions object.
 #[cfg(patina_posix_exports)]
-pub(crate) fn search(symbol: &CStr, file: &CStr) -> Option<CString> {
+pub(crate) unsafe fn search(
+    symbol: &CStr,
+    file: &CStr,
+    actions: *const libc::posix_spawn_file_actions_t,
+) -> Option<CString> {
     use crate::admission::{Admission, admitted_program};
     let bytes = file.to_bytes();
     if bytes.is_empty() || bytes.contains(&b'/') {
@@ -220,7 +230,17 @@ pub(crate) fn search(symbol: &CStr, file: &CStr) -> Option<CString> {
         // SAFETY: the environment's value, a C string.
         unsafe { CStr::from_ptr(path) }.to_bytes().to_vec()
     };
+    let moves = !actions.is_null() && {
+        // SAFETY: a live actions object, per this function's contract.
+        let id = unsafe { actions_id(actions) };
+        ACTIONS.lock().get(&id).is_some_and(|actions| {
+            actions
+                .iter()
+                .any(|action| matches!(action, Action::Chdir(_) | Action::Fchdir(_)))
+        })
+    };
     let mut earlier: Option<CString> = None;
+    let mut relative: Option<&[u8]> = None;
     for directory in path.split(|byte| *byte == b':') {
         let mut candidate = directory.to_vec();
         if !candidate.is_empty() && !candidate.ends_with(b"/") {
@@ -231,6 +251,18 @@ pub(crate) fn search(symbol: &CStr, file: &CStr) -> Option<CString> {
             continue;
         };
         if !matches!(admitted_program(&candidate), Admission::Unadmitted) {
+            if let Some(directory) = relative {
+                refuse_named(
+                    symbol,
+                    file,
+                    &format!(
+                        "whose PATH search reaches the relative directory `{}` after a \
+                         working-directory file action, before the admitted `{}`",
+                        String::from_utf8_lossy(directory),
+                        candidate.to_string_lossy()
+                    ),
+                );
+            }
             if let Some(shadow) = earlier {
                 refuse_named(
                     symbol,
@@ -243,6 +275,9 @@ pub(crate) fn search(symbol: &CStr, file: &CStr) -> Option<CString> {
                 );
             }
             return Some(candidate);
+        }
+        if moves && relative.is_none() && !directory.starts_with(b"/") {
+            relative = Some(directory);
         }
         if earlier.is_none() && !absent(&candidate) {
             earlier = Some(candidate);
@@ -599,8 +634,14 @@ fn arrange(
         match action {
             Action::Dup2 { fd, to } => {
                 // The copy stays open across exec; glibc's `dup2` of a
-                // number onto itself clears its close-on-exec bit.
+                // number onto itself clears its close-on-exec bit (an
+                // `fcntl`, which no limit bounds). A copy onto a number at
+                // or past the soft limit the child starts with, the
+                // caller's now, is `dup2`'s `EBADF`.
                 let (resolved, _) = *table.get(fd).ok_or(libc::EBADF)?;
+                if fd != to && usize::try_from(*to).is_ok_and(|to| to >= crate::fd_limit()) {
+                    return Err(libc::EBADF);
+                }
                 table.insert(*to, (resolved, false));
             }
             Action::Close(fd) => {
@@ -659,8 +700,8 @@ fn arrange(
 }
 
 /// Child `pid`'s plan, as [`install_plan`] reads it: one entry per
-/// description the child holds, each number's description, and the signals
-/// it ignores (`ignored`, a mask). Each
+/// description the child holds, each number's description, the signals
+/// it ignores (`ignored`, a mask) and the caller's `RLIMIT_NOFILE`. Each
 /// pipe the child holds is a reference of its own on the root's
 /// description, taken here; each file is the duplicate `files` names.
 fn plan(
@@ -712,16 +753,18 @@ fn plan(
             }
         })
         .collect();
+    let nofile = crate::limits::nofile();
     serde_json::to_vec(&serde_json::json!({
         "descriptions": descriptions,
         "numbers": numbers,
         "ignored": ignored,
+        "nofile": [nofile.cur, nofile.max],
     }))
     .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a plan: {error}")))
 }
 
-/// A child, before it is ready: its descriptor table and the signals it
-/// ignores become what its spawn arranged.
+/// A child, before it is ready: its `RLIMIT_NOFILE`, its descriptor table
+/// and the signals it ignores become what its spawn arranged.
 pub(super) fn install_plan() {
     send(channel(), &Message::Plan);
     let len = match receive(channel()) {
@@ -773,6 +816,14 @@ pub(super) fn install_plan() {
         .flatten()
         .filter_map(|entry| Some((entry[0].as_i64()? as c_int, entry[1].as_u64()? as usize)))
         .collect();
+    let nofile = plan["nofile"]
+        .as_array()
+        .and_then(|limit| Some((limit.first()?.as_u64()?, limit.get(1)?.as_u64()?)))
+        .unwrap_or_else(|| protocol_fatal_text("a plan without RLIMIT_NOFILE"));
+    crate::limits::inherit_nofile(crate::limits::Rlimit {
+        cur: nofile.0,
+        max: nofile.1,
+    });
     let (released, ids) = crate::state::fd_table()
         .lock()
         .replace(&descriptions, &numbers)
