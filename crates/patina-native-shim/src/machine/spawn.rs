@@ -496,6 +496,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             page: Some(page),
             ready: false,
             status: None,
+            artifact,
         },
     );
     ROLE.store(ROLE_ROOT, Ordering::Relaxed);

@@ -897,11 +897,22 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
     };
     let runtime_started = stop.started;
     if let Some(mut stop) = stop.stop {
-        // A compute stop's sampled PC, named from the executable that ran.
+        // A compute stop's sampled PC, named from the executable that ran:
+        // a child's admitted program (`artifact`), else the guest's own.
+        #[cfg(target_os = "linux")]
+        let child_image = stop
+            .get("artifact")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|id| admission.held(id as usize))
+            .and_then(|file| Image::map(file).ok());
+        #[cfg(not(target_os = "linux"))]
+        let child_image: Option<Image> = None;
         let location = stop
             .get("yield_point_delta")
             .and_then(serde_json::Value::as_i64)
-            .and_then(|delta| crate::coverage::locate(image.bytes(), delta));
+            .and_then(|delta| {
+                crate::coverage::locate(child_image.as_ref().unwrap_or(&image).bytes(), delta)
+            });
         if let (Some(location), serde_json::Value::Object(record)) = (location, &mut stop) {
             record.insert("location".into(), output::location_json(&location));
         }

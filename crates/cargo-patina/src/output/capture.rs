@@ -100,11 +100,17 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
         }
         match process {
             Some(pid) => {
-                let list = document
+                // A child's finding is the run's, attributed to its process.
+                let mut list = document
                     .get("runtime_findings")
                     .and_then(serde_json::Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                for finding in &mut list {
+                    if let serde_json::Value::Object(finding) = finding {
+                        finding.insert("process".into(), pid.into());
+                    }
+                }
                 match findings.iter_mut().find(|(seen, _)| *seen == pid) {
                     Some(entry) => entry.1 = list,
                     None => findings.push((pid, list)),

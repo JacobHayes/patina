@@ -73,6 +73,13 @@ pub(super) enum Message {
     /// Hub to a frozen child, before its resume: a signal another process
     /// sent it; its information, of `len` bytes, follows.
     Raise { len: u64 },
+    /// Either way, once the machine is deadlocked: what are your blocked
+    /// tasks (a frozen child's own; the hub's, the rest of the machine's
+    /// but the asker's)?
+    Describe,
+    /// The answer to [`Message::Describe`]: JSON of `len` bytes follows,
+    /// each process's pid and its blocked tasks.
+    DescribeReply { len: u64 },
 }
 
 /// The largest packet a frame's payload travels in: well inside a
@@ -138,6 +145,8 @@ impl Message {
             Message::Plan => words(16, [0; 3], None),
             Message::PlanReply { len } => words(17, [len, 0, 0], None),
             Message::Raise { len } => words(18, [len, 0, 0], None),
+            Message::Describe => words(19, [0; 3], None),
+            Message::DescribeReply { len } => words(20, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -189,6 +198,8 @@ impl Message {
             16 => Message::Plan,
             17 => Message::PlanReply { len: words[1] },
             18 => Message::Raise { len: words[1] },
+            19 => Message::Describe,
+            20 => Message::DescribeReply { len: words[1] },
             _ => return None,
         })
     }
@@ -245,6 +256,8 @@ mod tests {
             Message::Plan,
             Message::PlanReply { len: 2 },
             Message::Raise { len: 128 },
+            Message::Describe,
+            Message::DescribeReply { len: 64 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }

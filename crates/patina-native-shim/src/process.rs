@@ -162,6 +162,10 @@ pub(crate) struct RunStop<'a> {
     /// [`patina_yield_point`]'s address: ASLR-proof, so the supervisor can
     /// name the site from the binary on disk.
     yield_point_delta: Option<isize>,
+    /// The processes of the guest's machine the stop is about (a deadlock
+    /// names every process it holds); `None` for the process stopping, when
+    /// the machine holds others.
+    processes: Option<&'a [i32]>,
 }
 
 impl<'a> RunStop<'a> {
@@ -174,6 +178,7 @@ impl<'a> RunStop<'a> {
             detail,
             guest_exit: None,
             yield_point_delta: None,
+            processes: None,
         }
     }
 
@@ -197,6 +202,14 @@ impl<'a> RunStop<'a> {
     /// This stop, carrying where the stopped thread was (`yield_point_delta`).
     pub(crate) const fn with_yield_point_delta(mut self, delta: Option<isize>) -> Self {
         self.yield_point_delta = delta;
+        self
+    }
+
+    /// This stop, about `processes` of the guest's machine rather than the
+    /// process stopping.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) const fn with_processes(mut self, processes: &'a [i32]) -> Self {
+        self.processes = Some(processes);
         self
     }
 }
@@ -335,9 +348,9 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
     record.raw(b"\",\"reason\":\"");
     record.raw(stop.reason.as_bytes());
     record.raw(b"\",\"detail\":\"");
-    // Room for the closing quote, the guest status, the sampled site and the
-    // document's end.
-    const TAIL: usize = 96;
+    // Room for the closing quote, the guest status, the sampled site, the
+    // processes the stop is about and the document's end.
+    const TAIL: usize = 192;
     if child {
         record.raw(b"process ");
         record.number(i64::from(crate::patina_pid()));
@@ -354,6 +367,28 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
     if let Some(delta) = stop.yield_point_delta {
         record.raw(b",\"yield_point_delta\":");
         record.number(delta as i64);
+    }
+    // Which processes of a machine of several the stop is about: the one
+    // stopping, unless the stop names others.
+    #[cfg(target_os = "linux")]
+    let machine = crate::machine::is_multiprocess();
+    #[cfg(not(target_os = "linux"))]
+    let machine = false;
+    let me = [crate::patina_pid()];
+    let processes = match stop.processes {
+        Some(processes) => Some(processes),
+        None if machine => Some(me.as_slice()),
+        None => None,
+    };
+    if let Some(processes) = processes {
+        record.raw(b",\"processes\":[");
+        for (index, pid) in processes.iter().enumerate() {
+            if index > 0 {
+                record.raw(b",");
+            }
+            record.number(i64::from(*pid));
+        }
+        record.raw(b"]");
     }
     record.raw(b"}}\n");
     #[cfg(target_os = "linux")]

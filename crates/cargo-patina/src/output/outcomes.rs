@@ -66,6 +66,9 @@ pub struct Stop {
     /// the executable; absent when no PC was sampled or the binary names no
     /// function there.
     pub(crate) location: Option<CodeLocation>,
+    /// On a machine of several processes, the processes the stop is about
+    /// (the one that stopped, or every process a deadlock holds), by pid.
+    pub(crate) processes: Vec<u64>,
 }
 
 /// A stop's `location` as JSON: `{function, file?, line?}`.
@@ -116,6 +119,7 @@ impl Stop {
             guest_exit_code: None,
             mismatch: None,
             location: None,
+            processes: Vec::new(),
         }
     }
 
@@ -133,8 +137,17 @@ impl Stop {
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32);
         read.location = location_of(stop);
+        read.processes = processes_of(stop);
         Some(read)
     }
+}
+
+/// The `processes` a stop object names, read back.
+fn processes_of(stop: &serde_json::Value) -> Vec<u64> {
+    stop.get("processes")
+        .and_then(serde_json::Value::as_array)
+        .map(|pids| pids.iter().filter_map(serde_json::Value::as_u64).collect())
+        .unwrap_or_default()
 }
 
 /// The reason of a run the pre-run audit refused: the binary links something
@@ -328,13 +341,15 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
         .iter()
         .find(|finding| text(finding, "source") == "liveness" && !known_limit(finding))
     {
-        return Outcome::of(
-            RunClass::Liveness,
-            Some(Stop::new(
-                "liveness",
-                format!("the liveness watchdog fired: {}", text(finding, "detail")),
-            )),
-        );
+        // A child's finding is the run's, attributed to its process.
+        let process = finding.get("process").and_then(serde_json::Value::as_u64);
+        let mut detail = format!("the liveness watchdog fired: {}", text(finding, "detail"));
+        if let Some(pid) = process {
+            detail = format!("{detail} (process {pid})");
+        }
+        let mut stop = Stop::new("liveness", detail);
+        stop.processes = process.into_iter().collect();
+        return Outcome::of(RunClass::Liveness, Some(stop));
     }
     if let Some(verdict) = rows("verdicts")
         .iter()
@@ -345,13 +360,13 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
             text(verdict, "label"),
             text(verdict, "detail")
         );
-        if let Some(pid) = verdict.get("process").and_then(serde_json::Value::as_u64) {
+        let process = verdict.get("process").and_then(serde_json::Value::as_u64);
+        if let Some(pid) = process {
             detail = format!("{} (process {pid})", detail.trim());
         }
-        return Outcome::of(
-            RunClass::Violation,
-            Some(Stop::new("violation_verdict", detail.trim())),
-        );
+        let mut stop = Stop::new("violation_verdict", detail.trim());
+        stop.processes = process.into_iter().collect();
+        return Outcome::of(RunClass::Violation, Some(stop));
     }
 
     // The supervisor's own finding, which the incarnation may not have lived
@@ -374,6 +389,7 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32);
         stop.location = location_of(record);
+        stop.processes = processes_of(record);
         let Some(class) = RunClass::from_name(&text(record, "class")) else {
             // A stop the supervisor cannot read is a defect in patina's own
             // channel, never the guest's finding.

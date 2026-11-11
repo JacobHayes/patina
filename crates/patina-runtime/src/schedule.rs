@@ -763,6 +763,17 @@ impl Context {
         self.flush_recording();
     }
 
+    /// Every parked task of this process with the reason it parked, in task
+    /// order, unrecorded: what a deadlock of the whole machine names of
+    /// this process.
+    pub fn machine_parked_tasks(&self) -> Vec<(TaskId, String)> {
+        self.scheduler
+            .parked()
+            .into_iter()
+            .map(|(task, reason)| (task, reason.to_owned()))
+            .collect()
+    }
+
     /// The monotonic virtual time now, unrecorded: what a process switch
     /// carries to the process it resumes.
     pub fn machine_now(&self) -> Result<u64, RuntimeError> {

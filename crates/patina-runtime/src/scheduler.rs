@@ -431,6 +431,18 @@ impl DetScheduler {
         }
     }
 
+    /// Every parked task with the reason it parked, in task order: what a
+    /// deadlock names.
+    pub fn parked(&self) -> Vec<(TaskId, &str)> {
+        self.tasks
+            .iter()
+            .filter_map(|(task, state)| match state {
+                TaskState::Parked(reason) => Some((*task, reason.as_str())),
+                _ => None,
+            })
+            .collect()
+    }
+
     // Not an iterator: selection fails on deadlock and mutates task state.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> DriverResult<Option<TaskId>> {

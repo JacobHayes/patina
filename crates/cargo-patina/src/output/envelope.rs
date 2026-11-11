@@ -264,6 +264,9 @@ impl Envelope {
             if let Some(location) = &v.location {
                 rm.insert("location".into(), super::outcomes::location_json(location));
             }
+            if !v.processes.is_empty() {
+                rm.insert("processes".into(), Value::from(v.processes.clone()));
+            }
             m.insert("stop".into(), Value::Object(rm));
         }
         if self.trace_unusable {

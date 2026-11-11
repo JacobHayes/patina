@@ -803,6 +803,35 @@ pub(crate) fn with_context_msg<T>(
         // would only carry the message on to a fatal of its own.
         RuntimeError::Effect(effect) if effect.code == ErrorCode::Deadlock => {
             let _ = flush_before_refusal();
+            // On a machine of several processes, every process is blocked:
+            // the stop names each and its blocked tasks.
+            #[cfg(target_os = "linux")]
+            if let Some((detail, processes)) =
+                crate::machine::deadlock(&context.machine_parked_tasks())
+            {
+                let text = format!(
+                    "patina native shim fatal: every process of the guest's machine is blocked: \
+{detail}\n"
+                );
+                let _ = host_write_all(2, text.as_bytes());
+                // The root keeps its evidence (its facts, the recording so
+                // far, every process's timeline), as it does when a child
+                // stops the run: the deadlock replays.
+                if !crate::machine::is_child() {
+                    context.machine_stopped();
+                }
+                crate::host_abort(
+                    RunStop::new(
+                        RunClass::Liveness,
+                        "deadlock",
+                        &[
+                            b"every guest thread of every process is blocked and none can run: ",
+                            detail.as_bytes(),
+                        ],
+                    )
+                    .with_processes(&processes),
+                )
+            }
             let text = format!("patina native shim fatal: {error}\n");
             let _ = host_write_all(2, text.as_bytes());
             crate::host_abort(RunStop::new(

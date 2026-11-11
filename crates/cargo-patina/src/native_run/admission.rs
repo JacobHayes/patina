@@ -237,6 +237,12 @@ impl Admission {
         Ok(artifacts)
     }
 
+    /// The held file of admitted artifact `id` (not the guest's own, 0).
+    #[cfg(target_os = "linux")]
+    pub(super) fn held(&self, id: usize) -> Option<&fs::File> {
+        self.held.get(&id)
+    }
+
     /// The control-plane entry that carries the table to the guest, if it
     /// names anything.
     pub(super) fn env_value(&self) -> Option<String> {

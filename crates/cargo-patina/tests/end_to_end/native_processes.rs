@@ -1439,9 +1439,34 @@ fn main() {
             let status = Command::new(binary).arg("pause").status();
             println!("STUCK {status:?}");
         }
-        ["idle"] => loop {
+        ["idle", ..] => loop {
             std::thread::yield_now();
         },
+        [binary, "pipe-deadlock-child"] => {
+            // The child reads a pipe whose write end the parent holds, while
+            // the parent waits for the child: neither can go on.
+            use std::process::Stdio;
+            let mut child = Command::new(binary).arg("cat").stdin(Stdio::piped()).spawn().unwrap();
+            let _input = child.stdin.take().unwrap();
+            println!("WAITING");
+            let status = child.wait();
+            println!("DEADLOCK-OVER {status:?}");
+        }
+        ["self-pipe", ..] => {
+            // Reads a pipe whose only writer is itself.
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            println!("HUNG");
+            let mut byte = [0u8; 1];
+            let n = unsafe { read(fds[0], byte.as_mut_ptr().cast(), 1) };
+            println!("UNHUNG {n}");
+        }
+        [binary, child @ ("self-pipe" | "spin" | "idle"), token] => {
+            // The parent waits for a child that hangs, computes or polls.
+            println!("PARENT-WAITS");
+            let status = Command::new(binary).args([child, token]).status();
+            println!("WAITED-OUT {status:?}");
+        }
         [binary, "idle-child"] => {
             // Both processes poll, and nothing progresses.
             let mut child = Command::new(binary).arg("idle").spawn().unwrap();
@@ -2194,7 +2219,10 @@ fn main() {
     }
 
     /// A child's compute-bound stop is in the child's own timeline, so its
-    /// replay stops where the recording did.
+    /// replay stops where the recording did. The host observer that stops a
+    /// plain build is the child's own (its parent, frozen, has no candidate)
+    /// and samples the child: the stop names the child's process and the
+    /// site it spun at.
     #[test]
     fn a_childs_compute_stop_replays_where_it_stopped() {
         let guest = plain_guest();
@@ -2218,6 +2246,14 @@ fn main() {
             ],
         ));
         assert_eq!(recorded["result"], "timeout", "{recorded:#}");
+        assert_eq!(
+            (
+                &recorded["stop"]["processes"],
+                recorded["stop"]["location"].is_object()
+            ),
+            (&serde_json::json!([3]), true),
+            "{recorded:#}"
+        );
         let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
         assert!(
             bundle["processes"][0]["metadata"]["compute_stop"].is_object(),
@@ -2231,6 +2267,111 @@ fn main() {
             (&recorded["result"], &recorded["stop"]["reason"]),
             "{replayed:#}"
         );
+    }
+
+    /// What a run is judged by when it stops on the machine's liveness: its
+    /// class, its stop's reason and the processes the stop names.
+    fn liveness_verdict(envelope: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!([
+            envelope["result"],
+            envelope["stop"]["reason"],
+            envelope["stop"]["processes"]
+        ])
+    }
+
+    /// Run `args` (after the binary) with `flags` under one seed, recording,
+    /// twice, and replay the first: each case whose recording's verdict is
+    /// not `expected`, whose two recordings differ, or whose replay ends
+    /// otherwise, as a line of `wrong`.
+    fn stops_the_same_way(
+        guest: &common::native::Guest,
+        cases: &[(&[&str], &[&str], serde_json::Value)],
+    ) -> Vec<String> {
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (flags, args, expected) in cases {
+            let name = format!("{}-{}", args.join("-"), flags.len());
+            let record = |run: &str| {
+                let trace = guest.dir.path().join(format!("{name}-{run}.patina"));
+                let mut argv = vec!["--seed", "3", "--format", "json", "--record"];
+                argv.push(trace.to_str().unwrap());
+                argv.extend(flags.iter().copied());
+                argv.extend(["--", binary]);
+                argv.extend(args.iter().copied());
+                let envelope = json_envelope(&guest.command("run", &argv));
+                (trace, envelope)
+            };
+            let (first, recorded) = record("a");
+            let (second, _) = record("b");
+            if liveness_verdict(&recorded) != *expected {
+                wrong.push(format!("{args:?}: expected {expected}, got {recorded:#}"));
+                continue;
+            }
+            if fs::read(&first).ok() != fs::read(&second).ok() || !first.exists() {
+                wrong.push(format!(
+                    "{args:?}: the same seed did not record the same bytes"
+                ));
+            }
+            let replayed = json_envelope(
+                &guest.command("replay", &[first.to_str().unwrap(), "--format", "json"]),
+            );
+            if liveness_verdict(&replayed) != *expected {
+                wrong.push(format!("{args:?}: replayed {replayed:#}"));
+            }
+        }
+        wrong
+    }
+
+    /// A deadlock across processes (a parent waits for a child that reads a
+    /// pipe the parent holds; a child that blocks on what only it could end,
+    /// its own pipe or `pause`, while its parent waits) is the machine's: a
+    /// liveness stop that names every blocked process, whichever process
+    /// found it, and that records the same bytes per seed and replays.
+    #[test]
+    fn a_deadlock_across_processes_names_every_blocked_process() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let deadlock = serde_json::json!(["liveness", "deadlock", [2, 3]]);
+        let wrong = stops_the_same_way(
+            &guest,
+            &[
+                (&[], &["pipe-deadlock-child"], deadlock.clone()),
+                (&[], &["self-pipe", "hung"], deadlock.clone()),
+                (&[], &["stuck-child"], deadlock),
+            ],
+        );
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// A child that computes, spins or polls forever while its parent waits
+    /// for it reaches the machine's bounds (the compute budget, the
+    /// no-progress horizon, which travels with the baton), and the stop is
+    /// the child's: it names the child's process, records the same bytes per
+    /// seed and replays.
+    #[test]
+    fn a_child_that_spins_or_polls_is_stopped_and_attributed_to_it() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let horizon: &[&str] = &["--liveness-watchdog", "200000000"];
+        let wrong = stops_the_same_way(
+            &guest,
+            &[
+                (
+                    &["--compute-watchdog-ms", "300"],
+                    &["spin", "computes"],
+                    serde_json::json!(["timeout", "compute_bound", [3]]),
+                ),
+                (
+                    horizon,
+                    &["spin", "spins"],
+                    serde_json::json!(["liveness", "liveness", [3]]),
+                ),
+                (
+                    horizon,
+                    &["idle", "polls"],
+                    serde_json::json!(["liveness", "liveness", [3]]),
+                ),
+            ],
+        );
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
     }
 
     /// A replayed child that ends with recorded decisions left over has

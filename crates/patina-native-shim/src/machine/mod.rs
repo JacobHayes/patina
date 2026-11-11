@@ -134,6 +134,8 @@ struct Child {
     /// Whether it reported ready: before, its death is never its guest's.
     ready: bool,
     status: Option<i32>,
+    /// The admitted artifact it runs (0, the guest's own executable).
+    artifact: u64,
 }
 
 /// The hub's process table.
@@ -334,6 +336,21 @@ fn await_resume() -> (u64, ForeignState, MachineCarry) {
                 RAISED.lock().push(info_words(&info));
             }
             Some(Message::Kill) => killed(),
+            Some(Message::Describe) => {
+                // The machine is deadlocked: the hub names this process's
+                // blocked tasks.
+                let tasks = crate::with_context_raw(|context| Ok(context.machine_parked_tasks()))
+                    .unwrap_or_default();
+                let answer = serde_json::to_vec(&[(crate::patina_pid(), blocked(&tasks))])
+                    .unwrap_or_default();
+                send_frame(
+                    channel(),
+                    Message::DescribeReply {
+                        len: answer.len() as u64,
+                    },
+                    &answer,
+                );
+            }
             Some(other) => protocol_fatal("a resume", &other),
             None => orphaned(),
         }
@@ -537,6 +554,18 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
                     &answer,
                 )?;
             }
+            Some(Message::Describe) => {
+                // The child found the machine deadlocked: every other
+                // process's blocked tasks.
+                let answer = serde_json::to_vec(&describe_others(pid)).unwrap_or_default();
+                reply(
+                    channel,
+                    Message::DescribeReply {
+                        len: answer.len() as u64,
+                    },
+                    &answer,
+                )?;
+            }
             Some(Message::Plan) => {
                 let plan = spawn::PLANS.lock().remove(&pid).unwrap_or_default();
                 reply(
@@ -551,6 +580,93 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
             None => return None,
         }
     }
+}
+
+/// `tasks` (a process's parked tasks, each with why it parked) as a
+/// deadlock names them: its own threads, not the foreign tasks that stand
+/// for other processes.
+fn blocked(tasks: &[(TaskId, String)]) -> String {
+    let named: Vec<String> = tasks
+        .iter()
+        .filter(|(task, _)| !is_foreign(*task))
+        .map(|(task, reason)| format!("{} ({reason})", task.0))
+        .collect();
+    format!("parked tasks: {}", named.join(", "))
+}
+
+/// The machine is deadlocked: process `asker` (a child) asks for every
+/// other process's blocked tasks. The hub's own, then each live child's
+/// but the asker's, in pid order; a child gone meanwhile names none.
+fn describe_others(asker: i32) -> Vec<(i32, String)> {
+    let tasks =
+        crate::with_context_raw(|context| Ok(context.machine_parked_tasks())).unwrap_or_default();
+    let mut described = vec![(crate::patina_pid(), blocked(&tasks))];
+    let live: Vec<(i32, c_int)> = CHILDREN
+        .lock()
+        .iter()
+        .filter(|(pid, child)| **pid != asker && child.status.is_none())
+        .map(|(pid, child)| (*pid, child.channel))
+        .collect();
+    for (_, channel) in live {
+        described.extend(ask_describe(channel));
+    }
+    described
+}
+
+/// A frozen child's blocked tasks, which it answers on `channel`; none if
+/// it is gone.
+fn ask_describe(channel: c_int) -> Vec<(i32, String)> {
+    if !send_bytes_once(channel, &Message::Describe.encode()) {
+        return Vec::new();
+    }
+    match receive(channel) {
+        Some(Message::DescribeReply { len }) => receive_payload(channel, len)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// This process's scheduler found every task blocked, `tasks` its parked
+/// tasks (foreign ones included). When the machine holds other processes
+/// the deadlock is the machine's: a foreign task is parked only when every
+/// task of the processes it stands for is, with no timer due. The stop's
+/// detail names each live process and its blocked tasks, in pid order,
+/// with the processes it holds; `None` for a process alone.
+pub(crate) fn deadlock(tasks: &[(TaskId, String)]) -> Option<(String, Vec<i32>)> {
+    if !is_multiprocess() {
+        return None;
+    }
+    let mut described = vec![(crate::patina_pid(), blocked(tasks))];
+    if is_child() {
+        send(channel(), &Message::Describe);
+        match receive(channel()) {
+            Some(Message::DescribeReply { len }) => described.extend(
+                receive_payload(channel(), len)
+                    .and_then(|bytes| serde_json::from_slice::<Vec<(i32, String)>>(&bytes).ok())
+                    .unwrap_or_default(),
+            ),
+            Some(other) => protocol_fatal("the machine's blocked tasks", &other),
+            None => orphaned(),
+        }
+    } else {
+        let live: Vec<c_int> = CHILDREN
+            .lock()
+            .values()
+            .filter(|child| child.status.is_none())
+            .map(|child| child.channel)
+            .collect();
+        for channel in live {
+            described.extend(ask_describe(channel));
+        }
+    }
+    described.sort_by_key(|(pid, _)| *pid);
+    let detail = described
+        .iter()
+        .map(|(pid, tasks)| format!("process {pid}: {tasks}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some((detail, described.into_iter().map(|(pid, _)| pid).collect()))
 }
 
 /// Child `pid`'s facts document, marked as that process's (`"process"`), so
@@ -1199,15 +1315,38 @@ pub(crate) fn teardown() {
 /// The root's own evidence goes with it, as a stop the runtime takes leaves
 /// it: its facts, written after every child's, and its recording so far.
 fn child_stopped(pid: i32, record: &[u8]) -> ! {
+    let record = located(pid, record);
     end_machine(pid);
-    crate::process::host_abort_with_record(record)
+    crate::process::host_abort_with_record(&record)
+}
+
+/// Child `pid`'s stop record, saying which admitted artifact the child runs
+/// when it is not the guest's own executable and the record holds a sampled
+/// PC (`yield_point_delta`): the supervisor names the site from that
+/// program, not the root's.
+fn located(pid: i32, record: &[u8]) -> Vec<u8> {
+    let artifact = CHILDREN.lock().get(&pid).map_or(0, |child| child.artifact);
+    let annotated = (artifact != 0)
+        .then(|| serde_json::from_slice::<serde_json::Value>(record.trim_ascii_end()).ok())
+        .flatten()
+        .and_then(|mut parsed| {
+            let stop = parsed.get_mut("stop")?.as_object_mut()?;
+            if !stop.contains_key("yield_point_delta") {
+                return None;
+            }
+            stop.insert("artifact".into(), artifact.into());
+            let mut line = serde_json::to_vec(&parsed).ok()?;
+            line.push(b'\n');
+            Some(line)
+        });
+    annotated.unwrap_or_else(|| record.to_vec())
 }
 
 /// The run stops on what became of child `pid`, as `stop` says, with the
 /// root's evidence (see [`child_stopped`]).
 fn machine_stop(pid: i32, stop: crate::RunStop<'_>) -> ! {
     end_machine(pid);
-    crate::host_abort(stop)
+    crate::host_abort(stop.with_processes(&[pid]))
 }
 
 /// What every stop on a child's account does before the root ends the run:
