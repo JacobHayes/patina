@@ -24,6 +24,7 @@ mod handoff;
 mod lifecycle;
 mod metadata;
 mod native_identity;
+mod process;
 mod recorder;
 mod replay;
 mod stream;
@@ -45,6 +46,7 @@ pub use metadata::{
 pub use native_identity::{
     NativeAdmittedProgram, NativeIdentityDifference, NativeIdentityRecord, NativeLibraryIdentity,
 };
+pub use process::{ProcessEnd, ProcessTrace};
 pub use recorder::{PrefixWriteError, Recorder};
 pub use replay::Replayer;
 pub use stream::TraceStream;
@@ -143,7 +145,10 @@ pub use stream::TraceStream;
 /// - 32: the native build identity records the admission table
 ///   ([`NativeAdmittedProgram`]): every program besides itself the guest
 ///   could spawn, by its path and the digest of the artifact the run pinned.
-pub const TRACE_FORMAT_VERSION: u32 = 32;
+/// - 33: a run whose guest spawned processes records one timeline per child
+///   process ([`TraceBundle::processes`], [`ProcessTrace`]): its pid, parent,
+///   program, arguments, end and its own recording.
+pub const TRACE_FORMAT_VERSION: u32 = 33;
 /// The most a recorded trace may hold: 256 MiB serialized, and 4,000,000
 /// events in a timeline. A recording past either is abandoned
 /// ([`ABANDONED_TRACE_KEY`]) and the run goes on to its own outcome.

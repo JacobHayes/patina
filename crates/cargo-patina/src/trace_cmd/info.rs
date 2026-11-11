@@ -25,6 +25,22 @@ pub(crate) fn info_value(
             })
         })
         .collect();
+    // The guest's child processes, each with its own timeline.
+    let processes: Vec<Value> = bundle
+        .processes
+        .iter()
+        .map(|process| {
+            serde_json::json!({
+                "pid": process.pid,
+                "parent": process.parent,
+                "program": process.program,
+                "argv": process.argv,
+                "status": process.end.map(|(status, _)| status),
+                "end": process.end.map(|(_, end)| end),
+                "events": process.decisions.len(),
+            })
+        })
+        .collect();
     let metadata = raw
         .get("metadata")
         .cloned()
@@ -47,6 +63,7 @@ pub(crate) fn info_value(
         "guest_argv": bundle.metadata.guest_argv,
         "timeline": timeline,
         "timelines": timelines,
+        "processes": processes,
         "resolved_events": events.len(),
         "vtime": vtime,
         "metadata": metadata,
@@ -122,6 +139,20 @@ pub(super) fn print_info_human(facts: &Value) {
         })
         .unwrap_or_default();
     println!("timelines: {timeline_summary}");
+    for process in facts["processes"].as_array().into_iter().flatten() {
+        let end = match (process["end"].as_str(), process["status"].as_i64()) {
+            (Some(end), Some(status)) => format!("{end}, status {status}"),
+            _ => "running at the end".to_owned(),
+        };
+        println!(
+            "process {} (parent {}): {} {} ({} events, {end})",
+            process["pid"],
+            process["parent"],
+            process["program"].as_str().unwrap_or("?"),
+            compact_json_lossy(&process["argv"]),
+            process["events"],
+        );
+    }
     println!(
         "events: {} (resolved {})",
         facts["resolved_events"],

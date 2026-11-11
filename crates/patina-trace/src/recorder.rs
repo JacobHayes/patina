@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::bundle::{Decision, Decisions};
 use crate::{
     BuggifyConfigRecord, ComputeStop, LifecycleEvent, LifecycleEventKind, MAIN_TIMELINE,
-    MAX_TIMELINE_EVENTS, MAX_TRACE_BYTES, RunMetadata, TRACE_FORMAT_VERSION, TraceBundle,
-    TraceError, TraceEvent,
+    MAX_TIMELINE_EVENTS, MAX_TRACE_BYTES, ProcessEnd, ProcessTrace, RunMetadata,
+    TRACE_FORMAT_VERSION, TraceBundle, TraceError, TraceEvent,
 };
 
 /// A `Write` sink that counts bytes instead of keeping them, so a value can be
@@ -193,6 +193,8 @@ pub struct Recorder {
     metadata: RunMetadata,
     incarnation: u64,
     decisions: Vec<TraceEvent>,
+    /// The guest's child processes, by pid ([`Recorder::begin_process`]).
+    processes: std::collections::BTreeMap<i32, ProcessTrace>,
     ledger: EventLedger,
 }
 
@@ -213,6 +215,7 @@ impl Recorder {
             metadata,
             incarnation: 0,
             decisions: Vec::new(),
+            processes: std::collections::BTreeMap::new(),
             ledger: EventLedger::with_limits(max_bytes, max_events),
         }
     }
@@ -286,11 +289,12 @@ impl Recorder {
     pub fn into_bundle(self) -> Result<TraceBundle, TraceError> {
         match self.ledger.overflow_error() {
             Some(error) => Err(error),
-            None => Ok(TraceBundle::linear(
-                self.metadata,
-                self.incarnation,
-                self.decisions,
-            )),
+            None => {
+                let mut bundle =
+                    TraceBundle::linear(self.metadata, self.incarnation, self.decisions);
+                bundle.processes = self.processes.into_values().collect();
+                Ok(bundle)
+            }
         }
     }
 
@@ -304,6 +308,21 @@ impl Recorder {
             format_version: u32,
             metadata: &'a RunMetadata,
             timelines: [PrefixTimeline<'a>; 1],
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            processes: &'a [ProcessPrefix<'a>],
+        }
+        // A child process as the bundle stores it ([`ProcessTrace`]),
+        // borrowed.
+        #[derive(Serialize)]
+        struct ProcessPrefix<'a> {
+            pid: i32,
+            parent: i32,
+            program: &'a str,
+            argv: &'a [String],
+            status: Option<i32>,
+            end: Option<ProcessEnd>,
+            metadata: &'a RunMetadata,
+            timeline: PrefixTimeline<'a>,
         }
         #[derive(Serialize)]
         struct PrefixTimeline<'a> {
@@ -317,6 +336,47 @@ impl Recorder {
         if self.ledger.overflowed() {
             return Err(PrefixWriteError::Overflow);
         }
+        // The children, borrowed: a stop with none allocates nothing here.
+        let processes: Vec<ProcessPrefix<'_>> = self
+            .processes
+            .values()
+            .map(|process| {
+                let start = 0;
+                let end = process
+                    .decisions
+                    .last()
+                    .map_or(start + 1, |event| event.order.saturating_add(1));
+                ProcessPrefix {
+                    pid: process.pid,
+                    parent: process.parent,
+                    program: &process.program,
+                    argv: &process.argv,
+                    status: process.end.map(|(status, _)| status),
+                    end: process.end.map(|(_, end)| end),
+                    metadata: &process.metadata,
+                    timeline: PrefixTimeline {
+                        id: MAIN_TIMELINE,
+                        parent: None,
+                        from_sequence: None,
+                        branch_seed: None,
+                        lifecycle: [
+                            LifecycleEvent {
+                                order: start,
+                                kind: LifecycleEventKind::Start { incarnation: 0 },
+                            },
+                            LifecycleEvent {
+                                order: end,
+                                kind: LifecycleEventKind::End { incarnation: 0 },
+                            },
+                        ],
+                        decisions: Decisions {
+                            start_order: start,
+                            events: &process.decisions,
+                        },
+                    },
+                }
+            })
+            .collect();
         let start = self
             .decisions
             .first()
@@ -354,9 +414,77 @@ impl Recorder {
                         events: &self.decisions,
                     },
                 }],
+                processes: &processes,
             },
         )
         .map_err(PrefixWriteError::Serialization)
+    }
+
+    /// The metadata this recording runs under.
+    pub fn metadata(&self) -> &RunMetadata {
+        &self.metadata
+    }
+
+    /// Write the decisions recorded from the `from`th on, as a bundle's
+    /// timeline stores them (`[operation, outcome]` pairs), to `writer`, and
+    /// answer how many are recorded now: what a child process ships to the
+    /// root since its last ship. Borrowed, so a stop may call it.
+    pub fn write_decisions_from(
+        &self,
+        from: usize,
+        writer: impl std::io::Write,
+    ) -> Result<usize, PrefixWriteError> {
+        if self.ledger.overflowed() {
+            return Err(PrefixWriteError::Overflow);
+        }
+        let events = self.decisions.get(from..).unwrap_or_default();
+        serde_json::to_writer(
+            writer,
+            &Decisions {
+                start_order: events
+                    .first()
+                    .map_or(0, |event| event.order.saturating_sub(1)),
+                events,
+            },
+        )
+        .map_err(PrefixWriteError::Serialization)?;
+        Ok(self.decisions.len())
+    }
+
+    /// A child process of the guest began: `process` (no decisions yet,
+    /// no end), whose recording the root holds from now on.
+    pub fn begin_process(&mut self, process: ProcessTrace) {
+        self.processes.insert(process.pid, process);
+    }
+
+    /// Child `pid` made `decisions`, in its order, after those it shipped
+    /// before. They count against the trace's budgets as the root's own do.
+    pub fn extend_process(&mut self, pid: i32, decisions: Vec<(Operation, Outcome)>) {
+        let Some(process) = self.processes.get_mut(&pid) else {
+            return;
+        };
+        for (operation, outcome) in decisions {
+            if self.ledger.overflowed() {
+                return;
+            }
+            let event = TraceEvent::new(process.decisions.len() as u64, operation, outcome);
+            if self.ledger.admit(&event, "process") {
+                process.decisions.push(event);
+            } else {
+                self.decisions = Vec::new();
+                self.processes.clear();
+                return;
+            }
+        }
+    }
+
+    /// Child `pid` ended, with wait status `status`, as `end` says.
+    pub fn end_process(&mut self, pid: i32, status: i32, end: ProcessEnd) {
+        if let Some(process) = self.processes.get_mut(&pid)
+            && process.end.is_none()
+        {
+            process.end = Some((status, end));
+        }
     }
 
     /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
@@ -368,11 +496,15 @@ impl Recorder {
     pub fn to_bundle(&self) -> Result<TraceBundle, TraceError> {
         match self.ledger.overflow_error() {
             Some(error) => Err(error),
-            None => Ok(TraceBundle::linear(
-                self.metadata.clone(),
-                self.incarnation,
-                self.decisions.clone(),
-            )),
+            None => {
+                let mut bundle = TraceBundle::linear(
+                    self.metadata.clone(),
+                    self.incarnation,
+                    self.decisions.clone(),
+                );
+                bundle.processes = self.processes.values().cloned().collect();
+                Ok(bundle)
+            }
         }
     }
 }

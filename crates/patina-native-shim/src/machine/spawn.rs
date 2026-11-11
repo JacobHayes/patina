@@ -8,9 +8,12 @@
 //! to the table and to its scheduler as a runnable foreign task. The child
 //! runs when the scheduler picks it.
 //!
+//! A recording root keeps each child's recording (the child ships its
+//! decisions with every yield, exit and stop); a replaying one hands each
+//! child its recorded timeline as a trace of its own, in a memory file.
+//!
 //! What this slice does not model stops the run by name (`unsupported`,
-//! `not_modeled`): a spawn from a child, a spawn while recording or
-//! replaying, file actions (a `chdir` action included), a caller whose
+//! `not_modeled`): a spawn from a child, file actions (a `chdir` action included), a caller whose
 //! descriptors 0, 1 and 2 are not the run's own standard streams (a staged
 //! `--stdin` included: the child would read EOF) or that holds any other
 //! descriptor open across exec, spawn attributes
@@ -68,10 +71,6 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     };
     if is_child() {
         refuse(spawn, "from a child process (nested spawn)");
-    }
-    let mode = context(|context| Ok(context.execution_mode()));
-    if mode != ExecutionMode::Seeded {
-        refuse(spawn, "while recording or replaying");
     }
     let Ok(Some(launcher)) = crate::parse_control_u64(ENV_LAUNCH_FD) else {
         refuse(spawn, "in a run the supervisor gives no launch channel");
@@ -144,13 +143,49 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     });
     let payload = serde_json::to_vec(&request)
         .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a launch: {error}")));
-    send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2]);
+    // A replayed child replays its own recorded timeline, handed to it as a
+    // trace of its own; a replay that spawns a child its recording lacks
+    // has diverged.
+    let trace =
+        (context(|context| Ok(context.execution_mode())) == ExecutionMode::Replay).then(|| {
+            match context(|context| Ok(context.machine_process_trace(pid))) {
+                Some(Ok(bytes)) => memfd_with(&bytes),
+                Some(Err(error)) => protocol_fatal_text(&error.to_string()),
+                None => {
+                    let detail = format!(
+                        "the replay spawned process {pid}, which the recording does not hold"
+                    );
+                    crate::host_abort(crate::RunStop::new(
+                        patina_dst_abi::RunClass::Error,
+                        "trace_mismatch",
+                        &[detail.as_bytes()],
+                    ))
+                }
+            }
+        });
+    match trace {
+        Some(trace) => {
+            send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2, trace]);
+            close(trace);
+        }
+        None => send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2]),
+    }
     close(child);
     // The child may use the filesystem before it is ready (its working
     // directory): the hub serves it meanwhile.
     match off_guest(|| serve(pid, hub)) {
         Message::Ready => {}
         other => protocol_fatal("a new process's ready", &other),
+    }
+    // A recording root keeps the child's recording from here on.
+    if let Some(metadata) = super::BEGUN.lock().remove(&pid) {
+        // SAFETY: a NUL-terminated string (checked non-null above).
+        let program = unsafe { CStr::from_ptr(spawn.path) }
+            .to_string_lossy()
+            .into_owned();
+        context(|context| {
+            context.machine_begin_process(pid, parent, program, argv.clone(), &metadata)
+        });
     }
     CHILDREN.lock().insert(
         pid,
@@ -264,6 +299,47 @@ unsafe fn strings(array: *const *mut c_char) -> Option<Vec<String>> {
         strings.push(text.to_owned());
     }
     Some(strings)
+}
+
+/// A close-on-exec memory file holding `bytes`, read from its start.
+fn memfd_with(bytes: &[u8]) -> c_int {
+    // SAFETY: a static name; the flags are plain.
+    let fd = unsafe {
+        crate::sud_host_syscall(
+            libc::SYS_memfd_create,
+            c"patina-process-trace".as_ptr() as _,
+            libc::MFD_CLOEXEC as _,
+            0,
+            0,
+            0,
+            0,
+        )
+    } as c_int;
+    if fd < 0 {
+        protocol_fatal_text("creating a process's trace file failed");
+    }
+    let mut written = 0;
+    while written < bytes.len() {
+        // SAFETY: a live buffer of the remaining length.
+        let n = unsafe {
+            crate::sud_host_syscall(
+                libc::SYS_write,
+                fd as _,
+                bytes[written..].as_ptr() as _,
+                (bytes.len() - written) as _,
+                0,
+                0,
+                0,
+            )
+        };
+        if n <= 0 {
+            protocol_fatal_text("writing a process's trace failed");
+        }
+        written += n as usize;
+    }
+    // SAFETY: a seek on the descriptor just made.
+    unsafe { crate::sud_host_syscall(libc::SYS_lseek, fd as _, 0, libc::SEEK_SET as _, 0, 0, 0) };
+    fd
 }
 
 /// A `SOCK_SEQPACKET` pair, close-on-exec: the hub's end, the child's end.

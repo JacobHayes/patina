@@ -85,6 +85,14 @@ pub(crate) fn init_from_env() -> c_int {
         let mut builder = builder;
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
+        } else {
+            #[cfg(target_os = "linux")]
+            if crate::machine::is_child()
+                && crate::runtime::control_env(patina_dst_runtime::ENV_MODE).as_deref()
+                    == Some("record")
+            {
+                builder = builder.with_trace_transport(crate::machine::ShippedTrace);
+            }
         }
         // The structured run-facts channel.
         if let Some(fd) = control_facts_fd()? {

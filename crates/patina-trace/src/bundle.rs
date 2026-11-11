@@ -234,6 +234,10 @@ pub struct TraceBundle {
     pub format_version: u32,
     pub metadata: RunMetadata,
     pub timelines: Vec<Timeline>,
+    /// The guest's child processes, by pid, each with its own recording;
+    /// none for a run of one process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processes: Vec<crate::ProcessTrace>,
 }
 
 impl TraceBundle {
@@ -266,6 +270,7 @@ impl TraceBundle {
                 ),
                 decisions,
             }],
+            processes: Vec::new(),
         }
     }
 

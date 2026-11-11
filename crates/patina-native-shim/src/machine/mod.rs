@@ -26,9 +26,10 @@ use crate::{SpinMutex, TaskId};
 use patina_dst_abi::Fd;
 use patina_dst_abi::ForeignState;
 use patina_dst_runtime::MachineCarry;
+use patina_dst_trace::ProcessEnd;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 pub(crate) mod fs;
 pub(crate) mod spawn;
@@ -207,6 +208,17 @@ pub(crate) fn child_start() {
         protocol_fatal_text(&message);
     }
     context(|context| context.task_foreign(ELSEWHERE, ForeignState::Parked));
+    // A recording child: the root keeps its recording, under the metadata
+    // its runtime records with.
+    if let Some(metadata) = context(|context| Ok(context.machine_recording_metadata())) {
+        send_frame(
+            channel(),
+            Message::TraceBegin {
+                len: metadata.len() as u64,
+            },
+            &metadata,
+        );
+    }
     send(channel(), &Message::Ready);
     ELSEWHERE_RUNS.store(true, Ordering::Relaxed);
     let (now, view, carry) = await_resume();
@@ -322,7 +334,7 @@ fn serve_children(mut picked: TaskId) -> TaskId {
                     context.import_machine_carry(carry);
                     Ok(())
                 });
-                ended(pid, status, Notify::Parent);
+                ended(pid, status, ProcessEnd::Exit, Notify::Parent);
             }
             other => protocol_fatal("a child's yield or exit", &other),
         }
@@ -378,6 +390,20 @@ fn serve(pid: i32, channel: c_int) -> Message {
                 };
                 send(channel, &Message::Id(answer as i32));
             }
+            Some(Message::TraceBegin { len }) => {
+                let metadata = receive_payload(channel, len).unwrap_or_else(|| died(pid));
+                BEGUN.lock().insert(pid, metadata);
+            }
+            Some(Message::TraceDecisions { len }) => {
+                let decisions = receive_payload(channel, len).unwrap_or_else(|| died(pid));
+                crate::with_context_raw(|context| {
+                    Ok(context.machine_process_decisions(pid, &decisions))
+                })
+                .unwrap_or_else(|errno| {
+                    protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
+                })
+                .unwrap_or_else(|error| protocol_fatal_text(&error.to_string()));
+            }
             Some(Message::Facts { len }) => {
                 let facts = receive_payload(channel, len).unwrap_or_else(|| died(pid));
                 if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
@@ -405,11 +431,15 @@ enum Notify {
     Nobody,
 }
 
+/// A recording child's metadata, from its start until its spawn adds it
+/// to the root's recording.
+pub(super) static BEGUN: SpinMutex<BTreeMap<i32, Vec<u8>>> = SpinMutex::new(BTreeMap::new());
+
 /// Child `pid` ended with wait status `status`: its foreign task is gone
 /// (recorded), the root's filesystem handles it held are closed, it is a
 /// zombie until its parent reaps it, and, as `notify` says, its parent
 /// hears of it (`SIGCHLD`, waiters woken).
-fn ended(pid: i32, status: i32, notify: Notify) {
+fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
     let channel = {
         let mut children = CHILDREN.lock();
         let Some(child) = children
@@ -427,6 +457,7 @@ fn ended(pid: i32, status: i32, notify: Notify) {
     // change, no scheduling decision.
     let _ = crate::with_context_raw(|context| {
         context.task_foreign(foreign_task(pid), ForeignState::Gone)?;
+        context.machine_process_ended(pid, status, end);
         let filesystem = context.machine_filesystem();
         for handle in handles {
             let _ = filesystem.close(handle);
@@ -500,7 +531,11 @@ fn kill(pid: i32, notify: Notify) {
     };
     send(channel, &Message::Kill);
     off_guest(|| while receive(channel).is_some() {});
-    ended(pid, KILLED, notify);
+    let end = match notify {
+        Notify::Parent => ProcessEnd::Killed,
+        Notify::Nobody => ProcessEnd::Teardown,
+    };
+    ended(pid, KILLED, end, notify);
 }
 
 /// Run `wait`, a host wait on another process, as if another process held
@@ -557,6 +592,7 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
     loop {
         debug_assert_eq!(picked, ELSEWHERE);
         let (now, state, carry) = hand_over(ELSEWHERE);
+        ship_decisions();
         send(channel(), &Message::Yield { now, state, carry });
         let (now, view, carry) = await_resume();
         let local = context(|context| {
@@ -616,8 +652,97 @@ fn ship(header: Message, bytes: &[u8]) {
     }
 }
 
+/// How many of its decisions a recording child has shipped to the hub.
+static SHIPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// A recording child ships the decisions it made since its last ship, ahead
+/// of a yield, its exit or its stop: whenever the root holds the baton it
+/// holds every decision of every frozen child. Allocation-free and
+/// borrowed (a stop may be anywhere): the length is counted first, then the
+/// JSON streams in packets from fixed storage. A no-op in the root and in a
+/// child that does not record.
+fn ship_decisions() {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Packets {
+        fd: c_int,
+        buffer: [u8; wire::CHUNK_BYTES],
+        used: usize,
+    }
+    impl std::io::Write for Packets {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let n = bytes.len().min(self.buffer.len() - self.used);
+            self.buffer[self.used..self.used + n].copy_from_slice(&bytes[..n]);
+            self.used += n;
+            if self.used == self.buffer.len() {
+                self.flush()?;
+            }
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.used > 0 {
+                send_bytes(self.fd, &self.buffer[..self.used]);
+                self.used = 0;
+            }
+            Ok(())
+        }
+    }
+    if !is_child() {
+        return;
+    }
+    let from = SHIPPED.load(Ordering::Relaxed);
+    let shipped = crate::with_context_raw(|context| {
+        let mut count = Count(0);
+        let Some(Ok(_)) = context.machine_write_decisions_from(from, &mut count) else {
+            return Ok(None);
+        };
+        send(channel(), &Message::TraceDecisions { len: count.0 });
+        let mut packets = Packets {
+            fd: channel(),
+            buffer: [0; wire::CHUNK_BYTES],
+            used: 0,
+        };
+        let shipped = context.machine_write_decisions_from(from, &mut packets);
+        let _ = std::io::Write::flush(&mut packets);
+        Ok(shipped.and_then(Result::ok))
+    });
+    if let Ok(Some(shipped)) = shipped {
+        SHIPPED.store(shipped, Ordering::Relaxed);
+    }
+}
+
+/// A recording child's trace channel: the root keeps its recording, which
+/// the child ships as it goes ([`ship_decisions`]), so nothing is written
+/// at its end.
+pub(crate) struct ShippedTrace;
+
+impl patina_dst_runtime::TraceTransport for ShippedTrace {
+    fn read_bundle(&mut self) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::other(
+            "a recording child process reads no trace",
+        ))
+    }
+    fn write_bundle(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn write_prefix(&mut self, _recorder: &patina_dst_trace::Recorder) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// A child's stop record goes to the hub, which ends the run with it.
 pub(crate) fn ship_stop(record: &[u8]) {
+    if is_child() && !EXITED.load(Ordering::Relaxed) {
+        ship_decisions();
+    }
     ship(
         Message::Stop {
             len: record.len() as u64,
@@ -650,6 +775,7 @@ pub(crate) fn child_exit(status: i32) {
         Ok((context.machine_now()?, context.export_machine_carry()?))
     })
     .unwrap_or_default();
+    ship_decisions();
     send(channel(), &Message::Exit { now, status, carry });
     EXITED.store(true, Ordering::Relaxed);
 }

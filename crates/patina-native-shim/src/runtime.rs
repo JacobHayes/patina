@@ -1164,6 +1164,14 @@ pub(crate) fn runtime_config_from_control_plane()
         ("replay", Some(_)) => RuntimeConfig::replay_transport(required_control_string(
             patina_dst_runtime::ENV_FINGERPRINT,
         )?),
+        // A child process of the machine ships its recording to the root
+        // (`crate::machine`) and has no trace channel of its own.
+        ("record", None) if control_env(patina_dst_runtime::ENV_PROCESS).is_some() => {
+            RuntimeConfig::record_transport(
+                seed,
+                required_control_string(patina_dst_runtime::ENV_FINGERPRINT)?,
+            )
+        }
         ("record" | "replay", None) => return Err(trace_fd_required()),
         (value, _) => {
             return Err(RuntimeError::Config(format!(

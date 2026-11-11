@@ -67,6 +67,7 @@ fn flatten_orders_lifecycle_and_operations_globally() {
     let bundle = TraceBundle {
         format_version: patina_dst_trace::TRACE_FORMAT_VERSION,
         metadata: RunMetadata::new(7, "fp-test+crash-restart", 0, "patina"),
+        processes: Vec::new(),
         timelines: vec![patina_dst_trace::Timeline {
             id: "main".into(),
             parent: None,

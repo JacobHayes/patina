@@ -437,8 +437,20 @@ its own runtime, and the processes run in lockstep: one runs at a time
   other children and ends the run with that record, so the run has the
   child's class. A child that dies without saying how (a host fault the C
   signal front stops) is an internal stop naming its pid.
+- Recording and replay: each process records its own decisions. A
+  recording child ships its metadata when it starts and its new decisions
+  ahead of every yield, exit and stop (`TraceBegin`, `TraceDecisions`), so
+  the root holds every frozen child's decisions whenever it runs or stops;
+  the root's bundle carries one timeline per child (`processes`, format 33:
+  pid, parent, program, arguments, end and wait status, the child's
+  metadata and timeline) beside its own, whose `task_foreign` decisions are
+  each child's spawn, switches and end. A replaying root hands each child
+  its timeline as a trace of its own, in a memory file the launcher passes
+  as the child's `PATINA_RT_TRACE_FD`; each child replays strictly, so a
+  child that diverges fails the replay, and a replay that spawns a child
+  the recording lacks diverges (`trace_mismatch`).
 - Not modeled yet, each a named stop (`not_modeled`): spawn from a child,
-  spawn while recording or replaying, file actions (`chdir` included), a
+  file actions (`chdir` included), a
   caller whose descriptors 0 to 2 are not the run's own standard streams (a
   staged `--stdin` included) or that holds another descriptor open across
   exec, a caller that made, while alone, state each process models on its

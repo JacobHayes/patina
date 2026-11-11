@@ -15,6 +15,8 @@ pub struct Replayer {
     pub(super) metadata: RunMetadata,
     pub(super) decisions: Vec<TraceEvent>,
     pub(super) next: usize,
+    /// The recorded child processes, each replayed by its own process.
+    pub(super) processes: Vec<crate::ProcessTrace>,
 }
 
 impl Replayer {
@@ -50,7 +52,13 @@ impl Replayer {
             metadata: bundle.metadata,
             decisions,
             next: 0,
+            processes: bundle.processes,
         })
+    }
+
+    /// The recording of child process `pid`, if the trace holds one.
+    pub fn process(&self, pid: i32) -> Option<&crate::ProcessTrace> {
+        self.processes.iter().find(|process| process.pid == pid)
     }
 
     pub const fn root_seed(&self) -> u64 {

@@ -187,9 +187,20 @@ fn launch(
 ) -> Result<std::process::Child, CliError> {
     let request: Launch = serde_json::from_slice(payload)
         .map_err(|error| CliError(format!("malformed process launch request: {error}")))?;
-    let [channel, stdin, stdout, stderr]: [OwnedFd; 4] = fds
-        .try_into()
-        .map_err(|_| CliError("a process launch request must carry four descriptors".into()))?;
+    // The child's channel, stdio, and on a replay the child's own trace.
+    let mut fds = fds.into_iter();
+    let (Some(channel), Some(stdin), Some(stdout), Some(stderr), trace, None) = (
+        fds.next(),
+        fds.next(),
+        fds.next(),
+        fds.next(),
+        fds.next(),
+        fds.next(),
+    ) else {
+        return Err(CliError(
+            "a process launch request must carry four or five descriptors".into(),
+        ));
+    };
     let artifact = template
         .artifacts
         .get(&(request.artifact as usize))
@@ -220,6 +231,10 @@ fn launch(
         command.env(ENV_GUEST_ENV, &environment);
     }
     let raw_channel = channel.as_raw_fd();
+    let raw_trace = trace.as_ref().map(AsRawFd::as_raw_fd);
+    if let Some(trace) = raw_trace {
+        command.env(patina_dst_runtime::ENV_TRACE_FD, trace.to_string());
+    }
     command
         .env(ENV_SEED, request.seed.to_string())
         .env(
@@ -237,7 +252,7 @@ fn launch(
     // SAFETY: the hook runs in the forked child before exec and makes only
     // async-signal-safe system calls, allocating nothing.
     unsafe {
-        command.pre_exec(move || inherit_only(raw_channel));
+        command.pre_exec(move || inherit_only(raw_channel, raw_trace));
     }
     layout::pin(
         &mut command,
@@ -254,6 +269,7 @@ fn launch(
         ))
     })?;
     drop(channel);
+    drop(trace);
     Ok(child)
 }
 
@@ -263,9 +279,9 @@ fn json(value: &impl serde::Serialize) -> Result<String, CliError> {
         .map_err(|error| CliError(format!("failed to encode a process launch: {error}")))
 }
 
-/// In the forked child: die with the launcher thread, and let only stdio
-/// and `channel` cross the exec.
-fn inherit_only(channel: RawFd) -> io::Result<()> {
+/// In the forked child: die with the launcher thread, and let only stdio,
+/// `channel` and a replay's `trace` cross the exec.
+fn inherit_only(channel: RawFd, trace: Option<RawFd>) -> io::Result<()> {
     let check = |rc: libc::c_long| {
         if rc < 0 {
             Err(io::Error::last_os_error())
@@ -283,6 +299,9 @@ fn inherit_only(channel: RawFd) -> io::Result<()> {
             libc::CLOSE_RANGE_CLOEXEC,
         ))?;
         check(libc::fcntl(channel, libc::F_SETFD, 0) as libc::c_long)?;
+        if let Some(trace) = trace {
+            check(libc::fcntl(trace, libc::F_SETFD, 0) as libc::c_long)?;
+        }
     }
     Ok(())
 }

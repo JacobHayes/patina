@@ -572,6 +572,94 @@ fn main() {
         }
     }
 
+    /// A recording holds one timeline per child process; the same seed
+    /// records the same bytes; each child replays its own timeline, so a
+    /// replay of a self-spawn, a shared filesystem, a SIGKILL and an abort
+    /// passes; and a child's timeline that no longer matches what the child
+    /// does fails the replay.
+    #[test]
+    fn each_child_process_records_and_replays_its_own_timeline() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let record = |mode: &str, name: &str| {
+            let trace = guest.dir.path().join(name);
+            let recorded = common::native::assert_success(guest.command(
+                "run",
+                &[
+                    "--seed",
+                    "3",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--",
+                    binary,
+                    mode,
+                ],
+            ));
+            (trace, recorded)
+        };
+        let replay = |trace: &Path| {
+            let output = guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]);
+            json_envelope(&output)
+        };
+        for mode in ["parent", "relay", "kill-child", "abort-child"] {
+            let (trace, recorded) = record(mode, &format!("{mode}.patina"));
+            let bundle: serde_json::Value =
+                serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+            let processes = bundle["processes"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !processes.is_empty()
+                    && processes
+                        .iter()
+                        .all(|process| process["parent"] == 2 && process["timeline"].is_object()),
+                "{mode}: {:#}",
+                bundle["processes"]
+            );
+            let replayed = replay(&trace);
+            assert_eq!(replayed["result"], "ok", "{mode}: {replayed:#}");
+            let _ = recorded;
+        }
+        // The same seed records the same bytes.
+        let (first, _) = record("parent", "first.patina");
+        let (second, _) = record("parent", "second.patina");
+        assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
+        // `patina trace info` summarizes each child: the four the parent
+        // spawned, each ended by its exit.
+        let info = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            guest.dir.path(),
+            &["trace", "info", first.to_str().unwrap(), "--format", "json"],
+        );
+        let info = json_envelope(&info);
+        let summarized = info["trace_info"]["processes"].as_array().unwrap();
+        assert_eq!(
+            summarized
+                .iter()
+                .map(|process| (process["pid"].as_i64(), process["end"].as_str()))
+                .collect::<Vec<_>>(),
+            [3, 4, 5, 6].map(|pid| (Some(pid), Some("exit"))),
+            "{info:#}"
+        );
+
+        // A child's timeline with two decisions swapped: the child diverges.
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
+        let decisions = bundle["processes"][0]["timeline"]["decisions"]
+            .as_array_mut()
+            .unwrap();
+        let swap = (0..decisions.len() - 1)
+            .find(|&index| decisions[index][0] != decisions[index + 1][0])
+            .expect("a child made two different decisions");
+        decisions.swap(swap, swap + 1);
+        let planted = guest.dir.path().join("planted.patina");
+        fs::write(&planted, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let diverged = replay(&planted);
+        assert_eq!(
+            (&diverged["result"], &diverged["stop"]["reason"]),
+            (&"nondeterministic".into(), &"replay_divergence".into()),
+            "{diverged:#}"
+        );
+    }
+
     #[test]
     fn a_program_the_run_does_not_admit_is_still_refused() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);

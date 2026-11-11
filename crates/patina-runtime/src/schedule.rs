@@ -617,6 +617,103 @@ impl Context {
         self.filesystem.as_mut()
     }
 
+    /// Recording: child process `pid` of the guest began, a child of
+    /// `parent` running `program` with `argv`; `metadata` is the JSON of
+    /// the metadata its own runtime records under. A seeded or replayed run
+    /// keeps nothing.
+    pub fn machine_begin_process(
+        &mut self,
+        pid: i32,
+        parent: i32,
+        program: String,
+        argv: Vec<String>,
+        metadata: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let crate::recording::Execution::Record { recorder, .. } = &mut self.execution else {
+            return Ok(());
+        };
+        let metadata = serde_json::from_slice(metadata).map_err(|error| {
+            RuntimeError::Trace(TraceError::Invalid(format!(
+                "process {pid} sent malformed recording metadata: {error}"
+            )))
+        })?;
+        recorder.begin_process(patina_dst_trace::ProcessTrace {
+            pid,
+            parent,
+            program,
+            argv,
+            end: None,
+            metadata,
+            decisions: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Recording: child `pid` shipped its decisions since its last ship
+    /// (`decisions`, as [`patina_dst_trace::Recorder::write_decisions_from`]
+    /// wrote them).
+    pub fn machine_process_decisions(
+        &mut self,
+        pid: i32,
+        decisions: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let crate::recording::Execution::Record { recorder, .. } = &mut self.execution else {
+            return Ok(());
+        };
+        let decisions = serde_json::from_slice(decisions).map_err(|error| {
+            RuntimeError::Trace(TraceError::Invalid(format!(
+                "process {pid} sent malformed decisions: {error}"
+            )))
+        })?;
+        recorder.extend_process(pid, decisions);
+        Ok(())
+    }
+
+    /// Recording: child `pid` ended with wait status `status`, as `end` says.
+    pub fn machine_process_ended(
+        &mut self,
+        pid: i32,
+        status: i32,
+        end: patina_dst_trace::ProcessEnd,
+    ) {
+        if let crate::recording::Execution::Record { recorder, .. } = &mut self.execution {
+            recorder.end_process(pid, status, end);
+        }
+    }
+
+    /// Replay: the trace child process `pid` replays, serialized, or `None`
+    /// when the replayed trace holds no such process.
+    pub fn machine_process_trace(&self, pid: i32) -> Option<Result<Vec<u8>, RuntimeError>> {
+        let crate::recording::Execution::Replay(replayer) = &self.execution else {
+            return None;
+        };
+        let process = replayer.process(pid)?;
+        Some(process.bundle().to_bytes().map_err(RuntimeError::Trace))
+    }
+
+    /// A recording child process: the JSON of the metadata its runtime
+    /// records under, which the root keeps with its decisions.
+    pub fn machine_recording_metadata(&self) -> Option<Vec<u8>> {
+        let crate::recording::Execution::Record { recorder, .. } = &self.execution else {
+            return None;
+        };
+        serde_json::to_vec(recorder.metadata()).ok()
+    }
+
+    /// A recording child process: write its decisions from the `from`th on
+    /// to `writer` ([`patina_dst_trace::Recorder::write_decisions_from`]),
+    /// answering how many it holds now; `None` when it does not record.
+    pub fn machine_write_decisions_from(
+        &self,
+        from: usize,
+        writer: impl std::io::Write,
+    ) -> Option<Result<usize, patina_dst_trace::PrefixWriteError>> {
+        let crate::recording::Execution::Record { recorder, .. } = &self.execution else {
+            return None;
+        };
+        Some(recorder.write_decisions_from(from, writer))
+    }
+
     /// The monotonic virtual time now, unrecorded: what a process switch
     /// carries to the process it resumes.
     pub fn machine_now(&self) -> Result<u64, RuntimeError> {

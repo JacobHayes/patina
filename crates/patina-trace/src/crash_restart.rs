@@ -111,6 +111,7 @@ impl CrashRestartSegments {
         let bundle = TraceBundle {
             format_version: self.crashed.format_version,
             metadata,
+            processes: Vec::new(),
             timelines: vec![Timeline {
                 id: MAIN_TIMELINE.into(),
                 parent: None,

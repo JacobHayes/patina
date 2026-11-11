@@ -16,6 +16,7 @@ fn resolved_branch_lifecycle_state_is_validated() {
     let bundle = TraceBundle {
         format_version: TRACE_FORMAT_VERSION,
         metadata: RunMetadata::new(7, "fingerprint", 0, "patina"),
+        processes: Vec::new(),
         timelines: vec![
             Timeline {
                 id: MAIN_TIMELINE.into(),
@@ -160,6 +161,7 @@ fn crash_restart_bundle(digest: &str) -> TraceBundle {
     TraceBundle {
         format_version: TRACE_FORMAT_VERSION,
         metadata: RunMetadata::new(7, "fingerprint+crash-restart", 0, "patina"),
+        processes: Vec::new(),
         timelines: vec![Timeline {
             id: MAIN_TIMELINE.into(),
             parent: None,
