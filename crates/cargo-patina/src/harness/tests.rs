@@ -250,6 +250,7 @@ fn every_run_flag_reaches_each_tests_run() {
         ("--sched-pct-steps", "40"),
         ("--yield-stride", "7"),
         ("--heal-after", "1000"),
+        ("--allow", "some_symbol"),
     ];
     for (flag, value) in pairs {
         tokens.push(OsString::from(flag));
@@ -314,6 +315,7 @@ fn why_names_the_panic_or_the_stop() {
         message: None,
         trace: None,
         likely_artifacts: Vec::new(),
+        qualifications: Vec::new(),
     };
     let panicked = run(
         "note: linked\nthread 'a::b' (3) panicked at src/lib.rs:5:26:\nassertion failed\n",

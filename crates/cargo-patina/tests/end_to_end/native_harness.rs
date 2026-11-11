@@ -276,6 +276,93 @@ fn import_is_linked() {
         );
     }
 
+    /// `--allow` reaches every target's pre-run gate, as `run --allow` does:
+    /// a target that links an import (and, on x86-64, an instruction) its
+    /// tests never reach is refused as `unsupported`, and with `--allow`
+    /// naming them it runs, its result saying what its gate admitted and,
+    /// for the instruction, that its determinism is qualified.
+    #[test]
+    fn allow_admits_what_a_targets_tests_never_reach() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"dormant\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+unsafe extern "C" { fn system(command: *const u8) -> i32; }
+#[cfg(target_arch = "x86_64")]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn dormant_rdrand() -> u32 {
+    let value: u32;
+    unsafe { core::arch::asm!("rdrand eax", out("eax") value) };
+    value
+}
+#[test]
+fn never_reaches_them() {
+    assert_ne!(std::hint::black_box(system as *const () as usize), 0);
+    #[cfg(target_arch = "x86_64")]
+    assert_ne!(std::hint::black_box(dormant_rdrand as *const () as usize), 0);
+}
+"#,
+        )
+        .unwrap();
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let refused = invoke_unchecked(patina, root, &["test", "--format", "json"]);
+        assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+        let refused = json_of(&refused);
+        let target = &refused["targets"][0];
+        assert_eq!(
+            (
+                &refused["result"],
+                &target["listing"]["stop"]["reason"],
+                &target["allow"]
+            ),
+            (
+                &"unsupported".into(),
+                &"prerun_audit".into(),
+                &serde_json::Value::Null
+            ),
+            "{refused}"
+        );
+        let mut allowed = vec!["system"];
+        if cfg!(target_arch = "x86_64") {
+            allowed.push("dormant_rdrand");
+        }
+        let mut args = vec!["test", "--format", "json"];
+        for symbol in &allowed {
+            args.extend(["--allow", symbol]);
+        }
+        let admitted = invoke_unchecked(patina, root, &args);
+        assert_eq!(admitted.status.code(), Some(0), "{admitted:?}");
+        let admitted = json_of(&admitted);
+        assert_eq!(
+            results(&admitted),
+            BTreeMap::from([("never_reaches_them".to_string(), "ok".to_string())]),
+            "{admitted}"
+        );
+        let target = &admitted["targets"][0];
+        let mut recorded: Vec<&str> = target["allow"]
+            .as_array()
+            .map(|allow| allow.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default();
+        recorded.sort_unstable();
+        allowed.sort_unstable();
+        let qualified = target["qualifications"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|one| one["kind"] == "unsupported_symbols"));
+        assert_eq!(
+            (recorded, qualified),
+            (allowed, cfg!(target_arch = "x86_64")),
+            "{admitted}"
+        );
+    }
+
     /// Same-named targets are Cargo's default for a package with lib.rs and
     /// main.rs. Each selection flag runs its own target and no other: every
     /// target carries a canary that fails only under Patina, so a wrong

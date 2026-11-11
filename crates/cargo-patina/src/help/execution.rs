@@ -413,6 +413,10 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     doc: "Run every test, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each run's determinism is qualified, and so is its replay.",
                     ..ALLOW_RANDOMIZED_LAYOUT_FLAG
                 },
+                Flag {
+                    doc: "Let every test target's pre-run gate admit SYMBOL, as `run --allow` does, for a dependency that links an instruction or import its tests never reach (repeatable; `all` admits every unsupported symbol). A target that ran under it lists its `qualifications` in the JSON report and is named once in the summary.",
+                    ..ALLOW_FLAG
+                },
             ],
         },
         Group {

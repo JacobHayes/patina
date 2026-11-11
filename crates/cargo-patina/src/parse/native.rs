@@ -104,6 +104,7 @@ pub(crate) fn parse_test_from(
                 ..liveness_of(&args)
             },
             allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
+            allow: super::control::allow_of(&args).into_iter().collect(),
         },
     })
 }

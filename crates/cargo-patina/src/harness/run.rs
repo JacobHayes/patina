@@ -34,6 +34,9 @@ pub(crate) struct SeedRun {
     /// The child's `likely_artifacts`: what points at the simulated world
     /// rather than the test, beside its class.
     pub(crate) likely_artifacts: Vec<serde_json::Value>,
+    /// The child's `qualifications`: what it ran under that qualifies its
+    /// determinism (an `--allow` its gate used, a randomized layout).
+    pub(crate) qualifications: Vec<serde_json::Value>,
 }
 
 impl SeedRun {
@@ -48,6 +51,7 @@ impl SeedRun {
             message: None,
             trace: None,
             likely_artifacts: Vec::new(),
+            qualifications: Vec::new(),
         }
     }
 }
@@ -71,6 +75,10 @@ pub(crate) struct Suite {
     pub(crate) unlisted: Vec<(usize, SeedRun)>,
     /// Tests listed, before the filter.
     pub(crate) listed: usize,
+    /// What qualified each target's runs, by index into the built targets:
+    /// its listing's qualifications (the gate judges the target's binary,
+    /// the same for every test of it).
+    pub(crate) qualified: Vec<(usize, Vec<serde_json::Value>)>,
 }
 
 /// The wall-clock backstop's stop reason: the run outlived `--timeout-secs`.
@@ -101,10 +109,14 @@ pub(super) fn run_suite(
     )?;
     let mut cases = Vec::new();
     let mut unlisted = Vec::new();
+    let mut qualified = Vec::new();
     let mut listed = 0;
     for (position, (index, _)) in staged.iter().enumerate() {
         let all = &listings[position * 2];
         let ignored = &listings[position * 2 + 1];
+        if !all.qualifications.is_empty() {
+            qualified.push((*index, all.qualifications.clone()));
+        }
         let Some(failed) = [all, ignored]
             .into_iter()
             .find(|run| run.result.is_failure())
@@ -163,6 +175,7 @@ pub(super) fn run_suite(
         skipped,
         unlisted,
         listed,
+        qualified,
     })
 }
 
@@ -469,6 +482,7 @@ fn list_command(
     if invocation.run.allow_randomized_layout {
         args.push("--allow-randomized-address-layout".into());
     }
+    push_allow(&mut args, &invocation.run);
     args.push("--".into());
     args.extend(libtest.iter().map(OsString::from));
     patina_command(args, &[])
@@ -665,6 +679,11 @@ pub(crate) fn seed_outcome(
             .and_then(serde_json::Value::as_array)
             .cloned()
             .unwrap_or_default(),
+        qualifications: envelope
+            .get("qualifications")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -757,6 +776,15 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
     }
     if run.allow_randomized_layout {
         args.push("--allow-randomized-address-layout".into());
+    }
+    push_allow(args, run);
+}
+
+/// Every `--allow`, as the child `run` takes it.
+fn push_allow(args: &mut Vec<OsString>, run: &RunFlags) {
+    for symbol in &run.allow {
+        args.push("--allow".into());
+        args.push(symbol.into());
     }
 }
 

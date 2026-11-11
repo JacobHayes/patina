@@ -139,6 +139,8 @@ pub(crate) struct RunFlags {
     pub(crate) schedule: NativeSchedule,
     pub(crate) liveness: NativeLiveness,
     pub(crate) allow_randomized_layout: bool,
+    /// `--allow`: what every target's pre-run gate admits, `all` included.
+    pub(crate) allow: Vec<String>,
 }
 
 pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> {

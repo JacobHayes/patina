@@ -34,6 +34,7 @@ pub(crate) const NOT_ACCEPTED: &[&str] = &[
 
 pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[
     ("all_features", Arity::Switch),
+    ("allow", Arity::Value),
     ("allow_randomized_address_layout", Arity::Switch),
     ("budget", Arity::Value),
     ("buggify", Arity::Switch),

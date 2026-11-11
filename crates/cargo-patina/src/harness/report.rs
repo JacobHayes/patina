@@ -121,7 +121,7 @@ pub(super) fn no_run(built: &[BuiltTarget], skipped: &[SkippedTarget], build_sec
             "result": class.as_str(),
             "exit_code": class.exit_code(),
             "build_seconds": round(build_seconds),
-            "targets": targets_json(built, skipped, &[]),
+            "targets": targets_json(built, skipped, &[], &[], &[]),
         });
         println!("{document}");
     } else {
@@ -147,6 +147,8 @@ fn targets_json(
     built: &[BuiltTarget],
     skipped: &[SkippedTarget],
     unlisted: &[(usize, SeedRun)],
+    qualified: &[(usize, Vec<Value>)],
+    allow: &[String],
 ) -> Vec<Value> {
     let mut targets: Vec<Value> = built
         .iter()
@@ -163,6 +165,15 @@ fn targets_json(
             }
             if let Some((_, run)) = unlisted.iter().find(|(unlisted, _)| *unlisted == index) {
                 entry["listing"] = run_json(run);
+            }
+            // What its pre-run gate admitted beyond the default (`--allow`),
+            // and what that qualified of its runs.
+            if !allow.is_empty() && built.guest.is_ok() {
+                entry["allow"] = json!(allow);
+            }
+            if let Some((_, qualifications)) = qualified.iter().find(|(target, _)| *target == index)
+            {
+                entry["qualifications"] = json!(qualifications);
             }
             entry
         })
@@ -336,8 +347,16 @@ impl Outcome<'_> {
             .guest
             .as_ref()
             .ok()?;
+        // The replay's gate admits what the run's did.
+        let allow: String = self
+            .invocation
+            .run
+            .allow
+            .iter()
+            .map(|symbol| format!(" --allow {}", cli::shell_quote(OsStr::new(symbol))))
+            .collect();
         Some(format!(
-            "patina replay {} {}",
+            "patina replay {} {}{allow}",
             cli::shell_quote(guest.as_os_str()),
             cli::shell_quote(OsStr::new(&trace.path)),
         ))
@@ -402,6 +421,28 @@ impl Outcome<'_> {
                 "  target {} skipped: {}",
                 skipped.target.label(),
                 skipped.reason
+            );
+        }
+        if !self.invocation.run.allow.is_empty() {
+            let qualified: Vec<String> = self
+                .suite
+                .qualified
+                .iter()
+                .filter(|(_, qualifications)| {
+                    qualifications
+                        .iter()
+                        .any(|qualification| qualification["kind"] == "unsupported_symbols")
+                })
+                .map(|(index, _)| self.built[*index].target.label())
+                .collect();
+            println!(
+                "  every target's pre-run gate admitted --allow {}{}",
+                self.invocation.run.allow.join(", "),
+                if qualified.is_empty() {
+                    String::new()
+                } else {
+                    format!("; determinism qualified in {}", qualified.join(", "))
+                }
             );
         }
         if !problems.is_empty() {
@@ -550,7 +591,13 @@ impl Outcome<'_> {
             "build_seconds": round(self.build_seconds),
             "run_seconds": round(self.run_seconds),
             "jobs": self.invocation.jobs,
-            "targets": targets_json(self.built, self.skipped_targets, &self.suite.unlisted),
+            "targets": targets_json(
+                self.built,
+                self.skipped_targets,
+                &self.suite.unlisted,
+                &self.suite.qualified,
+                &self.invocation.run.allow,
+            ),
             "tests": tests,
         });
         if let Some(attribution) = class.attribution() {
