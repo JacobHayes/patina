@@ -9,13 +9,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
-fn native_run_buggify_value_form_enables_and_carries_permille() {
-    // Point pin for the `--buggify=N` native parser/plumbing path; class-level
+fn native_run_buggify_knobs_enable_and_carry_their_values() {
+    // Point pin for the `--buggify-fire-permille N` native parser/plumbing path; class-level
     // pairing: runtime/trace `+buggify` metadata-coherence fail-closed guard.
     let parsed = native_run(&[
         "native-run",
         "bin",
-        "--buggify=372",
+        "--buggify-fire-permille",
+        "372",
         "--buggify-activation-permille=330",
         "--buggify-cutoff-nanos=12345",
         "--buggify-after-setup",
@@ -34,6 +35,11 @@ fn native_run_buggify_value_form_enables_and_carries_permille() {
         env.iter()
             .any(|(name, value)| *name == ENV_BUGGIFY_ACTIVATION && value == "330")
     );
+    // The switch alone enables buggify at the runtime's default rates.
+    let bare = native_run(&["native-run", "bin", "--buggify"])
+        .buggify
+        .expect("--buggify enables SDK buggify");
+    assert_eq!(bare.fire_permille, None);
 }
 
 #[test]

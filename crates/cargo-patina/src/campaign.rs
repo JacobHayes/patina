@@ -59,8 +59,8 @@ pub use patina_dst_abi::RunClass;
 pub(crate) use planes::FAULT_PLANE_NAMES;
 pub use planes::{FaultPlane, FaultPlanes};
 pub(crate) use repro::{GenerationRepro, generation_repro, run_reduced_generation};
+pub use spec::CampaignSpec;
 pub(crate) use spec::DEFAULT_OUT_DIR;
-pub use spec::{AllowUnmetSometimes, CampaignSpec};
 
 use crate::CliError;
 use driver::run_campaign;
@@ -377,7 +377,11 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         // still leaving clean generations (neither always nor never firing).
         let activation = 300 + (u32::from(hash.read(gen_byte::BUGGIFY_ACTIVATION)) * 600 / 255);
         let fire = 300 + (u32::from(hash.read(gen_byte::BUGGIFY_FIRE)) * 600 / 255);
-        push_run_flag(&mut flags, "--buggify", RunValue::Int(u64::from(fire)));
+        push_run_flag(
+            &mut flags,
+            "--buggify-fire-permille",
+            RunValue::Int(u64::from(fire)),
+        );
         push_run_flag(
             &mut flags,
             "--buggify-activation-permille",

@@ -239,8 +239,15 @@ pub(super) const BUGGIFY_FLAGS: &[Flag] = &[
     f(
         "--buggify",
         None,
-        Value::Optional("PERMILLE", Kind::Permille),
-        "Enable cooperative-SUT (buggify) fault injection; PERMILLE is the per-evaluation firing probability (default 250 = 25%).",
+        Value::None,
+        "Enable cooperative-SUT (buggify) fault injection.",
+        false,
+    ),
+    f(
+        "--buggify-fire-permille",
+        None,
+        Value::Required("N", Kind::Permille),
+        "Per-evaluation firing probability of an active buggify site (default 250 = 25%). Implies --buggify.",
         false,
     ),
     f(
@@ -274,19 +281,19 @@ pub(super) const COMPUTE_WATCHDOG_FLAG: Flag = f(
     false,
 );
 
-pub(super) const LIVENESS_FLAGS_OPTIONAL: &[Flag] = &[
+pub(super) const LIVENESS_FLAGS: &[Flag] = &[
     f(
         "--liveness-watchdog",
         None,
-        Value::Optional("NANOS", Kind::U64),
-        "Arm a no-progress watchdog over virtual time (bare = runtime default budget).",
+        Value::Required("NANOS", Kind::PositiveU64),
+        "Arm a no-progress watchdog: the run is a liveness failure when NANOS virtual nanoseconds pass without progress (600000000000 = 10 minutes is a generous budget).",
         false,
     ),
     f(
         "--converge-within",
         None,
-        Value::Optional("NANOS", Kind::U64),
-        "Require convergence within NANOS of the last injected fault (bare = default).",
+        Value::Required("NANOS", Kind::PositiveU64),
+        "Require convergence within NANOS virtual nanoseconds of the last injected fault (300000000000 = 5 minutes is a generous budget).",
         false,
     ),
     needs(
@@ -305,8 +312,8 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
     f(
         "--sched-pct",
         None,
-        Value::Optional("N", Kind::PositiveU64),
-        "PCT priority-scheduling exploration; N is the bug depth (>= 1).",
+        Value::Required("DEPTH", Kind::PositiveU64),
+        "PCT priority-scheduling exploration at bug depth DEPTH (>= 1; 3 finds most ordering bugs of up to three steps).",
         false,
     ),
     needs(

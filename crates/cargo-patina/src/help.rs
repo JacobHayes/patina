@@ -40,7 +40,7 @@ use flags::DNS_FLAGS;
 use flags::FAULT_FLAGS;
 pub use flags::GLOBAL_OUTPUT;
 pub use flags::HELP_FLAGS;
-use flags::LIVENESS_FLAGS_OPTIONAL;
+use flags::LIVENESS_FLAGS;
 use flags::NATIVE_SCHEDULE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::{

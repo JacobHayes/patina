@@ -271,7 +271,9 @@ fn main() {
                     "100",
                     "--swarm",
                     "--liveness-watchdog",
+                    "600000000000",
                     "--sched-pct",
+                    "3",
                     "--buggify",
                 ],
                 envs,
@@ -1110,12 +1112,12 @@ fn main() {
         let timeout = ("timeout".to_owned(), 2);
         for options in [
             &["--seed", "1"][..],
-            &["--sched-pct=1", "--seed", "1"],
+            &["--sched-pct", "1", "--seed", "1"],
             &["--yield-stride", "64", "--seed", "1"],
-            &["--sched-pct=1", "--yield-stride", "64", "--seed", "1"],
-            &["--sched-pct=1", "--yield-stride", "64", "--seed", "2"],
-            &["--sched-pct=3", "--yield-stride", "64", "--seed", "1"],
-            &["--sched-pct=1", "--yield-stride", "1", "--seed", "1"],
+            &["--sched-pct", "1", "--yield-stride", "64", "--seed", "1"],
+            &["--sched-pct", "1", "--yield-stride", "64", "--seed", "2"],
+            &["--sched-pct", "3", "--yield-stride", "64", "--seed", "1"],
+            &["--sched-pct", "1", "--yield-stride", "1", "--seed", "1"],
         ] {
             let result = run(options, "set");
             assert_eq!(outcome(&result), clean, "{options:?}: {result:#}");
@@ -1124,7 +1126,7 @@ fn main() {
         // A spinner whose every turn is a call that gets somewhere, under
         // PCT, on seeds where it outranks the setter: the setter still runs.
         for seed in ["1", "2", "4"] {
-            let options = ["--sched-pct=1", "--seed", seed];
+            let options = ["--sched-pct", "1", "--seed", seed];
             let result = run(&options, "log");
             assert_eq!(outcome(&result), clean, "{options:?}: {result:#}");
         }
@@ -1137,7 +1139,7 @@ fn main() {
         for (options, mode) in [
             (&[][..], "never"),
             (&["--yield-stride", "64"], "never"),
-            (&["--sched-pct=1", "--yield-stride", "64"], "never"),
+            (&["--sched-pct", "1", "--yield-stride", "64"], "never"),
             (&["--yield-stride", "64", "--record", record[1]], "never"),
         ] {
             let mut options = options.to_vec();

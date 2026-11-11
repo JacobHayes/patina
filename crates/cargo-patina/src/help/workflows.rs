@@ -6,7 +6,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
+        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
         "patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -45,9 +45,7 @@ on-disk artifacts). Campaigns also write <out-dir>/sites.json (schema \
 patina.campaign.sites/v1), summarize SDK site coverage, and fail by default \
 when a `sometimes!`/`reachable!` oracle is never satisfied. Literal-label SDK \
 macro sites are declared through the link-time table, so never-reached oracles \
-appear with registered_gens=0; --allow-unmet-sometimes[=MIN_GENS] reports but \
-waives that gate (unconditionally or only below the observed generation \
-threshold). `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
+appear with registered_gens=0; --allow-unmet-sometimes reports but waives that gate. `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
 named planes, for a guest that needs one plane always off (a store that must \
 open on the simulated disk, say), and is recorded and pinned like every spec \
 flag. The spec key `\"exclude_knobs\": [\"--net-reset-permille\"]` turns single \
@@ -157,8 +155,8 @@ refused by name.",
                 f(
                     "--allow-unmet-sometimes",
                     None,
-                    Value::Optional("MIN_GENS", Kind::PositiveU64),
-                    "Waive the default unmet SDK oracle coverage gate; with =MIN_GENS, waive only while observed generations are below MIN_GENS.",
+                    Value::None,
+                    "Report but waive the default gate on SDK oracles (`sometimes!`, `reachable!`) no generation satisfied.",
                     false,
                 ),
                 f(

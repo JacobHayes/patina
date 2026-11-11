@@ -3,7 +3,7 @@
 use super::*;
 
 /// The SDK guest's source. Its buggify sites all activate and always fire under
-/// `--buggify=1000 --buggify-activation-permille 1000`, so the outcome is
+/// `--buggify-fire-permille 1000 --buggify-activation-permille 1000`, so the outcome is
 /// deterministic without hunting for a firing seed. Every declared SDK site
 /// macro sits behind a branch no run takes: invisible to lazy registration,
 /// visible through the linked table. The `no-setup` argument skips

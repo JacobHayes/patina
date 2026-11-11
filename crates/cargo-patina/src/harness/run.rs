@@ -687,12 +687,18 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
         push(flag, value.clone());
     }
     if let Some(buggify) = &run.buggify {
+        if let Some(value) = &buggify.fire_permille {
+            push("--buggify-fire-permille", value.clone());
+        }
         if let Some(value) = &buggify.activation_permille {
             push("--buggify-activation-permille", value.clone());
         }
         if let Some(value) = &buggify.cutoff_nanos {
             push("--buggify-cutoff-nanos", value.clone());
         }
+    }
+    if let Some(depth) = &run.schedule.pct {
+        push("--sched-pct", depth.clone());
     }
     if let Some(steps) = &run.schedule.pct_steps {
         push("--sched-pct-steps", steps.clone());
@@ -703,6 +709,12 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
     if let Some(ms) = &run.liveness.compute_watchdog_ms {
         push("--compute-watchdog-ms", ms.clone());
     }
+    if let Some(budget) = &run.liveness.watchdog {
+        push("--liveness-watchdog", budget.clone());
+    }
+    if let Some(budget) = &run.liveness.converge {
+        push("--converge-within", budget.clone());
+    }
     if let Some(heal) = &run.liveness.heal_after {
         push("--heal-after", heal.clone());
     }
@@ -710,21 +722,9 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
         args.push("--mount".into());
         args.push(mount.to_arg());
     }
-    let optional = |flag: &str, value: Option<&str>| {
-        value.map(|value| {
-            if value.is_empty() {
-                OsString::from(flag)
-            } else {
-                OsString::from(format!("{flag}={value}"))
-            }
-        })
-    };
-    args.extend(optional(
-        "--buggify",
-        run.buggify
-            .as_ref()
-            .map(|buggify| buggify.fire_permille.as_deref().unwrap_or("")),
-    ));
+    if run.buggify.is_some() {
+        args.push("--buggify".into());
+    }
     if run
         .buggify
         .as_ref()
@@ -732,18 +732,9 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
     {
         args.push("--buggify-after-setup".into());
     }
-    args.extend(optional("--sched-pct", run.schedule.pct.as_deref()));
     if run.schedule.swarm {
         args.push("--swarm".into());
     }
-    args.extend(optional(
-        "--liveness-watchdog",
-        run.liveness.watchdog.as_deref(),
-    ));
-    args.extend(optional(
-        "--converge-within",
-        run.liveness.converge.as_deref(),
-    ));
     if run.allow_randomized_layout {
         args.push("--allow-randomized-address-layout".into());
     }

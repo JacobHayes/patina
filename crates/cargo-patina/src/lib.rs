@@ -301,7 +301,8 @@ impl KnobValues {
 /// of the enclosing `Option` means `--buggify` was passed (buggify enabled).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NativeBuggify {
-    /// Per-evaluation firing probability in per-mille from `--buggify[=permille]`.
+    /// Per-evaluation firing probability in per-mille from `--buggify-fire-permille`;
+    /// `None` leaves the runtime default.
     fire_permille: Option<String>,
     /// Per-run site activation probability from `--buggify-activation-permille`.
     activation_permille: Option<String>,
@@ -319,8 +320,7 @@ struct NativeBuggify {
 /// plain build.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct NativeSchedule {
-    /// PCT bug depth `d` from `--sched-pct[=D]`. `Some("")` = bare `--sched-pct`
-    /// (default depth); `Some("N")` = explicit depth. `None` = PCT off.
+    /// PCT bug depth `d` from `--sched-pct D`. `None` = PCT off.
     pct: Option<String>,
     /// Expected schedule length from `--sched-pct-steps N`. Inert without `pct`.
     pct_steps: Option<String>,
@@ -342,13 +342,11 @@ struct NativeSchedule {
 struct NativeLiveness {
     /// Native-only host-time terminal bound; never a schedule input.
     compute_watchdog_ms: Option<String>,
-    /// `--liveness-watchdog[=NANOS]`: generic no-progress budget. `Some("")` = bare
-    /// (runtime default budget); `Some("N")` = explicit budget. `None` = off.
+    /// `--liveness-watchdog NANOS`: generic no-progress budget. `None` = off.
     watchdog: Option<String>,
-    /// `--converge-within[=NANOS]`: heal-then-converge budget. `Some("")` = bare
-    /// (runtime default); `Some("N")` = explicit. `None` = off.
+    /// `--converge-within NANOS`: heal-then-converge budget. `None` = off.
     converge: Option<String>,
-    /// `--heal-after=NANOS`: explicit override for the converge arm-time. Inert
+    /// `--heal-after NANOS`: explicit override for the converge arm-time. Inert
     /// without `converge`.
     heal_after: Option<String>,
 }

@@ -112,7 +112,7 @@ is caught by the queue's *own* invariants — no special test assertion.
 Watch Patina catch one (it fails, loudly and reproducibly):
 
 ```sh
-patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify=500 --buggify-after-setup \
+patina run ../../target/testbeds/workq/patina/workq --seed 2 --buggify-fire-permille 500 --buggify-after-setup \
   -- --jobs 24 --data-dir /workq --bug skip-redelivery-commit
 ```
 

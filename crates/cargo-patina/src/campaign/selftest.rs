@@ -8,8 +8,8 @@ use super::report::{CoverageGate, coverage_verdict};
 use super::spec::json_classify_rules;
 use super::verify::{selftest_class_checks, selftest_sampling};
 use super::{
-    AllowUnmetSometimes, ClassifyRules, FindingFacts, GenerationFacts, RunClass, RunFacts,
-    VerdictFacts, classify, signature,
+    ClassifyRules, FindingFacts, GenerationFacts, RunClass, RunFacts, VerdictFacts, classify,
+    signature,
 };
 use crate::sdk_report::CoverageTally;
 use scaling::fault_scale_selftest;
@@ -874,7 +874,7 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     println!("-- coverage gate --");
     let mut coverage_check = |name: &str,
                               tally: &CoverageTally,
-                              waiver: Option<AllowUnmetSometimes>,
+                              waiver: bool,
                               want_gate: CoverageGate,
                               want_unmet: usize| {
         let verdict = coverage_verdict(tally, waiver);
@@ -897,27 +897,19 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     };
     let unmet = coverage_fixture(false).expect("unmet coverage fixture parses");
     let met = coverage_fixture(true).expect("met coverage fixture parses");
-    coverage_check("sometimes-met-passes", &met, None, CoverageGate::Pass, 0);
-    coverage_check("sometimes-unmet-fails", &unmet, None, CoverageGate::Fail, 1);
+    coverage_check("sometimes-met-passes", &met, false, CoverageGate::Pass, 0);
     coverage_check(
-        "sometimes-unmet-waived-bare",
+        "sometimes-unmet-fails",
         &unmet,
-        Some(AllowUnmetSometimes::Always),
-        CoverageGate::Waived,
-        1,
-    );
-    coverage_check(
-        "sometimes-unmet-waived-under-threshold",
-        &unmet,
-        Some(AllowUnmetSometimes::BelowGenerations(3)),
-        CoverageGate::Waived,
-        1,
-    );
-    coverage_check(
-        "sometimes-unmet-enforced-at-threshold",
-        &unmet,
-        Some(AllowUnmetSometimes::BelowGenerations(2)),
+        false,
         CoverageGate::Fail,
+        1,
+    );
+    coverage_check(
+        "sometimes-unmet-waived",
+        &unmet,
+        true,
+        CoverageGate::Waived,
         1,
     );
     let declared_reachable =
@@ -925,7 +917,7 @@ reason=\"incomplete trace out/traces/.{trace}.tmp.{scratch}: empty trace file\""
     coverage_check(
         "declared-reachable-unreached-fails",
         &declared_reachable,
-        None,
+        false,
         CoverageGate::Fail,
         1,
     );

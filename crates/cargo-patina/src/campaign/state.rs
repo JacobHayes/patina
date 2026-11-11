@@ -3,7 +3,7 @@
 use super::observe::EdgeCoverageState;
 use super::spec::classify_rules_to_json;
 use super::verify::{CleanReruns, Verification};
-use super::{AllowUnmetSometimes, CampaignSpec, FAULT_SCALE_FULL, RunClass, VerdictFacts};
+use super::{CampaignSpec, FAULT_SCALE_FULL, RunClass, VerdictFacts};
 use crate::CliError;
 use crate::aux_store::validate_resume_watermark;
 use crate::sdk_report::CoverageTally;
@@ -592,8 +592,8 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("report".into(), spec.report.into());
     map.insert("plateau_after".into(), spec.plateau_after.into());
     map.insert("guided".into(), spec.guided.into());
-    if let Some(value) = spec.allow_unmet_sometimes {
-        map.insert("allow_unmet_sometimes".into(), allow_unmet_to_json(value));
+    if spec.allow_unmet_sometimes {
+        map.insert("allow_unmet_sometimes".into(), true.into());
     }
     if !spec.classify.is_empty() {
         map.insert("classify".into(), classify_rules_to_json(&spec.classify));
@@ -608,13 +608,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         map.insert("verify".into(), false.into());
     }
     serde_json::Value::Object(map)
-}
-
-pub(super) fn allow_unmet_to_json(value: AllowUnmetSometimes) -> serde_json::Value {
-    match value {
-        AllowUnmetSometimes::Always => serde_json::Value::Bool(true),
-        AllowUnmetSometimes::BelowGenerations(min) => serde_json::Value::from(min),
-    }
 }
 
 pub(super) fn spec_from_state_json(value: &serde_json::Value) -> Result<CampaignSpec, String> {

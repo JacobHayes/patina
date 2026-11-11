@@ -226,7 +226,7 @@ fn main() {
     }
 
     #[test]
-    fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives_threshold() {
+    fn campaign_sometimes_gate_fails_unmet_accepts_met_and_waives() {
         let directory = tempdir().unwrap();
         let unmet = sometimes_gate_guest("never-green", false);
         let met = sometimes_gate_guest("met-green", true);
@@ -291,24 +291,14 @@ fn main() {
         );
 
         let waived_out = directory.path().join("waived");
-        let waived_run = run(&unmet, &waived_out, &["--allow-unmet-sometimes=10"], None);
+        let waived_run = run(&unmet, &waived_out, &["--allow-unmet-sometimes"], None);
         let waived_stdout = String::from_utf8_lossy(&waived_run.stdout);
         assert!(
             waived_run.status.success()
                 && waived_stdout.contains("gate=waived")
                 && waived_stdout.contains("UNMET sometimes 'never-green'"),
-            "threshold waiver below MIN_GENS should report but not fail:\nstdout:\n{waived_stdout}\nstderr:\n{}",
+            "the waiver should report but not fail:\nstdout:\n{waived_stdout}\nstderr:\n{}",
             String::from_utf8_lossy(&waived_run.stderr)
-        );
-
-        let enforced_out = directory.path().join("enforced");
-        let enforced_run = run(&unmet, &enforced_out, &["--allow-unmet-sometimes=5"], None);
-        assert_eq!(
-            enforced_run.status.code(),
-            Some(1),
-            "threshold waiver must enforce at observed generations >= MIN_GENS\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&enforced_run.stdout),
-            String::from_utf8_lossy(&enforced_run.stderr)
         );
     }
 
@@ -453,10 +443,12 @@ fn main() {
                     "--seed",
                     seed,
                     "--swarm",
-                    "--buggify=372",
+                    "--buggify-fire-permille",
+                    "372",
                     // `run` takes the optional-value form with `=`; the space form is
                     // a usage error, which would silently make this check vacuous.
-                    "--liveness-watchdog=600000000000",
+                    "--liveness-watchdog",
+                    "600000000000",
                 ],
             );
             assert!(
@@ -520,7 +512,8 @@ fn main() {
                     "--seed",
                     &seed.to_string(),
                     "--swarm",
-                    "--buggify=372",
+                    "--buggify-fire-permille",
+                    "372",
                     "--record",
                     trace.to_str().unwrap(),
                 ],

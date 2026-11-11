@@ -13,7 +13,12 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
 
     // Every site active and always firing; the run is deterministic and its
     // replay carries no --buggify.
-    let flags = ["--buggify=1000", "--buggify-activation-permille", "1000"];
+    let flags = [
+        "--buggify-fire-permille",
+        "1000",
+        "--buggify-activation-permille",
+        "1000",
+    ];
     let (seeded, trace) = guest.assert_recorded(4, &flags);
     let stdout = String::from_utf8_lossy(&seeded.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&seeded.stderr).into_owned();
@@ -43,7 +48,7 @@ fn native_buggify_sdk_reports_records_replays_and_gates_on_setup() {
             "fired-in-bounds",
         ],
     );
-    // Point pin for `--buggify=N` value-form plumbing; class-level pairing:
+    // Point pin for `--buggify-fire-permille N` plumbing; class-level pairing:
     // the trace/runtime `+buggify` fingerprint metadata-coherence invariant.
     let bundle = patina_dst_trace::TraceBundle::load(&trace).unwrap();
     let buggify = bundle

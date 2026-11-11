@@ -1,11 +1,10 @@
 //! Campaign progress, coverage verdicts, and result rendering.
 
-use super::AllowUnmetSometimes;
 use super::classify::{HOST_KILL_SHAPE, SHUTDOWN_FAILURE_SHAPE, is_conclusive};
 use super::observe::EdgeCoverageState;
 use super::state::{
-    CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord, allow_unmet_to_json,
-    class_counts_failures, signatures_to_json,
+    CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord, class_counts_failures,
+    signatures_to_json,
 };
 use super::verify::{VerificationSummary, VerifyStatus};
 use crate::coverage::top_uncovered_crates;
@@ -61,7 +60,7 @@ pub(super) struct CoverageSummary<'a> {
 pub(super) struct CoverageVerdict<'a> {
     pub(super) summary: CoverageSummary<'a>,
     pub(super) gate: CoverageGate,
-    waiver: Option<AllowUnmetSometimes>,
+    waiver: bool,
 }
 
 fn coverage_summary(coverage: &CoverageTally) -> CoverageSummary<'_> {
@@ -100,14 +99,11 @@ fn coverage_summary(coverage: &CoverageTally) -> CoverageSummary<'_> {
     summary
 }
 
-pub(super) fn coverage_verdict(
-    coverage: &CoverageTally,
-    waiver: Option<AllowUnmetSometimes>,
-) -> CoverageVerdict<'_> {
+pub(super) fn coverage_verdict(coverage: &CoverageTally, waiver: bool) -> CoverageVerdict<'_> {
     let summary = coverage_summary(coverage);
     let gate = if summary.unmet.is_empty() {
         CoverageGate::Pass
-    } else if waiver_applies(waiver, coverage.generations_observed) {
+    } else if waiver {
         CoverageGate::Waived
     } else {
         CoverageGate::Fail
@@ -117,18 +113,6 @@ pub(super) fn coverage_verdict(
         gate,
         waiver,
     }
-}
-
-fn waiver_applies(waiver: Option<AllowUnmetSometimes>, generations_observed: u64) -> bool {
-    match waiver {
-        Some(AllowUnmetSometimes::Always) => true,
-        Some(AllowUnmetSometimes::BelowGenerations(min)) => generations_observed < min,
-        None => false,
-    }
-}
-
-fn waiver_json(waiver: Option<AllowUnmetSometimes>) -> serde_json::Value {
-    waiver.map_or(serde_json::Value::Null, allow_unmet_to_json)
 }
 
 /// Print one human-mode progress heartbeat: enough to answer "is it still running,
@@ -623,7 +607,7 @@ fn coverage_envelope_json(
         "oracle_sites": verdict.summary.oracle_sites,
         "satisfied": verdict.summary.satisfied,
         "gate": verdict.gate.as_str(),
-        "waiver": waiver_json(verdict.waiver),
+        "waiver": verdict.waiver,
         "unmet": unmet,
         "always_unevaluated": always_unevaluated,
         "edge": edge,
@@ -712,7 +696,7 @@ mod tests {
             generations_observed: state.generations_done,
             ..CoverageTally::default()
         };
-        let coverage_verdict = coverage_verdict(&coverage, None);
+        let coverage_verdict = coverage_verdict(&coverage, false);
         let edge_coverage = EdgeCoverageState::unavailable("not-instrumented", None);
         build_campaign_envelope(CampaignEnvelopeInput {
             result,
@@ -820,7 +804,7 @@ mod tests {
         ] {
             coverage.sites.insert(site.label.clone(), site);
         }
-        let verdict = coverage_verdict(&coverage, None);
+        let verdict = coverage_verdict(&coverage, false);
         assert_eq!(verdict.gate, CoverageGate::Pass);
         let envelope = coverage_envelope_json(
             &coverage,

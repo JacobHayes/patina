@@ -166,7 +166,7 @@
 /// checked when the test is compiled:
 ///
 /// ```no_run
-/// #[patina_dst::test(seeds = 30, buggify = 500, fs_error_permille = 20)]
+/// #[patina_dst::test(seeds = 30, buggify_fire_permille = 500, fs_error_permille = 20)]
 /// fn survives_faults() {}
 /// ```
 ///

@@ -89,8 +89,8 @@ bug_leg() {
   bseed_caught="$bseed"
 }
 bug_leg dedup-ignore-producer 1 "" "--timeout-secs 20 --bug dedup-ignore-producer" '^WORKQ_FAILURE not-converged'
-bug_leg skip-redelivery-commit 2 "--buggify=500 --buggify-after-setup" "--bug skip-redelivery-commit" '^violation '
-bug_leg apply-check-outside-lock 1 "--buggify=500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^violation '
+bug_leg skip-redelivery-commit 2 "--buggify-fire-permille 500 --buggify-after-setup" "--bug skip-redelivery-commit" '^violation '
+bug_leg apply-check-outside-lock 1 "--buggify-fire-permille 500 --buggify-after-setup" "--tick-ms 2 --bug apply-check-outside-lock" '^violation '
 bug_leg ignore-short-write 1 "--fs-short-permille 200" "--bug ignore-short-write" '^violation '
 fsync_bug="--ack-ledger /workq-acks --bug skip-wal-fsync"
 bug_leg skip-wal-fsync 2 "--machine-crash-permille 10" "$fsync_bug" '^violation '

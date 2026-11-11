@@ -10,8 +10,6 @@ pub(crate) enum Arity {
     Switch,
     /// `name = value`.
     Value,
-    /// `name` or `name = value`.
-    OptionalValue,
 }
 
 /// The flags of `patina test` an attribute does not take: the selection of
@@ -38,12 +36,13 @@ pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[
     ("all_features", Arity::Switch),
     ("allow_randomized_address_layout", Arity::Switch),
     ("budget", Arity::Value),
-    ("buggify", Arity::OptionalValue),
+    ("buggify", Arity::Switch),
     ("buggify_activation_permille", Arity::Value),
     ("buggify_after_setup", Arity::Switch),
     ("buggify_cutoff_nanos", Arity::Value),
+    ("buggify_fire_permille", Arity::Value),
     ("compute_watchdog_ms", Arity::Value),
-    ("converge_within", Arity::OptionalValue),
+    ("converge_within", Arity::Value),
     ("cpus", Arity::Value),
     ("dns_entry", Arity::Value),
     ("dns_fail_permille", Arity::Value),
@@ -60,7 +59,7 @@ pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[
     ("hostname", Arity::Value),
     ("instrument", Arity::Switch),
     ("jobs", Arity::Value),
-    ("liveness_watchdog", Arity::OptionalValue),
+    ("liveness_watchdog", Arity::Value),
     ("machine_crash_permille", Arity::Value),
     ("mount", Arity::Value),
     ("net_connect_refuse_permille", Arity::Value),
@@ -76,7 +75,7 @@ pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[
     ("process_crash_permille", Arity::Value),
     ("realtime_epoch", Arity::Value),
     ("release", Arity::Switch),
-    ("sched_pct", Arity::OptionalValue),
+    ("sched_pct", Arity::Value),
     ("sched_pct_steps", Arity::Value),
     ("seed", Arity::Value),
     ("seeds", Arity::Value),

@@ -189,14 +189,11 @@ fn cli_args(arguments: &[(String, Option<String>)]) -> Result<Vec<String>, Strin
         };
         let flag = format!("--{}", name.replace('_', "-"));
         match (arity, value) {
-            (Arity::Switch, None) | (Arity::OptionalValue, None) => args.push(flag),
+            (Arity::Switch, None) => args.push(flag),
             (Arity::Value, Some(value)) => {
                 args.push(flag);
                 args.push(value.clone());
             }
-            // An optional value is one word with its flag: `--flag VALUE`
-            // would read VALUE as a positional.
-            (Arity::OptionalValue, Some(value)) => args.push(format!("{flag}={value}")),
             (Arity::Switch, Some(_)) => {
                 return Err(format!("`{name}` takes no value; write `{name}` alone"));
             }
@@ -423,10 +420,13 @@ mod tests {
             words(&[("seeds", Some("3")), ("buggify", None), ("release", None)]).unwrap(),
             ["--seeds", "3", "--buggify", "--release"]
         );
-        // A flag whose value is optional carries it in the same word.
         assert_eq!(
-            words(&[("buggify", Some("500")), ("sched_pct", Some("3"))]).unwrap(),
-            ["--buggify=500", "--sched-pct=3"]
+            words(&[
+                ("buggify_fire_permille", Some("500")),
+                ("sched_pct", Some("3"))
+            ])
+            .unwrap(),
+            ["--buggify-fire-permille", "500", "--sched-pct", "3"]
         );
         // A misspelled name, a value on a switch, a value flag without one,
         // and the two flags the attribute supplies itself.

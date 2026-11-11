@@ -160,7 +160,7 @@ Reproduce a recorded run with `patina replay`.",
         Group {
             title: "Liveness options",
             families: SOLE,
-            flags: LIVENESS_FLAGS_OPTIONAL,
+            flags: LIVENESS_FLAGS,
         },
     ],
     refusals: NO_REFUSALS,
@@ -430,7 +430,7 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
         Group {
             title: "Liveness options",
             families: SOLE,
-            flags: LIVENESS_FLAGS_OPTIONAL,
+            flags: LIVENESS_FLAGS,
         },
     ],
     refusals: NO_REFUSALS,

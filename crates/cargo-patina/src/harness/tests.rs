@@ -169,7 +169,7 @@ fn the_test_attribute_takes_exactly_this_verbs_flags() {
             let arity = match flag.value {
                 help::Value::None => Arity::Switch,
                 help::Value::Required(..) => Arity::Value,
-                help::Value::Optional(..) => Arity::OptionalValue,
+                help::Value::Optional(..) => unreachable!("`test` has no optional-value flag"),
             };
             (flag.name.trim_start_matches("--").replace('-', "_"), arity)
         })
@@ -257,12 +257,16 @@ fn every_run_flag_reaches_each_tests_run() {
         tokens.push(OsString::from(value));
     }
     let switches = [
-        "--buggify=250",
+        "--buggify-fire-permille",
+        "250",
         "--buggify-after-setup",
-        "--sched-pct=2",
+        "--sched-pct",
+        "2",
         "--swarm",
-        "--liveness-watchdog=1000",
-        "--converge-within=2000",
+        "--liveness-watchdog",
+        "1000",
+        "--converge-within",
+        "2000",
         "--allow-randomized-address-layout",
     ];
     tokens.extend(switches.iter().map(OsString::from));

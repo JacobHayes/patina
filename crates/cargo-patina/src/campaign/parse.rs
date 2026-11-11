@@ -1,7 +1,7 @@
 //! Campaign invocation parsing and continuation controls.
 
 use super::spec::DEFAULT_PROGRESS_EVERY;
-use super::{AllowUnmetSometimes, CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes};
+use super::{CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes};
 use crate::{CliError, cli, help};
 use patina_dst_runtime::FaultKnob;
 use std::ffi::{OsStr, OsString};
@@ -207,16 +207,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         spec.plateau_after = value;
     }
     spec.guided |= args.flag("--guided");
-    if let Some(value) = args.text("--allow-unmet-sometimes") {
-        spec.allow_unmet_sometimes = Some(match value {
-            "" => AllowUnmetSometimes::Always,
-            generations => AllowUnmetSometimes::BelowGenerations(
-                generations
-                    .parse()
-                    .expect("validated by the registry grammar"),
-            ),
-        });
-    }
+    spec.allow_unmet_sometimes |= args.flag("--allow-unmet-sometimes");
     if !guest_args.is_empty() {
         spec.guest_args = guest_args;
     }

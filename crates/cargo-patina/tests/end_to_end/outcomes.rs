@@ -511,12 +511,13 @@ fn a_liveness_stop_is_recorded_and_replays_to_the_same_stop() {
         )
     };
     // Under PCT too, whose decisions a replay consumes rather than makes.
-    for policy in [&[][..], &["--sched-pct=3"]] {
+    for policy in [&[][..], &["--sched-pct", "3"]] {
         let _ = std::fs::remove_file(trace);
         let mut arguments = vec![
             "--seed",
             "1",
             "--liveness-watchdog",
+            "600000000000",
             "--record",
             trace,
             "--format",

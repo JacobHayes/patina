@@ -182,7 +182,7 @@ into the trace so replay reproduces them flag-free.
   a guest that makes no such read (any Darwin guest, and Rust's std)
   gets no entropy report. The knob is undiagnosable there, not vacuous.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
-- **Schedule exploration** (native): `--sched-pct` (PCT priority scheduling) and
+- **Schedule exploration** (native): `--sched-pct DEPTH` (PCT priority scheduling) and
   `--swarm` (seed-derived fault-class subsets). `campaign --sched-pct` sweeps
   PCT per generation. To make atomics-only race windows schedulable, build with
   `patina build --instrument` and run with `--yield-stride N`: a
@@ -191,8 +191,8 @@ into the trace so replay reproduces them flag-free.
   trace; at the default 0 the same binary keeps only its edge counters, so
   `--coverage-out` and `campaign --guided` work without paying for preemption.
   `campaign --yield-stride` sweeps strides from 1 to 1024 per generation.
-- **Liveness oracles**: `--liveness-watchdog` (virtual-time no-progress
-  detector) and `--converge-within` (heal-then-converge budget).
+- **Liveness oracles**: `--liveness-watchdog NANOS` (virtual-time no-progress
+  detector) and `--converge-within NANOS` (heal-then-converge budget).
   A native guest that goes 10 host seconds without a call that reaches the
   runtime stops by name (`--compute-watchdog-ms MS`), as a `timeout`: a known
   cooperative-runtime limit, not a finding
@@ -231,7 +231,7 @@ Patina, so never-reached `sometimes!`/`reachable!` oracles appear in reports
 with `registered_gens=0`. Each row carries `@file:line`. `patina
 campaign` folds every generation into `<out-dir>/sites.json` (`patina.campaign.sites/v1`) and fails by default
 when a `sometimes!`/`reachable!` oracle is never satisfied; use
-`--allow-unmet-sometimes[=MIN_GENS]` only as an explicit waiver. The same store
+`--allow-unmet-sometimes` only as an explicit waiver. The same store
 is the source of truth for which sites the build declares. A declared `always!` that no generation evaluates is listed as `UNEVALUATED` (and under `always_unevaluated` in the JSON); it is reported, not gated.
 
 ## Record and replay

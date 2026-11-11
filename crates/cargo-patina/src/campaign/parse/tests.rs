@@ -1,9 +1,7 @@
 //! Tests for campaign invocation parsing and continuation controls.
 
 use super::super::spec::json_classify_rules;
-use super::super::{
-    AllowUnmetSometimes, CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes, RunClass,
-};
+use super::super::{CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes, RunClass};
 use super::*;
 use std::ffi::OsString;
 use std::fs;
@@ -226,34 +224,19 @@ fn campaign_locates_the_artifact_around_options() {
 fn allow_unmet_sometimes_parses_flag_and_spec_shapes() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     let bare = parse(args(&["art", "--allow-unmet-sometimes"])).unwrap();
-    assert_eq!(
-        bare.spec.allow_unmet_sometimes,
-        Some(AllowUnmetSometimes::Always)
-    );
-    let threshold = parse(args(&["art", "--allow-unmet-sometimes=10"])).unwrap();
-    assert_eq!(
-        threshold.spec.allow_unmet_sometimes,
-        Some(AllowUnmetSometimes::BelowGenerations(10))
-    );
-    assert!(refusal(&["art", "--allow-unmet-sometimes=0"]).contains("--allow-unmet-sometimes"));
+    assert!(bare.spec.allow_unmet_sometimes);
+    assert!(refusal(&["art", "--allow-unmet-sometimes=10"]).contains("--allow-unmet-sometimes"));
 
     let mut spec = CampaignSpec::default();
     spec.apply_json(&serde_json::json!({"allow_unmet_sometimes": true}))
         .unwrap();
-    assert_eq!(
-        spec.allow_unmet_sometimes,
-        Some(AllowUnmetSometimes::Always)
-    );
-    spec.apply_json(&serde_json::json!({"allow_unmet_sometimes": 7}))
-        .unwrap();
-    assert_eq!(
-        spec.allow_unmet_sometimes,
-        Some(AllowUnmetSometimes::BelowGenerations(7))
-    );
-    let error = CampaignSpec::default()
-        .apply_json(&serde_json::json!({"allow_unmet_sometimes": "yes"}))
-        .expect_err("a malformed allow_unmet_sometimes is refused");
-    assert!(error.to_string().contains("allow_unmet_sometimes"));
+    assert!(spec.allow_unmet_sometimes);
+    for malformed in [serde_json::json!(7), serde_json::json!("yes")] {
+        let error = CampaignSpec::default()
+            .apply_json(&serde_json::json!({"allow_unmet_sometimes": malformed}))
+            .expect_err("a malformed allow_unmet_sometimes is refused");
+        assert!(error.to_string().contains("allow_unmet_sometimes"));
+    }
 }
 
 #[test]

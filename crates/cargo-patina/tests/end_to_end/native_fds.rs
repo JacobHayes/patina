@@ -652,7 +652,7 @@ fn main() {
 
     /// The seeded scheduler, and PCT with its change points spread over a short
     /// run's decisions rather than the default 2000 the run never reaches.
-    const PCT: [&str; 3] = ["--sched-pct=2", "--sched-pct-steps", "150"];
+    const PCT: [&str; 4] = ["--sched-pct", "2", "--sched-pct-steps", "150"];
 
     #[test]
     fn native_descriptor_table_holds_linux_atomicity_and_reservation() {

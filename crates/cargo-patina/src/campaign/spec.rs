@@ -10,12 +10,6 @@ use crate::{CliError, help};
 
 pub(super) const DEFAULT_PLATEAU_AFTER: u64 = 200;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AllowUnmetSometimes {
-    Always,
-    BelowGenerations(u64),
-}
-
 /// The default progress-heartbeat cadence: in human mode, print one
 /// `PATINA_CAMPAIGN_PROGRESS` line every this-many generations (on top of the
 /// always-printed novel/failing lines). 100 is a deliberate middle ground — at the
@@ -163,7 +157,7 @@ pub struct CampaignSpec {
     pub guided: bool,
     /// Waive the default campaign-level gate for `sometimes!` sites that were
     /// registered but never satisfied.
-    pub allow_unmet_sometimes: Option<AllowUnmetSometimes>,
+    pub allow_unmet_sometimes: bool,
     /// Verify reproduction: run each novel finding's reproduce path once before
     /// reporting it, and a seeded sample of clean generations twice, filing a
     /// mismatch as `NONDETERMINISM` (`campaign/verify.rs`). On by default;
@@ -205,7 +199,7 @@ impl Default for CampaignSpec {
             generation_log: false,
             plateau_after: DEFAULT_PLATEAU_AFTER,
             guided: false,
-            allow_unmet_sometimes: None,
+            allow_unmet_sometimes: false,
             verify: true,
             classify: ClassifyRules::default(),
         }
@@ -372,9 +366,7 @@ impl CampaignSpec {
                 "generation_log" => self.generation_log = json_bool(key, val)?,
                 "plateau_after" => self.plateau_after = json_u64(key, val)?,
                 "guided" => self.guided = json_bool(key, val)?,
-                "allow_unmet_sometimes" => {
-                    self.allow_unmet_sometimes = Some(json_allow_unmet_sometimes(key, val)?)
-                }
+                "allow_unmet_sometimes" => self.allow_unmet_sometimes = json_bool(key, val)?,
                 "classify" => self.classify = json_classify_rules(val)?,
                 "verify" => self.verify = json_bool(key, val)?,
                 other => {
@@ -484,26 +476,6 @@ fn json_bool(key: &str, value: &serde_json::Value) -> Result<bool, CliError> {
     value
         .as_bool()
         .ok_or_else(|| CliError(format!("campaign spec {key:?} must be a boolean")))
-}
-
-fn json_allow_unmet_sometimes(
-    key: &str,
-    value: &serde_json::Value,
-) -> Result<AllowUnmetSometimes, CliError> {
-    if value.as_bool() == Some(true) {
-        return Ok(AllowUnmetSometimes::Always);
-    }
-    if let Some(value) = value.as_u64() {
-        if value == 0 {
-            return Err(CliError(format!(
-                "campaign spec {key:?} must be true or a positive unsigned integer"
-            )));
-        }
-        return Ok(AllowUnmetSometimes::BelowGenerations(value));
-    }
-    Err(CliError(format!(
-        "campaign spec {key:?} must be true or a positive unsigned integer"
-    )))
 }
 
 /// Parse the spec's `classify` object into [`ClassifyRules`].

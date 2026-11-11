@@ -127,19 +127,20 @@ pub(crate) fn knob_flag_pairs(knobs: &KnobValues) -> Vec<(&'static str, &String)
 }
 
 /// The cooperative-SUT (buggify) knobs, or `None` when buggify was not enabled.
-/// Any of the four flags enables it — the three detail knobs each imply
+/// Any of the five flags enables it — the four detail knobs each imply
 /// `--buggify`, as their help says.
 pub(super) fn buggify_of(args: &cli::Args) -> Option<NativeBuggify> {
-    let fire = args.text("--buggify");
+    let enabled = args.flag("--buggify");
+    let fire = args.string("--buggify-fire-permille");
     let activation = args.string("--buggify-activation-permille");
     let cutoff = args.string("--buggify-cutoff-nanos");
     let after_setup = args.flag("--buggify-after-setup");
-    if fire.is_none() && activation.is_none() && cutoff.is_none() && !after_setup {
+    if !enabled && fire.is_none() && activation.is_none() && cutoff.is_none() && !after_setup {
         return None;
     }
     Some(NativeBuggify {
-        // A bare `--buggify` supplies no per-mille; the runtime default applies.
-        fire_permille: fire.filter(|value| !value.is_empty()).map(str::to_string),
+        // Without --buggify-fire-permille the runtime default applies.
+        fire_permille: fire,
         activation_permille: activation,
         cutoff_nanos: cutoff,
         after_setup,
