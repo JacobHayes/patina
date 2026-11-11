@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "patina-dst"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "patina-dst-macros",
 ]
 
 [[package]]
 name = "patina-dst-macros"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "patina-macro-adopter"
