@@ -157,7 +157,7 @@ fn copy_out(out: *mut DarwinStatfs) -> SysResult<()> {
 unsafe fn path_statfs(path: *const c_char, out: *mut DarwinStatfs) -> SysResult<()> {
     // SAFETY: the libc contract makes `path` a readable C string or NULL,
     // which `path_from_c` refuses.
-    let path = unsafe { crate::path_from_c(path) }.map_err(failed)?;
+    let path = unsafe { crate::path_from_c("statfs", path) }.map_err(failed)?;
     match paths::resolve(paths::AT_FDCWD, &path, 0).map_err(failed)? {
         paths::Resolution::Volume(resolved) if resolved.metadata.is_some() => copy_out(out),
         paths::Resolution::Volume(_) => Err(failed(libc::ENOENT)),

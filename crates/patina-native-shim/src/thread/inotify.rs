@@ -460,9 +460,10 @@ pub(crate) unsafe fn add_watch(fd: c_int, path: *const c_char, mask: u32) -> i64
         return errno(EFAULT);
     }
     // SAFETY: the caller's contract.
-    let Ok(path) = unsafe { CStr::from_ptr(path) }.to_str() else {
-        return errno(EINVAL);
-    };
+    let path = crate::guest_name(
+        "inotify_add_watch",
+        unsafe { CStr::from_ptr(path) }.to_bytes(),
+    );
     let flags = if mask & IN_DONT_FOLLOW != 0 {
         crate::paths::RESOLVE_NOFOLLOW
     } else {

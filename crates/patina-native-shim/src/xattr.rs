@@ -85,7 +85,7 @@ unsafe fn path_node(path: *const c_char, follow: bool) -> Result<Node, c_int> {
         return Err(EFAULT);
     }
     // SAFETY: This function's contract guarantees a readable string when non-null.
-    let path = unsafe { path_from_c(path)? };
+    let path = unsafe { path_from_c("xattr", path)? };
     let flags = if follow { 0 } else { paths::RESOLVE_NOFOLLOW };
     let resolved = match paths::resolve(paths::AT_FDCWD, &path, flags)? {
         paths::Resolution::Volume(resolved) => resolved,

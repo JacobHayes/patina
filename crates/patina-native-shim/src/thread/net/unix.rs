@@ -161,8 +161,8 @@ pub(super) fn pair(state: &mut ThreadRuntime, a: c_int, b: c_int) {
     }
 }
 
-fn path_of(bytes: &[u8]) -> Result<String, c_int> {
-    String::from_utf8(bytes.to_vec()).map_err(|_| EINVAL)
+fn path_of(call: &str, bytes: &[u8]) -> String {
+    crate::guest_name(call, bytes).to_owned()
 }
 
 /// `unix_bind_bsd`'s node: a socket entry at `path` with `0777 & ~umask`;
@@ -198,10 +198,10 @@ fn make_node(path: &str) -> Result<paths::Resolved, c_int> {
 /// `ty`. A missing path is the resolver's answer (`ENOENT`, …), a name
 /// nothing listens at or a node that is no socket `ECONNREFUSED`, a socket of
 /// another type `EPROTOTYPE`.
-fn find(name: &UnixName, ty: i32) -> Result<c_int, c_int> {
+fn find(call: &str, name: &UnixName, ty: i32) -> Result<c_int, c_int> {
     let handle = match name {
         UnixName::Path(path) => {
-            let metadata = match paths::resolve(paths::AT_FDCWD, &path_of(path)?, 0)? {
+            let metadata = match paths::resolve(paths::AT_FDCWD, &path_of(call, path), 0)? {
                 paths::Resolution::Volume(resolved) => resolved.metadata.ok_or(ENOENT)?,
                 // Through a descriptor's procfs link: a socket's own sockfs
                 // inode, which no name binds, or a node whose names are
@@ -281,7 +281,7 @@ pub(super) fn bind(handle: c_int, bytes: &[u8]) -> Result<(), c_int> {
     match name {
         UnixName::Unnamed => autobind(&mut lock_state(), handle),
         UnixName::Path(ref path) => {
-            let target = path_of(path)?;
+            let target = path_of("bind", path);
             let made = make_node(&target)?;
             let ino = made.metadata.as_ref().expect("made a node").ino;
             let mut state = lock_state();
@@ -341,7 +341,7 @@ pub(super) fn connect(handle: c_int, bytes: &[u8], nonblocking: bool) -> Result<
         autobind(&mut lock_state(), handle)?;
     }
     loop {
-        let listener = find(&name, ty)?;
+        let listener = find("connect", &name, ty)?;
         let mut state = lock_state();
         let target = sock(&state, listener)?;
         let (backlog, pending) = match &as_unix(target).state {
@@ -408,7 +408,7 @@ fn connect_datagram(handle: c_int, bytes: &[u8]) -> Result<(), c_int> {
         if sock(&lock_state(), handle)?.opts.passcred {
             autobind(&mut lock_state(), handle)?;
         }
-        let target = find(&name, SOCK_DGRAM)?;
+        let target = find("connect", &name, SOCK_DGRAM)?;
         let state = lock_state();
         if !may_send(&state, handle, target) {
             return Err(crate::EPERM);
@@ -787,7 +787,7 @@ fn send_record(handle: c_int, mut message: Outgoing, ty: i32) -> Result<usize, c
     let mut data = message.data.read_all()?;
     loop {
         let target = match &destination {
-            Some(name) => find(name, ty)?,
+            Some(name) => find("sendmsg", name, ty)?,
             None => {
                 let mut state = lock_state();
                 let peer = as_unix(sock(&state, handle)?).peer.ok_or(ENOTCONN)?;

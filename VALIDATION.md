@@ -195,6 +195,8 @@ versions, target triple and fingerprint.
   an `O_SYNC`/`O_DSYNC` description), background writeback (dirty expiry,
   memory pressure) never writes data on its own, and `O_DIRECT` is not
   modelled: an open asking for it stops the run by name.
+- **Non-UTF-8 file names.** The simulated filesystem holds UTF-8 names only;
+  a path that is not UTF-8 stops the run as `unsupported` (`non_utf8_path`).
 - **Custom allocators.** Multi-threaded jemalloc has no automated end-to-end test.
 - **Scope.** One record path is one finalized context, so multi-test aggregation
   is unsupported. Arbitrary host DNS, arbitrary FFI, dynamic loading and full

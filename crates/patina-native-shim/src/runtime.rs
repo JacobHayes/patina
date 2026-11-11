@@ -1418,20 +1418,49 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     0
 }
 
-/// Decode a NUL-terminated C path as UTF-8.
+/// Decode the NUL-terminated C path the guest handed `call`, through
+/// [`guest_name`].
 ///
 /// # Safety
 /// When non-null, `path` must be readable through its terminating NUL byte.
 /// A null pointer is accepted and returns `EINVAL`.
-pub(crate) unsafe fn path_from_c(path: *const c_char) -> Result<String, c_int> {
+pub(crate) unsafe fn path_from_c(call: &str, path: *const c_char) -> Result<String, c_int> {
     if path.is_null() {
         return Err(EINVAL);
     }
     // SAFETY: The caller guarantees a readable NUL-terminated string when non-null.
-    unsafe { CStr::from_ptr(path) }
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|_| EINVAL)
+    let bytes = unsafe { CStr::from_ptr(path) }.to_bytes();
+    Ok(guest_name(call, bytes).to_owned())
+}
+
+/// The one door a guest's name takes into the simulated filesystem: its bytes
+/// as UTF-8. Linux accepts any bytes but NUL and `/` in a name; the simulated
+/// filesystem holds UTF-8 names only, so a name that is not UTF-8 stops the
+/// run as unsupported, naming `call`, rather than answering an `EINVAL` the
+/// kernel never would.
+pub(crate) fn guest_name<'a>(call: &str, bytes: &'a [u8]) -> &'a str {
+    match core::str::from_utf8(bytes) {
+        Ok(name) => name,
+        Err(_) => {
+            let _ = flush_before_refusal();
+            let detail: [&[u8]; 3] = [
+                b"`",
+                call.as_bytes(),
+                b"` was given a path that is not UTF-8; the simulated filesystem \
+                  holds UTF-8 names only",
+            ];
+            let _ = host_write_all(2, b"patina: ");
+            for part in detail {
+                let _ = host_write_all(2, part);
+            }
+            let _ = host_write_all(2, b"\n");
+            crate::host_abort(RunStop::new(
+                RunClass::Unsupported,
+                "non_utf8_path",
+                &detail,
+            ));
+        }
+    }
 }
 
 pub(crate) fn clock(value: u32) -> Result<ClockKind, c_int> {

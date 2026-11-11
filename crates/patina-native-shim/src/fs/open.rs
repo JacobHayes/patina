@@ -101,7 +101,7 @@ pub(crate) fn deny_raw(message: &str) -> i64 {
 /// directory is `ENOTDIR`; a write-mode open of a directory is `EISDIR`.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 pub unsafe extern "C" fn patina_openat(
     dirfd: c_int,
     path: *const c_char,
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn patina_openat(
 /// (`paths::RESOLVE_SCOPE_FLAGS`); any other bit is `EINVAL`.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 #[cfg(target_os = "linux")]
 pub unsafe fn patina_openat2(
     dirfd: c_int,
@@ -264,7 +264,7 @@ fn open_namespace(index: usize, flags: u32, cloexec: bool) -> c_int {
 /// The one open behind [`patina_openat`] and `patina_openat2`.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 pub(crate) unsafe fn open_at(
     dirfd: c_int,
     path: *const c_char,
@@ -287,7 +287,7 @@ pub(crate) unsafe fn open_at(
         return fail(EWOULDBLOCK);
     }
     // SAFETY: `open_at`'s contract requires a readable NUL-terminated string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("open", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };

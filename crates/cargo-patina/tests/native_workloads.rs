@@ -1291,6 +1291,34 @@ fn tokio_runtimes_drive_tcp_through_the_virtual_reactor() {
     );
 }
 
+/// A name that is not UTF-8 (a valid Linux name) stops the run as
+/// unsupported where it enters the simulated filesystem, through either door:
+/// std's `open` (the C interposer) and, on Linux, a raw `openat` (the SUD
+/// row). RED before: both answered `EINVAL`, which the kernel never does.
+#[test]
+fn a_non_utf8_path_stops_as_unsupported_at_every_door() {
+    let g = Guest::assert_build("non_utf8_path_probe.rs");
+    if cfg!(target_os = "linux") && !kernel_supports(KernelFeature::Sud) {
+        g.assert_run_refused(1, SUD_REFUSAL_DIAGNOSTICS);
+        return;
+    }
+    let doors: &[&str] = if cfg!(target_os = "linux") {
+        &["libc", "raw"]
+    } else {
+        &["libc"]
+    };
+    for door in doors {
+        let output = g.command("run", &["--seed", "1", "--format", "json", "--", door]);
+        assert!(!output.status.success(), "{door}: {}", text(&output.stdout));
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"unsupported".into(), &"non_utf8_path".into()),
+            "{door}: {envelope:#}"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;

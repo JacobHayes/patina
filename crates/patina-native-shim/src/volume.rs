@@ -379,7 +379,7 @@ fn copy_out(description: KernelStatfs, out: *mut KernelStatfs) -> crate::abi::Sy
 /// `statfs(2)`: the filesystem `path` (a trailing symlink followed) is on.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string; `out`, when
+/// `path` must point to a valid NUL-terminated string; `out`, when
 /// non-null, to a writable `struct statfs`.
 #[cfg(test)]
 pub unsafe fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_int {
@@ -391,14 +391,14 @@ pub unsafe fn patina_statfs(path: *const c_char, out: *mut KernelStatfs) -> c_in
 /// Resolve a path and return its modeled filesystem description.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string; `out`, when
+/// `path` must point to a valid NUL-terminated string; `out`, when
 /// non-null, must point to writable `KernelStatfs` storage.
 pub(crate) unsafe fn statfs(
     path: *const c_char,
     out: *mut KernelStatfs,
 ) -> crate::abi::SysResult<()> {
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("statfs", path) } {
         Ok(path) => path,
         Err(errno) => return Err(crate::abi::failed(errno)),
     };

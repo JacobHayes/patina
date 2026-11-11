@@ -308,7 +308,7 @@ pub unsafe fn patina_uname(out: *mut c_void) -> c_int {
 /// walked to the kernel's 40-hop limit. A missing entry is `ENOENT`.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string and `out` to a
+/// `path` must point to a valid NUL-terminated string and `out` to a
 /// writable `struct patina_metadata`.
 pub unsafe fn patina_metadata_at(
     dirfd: c_int,
@@ -350,7 +350,7 @@ pub(crate) unsafe fn metadata_at(
         return fail(EINVAL);
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("stat", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -719,14 +719,14 @@ unsafe fn fd_metadata_with(
 /// because Linux gives a symlink no mode of its own to change.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 pub unsafe fn patina_chmod(dirfd: c_int, path: *const c_char, mode: u32, flags: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("chmod", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -863,7 +863,7 @@ fn resolve_time_arguments(
 /// identity owns every entry, so the kernel's owner-or-`w` rule always passes.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn patina_utimensat(
     dirfd: c_int,
@@ -886,7 +886,7 @@ pub unsafe extern "C" fn patina_utimensat(
         return fail(EINVAL);
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("utimensat", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -1070,7 +1070,7 @@ fn chown_notifies(uid: u32, gid: u32, before: u32, after: u32) -> bool {
 /// but its own ctime moves.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 pub unsafe extern "C" fn patina_chown(
     dirfd: c_int,
     path: *const c_char,
@@ -1083,7 +1083,7 @@ pub unsafe extern "C" fn patina_chown(
         return fail(EINVAL);
     }
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("chown", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
@@ -1190,14 +1190,14 @@ pub extern "C" fn patina_fchown(raw_fd: c_int, uid: u32, gid: u32) -> c_int {
 /// kind `EINVAL`; the driver charges `w` on the entry.
 ///
 /// # Safety
-/// `path` must point to a valid NUL-terminated UTF-8 string.
+/// `path` must point to a valid NUL-terminated string.
 pub unsafe extern "C" fn patina_truncate(dirfd: c_int, path: *const c_char, length: i64) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     let Ok(length) = u64::try_from(length) else {
         return fail(EINVAL);
     };
     // SAFETY: This export's C ABI contract guarantees a readable path string.
-    let path = match unsafe { path_from_c(path) } {
+    let path = match unsafe { path_from_c("truncate", path) } {
         Ok(path) => path,
         Err(errno) => return fail(errno),
     };
