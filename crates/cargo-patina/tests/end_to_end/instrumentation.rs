@@ -188,175 +188,18 @@ fn main() {
         );
     }
 
-    // A guest that produces every end-of-run diagnostic a single native run can:
-    // concurrent workers (schedule report) and fault-eligible filesystem traffic
-    // (fs-fault report), with the swarm/liveness/policy/SDK reports armed by flags.
-    const REPORT_KNOB_SOURCE: &str = r#"
-use std::fs;
-use std::sync::{Arc, Mutex};
-use std::thread;
-
-fn main() {
-    let counter = Arc::new(Mutex::new(0u64));
-    let mut handles = Vec::new();
-    for _ in 0..3 {
-        let counter = Arc::clone(&counter);
-        handles.push(thread::spawn(move || {
-            for _ in 0..20 {
-                *counter.lock().unwrap() += 1;
-            }
-        }));
-    }
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    for index in 0..8 {
-        let path = format!("/tmp/report-probe-{index}");
-        let _ = fs::write(&path, b"payload");
-        let _ = fs::read(&path);
-    }
-    println!("REPORT_KNOBS total={}", *counter.lock().unwrap());
-}
-"#;
-
-    // Every end-of-run report knob must actually suppress its report on the NATIVE
-    // family, and suppressing it must not change a single recorded byte.
-    //
-    // Native is the family where this cannot work by accident. The supervisor clears
-    // the guest's environment, so a knob reaches the guest only if it is forwarded
-    // explicitly; and the shim scrubs `environ` at startup, so by finalization the
-    // interposed `getenv` returns NULL for everything and a late `std::env` read
-    // cannot tell "suppressed" from "unset". Both halves were missing: only
-    // `PATINA_COVERAGE_REPORT` was forwarded, and the runtime read the remaining
-    // knobs from the process environment at `Context::finish` — so on this whole
-    // family every documented suppressor was silently inert.
-    //
-    // The trace comparison is the other half of the contract: suppression is
-    // presentation, never run semantics, so the recorded bytes — and with them the
-    // fingerprint and everything replay reconciles — must be identical whether the
-    // reports printed or not.
+    // `--coverage-out` is legal only on a binary with edge counters: a plain
+    // build fails closed with the build hint.
     #[test]
-    fn native_report_knobs_suppress_every_report_without_touching_the_trace() {
-        let guest = native_build::source_guest("reports", REPORT_KNOB_SOURCE);
-        let directory = &guest.dir;
-        let workspace = native_workspace();
-        let bin = guest.binary.to_str().unwrap();
-
-        // Each knob with the line prefix it silences. `PATINA_SCHEDULE_POLICY_REPORT`
-        // gates a line named `PATINA_SCHEDULE_POLICY`, so knob and prefix are spelled
-        // out separately rather than derived from one another.
-        let armed: &[(&str, &str)] = &[
-            ("PATINA_SCHEDULE_REPORT", "PATINA_SCHEDULE_REPORT "),
-            ("PATINA_SWARM_REPORT", "PATINA_SWARM_REPORT "),
-            ("PATINA_LIVENESS_REPORT", "PATINA_LIVENESS_REPORT "),
-            ("PATINA_SDK_REPORT", "PATINA_SDK_REPORT "),
-            ("PATINA_FS_FAULT_REPORT", "PATINA_FS_FAULT_REPORT "),
-            ("PATINA_SCHEDULE_POLICY_REPORT", "PATINA_SCHEDULE_POLICY "),
-        ];
-        let loud_trace = directory.path().join("loud.patina");
-        let quiet_trace = directory.path().join("quiet.patina");
-        let run = |trace: &Path, envs: &[(&str, &str)]| {
-            let output = invoke_unchecked_clean_env(
-                env!("CARGO_BIN_EXE_patina"),
-                workspace,
-                &[
-                    "run",
-                    "-v",
-                    bin,
-                    "--seed",
-                    "1",
-                    "--record",
-                    trace.to_str().unwrap(),
-                    "--fs-error-permille",
-                    "100",
-                    "--swarm",
-                    "--liveness-watchdog",
-                    "600000000000",
-                    "--sched-pct",
-                    "3",
-                    "--buggify",
-                ],
-                envs,
-            );
-            assert!(
-                output.status.success(),
-                "native report-knob run failed with {}\nstdout:\n{}\nstderr:\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output
-        };
-
-        let loud = run(&loud_trace, &[]);
-        let loud_stderr = String::from_utf8_lossy(&loud.stderr).into_owned();
-        for (knob, prefix) in armed {
-            assert!(
-                loud_stderr.contains(prefix),
-                "{knob}'s report is missing from an unsuppressed run, so suppressing it \
-             would prove nothing; stderr:\n{loud_stderr}"
-            );
-        }
-
-        let silenced: Vec<(&str, &str)> = armed.iter().map(|(knob, _)| (*knob, "0")).collect();
-        let quiet = run(&quiet_trace, &silenced);
-        let quiet_stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
-        for (knob, prefix) in armed {
-            assert!(
-                !quiet_stderr.contains(prefix),
-                "{knob}=0 did not suppress its report on the native family; stderr:\n{quiet_stderr}"
-            );
-        }
-        let guest_line = |output: &Output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .find(|line| line.starts_with("REPORT_KNOBS "))
-                .unwrap_or_else(|| panic!("guest produced no output line"))
-                .to_string()
-        };
-        assert_eq!(
-            guest_line(&loud),
-            guest_line(&quiet),
-            "report suppression must not change the guest's own output"
-        );
-        assert_eq!(
-            fs::read(&loud_trace).unwrap(),
-            fs::read(&quiet_trace).unwrap(),
-            "report suppression is presentation only: the recorded trace must be byte-identical"
-        );
-
-        // A replay reconciles against a recording made under different suppression
-        // settings and reproduces the same guest output — suppression reaches neither
-        // the fingerprint nor anything replay checks.
-        let replayed = invoke_unchecked_clean_env(
-            env!("CARGO_BIN_EXE_patina"),
-            workspace,
-            &["replay", "-v", bin, loud_trace.to_str().unwrap()],
-            &silenced,
-        );
-        assert!(
-            replayed.status.success(),
-            "replay of a loud recording under suppressed reports must reconcile; stderr:\n{}",
-            String::from_utf8_lossy(&replayed.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&replayed.stdout).contains("REPORT_KNOBS total=60"),
-            "replayed guest output changed under suppression:\n{}",
-            String::from_utf8_lossy(&replayed.stdout)
-        );
-
-        // `--coverage-out` is legal only on an `--instrument` build: the plain
-        // binary fails closed with the build hint.
-        let refused_map = directory.path().join("plain.covmap");
+    fn coverage_out_refuses_a_binary_without_edge_counters() {
+        let guest = native_build::source_guest("plain", "fn main() {}");
+        let refused_map = guest.dir.path().join("plain.covmap");
         let refused = invoke_unchecked(
             env!("CARGO_BIN_EXE_patina"),
-            workspace,
+            native_workspace(),
             &[
                 "run",
-                "-v",
-                bin,
-                "--seed",
-                "1",
+                guest.binary.to_str().unwrap(),
                 "--coverage-out",
                 refused_map.to_str().unwrap(),
             ],

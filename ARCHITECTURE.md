@@ -281,8 +281,7 @@ These concerns are kept out of the interposed data plane:
   the umask work the same way; the working directory is held as a node.
 - **Knob resolution.** Every `PATINA_RT_*` knob is resolved once, at
   configuration time. The runtime never reads the process environment after
-  installation. Report suppressors travel one table
-  (`patina_dst_runtime::Report`) and are presentation only.
+  installation.
 - **Address layout.** The supervisor launches every incarnation so the kernel
   picks the same addresses (`src/native_run/layout.rs`): ASLR off for the
   image (`ADDR_NO_RANDOMIZE`; Darwin `_POSIX_SPAWN_DISABLE_ASLR`), the modeled

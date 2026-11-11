@@ -667,7 +667,6 @@ impl RuntimeBuilder {
             pending_diagnostics: Vec::new(),
             liveness,
             swarm: swarm_record,
-            reports: self.config.reports,
             facts,
             facts_sealed: false,
             facts_context: facts::next_context(),

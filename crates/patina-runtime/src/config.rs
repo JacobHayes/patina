@@ -2,7 +2,6 @@
 
 use crate::crash::Incarnation;
 use crate::network::builtin_dns_resolution;
-use crate::reports::ReportConfig;
 use crate::scheduler::SchedulePolicy;
 use crate::{
     DEFAULT_BOOT_ORIGIN_NANOS, DEFAULT_BUGGIFY_ACTIVATION_PERMILLE, DEFAULT_BUGGIFY_CUTOFF_NANOS,
@@ -173,11 +172,6 @@ pub struct RuntimeConfig {
     pub(super) liveness: LivenessConfig,
     /// The compute budget ([`RuntimeConfig::with_compute_budget`]).
     pub(super) compute_budget_nanos: u64,
-    /// Which end-of-run diagnostic reports print. Presentation only: resolved
-    /// once from the family's control plane, never fingerprinted, never recorded,
-    /// never reconciled — a replay may silence a report the recording printed and
-    /// still produce the identical op stream.
-    pub(super) reports: ReportConfig,
     /// Whether syscall-user-dispatch was armed for this run (Linux/x86_64 managed
     /// run on a SUD kernel). Recorded into the trace's [`RunMetadata::sud`] so a
     /// cross-kernel replay is refused up front. `None` on every non-SUD run
@@ -235,7 +229,6 @@ impl RuntimeConfig {
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
             compute_budget_nanos: crate::DEFAULT_COMPUTE_BUDGET_NANOS,
-            reports: ReportConfig::default(),
             sud: None,
             tsc: None,
             address_layout: None,
@@ -643,22 +636,6 @@ impl RuntimeConfig {
     pub fn with_swarm(mut self, swarm: bool) -> Self {
         self.swarm = swarm;
         self
-    }
-
-    /// Install the end-of-run report-suppression preferences wholesale, for a
-    /// family that resolved them from its own control plane (the native shim
-    /// parses its pre-scrub environment snapshot once and shares the result with
-    /// its own coverage finalization).
-    #[must_use]
-    pub const fn with_reports(mut self, reports: ReportConfig) -> Self {
-        self.reports = reports;
-        self
-    }
-
-    /// Which end-of-run diagnostic reports this run prints.
-    #[must_use]
-    pub const fn reports(&self) -> ReportConfig {
-        self.reports
     }
 
     /// The compute budget: how much metered computation (an instrumented

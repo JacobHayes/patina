@@ -109,12 +109,7 @@ pub use buggify::{
 
 pub use patina_dst_abi::EntropyWait;
 
-pub use reports::{
-    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT,
-    ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT,
-    ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report, ReportConfig,
-    set_diagnostic_writer, set_report_writer,
-};
+pub use reports::{set_diagnostic_writer, set_report_writer};
 
 pub use patina_dst_abi::VerdictKind;
 
@@ -643,11 +638,8 @@ pub struct Context {
     /// than re-drawing one. Drives `PATINA_SWARM_REPORT` and the
     /// `swarm_deselected` field of `PATINA_SDK_REPORT`.
     swarm: Option<patina_dst_trace::SwarmConfigRecord>,
-    /// Which end-of-run diagnostic reports [`Context::finish`] prints, resolved
-    /// at configuration time. Presentation only — it reaches no recorded byte.
-    reports: ReportConfig,
     /// Where this run's structured facts document goes, or `None` when nobody
-    /// asked for one. Like `reports`, it reaches no recorded byte.
+    /// asked for one. It reaches no recorded byte.
     facts: Option<Box<dyn FactsSink>>,
     /// Whether a compute-bound stop wrote the run's terminal facts document.
     /// Every other write is a fresh, complete document the reader takes the

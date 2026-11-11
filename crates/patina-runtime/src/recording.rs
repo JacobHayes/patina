@@ -251,9 +251,7 @@ impl Context {
     ///
     /// A plane is present exactly when its human line would have had something to
     /// say (the plane saw at least one opportunity) — absent means the feature
-    /// did not fire, never "zero". Deliberately independent of
-    /// [`ReportConfig`]: silencing a printed diagnostic must not blind the
-    /// structured channel.
+    /// did not fire, never "zero".
     pub fn run_facts(&self) -> serde_json::Value {
         let mut planes = serde_json::Map::new();
         if let Some(report) = self.fs_fault_report().filter(|r| r.eligible_ops > 0) {
@@ -421,61 +419,58 @@ impl Context {
         // drains after each SDK entry point so the lines interleave with guest
         // output; this catches what a direct context's caller left. Drained, so
         // nothing can print twice.
-        // Deliberately not gated by `ReportConfig`: a verdict is the run's
-        // result, not a diagnostic, and a suppressible result is a silent hole.
         for line in self.take_pending_diagnostics() {
             crate::reports::diagnostic!("{line}");
         }
-        emit_schedule_report(self.reports, &self.schedule.diagnostics());
+        emit_schedule_report(&self.schedule.diagnostics());
         // Swarm selection diagnostic. Default-on for every masked run so which
         // classes this generation actually carried is never left to inference
         // from an absent knob effect.
         if let Some(swarm) = self.swarm.as_ref() {
-            emit_swarm_report(self.reports, swarm);
+            emit_swarm_report(swarm);
         }
         // Exploration-policy diagnostic (PCT). Populated from live
         // selection, so it reflects a record/seeded run; a replay reports the
         // inert default because recorded selections bypass the policy.
         if let Some(report) = self.scheduler.policy_report() {
-            emit_schedule_policy_report(self.reports, &report);
+            emit_schedule_policy_report(&report);
         }
         // Filesystem fault-injection diagnostic. Default-on so a run configured
         // with fs fault knobs that never actually perturb eligible I/O is never a
         // false green.
         if let Some(report) = self.fs_fault_report() {
-            emit_fs_fault_report(self.reports, &report);
+            emit_fs_fault_report(&report);
         }
         // DNS fault-injection diagnostic, on the same default-on terms.
         if let Some(report) = self.dns_fault_report() {
-            emit_dns_fault_report(self.reports, &report);
+            emit_dns_fault_report(&report);
         }
         // Network fault-injection diagnostic. Default-on so a run configured with
         // net fault knobs that never actually perturbed any send (the knobs being
         // silently inert on the exercised code path) is never a false green.
         if let Some(report) = self.net_fault_report() {
-            emit_net_fault_report(self.reports, &report);
+            emit_net_fault_report(&report);
         }
         // Entropy fault-injection diagnostic, on the same default-on terms.
         if let Some(report) = self.entropy_fault_report() {
-            emit_entropy_fault_report(self.reports, &report);
+            emit_entropy_fault_report(&report);
         }
         // Clock (epoch-jump) fault-injection diagnostic, on the same
         // default-on terms.
         if let Some(report) = self.clock_fault_report() {
-            emit_clock_fault_report(self.reports, &report);
+            emit_clock_fault_report(&report);
         }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before
-        // finish()). Default-on so "watchdog enabled, run OK" is never silently
-        // vacuous; suppressed by a false-y PATINA_LIVENESS_REPORT.
+        // finish()), so "watchdog enabled, run OK" is never silently vacuous.
         if self.liveness.active {
-            emit_liveness_report(self.reports, &self.liveness);
+            emit_liveness_report(&self.liveness);
         }
         // Cooperative-SUT diagnostic + metadata. Computed before the execution is
         // consumed so the record sink can fold in the run's realized active-site
         // set and knob picks.
         let buggify_diag = self.buggify_diagnostics();
-        emit_sdk_report(self.reports, &buggify_diag);
+        emit_sdk_report(&buggify_diag);
         // A replay that ends with recorded operations left over diverged. The
         // execution's own finish below refuses it too, but only after the facts
         // are written, so the divergence is noted here first.

@@ -11,11 +11,6 @@
 //! [`ENV_FACTS_FD`](crate::ENV_FACTS_FD) descriptor), so a run that nobody asked
 //! facts of behaves exactly as before.
 //!
-//! Deliberately independent of the report-suppression knobs
-//! ([`ReportConfig`](crate::ReportConfig)): those decide what *prints*, and the
-//! facts channel is not printing. A consumer must not be able to blind the
-//! structured channel by silencing a human diagnostic.
-//!
 //! Field order is fixed (`serde_json::Map` is ordered), and every value is an
 //! integer, boolean, or a stable token, so the same run emits byte-identical
 //! facts on a repeat.

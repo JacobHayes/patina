@@ -1243,7 +1243,6 @@ pub(crate) fn runtime_config_from_control_plane()
     // and is carried in the config: by finalization the context is out of the slot
     // and the interposed `getenv` returns NULL for everything, so a knob read then
     // would silently report "not set" and every suppression request would be inert.
-    config = config.with_reports(control_reports());
     // Record whether syscall-user-dispatch was armed for this run (the C layer's
     // arming state), so a cross-kernel replay is refused up front rather than
     // diverging mid-run. `None` on every non-SUD run.

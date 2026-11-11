@@ -15,11 +15,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "The runtime's supervisor↔guest control plane, below. Set only by the supervisor: a native guest starts from an empty environment.",
     },
     EnvVar {
-        name: patina_dst_runtime::Report::ENV_NAMES,
-        scope: "user",
-        doc: "End-of-run diagnostics, all on by default; a false-y value (0/off/false/no) silences one. Presentation only: suppressing a report changes no recorded byte, so a quiet run and a loud one replay against each other. The structured run facts a campaign classifies do not depend on them.",
-    },
-    EnvVar {
         name: "PATINA_RT_PARAMS_JSON",
         scope: "protocol",
         doc: "Run parameters as a JSON object (mirrors --param); recorded and restored on replay.",

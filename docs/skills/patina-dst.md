@@ -273,12 +273,9 @@ output, not by trusting a field list.
 
 **stderr, the `PATINA_*` markers.** End-of-run reports are the project's
 observability contract: scheduling, swarm selection, liveness, SDK sites,
-per-domain fault activity, coverage, and depth each emit a marker line. They are
-**on by default** and each is silenced by setting its own variable to a false-y value.
-Suppression is presentation only — it changes no recorded byte and no
-fingerprint, so a quiet run and a loud one replay against each other. They are
-for reading; tools read the envelope, which carries the same facts whatever is
-silenced.
+per-domain fault activity, coverage, and depth each emit a marker line, which
+`--verbose` prints. They are for reading; tools read the envelope, which carries
+the same facts.
 
 Read these reports. A clean pass with a fault knob that never fired, or a spawned
 thread that never yielded, is a **vacuous** result, and the reports are how you

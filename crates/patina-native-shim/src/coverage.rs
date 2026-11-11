@@ -417,21 +417,6 @@ fn control_coverage_fd() -> Result<Option<c_int>, RuntimeError> {
         .transpose()
 }
 
-/// The run's end-of-run report-suppression preferences, parsed ONCE from the
-/// constructor's pre-scrub control-plane snapshot and cached.
-///
-/// Cached because both consumers need the same answer at different times: the
-/// runtime config takes it at install, and coverage finalization takes it at
-/// shutdown — after the context has left the slot, where a `std::env` read would
-/// route through the interposed `getenv` and come back empty. The control plane
-/// is the only view of the operator's environment that outlives the scrub, so it
-/// is the only one either consumer may use.
-pub(crate) fn control_reports() -> patina_dst_runtime::ReportConfig {
-    *REPORTS.get_or_init(|| patina_dst_runtime::ReportConfig::default().applied(control_env))
-}
-
-static REPORTS: OnceLock<patina_dst_runtime::ReportConfig> = OnceLock::new();
-
 pub(crate) fn prepare_coverage_output(
     requested: bool,
     ranges: &CoverageRanges,
@@ -465,17 +450,15 @@ pub(crate) fn finalize_coverage() -> Result<(), String> {
     else {
         return Ok(());
     };
-    if control_reports().enabled(patina_dst_runtime::Report::Coverage) {
-        report_line(&format!(
-            "PATINA_COVERAGE_REPORT edges_total={} edges_covered={} covered_permille={} hits_total={} hits_max={} saturated={}",
-            prepared.summary.edges_total,
-            prepared.summary.edges_covered,
-            prepared.summary.covered_permille,
-            prepared.summary.hits_total,
-            prepared.summary.hits_max,
-            prepared.summary.saturated,
-        ));
-    }
+    report_line(&format!(
+        "PATINA_COVERAGE_REPORT edges_total={} edges_covered={} covered_permille={} hits_total={} hits_max={} saturated={}",
+        prepared.summary.edges_total,
+        prepared.summary.edges_covered,
+        prepared.summary.covered_permille,
+        prepared.summary.hits_total,
+        prepared.summary.hits_max,
+        prepared.summary.saturated,
+    ));
     if let (Some(fd), Some(map)) = (coverage_fd, prepared.map) {
         host_write_all(fd, &map).map_err(|error| {
             format!(

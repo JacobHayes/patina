@@ -2,13 +2,15 @@
 
 use patina_dst_rng_seeded::fault_domain;
 
+use crate::reports::{
+    CLOCK_FAULT_REPORT, DNS_FAULT_REPORT, ENTROPY_FAULT_REPORT, FS_FAULT_REPORT, NET_FAULT_REPORT,
+};
 use crate::{
-    ENV_CLOCK_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
-    ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
-    ENV_FS_ERROR_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY,
+    ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE,
+    ENV_EPOCH_JUMP_NANOS, ENV_FS_ERROR_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_LATENCY,
     ENV_FS_SHORT_PERMILLE, ENV_MACHINE_CRASH_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE,
-    ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER,
-    ENV_NET_LATENCY, ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
+    ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE, ENV_NET_JITTER, ENV_NET_LATENCY,
+    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
     ENV_PROCESS_CRASH_PERMILLE, ENV_SLEEP_JITTER,
 };
 
@@ -178,7 +180,7 @@ fault_registry! {
                     env: ENV_FS_ERROR_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("fs_error"),
-                    report: Some(ENV_FS_FAULT_REPORT),
+                    report: Some(FS_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -194,7 +196,7 @@ fault_registry! {
                     env: ENV_FS_ERROR_AT,
                     plumbing: Plumbing::Repeatable(RepeatableFormat::FsErrorTargets),
                     swarm_class: None,
-                    report: Some(ENV_FS_FAULT_REPORT),
+                    report: Some(FS_FAULT_REPORT),
                 },
                 sample: std::collections::BTreeSet::from(["sync:1".parse().expect("a target")]),
             }
@@ -205,7 +207,7 @@ fault_registry! {
                     env: ENV_FS_SHORT_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("fs_short"),
-                    report: Some(ENV_FS_FAULT_REPORT),
+                    report: Some(FS_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -217,7 +219,7 @@ fault_registry! {
                     env: ENV_FS_LATENCY,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("fs_latency"),
-                    report: Some(ENV_FS_FAULT_REPORT),
+                    report: Some(FS_FAULT_REPORT),
                 },
                 sample: Some((1, 2)),
             }
@@ -232,7 +234,7 @@ fault_registry! {
                     // A deterministic base link latency: applied to every delivery
                     // rather than drawn, so it derives no stream of its own.
                     swarm_class: Some("net_latency"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -243,7 +245,7 @@ fault_registry! {
                     env: ENV_NET_JITTER,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("net_jitter"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: Some((1, 2)),
             }
@@ -254,7 +256,7 @@ fault_registry! {
                     env: ENV_NET_DROP_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("net_drop"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -266,7 +268,7 @@ fault_registry! {
                     env: ENV_NET_DUPLICATE_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("net_duplicate"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -278,7 +280,7 @@ fault_registry! {
                     env: ENV_NET_CONNECT_REFUSE_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("net_connect_refuse"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -290,7 +292,7 @@ fault_registry! {
                     env: ENV_NET_RESET_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("net_reset"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -305,7 +307,7 @@ fault_registry! {
                     // Deterministic (rate 1.0): a datagram across a partition is
                     // always dropped, so nothing is drawn.
                     swarm_class: Some("net_partition"),
-                    report: Some(ENV_NET_FAULT_REPORT),
+                    report: Some(NET_FAULT_REPORT),
                 },
                 sample: std::collections::BTreeSet::from([("a".to_string(), "b".to_string()), ("b".to_string(), "a".to_string())]),
             }
@@ -351,7 +353,7 @@ fault_registry! {
                     env: ENV_EPOCH_JUMP_NANOS,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("epoch_jump"),
-                    report: Some(ENV_CLOCK_FAULT_REPORT),
+                    report: Some(CLOCK_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -366,7 +368,7 @@ fault_registry! {
                     env: ENV_DNS_FAIL_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("dns_fail"),
-                    report: Some(ENV_DNS_FAULT_REPORT),
+                    report: Some(DNS_FAULT_REPORT),
                 },
                 sample: 1,
             }
@@ -378,7 +380,7 @@ fault_registry! {
                     env: ENV_DNS_LATENCY,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("dns_latency"),
-                    report: Some(ENV_DNS_FAULT_REPORT),
+                    report: Some(DNS_FAULT_REPORT),
                 },
                 sample: Some((1, 2)),
             }
@@ -395,7 +397,7 @@ fault_registry! {
                     env: ENV_ENTROPY_FAIL_PERMILLE,
                     plumbing: Plumbing::Scalar,
                     swarm_class: Some("entropy_fail"),
-                    report: Some(ENV_ENTROPY_FAULT_REPORT),
+                    report: Some(ENTROPY_FAULT_REPORT),
                 },
                 sample: 1,
             }

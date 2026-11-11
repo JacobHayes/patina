@@ -513,16 +513,6 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             reports_file.as_raw_fd().to_string(),
         );
         fds.push(reports_file.as_raw_fd());
-        // The guest's environment is cleared above, so every end-of-run report
-        // knob the operator set has to be forwarded explicitly or it never
-        // reaches the guest at all. Driven by `Report::ALL` rather than a
-        // hand-kept list, so a report added to the runtime is silenceable on
-        // native the day it exists.
-        for report in patina_dst_runtime::Report::ALL {
-            if let Some(value) = env::var_os(report.env()) {
-                command.env(report.env(), value);
-            }
-        }
         if !invocation.environment.is_empty() {
             let encoded = serde_json::to_string(&invocation.environment).map_err(|error| {
                 CliError(format!(
