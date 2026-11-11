@@ -134,6 +134,25 @@ impl Info {
         info.words[4] = u64::from(generation);
         info
     }
+    /// A child's state change (`do_notify_parent`): `SIGCHLD` with
+    /// `CLD_EXITED` and the exit code, or `CLD_KILLED`/`CLD_DUMPED` and the
+    /// signal, from wait status `status`, sent by the child `pid`. The child's
+    /// CPU times (`si_utime`, `si_stime`) are 0: a child's CPU is not carried.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn child(pid: i32, status: i32) -> Self {
+        let (code, value) = if libc::WIFEXITED(status) {
+            (libc::CLD_EXITED, libc::WEXITSTATUS(status))
+        } else if libc::WCOREDUMP(status) {
+            (libc::CLD_DUMPED, libc::WTERMSIG(status))
+        } else {
+            (libc::CLD_KILLED, libc::WTERMSIG(status))
+        };
+        let mut info = Self::new(SIGCHLD, code);
+        info.words[2] =
+            u64::from(pid as u32) | (u64::from(crate::identity::credential().uid) << 32);
+        info.words[3] = u64::from(value as u32);
+        info
+    }
     pub(crate) fn signo(&self) -> u8 {
         self.words[0] as u8
     }
@@ -461,6 +480,8 @@ pub(crate) use generation::patina_signal_reserved;
 pub(crate) use generation::{
     GenerationInfo, GenerationTarget, abort_through_kernel, generate_signal,
 };
+#[cfg(target_os = "linux")]
+pub(super) use generation::{child_changed, children_reap_themselves};
 pub(super) use generation::{clear_tid, temporary_mask, with_mask, with_temporary_mask};
 pub(crate) use generation::{patina_raw_exit, patina_set_tid_address};
 #[cfg(test)]

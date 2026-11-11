@@ -681,8 +681,10 @@ pub(super) const BINDINGS: &[(Syscall, Handler)] = &[
     (Syscall::N_tgkill, |_, a| {
         sys_tgkill(a[0] as i64, a[1] as i64, a[2] as i64)
     }),
-    (Syscall::N_wait4, |_, a| sys_wait4(a[0], a[1], a[2])),
-    (Syscall::N_waitid, |_, a| sys_waitid(a[0], a[1], a[2], a[3])),
+    (Syscall::N_wait4, |_, a| sys_wait4(a[0], a[1], a[2], a[3])),
+    (Syscall::N_waitid, |_, a| {
+        sys_waitid(a[0], a[1], a[2], a[3], a[4])
+    }),
     (Syscall::N_getpgid, |_, a| {
         crate::identity::getpgid(a[0] as i32)
     }),

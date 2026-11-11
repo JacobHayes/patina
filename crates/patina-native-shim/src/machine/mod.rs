@@ -91,6 +91,12 @@ pub(crate) fn allocate_id() -> c_int {
     }
 }
 
+/// Id `id` is taken (a thread of a root that is still the whole machine,
+/// numbered after its task): the machine's next ids come after it.
+pub(crate) fn reserve_id(id: c_int) {
+    NEXT_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
+}
+
 /// A child process the hub knows: live until it exits, then a zombie
 /// holding its wait status until its parent reaps it.
 struct Child {
@@ -119,12 +125,40 @@ pub(crate) fn others_live() -> bool {
 /// state each process models on its own that is really the machine's
 /// (locks, FIFOs, shared file mappings, System V IPC), which another
 /// process could not see.
-pub(crate) fn refuse_shared(what: &str) {
+///
+/// While this process is alone, the first such state it makes is noted
+/// ([`shared_state_used`]): a later spawn would hand a child a machine whose
+/// state that process holds on its own, and is refused.
+pub(crate) fn refuse_shared(what: &'static str) {
+    if !others_live() {
+        let mut used = SHARED_USED.lock();
+        if used.is_none() {
+            *used = Some(what);
+        }
+        return;
+    }
+    refuse_beside_others(what);
+}
+
+/// Stop the run by name if another process of the machine lives: `what`
+/// changes something every process of the machine sees (its process
+/// group, its session) that only this one's table would hold.
+pub(crate) fn refuse_beside_others(what: &str) {
     if others_live() {
         crate::trap_unmodeled(&format!(
             "{what} while the guest's machine holds several processes is not modeled"
         ));
     }
+}
+
+/// The first per-process state of the machine's (see [`refuse_shared`])
+/// this process made while alone.
+static SHARED_USED: SpinMutex<Option<&'static str>> = SpinMutex::new(None);
+
+/// What per-process state of the machine's this process made while alone,
+/// if any: a spawn now would leave a child outside it.
+pub(crate) fn shared_state_used() -> Option<&'static str> {
+    *SHARED_USED.lock()
 }
 
 /// Stop the run by name if this process has had a child: what a child
@@ -288,7 +322,7 @@ fn serve_children(mut picked: TaskId) -> TaskId {
                     context.import_machine_carry(carry);
                     Ok(())
                 });
-                ended(pid, status);
+                ended(pid, status, Notify::Parent);
             }
             other => protocol_fatal("a child's yield or exit", &other),
         }
@@ -360,11 +394,22 @@ fn serve(pid: i32, channel: c_int) -> Message {
     }
 }
 
+/// How the rest of the root hears of a child's end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Notify {
+    /// While the root runs: `SIGCHLD` is queued, and every task waiting for
+    /// a child looks again.
+    Parent,
+    /// At the root's end (teardown): no guest code runs any more, so
+    /// nothing is queued and no task is woken (the waiters are forgotten).
+    Nobody,
+}
+
 /// Child `pid` ended with wait status `status`: its foreign task is gone
 /// (recorded), the root's filesystem handles it held are closed, it is a
-/// zombie until its parent reaps it, and every task waiting for a child of
-/// that parent looks again.
-fn ended(pid: i32, status: i32) {
+/// zombie until its parent reaps it, and, as `notify` says, its parent
+/// hears of it (`SIGCHLD`, waiters woken).
+fn ended(pid: i32, status: i32, notify: Notify) {
     let channel = {
         let mut children = CHILDREN.lock();
         let Some(child) = children
@@ -388,7 +433,13 @@ fn ended(pid: i32, status: i32) {
         }
         Ok(())
     });
-    spawn::wake_waiters();
+    match notify {
+        Notify::Parent => {
+            thread::child_changed(pid, status);
+            spawn::wake_waiters();
+        }
+        Notify::Nobody => spawn::forget_waiters(),
+    }
 }
 
 /// What the hub answers a child's signal to a process it does not model
@@ -406,7 +457,7 @@ pub(crate) fn signal_child(pid: i32, sig: i32) -> Option<i64> {
         .map(|child| child.status.is_none())?;
     match sig {
         0 => {}
-        libc::SIGKILL if live => kill(pid),
+        libc::SIGKILL if live => kill(pid, Notify::Parent),
         libc::SIGKILL => {}
         _ => return Some(UNMODELED_SIGNAL),
     }
@@ -435,8 +486,10 @@ modeled (only SIGKILL and the probe, signal 0, cross processes)",
 }
 
 /// Kill live child `pid`, frozen on its channel: it dies of `SIGKILL`, and
-/// its end of the channel closes once the host process is gone.
-fn kill(pid: i32) {
+/// its end of the channel closes once the host process is gone. The wait
+/// for that is the host's, so no guest code of this process runs meanwhile
+/// (the compute observer has no candidate).
+fn kill(pid: i32, notify: Notify) {
     let Some(channel) = CHILDREN
         .lock()
         .get(&pid)
@@ -446,8 +499,18 @@ fn kill(pid: i32) {
         return;
     };
     send(channel, &Message::Kill);
-    while receive(channel).is_some() {}
-    ended(pid, KILLED);
+    off_guest(|| while receive(channel).is_some() {});
+    ended(pid, KILLED, notify);
+}
+
+/// Run `wait`, a host wait on another process, as if another process held
+/// the baton: no guest code of this process runs meanwhile, so the compute
+/// observer has no candidate here.
+pub(crate) fn off_guest<T>(wait: impl FnOnce() -> T) -> T {
+    let before = ELSEWHERE_RUNS.swap(true, Ordering::Relaxed);
+    let answer = wait();
+    ELSEWHERE_RUNS.store(before, Ordering::Relaxed);
+    answer
 }
 
 /// The root's end: every child still running is killed (its foreign task's
@@ -463,7 +526,7 @@ pub(crate) fn teardown() {
         .map(|(pid, _)| *pid)
         .collect();
     for pid in live {
-        kill(pid);
+        kill(pid, Notify::Nobody);
     }
 }
 

@@ -8,9 +8,12 @@
 //! to the table and to its scheduler as a runnable foreign task. The child
 //! runs when the scheduler picks it.
 //!
-//! What this slice does not model stops the run by name, as the spawn
-//! entries' refusal does (`unsupported`, `deny_trap`): a spawn from a child,
-//! a spawn while recording or replaying, file actions, spawn attributes
+//! What this slice does not model stops the run by name (`unsupported`,
+//! `not_modeled`): a spawn from a child, a spawn while recording or
+//! replaying, file actions (a `chdir` action included), a caller whose
+//! descriptors 0, 1 and 2 are not the run's own standard streams (a staged
+//! `--stdin` included: the child would read EOF) or that holds any other
+//! descriptor open across exec, spawn attributes
 //! other than the signal mask and default dispositions a fresh process has
 //! anyway, a signal mask that is not empty, a run the supervisor gave no
 //! launch channel (crash-restart and the scheduling-policy knobs), and
@@ -77,6 +80,18 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     if !spawn.file_actions.is_null() && unsafe { actions_used(spawn.file_actions) } != 0 {
         refuse(spawn, "with file actions");
     }
+    if thread::children_reap_themselves() {
+        refuse(spawn, "while SIGCHLD is ignored or carries SA_NOCLDWAIT");
+    }
+    if let Some(what) = shared_state_used() {
+        refuse(
+            spawn,
+            &format!("after the guest used {what}, which a child would not share"),
+        );
+    }
+    if let Some(what) = descriptor_gap() {
+        refuse(spawn, &what);
+    }
     if !spawn.attr.is_null() {
         // SAFETY: the caller's attributes object, per the entry's contract.
         let (flags, mask_empty) = unsafe { attributes(spawn.attr) };
@@ -133,7 +148,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     close(child);
     // The child may use the filesystem before it is ready (its working
     // directory): the hub serves it meanwhile.
-    match serve(pid, hub) {
+    match off_guest(|| serve(pid, hub)) {
         Message::Ready => {}
         other => protocol_fatal("a new process's ready", &other),
     }
@@ -176,6 +191,26 @@ fn refuse(spawn: &Spawn, what: &str) -> ! {
     let _ = crate::host_write_all(2, line.as_bytes());
     crate::patina_flush_captured_stdio();
     crate::host_abort(crate::RunStop::unmodeled(&[detail.as_bytes()]))
+}
+
+/// How the caller's descriptor table differs from what a child is given
+/// (the run's own standard streams at 0, 1 and 2, nothing else), if it does:
+/// a child would not see what the caller arranged, so the spawn refuses.
+fn descriptor_gap() -> Option<String> {
+    use crate::fdtable::FdKind;
+    let table = crate::state::fd_table().lock();
+    for (number, kind) in [(0, FdKind::Stdin), (1, FdKind::Stdout), (2, FdKind::Stderr)] {
+        if table.kind(number) != Some(kind) {
+            return Some(format!(
+                "with descriptor {number} other than the run's own standard stream"
+            ));
+        }
+    }
+    table
+        .numbers()
+        .into_iter()
+        .find(|&number| number > 2 && table.cloexec(number) == Ok(false))
+        .map(|number| format!("with descriptor {number} open across exec"))
 }
 
 /// glibc's `posix_spawn_file_actions_t.__used`: how many actions it holds.
@@ -330,9 +365,10 @@ fn find(pid: i32) -> Found {
     if running { Found::Running } else { Found::None }
 }
 
-/// Reap zombie `pid`: it leaves the table.
+/// Reap zombie `pid`: it leaves the table, and the machine forgets it.
 fn reap(pid: i32) {
     CHILDREN.lock().remove(&pid);
+    crate::identity::remove_child(pid);
 }
 
 /// Park the caller until a child changes state; `Err(errno)` when a signal
@@ -350,17 +386,24 @@ fn park() -> Result<(), c_int> {
     parked
 }
 
+/// The root ends: no task waits for a child any more, and none is woken.
+pub(super) fn forget_waiters() {
+    WAITERS.lock().clear();
+}
+
 /// A child exited: every task waiting for one looks again.
 pub(super) fn wake_waiters() {
     let waiters = core::mem::take(&mut *WAITERS.lock());
     thread::wake_waiting(&waiters);
 }
 
-/// `wait4` (`pid`, the status out-pointer `status`, `options`) over the
-/// table, its options already checked.
-pub(crate) fn wait4(pid: i32, status: usize, options: u32) -> i64 {
+/// `wait4` (`pid`, the status out-pointer `status`, `options`, whether it
+/// was handed a resource-usage out-pointer) over the table, its options
+/// already checked.
+pub(crate) fn wait4(pid: i32, status: usize, options: u32, rusage: bool) -> i64 {
     loop {
         match find(pid) {
+            Found::Zombie(..) if rusage => refuse_rusage("wait4"),
             Found::Zombie(child, wait_status) => {
                 if status != 0 && crate::uaccess::write(status, &wait_status).is_err() {
                     return -i64::from(libc::EFAULT);
@@ -381,7 +424,7 @@ pub(crate) fn wait4(pid: i32, status: usize, options: u32) -> i64 {
 
 /// `waitid` (`P_ALL` as `id` -1, `P_PID` as the pid; the `siginfo_t`
 /// out-pointer `info`; `options`) over the table, its options checked.
-pub(crate) fn waitid(id: i32, info: usize, options: u32) -> i64 {
+pub(crate) fn waitid(id: i32, info: usize, options: u32, rusage: bool) -> i64 {
     if options & WEXITED == 0 {
         // Stopped and continued children are never: nothing to wait for.
         return match find(id) {
@@ -396,6 +439,7 @@ pub(crate) fn waitid(id: i32, info: usize, options: u32) -> i64 {
     }
     loop {
         match find(id) {
+            Found::Zombie(..) if rusage => refuse_rusage("waitid"),
             Found::Zombie(child, wait_status) => {
                 let answer = write_info(info, Some((child, wait_status)));
                 if answer == 0 && options & WNOWAIT == 0 {
@@ -412,6 +456,15 @@ pub(crate) fn waitid(id: i32, info: usize, options: u32) -> i64 {
             }
         }
     }
+}
+
+/// A wait that would reap a child into a resource-usage out-pointer: what
+/// a child spent is not carried to its parent.
+fn refuse_rusage(call: &str) -> ! {
+    crate::trap_unmodeled(&format!(
+        "{call} with a resource-usage out-pointer for a child process (its usage is not \
+carried to the parent) is not modeled"
+    ))
 }
 
 /// Fill the caller's `siginfo_t` for `found` (a child's pid and wait

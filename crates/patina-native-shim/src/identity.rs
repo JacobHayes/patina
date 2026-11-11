@@ -283,6 +283,21 @@ pub(crate) fn add_child(pid: i32) -> (i32, i32) {
     })
 }
 
+/// Forget reaped child `pid`: no row names it any more (`ESRCH`).
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_child(pid: i32) {
+    with_table(|table| {
+        if let Some(index) = table
+            .later
+            .as_slice()
+            .iter()
+            .position(|record| record.process == Process(pid))
+        {
+            table.later.remove(index);
+        }
+    });
+}
+
 /// `SIGCONT`, which `check_kill_permission` lets through within a session.
 const SIGCONT: i32 = linux_raw_sys::general::SIGCONT as i32;
 
@@ -684,6 +699,8 @@ pub(crate) fn getpgrp() -> i64 {
 /// caller's session (`EPERM`) — group 1 does while the caller is in init's
 /// session, and the caller's current group always does.
 pub(crate) fn setpgid(pid: i32, group: i32) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_beside_others("setpgid");
     let caller = Process::current();
     // 0 is the caller's process, named by its leader's pid
     // (`task_pid_vnr(group_leader)`), whichever thread calls.
@@ -740,6 +757,8 @@ pub(crate) fn getsid(pid: i32) -> i64 {
 /// a group (a group leader), is `EPERM`; otherwise the caller leads a new
 /// session and group, both its pid, which it answers.
 pub(crate) fn setsid() -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_beside_others("setsid");
     let caller = Process::current();
     with_table(|table| {
         let membership = &mut table.record_mut(caller).membership;

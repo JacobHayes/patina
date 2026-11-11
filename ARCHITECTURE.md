@@ -365,9 +365,9 @@ model does not answer is a named stop, never a host passthrough.
 
 ### Processes
 
-On Linux a guest may `posix_spawnp` an admitted program (`PATINA_RT_ADMIT`:
-guest-visible path to the index of an artifact the supervisor holds; `patina
-run` admits the guest itself). Each guest process is a host process running
+On Linux a guest may `posix_spawnp` an admitted program (see the admission
+table under Traces: the guest itself, and under `patina test` its package's
+binaries). Each guest process is a host process running
 its own runtime, and the processes run in lockstep: one runs at a time
 (`src/machine/`).
 
@@ -388,7 +388,10 @@ its own runtime, and the processes run in lockstep: one runs at a time
   baton. A child's progress is its parent's, and a charge shows whichever
   process runs next. Each process keeps its own CPU total.
 - The supervisor launches every child (`native_run/machine.rs`) on the
-  root's request over `PATINA_RT_LAUNCH_FD`: the root's control plane less
+  root's request over `PATINA_RT_LAUNCH_FD`, from the admitted artifact's
+  held file by its descriptor (`/proc/self/fd/N`), so a child runs the bytes
+  the admission audited whatever has since become of their path: the root's
+  control plane less
   what only the root writes and the filesystem fault knobs, the child's seed
   (from the run's and its pid),
   pid, parent, group and session (`PATINA_RT_PROCESS`), its channel to the
@@ -402,13 +405,23 @@ its own runtime, and the processes run in lockstep: one runs at a time
   the hub.
 - The machine has one filesystem, the root's: a child's runtime drives
   `RemoteFs` (`src/machine/fs.rs`), which forwards each driver call to the
-  hub, and the hub answers it on the root's driver stack, where every fault
-  is drawn, recording nothing; the child records the outcome. A child starts
-  in its parent's working directory.
-- While another process holds the baton, a process runs no guest code: the
-  compute observer has no candidate there.
-- `wait4`/`waitid` answer from the table; a blocking wait parks the task
-  until a child's end wakes it. A child's exit sends its status to the hub;
+  hub, and the hub answers it on the root's driver stack, where every
+  filesystem error and short transfer is drawn, recording nothing; the child
+  records the outcome. Filesystem latency is charged by the calling
+  process's own runtime, from its own seeded stream. A child starts in its
+  parent's working directory.
+- While another process holds the baton, or the hub waits on the host for
+  a child (its launch and ready, its death after `SIGKILL`), a process runs
+  no guest code: the compute observer has no candidate there.
+- Thread ids: a root that is still the whole machine numbers its threads
+  after their tasks, unbounded; threads made once the machine holds several
+  processes take the hub's ids, up to 65,536 thread tasks a process (past
+  that, a named stop).
+- `wait4`/`waitid` answer from the table (`P_PGID` as the caller's group,
+  which holds every child); a blocking wait parks the task until a child's
+  end wakes it. A child's end queues `SIGCHLD` (`CLD_EXITED`, `CLD_KILLED`)
+  for the root, delivered at its next scheduling point; a reaped child is
+  forgotten (`ESRCH`). A child's exit sends its status to the hub;
   a default fatal signal action (`abort` included) is the child's death by
   that signal, which its parent's wait sees. The hub closes the root's
   filesystem handles a child held when it ends.
@@ -416,21 +429,28 @@ its own runtime, and the processes run in lockstep: one runs at a time
   sibling: the hub tells the frozen child, which raises `SIGKILL` on its
   host process; its channel's end closing confirms the death, and the
   launcher reaps it. Signal 0 probes a child. When the root ends, the hub
-  kills every child still running (each foreign task's end recorded); the
+  kills every child still running (each foreign task's end recorded, no
+  `SIGCHLD`, no waiter woken: no guest code runs any more); the
   launcher then kills, by pidfd, and reaps anything left.
 - A child writes no facts, trace or stop record: it ships its facts and its
   stop record (detail prefixed `process N:`) to the hub, which kills the
   other children and ends the run with that record, so the run has the
   child's class. A child that dies without saying how (a host fault the C
   signal front stops) is an internal stop naming its pid.
-- Not modeled yet, each a named stop: spawn from a child, spawn while
-  recording or replaying, file actions, spawn attributes beyond a fresh
-  process's defaults, crash-restart, crash-knob and scheduling-policy runs
-  (`deny_trap`); and, while another process lives, file locks, FIFOs, shared
+- Not modeled yet, each a named stop (`not_modeled`): spawn from a child,
+  spawn while recording or replaying, file actions (`chdir` included), a
+  caller whose descriptors 0 to 2 are not the run's own standard streams (a
+  staged `--stdin` included) or that holds another descriptor open across
+  exec, a caller that made, while alone, state each process models on its
+  own (a file lock, a FIFO, a shared file mapping, System V IPC, inotify),
+  `SIGCHLD` ignored or `SA_NOCLDWAIT` (children that reap themselves),
+  spawn attributes beyond a fresh process's defaults, crash-restart,
+  crash-knob and scheduling-policy runs; and, while another process lives, file locks, FIFOs, shared
   file mappings, System V IPC, inotify, another pid's procfs directory,
   signals across processes other than `SIGKILL` and 0, signals to a group or
-  to every process, a socket in a child, and after a child ran,
-  `RUSAGE_CHILDREN` and `times` (`not_modeled`).
+  to every process, a socket in a child, `setpgid` and `setsid`; and after a
+  child ran, `RUSAGE_CHILDREN`, `times`, and a wait that reaps into a
+  resource-usage out-pointer.
 
 ## Virtual time
 
@@ -609,8 +629,8 @@ lifecycle markers for crash restart).
   until a spawn reaches it. The keys are absolute host paths, so a recording
   that names programs is byte-identical per checkout. Admission covers
   `posix_spawnp` and `pidfd_spawnp` only, matched exactly (no `PATH`
-  search): a spawn of an admitted program still stops as `not_modeled` until
-  multi-process runs land, any other spawn is refused (`deny_trap`), and
+  search): a spawn of an admitted program runs it as a child process (see
+  Processes), any other spawn is refused (`deny_trap`), and
   `fork` and the exec family (a `Command` that falls back to them included)
   are refused as before.
 - **One format version** (`TRACE_FORMAT_VERSION`); other versions are refused,

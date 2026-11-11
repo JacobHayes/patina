@@ -180,6 +180,31 @@ modeled (only SIGKILL and the probe, signal 0, cross processes)"
     0
 }
 
+/// A child of this process changed state (wait status `status`): `SIGCHLD`
+/// goes to the process, as the kernel's `do_notify_parent` sends it,
+/// delivered at a task's next scheduling point (discarded while the
+/// disposition ignores it, the default).
+#[cfg(target_os = "linux")]
+pub(in crate::thread) fn child_changed(pid: i32, status: i32) {
+    let mut state = lock_state();
+    let wakes = state.generate_locked(SignalTarget::Process, Info::child(pid, status));
+    drop(state);
+    for task in wakes {
+        RealScheduler
+            .wake(task)
+            .unwrap_or_else(|error| fatal(&error));
+    }
+}
+
+/// Whether this process's children reap themselves at their end: `SIGCHLD`
+/// set to `SIG_IGN`, or its action carrying `SA_NOCLDWAIT`.
+#[cfg(target_os = "linux")]
+pub(in crate::thread) fn children_reap_themselves() -> bool {
+    const SA_NOCLDWAIT: u64 = 0x2;
+    let action = lock_state().signals.actions[usize::from(SIGCHLD)];
+    action.handler == SIG_IGN || action.flags & SA_NOCLDWAIT != 0
+}
+
 /// A generation the virtual kernel made, for its caller to record
 /// (`SignalGenerated`). The transition that makes it touches only the
 /// thread runtime, so a caller that cannot reach the runtime context there

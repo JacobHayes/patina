@@ -66,6 +66,8 @@ mod lifecycle;
 mod machine;
 #[cfg(target_os = "linux")]
 pub(crate) use machine::{activate, earliest_timer, pick_next, wait_for_child, wake_waiting};
+#[cfg(target_os = "linux")]
+pub(crate) use machine::{child_changed, children_reap_themselves};
 mod net_state;
 mod pipe;
 mod posix_error;
@@ -438,25 +440,40 @@ pub(crate) fn charge_task() -> Option<TaskId> {
 /// machine: the main thread is [`MAIN_TASK`], and its id is the guest's pid.
 const TID_OFFSET: u64 = crate::registry::ROOT_PID as u64 - 1;
 
-/// The ids of this process's threads, by task: the machine hands each new
-/// thread its id ([`crate::machine::allocate_id`]), one namespace with the
-/// pids. Lock-free, so a lookup is safe wherever a thread id is asked for;
-/// 0 for a task that has none.
+/// The ids of this process's threads, by task, once the machine holds
+/// several processes: the machine hands each new thread its id
+/// ([`crate::machine::allocate_id`]), one namespace with the pids.
+/// Lock-free, so a lookup is safe wherever a thread id is asked for; 0 for
+/// a task that has none. A process that is the whole machine numbers its
+/// threads after their tasks instead ([`TID_OFFSET`]), with no bound but
+/// the id space, and the tasks it numbered so keep those ids after its
+/// first spawn ([`ARITHMETIC_HIGH`]).
 #[cfg(target_os = "linux")]
 static TIDS: [std::sync::atomic::AtomicI32; 1 << 16] =
     [const { std::sync::atomic::AtomicI32::new(0) }; 1 << 16];
 /// The highest task [`TIDS`] holds an id for.
 #[cfg(target_os = "linux")]
 static TIDS_HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The highest task numbered after its task id, while this process was the
+/// whole machine.
+#[cfg(target_os = "linux")]
+static ARITHMETIC_HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Give the new thread task `task` its id, the machine's next.
 fn assign_tid(task: TaskId) {
     #[cfg(target_os = "linux")]
     {
+        if !crate::machine::is_multiprocess() {
+            ARITHMETIC_HIGH.fetch_max(task.0, Ordering::Relaxed);
+            crate::machine::reserve_id(c_int::try_from(task.0 + TID_OFFSET).unwrap_or(c_int::MAX));
+            return;
+        }
         let Some(slot) = TIDS.get(task.0 as usize) else {
-            fatal(&format!(
-                "task {} is past the thread ids a process holds",
-                task.0
+            crate::trap_unmodeled(&format!(
+                "thread task {} in a machine of several processes (past the {} thread tasks a \
+process holds there) is not modeled",
+                task.0,
+                TIDS.len()
             ));
         };
         slot.store(crate::machine::allocate_id(), Ordering::Relaxed);
@@ -498,15 +515,16 @@ pub(crate) fn task_of(tid: c_int) -> Option<TaskId> {
         return Some(TaskId(task));
     }
     // A process that is the whole machine numbers its threads after their
-    // tasks, as the machine's allocator would; in a machine of several
-    // processes only the table names a thread.
-    if crate::machine::is_multiprocess() {
-        return None;
-    }
-    u64::try_from(tid)
+    // tasks; in a machine of several processes only the table names a
+    // thread made since, and the arithmetic one made before.
+    let task = u64::try_from(tid)
         .ok()
         .filter(|tid| *tid > TID_OFFSET)
-        .map(|tid| TaskId(tid - TID_OFFSET))
+        .map(|tid| TaskId(tid - TID_OFFSET))?;
+    if crate::machine::is_multiprocess() && task.0 > ARITHMETIC_HIGH.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(task)
 }
 
 pub(crate) fn deterministic_thread_id() -> c_int {

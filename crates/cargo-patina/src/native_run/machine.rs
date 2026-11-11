@@ -73,11 +73,12 @@ fn child_inherits(name: &str) -> bool {
         rt::ENV_ADMIT,
         rt::ENV_ADDRESS_LAYOUT,
         rt::ENV_INITIAL_STACK,
-        // The root's driver stack draws every filesystem fault and delay.
+        // The root's driver stack draws every filesystem fault. Latency is
+        // the calling process's own (its runtime charges it, from its own
+        // seeded stream), so a child keeps that knob.
         rt::ENV_FS_ERROR_PERMILLE,
         rt::ENV_FS_SHORT_PERMILLE,
         rt::ENV_FS_ERROR_AT,
-        rt::ENV_FS_LATENCY,
     ];
     !OWN.contains(&name) && !name.starts_with(ENVP_SLOT_PREFIX) && !name.starts_with("_PATINA_PAD_")
 }

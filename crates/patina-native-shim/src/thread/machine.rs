@@ -67,3 +67,15 @@ pub(crate) fn wake_waiting(tasks: &[TaskId]) {
         }
     }
 }
+
+/// A child of this process changed state (wait status `status`): `SIGCHLD`
+/// is queued for the process.
+pub(crate) fn child_changed(pid: c_int, status: c_int) {
+    signals::child_changed(pid, status);
+}
+
+/// Whether this process's children would reap themselves (`SIGCHLD`
+/// ignored, or `SA_NOCLDWAIT`).
+pub(crate) fn children_reap_themselves() -> bool {
+    signals::children_reap_themselves()
+}

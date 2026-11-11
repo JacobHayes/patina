@@ -483,21 +483,23 @@ unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -> c_
 /// acts and path follow libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
-    _acts: *mut libc::posix_spawn_file_actions_t,
+    acts: *mut libc::posix_spawn_file_actions_t,
     _path: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    0
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { count_action(acts) }
 }
 /// # Safety
 /// acts and path follow libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_addchdir(
-    _acts: *mut libc::posix_spawn_file_actions_t,
+    acts: *mut libc::posix_spawn_file_actions_t,
     _path: *const c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    0
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { count_action(acts) }
 }
 /// # Safety
 /// All pointers follow libc's posix_spawnp argument contract.
@@ -570,6 +572,16 @@ unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     if fd < 0 || newfd < 0 {
         return libc::EBADF;
     }
+    // SAFETY: the caller's actions object, per the entry's contract.
+    unsafe { count_action(acts) }
+}
+
+/// Count one action in `acts`, so a spawn that would carry it out sees it
+/// (`crate::machine::spawn`). Answers 0.
+///
+/// # Safety
+/// `acts` is null or a live actions object.
+unsafe fn count_action(acts: *mut libc::posix_spawn_file_actions_t) -> c_int {
     #[cfg(target_os = "linux")]
     if !acts.is_null() {
         // SAFETY: `__used`, the second `int` of glibc's actions object.

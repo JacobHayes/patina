@@ -22,6 +22,18 @@ unsafe extern "C" {
     fn pause() -> i32;
     fn kill(pid: i32, sig: i32) -> i32;
     fn flock(fd: i32, operation: i32) -> i32;
+    fn dup2(old: i32, new: i32) -> i32;
+    fn pipe(fds: *mut i32) -> i32;
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+    fn syscall(number: i64, ...) -> i64;
+    fn mkfifo(path: *const u8, mode: u32) -> i32;
+    fn waitid(idtype: u32, id: u32, info: *mut [i32; 32], options: i32) -> i32;
+}
+
+const SIGCHLD: i32 = 17;
+static CHILD_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+extern "C" fn on_chld(_: i32) {
+    CHILD_CHANGED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 const SIGUSR1: i32 = 10;
@@ -135,6 +147,7 @@ fn main() {
             println!("NAPPED status={:?}", status.map(|status| status.code()));
         }
         ["sleeper", ..] => loop {
+            println!("SLEEPING");
             std::thread::sleep(std::time::Duration::from_secs(3600));
         },
         [binary, "kill-child"] => {
@@ -157,6 +170,7 @@ fn main() {
             println!("LEFT");
         }
         ["signal-parent"] => {
+            println!("SIGNALING");
             unsafe { kill(std::os::unix::process::parent_id() as i32, SIGUSR1) };
         }
         [binary, "signal-parent"] => {
@@ -169,6 +183,88 @@ fn main() {
             let file = std::fs::File::create("/tmp/lock").unwrap();
             let locked = unsafe { flock(file.as_raw_fd(), 2) };
             println!("LOCKED {locked}");
+        }
+        ["pwd"] => println!("PWD {}", std::env::current_dir().unwrap().display()),
+        [binary, "chdir-child"] => {
+            let status = Command::new(binary).arg("pwd").current_dir("/tmp").status();
+            println!("CHDIR {status:?}");
+        }
+        [binary, "redirected-child"] => {
+            use std::os::fd::AsRawFd;
+            let file = std::fs::File::create("/tmp/out").unwrap();
+            assert_eq!(unsafe { dup2(file.as_raw_fd(), 1) }, 1);
+            let status = Command::new(binary).arg("pwd").status();
+            eprintln!("REDIRECTED {status:?}");
+        }
+        [binary, "pipe-child"] => {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            let status = Command::new(binary).arg("pwd").status();
+            println!("PIPED {status:?}");
+        }
+        [binary, "inotify-child"] => {
+            // inotify_init1(IN_CLOEXEC), through the system-call door.
+            let number = if cfg!(target_arch = "aarch64") { 26 } else { 294 };
+            assert!(unsafe { syscall(number, 0o2000000) } >= 0);
+            let status = Command::new(binary).arg("pwd").status();
+            println!("WATCHED {status:?}");
+        }
+        [binary, "fifo-child"] => {
+            assert_eq!(unsafe { mkfifo(c"/tmp/fifo".as_ptr().cast(), 0o600) }, 0);
+            let status = Command::new(binary).arg("pwd").status();
+            println!("FIFO {status:?}");
+        }
+        [binary, "stdin-child"] => {
+            let status = Command::new(binary).arg("pwd").status();
+            println!("STDIN {status:?}");
+        }
+        [binary, "sigchld-child"] => {
+            // The parent sleeps in `pause` until SIGCHLD says its child ended.
+            unsafe { signal(SIGCHLD, on_chld as usize) };
+            let mut child = Command::new(binary).args(["child", "5"]).spawn().unwrap();
+            while !CHILD_CHANGED.load(std::sync::atomic::Ordering::SeqCst) {
+                unsafe { pause() };
+            }
+            assert_eq!(child.wait().unwrap().code(), Some(5));
+        }
+        [binary, "ignored-sigchld-child"] => {
+            unsafe { signal(SIGCHLD, 1) }; // SIG_IGN: children reap themselves
+            let status = Command::new(binary).args(["child", "0"]).status();
+            println!("IGNORED {status:?}");
+        }
+        [binary, "reaped-child"] => {
+            let mut child = Command::new(binary).args(["child", "0"]).spawn().unwrap();
+            let pid = child.id() as i32;
+            assert_eq!(unsafe { kill(pid, 0) }, 0);
+            child.wait().unwrap();
+            assert_eq!(unsafe { kill(pid, 0) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(3)); // ESRCH
+        }
+        [binary, "group-wait-child"] => {
+            let child = Command::new(binary).args(["child", "4"]).spawn().unwrap();
+            let mut info = [0i32; 32];
+            // P_PGID of the caller's group (0), WEXITED.
+            assert_eq!(unsafe { waitid(2, 0, &mut info, 4) }, 0);
+            assert_eq!((info[0], info[4], info[6]), (SIGCHLD, child.id() as i32, 4));
+        }
+        [binary, "setpgid-beside-child"] => {
+            let _child = Command::new(binary).arg("sleeper").spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let moved = unsafe { setpgid(0, 0) };
+            println!("MOVED {moved}");
+        }
+        [binary, "exit-while-waiting"] => {
+            // A thread waits for a child that never ends while main returns.
+            let mut child = Command::new(binary).arg("sleeper").spawn().unwrap();
+            std::thread::spawn(move || child.wait());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        ["many-threads", count] => {
+            // A process alone on its machine makes more threads over its life
+            // than any fixed table of them holds.
+            for _ in 0..count.parse::<u32>().unwrap() {
+                std::thread::spawn(|| {}).join().unwrap();
+            }
         }
         ["unadmitted"] => {
             let status = Command::new("/bin/true").status();
@@ -358,31 +454,122 @@ fn main() {
         assert!(survivors.is_empty(), "host processes left: {survivors:?}");
     }
 
-    fn run_class(guest: &common::native::Guest, args: &[&str]) -> serde_json::Value {
-        let mut argv = vec!["--seed", "1", "--format", "json", "--"];
-        argv.extend_from_slice(args);
-        let output = guest.command("run", &argv);
+    /// A run that stops as not modeled after the child process ran (its
+    /// `marker` line is in the run's output), so a refused spawn cannot
+    /// pass for it.
+    fn stops_after_the_child_ran(guest: &common::native::Guest, mode: &str, marker: &str) {
+        let binary = guest.binary.to_str().unwrap();
+        let output = guest.command(
+            "run",
+            &["--seed", "1", "--format", "json", "--", binary, mode],
+        );
         let envelope = json_envelope(&output);
-        assert!(!output.status.success(), "{envelope:#}");
-        envelope["result"].clone()
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"unsupported".into(), &"not_modeled".into()),
+            "{mode}: {envelope:#}"
+        );
+        let text = format!(
+            "{}{}{envelope}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains(marker), "{mode}: the child never ran: {text}");
     }
 
     #[test]
     fn a_childs_own_stop_ends_the_run_with_its_class() {
         // The child signals its parent, which no process may yet.
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
-        let binary = guest.binary.to_str().unwrap();
-        assert_eq!(run_class(&guest, &[binary, "signal-parent"]), "unsupported");
+        stops_after_the_child_ran(&guest, "signal-parent", "SIGNALING");
     }
 
     #[test]
     fn a_file_lock_beside_a_live_child_is_refused() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        stops_after_the_child_ran(&guest, "lock-beside-child", "SLEEPING");
+        stops_after_the_child_ran(&guest, "setpgid-beside-child", "SLEEPING");
+    }
+
+    /// A child's end is its parent's `SIGCHLD`, which wakes a parent asleep
+    /// in `pause`; children that would reap themselves are refused; a reaped
+    /// child is gone; a wait for the caller's group finds the child; and a
+    /// root that returns while a thread waits for a child ends cleanly.
+    #[test]
+    fn a_childs_end_reaches_its_parent_as_sigchld_and_waits() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
         let binary = guest.binary.to_str().unwrap();
-        assert_eq!(
-            run_class(&guest, &[binary, "lock-beside-child"]),
-            "unsupported"
+        for mode in [
+            "sigchld-child",
+            "reaped-child",
+            "group-wait-child",
+            "exit-while-waiting",
+        ] {
+            common::native::assert_success(
+                guest.command("run", &["--seed", "1", "--", binary, mode]),
+            );
+        }
+        let output = guest.command(
+            "run",
+            &[
+                "--seed",
+                "1",
+                "--format",
+                "json",
+                "--",
+                binary,
+                "ignored-sigchld-child",
+            ],
         );
+        let envelope = json_envelope(&output);
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"unsupported".into(), &"not_modeled".into()),
+            "{envelope:#}"
+        );
+    }
+
+    /// A process alone on its machine makes more threads over its life than
+    /// a table of a process's thread ids holds once it spawns.
+    #[test]
+    fn a_single_process_makes_any_number_of_threads() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", "many-threads", "70000"]),
+        );
+    }
+
+    /// A spawn whose child would not see what its caller arranged: a `chdir`
+    /// file action, a standard stream redirected or staged, a descriptor
+    /// open across exec, state the caller made alone that the machine would
+    /// share (an inotify instance, a FIFO). Each stops as not modeled rather than running a
+    /// child that silently differs.
+    #[test]
+    fn a_spawn_the_child_would_not_see_as_arranged_is_not_modeled() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let stdin = tempfile::tempdir().unwrap();
+        let stdin = stdin.path().join("stdin");
+        fs::write(&stdin, b"input").unwrap();
+        for (extra, mode) in [
+            (vec![], "chdir-child"),
+            (vec![], "redirected-child"),
+            (vec![], "pipe-child"),
+            (vec![], "inotify-child"),
+            (vec![], "fifo-child"),
+            (vec!["--stdin", stdin.to_str().unwrap()], "stdin-child"),
+        ] {
+            let mut argv = vec!["--seed", "1", "--format", "json"];
+            argv.extend(extra);
+            argv.extend(["--", binary, mode]);
+            let output = guest.command("run", &argv);
+            let envelope = json_envelope(&output);
+            assert_eq!(
+                (&envelope["result"], &envelope["stop"]["reason"]),
+                (&"unsupported".into(), &"not_modeled".into()),
+                "{mode}: {envelope:#}"
+            );
+        }
     }
 
     #[test]

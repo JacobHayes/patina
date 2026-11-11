@@ -441,6 +441,8 @@ unsafe fn open_resolved(
             match driver_open(&resolved.path, open_flags) {
                 Ok(fd) => bind_fs_handle(fd, kind, status, cloexec),
                 Err(errno) if errno == EINVAL && !path_only => {
+                    #[cfg(target_os = "linux")]
+                    crate::machine::refuse_shared("a FIFO");
                     let ino = resolved.metadata.expect("a FIFO entry has metadata").ino;
                     thread::fifo_open(
                         ino,

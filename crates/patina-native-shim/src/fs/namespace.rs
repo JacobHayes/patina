@@ -96,6 +96,8 @@ pub unsafe extern "C" fn patina_mkdir(dirfd: c_int, path: *const c_char, mode: u
 /// `path` must point to a valid NUL-terminated string.
 pub unsafe fn patina_mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("a FIFO");
     let mode = (mode & 0o7777) & !paths::umask();
     // SAFETY: Forwarded from this function's C ABI contract.
     unsafe {
