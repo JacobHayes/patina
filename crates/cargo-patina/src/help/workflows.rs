@@ -62,9 +62,9 @@ shape, so it is recorded in the out-dir spec, baked into the per-generation flag
 the reproduce commands replay, and refused on a continuation like every other spec \
 flag.\n\
 \n\
-The crash plane (`crash` in --faults) draws a per-crash-point crash rate on a \
-power-of-two sweep and a process or machine crash kind; a generation whose crash \
-lands restarts once from the image the crash leaves. `minimize --generation` on a crash generation shrinks the crashed and the \
+The crash plane (`crash` in --faults) draws the machine's and the process's \
+per-crash-point crash rates independently, each on a power-of-two sweep; a \
+generation whose crash lands restarts once from the image the crash leaves. `minimize --generation` on a crash generation shrinks the crashed and the \
 restarted incarnation separately, keeping the crash on the operation it followed.\n\
 \n\
 A native artifact's `run` invocation shape is forwarded verbatim to every \
@@ -195,14 +195,14 @@ refused by name.",
                         "PLANE,...",
                         Kind::EnumList(crate::campaign::FAULT_PLANE_NAMES),
                     ),
-                    "Randomize fault knobs per generation over every fault plane (bare) or only the named ones: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump). A plane left out draws none of its knobs, and --swarm masks within the planes selected.",
+                    "Randomize fault knobs per generation over every fault plane (bare) or only the named ones: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump), crash (native only: machine and process crash rates). A plane left out draws none of its knobs, and --swarm masks within the planes selected.",
                     false,
                 ),
                 f(
                     "--fault-scale-permille",
                     None,
                     Value::Required("N", Kind::Permille),
-                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the crash kind and TCP buffer size, and the cooperative-SUT knobs, are left alone.",
+                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the TCP buffer size, and the cooperative-SUT knobs, are left alone.",
                     false,
                 ),
                 f(

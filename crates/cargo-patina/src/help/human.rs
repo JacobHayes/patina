@@ -55,10 +55,15 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 fn push_flag(out: &mut String, flag: &Flag) {
     let left = flag_left(flag);
-    let doc = match flag.env_name() {
-        Some(env) => format!("{} [env: {env}]", flag.doc),
-        None => flag.doc.to_string(),
-    };
+    let mut doc = flag.doc.to_string();
+    // A list's members come from the value grammar itself, so the help names
+    // every value the parser accepts.
+    if let Some(Kind::EnumList(choices)) = flag.value.grammar() {
+        doc.push_str(&format!(" [values: {}]", choices.join(", ")));
+    }
+    if let Some(env) = flag.env_name() {
+        doc.push_str(&format!(" [env: {env}]"));
+    }
     let doc_lines = wrap(&doc, WRAP_WIDTH.saturating_sub(DOC_COLUMN));
     // The left column and the first doc line share a row unless the left column
     // overruns the doc column, in which case the doc starts on the next line.
