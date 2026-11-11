@@ -15,6 +15,7 @@ mod tests {
 use std::process::Command;
 
 unsafe extern "C" {
+    fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn signal(sig: i32, handler: usize) -> usize;
     fn timer_create(clock: i32, event: *mut [u64; 8], timer: *mut usize) -> i32;
@@ -37,6 +38,23 @@ unsafe extern "C" {
         argv: *const *const std::ffi::c_char,
         envp: *const *const std::ffi::c_char,
     ) -> i32;
+    fn posix_spawn(
+        pid: *mut i32,
+        path: *const std::ffi::c_char,
+        actions: *const u8,
+        attr: *const u8,
+        argv: *const *const std::ffi::c_char,
+        envp: *const *const std::ffi::c_char,
+    ) -> i32;
+    fn posix_spawn_file_actions_init(actions: *mut [u64; 10]) -> i32;
+    fn posix_spawn_file_actions_addopen(
+        actions: *mut [u64; 10],
+        fd: i32,
+        path: *const std::ffi::c_char,
+        flags: i32,
+        mode: u32,
+    ) -> i32;
+    fn socketpair(domain: i32, kind: i32, protocol: i32, fds: *mut i32) -> i32;
     static environ: *const *const std::ffi::c_char;
 }
 
@@ -212,17 +230,248 @@ fn main() {
             println!("CHDIR {status:?}");
         }
         [binary, "redirected-child"] => {
+            // The child's standard output is the parent's open file.
             use std::os::fd::AsRawFd;
             let file = std::fs::File::create("/tmp/out").unwrap();
             assert_eq!(unsafe { dup2(file.as_raw_fd(), 1) }, 1);
-            let status = Command::new(binary).arg("pwd").status();
-            eprintln!("REDIRECTED {status:?}");
+            let status = Command::new(binary).arg("pwd").status().unwrap();
+            let written = std::fs::read_to_string("/tmp/out").unwrap();
+            eprintln!("REDIRECTED code={:?} file={:?}", status.code(), written.trim());
         }
         [binary, "pipe-child"] => {
+            // A pipe open across exec: the child holds both ends too.
             let mut fds = [0; 2];
             assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
             let status = Command::new(binary).arg("pwd").status();
             println!("PIPED {status:?}");
+        }
+        ["speak"] => {
+            print!("to-stdout");
+            eprint!("to-stderr");
+            std::process::exit(3);
+        }
+        [binary, "output-child"] => {
+            let output = Command::new(binary).arg("speak").output().unwrap();
+            println!(
+                "OUTPUT code={:?} out={:?} err={:?}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        ["upper"] => {
+            // Each line back in capitals, as it arrives; then a count.
+            use std::io::{BufRead, Write};
+            let mut lines = 0;
+            for line in std::io::stdin().lock().lines() {
+                let line = line.unwrap();
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{}", line.to_uppercase()).unwrap();
+                out.flush().unwrap();
+                lines += 1;
+            }
+            eprintln!("UPPER lines={lines}");
+        }
+        [binary, "interactive-child"] => {
+            use std::io::{BufRead, BufReader, Write};
+            use std::process::Stdio;
+            let mut child = Command::new(binary)
+                .arg("upper")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            let mut output = BufReader::new(child.stdout.take().unwrap());
+            let mut answers = Vec::new();
+            for word in ["patina", "lockstep", "pipes"] {
+                writeln!(input, "{word}").unwrap();
+                input.flush().unwrap();
+                let mut line = String::new();
+                output.read_line(&mut line).unwrap();
+                answers.push(line.trim().to_owned());
+            }
+            drop(input);
+            let mut rest = String::new();
+            std::io::Read::read_to_string(&mut output, &mut rest).unwrap();
+            let status = child.wait().unwrap();
+            println!("INTERACTIVE {answers:?} rest={rest:?} code={:?}", status.code());
+        }
+        ["produce", count] => {
+            // Far more than a pipe holds, so the producer waits for room.
+            use std::io::Write;
+            let line = b"patina-pipeline\n";
+            let mut out = std::io::stdout().lock();
+            for _ in 0..count.parse::<usize>().unwrap() {
+                out.write_all(line).unwrap();
+            }
+        }
+        [binary, "pipeline-children"] => {
+            use std::process::Stdio;
+            let mut producer = Command::new(binary)
+                .args(["produce", "10000"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let upper = Command::new(binary)
+                .arg("upper")
+                .stdin(producer.stdout.take().unwrap())
+                .stderr(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let output = upper.wait_with_output().unwrap();
+            let produced = producer.wait().unwrap();
+            let text = String::from_utf8(output.stdout).unwrap();
+            println!(
+                "PIPELINE lines={} upper={} codes={:?} err={:?}",
+                text.lines().count(),
+                text.lines().all(|line| line == "PATINA-PIPELINE"),
+                (produced.code(), output.status.code()),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        ["leave"] => {}
+        [binary, "epipe-child"] => {
+            // The reader is gone before the write: EPIPE (Rust ignores
+            // SIGPIPE).
+            use std::io::Write;
+            use std::process::Stdio;
+            let mut child = Command::new(binary).arg("leave").stdin(Stdio::piped()).spawn().unwrap();
+            let mut input = child.stdin.take().unwrap();
+            let status = child.wait().unwrap();
+            let written = input.write_all(b"too late");
+            println!(
+                "EPIPE code={:?} errno={:?}",
+                status.code(),
+                written.err().and_then(|error| error.raw_os_error())
+            );
+        }
+        ["flood"] => {
+            // SIGPIPE's default action, then writes until the reader is gone.
+            use std::io::Write;
+            unsafe { signal(13, 0) };
+            let mut out = std::io::stdout().lock();
+            loop {
+                if let Err(error) = out.write_all(&[b'x'; 4096]) {
+                    eprintln!("FLOOD survived {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        [binary, "sigpipe-child"] => {
+            use std::io::Read;
+            use std::os::unix::process::ExitStatusExt;
+            use std::process::Stdio;
+            let mut child = Command::new(binary).arg("flood").stdout(Stdio::piped()).spawn().unwrap();
+            let mut first = [0u8; 100];
+            child.stdout.take().unwrap().read_exact(&mut first).unwrap();
+            let status = child.wait().unwrap();
+            println!("SIGPIPE signal={:?} first={}", status.signal(), first.iter().all(|byte| *byte == b'x'));
+        }
+        ["count-stdin"] => {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::io::stdin().read_to_end(&mut data).unwrap();
+            println!("discarded");
+            eprintln!("COUNT {} {:?}", data.len(), String::from_utf8_lossy(&data));
+        }
+        [binary, "null-child"] => {
+            use std::process::Stdio;
+            let status = Command::new(binary)
+                .arg("count-stdin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            println!("NULL code={:?}", status.code());
+        }
+        [binary, "posix-spawn-child"] => {
+            let path = std::ffi::CString::new(binary).unwrap();
+            let argv = [path.as_ptr(), c"child".as_ptr(), c"6".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawn(&mut pid, path.as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            let mut status = 0;
+            let waited = unsafe { waitpid(pid, &mut status, 0) };
+            println!("SPAWNED {spawned} waited={} code={}", waited == pid, (status >> 8) & 0xff);
+        }
+        [binary, "path-search-child"] => {
+            // The program by name, found on PATH after a directory without it.
+            let (directory, name) = binary.rsplit_once('/').unwrap();
+            unsafe { std::env::set_var("PATH", format!("/nowhere:{directory}")) };
+            let name = std::ffi::CString::new(name).unwrap();
+            let argv = [name.as_ptr(), c"child".as_ptr(), c"8".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawnp(&mut pid, name.as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            let mut status = 0;
+            let waited = unsafe { waitpid(pid, &mut status, 0) };
+            println!("SEARCHED {spawned} waited={} code={}", waited == pid, (status >> 8) & 0xff);
+        }
+        ["path-miss"] => {
+            unsafe { std::env::set_var("PATH", "/usr/bin:/bin") };
+            let argv = [c"true".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawnp(&mut pid, c"true".as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            println!("MISSED {spawned}");
+        }
+        ["exact-miss"] => {
+            let argv = [c"/bin/true".as_ptr(), std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawn(&mut pid, c"/bin/true".as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            println!("MISSED {spawned}");
+        }
+        [binary, "pre-exec-child"] => {
+            use std::os::unix::process::CommandExt;
+            let status = unsafe { Command::new(binary).args(["child", "0"]).pre_exec(|| Ok(())).status() };
+            println!("PRE-EXEC {status:?}");
+        }
+        [binary, "fionread-child"] => {
+            // A child asks how much its inherited pipe holds.
+            let mut child = Command::new(binary)
+                .arg("fionread")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            println!("FIONREAD {:?}", child.wait());
+        }
+        ["fionread"] => {
+            let mut queued = 0i32;
+            let answer = unsafe { ioctl(0, 0x541B, &mut queued) };
+            println!("QUEUED {answer} {queued}");
+        }
+        [binary, "socket-child"] => {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { socketpair(1, 1, 0, fds.as_mut_ptr()) }, 0);
+            let status = Command::new(binary).arg("pwd").status();
+            println!("SOCKET {status:?}");
+        }
+        [binary, "open-action-child"] => {
+            let path = std::ffi::CString::new(binary).unwrap();
+            let argv = [path.as_ptr(), c"pwd".as_ptr(), std::ptr::null()];
+            let mut actions = [0u64; 10];
+            unsafe {
+                posix_spawn_file_actions_init(&mut actions);
+                posix_spawn_file_actions_addopen(&mut actions, 5, c"/tmp/x".as_ptr(), 0o101, 0o644);
+            }
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawn(&mut pid, path.as_ptr(), actions.as_ptr().cast(), std::ptr::null(), argv.as_ptr(), environ)
+            };
+            println!("OPENED {spawned}");
+        }
+        ["cat"] => {
+            use std::io::Read;
+            let mut data = String::new();
+            std::io::stdin().read_to_string(&mut data).unwrap();
+            println!("CAT {data:?}");
         }
         [binary, "inotify-child"] => {
             // inotify_init1(IN_CLOEXEC), through the system-call door.
@@ -237,8 +486,15 @@ fn main() {
             println!("FIFO {status:?}");
         }
         [binary, "stdin-child"] => {
-            let status = Command::new(binary).arg("pwd").status();
-            println!("STDIN {status:?}");
+            // The run's staged standard input: the child reads what is left
+            // (read unbuffered: `std::io::stdin` would take it all).
+            use std::io::Read;
+            use std::os::fd::FromRawFd;
+            let mut first = [0u8; 2];
+            let mut zero = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+            zero.read_exact(&mut first).unwrap();
+            let status = Command::new(binary).arg("cat").status().unwrap();
+            println!("STDIN first={:?} code={:?}", String::from_utf8_lossy(&first), status.code());
         }
         [binary, "sigchld-child"] => {
             // The parent sleeps in `pause` until SIGCHLD says its child ended.
@@ -772,28 +1028,24 @@ fn main() {
         );
     }
 
-    /// A spawn whose child would not see what its caller arranged: a `chdir`
-    /// file action, a standard stream redirected or staged, a descriptor
-    /// open across exec, state the caller made alone that the machine would
-    /// share (an inotify instance, a FIFO). Each stops as not modeled rather than running a
-    /// child that silently differs.
+    /// A spawn whose child would not see what its caller arranged: a socket
+    /// open across exec, a file action that opens a file, state the caller
+    /// made alone that the machine would share (an inotify instance, a
+    /// FIFO), an environment too large to launch. Each stops as not modeled
+    /// rather than running a child that silently differs.
     #[test]
     fn a_spawn_the_child_would_not_see_as_arranged_is_not_modeled() {
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
         let binary = guest.binary.to_str().unwrap();
-        let stdin = tempfile::tempdir().unwrap();
-        let stdin = stdin.path().join("stdin");
-        fs::write(&stdin, b"input").unwrap();
         // Every mode is judged, so a run shows each one that went wrong.
         let mut wrong = Vec::new();
         for (extra, mode) in [
-            (vec![], "chdir-child"),
-            (vec![], "redirected-child"),
-            (vec![], "pipe-child"),
+            (Vec::<&str>::new(), "socket-child"),
+            (vec![], "open-action-child"),
             (vec![], "inotify-child"),
             (vec![], "fifo-child"),
-            (vec!["--stdin", stdin.to_str().unwrap()], "stdin-child"),
             (vec![], "big-env-child"),
+            (vec![], "fionread-child"),
         ] {
             let mut argv = vec!["--seed", "1", "--format", "json"];
             argv.extend(extra);
@@ -1669,5 +1921,186 @@ fn main() {
             (&"unsupported".into(), &"deny_trap".into()),
             "{envelope:#}"
         );
+    }
+
+    /// Every mode of the `Command` shapes and spawn doors, with what its run
+    /// must print: a line its stdout holds (or, `stderr`, its stderr).
+    fn shapes(stdin: &Path) -> Vec<(Vec<String>, &'static str, &'static str, bool)> {
+        let stdin = vec!["--stdin".to_owned(), stdin.to_str().unwrap().to_owned()];
+        vec![
+            (
+                vec![],
+                "output-child",
+                "OUTPUT code=Some(3) out=\"to-stdout\" err=\"to-stderr\"",
+                false,
+            ),
+            (
+                vec![],
+                "interactive-child",
+                "INTERACTIVE [\"PATINA\", \"LOCKSTEP\", \"PIPES\"] rest=\"\" code=Some(0)",
+                false,
+            ),
+            (
+                vec![],
+                "pipeline-children",
+                "PIPELINE lines=10000 upper=true codes=(Some(0), Some(0)) err=\"UPPER lines=10000\"",
+                false,
+            ),
+            (
+                vec![],
+                "epipe-child",
+                "EPIPE code=Some(0) errno=Some(32)",
+                false,
+            ),
+            (
+                vec![],
+                "sigpipe-child",
+                "SIGPIPE signal=Some(13) first=true",
+                false,
+            ),
+            (vec![], "null-child", "NULL code=Some(0)", false),
+            (vec![], "null-child", "COUNT 0 \"\"", true),
+            (vec![], "chdir-child", "PWD /tmp", false),
+            (
+                vec![],
+                "redirected-child",
+                "REDIRECTED code=Some(0) file=\"PWD /",
+                true,
+            ),
+            (vec![], "pipe-child", "PIPED Ok(", false),
+            (
+                vec![],
+                "posix-spawn-child",
+                "SPAWNED 0 waited=true code=6",
+                false,
+            ),
+            (
+                vec![],
+                "path-search-child",
+                "SEARCHED 0 waited=true code=8",
+                false,
+            ),
+            (
+                stdin.clone(),
+                "stdin-child",
+                "STDIN first=\"in\" code=Some(0)",
+                false,
+            ),
+            (stdin, "stdin-child", "CAT \"put\"", false),
+        ]
+    }
+
+    /// `Command`'s shapes reach an admitted child: `output()` captures its
+    /// stdout, stderr and status; piped stdin and stdout round trip line by
+    /// line; a pipeline's children move more than a pipe holds; a reader
+    /// sees end of file when its writer exits; a writer whose reader exited
+    /// gets `EPIPE` (or dies of `SIGPIPE`); `Stdio::null`, `current_dir`, a
+    /// redirected stream, a pipe open across exec, the run's staged stdin;
+    /// `posix_spawn` by path, and `posix_spawnp` by name through `PATH`.
+    #[test]
+    fn command_shapes_reach_an_admitted_child() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let stdin = dir.path().join("stdin");
+        fs::write(&stdin, b"input").unwrap();
+        let mut wrong = Vec::new();
+        for (extra, mode, expected, stderr) in shapes(&stdin) {
+            let mut argv = vec!["--seed", "1"];
+            argv.extend(extra.iter().map(String::as_str));
+            argv.extend(["--", binary, mode]);
+            let output = guest.command("run", &argv);
+            let stream = if stderr {
+                &output.stderr
+            } else {
+                &output.stdout
+            };
+            let text = String::from_utf8_lossy(stream);
+            if !output.status.success() || !text.lines().any(|line| line.contains(expected)) {
+                wrong.push(format!(
+                    "{mode}: expected {expected:?}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        // What `Stdio::null` swallowed never reaches the run.
+        let null = guest.command("run", &["--seed", "1", "--", binary, "null-child"]);
+        if String::from_utf8_lossy(&null.stdout).contains("discarded") {
+            wrong.push("null-child: the null device's output reached the run".into());
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// Each shape records and replays (every process's timeline agrees), and
+    /// the same seed records the same bytes.
+    #[test]
+    fn command_shapes_record_and_replay() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let stdin = dir.path().join("stdin");
+        fs::write(&stdin, b"input").unwrap();
+        let mut wrong = Vec::new();
+        let mut seen = Vec::new();
+        for (extra, mode, _, _) in shapes(&stdin) {
+            if seen.contains(&mode) {
+                continue;
+            }
+            seen.push(mode);
+            let record = |name: &str| {
+                let trace = dir.path().join(format!("{mode}-{name}.patina"));
+                let mut argv = vec!["--seed", "3", "--record", trace.to_str().unwrap()];
+                argv.extend(extra.iter().map(String::as_str));
+                argv.extend(["--", binary, mode]);
+                let output = guest.command("run", &argv);
+                (trace, output)
+            };
+            let (first, recorded) = record("first");
+            let (second, _) = record("second");
+            if !recorded.status.success() {
+                wrong.push(format!(
+                    "{mode}: recording failed\n{}",
+                    String::from_utf8_lossy(&recorded.stderr)
+                ));
+                continue;
+            }
+            if fs::read(&first).unwrap() != fs::read(&second).unwrap() {
+                wrong.push(format!("{mode}: the same seed recorded different bytes"));
+            }
+            let replayed = guest.command("replay", &[first.to_str().unwrap(), "--format", "json"]);
+            let replayed = json_envelope(&replayed);
+            if replayed["result"] != "ok" {
+                wrong.push(format!("{mode}: {replayed:#}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// The spawn doors refuse what the admission does not hold, however it
+    /// is named: a program by name that `PATH` finds no admitted program
+    /// for, and one by path through `posix_spawn`. `Command` with a
+    /// `pre_exec` closure takes std's fork-and-exec path, a named stop.
+    #[test]
+    fn a_spawn_door_refuses_what_the_admission_does_not_hold() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (argv, reason) in [
+            (vec!["path-miss"], "deny_trap"),
+            (vec!["exact-miss"], "deny_trap"),
+            (vec![binary, "pre-exec-child"], "deny_trap"),
+        ] {
+            let mut args = vec!["--seed", "1", "--format", "json", "--"];
+            args.extend(argv.iter().copied());
+            let output = guest.command("run", &args);
+            let envelope = json_envelope(&output);
+            if (&envelope["result"], &envelope["stop"]["reason"])
+                != (&"unsupported".into(), &reason.into())
+            {
+                wrong.push(format!("{argv:?}: {envelope:#}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

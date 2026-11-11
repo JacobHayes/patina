@@ -337,8 +337,14 @@ Current limits. Each fails loudly rather than silently:
 - **Not on crates.io**: the tool comes from GitHub releases and the SDK from
   the release's git tag (see [Installing](#installing)). The SDK crate is
   `patina-dst`, used as `patina_dst::` in code.
-- **No process spawning**: `fork`/`posix_spawn` and friends are denied
-  (a guest that reaches them aborts deterministically). One process per run.
+- **Process spawning is narrow**: on Linux, `std::process::Command` and
+  `tokio::process::Command` (through glibc's `posix_spawn`/`posix_spawnp`)
+  may run an admitted program, the guest itself or the tested package's
+  own binaries, as a lockstep child with piped, null, inherited or
+  file-redirected stdio, `current_dir` and its own environment. Any other
+  program, `fork`, the exec family, `system`/`popen`, and a `Command` that
+  falls back to `fork`+`exec` (`pre_exec`, a uid or gid, an `env("PATH")`
+  with a bare program name) are denied; macOS has one process per run.
 - **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see
   one virtual host (`lo`, `eth0` at 10.0.0.1/24, no default route) and names
   resolve only through the run's `--dns-entry` table. TCP and UDP over the

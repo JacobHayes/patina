@@ -201,7 +201,16 @@ versions, target triple and fingerprint.
   child's stop recording each other child's teardown; the compute
   observer quiet in a process serving another's computation; two hundred
   short-lived children in turn; and a forged
-  admission request judged again), and the shim's unit tests the hub's
+  admission request judged again; `std::process::Command` shapes against
+  an admitted child: `output()`, `status()`, piped stdin and stdout both
+  ways, a two-child pipeline of 10,000 lines, a reader gone (`EPIPE`, and
+  `SIGPIPE` by default), `Stdio::null` and `inherit`, `current_dir`,
+  `env_clear`, a redirect to a file, a staged `--stdin` a child reads on
+  from its parent's offset, plain `posix_spawn` and a `PATH` search, with
+  their record-to-replay and same-seed trace bytes; a `PATH` search or
+  exact path outside the admission and a `pre_exec` fallback refused, and
+  a socket, FIFO or `addopen` action across a spawn, and `FIONREAD` on a
+  child's inherited pipe, a named stop), and the shim's unit tests the hub's
   checks of a child's page; `testbeds/multiproc` pins each workload's first refusal or
   pass on x86_64 Linux; arm64 and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.

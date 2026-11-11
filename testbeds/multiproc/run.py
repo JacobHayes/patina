@@ -16,13 +16,12 @@ ROOT = HERE.parent.parent
 RUST = {"spawn-wait", "fanout", "pipeline", "buildlike"}
 # The expected first unsupported boundary, not the eventual capability this
 # fixture will prove, or ("pass", None) for a fixture Patina runs to success.
-# "runtime" is a refused process door (`deny_trap`); "admitted" a spawn of an
-# admitted program the machine does not run yet (`not_modeled`).
+# "runtime" is a refused process door (`deny_trap`).
 # A newly supported boundary requires deliberate migration.
 EXPECTED = {
     "spawn-wait": ("pass", None),
-    "fanout": ("admitted", "posix_spawnp"),
-    "pipeline": ("admitted", "posix_spawnp"),
+    "fanout": ("pass", None),
+    "pipeline": ("pass", None),
     "forkwait-c": ("runtime", "fork"),
     "forkwait-cxx": ("audit", "newlocale"),
     "buildlike": ("pass", None),
@@ -39,7 +38,7 @@ EXPECTED = {
     "shared-futex": ("runtime", "fork"),
 }
 
-STOP_REASONS = {"runtime": "deny_trap", "admitted": "not_modeled"}
+STOP_REASONS = {"runtime": "deny_trap"}
 
 
 def classify(status, envelope, expected):

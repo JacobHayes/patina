@@ -229,7 +229,7 @@ Patina fails closed. Before a native guest runs:
   entry; anything else is `early-init`. `ET_REL` inputs are refused.
 
 At run time: deny-trap interposers (the process-spawn family, `dlopen`/`dlclose`) abort
-by name if reached, except a Linux `posix_spawnp` of an admitted program (see
+by name if reached, except a Linux `posix_spawn`/`posix_spawnp` of an admitted program (see
 Processes); a SUD-trapped row marked `Trap` aborts by name; on Linux
 `dlsym` answers the shim's own definitions (`src/posix/dlsym.rs`) and NULL
 otherwise; replay refuses fingerprint and operation mismatches.
@@ -365,9 +365,12 @@ model does not answer is a named stop, never a host passthrough.
 
 ### Processes
 
-On Linux a guest may `posix_spawnp` an admitted program (see the admission
-table under Traces: the guest itself, and under `patina test` its package's
-binaries). Each guest process is a host process running
+On Linux a guest may `posix_spawn` or `posix_spawnp` an admitted program
+(see the admission table under Traces: the guest itself, and under
+`patina test` its package's binaries); this is the door `std::process::Command`
+and `tokio::process::Command` take on glibc unless a setting sends them to
+`fork`+`exec` (`pre_exec`, a uid, gid or groups, `chroot`, or an
+environment `PATH` with a bare program name), which stays refused. Each guest process is a host process running
 its own runtime, and the processes run in lockstep: one runs at a time
 (`src/machine/`).
 
@@ -425,6 +428,27 @@ its own runtime, and the processes run in lockstep: one runs at a time
   records the outcome. Filesystem latency is charged by the calling
   process's own runtime, from its own seeded stream. A child starts in its
   parent's working directory.
+- A child's descriptors (`src/machine/spawn.rs`) are its parent's that stay
+  open across exec, after the spawn's file actions (`dup2`, `close`,
+  `closefrom`, `chdir`, `fchdir`), which the shim records itself (glibc's
+  action list is opaque, and a list whose count disagrees with the shim's
+  is refused). The parent's table is simulated, the actions applied, and
+  each remaining descriptor classified: the run's standard streams and the
+  memory devices (`/dev/null` and friends) are the child's own; a file
+  (the staged `--stdin` included) is a duplicate of the root's driver
+  handle, its offset shared; a pipe end stays the root's description. The
+  child asks the hub for this plan before it reports ready and installs it
+  as its table. A `chdir` action is the child's starting directory.
+- A pipe a child holds (`src/machine/pipes.rs`) is a remote end: each read,
+  write, readiness check and close is a request the hub serves on the
+  root's pipe model, with the root holding one hidden reference per child
+  that holds the description (dropped when the child closes it or ends, so
+  the last writer's end is end of file and the last reader's is `EPIPE`,
+  `SIGPIPE` included). A transfer that cannot go now notes the child's
+  interest on the channel; the channel's next change wakes the child's
+  foreign task, a recorded root decision. Each answer says whether the
+  request woke a task of another process (the child's `ELSEWHERE` becomes
+  runnable) or one of its own (its remote waiters look again).
 - Each child has a page (`src/machine/log.rs`), a memory file it shares
   with the hub, which it writes what must outlive it to as it happens: its
   time as of its latest runtime step, the compute-bound stop it took,
@@ -516,11 +540,9 @@ its own runtime, and the processes run in lockstep: one runs at a time
   recording lacks diverges (`trace_mismatch`).
 - Not modeled yet, each a named stop (`unsupported`/`not_modeled`, never
   `deny_trap`, which is for programs outside the admission): spawn from a
-  child,
-  file actions (`chdir` included), a
-  caller whose descriptors 0 to 2 are not the run's own standard streams (a
-  staged `--stdin` included) or that holds another descriptor open across
-  exec, a caller that made, while alone, state each process models on its
+  child, an `addopen` file action, a descriptor open across exec that is
+  not a standard stream, memory device, file or anonymous pipe (a socket, a
+  FIFO, a directory, an epoll instance, ...), a caller that made, while alone, state each process models on its
   own (a file lock, a FIFO, a shared file mapping, System V IPC, inotify),
   `SIGCHLD` ignored or `SA_NOCLDWAIT` (children that reap themselves),
   spawn attributes beyond a fresh process's defaults, crash-restart,
@@ -545,6 +567,13 @@ its own runtime, and the processes run in lockstep: one runs at a time
   budget is one for the whole machine: the root's timeline and every
   child's count against it together. A child that dies after it told the
   hub it ended (a destructor that faults after its exit) is not seen.
+  Status flags (`O_NONBLOCK`, `O_APPEND`) set on an inherited description
+  after the spawn are each process's own. An inherited pipe end's `st_ino`
+  differs per process. `splice`, `tee`, `vmsplice`, `FIONREAD` and the
+  pipe-size `fcntl`s on a child's pipe end are a named stop
+  (`not_modeled`). A child's pipe data travels in hub requests (a copy each way,
+  at most a pipe's capacity a request). `pidfd_open` of a child answers
+  `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
 
 ## Virtual time
 
@@ -722,8 +751,11 @@ lifecycle markers for crash restart).
   changed digest or verdict, while an artifact that is gone refuses nothing
   until a spawn reaches it. The keys are absolute host paths, so a recording
   that names programs is byte-identical per checkout. Admission covers
-  `posix_spawnp` and `pidfd_spawnp` only, matched exactly (no `PATH`
-  search): a spawn of an admitted program runs it as a child process (see
+  `posix_spawn`, `posix_spawnp` and `pidfd_spawnp`, matched exactly; a
+  `posix_spawnp` of a name without a slash searches the guest's `PATH`
+  (default `/bin:/usr/bin`) for the first candidate the table lists as
+  admitted or refused, so a search never reaches a program outside the
+  table: a spawn of an admitted program runs it as a child process (see
   Processes), any other spawn is refused (`deny_trap`), and
   `fork` and the exec family (a `Command` that falls back to them included)
   are refused as before.
