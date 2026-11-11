@@ -46,6 +46,8 @@ mod fs_image;
 mod gate;
 mod identity;
 mod layout;
+#[cfg(target_os = "linux")]
+mod machine;
 mod trace;
 
 /// Name prefix of the envp slots reserved for the shim's startup map.
@@ -151,8 +153,10 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     })?;
     // The executable's bytes, mapped once: the build identity and the pre-run
     // gate both judge exactly these.
-    let image = fs::File::open(&binary)
-        .and_then(|file| Image::map(&file))
+    // The file stays open for the run: a spawn of the guest itself runs it.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    let (binary_file, image) = fs::File::open(&binary)
+        .and_then(|file| Image::map(&file).map(|image| (file, image)))
         .map_err(|error| {
             CliError(format!(
                 "failed to read native program {}: {error}",
@@ -485,6 +489,23 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
     // the recording without its build identity.
     let replay_channel = replay_trace.as_ref().map(guest_trace_channel).transpose()?;
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
+    // A guest may spawn the programs admitted to it as processes of its
+    // machine, which the supervisor launches: not yet across crash-restart
+    // incarnations or under the scheduling-policy knobs, where the guest
+    // finds no launch channel and a spawn stops by name.
+    #[cfg(target_os = "linux")]
+    let machine = if crash_restart_plan.is_none()
+        && invocation.schedule.pct.is_none()
+        && !invocation.schedule.swarm
+    {
+        let (root, launcher) = machine::launch_channel()?;
+        let artifacts = admission
+            .artifacts(&binary_file)
+            .map_err(|error| CliError(format!("failed to hold the admitted programs: {error}")))?;
+        Some((root, launcher, artifacts))
+    } else {
+        None
+    };
     // Every incarnation of the run is launched from this one description; only
     // its descriptors (trace channel, base filesystem, crash handoff) differ. A
     // run without a crash rate is the single incarnation 0. Returns the
@@ -659,6 +680,12 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
             command.env(ENV_GUEST_STDIN_FD, file.as_raw_fd().to_string());
             fds.push(file.as_raw_fd());
         }
+        #[cfg(target_os = "linux")]
+        if let Some((root, _, _)) = &machine {
+            use std::os::fd::AsRawFd;
+            command.env(patina_dst_runtime::ENV_LAUNCH_FD, root.as_raw_fd().to_string());
+            fds.push(root.as_raw_fd());
+        }
         layout::pin(
             &mut command,
             NATIVE_GUEST_ARGV0,
@@ -715,7 +742,32 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
             crash_report: None,
             restart: None,
         })?;
-        wait_native_child_once(&mut command, &binary, &inherited_fds)?.0
+        #[cfg(target_os = "linux")]
+        let (root_end, launcher) = match machine {
+            Some((root, launcher, artifacts)) => (
+                Some(root),
+                Some(machine::start(
+                    launcher,
+                    machine::Template::of_root(
+                        &command,
+                        artifacts,
+                        invocation.allow_randomized_layout,
+                    ),
+                )),
+            ),
+            None => (None, None),
+        };
+        let captured = wait_native_child_once(&mut command, &binary, &inherited_fds);
+        // The root is gone: with the last copy of its launch channel end
+        // closed, the launcher kills and reaps what is left of the machine.
+        #[cfg(target_os = "linux")]
+        {
+            drop(root_end);
+            if let Some(launcher) = launcher {
+                let _ = launcher.join();
+            }
+        }
+        captured?.0
     };
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;

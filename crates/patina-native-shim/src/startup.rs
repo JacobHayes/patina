@@ -71,6 +71,8 @@ pub(crate) fn init_from_env() -> c_int {
         watchdog::configure()?;
         #[cfg(patina_posix_exports)]
         crate::admission::capture()?;
+        #[cfg(target_os = "linux")]
+        crate::machine::configure()?;
         let mut builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });

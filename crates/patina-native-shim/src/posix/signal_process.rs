@@ -237,10 +237,12 @@ fn guest_c_string(addr: usize, buffer: &mut [u8]) -> Option<&CStr> {
 }
 
 /// The spawn attribute and file-action calls only fill in the caller's own
-/// structure; none starts a process. They answer 0 and record nothing, so a
-/// caller reaches the spawn itself, which refuses naming the program. The
-/// structure is zeroed on `init`, as glibc leaves it, so nothing reads
-/// uninitialized bytes; the setters' values are never consulted.
+/// structure; none starts a process. They answer 0, so a caller reaches the
+/// spawn itself. The structure is zeroed on `init`, as glibc leaves it, so
+/// nothing reads uninitialized bytes. On Linux they keep what a spawn of an
+/// admitted program consults (`crate::machine::spawn`) where glibc keeps it:
+/// an action counts in the actions object's `__used`, the flags and the
+/// group sit in the attributes object's `__flags` and `__pgrp`.
 ///
 /// # Safety
 /// `object` is null or a writable `T`.
@@ -501,14 +503,33 @@ unsafe extern "C" fn posix_spawn_file_actions_addchdir(
 /// All pointers follow libc's posix_spawnp argument contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnp(
-    _pid: *mut libc::pid_t,
+    pid: *mut libc::pid_t,
     file: *const c_char,
-    _file_actions: *const libc::posix_spawn_file_actions_t,
-    _attrp: *const libc::posix_spawnattr_t,
+    file_actions: *const libc::posix_spawn_file_actions_t,
+    attrp: *const libc::posix_spawnattr_t,
     argv: *const *mut c_char,
-    _envp: *const *mut c_char,
+    envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    // An admitted program runs as a process of the machine.
+    #[cfg(target_os = "linux")]
+    {
+        let spawn = crate::machine::spawn::Spawn {
+            symbol: c"posix_spawnp",
+            pid,
+            path: file,
+            file_actions,
+            attr: attrp,
+            argv,
+            envp,
+        };
+        // SAFETY: the pointers follow libc's posix_spawnp contract.
+        if let Some(answer) = unsafe { crate::machine::spawn::spawn(&spawn) } {
+            return answer;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (pid, file_actions, attrp, envp);
     spawn_trap(
         c"posix_spawnp",
         Some(Program { path: file, argv }),
@@ -541,7 +562,7 @@ unsafe extern "C" fn posix_spawn_file_actions_init(
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_adddup2(
-    _acts: *mut libc::posix_spawn_file_actions_t,
+    acts: *mut libc::posix_spawn_file_actions_t,
     fd: c_int,
     newfd: c_int,
 ) -> c_int {
@@ -549,6 +570,16 @@ unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     if fd < 0 || newfd < 0 {
         return libc::EBADF;
     }
+    #[cfg(target_os = "linux")]
+    if !acts.is_null() {
+        // SAFETY: `__used`, the second `int` of glibc's actions object.
+        unsafe {
+            let used = acts.cast::<c_int>().add(1);
+            used.write_unaligned(used.read_unaligned().saturating_add(1));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = acts;
     0
 }
 /// # Safety
@@ -612,20 +643,39 @@ unsafe extern "C" fn posix_spawnattr_destroy(_attr: *mut libc::posix_spawnattr_t
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnattr_setflags(
-    _attr: *mut libc::posix_spawnattr_t,
-    _flags: c_short,
+    attr: *mut libc::posix_spawnattr_t,
+    flags: c_short,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    #[cfg(target_os = "linux")]
+    if !attr.is_null() {
+        // SAFETY: `__flags`, the leading `short` of glibc's attributes object.
+        unsafe { attr.cast::<c_short>().write_unaligned(flags) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (attr, flags);
     0
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnattr_setpgroup(
-    _attr: *mut libc::posix_spawnattr_t,
-    _pgroup: libc::pid_t,
+    attr: *mut libc::posix_spawnattr_t,
+    pgroup: libc::pid_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    #[cfg(target_os = "linux")]
+    if !attr.is_null() {
+        // SAFETY: `__pgrp`, the `pid_t` after the flags in glibc's object.
+        unsafe {
+            attr.cast::<u8>()
+                .add(4)
+                .cast::<libc::pid_t>()
+                .write_unaligned(pgroup)
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (attr, pgroup);
     0
 }
 /// # Safety

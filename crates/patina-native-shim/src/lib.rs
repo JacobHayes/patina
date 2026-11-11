@@ -34,10 +34,14 @@ mod posix;
 #[cfg(patina_posix_exports)]
 mod posix_env;
 // The programs the guest may spawn. See `admission.rs`.
-#[cfg(any(test, patina_posix_exports))]
+#[cfg(any(test, patina_posix_exports, target_os = "linux"))]
 mod admission;
 #[cfg(patina_posix_exports)]
 mod variadic;
+// The machine of guest processes: the hub in the root, the channel each
+// child holds to it, spawn and wait. See `machine/mod.rs`.
+#[cfg(target_os = "linux")]
+mod machine;
 #[cfg(all(patina_posix_exports, target_os = "linux"))]
 include!(concat!(env!("OUT_DIR"), "/route_aliases.rs"));
 

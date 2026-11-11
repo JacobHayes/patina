@@ -309,8 +309,9 @@ pub(super) fn sys_prctl(option_reg: u64, arg2: u64, arg3: u64, arg4: u64, arg5: 
 /// `wait4(2)` in the kernel's order (kernel/exit.c `kernel_wait4`): an
 /// option bit outside `WNOHANG|WUNTRACED|WCONTINUED|__WNOTHREAD|__WCLONE|
 /// __WALL` is `EINVAL` and a pid of `INT_MIN` `ESRCH`, both before any child
-/// is looked for; the virtual process has no child, so the rest is `ECHILD`.
-pub(super) fn sys_wait4(pid: u64, options: u64) -> i64 {
+/// is looked for; the rest is the machine's process table's
+/// ([`crate::machine::spawn::wait4`]).
+pub(super) fn sys_wait4(pid: u64, status: u64, options: u64) -> i64 {
     const WNOHANG: u32 = 0x0000_0001;
     const WUNTRACED: u32 = 0x0000_0002;
     const WCONTINUED: u32 = 0x0000_0008;
@@ -323,7 +324,7 @@ pub(super) fn sys_wait4(pid: u64, options: u64) -> i64 {
     } else if pid as i32 == i32::MIN {
         -ESRCH
     } else {
-        -ECHILD
+        crate::machine::spawn::wait4(pid as i32, status as usize, options as u32)
     }
 }
 
@@ -331,9 +332,9 @@ pub(super) fn sys_wait4(pid: u64, options: u64) -> i64 {
 /// an option bit outside the allowed set, or no event class, is `EINVAL`;
 /// then `which`: a `P_PID` pid of 0 or less and a negative `P_PGID` or
 /// `P_PIDFD` id are `EINVAL`, a `P_PIDFD` descriptor that is no pidfd
-/// `EBADF` (`pidfd_get_pid`), any other `which` `EINVAL`. The virtual
-/// process has no child, so the rest is `ECHILD`.
-pub(super) fn sys_waitid(which: u64, upid: u64, options: u64) -> i64 {
+/// `EBADF` (`pidfd_get_pid`), any other `which` `EINVAL`. The rest is the
+/// machine's process table's ([`crate::machine::spawn::waitid`]).
+pub(super) fn sys_waitid(which: u64, upid: u64, info: u64, options: u64) -> i64 {
     const P_ALL: i32 = 0;
     const P_PID: i32 = 1;
     const P_PGID: i32 = 2;
@@ -362,7 +363,9 @@ pub(super) fn sys_waitid(which: u64, upid: u64, options: u64) -> i64 {
             Ok(_) => -ECHILD,
             Err(code) => -i64::from(code),
         },
-        P_ALL | P_PID | P_PGID => -ECHILD,
+        P_ALL => crate::machine::spawn::waitid(-1, info as usize, options),
+        P_PID => crate::machine::spawn::waitid(upid, info as usize, options),
+        P_PGID => -ECHILD,
         _ => -EINVAL,
     }
 }
@@ -456,16 +459,16 @@ mod tests {
     #[test]
     fn wait_rows_answer_echild_and_einval() {
         let any = (-1i64) as u64;
-        assert_eq!(sys_wait4(any, 0), -ECHILD);
-        assert_eq!(sys_wait4(any, 0x0000_0001 | 0x4000_0000), -ECHILD); // WNOHANG|__WALL
-        assert_eq!(sys_wait4(any, 0x100), -EINVAL);
-        assert_eq!(sys_wait4(any, 0x0000_0004), -EINVAL); // WEXITED is waitid's
-        assert_eq!(sys_wait4(i32::MIN as u64, 0), -ESRCH);
-        assert_eq!(sys_wait4(i32::MIN as u64, 0x100), -EINVAL); // options first
-        assert_eq!(sys_waitid(0, 0, 0x0000_0004), -ECHILD); // P_ALL, WEXITED
-        assert_eq!(sys_waitid(0, 0, 0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
-        assert_eq!(sys_waitid(0, 0, 0), -EINVAL);
-        assert_eq!(sys_waitid(0, 0, 0x0001_0000), -EINVAL);
-        assert_eq!(sys_waitid(0, 0, 0x4000_0000), -EINVAL); // __WALL alone lacks an event class
+        assert_eq!(sys_wait4(any, 0, 0), -ECHILD);
+        assert_eq!(sys_wait4(any, 0, 0x0000_0001 | 0x4000_0000), -ECHILD); // WNOHANG|__WALL
+        assert_eq!(sys_wait4(any, 0, 0x100), -EINVAL);
+        assert_eq!(sys_wait4(any, 0, 0x0000_0004), -EINVAL); // WEXITED is waitid's
+        assert_eq!(sys_wait4(i32::MIN as u64, 0, 0), -ESRCH);
+        assert_eq!(sys_wait4(i32::MIN as u64, 0, 0x100), -EINVAL); // options first
+        assert_eq!(sys_waitid(0, 0, 0, 0x0000_0004), -ECHILD); // P_ALL, WEXITED
+        assert_eq!(sys_waitid(0, 0, 0, 0x0000_0004 | 0x0000_0001), -ECHILD); // WEXITED|WNOHANG
+        assert_eq!(sys_waitid(0, 0, 0, 0), -EINVAL);
+        assert_eq!(sys_waitid(0, 0, 0, 0x0001_0000), -EINVAL);
+        assert_eq!(sys_waitid(0, 0, 0, 0x4000_0000), -EINVAL); // __WALL alone lacks an event class
     }
 }

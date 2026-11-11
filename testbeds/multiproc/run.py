@@ -15,11 +15,12 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 RUST = {"spawn-wait", "fanout", "pipeline", "buildlike"}
 # The expected first unsupported boundary, not the eventual capability this
-# fixture will prove. A newly supported boundary requires deliberate migration.
+# fixture will prove, or ("pass", None) for a fixture Patina runs to success.
 # "runtime" is a refused process door (`deny_trap`); "admitted" a spawn of an
-# admitted program (the guest itself), which stops as `not_modeled`.
+# admitted program the machine does not run yet (`not_modeled`).
+# A newly supported boundary requires deliberate migration.
 EXPECTED = {
-    "spawn-wait": ("admitted", "posix_spawnp"),
+    "spawn-wait": ("pass", None),
     "fanout": ("admitted", "posix_spawnp"),
     "pipeline": ("admitted", "posix_spawnp"),
     "forkwait-c": ("runtime", "fork"),
@@ -42,8 +43,16 @@ STOP_REASONS = {"runtime": "deny_trap", "admitted": "not_modeled"}
 
 
 def classify(status, envelope, expected):
-    """Only a failed, attributed boundary is a pending gap; success is drift."""
-    if envelope.get("schema") != "patina.result/v2" or status == 0:
+    """Only a failed, attributed boundary is a pending gap; success is drift,
+    except for a fixture expected to pass, whose success is the only pass."""
+    if envelope.get("schema") != "patina.result/v2":
+        return "unexpected"
+    if expected[0] == "pass":
+        if (status == 0 and envelope.get("exit_code") == 0 and envelope.get("verb") == "run"
+                and envelope.get("result") == "ok"):
+            return "pass"
+        return "unexpected"
+    if status == 0:
         return "unexpected"
     if envelope.get("exit_code") != status:
         return "unexpected"
@@ -72,7 +81,14 @@ def classify(status, envelope, expected):
 
 
 def selftest():
+    passing = {"schema": "patina.result/v2", "verb": "run", "result": "ok", "exit_code": 0}
+    assert classify(0, passing, ("pass", None)) == "pass"
+    assert classify(2, dict(passing, exit_code=2, result="unsupported"), ("pass", None)) == "unexpected"
+    assert classify(0, dict(passing, result="finding"), ("pass", None)) == "unexpected"
+    assert classify(0, passing, ("runtime", "posix_spawnp")) == "unexpected"
     for expected in dict.fromkeys(EXPECTED.values()):
+        if expected[0] == "pass":
+            continue
         workload = ":".join(expected)
         kind, name = expected
         env = {"schema": "patina.result/v2", "verb": "run", "exit_code": 2}
@@ -250,6 +266,11 @@ def run():
                     raise RuntimeError(f"{name}: expected the pre-run audit refusal\n{result.stdout}")
                 result = invoke([cli, "audit", str(built), "--format", "json"], timeout=15)
                 envelope = json.loads(result.stdout)
+            if expected[0] == "pass":
+                if classify(result.returncode, envelope, expected) != "pass":
+                    raise RuntimeError(f"{name}: unexpected Patina outcome\n{result.stdout}\n{result.stderr}")
+                print(f"{name}: patina PASS", flush=True)
+                continue
             if classify(result.returncode, envelope, expected) != "pending-gap":
                 raise RuntimeError(f"{name}: unexpected Patina outcome\n{result.stdout}\n{result.stderr}")
             print(f"{name}: PENDING GAP {expected[0]}:{expected[1]}", flush=True)

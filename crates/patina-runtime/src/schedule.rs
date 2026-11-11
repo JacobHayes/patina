@@ -528,6 +528,98 @@ impl Context {
         Ok(())
     }
 
+    /// Set the state of `task`, which stands for another process of the
+    /// machine ([`patina_dst_abi::ForeignState`]), from whatever state it is
+    /// in. A deadline already reached expires at once, as a timed park's does.
+    /// Foreign tasks stay out of the schedule diagnostics and the charges.
+    pub fn task_foreign(
+        &mut self,
+        task: TaskId,
+        state: patina_dst_abi::ForeignState,
+    ) -> Result<(), RuntimeError> {
+        use patina_dst_abi::ForeignState;
+        let operation = Operation::TaskForeign { task, state };
+        let expected = self.replay_expected(&operation)?;
+        self.deregister_timer(task);
+        match state {
+            ForeignState::Runnable => {
+                self.scheduler.set_foreign(task, Some(true));
+                self.scheduler_tasks.insert(task);
+                self.parked_tasks.remove(&task);
+            }
+            ForeignState::Parked | ForeignState::ParkedUntil { .. } => {
+                self.scheduler.set_foreign(task, Some(false));
+                self.scheduler_tasks.insert(task);
+                self.parked_tasks.insert(task);
+            }
+            ForeignState::Gone => {
+                self.scheduler.set_foreign(task, None);
+                self.scheduler_tasks.remove(&task);
+                self.parked_tasks.remove(&task);
+            }
+        }
+        if self.charges.running == Some(task) {
+            self.charges.running = None;
+        }
+        let outcome = self.reconcile(operation.clone(), expected, Outcome::Unit)?;
+        decode_unit(&operation, outcome)?;
+        if let ForeignState::ParkedUntil { deadline_nanos } = state {
+            let seq = self.timer_seq;
+            self.timer_seq = seq.checked_add(1).ok_or_else(|| {
+                EffectError::new(
+                    ErrorCode::InvalidInput,
+                    "virtual timer registration sequence exhausted",
+                )
+            })?;
+            let key = (deadline_nanos, seq);
+            self.timer_by_task.insert(task, key);
+            self.timers.insert(key, task);
+            let now = self.current_monotonic()?;
+            self.expire_due_at(now)?;
+        }
+        Ok(())
+    }
+
+    /// What every task but `except` amounts to, as another process sees this
+    /// one: runnable when one is, else parked until the earliest timed park
+    /// or process timer, else parked.
+    pub fn process_view(&self, except: Option<TaskId>) -> patina_dst_abi::ForeignState {
+        use patina_dst_abi::ForeignState;
+        let others = || {
+            self.scheduler_tasks
+                .iter()
+                .filter(move |task| Some(**task) != except)
+        };
+        if others().any(|task| !self.parked_tasks.contains(task)) {
+            return ForeignState::Runnable;
+        }
+        let timed = self
+            .timers
+            .iter()
+            .filter(|(_, task)| Some(**task) != except)
+            .map(|((deadline, _), _)| *deadline)
+            .next();
+        match timed.into_iter().chain(self.alarm).min() {
+            Some(deadline_nanos) => ForeignState::ParkedUntil { deadline_nanos },
+            None => ForeignState::Parked,
+        }
+    }
+
+    /// The monotonic virtual time now, unrecorded: what a process switch
+    /// carries to the process it resumes.
+    pub fn machine_now(&self) -> Result<u64, RuntimeError> {
+        self.current_monotonic()
+    }
+
+    /// Advance the clock to a later instant another process reached, as an
+    /// idle sleep (recorded), expiring every timer it passes.
+    pub fn advance_to(&mut self, now: u64) -> Result<(), RuntimeError> {
+        if now > self.current_monotonic()? {
+            self.sleep_until(ClockKind::Monotonic, now)?;
+        }
+        Ok(())
+    }
+
     /// Convert an absolute `deadline_nanos` in the `clock` domain to the
     /// monotonic domain used by the timer registry. A realtime deadline reads
     /// the realtime clock as a recorded boundary observation (it carries the

@@ -182,11 +182,12 @@ versions, target triple and fingerprint.
   (libc doors); only the trap handlers deliver from C. `native_signals`
   (`signals/frame_abandon.c`, `planted-faults` shim) pins each such delivery
   origin. Ambient host signals are outside the model.
-- **Multi-process.** No second process runs. A spawn of an admitted program
-  (the guest itself, or its package's binary under `patina test`) stops as
-  `not_modeled`; any other spawn, `fork` and the exec family deny-trap.
-  `testbeds/multiproc` pins each workload's first refusal on x86_64 Linux; arm64
-  and Darwin baselines are pending.
+- **Multi-process.** A spawn of an admitted program (the guest itself, or its
+  package's binary under `patina test`) runs as a lockstep child process on
+  Linux (ARCHITECTURE.md, Processes), within the named limits there; any
+  other spawn, `fork` and the exec family deny-trap. `native_processes` pins
+  the behaviour; `testbeds/multiproc` pins each workload's first refusal or
+  pass on x86_64 Linux; arm64 and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block
   accounting and page-cache residency are not modeled: `cachestat` counts every

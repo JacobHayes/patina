@@ -2,8 +2,9 @@
 
 These are Patina's own synthetic process workloads. The native leg runs the
 real host kernel and checks the result inside each guest. The Patina leg pins
-its first current refusal by name; a pending gap is evidence of containment,
-not evidence that Patina supports processes. An unexpected success, a different
+its first current refusal by name, or a pass for a fixture Patina runs; a
+pending gap is evidence of containment, not evidence that Patina supports that
+fixture's processes. An unexpected success, a different
 refusal, an unrelated abort, a failed build or a timeout fails the battery.
 
 ```sh
@@ -24,7 +25,7 @@ honors the check runner's target isolation without selecting a target directory.
 
 | Guest | Native invariant | Current x86_64 Linux Patina refusal |
 |---|---|---|
-| `spawn-wait` | sequential self-spawns succeed and are reaped | `posix_spawnp` of itself, an admitted program |
+| `spawn-wait` | sequential self-spawns succeed and are reaped | none: passes under Patina |
 | `fanout` | parallel children produce checked stdout and stderr through pipes | `posix_spawnp` of itself, an admitted program |
 | `pipeline` | producer, transformer and consumer transfer and check the complete payload | `posix_spawnp` of itself, an admitted program |
 | `forkwait-c` | C fork-per-test exit and abort statuses survive wait | `fork` |

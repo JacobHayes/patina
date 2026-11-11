@@ -437,6 +437,17 @@ pub(crate) fn thread_finish(task: TaskId, retval: usize, exit_status: i32) {
     // (if any) and let this host thread return out of the trampoline and
     // exit. When no task remains the program is ending.
     if let Some(next) = next {
+        // Another process's turn: this host thread serves the machine until
+        // the baton comes back to a task of this process.
+        #[cfg(target_os = "linux")]
+        let next = if crate::machine::is_foreign(next) {
+            drop(state);
+            let next = crate::machine::run_elsewhere(next);
+            state = lock_state();
+            next
+        } else {
+            next
+        };
         let next_sem = state.task_sem(next);
         drop(state);
         next_sem.signal();
@@ -493,6 +504,7 @@ pub unsafe extern "C" fn patina_thread_create(
         Ok(task) => task,
         Err(message) => fatal(&message),
     };
+    assign_tid(task);
     state.table.register(task);
     // The host thread starts detached too, so nothing ever joins it.
     if created_detached && state.table.detach(task).is_err() {

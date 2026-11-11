@@ -411,6 +411,26 @@ impl DetScheduler {
         Ok(())
     }
 
+    /// Set a foreign task's state directly, from any state: created on first
+    /// use, removed when `None`. A foreign task stands for another process
+    /// of the machine, which the exploration policy does not rank.
+    pub fn set_foreign(&mut self, task: TaskId, runnable: Option<bool>) {
+        match runnable {
+            Some(true) => {
+                self.tasks.insert(task, TaskState::Runnable);
+            }
+            Some(false) => {
+                self.tasks.insert(task, TaskState::Parked("process".into()));
+            }
+            None => {
+                self.tasks.remove(&task);
+                if let Some(pct) = self.pct.as_mut() {
+                    pct.on_complete(task);
+                }
+            }
+        }
+    }
+
     // Not an iterator: selection fails on deadlock and mutates task state.
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> DriverResult<Option<TaskId>> {

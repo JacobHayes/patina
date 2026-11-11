@@ -75,6 +75,7 @@ operation_kinds! {
     Operation::TaskWake { .. } => ("task_wake", Schedule);
     Operation::SignalGenerated { .. } => ("signal_generated", Schedule);
     Operation::TaskComplete { .. } => ("task_complete", Schedule);
+    Operation::TaskForeign { .. } => ("task_foreign", Schedule);
     Operation::SchedulerNext => ("scheduler_next", Schedule);
     Operation::NetBind { .. } => ("net_bind", Net);
     Operation::NetBindShared { .. } => ("net_bind_shared", Net);

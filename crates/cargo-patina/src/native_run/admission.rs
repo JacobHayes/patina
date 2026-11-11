@@ -111,8 +111,8 @@ enum Entry {
 pub(super) struct Admission {
     /// The programs as the recording names them.
     pub(super) programs: Vec<NativeAdmittedProgram>,
-    /// Each admitted program's artifact, open for the run.
-    _held: Vec<fs::File>,
+    /// Each admitted program's artifact, open for the run, by id.
+    held: BTreeMap<usize, fs::File>,
     /// Every path the guest may name, the guest's own included.
     table: BTreeMap<String, Entry>,
 }
@@ -147,7 +147,7 @@ pub(super) fn admit(
     };
     let mut admission = Admission {
         programs: Vec::with_capacity(programs.len()),
-        _held: Vec::new(),
+        held: BTreeMap::new(),
         table: BTreeMap::new(),
     };
     for mut program in programs {
@@ -191,7 +191,7 @@ pub(super) fn admit(
                 match refusal {
                     Some(reason) => Entry::Refused(reason),
                     None => {
-                        admission._held.push(file);
+                        admission.held.insert(id, file);
                         Entry::Admitted(id)
                     }
                 }
@@ -217,6 +217,22 @@ pub(super) fn admit(
 }
 
 impl Admission {
+    /// Every admitted artifact as a descriptor of its held file, by id, with
+    /// `guest`, the guest's own executable, as id 0: what a spawn of an
+    /// admitted program runs, the very bytes audited for it.
+    #[cfg(target_os = "linux")]
+    pub(super) fn artifacts(
+        &self,
+        guest: &fs::File,
+    ) -> io::Result<BTreeMap<usize, std::os::fd::OwnedFd>> {
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(0, guest.try_clone()?.into());
+        for (id, file) in &self.held {
+            artifacts.insert(*id, file.try_clone()?.into());
+        }
+        Ok(artifacts)
+    }
+
     /// The control-plane entry that carries the table to the guest, if it
     /// names anything.
     pub(super) fn env_value(&self) -> Option<String> {

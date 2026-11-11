@@ -182,6 +182,7 @@ impl Operation {
             | Operation::TaskPark { .. }
             | Operation::TaskParkTimed { .. }
             | Operation::TaskWake { .. }
+            | Operation::TaskForeign { .. }
             | Operation::SchedulerNext
             // The park-until-delivery probe: when, not what.
             | Operation::NetNextDelivery { .. } => EffectClass::Schedule,

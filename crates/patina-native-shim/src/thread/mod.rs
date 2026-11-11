@@ -62,6 +62,10 @@ mod futex;
 #[path = "reactor/kqueue.rs"]
 pub(crate) mod kqueue;
 mod lifecycle;
+#[cfg(target_os = "linux")]
+mod machine;
+#[cfg(target_os = "linux")]
+pub(crate) use machine::{activate, pick_next, wait_for_child, wake_waiting};
 mod net_state;
 mod pipe;
 mod posix_error;
@@ -430,24 +434,75 @@ pub(crate) fn charge_task() -> Option<TaskId> {
     (task != UNMANAGED_TASK).then_some(task)
 }
 
-/// How far thread ids sit above task ids: the main thread is
-/// [`MAIN_TASK`], and its id is the guest's pid.
+/// How far thread ids sit above task ids in a process that is the whole
+/// machine: the main thread is [`MAIN_TASK`], and its id is the guest's pid.
 const TID_OFFSET: u64 = crate::registry::ROOT_PID as u64 - 1;
+
+/// The ids of this process's threads, by task: the machine hands each new
+/// thread its id ([`crate::machine::allocate_id`]), one namespace with the
+/// pids. Lock-free, so a lookup is safe wherever a thread id is asked for;
+/// 0 for a task that has none.
+#[cfg(target_os = "linux")]
+static TIDS: [std::sync::atomic::AtomicI32; 1 << 16] =
+    [const { std::sync::atomic::AtomicI32::new(0) }; 1 << 16];
+/// The highest task [`TIDS`] holds an id for.
+#[cfg(target_os = "linux")]
+static TIDS_HIGH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Give the new thread task `task` its id, the machine's next.
+fn assign_tid(task: TaskId) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(slot) = TIDS.get(task.0 as usize) else {
+            fatal(&format!(
+                "task {} is past the thread ids a process holds",
+                task.0
+            ));
+        };
+        slot.store(crate::machine::allocate_id(), Ordering::Relaxed);
+        TIDS_HIGH.fetch_max(task.0, Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = task;
+}
 
 /// The thread id of `task`: the guest's pid for the main thread (and for
 /// the unmanaged main thread before the thread subsystem activates).
 pub(crate) fn tid_of(task: TaskId) -> c_int {
-    if task == UNMANAGED_TASK {
-        crate::patina_pid()
-    } else {
-        c_int::try_from(task.0 + TID_OFFSET).unwrap_or(c_int::MAX)
+    if task == UNMANAGED_TASK || task == MAIN_TASK {
+        return crate::patina_pid();
     }
+    #[cfg(target_os = "linux")]
+    if let Some(tid) = TIDS
+        .get(task.0 as usize)
+        .map(|slot| slot.load(Ordering::Relaxed))
+        .filter(|tid| *tid != 0)
+    {
+        return tid;
+    }
+    c_int::try_from(task.0 + TID_OFFSET).unwrap_or(c_int::MAX)
 }
 
 /// The task a thread id names, if it is one a task could have (the
 /// thread ids below the guest's pid belong to no thread of the guest).
 #[cfg(target_os = "linux")]
 pub(crate) fn task_of(tid: c_int) -> Option<TaskId> {
+    if tid == crate::patina_pid() {
+        return Some(MAIN_TASK);
+    }
+    let high = TIDS_HIGH.load(Ordering::Relaxed);
+    if let Some(task) = (2..=high).find(|task| {
+        TIDS.get(*task as usize)
+            .is_some_and(|slot| slot.load(Ordering::Relaxed) == tid)
+    }) {
+        return Some(TaskId(task));
+    }
+    // A process that is the whole machine numbers its threads after their
+    // tasks, as the machine's allocator would; in a machine of several
+    // processes only the table names a thread.
+    if crate::machine::is_multiprocess() {
+        return None;
+    }
     u64::try_from(tid)
         .ok()
         .filter(|tid| *tid > TID_OFFSET)
@@ -904,7 +959,23 @@ mod baton {
 
 /// Release the state lock, hand the baton to `picked` by signaling its
 /// semaphore, then park on `me`'s semaphore until it is handed back.
+///
+/// A `picked` that stands for another process ([`crate::machine`]) moves the
+/// machine's baton there; it comes back to a task of this process, which
+/// takes it on from here (`me` keeps running when it is `me`).
 fn handoff(state: StateGuard, picked: TaskId, me: TaskId) {
+    #[cfg(target_os = "linux")]
+    let (state, picked) = if crate::machine::is_foreign(picked) {
+        drop(state);
+        let local = crate::machine::run_elsewhere(picked);
+        if local == me {
+            exits::await_exits();
+            return;
+        }
+        (lock_state(), local)
+    } else {
+        (state, picked)
+    };
     let picked_sem = state.task_sem(picked);
     let my_sem = state.task_sem(me);
     drop(state);

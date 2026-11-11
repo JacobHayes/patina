@@ -105,6 +105,10 @@ extern "C" fn native_start() {
     // SAFETY: after capture, runtime installation and Linux auxv scrubbing.
     unsafe { crate::posix_env::scrub_environ() };
     crate::patina_note_startup_constructor_finished();
+    // A child process of the machine reports ready and waits for its turn
+    // before any guest code runs.
+    #[cfg(target_os = "linux")]
+    crate::machine::child_start();
 }
 
 extern "C" fn finalize_atexit() {

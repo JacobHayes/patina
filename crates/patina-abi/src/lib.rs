@@ -72,6 +72,21 @@ pub enum SignalTarget {
     Task(TaskId),
 }
 
+/// What another process of the machine is doing, as one process's scheduler
+/// holds it: a stand-in task whose state the machine's hub sets
+/// ([`Operation::TaskForeign`]). Runnable when that process (or, in a child,
+/// any other process) has a runnable task, parked until the earliest of its
+/// wake times when it only sleeps, parked when it only waits, gone when it
+/// has exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ForeignState {
+    Runnable,
+    Parked,
+    ParkedUntil { deadline_nanos: u64 },
+    Gone,
+}
+
 /// A virtual network socket identifier scoped to one runtime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]

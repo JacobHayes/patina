@@ -410,6 +410,14 @@ pub enum Operation {
     TaskComplete {
         task: TaskId,
     },
+    /// Set the state of a task that stands for another process of the
+    /// machine ([`ForeignState`]): created on first use, removed when gone.
+    /// Unlike the other task operations it applies from any state, since
+    /// that process changes state while this one does not run.
+    TaskForeign {
+        task: TaskId,
+        state: ForeignState,
+    },
     SchedulerNext,
     NetBind {
         address: String,

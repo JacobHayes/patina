@@ -60,6 +60,10 @@ pub(crate) fn shutdown_run() -> c_int {
     // before the runtime is taken away to be finalized.
     crate::charge::flush_now();
     thread::deactivate();
+    #[cfg(target_os = "linux")]
+    if crate::machine::is_child() {
+        return child_shutdown();
+    }
     let mut context = {
         let mut guard = slot().lock();
         match guard.take() {
@@ -175,6 +179,32 @@ never called patina_dst::lifecycle::setup_complete()\n",
 /// died mid-run leaves; without the marker it could not tell "this run outgrew
 /// its budget" from "this run never finalized", and it must keep failing loudly
 /// on the latter.
+/// A child process's end: its output goes out, the hub learns its exit
+/// status, and nothing else is written; the root writes the run's facts and
+/// trace. Idempotent, as [`shutdown_run`] is.
+#[cfg(target_os = "linux")]
+fn child_shutdown() -> c_int {
+    if slot().lock().is_none() {
+        set_errno(0);
+        return 0;
+    }
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    let flushed = flush_captured_stdio();
+    let status = guest_exit_status().unwrap_or(0);
+    crate::machine::child_exit((status & 0xff) << 8);
+    // The baton is the hub's again: this process's runtime is done.
+    if let Some(context) = slot().lock().take() {
+        std::mem::forget(context);
+    }
+    match flushed {
+        Ok(()) => {
+            set_errno(0);
+            0
+        }
+        Err(_) => fail(EIO),
+    }
+}
+
 fn abandon_over_budget_trace(error: &TraceError) {
     let _ = host_write_all(2, over_budget_diagnostic(error).as_bytes());
     if let Ok(Some(fd)) = control_trace_fd() {

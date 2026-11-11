@@ -60,6 +60,8 @@ mod native_harness;
 mod native_net;
 #[path = "end_to_end/native_platform.rs"]
 mod native_platform;
+#[path = "end_to_end/native_processes.rs"]
+mod native_processes;
 #[path = "end_to_end/native_replay.rs"]
 mod native_replay;
 #[path = "end_to_end/native_scheduling.rs"]

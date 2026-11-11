@@ -29,10 +29,14 @@
 //!
 //! The process tree is a pid namespace held in one table ([`Process`]): its
 //! init ([`INIT_PID`], leader of process group 1 and session 1) and the guest
-//! processes, today the one the run starts ([`ROOT_PID`]), init's child,
-//! starting as the leader of its own group inside init's session, as a
-//! program a container's init started. A process is named by its pid, and
-//! the caller's is [`Process::current`]; no other code names the root's pid.
+//! processes: the one the run starts ([`ROOT_PID`]), init's child, starting
+//! as the leader of its own group inside init's session, as a program a
+//! container's init started, and the children the guest spawns
+//! (`crate::machine`), each in its parent's group and session. Each guest
+//! process is a host process of its own whose table holds init, the root and
+//! itself; the root's holds every child it made. A process is named by its
+//! pid, and the caller's is [`Process::current`]; no other code names the
+//! root's pid.
 //! A guest process's group and session are process state its
 //! `setpgid`/`setsid` change under the kernel's rules; init's never change.
 //! Init has no signal handlers and sleeps (see `registry::INIT_PID`).
@@ -45,6 +49,7 @@ use crate::neg_errno as errno;
 use crate::registry::{Capability, IDENTITY_GID, IDENTITY_UID, INIT_PID, ROOT_PID};
 use crate::{EFAULT, EINVAL, EPERM, ESRCH};
 use std::ffi::c_int;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// A process's credential (`struct cred`): its ids, its supplementary
 /// groups, and its five capability sets as masks of [`Capability::bit`].
@@ -124,10 +129,9 @@ impl Process {
     /// The guest process the run starts.
     const ROOT: Process = Process(ROOT_PID as i32);
 
-    /// The process the calling thread belongs to: the run's one guest
-    /// process, until a guest can create another.
+    /// The process the calling thread belongs to: this host process's.
     pub(crate) fn current() -> Process {
-        Process::ROOT
+        Process(CURRENT.load(Ordering::Relaxed))
     }
 
     /// The process's pid.
@@ -244,6 +248,39 @@ static TABLE: SpinMutex<Table> = SpinMutex::new(Table {
 
 fn with_table<T>(f: impl FnOnce(&mut Table) -> T) -> T {
     f(&mut TABLE.lock())
+}
+
+/// The pid of the process this host process runs: the root's until a child
+/// enters its own ([`enter_process`]).
+static CURRENT: AtomicI32 = AtomicI32::new(ROOT_PID as i32);
+
+/// This host process runs the guest's child `pid`, made by `parent` in group
+/// `pgid` and session `sid`: before any guest code, at startup.
+pub(crate) fn enter_process(pid: i32, parent: i32, pgid: i32, sid: i32) {
+    with_table(|table| {
+        table.later.push(Record {
+            process: Process(pid),
+            parent,
+            membership: Membership { pgid, sid },
+        })
+    });
+    CURRENT.store(pid, Ordering::Relaxed);
+}
+
+/// The caller made child `pid`: it joins the table in the caller's group and
+/// session (`copy_process`). Answers the child's group and session.
+#[cfg_attr(not(patina_posix_exports), allow(dead_code))]
+pub(crate) fn add_child(pid: i32) -> (i32, i32) {
+    let parent = Process::current();
+    with_table(|table| {
+        let membership = table.record(parent).membership;
+        table.later.push(Record {
+            process: Process(pid),
+            parent: parent.0,
+            membership,
+        });
+        (membership.pgid, membership.sid)
+    })
 }
 
 /// `SIGCONT`, which `check_kill_permission` lets through within a session.

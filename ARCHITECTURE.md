@@ -229,7 +229,8 @@ Patina fails closed. Before a native guest runs:
   entry; anything else is `early-init`. `ET_REL` inputs are refused.
 
 At run time: deny-trap interposers (the process-spawn family, `dlopen`/`dlclose`) abort
-by name if reached; a SUD-trapped row marked `Trap` aborts by name; on Linux
+by name if reached, except a Linux `posix_spawnp` of an admitted program (see
+Processes); a SUD-trapped row marked `Trap` aborts by name; on Linux
 `dlsym` answers the shim's own definitions (`src/posix/dlsym.rs`) and NULL
 otherwise; replay refuses fingerprint and operation mismatches.
 
@@ -361,6 +362,42 @@ the SUD rows: a door never decides by kind itself.
 
 Every answer is a function of recorded decisions and modeled state; what the
 model does not answer is a named stop, never a host passthrough.
+
+### Processes
+
+On Linux a guest may `posix_spawnp` an admitted program (`PATINA_RT_ADMIT`:
+guest-visible path to the index of an artifact the supervisor holds; `patina
+run` admits the guest itself). Each guest process is a host process running
+its own runtime, and the processes run in lockstep: one runs at a time
+(`src/machine/`).
+
+- The root (pid 2) is the machine's hub. It holds the process table, and its
+  scheduler holds one foreign task per live child
+  (`Operation::TaskForeign`, ids from `1 << 48`, never a thread id). A pick of
+  one is a process switch, made inside `handoff`: the hub resumes the child
+  with the machine's monotonic time and a view of the rest of the machine,
+  and serves it until it yields or exits. A child holds one foreign task,
+  `ELSEWHERE`, whose pick yields to the hub with its time and its own state.
+  Each side advances its clock to the other's on a switch.
+- The supervisor launches every child (`native_run/machine.rs`) on the
+  root's request over `PATINA_RT_LAUNCH_FD`: the root's control plane less
+  what only the root writes, the child's seed (from the run's and its pid),
+  pid, parent, group and session (`PATINA_RT_PROCESS`), its channel to the
+  hub (`PATINA_RT_CHANNEL_FD`, `SOCK_SEQPACKET`), the root's host stdio, the
+  same layout pin, and no other descriptor. A child reports ready from the
+  startup constructor and runs no guest code before its first resume. When
+  the root ends, a child finds its channel closed and exits; the launcher
+  kills and reaps any left.
+- Pids and thread ids share one namespace, which the hub allocates: a
+  process's main thread id is its pid, and its other threads' ids come from
+  the hub.
+- `wait4`/`waitid` answer from the table; a blocking wait parks the task
+  until a child's exit wakes it. A child's exit sends its status to the hub;
+  it writes no facts, trace or stop record.
+- Not modeled yet, each a named `deny_trap` stop: spawn from a child, spawn
+  while recording or replaying, file actions, spawn attributes beyond a
+  fresh process's defaults, crash-restart and scheduling-policy runs. A
+  child's own stop or crash ends the run as an internal stop.
 
 ## Virtual time
 

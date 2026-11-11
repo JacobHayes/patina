@@ -370,6 +370,13 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
         ),
         (Operation::TaskYield { task: TaskId(1) }, Outcome::Unit),
         (
+            Operation::TaskForeign {
+                task: TaskId(1 << 48),
+                state: patina_dst_abi::ForeignState::Parked,
+            },
+            Outcome::Unit,
+        ),
+        (
             Operation::TaskPark {
                 task: TaskId(1),
                 reason: "wait".into(),

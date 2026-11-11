@@ -243,11 +243,25 @@ pub const NATIVE_INITIAL_STACK_TRAILER_SLOTS: usize = 256;
 
 pub const ENV_STEP_BUDGET: &str = "PATINA_RT_STEP_BUDGET";
 
+/// The root process's end of its launch channel to the supervisor: a
+/// `SOCK_SEQPACKET` socket over which the machine's hub asks the supervisor
+/// to start an admitted program as a child process.
+pub const ENV_LAUNCH_FD: &str = "PATINA_RT_LAUNCH_FD";
+
+/// A child process's end of its channel to the machine's hub in the root
+/// process; present only in a child.
+pub const ENV_CHANNEL_FD: &str = "PATINA_RT_CHANNEL_FD";
+
+/// A child process's pid, its parent's, its process group and session, as
+/// `PID:PPID:PGID:SID`; present only in a child.
+pub const ENV_PROCESS: &str = "PATINA_RT_PROCESS";
+
 pub const ENV_PARAMS_JSON: &str = "PATINA_RT_PARAMS_JSON";
 
 /// The programs the guest may name in a spawn, as a JSON object mapping each
 /// path to what it is: `{"admitted": ID}` (the supervisor holds artifact ID;
-/// 0 is the guest itself; the spawn still stops as `not_modeled`),
+/// 0 is the guest itself; a spawn of it runs as a child process of the
+/// machine, launched from that held artifact),
 /// `{"refused": REASON}` (a failed build or the pre-run audit), or, on a
 /// replay, `{"missing": REASON}` (the recording's artifact is gone). The
 /// guest itself is keyed by the paths it was run from; under `patina test`,
@@ -979,6 +993,15 @@ impl Context {
     /// count, else [`patina_dst_abi::DEFAULT_CPUS`].
     pub fn cpus(&self) -> u32 {
         self.cpus
+    }
+
+    /// Whether this run records, replays, or neither.
+    pub fn execution_mode(&self) -> ExecutionMode {
+        match self.execution {
+            recording::Execution::Seeded => ExecutionMode::Seeded,
+            recording::Execution::Record { .. } => ExecutionMode::Record,
+            recording::Execution::Replay(_) => ExecutionMode::Replay,
+        }
     }
 
     /// The edge-hook yield stride an instrumented guest runs with: the run's
