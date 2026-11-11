@@ -305,4 +305,57 @@ mod tests {
         );
         assert_eq!(refused["guest_exit"]["signal_name"], "SIGABRT");
     }
+
+    /// A Rust backtrace symbolizes against the guest's own executable, which
+    /// it finds through procfs. A panic under `RUST_BACKTRACE=1` either names
+    /// the panicking function in its frames or the run says, structurally,
+    /// that the executable was not there to read; a run that never looks for
+    /// it says nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_backtrace_names_its_frames_or_the_run_says_why_not() {
+        const FRAME: &str = "backtrace_probe_frame";
+        let source = format!(
+            r#"
+#[inline(never)]
+fn {FRAME}(panic: bool) {{
+    if panic {{ panic!("asked to"); }}
+}}
+fn main() {{
+    {FRAME}(std::hint::black_box(std::env::args().nth(1).is_some()));
+}}
+"#
+        );
+        let guest = super::shared_guest("backtrace-guest", |directory| {
+            build_facts_guest(directory, "backtrace", &source)
+        });
+        let guest = guest.to_str().unwrap();
+        let run = |extra: &[&str]| {
+            let mut arguments = vec![
+                "run",
+                guest,
+                "--env",
+                "RUST_BACKTRACE=1",
+                "--format",
+                "json",
+            ];
+            arguments.extend_from_slice(extra);
+            envelope(&arguments)
+        };
+
+        let panicked = run(&["--", "panic"]);
+        assert_eq!(panicked["result"], "failure", "{panicked:#}");
+        let stderr = panicked["stderr"].as_str().unwrap();
+        let named = stderr
+            .split_once("stack backtrace:")
+            .is_some_and(|(_, frames)| frames.contains(FRAME));
+        assert!(
+            named || panicked["executable_unavailable"] == true,
+            "the backtrace names no frame and the run does not say why:\n{panicked:#}"
+        );
+
+        let clean = run(&[]);
+        assert_eq!(clean["result"], "ok", "{clean:#}");
+        assert!(clean["executable_unavailable"].is_null(), "{clean:#}");
+    }
 }

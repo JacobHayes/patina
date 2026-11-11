@@ -669,6 +669,9 @@ pub struct Context {
     /// ([`patina_dst_trace::TraceError::replay_divergence`]). Carried on the
     /// facts channel, never on a guest-writable stream.
     replay_divergence: Option<&'static str>,
+    /// Whether the guest looked for its own executable's file, which the
+    /// model does not provide ([`Context::note_executable_unavailable`]).
+    executable_unavailable: bool,
     /// Poll escalation state. See [`Escalation`]; inert until a guest polls
     /// without progress, so a run that never does is unchanged by it.
     spin: Escalation,

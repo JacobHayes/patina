@@ -410,7 +410,10 @@ class of confusing first-run failures.
 - **The guest environment starts empty.** Nothing leaks in from the host. If a
   run needs a variable (`RUST_BACKTRACE=1` is the common one), inject it
   explicitly through the run verb's env-injection flag — it becomes part of the
-  recorded, replayable run.
+  recorded, replayable run. A backtrace still prints no symbols (the guest
+  cannot read its own executable; the envelope's `executable_unavailable`
+  says so): use `RUST_BACKTRACE=full` and resolve its addresses against the
+  binary with `addr2line`.
 - **Machine crashes follow ext4's journal.** Metadata rolls back to the last
   commit (an `fsync` of a changed inode, `sync`/`syncfs`, or 5 virtual seconds
   after the first change), so a create or rename nothing committed is lost,

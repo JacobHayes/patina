@@ -79,6 +79,10 @@ pub(crate) fn shutdown_run() -> c_int {
     if crate::process::METERED_RUNTIME.load(std::sync::atomic::Ordering::Relaxed) {
         context.note_metered_runtime();
     }
+    #[cfg(target_os = "linux")]
+    if crate::procfs::EXECUTABLE_LOOKED_UP.load(std::sync::atomic::Ordering::Relaxed) {
+        context.note_executable_unavailable();
+    }
     let finished = context.finish();
     let coverage = finalize_coverage();
     let flushed = flush_captured_stdio();

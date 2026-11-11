@@ -382,6 +382,9 @@ fire", never zero.
   (`time_model_mismatch`, `schedule_divergence`, `compute_stop_state`,
   `custom_op_fault_shape`). Carried on the `patina.runfacts/v1` channel, which
   the guest cannot write, so no guest output can claim one.
+- `executable_unavailable` — `true` when the guest looked up its own
+  executable (`/proc/self/exe`, `/proc/self/maps`), which the simulated
+  filesystem does not hold: a backtrace it printed has no symbols.
 - `sdk` — the cooperative-SUT site accounting when the run declared or
   evaluated a site: `enabled`, `swarm_deselected`, the fire/activation
   permille, `sites_registered`, `sites_activated`, `total_firings`, the

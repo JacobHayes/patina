@@ -671,6 +671,7 @@ impl RuntimeBuilder {
             facts_sealed: false,
             facts_context: facts::next_context(),
             replay_divergence: None,
+            executable_unavailable: false,
             spin: Escalation::default(),
             charges: Default::default(),
             alarm: None,

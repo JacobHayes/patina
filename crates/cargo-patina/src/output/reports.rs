@@ -225,6 +225,10 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .get("replay_divergence")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
+            env.executable_unavailable = facts
+                .get("executable_unavailable")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
         }
         env.stop = outcome.stop.clone();
         if failed {
@@ -236,13 +240,28 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         env.stdout = Some(stdout_text);
         env.stderr = Some(stderr_text);
         env.emit();
-    } else if let Some(headline) = outcome.headline(Some(&guest_exit)) {
-        // The one line that says whose move it is, after everything the guest
-        // printed: the first thing a reader is told about how the run ended.
-        eprintln!("{headline}");
-        // A failure is a seed, and a seed is a command: say it.
-        if let Some(command) = &report.reproduce {
-            eprintln!("patina: reproduce: {command}");
+    } else {
+        if report
+            .facts
+            .as_ref()
+            .and_then(|facts| facts.get("executable_unavailable"))
+            .is_some_and(|value| value == true)
+        {
+            eprintln!(
+                "patina: note: the guest looked for its own executable (/proc/self/exe or \
+                 /proc/self/maps), which the simulated filesystem does not hold, so a backtrace \
+                 it printed has no symbols; RUST_BACKTRACE=full prints the frames' addresses, \
+                 which addr2line resolves against the binary (docs/GUIDE.md, \"Backtraces\")"
+            );
+        }
+        if let Some(headline) = outcome.headline(Some(&guest_exit)) {
+            // The one line that says whose move it is, after everything the guest
+            // printed: the first thing a reader is told about how the run ended.
+            eprintln!("{headline}");
+            // A failure is a seed, and a seed is a command: say it.
+            if let Some(command) = &report.reproduce {
+                eprintln!("patina: reproduce: {command}");
+            }
         }
     }
 

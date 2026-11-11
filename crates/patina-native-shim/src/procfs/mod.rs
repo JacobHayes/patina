@@ -174,6 +174,18 @@ pub(crate) enum OfProcess {
 const OF_PROCESS: [(OfProcess, &str); 2] =
     [(OfProcess::Status, "status"), (OfProcess::Stat, "stat")];
 
+/// The entries of a process's directory that lead to its executable's
+/// file (`exe`, and `maps`, which names it). The volume does not hold the
+/// guest's executable, so neither is modeled and both are `ENOENT`; a
+/// symbolizer (a Rust backtrace's) that looks for the guest's own then
+/// finds nothing, and the run says so ([`EXECUTABLE_LOOKED_UP`]).
+const EXECUTABLE_NAMES: [&str; 2] = ["exe", "maps"];
+
+/// Whether the guest looked up one of its own [`EXECUTABLE_NAMES`]; noted
+/// on the run's facts at shutdown (`Context::note_executable_unavailable`).
+pub(crate) static EXECUTABLE_LOOKED_UP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// `PROC_ROOT_INO`.
 const ROOT_INO: u64 = 1;
 /// `/proc/self`'s inode: the first `proc_alloc_inum` hands out
@@ -376,11 +388,16 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
         Node::Process(pid) if name == "fd" => Ok(Node::Fds(pid)),
         // Init's (root's `0500`) the caller may not search.
         Node::Fds(pid) if pid != Process::current().pid() => Err(EACCES),
-        Node::Process(pid) => OF_PROCESS
-            .iter()
-            .find(|(_, each)| *each == name)
-            .map(|(file, _)| Node::Of(pid, *file))
-            .ok_or(ENOENT),
+        Node::Process(pid) => {
+            if pid == Process::current().pid() && EXECUTABLE_NAMES.contains(&name) {
+                EXECUTABLE_LOOKED_UP.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            OF_PROCESS
+                .iter()
+                .find(|(_, each)| *each == name)
+                .map(|(file, _)| Node::Of(pid, *file))
+                .ok_or(ENOENT)
+        }
         Node::Tasks(pid) => {
             let tid = pid_name(name).ok_or(ENOENT)?;
             if threads(pid).contains(&tid) {

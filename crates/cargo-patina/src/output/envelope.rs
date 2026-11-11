@@ -60,6 +60,10 @@ pub struct Envelope {
     /// its trace. Lifted from the facts channel, which the guest cannot write,
     /// never from the run's text.
     pub(super) replay_divergence: Option<String>,
+    /// The guest looked for its own executable's file, which the model does
+    /// not provide (`patina.runfacts/v1`'s `executable_unavailable`): a
+    /// backtrace it printed has no symbols.
+    pub(super) executable_unavailable: bool,
     /// Native crash-restart facts, if the supervisor performed a modeled
     /// restart. `terminal_outcome.kind` is [`CRASH_REPLAY_DIVERGED`] for a
     /// replay that departed from its recording at or before the crash.
@@ -107,6 +111,7 @@ impl Envelope {
             runtime_findings: Vec::new(),
             cpu_charges: None,
             replay_divergence: None,
+            executable_unavailable: false,
             crash_restart: None,
             qualifications: Vec::new(),
             stop: None,
@@ -205,6 +210,9 @@ impl Envelope {
         }
         if let Some(v) = &self.replay_divergence {
             m.insert("replay_divergence".into(), Value::from(v.clone()));
+        }
+        if self.executable_unavailable {
+            m.insert("executable_unavailable".into(), Value::from(true));
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());

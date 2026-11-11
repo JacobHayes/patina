@@ -325,6 +325,9 @@ impl Context {
             if let Some(kind) = self.replay_divergence {
                 root.insert("replay_divergence".into(), kind.into());
             }
+            if self.executable_unavailable {
+                root.insert("executable_unavailable".into(), true.into());
+            }
         }
         document
     }
@@ -341,6 +344,14 @@ impl Context {
             self.replay_divergence.get_or_insert(kind);
             self.emit_facts();
         }
+    }
+
+    /// Note that the guest looked for its own executable's file (a native
+    /// guest's `/proc/self/exe` or `/proc/self/maps`), which the model does
+    /// not provide: what reads it, a backtrace's symbolizer, found nothing.
+    /// Carried on the facts channel as `executable_unavailable`.
+    pub fn note_executable_unavailable(&mut self) {
+        self.executable_unavailable = true;
     }
 
     /// Hand back a runtime-detected error, first noting it on the facts channel

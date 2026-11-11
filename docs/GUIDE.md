@@ -311,5 +311,13 @@ Current limits. Each fails loudly rather than silently:
   reading clocks/entropy, and direct host APIs are refused, not virtualized.
   Patina makes *mostly-Rust* programs deterministic; it does not promise to run
   arbitrary native code.
+- **Backtraces have no symbols**: a symbolizer reads the guest's own
+  executable through `/proc/self/exe` or `/proc/self/maps`, and the simulated
+  filesystem holds neither, so `RUST_BACKTRACE=1` prints no frames. The run
+  says so (`executable_unavailable` in the JSON envelope, a `patina: note:`
+  otherwise). `RUST_BACKTRACE=full` prints each frame's address, which is
+  the same on every run of the seed; resolve them offline with
+  `addr2line -f -C -e <binary> <address - load address>` (the load address
+  is `0x555555554000` on x86_64 Linux with address randomization off).
 - Host-facing escape hatches (allowlisted host files via `--mount`) are
   explicit, read-only, and fingerprinted — never ambient.
