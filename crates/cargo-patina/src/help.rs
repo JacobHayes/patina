@@ -364,12 +364,12 @@ pub struct Verb {
 /// No declared refusals: every flag this verb rejects is simply unknown to it.
 const NO_REFUSALS: &[Refusal] = &[];
 
-/// A `PATINA_*` environment variable's documentation.
+/// An environment variable's documentation.
 #[derive(Clone, Copy, Debug)]
 pub struct EnvVar {
     pub name: &'static str,
-    /// `"user"` (an operator-facing knob), `"protocol"` (an internal
-    /// supervisor↔guest / oracle protocol var, set for you), or `"tool"`.
+    /// `"user"` (an operator-facing knob) or `"tool"` (a build tool's
+    /// variable Patina honors).
     pub scope: &'static str,
     pub doc: &'static str,
 }

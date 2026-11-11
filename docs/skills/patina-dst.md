@@ -175,7 +175,7 @@ registry; help text and the parsers are both generated from it. Four commands
 cover essentially everything.
 
 **1. Start at the index.** It lists every verb with its summary and usage forms,
-the global flags, and the environment protocol:
+the global flags, and the environment variables:
 
 ```sh
 patina --help                    # human

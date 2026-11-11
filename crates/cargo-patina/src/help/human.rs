@@ -108,7 +108,7 @@ fn push_output_and_env_footer(out: &mut String) {
     for flag in GLOBAL_OUTPUT {
         push_flag(out, flag);
     }
-    out.push_str("\nRun `patina --help` for the environment protocol and shared sections.\n");
+    out.push_str("\nRun `patina --help` for the environment variables and shared sections.\n");
 }
 
 /// Render the compact top-level overview.
@@ -183,13 +183,11 @@ finding in the guest or its coverage gate fails, else 2 when any generation is n
     out.push_str("\nENVIRONMENT:\n");
     push_prose(
         &mut out,
-        "User-facing knobs, the internal supervisor/oracle protocol vars (set for you; listed \
-for transparency), and honored tool vars. `--help --format json` emits the full registry.",
+        "Every variable patina reads. `--help --format json` emits the full registry.",
     );
     out.push('\n');
     for env in ENVIRONMENT {
         let tag = match env.scope {
-            "protocol" => " [internal protocol]",
             "tool" => " [tool]",
             _ => "",
         };

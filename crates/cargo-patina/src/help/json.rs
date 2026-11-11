@@ -9,7 +9,7 @@ use super::*;
 // The machine-readable help is served in two shapes under one schema tag:
 //
 //   * `patina --help --format json` — the INDEX: the schema tag, the
-//     global output flags, the `PATINA_*` environment protocol, and every verb
+//     global output flags, the environment variables, and every verb
 //     as `{summary, forms}` (NO flag_groups). A `verb_detail` hint field names
 //     the command that yields a verb's full flag detail.
 //   * `patina <verb> --help --format json` — one VERB's detail: the schema
@@ -102,7 +102,7 @@ fn global_flags_json() -> serde_json::Value {
     J::Object(global)
 }
 
-/// The `PATINA_*` environment protocol as an array of `{name, scope, doc}` (index
+/// The environment variables as an array of `{name, scope, doc}` (index
 /// only — the env contract is global, not per-verb).
 fn environment_json() -> serde_json::Value {
     use serde_json::{Map, Value as J};

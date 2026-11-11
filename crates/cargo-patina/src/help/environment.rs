@@ -1,8 +1,9 @@
-//! CLI environment-variable registry.
+//! The environment variables the CLI honors.
 
 use super::*;
 
-/// The `PATINA_*` environment protocol and honored tool variables.
+/// Every environment variable the tool reads. The supervisor-to-guest control
+/// plane (`PATINA_RT_*`) is internal and documented in ARCHITECTURE.md.
 pub const ENVIRONMENT: &[EnvVar] = &[
     EnvVar {
         name: "PATINA_SEED / PATINA_SEEDS / PATINA_FORMAT",
@@ -10,144 +11,9 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Defaults for --seed, --seeds and --format where a verb takes them. A typed flag wins, then a non-empty variable, then the built-in default. No other flag has an environment default.",
     },
     EnvVar {
-        name: "PATINA_RT_*",
-        scope: "protocol",
-        doc: "The runtime's supervisor↔guest control plane, below. Set only by the supervisor: a native guest starts from an empty environment.",
-    },
-    EnvVar {
-        name: "PATINA_RT_PARAMS_JSON",
-        scope: "protocol",
-        doc: "Run parameters as a JSON object (mirrors --param); recorded and restored on replay.",
-    },
-    EnvVar {
         name: "PATINA_CLI",
         scope: "user",
         doc: "Absolute path to the patina a `#[patina_dst::test]` launches under plain `cargo test` (default: patina on PATH).",
-    },
-    EnvVar {
-        name: "PATINA_RT_MODE",
-        scope: "protocol",
-        doc: "Run mode (seeded/record/replay); set by the supervisor for the guest.",
-    },
-    EnvVar {
-        name: "PATINA_RT_TRACE_FD",
-        scope: "protocol",
-        doc: "Inherited already-open trace descriptor (native), so a fully interposed guest never recurses into the deterministic FS while finalizing its trace.",
-    },
-    EnvVar {
-        name: "PATINA_RT_COVERAGE_FD",
-        scope: "protocol",
-        doc: "Native coverage dump descriptor for --coverage-out.",
-    },
-    EnvVar {
-        name: "PATINA_RT_FACTS_FD",
-        scope: "protocol",
-        doc: "Inherited descriptor carrying the run's patina.runfacts/v1 document, so a fully interposed guest never writes it through the deterministic FS. Set on every run; the CLI judges the run from it and folds the document into the envelope's fault_reports/runtime_findings.",
-    },
-    EnvVar {
-        name: "PATINA_RT_STOP_FD",
-        scope: "protocol",
-        doc: "Inherited pipe the native shim writes its stop record to (patina.runstop/v1) just before it ends a run: the class the run is filed under, a reason token and the detail naming what was reached. The CLI reports it as the envelope's result and stop.",
-    },
-    EnvVar {
-        name: "PATINA_RT_FS_IMAGE_FD",
-        scope: "protocol",
-        doc: "Inherited descriptor streaming the --mount host-directory image to the guest.",
-    },
-    EnvVar {
-        name: "PATINA_RT_STEP_BUDGET",
-        scope: "protocol",
-        doc: "Maximum boundary operations (mirrors --budget).",
-    },
-    EnvVar {
-        name: "PATINA_RT_FINGERPRINT",
-        scope: "protocol",
-        doc: "Compatibility fingerprint checked on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_EXPECTED_SUPERVISOR_SHA256",
-        scope: "protocol",
-        doc: "Digest of the patina that launched this one (campaign and reduction children); a patina of another build refuses before running anything.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_ARGV",
-        scope: "protocol",
-        doc: "Recorded guest argv restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_ENV_JSON",
-        scope: "protocol",
-        doc: "Recorded native guest environment map from run --env, restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_CWD",
-        scope: "protocol",
-        doc: "Recorded native guest initial working directory from run --cwd, restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_STDIN_FD",
-        scope: "protocol",
-        doc: "Inherited descriptor holding the run --stdin bytes the guest's descriptor 0 reads; recorded and restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_REALTIME_EPOCH_NANOS",
-        scope: "protocol",
-        doc: "Virtual realtime epoch in Unix-time nanoseconds (mirrors --realtime-epoch); recorded and restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_HOSTNAME",
-        scope: "protocol",
-        doc: "Node name the guest's virtual kernel reports (mirrors --hostname); recorded and restored on replay.",
-    },
-    EnvVar {
-        name: "PATINA_RT_GUEST_CPUS",
-        scope: "protocol",
-        doc: "The guest's virtual CPU count (mirrors native --cpus, default 4); recorded, supplied by replay from the trace, and refused when it disagrees.",
-    },
-    EnvVar {
-        name: "PATINA_RT_MACHINE_CRASH_PERMILLE / PATINA_RT_PROCESS_CRASH_PERMILLE / PATINA_RT_FS_ERROR_PERMILLE / PATINA_RT_FS_ERROR_AT / PATINA_RT_FS_SHORT_PERMILLE",
-        scope: "protocol",
-        doc: "Crash, filesystem error, targeted error, and short-I/O fault knobs (mirror --machine-crash-permille, --process-crash-permille and the --fs-* flags).",
-    },
-    EnvVar {
-        name: "PATINA_RT_SLEEP_JITTER_NANOS / PATINA_RT_NET_JITTER_NANOS / PATINA_RT_NET_DROP_PERMILLE / PATINA_RT_NET_LATENCY_NANOS",
-        scope: "protocol",
-        doc: "Seed-driven timing/network fault knobs (mirror the --*-nanos/--net-* flags).",
-    },
-    EnvVar {
-        name: "PATINA_RT_ENTROPY_FAIL_PERMILLE",
-        scope: "protocol",
-        doc: "Seeded guest entropy-request failure knob (mirrors --entropy-fail-permille).",
-    },
-    EnvVar {
-        name: "PATINA_RT_EPOCH_JUMP_NANOS",
-        scope: "protocol",
-        doc: "Seeded realtime-epoch jump knob (mirrors --epoch-jump-nanos).",
-    },
-    EnvVar {
-        name: "PATINA_RT_BUGGIFY / PATINA_RT_BUGGIFY_ACTIVATION_PERMILLE / PATINA_RT_BUGGIFY_CUTOFF_NANOS / PATINA_RT_BUGGIFY_AFTER_SETUP",
-        scope: "protocol",
-        doc: "Cooperative-SUT (buggify) knobs (mirror the --buggify* flags).",
-    },
-    EnvVar {
-        name: "PATINA_RT_SCHED_PCT / PATINA_RT_SCHED_PCT_STEPS / PATINA_RT_SCHED_YIELD_STRIDE",
-        scope: "protocol",
-        doc: "Native scheduling exploration knobs (mirror --sched-pct/--yield-stride).",
-    },
-    EnvVar {
-        name: "PATINA_RT_SWARM",
-        scope: "protocol",
-        doc: "Seed-derived swarm fault-class selection (mirrors --swarm).",
-    },
-    EnvVar {
-        name: "PATINA_RT_LIVENESS_WATCHDOG_NANOS / PATINA_RT_CONVERGE_WITHIN_NANOS / PATINA_RT_HEAL_AFTER_NANOS",
-        scope: "protocol",
-        doc: "Liveness watchdog / convergence budgets (mirror --liveness-watchdog/--converge-within/--heal-after).",
-    },
-    EnvVar {
-        name: "PATINA_RT_COMPUTE_WATCHDOG_MS",
-        scope: "protocol",
-        doc: "Native compute bound: host milliseconds a guest may run charged no virtual time and beginning no boundary operation before the run stops as a timeout (default 10000; 1..=86400000; mirrors --compute-watchdog-ms). Replay follows the recorded terminal boundary, not this timeout. This is a known runtime limit, not a finding in the guest.",
     },
     EnvVar {
         name: "CARGO / RUSTC / CC",

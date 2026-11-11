@@ -106,7 +106,7 @@ line. `PATINA_RT_*` is reserved for the runtime's internal control plane.
 Every verb has `--help`, and `--help --format json` emits a machine-readable
 registry (schema `patina.help/v2`) with progressive disclosure: bare
 `patina --help --format json` is a compact index (every verb's summary and
-usage forms, the global flags, and the environment protocol), while
+usage forms, the global flags, and the environment variables), while
 `patina <verb> --help --format json` returns that one verb's full flag
 detail — handy for scripts and AI agents. Results are available as JSON via
 `--format json` (usually a single `patina.result/v2` envelope; `coverage` emits

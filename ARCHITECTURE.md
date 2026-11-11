@@ -279,9 +279,13 @@ These concerns are kept out of the interposed data plane:
   records it. After startup the environment is guest memory
   (`src/posix_env.rs`), reproduced by re-execution, not recorded. `--cwd` and
   the umask work the same way; the working directory is held as a node.
-- **Knob resolution.** Every `PATINA_RT_*` knob is resolved once, at
-  configuration time. The runtime never reads the process environment after
-  installation.
+- **Knob resolution.** The supervisor passes the run's settings as
+  `PATINA_RT_*` variables (`patina_dst_runtime::RUNTIME_ENV_PREFIX`; each is an
+  `ENV_*` constant there, with its meaning), plus inherited descriptors for the
+  trace, facts, stop record, reports and coverage. They are internal: `patina
+  --help` does not list them, and an inherited one is stripped. Every knob is
+  resolved once, at configuration time. The runtime never reads the process
+  environment after installation.
 - **Address layout.** The supervisor launches every incarnation so the kernel
   picks the same addresses (`src/native_run/layout.rs`): ASLR off for the
   image (`ADDR_NO_RANDOMIZE`; Darwin `_POSIX_SPAWN_DISABLE_ASLR`), the modeled
